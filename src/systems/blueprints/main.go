@@ -321,7 +321,16 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 		return
 	}
 
-	if lockID != "" && lockErr == nil {
+	if lockErr == nil {
+		// Workspace is locked — caller must supply the matching lock ID.
+		if lockID == "" {
+			slog.Warn("state update rejected: workspace is locked", "workspace", workspaceKey)
+			span.SetStatus(codes.Error, "locked")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(existingLock))
+			return
+		}
 		var lockObj map[string]any
 		if json.Unmarshal([]byte(existingLock), &lockObj) == nil {
 			if id, _ := lockObj["ID"].(string); id != lockID {
@@ -507,17 +516,22 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 	}
 
 	if lockErr == nil {
+		// Workspace is locked — caller must supply the matching lock ID.
+		var reqID string
 		if len(body) > 0 {
-			var reqData, lockData map[string]any
-			if json.Unmarshal(body, &reqData) == nil && json.Unmarshal([]byte(existingLock), &lockData) == nil {
-				reqID, _ := reqData["ID"].(string)
-				lockID, _ := lockData["ID"].(string)
-				if reqID != "" && lockID != reqID {
-					slog.Warn("unlock rejected: lock id mismatch", "workspace", workspaceKey)
-					span.SetStatus(codes.Error, "lock id mismatch")
-					http.Error(w, "lock ID mismatch", http.StatusConflict)
-					return
-				}
+			var reqData map[string]any
+			if json.Unmarshal(body, &reqData) == nil {
+				reqID, _ = reqData["ID"].(string)
+			}
+		}
+		var lockData map[string]any
+		if json.Unmarshal([]byte(existingLock), &lockData) == nil {
+			storedID, _ := lockData["ID"].(string)
+			if reqID == "" || reqID != storedID {
+				slog.Warn("unlock rejected: lock id mismatch", "workspace", workspaceKey)
+				span.SetStatus(codes.Error, "lock id mismatch")
+				http.Error(w, "lock ID mismatch", http.StatusConflict)
+				return
 			}
 		}
 
