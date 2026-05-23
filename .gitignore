@@ -1,6 +1,7 @@
 # Go build output
 src/systems/gatekeeper/gatekeeper
 src/systems/blueprints/blueprints
+src/systems/conductor/conductor
 
 # SQLite databases
 *.db
