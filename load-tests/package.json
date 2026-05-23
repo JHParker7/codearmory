@@ -1,0 +1,13 @@
+{
+  "name": "gatekeeper-load-tests",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "artillery run artillery.yml",
+    "test:quick": "artillery run --overrides '{\"config\":{\"phases\":[{\"duration\":30,\"arrivalRate\":5}]}}' artillery.yml",
+    "report": "artillery report report.json"
+  },
+  "devDependencies": {
+    "artillery": "^2.0.22"
+  }
+}

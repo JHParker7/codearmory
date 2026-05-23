@@ -1,0 +1,682 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+)
+
+var (
+	db            *pgxpool.Pool
+	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	httpClient    = &http.Client{
+		Transport: otelhttp.NewTransport(http.DefaultTransport),
+		Timeout:   10 * time.Second,
+	}
+)
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+const maxBodyBytes = 64 * 1024 * 1024 // 64 MB — generous upper bound for Terraform state
+
+const createTables = `
+CREATE TABLE IF NOT EXISTS states (
+    workspace  TEXT PRIMARY KEY,
+    data       BYTEA        NOT NULL,
+    updated_at TIMESTAMPTZ  DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS locks (
+    workspace  TEXT PRIMARY KEY,
+    lock_data  TEXT         NOT NULL,
+    created_at TIMESTAMPTZ  DEFAULT now(),
+    updated_at TIMESTAMPTZ  DEFAULT now()
+);
+`
+
+// ── Logger middleware ─────────────────────────────────────────────────────────
+
+type statusResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rw *statusResponseWriter) WriteHeader(status int) {
+	rw.status = status
+	rw.ResponseWriter.WriteHeader(status)
+}
+
+type Logger struct{ handler http.Handler }
+
+func (l *Logger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	rw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
+	l.handler.ServeHTTP(rw, r)
+	sc := trace.SpanFromContext(r.Context()).SpanContext()
+	slog.Info(r.Method+" "+r.URL.Path,
+		"status", rw.status,
+		"duration", time.Since(start),
+		"trace_id", sc.TraceID().String(),
+		"span_id", sc.SpanID().String(),
+	)
+}
+
+func newLogger(h http.Handler) *Logger { return &Logger{h} }
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+func loginToGatekeeper(ctx context.Context, email, password string) (string, bool) {
+	ctx, span := otel.Tracer("blueprints").Start(ctx, "loginToGatekeeper")
+	defer span.End()
+
+	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/login", bytes.NewReader(body))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("failed to build gatekeeper login request", "error", err)
+		return "", false
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("gatekeeper login request failed", "error", err)
+		return "", false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		span.SetStatus(codes.Error, "login rejected")
+		slog.Warn("gatekeeper login rejected", "status", resp.StatusCode)
+		return "", false
+	}
+
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", false
+	}
+
+	span.SetStatus(codes.Ok, "")
+	return result.Token, true
+}
+
+func extractToken(ctx context.Context, r *http.Request) (string, bool) {
+	h := r.Header.Get("Authorization")
+	if strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimPrefix(h, "Bearer "), true
+	}
+	if strings.HasPrefix(h, "Basic ") {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(h, "Basic "))
+		if err != nil {
+			return "", false
+		}
+		parts := strings.SplitN(string(decoded), ":", 2)
+		if len(parts) != 2 {
+			return "", false
+		}
+		return loginToGatekeeper(ctx, parts[0], parts[1])
+	}
+	return "", false
+}
+
+func checkPermissions(ctx context.Context, token, resource, action string) bool {
+	ctx, span := otel.Tracer("blueprints").Start(ctx, "checkPermissions")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("permission.resource", resource),
+		attribute.String("permission.action", action),
+	)
+
+	body, _ := json.Marshal(map[string]string{
+		"service":  "blueprints",
+		"resource": resource,
+		"action":   action,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("failed to build gatekeeper check_permissions request", "error", err)
+		meterPermChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", false)))
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("gatekeeper check_permissions failed", "error", err)
+		meterPermChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", false)))
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		span.SetStatus(codes.Error, "denied")
+		slog.Warn("permission denied", "resource", resource, "action", action, "status", resp.StatusCode)
+		meterPermChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", false)))
+		return false
+	}
+
+	var result struct {
+		Authorized bool `json:"authorized"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return false
+	}
+
+	span.SetAttributes(attribute.Bool("permission.authorized", result.Authorized))
+	span.SetStatus(codes.Ok, "")
+	meterPermChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", result.Authorized)))
+	if !result.Authorized {
+		slog.Warn("permission denied", "resource", resource, "action", action)
+	}
+	return result.Authorized
+}
+
+// requireAuth extracts the token and writes 401 on failure. Returns (token, true) on success.
+func requireAuth(ctx context.Context, w http.ResponseWriter, r *http.Request) (string, bool) {
+	token, ok := extractToken(ctx, r)
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Basic")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}
+	return token, ok
+}
+
+// ── State handlers ────────────────────────────────────────────────────────────
+
+func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey, resource string) {
+	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "getState")
+	defer span.End()
+	span.SetAttributes(attribute.String("workspace", workspaceKey))
+
+	token, ok := requireAuth(ctx, w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
+		return
+	}
+	if !checkPermissions(ctx, token, resource, "getState") {
+		span.SetStatus(codes.Error, "forbidden")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var data []byte
+	err := db.QueryRow(ctx, "SELECT data FROM states WHERE workspace = $1", workspaceKey).Scan(&data)
+	if errors.Is(err, pgx.ErrNoRows) {
+		slog.Info("state not found", "workspace", workspaceKey)
+		span.SetStatus(codes.Ok, "")
+		meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "not_found")))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("state read failed", "workspace", workspaceKey, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	plaintext, err := decrypt(data)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("state decrypt failed", "workspace", workspaceKey, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("state retrieved", "workspace", workspaceKey)
+	span.SetStatus(codes.Ok, "")
+	meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "found")))
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(plaintext)
+}
+
+func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey, resource string) {
+	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "updateState")
+	defer span.End()
+	span.SetAttributes(attribute.String("workspace", workspaceKey))
+
+	token, ok := requireAuth(ctx, w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
+		return
+	}
+	if !checkPermissions(ctx, token, resource, "updateState") {
+		span.SetStatus(codes.Error, "forbidden")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	plaintext, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	body, err := encrypt(plaintext)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("state encrypt failed", "workspace", workspaceKey, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	lockID := r.URL.Query().Get("ID")
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var existingLock string
+	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
+	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
+		span.RecordError(lockErr)
+		span.SetStatus(codes.Error, lockErr.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if lockID != "" && lockErr == nil {
+		var lockObj map[string]any
+		if json.Unmarshal([]byte(existingLock), &lockObj) == nil {
+			if id, _ := lockObj["ID"].(string); id != lockID {
+				slog.Warn("state update rejected: lock id mismatch", "workspace", workspaceKey)
+				span.SetStatus(codes.Error, "lock id mismatch")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				w.Write([]byte(existingLock))
+				return
+			}
+		}
+	}
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO states (workspace, data) VALUES ($1, $2)
+		 ON CONFLICT (workspace) DO UPDATE SET data = $2, updated_at = now()`,
+		workspaceKey, body,
+	)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("state update failed", "workspace", workspaceKey, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("state updated", "workspace", workspaceKey)
+	span.SetStatus(codes.Ok, "")
+	meterUpdateState.Add(ctx, 1)
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleDeleteState(w http.ResponseWriter, r *http.Request, workspaceKey, resource string) {
+	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "deleteState")
+	defer span.End()
+	span.SetAttributes(attribute.String("workspace", workspaceKey))
+
+	token, ok := requireAuth(ctx, w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
+		return
+	}
+	if !checkPermissions(ctx, token, resource, "deleteState") {
+		span.SetStatus(codes.Error, "forbidden")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	if _, err := db.Exec(ctx, "DELETE FROM states WHERE workspace = $1", workspaceKey); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("state delete failed", "workspace", workspaceKey, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("state deleted", "workspace", workspaceKey)
+	span.SetStatus(codes.Ok, "")
+	meterDeleteState.Add(ctx, 1)
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey, resource string) {
+	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "lockState")
+	defer span.End()
+	span.SetAttributes(attribute.String("workspace", workspaceKey))
+
+	token, ok := requireAuth(ctx, w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
+		return
+	}
+	if !checkPermissions(ctx, token, resource, "lockState") {
+		span.SetStatus(codes.Error, "forbidden")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var existingLock string
+	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
+	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
+		span.RecordError(lockErr)
+		span.SetStatus(codes.Error, lockErr.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if lockErr == nil {
+		slog.Warn("lock conflict", "workspace", workspaceKey)
+		span.SetStatus(codes.Error, "lock conflict")
+		meterLockState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "conflict")))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusLocked)
+		w.Write([]byte(existingLock))
+		return
+	}
+
+	if _, err := tx.Exec(ctx, "INSERT INTO locks (workspace, lock_data) VALUES ($1, $2)", workspaceKey, string(body)); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("lock insert failed", "workspace", workspaceKey, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("state locked", "workspace", workspaceKey)
+	span.SetStatus(codes.Ok, "")
+	meterLockState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "ok")))
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey, resource string) {
+	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "unlockState")
+	defer span.End()
+	span.SetAttributes(attribute.String("workspace", workspaceKey))
+
+	token, ok := requireAuth(ctx, w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
+		return
+	}
+	if !checkPermissions(ctx, token, resource, "unlockState") {
+		span.SetStatus(codes.Error, "forbidden")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var existingLock string
+	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
+	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
+		span.RecordError(lockErr)
+		span.SetStatus(codes.Error, lockErr.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if lockErr == nil {
+		if len(body) > 0 {
+			var reqData, lockData map[string]any
+			if json.Unmarshal(body, &reqData) == nil && json.Unmarshal([]byte(existingLock), &lockData) == nil {
+				reqID, _ := reqData["ID"].(string)
+				lockID, _ := lockData["ID"].(string)
+				if reqID != "" && lockID != reqID {
+					slog.Warn("unlock rejected: lock id mismatch", "workspace", workspaceKey)
+					span.SetStatus(codes.Error, "lock id mismatch")
+					http.Error(w, "lock ID mismatch", http.StatusConflict)
+					return
+				}
+			}
+		}
+
+		if _, err := tx.Exec(ctx, "DELETE FROM locks WHERE workspace = $1", workspaceKey); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			slog.Error("lock delete failed", "workspace", workspaceKey, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("state unlocked", "workspace", workspaceKey)
+	span.SetStatus(codes.Ok, "")
+	meterUnlockState.Add(ctx, 1)
+	w.WriteHeader(http.StatusOK)
+}
+
+// ── Route helpers ─────────────────────────────────────────────────────────────
+
+func userKey(r *http.Request) (string, string) {
+	u, w := r.PathValue("username"), r.PathValue("workspace")
+	return u + "/" + w, "blueprints/states/" + u + "/" + w
+}
+
+func orgKey(r *http.Request) (string, string) {
+	o, t, w := r.PathValue("org"), r.PathValue("team"), r.PathValue("workspace")
+	return o + "/" + t + "/" + w, "blueprints/" + o + "/states/" + t + "/" + w
+}
+
+// lockUnlock dispatches LOCK/UNLOCK custom methods to their handlers.
+// Registered without a method prefix so it catches what the method-specific
+// patterns (GET, POST, DELETE) don't.
+func lockUnlock(keyFn func(*http.Request) (string, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		k, res := keyFn(r)
+		switch r.Method {
+		case "LOCK":
+			handleLockState(w, r, k, res)
+		case "UNLOCK":
+			handleUnlockState(w, r, k, res)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+func main() {
+	logLevel := slog.LevelInfo
+	if os.Getenv("LOG_LEVEL") == "debug" {
+		logLevel = slog.LevelDebug
+	}
+	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+	slog.SetDefault(slog.New(jsonHandler))
+
+	otelHandler, shutdown, err := setupOTel(context.Background())
+	if err != nil {
+		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
+	} else {
+		slog.SetDefault(slog.New(&fanoutHandler{handlers: []slog.Handler{jsonHandler, otelHandler}}))
+		defer shutdown(context.Background())
+	}
+	initMetrics()
+
+	if err := initEncryption(); err != nil {
+		slog.Error("encryption init failed", "error", err)
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+
+	db, err = pgxpool.New(ctx, envOrDefault("DATABASE_URL", "postgresql://postgres:test@127.0.0.1:5432/blueprints"))
+	if err != nil {
+		slog.Error("failed to create database pool", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(ctx, createTables); err != nil {
+		slog.Error("failed to create tables", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("database pool initialized")
+
+	mux := http.NewServeMux()
+
+	// User-scoped: /state/{username}/{workspace}
+	mux.HandleFunc("GET /state/{username}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
+		k, res := userKey(r)
+		handleGetState(w, r, k, res)
+	})
+	mux.HandleFunc("POST /state/{username}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
+		k, res := userKey(r)
+		handleUpdateState(w, r, k, res)
+	})
+	mux.HandleFunc("DELETE /state/{username}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
+		k, res := userKey(r)
+		handleDeleteState(w, r, k, res)
+	})
+	mux.HandleFunc("/state/{username}/{workspace}", lockUnlock(userKey))
+
+	// Org-scoped: /{org}/state/{team}/{workspace}
+	mux.HandleFunc("GET /{org}/state/{team}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
+		k, res := orgKey(r)
+		handleGetState(w, r, k, res)
+	})
+	mux.HandleFunc("POST /{org}/state/{team}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
+		k, res := orgKey(r)
+		handleUpdateState(w, r, k, res)
+	})
+	mux.HandleFunc("DELETE /{org}/state/{team}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
+		k, res := orgKey(r)
+		handleDeleteState(w, r, k, res)
+	})
+	mux.HandleFunc("/{org}/state/{team}/{workspace}", lockUnlock(orgKey))
+
+	port := envOrDefault("PORT", "8081")
+
+	wrappedMux := otelhttp.NewHandler(newLogger(mux), "blueprints",
+		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
+	)
+
+	certFile := os.Getenv("TLS_CERT_FILE")
+	keyFile := os.Getenv("TLS_KEY_FILE")
+	caFile := os.Getenv("CA_CERT_FILE")
+
+	if certFile != "" && keyFile != "" {
+		tlsConfig := &tls.Config{}
+		if caFile != "" {
+			caCert, err := os.ReadFile(caFile)
+			if err != nil {
+				slog.Error("failed to read CA cert", "error", err)
+				os.Exit(1)
+			}
+			caPool := x509.NewCertPool()
+			caPool.AppendCertsFromPEM(caCert)
+			tlsConfig.ClientCAs = caPool
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+		server := &http.Server{Addr: ":" + port, Handler: wrappedMux, TLSConfig: tlsConfig}
+		slog.Info("listening with TLS", "port", port)
+		if err := server.ListenAndServeTLS(certFile, keyFile); err != nil {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		slog.Info("listening", "port", port)
+		if err := http.ListenAndServe(":"+port, wrappedMux); err != nil {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	}
+}

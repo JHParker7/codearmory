@@ -1,0 +1,24 @@
+# Go build output
+src/systems/gatekeeper/gatekeeper
+src/systems/blueprints/blueprints
+
+# SQLite databases
+*.db
+
+# Postgres data directory
+db/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Load test node modules
+load-tests/node_modules/
+load-tests/package-lock.json
+
+# Environment
+.env
+.vscode/
+.continue/
