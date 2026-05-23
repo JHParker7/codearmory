@@ -349,7 +349,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 			resourceMatch = true
 		} else {
 			for _, allowedResource := range permission.Resources {
-				if string(allowedResource[len(allowedResource)-1]) == "*" {
+				if len(allowedResource) > 0 && allowedResource[len(allowedResource)-1] == '*' {
 					prefix := allowedResource[:len(allowedResource)-1]
 					if strings.HasPrefix(resource, prefix) {
 						resourceMatch = true
@@ -376,7 +376,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 			allowedAction = true
 		}
 		for _, per_action := range permission.Actions {
-			if string(per_action[len(per_action)-1]) == "*" {
+			if len(per_action) > 0 && per_action[len(per_action)-1] == '*' {
 				prefix := per_action[:len(per_action)-1]
 				if strings.HasPrefix(action, prefix) {
 					allowedAction = true

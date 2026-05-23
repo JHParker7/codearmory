@@ -48,6 +48,22 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service is required", http.StatusBadRequest)
 		return
 	}
+	for _, a := range req.Actions {
+		if a == "" {
+			span.SetStatus(codes.Error, "empty action")
+			slog.Warn("create permissions: empty string in actions", "caller_id", callerID)
+			http.Error(w, "actions must not contain empty strings", http.StatusBadRequest)
+			return
+		}
+	}
+	for _, r := range req.Resources {
+		if r == "" {
+			span.SetStatus(codes.Error, "empty resource")
+			slog.Warn("create permissions: empty string in resources", "caller_id", callerID)
+			http.Error(w, "resources must not contain empty strings", http.StatusBadRequest)
+			return
+		}
+	}
 	span.SetAttributes(
 		attribute.String("permissions.service", req.Service),
 		attribute.Int("permissions.actions_count", len(req.Actions)),
@@ -151,6 +167,22 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("update permissions: missing service", "caller_id", callerID, "permissions_id", id)
 		http.Error(w, "service is required", http.StatusBadRequest)
 		return
+	}
+	for _, a := range req.Actions {
+		if a == "" {
+			span.SetStatus(codes.Error, "empty action")
+			slog.Warn("update permissions: empty string in actions", "caller_id", callerID, "permissions_id", id)
+			http.Error(w, "actions must not contain empty strings", http.StatusBadRequest)
+			return
+		}
+	}
+	for _, r := range req.Resources {
+		if r == "" {
+			span.SetStatus(codes.Error, "empty resource")
+			slog.Warn("update permissions: empty string in resources", "caller_id", callerID, "permissions_id", id)
+			http.Error(w, "resources must not contain empty strings", http.StatusBadRequest)
+			return
+		}
 	}
 	span.SetAttributes(
 		attribute.String("new.service", req.Service),

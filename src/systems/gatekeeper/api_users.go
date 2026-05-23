@@ -397,6 +397,13 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := user.Add(ctx); err != nil {
+		// Clean up the permission and role that were already committed.
+		if cleanErr := permission.Remove(ctx); cleanErr != nil {
+			slog.Error("signup: failed to clean up orphaned permission", "permissions_id", permission.PermissionsID, "error", cleanErr)
+		}
+		if cleanErr := role.Remove(ctx); cleanErr != nil {
+			slog.Error("signup: failed to clean up orphaned role", "role_id", role.RoleID, "error", cleanErr)
+		}
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			span.SetStatus(codes.Error, "email or username conflict")
 			slog.Warn("signup failed: email or username already in use", "email", req.Email, "username", req.Username)
