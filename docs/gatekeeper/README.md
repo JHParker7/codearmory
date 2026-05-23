@@ -22,8 +22,7 @@ Org
 ## Getting Started
 
 ```bash
-git clone <repo>
-cd gatekeeper/src
+cd src/systems/gatekeeper
 DATABASE_URL="postgres://user:pass@localhost:5000/gatekeeper" \
 DATABASE_READ_URL="postgres://user:pass@localhost:5001/gatekeeper" \
 go run ./...
@@ -35,7 +34,7 @@ On first run, `main` creates all tables and applies foreign key constraints auto
 
 ## Development
 
-All commands run from `src/`:
+All commands run from `src/systems/gatekeeper/`:
 
 ```bash
 go build ./...          # Build
@@ -47,29 +46,35 @@ go vet ./...            # Static analysis
 Integration tests (Python) require a running server:
 
 ```bash
-pip install -r tests/requirements.txt
-API_URL=http://localhost:8080
-DATABASE_URL="postgres://user:pass@localhost/gatekeeper"
-# ---------- if testing local 
-cd infra/local
-docker compose up
-cd ../..
-# ----------
-pytest tests/
+pip install -r tests/gatekeeper/requirements.txt
+API_URL=http://localhost:8080 pytest tests/gatekeeper/ -v
 ```
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL write connection string (`postgres://user:pass@host/db`) |
+| `DATABASE_READ_URL` | No | PostgreSQL read-replica connection string. Falls back to `DATABASE_URL` if unset. |
+| `TLS_CERT_FILE` | No | Path to the PEM-encoded TLS certificate. Required together with `TLS_KEY_FILE` to enable HTTPS. |
+| `TLS_KEY_FILE` | No | Path to the PEM-encoded TLS private key. Required together with `TLS_CERT_FILE` to enable HTTPS. |
+| `PORT` | No | Port the server listens on (default: `8080`). |
+| `OTEL_SERVICE_NAME` | No | Service name reported in traces and metrics (default: `gatekeeper`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | OTel Collector HTTP endpoint. Omit to disable telemetry. |
+| `LOG_LEVEL` | No | Set to `debug` for verbose output. |
 
 ## API
 
-A complete OpenAPI 3.0 spec is at [`docs/openapi.yaml`](./docs/openapi.yaml). Import it into any OpenAPI-compatible tool (Swagger UI, Insomnia, Postman, etc.) for interactive docs.
+A complete OpenAPI 3.0 spec is at [`openapi.yaml`](./openapi.yaml). Import it into any OpenAPI-compatible tool (Swagger UI, Insomnia, Postman, etc.) for interactive docs.
 
-Extended documentation is in [`docs/`](./docs/):
+Extended documentation is in this directory:
 
 | File | Contents |
 |------|----------|
-| [`architecture.md`](./docs/architecture.md) | Entity model, auth flow, permission resolution, observability |
-| [`permissions.md`](./docs/permissions.md) | RBAC model, matching rules, examples, bootstrapping |
-| [`development.md`](./docs/development.md) | Local setup, unit tests, integration tests, adding new resources |
-| [`deployment.md`](./docs/deployment.md) | Docker Compose, Helm chart, Kubernetes HPA, TLS, environment variables |
+| [`architecture.md`](./architecture.md) | Entity model, auth flow, permission resolution, observability |
+| [`permissions.md`](./permissions.md) | RBAC model, matching rules, examples, bootstrapping |
+| [`development.md`](./development.md) | Local setup, unit tests, integration tests, adding new resources |
+| [`deployment.md`](./deployment.md) | Docker Compose, Helm chart, Kubernetes HPA, TLS, environment variables |
 
 Quick reference:
 
@@ -78,10 +83,13 @@ Quick reference:
 | `POST` | `/signup` | — | Create account |
 | `POST` | `/login` | — | Authenticate, get JWT |
 | `GET` | `/check_permissions` | ✓ | Check caller's permission |
+| `GET` | `/users` | ✓ | List users |
 | `GET` `PUT` `DELETE` | `/users/{id}` | ✓ | User management |
 | `POST` | `/orgs` | ✓ | Create org |
+| `GET` | `/orgs` | ✓ | List orgs |
 | `GET` `PUT` `DELETE` | `/orgs/{id}` | ✓ | Org management |
 | `POST` | `/teams` | ✓ | Create team |
+| `GET` | `/teams` | ✓ | List teams |
 | `GET` `PUT` `DELETE` | `/teams/{id}` | ✓ | Team management |
 | `POST` | `/roles` | ✓ | Create role |
 | `GET` `PUT` `DELETE` | `/roles/{id}` | ✓ | Role management |
@@ -90,6 +98,7 @@ Quick reference:
 | `GET` `DELETE` | `/sessions/{id}` | ✓ | Session management |
 | `POST` | `/orgs/{id}/invites` | ✓ | Invite a user to an org |
 | `POST` | `/teams/{id}/invites` | ✓ | Invite a user to a team |
+| `GET` | `/invites` | ✓ | List invites (own invites only) |
 | `GET` | `/invites/{id}` | ✓ | Get invite (inviter or invitee only) |
 | `POST` | `/invites/{id}/accept` | ✓ | Accept invite |
 | `POST` | `/invites/{id}/decline` | ✓ | Decline invite |
@@ -153,4 +162,4 @@ ingress:
 | `permissions` | `permissions_id` | —                                                             |
 | `invites`     | `invite_id`      | `inviter_id` → `users`                                       |
 
-`users.email` and `users.username` have unique indexes. All tables use a soft-delete `active` column. Schema is defined in Go via GORM struct tags in `src/types.go`.
+`users.email` and `users.username` have unique indexes. All tables use a soft-delete `active` column. Schema is defined in Go via GORM struct tags in `src/systems/gatekeeper/types.go`.

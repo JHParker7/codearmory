@@ -96,7 +96,7 @@ VALUES (gen_random_uuid(), CAST('["<permissions_id>"]' AS jsonb), true, now(), n
 UPDATE users SET role_id = '<role_id>' WHERE email = 'admin@example.com';
 ```
 
-The integration test suite does exactly this for the `admin_token` fixture in `tests/conftest.py`.
+The integration test suite does exactly this for the `admin_token` fixture in `tests/gatekeeper/conftest.py`.
 
 ## Examples
 

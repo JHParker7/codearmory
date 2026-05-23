@@ -102,7 +102,7 @@ Cascading effects that are handled explicitly (not via FK cascade):
 
 ## Database
 
-PostgreSQL in production; SQLite (in-memory) for unit tests. The schema is defined entirely via GORM struct tags in `src/types.go`. `main.go` calls `AutoMigrate` (tables, columns, indexes) then `applyForeignKeys` (idempotent `DO $$` blocks) on every startup.
+PostgreSQL in production; SQLite (in-memory) for unit tests. The schema is defined entirely via GORM struct tags in `src/systems/gatekeeper/types.go`. `main.go` calls `AutoMigrate` (tables, columns, indexes) then `applyForeignKeys` (idempotent `DO $$` blocks) on every startup.
 
 Migration order: `Org → Role → Team → User → Session → Permissions → Invite`
 

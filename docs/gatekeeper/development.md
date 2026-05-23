@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Go 1.22+
+- Go 1.25+
 - Docker and Docker Compose (for the local stack)
 - Python 3.10+ and pip (for integration tests)
 
@@ -19,7 +19,7 @@ cd ../..
 Run the server against it:
 
 ```bash
-cd src
+cd src/systems/gatekeeper
 DATABASE_URL="postgresql://postgres:test@127.0.0.1:5000/postgres" \
 DATABASE_READ_URL="postgresql://postgres:test@127.0.0.1:5001/postgres" \
 OTEL_SERVICE_NAME=gatekeeper \
@@ -33,7 +33,7 @@ Grafana is available at http://localhost:3000 (anonymous admin). Tempo, Promethe
 
 ## Go Commands
 
-All commands run from `src/`:
+All commands run from `src/systems/gatekeeper/`:
 
 ```bash
 go build ./...          # Compile
@@ -45,9 +45,9 @@ go vet ./...            # Static analysis
 
 ## Unit Tests
 
-Tests use an in-memory SQLite database wired up in `TestMain` (`src/db_test.go`). No running database or server is needed.
+Tests use an in-memory SQLite database wired up in `TestMain` (`src/systems/gatekeeper/db_test.go`). No running database or server is needed.
 
-Key test helpers in `src/api_helpers_test.go`:
+Key test helpers in `src/systems/gatekeeper/api_helpers_test.go`:
 
 | Helper | Purpose |
 |--------|---------|
@@ -62,12 +62,12 @@ Key test helpers in `src/api_helpers_test.go`:
 Integration tests run against a live server and require PostgreSQL. With the local stack running:
 
 ```bash
-pip install -r tests/requirements.txt
+pip install -r tests/gatekeeper/requirements.txt
 
-API_URL=http://localhost:8080 pytest tests/ -v
+API_URL=http://localhost:8080 pytest tests/gatekeeper/ -v
 ```
 
-Test fixtures (`tests/conftest.py`):
+Test fixtures (`tests/gatekeeper/conftest.py`):
 
 | Fixture | Scope | Description |
 |---------|-------|-------------|
@@ -83,13 +83,13 @@ Test fixtures (`tests/conftest.py`):
 
 Follow the existing pattern:
 
-1. **Add the struct** to `src/types.go` with GORM tags and an `active bool` soft-delete column.
-2. **Implement the `db` interface** in `src/db.go` (`Add`, `Update`, `Remove`, `Get`).
-3. **Add `AutoMigrate` and FK** entries in `src/main.go`.
-4. **Add `AutoMigrate`** in `TestMain` in `src/db_test.go`.
-5. **Write handlers** in a new `src/api_{resource}.go` file following the `handleCreate{X}` / `handleGet{X}` / `handleUpdate{X}` / `handleDelete{X}` pattern.
-6. **Register routes** in `src/main.go`.
-7. **Write unit tests** in `src/api_{resource}_test.go`.
+1. **Add the struct** to `src/systems/gatekeeper/types.go` with GORM tags and an `active bool` soft-delete column.
+2. **Implement the `db` interface** in `src/systems/gatekeeper/db.go` (`Add`, `Update`, `Remove`, `Get`).
+3. **Add `AutoMigrate` and FK** entries in `src/systems/gatekeeper/main.go`.
+4. **Add `AutoMigrate`** in `TestMain` in `src/systems/gatekeeper/db_test.go`.
+5. **Write handlers** in a new `src/systems/gatekeeper/api_{resource}.go` file following the `handleCreate{X}` / `handleGet{X}` / `handleUpdate{X}` / `handleDelete{X}` pattern.
+6. **Register routes** in `src/systems/gatekeeper/main.go`.
+7. **Write unit tests** in `src/systems/gatekeeper/api_{resource}_test.go`.
 8. **Add to `openapi.yaml`**.
 
 Each handler should:

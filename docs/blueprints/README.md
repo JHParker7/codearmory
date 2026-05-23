@@ -1,21 +1,23 @@
 # Blueprints
 
-A self-hosted [Terraform HTTP backend](https://developer.hashicorp.com/terraform/language/backend/http) that stores workspace state in PostgreSQL. Authentication and authorization are delegated to an external [Gatekeeper](https://github.com/jhparker7/gatekeeper) service.
+A self-hosted [Terraform HTTP backend](https://developer.hashicorp.com/terraform/language/backend/http) that stores workspace state in PostgreSQL. Authentication and authorization are delegated to [Gatekeeper](../gatekeeper/README.md).
 
 ## Features
 
 - Full Terraform backend protocol: GET/POST/DELETE state, LOCK/UNLOCK
 - Per-workspace pessimistic locking with lock-ID validation
 - Bearer token and HTTP Basic auth (Basic credentials are exchanged for a token via Gatekeeper)
+- At-rest encryption of state data with AES-256-GCM (optional)
+- mTLS support for mutual client certificate verification
 - Prometheus metrics at `/metrics`
 - Distributed tracing via OpenTelemetry → Tempo
 - Structured JSON logging via Loki
 
 ## Requirements
 
-- Python 3.12+
+- Go 1.25+
 - PostgreSQL
-- A running [Gatekeeper](https://github.com/jhparker7/gatekeeper) instance
+- A running Gatekeeper instance
 
 ## Configuration
 
@@ -25,17 +27,23 @@ All configuration is via environment variables.
 |---|---|---|
 | `DATABASE_URL` | `postgresql://postgres:test@127.0.0.1:5432/blueprints` | PostgreSQL connection string |
 | `GATEKEEPER_URL` | `http://localhost:8080` | Base URL of the Gatekeeper service |
+| `ENCRYPTION_KEY` | — | 64-character hex string (32 bytes) for AES-256-GCM at-rest encryption. Omit to store state as plaintext. |
 | `TEMPO_ENDPOINT` | `http://localhost:4318` | OTLP/HTTP endpoint for trace export |
 | `LOKI_URL` | `http://localhost:3100` | Loki push endpoint for log shipping |
 | `TELEMETRY_ENABLED` | `true` | Set to `false` to disable tracing and Loki log shipping |
+| `PORT` | `8081` | Port the server listens on |
+| `TLS_CERT_FILE` | — | Path to PEM-encoded TLS certificate. Required with `TLS_KEY_FILE` to enable HTTPS. |
+| `TLS_KEY_FILE` | — | Path to PEM-encoded TLS private key. Required with `TLS_CERT_FILE` to enable HTTPS. |
+| `CA_CERT_FILE` | — | Path to PEM-encoded CA certificate. When set, enables mTLS (requires and verifies client certificates). |
+| `LOG_LEVEL` | `info` | Set to `debug` for verbose output. |
 
 ## Running locally
 
 ```bash
-pip install -r src/requirements.txt
+cd src/systems/blueprints
 DATABASE_URL=postgresql://postgres:pass@localhost:5432/blueprints \
   GATEKEEPER_URL=http://localhost:8080 \
-  python src/app.py
+  go run .
 ```
 
 The server listens on port `8081`.
@@ -43,49 +51,98 @@ The server listens on port `8081`.
 ## Docker
 
 ```bash
-docker run -p 8081:8000 \
+cd src/systems/blueprints
+docker build -t blueprints:latest .
+
+docker run -p 8081:8081 \
   -e DATABASE_URL=postgresql://postgres:pass@db:5432/blueprints \
   -e GATEKEEPER_URL=http://gatekeeper:8080 \
-  ghcr.io/jhparker7/blueprints:latest
+  blueprints:latest
 ```
 
+## API
+
+Blueprints supports two workspace scoping modes:
+
+### User-scoped workspaces
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/state/{username}/{workspace}` | Fetch state (204 if none exists) |
+| `POST` | `/state/{username}/{workspace}` | Store/update state |
+| `DELETE` | `/state/{username}/{workspace}` | Delete state |
+| `LOCK` | `/state/{username}/{workspace}` | Acquire workspace lock |
+| `UNLOCK` | `/state/{username}/{workspace}` | Release workspace lock |
+
+### Org-scoped workspaces
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/{org}/state/{team}/{workspace}` | Fetch state (204 if none exists) |
+| `POST` | `/{org}/state/{team}/{workspace}` | Store/update state |
+| `DELETE` | `/{org}/state/{team}/{workspace}` | Delete state |
+| `LOCK` | `/{org}/state/{team}/{workspace}` | Acquire workspace lock |
+| `UNLOCK` | `/{org}/state/{team}/{workspace}` | Release workspace lock |
+
 ## Terraform configuration
+
+### User-scoped
 
 ```hcl
 terraform {
   backend "http" {
-    address        = "http://blueprints:8081/state/<workspace>"
-    lock_address   = "http://blueprints:8081/state/<workspace>"
-    unlock_address = "http://blueprints:8081/state/<workspace>"
-    username       = "user@example.com"
+    address        = "http://blueprints:8081/state/alice/dev"
+    lock_address   = "http://blueprints:8081/state/alice/dev"
+    unlock_address = "http://blueprints:8081/state/alice/dev"
+    username       = "alice@example.com"
     password       = "your-password"
   }
 }
 ```
 
-## API
+### Org-scoped
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/state/{workspace}` | Fetch state (204 if none exists) |
-| `POST` | `/state/{workspace}` | Store/update state |
-| `DELETE` | `/state/{workspace}` | Delete state |
-| `LOCK` | `/state/{workspace}` | Acquire workspace lock |
-| `UNLOCK` | `/state/{workspace}` | Release workspace lock |
-| `GET` | `/metrics` | Prometheus metrics |
+```hcl
+terraform {
+  backend "http" {
+    address        = "http://blueprints:8081/acme/state/platform/prod"
+    lock_address   = "http://blueprints:8081/acme/state/platform/prod"
+    unlock_address = "http://blueprints:8081/acme/state/platform/prod"
+    username       = "alice@example.com"
+    password       = "your-password"
+  }
+}
+```
+
+## Permissions
+
+Blueprints delegates all authorization to Gatekeeper. The required Gatekeeper permission records use `service: "blueprints"`.
+
+Resource paths follow the pattern:
+- User-scoped: `blueprints/states/{username}/{workspace}`
+- Org-scoped: `blueprints/{org}/states/{team}/{workspace}`
+
+Available actions: `getState`, `updateState`, `deleteState`, `lockState`, `unlockState`.
+
+Example — grant a user full access to their own workspaces:
+
+```json
+{
+  "service": "blueprints",
+  "actions": ["getState", "updateState", "deleteState", "lockState", "unlockState"],
+  "resources": ["blueprints/states/alice/*"]
+}
+```
 
 ## Testing
 
 ```bash
-pip install -r src/requirements.txt
-
 # Unit tests (no external services required)
-python -m pytest tests/unit_tests/
+cd src/systems/blueprints
+go test ./...
 
 # Integration tests (requires running Blueprints, Gatekeeper, and PostgreSQL)
-python -m pytest tests/integration_tests/
+pip install -r tests/blueprints/requirements.txt
+API_URL=http://localhost:8081 GATEKEEPER_URL=http://localhost:8080 \
+  pytest tests/blueprints/ -v
 ```
-
-## Release
-
-Releases are automated via [semantic-release](https://semantic-release.gitbook.io) on push to `master`. A passing test run triggers a version bump, GitHub release, and a Docker image push to `ghcr.io/jhparker7/blueprints`.

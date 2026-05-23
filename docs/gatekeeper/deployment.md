@@ -24,7 +24,7 @@ Services:
 The application image is `gatekeeper:0.0.4`. Build it from source:
 
 ```bash
-cd src
+cd src/systems/gatekeeper
 docker build -t gatekeeper:0.0.4 .
 ```
 
