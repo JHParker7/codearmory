@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -90,6 +91,9 @@ func isBlueprints(path string) bool {
 
 // ── User existence middleware ─────────────────────────────────────────────────
 
+// uuidRE matches the UUID format Gatekeeper uses for user IDs.
+var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 // getUserID decodes the JWT payload (without signature verification) and returns
 // the sub claim, which Gatekeeper sets to the user's ID.
 func getUserID(token string) (string, bool) {
@@ -107,6 +111,9 @@ func getUserID(token string) (string, bool) {
 	if err := json.Unmarshal(payload, &claims); err != nil || claims.Sub == "" {
 		return "", false
 	}
+	if !uuidRE.MatchString(claims.Sub) {
+		return "", false
+	}
 	return claims.Sub, true
 }
 
@@ -118,7 +125,7 @@ func checkUserExists(ctx context.Context, token, userID string) bool {
 	defer span.End()
 	span.SetAttributes(attribute.String("user.id", userID))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/users/"+userID, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/users/"+url.PathEscape(userID), nil)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
