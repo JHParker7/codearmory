@@ -1,0 +1,166 @@
+services:
+
+  # ── Database ──────────────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Application services ──────────────────────────────────────────────────────
+
+  gatekeeper:
+    build:
+      context: ../../src/systems/gatekeeper
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
+      OTEL_SERVICE_NAME: gatekeeper
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  blueprints:
+    build:
+      context: ../../src/systems/blueprints
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/blueprints
+      GATEKEEPER_URL: http://gatekeeper:8080
+      OTEL_SERVICE_NAME: blueprints
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+      # ENCRYPTION_KEY: <64-hex-char key> — omit to store state as plaintext
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_started
+    restart: on-failure
+
+  conductor:
+    build:
+      context: ../../src/systems/conductor
+    environment:
+      GATEKEEPER_URL: http://gatekeeper:8080
+      BLUEPRINTS_URL: http://blueprints:8081
+      OTEL_SERVICE_NAME: conductor
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+    ports:
+      - "8082:8082"
+    depends_on:
+      gatekeeper:
+        condition: service_started
+      blueprints:
+        condition: service_started
+    restart: on-failure
+
+  # ── Observability ─────────────────────────────────────────────────────────────
+
+  otelcol:
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    volumes:
+      - ./otelcol.yml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    depends_on:
+      tempo:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.7.2
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./tempo.yml:/etc/tempo.yml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:3200/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.4.2
+    command: ["-config.file=/etc/loki.yml"]
+    volumes:
+      - ./loki.yml:/etc/loki.yml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:3100/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:9090/-/healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      tempo:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  tempo_data:
+  loki_data:
+  prometheus_data:
+  grafana_data:

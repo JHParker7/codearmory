@@ -28,10 +28,9 @@ All configuration is via environment variables.
 | `DATABASE_URL` | `postgresql://postgres:test@127.0.0.1:5432/blueprints` | PostgreSQL connection string |
 | `GATEKEEPER_URL` | `http://localhost:8080` | Base URL of the Gatekeeper service |
 | `ENCRYPTION_KEY` | — | 64-character hex string (32 bytes) for AES-256-GCM at-rest encryption. Omit to store state as plaintext. |
-| `TEMPO_ENDPOINT` | `http://localhost:4318` | OTLP/HTTP endpoint for trace export |
-| `LOKI_URL` | `http://localhost:3100` | Loki push endpoint for log shipping |
-| `TELEMETRY_ENABLED` | `true` | Set to `false` to disable tracing and Loki log shipping |
 | `PORT` | `8081` | Port the server listens on |
+| `OTEL_SERVICE_NAME` | `blueprints` | Service name reported in traces and metrics |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTel Collector HTTP endpoint. Omit to disable telemetry. |
 | `TLS_CERT_FILE` | — | Path to PEM-encoded TLS certificate. Required with `TLS_KEY_FILE` to enable HTTPS. |
 | `TLS_KEY_FILE` | — | Path to PEM-encoded TLS private key. Required with `TLS_CERT_FILE` to enable HTTPS. |
 | `CA_CERT_FILE` | — | Path to PEM-encoded CA certificate. When set, enables mTLS (requires and verifies client certificates). |
