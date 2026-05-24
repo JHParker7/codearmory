@@ -41,6 +41,30 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
+// secret reads the named environment variable. If <NAME>_FILE is set, the
+// value is read from that file instead (trailing whitespace stripped), so that
+// Docker Compose secrets mounts and Kubernetes Secret volumes work without any
+// code changes. The file path takes precedence over the plain env var. If the
+// file is specified but unreadable the process exits immediately.
+func secret(name string) string {
+	if path := os.Getenv(name + "_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Error("cannot read secret file", "var", name+"_FILE", "path", path, "error", err)
+			os.Exit(1)
+		}
+		return strings.TrimSpace(string(data))
+	}
+	return os.Getenv(name)
+}
+
+func secretOrDefault(name, def string) string {
+	if v := secret(name); v != "" {
+		return v
+	}
+	return def
+}
+
 const maxBodyBytes = 64 * 1024 * 1024 // 64 MB — generous upper bound for Terraform state
 
 const createTables = `
@@ -625,7 +649,7 @@ func main() {
 
 	ctx := context.Background()
 
-	db, err = pgxpool.New(ctx, envOrDefault("DATABASE_URL", "postgresql://postgres:test@127.0.0.1:5432/blueprints"))
+	db, err = pgxpool.New(ctx, secretOrDefault("DATABASE_URL", "postgresql://postgres:test@127.0.0.1:5432/blueprints"))
 	if err != nil {
 		slog.Error("failed to create database pool", "error", err)
 		os.Exit(1)

@@ -9,18 +9,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 )
 
 var encKey []byte
 
-// initEncryption loads ENCRYPTION_KEY from the environment. The key must be a
-// 64-character hex string (32 bytes / AES-256). If the variable is absent,
-// state is stored and retrieved as plaintext.
+// initEncryption loads ENCRYPTION_KEY (or ENCRYPTION_KEY_FILE) from the
+// environment. The key must be a 64-character hex string (32 bytes / AES-256).
+// If neither variable is set, state is stored and retrieved as plaintext.
 func initEncryption() error {
-	raw := os.Getenv("ENCRYPTION_KEY")
+	raw := secret("ENCRYPTION_KEY")
 	if raw == "" {
-		slog.Warn("ENCRYPTION_KEY not set: state data will be stored as plaintext")
+		slog.Warn("ENCRYPTION_KEY / ENCRYPTION_KEY_FILE not set: state data will be stored as plaintext")
 		return nil
 	}
 	key, err := hex.DecodeString(raw)

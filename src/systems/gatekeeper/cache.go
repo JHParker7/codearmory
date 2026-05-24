@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -15,14 +14,14 @@ const entityTTL = 5 * time.Minute
 var redisClient *redis.Client
 
 func initCache() {
-	url := os.Getenv("REDIS_URL")
+	url := secret("REDIS_URL")
 	if url == "" {
-		slog.Info("redis cache disabled (REDIS_URL not set)")
+		slog.Info("redis cache disabled (REDIS_URL / REDIS_URL_FILE not set)")
 		return
 	}
 	opt, err := redis.ParseURL(url)
 	if err != nil {
-		slog.Warn("invalid REDIS_URL, cache disabled", "error", err)
+		slog.Warn("invalid REDIS_URL / REDIS_URL_FILE, cache disabled", "error", err)
 		return
 	}
 	c := redis.NewClient(opt)

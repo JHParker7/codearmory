@@ -43,7 +43,7 @@ func connect() *gorm.DB {
 	if gormDB != nil {
 		return gormDB
 	}
-	conn, err := gorm.Open(postgres.Open(os.Getenv("DATABASE_URL")), &gorm.Config{
+	conn, err := gorm.Open(postgres.Open(secret("DATABASE_URL")), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
@@ -65,9 +65,9 @@ func connectRead() *gorm.DB {
 	if gormDB != nil {
 		return gormDB
 	}
-	readURL := os.Getenv("DATABASE_READ_URL")
+	readURL := secret("DATABASE_READ_URL")
 	if readURL == "" {
-		readURL = os.Getenv("DATABASE_URL")
+		readURL = secret("DATABASE_URL")
 	}
 	conn, err := gorm.Open(postgres.Open(readURL), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
