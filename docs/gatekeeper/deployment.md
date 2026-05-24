@@ -2,11 +2,11 @@
 
 ## Local (Docker Compose)
 
-The local stack in `infra/local/` runs the full observability pipeline alongside the application.
+The local stack in `infra/local/` runs the full application alongside its dependencies.
 
 ```bash
 cd infra/local
-docker compose up
+docker compose up --build
 ```
 
 Services:
@@ -14,18 +14,15 @@ Services:
 | Service | Port | Description |
 |---------|------|-------------|
 | gatekeeper | 8080 | Application |
-| database (PostgreSQL) | 5432 | Primary datastore |
-| otelcol | 4317 (gRPC), 4318 (HTTP) | OTel Collector |
-| loki | 3100 | Log aggregation |
-| tempo | 3200 | Trace storage |
-| prometheus | 9090 | Metrics |
-| grafana | 3000 | Dashboards |
+| blueprints | 8081 | Terraform state backend |
+| conductor | 8082 | API gateway |
+| postgres | 5432 | Primary datastore |
+| redis | 6379 | Permission-check and user cache |
 
-The application image is `gatekeeper:0.0.4`. Build it from source:
+Images are built from source on each `docker compose up --build`. Pre-built images are available on GHCR:
 
 ```bash
-cd src/systems/gatekeeper
-docker build -t gatekeeper:0.0.4 .
+docker pull ghcr.io/code-armory-app/gatekeeper:alpha-latest
 ```
 
 ## Kubernetes (Helm)
@@ -130,6 +127,7 @@ The `replicas` field is omitted from the Deployment intentionally — setting it
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL write connection string (`postgres://user:pass@host/db`) |
 | `DATABASE_READ_URL` | No | PostgreSQL read-replica connection string. Falls back to `DATABASE_URL` if unset. |
+| `REDIS_URL` | No | Redis connection string (`redis://host:6379/0`). Omit to disable caching. |
 | `TLS_CERT_FILE` | No | Path to the PEM-encoded TLS certificate. Required together with `TLS_KEY_FILE` to enable HTTPS. |
 | `TLS_KEY_FILE` | No | Path to the PEM-encoded TLS private key. Required together with `TLS_CERT_FILE` to enable HTTPS. |
 | `OTEL_SERVICE_NAME` | No | Service name reported in traces and metrics (default: `gatekeeper`) |

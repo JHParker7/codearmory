@@ -56,6 +56,7 @@ API_URL=http://localhost:8080 pytest tests/gatekeeper/ -v
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL write connection string (`postgres://user:pass@host/db`) |
 | `DATABASE_READ_URL` | No | PostgreSQL read-replica connection string. Falls back to `DATABASE_URL` if unset. |
+| `REDIS_URL` | No | Redis connection string (`redis://host:6379/0`). Omit to disable caching. |
 | `TLS_CERT_FILE` | No | Path to the PEM-encoded TLS certificate. Required together with `TLS_KEY_FILE` to enable HTTPS. |
 | `TLS_KEY_FILE` | No | Path to the PEM-encoded TLS private key. Required together with `TLS_CERT_FILE` to enable HTTPS. |
 | `PORT` | No | Port the server listens on (default: `8080`). |
@@ -104,7 +105,13 @@ Quick reference:
 | `POST` | `/invites/{id}/decline` | ✓ | Decline invite |
 | `DELETE` | `/invites/{id}` | ✓ | Revoke invite |
 
-All protected endpoints require `Authorization: Bearer <token>` and enforce RBAC permission checks. On signup, every user automatically receives `getUser`, `updateUser`, and `deleteUser` on their own user resource. All other permissions must be explicitly granted.
+All protected endpoints require `Authorization: Bearer <token>` and enforce RBAC permission checks. On signup, every user automatically receives:
+
+- `getUser`, `updateUser`, `deleteUser` on their own user resource
+- `createOrg` on `gatekeeper/orgs`, `createTeam` on `gatekeeper/teams`
+- `getState`, `updateState`, `deleteState`, `lockState`, `unlockState` on `blueprints/states/{username}/*`
+
+All other permissions must be explicitly granted. When a user creates an org, they additionally receive full state access on `blueprints/{org}/states/*`.
 
 Invite endpoints are accessible only to the inviter and the invitee. Accepting an org invite sets `org_id` on the invitee's user record; accepting a team invite sets `team_id`.
 
@@ -152,14 +159,15 @@ ingress:
 
 ## Schema
 
-| Table         | Primary Key      | Foreign Keys                                                  |
-|---------------|------------------|---------------------------------------------------------------|
-| `orgs`        | `org_id`         | —                                                             |
-| `roles`       | `role_id`        | `org_id` → `orgs`                                            |
-| `teams`       | `team_id`        | `role_id` → `roles`                                          |
-| `users`       | `user_id`        | `org_id` → `orgs`, `role_id` → `roles`, `team_id` → `teams` |
-| `sessions`    | `session_id`     | `user_id` → `users`                                          |
-| `permissions` | `permissions_id` | —                                                             |
-| `invites`     | `invite_id`      | `inviter_id` → `users`                                       |
+| Table                 | Primary Key            | Foreign Keys                                                  |
+|-----------------------|------------------------|---------------------------------------------------------------|
+| `orgs`                | `org_id`               | —                                                             |
+| `roles`               | `role_id`              | `org_id` → `orgs`                                            |
+| `teams`               | `team_id`              | `role_id` → `roles`                                          |
+| `users`               | `user_id`              | `org_id` → `orgs`, `role_id` → `roles`, `team_id` → `teams` |
+| `sessions`            | `session_id`           | `user_id` → `users`                                          |
+| `permissions`         | `permissions_id`       | —                                                             |
+| `invites`             | `invite_id`            | `inviter_id` → `users`                                       |
+| `permissions_checks`  | `permissions_check_id` | `user_id` → `users`, `org_id` → `orgs`, `team_id` → `teams` |
 
 `users.email` and `users.username` have unique indexes. All tables use a soft-delete `active` column. Schema is defined in Go via GORM struct tags in `src/systems/gatekeeper/types.go`.
