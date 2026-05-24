@@ -60,3 +60,77 @@ jobs:
       - name: Run cli unit tests
         run: cd src/cli; go test .
 
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs:
+      - gatekeeper-unit-test
+      - blueprints-unit-test
+      - conductor-unit-test
+      - cli-unit-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          pip install \
+            -r tests/gatekeeper/requirements.txt \
+            -r tests/conductor/requirements.txt \
+            -r tests/blueprints/requirements.txt \
+            -r tests/cli/requirements.txt
+
+      - name: Build CLI binary
+        run: go build -o "${{ runner.temp }}/armory" .
+        working-directory: src/cli
+
+      - name: Deploy compose stack
+        run: docker compose up -d --build --wait
+        working-directory: infra/local
+
+      - name: Wait for application services
+        run: |
+          for port in 8080 8081 8082; do
+            echo "Waiting for port $port..."
+            timeout 60 bash -c "until curl -s -o /dev/null --max-time 2 http://localhost:$port/; do sleep 1; done"
+            echo "Port $port is ready"
+          done
+
+      - name: Run gatekeeper integration tests
+        env:
+          API_URL: http://localhost:8080
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gatekeeper
+        run: pytest tests/gatekeeper -v
+
+      - name: Run blueprints integration tests
+        env:
+          BLUEPRINTS_URL: http://localhost:8081
+          GATEKEEPER_URL: http://localhost:8080
+        run: pytest tests/blueprints -v
+
+      - name: Run conductor integration tests
+        env:
+          CONDUCTOR_URL: http://localhost:8082
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gatekeeper
+        run: pytest tests/conductor -v
+
+      - name: Run CLI integration tests
+        env:
+          CONDUCTOR_URL: http://localhost:8082
+          ARMORY_BIN: ${{ runner.temp }}/armory
+        run: pytest tests/cli -v
+
+      - name: Show compose logs on failure
+        if: failure()
+        run: docker compose logs
+        working-directory: infra/local
+
