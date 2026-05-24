@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -33,6 +34,85 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// ── Input validation ──────────────────────────────────────────────────────────
+
+const bodyMax = 64 * 1024 // 64 KB cap on public-route request bodies
+
+var (
+	// emailRE is a loose format check; full RFC 5322 parsing is left to Gatekeeper.
+	emailRE = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+	// slugRE allows alphanumeric characters, hyphens, and underscores (1–64 chars).
+	// Used for both username body fields and path segments (username, org, team, workspace).
+	slugRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+)
+
+// readAndRestore reads the entire request body (up to bodyMax bytes), writes an
+// error response and returns (nil, false) if the limit is exceeded or a read
+// error occurs, and otherwise resets r.Body so the proxy can forward it unchanged.
+func readAndRestore(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, bodyMax)
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	return data, true
+}
+
+func validateSignupBody(w http.ResponseWriter, r *http.Request) bool {
+	data, ok := readAndRestore(w, r)
+	if !ok {
+		return false
+	}
+	var req struct {
+		Email    string `json:"email"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return false
+	}
+	if req.Email == "" || req.Username == "" || req.Password == "" {
+		http.Error(w, "email, username, and password are required", http.StatusBadRequest)
+		return false
+	}
+	if !emailRE.MatchString(req.Email) {
+		http.Error(w, "invalid email format", http.StatusBadRequest)
+		return false
+	}
+	if !slugRE.MatchString(req.Username) {
+		http.Error(w, "username must be 1-64 alphanumeric, hyphen, or underscore characters", http.StatusBadRequest)
+		return false
+	}
+	if len(req.Password) < 8 {
+		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func validateLoginBody(w http.ResponseWriter, r *http.Request) bool {
+	data, ok := readAndRestore(w, r)
+	if !ok {
+		return false
+	}
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return false
+	}
+	if req.Email == "" || req.Password == "" {
+		http.Error(w, "email and password are required", http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 // ── Logger middleware ─────────────────────────────────────────────────────────
@@ -75,18 +155,59 @@ func newProxy(target string) *httputil.ReverseProxy {
 	return httputil.NewSingleHostReverseProxy(u)
 }
 
-// isBlueprints reports whether the request path should be routed to Blueprints.
-// User-scoped paths start with /state/; org-scoped paths have "state" as the
-// second segment (/{org}/state/{team}/{workspace}).
-func isBlueprints(path string) bool {
-	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 3)
-	if len(parts) >= 1 && parts[0] == "state" {
+// proxyWith forwards r to p after running all checks in order. Each check is
+// responsible for writing its own error response; if any returns false,
+// forwarding is aborted.
+func proxyWith(p *httputil.ReverseProxy, checks ...func(http.ResponseWriter, *http.Request) bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, check := range checks {
+			if !check(w, r) {
+				return
+			}
+		}
+		p.ServeHTTP(w, r)
+	})
+}
+
+// validUUID returns a check that path value `name` is a well-formed UUID.
+func validUUID(name string) func(http.ResponseWriter, *http.Request) bool {
+	return func(w http.ResponseWriter, r *http.Request) bool {
+		if uuidRE.MatchString(r.PathValue(name)) {
+			return true
+		}
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return false
+	}
+}
+
+// validSlug returns a check that path value `name` matches the safe slug pattern.
+func validSlug(name string) func(http.ResponseWriter, *http.Request) bool {
+	return func(w http.ResponseWriter, r *http.Request) bool {
+		if slugRE.MatchString(r.PathValue(name)) {
+			return true
+		}
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return false
+	}
+}
+
+// validJSON reads and restores the body for POST/PUT/PATCH requests, rejecting
+// it with 400 if it is not well-formed JSON. Empty bodies are allowed through.
+func validJSON(w http.ResponseWriter, r *http.Request) bool {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	default:
 		return true
 	}
-	if len(parts) >= 2 && parts[1] == "state" {
-		return true
+	data, ok := readAndRestore(w, r)
+	if !ok {
+		return false
 	}
-	return false
+	if len(data) > 0 && !json.Valid(data) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 // ── User existence middleware ─────────────────────────────────────────────────
@@ -210,21 +331,83 @@ func main() {
 	gk := newProxy(gatekeeperURL)
 	bp := newProxy(blueprintsURL)
 
+	// auth wraps a handler with the user-existence check.
+	auth := func(h http.Handler) http.Handler { return userMiddleware(h) }
+	// id is a UUID check on the path value named "id".
+	id := validUUID("id")
+
 	mux := http.NewServeMux()
 
-	// Public routes — forwarded to Gatekeeper without a user check.
-	mux.Handle("POST /signup", gk)
-	mux.Handle("POST /login", gk)
-
-	// All other routes go through the user-existence middleware, then are
-	// dispatched to Blueprints or Gatekeeper based on the request path.
-	mux.Handle("/", userMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isBlueprints(r.URL.Path) {
-			bp.ServeHTTP(w, r)
-		} else {
-			gk.ServeHTTP(w, r)
+	// ── Public routes — validated then forwarded to Gatekeeper ───────────────
+	mux.Handle("POST /signup", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !validateSignupBody(w, r) {
+			return
 		}
-	})))
+		gk.ServeHTTP(w, r)
+	}))
+	mux.Handle("POST /login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !validateLoginBody(w, r) {
+			return
+		}
+		gk.ServeHTTP(w, r)
+	}))
+
+	// ── Gatekeeper — authenticated routes ────────────────────────────────────
+	mux.Handle("GET /check_permissions", auth(proxyWith(gk)))
+
+	mux.Handle("GET /users", auth(proxyWith(gk)))
+	mux.Handle("GET /users/{id}", auth(proxyWith(gk, id)))
+	mux.Handle("PUT /users/{id}", auth(proxyWith(gk, id, validJSON)))
+	mux.Handle("DELETE /users/{id}", auth(proxyWith(gk, id)))
+
+	mux.Handle("GET /orgs", auth(proxyWith(gk)))
+	mux.Handle("POST /orgs", auth(proxyWith(gk, validJSON)))
+	mux.Handle("GET /orgs/{id}", auth(proxyWith(gk, id)))
+	mux.Handle("PUT /orgs/{id}", auth(proxyWith(gk, id, validJSON)))
+	mux.Handle("DELETE /orgs/{id}", auth(proxyWith(gk, id)))
+	mux.Handle("POST /orgs/{id}/invites", auth(proxyWith(gk, id, validJSON)))
+
+	mux.Handle("GET /teams", auth(proxyWith(gk)))
+	mux.Handle("POST /teams", auth(proxyWith(gk, validJSON)))
+	mux.Handle("GET /teams/{id}", auth(proxyWith(gk, id)))
+	mux.Handle("PUT /teams/{id}", auth(proxyWith(gk, id, validJSON)))
+	mux.Handle("DELETE /teams/{id}", auth(proxyWith(gk, id)))
+	mux.Handle("POST /teams/{id}/invites", auth(proxyWith(gk, id, validJSON)))
+
+	mux.Handle("POST /roles", auth(proxyWith(gk, validJSON)))
+	mux.Handle("GET /roles/{id}", auth(proxyWith(gk, id)))
+	mux.Handle("PUT /roles/{id}", auth(proxyWith(gk, id, validJSON)))
+	mux.Handle("DELETE /roles/{id}", auth(proxyWith(gk, id)))
+
+	mux.Handle("POST /permissions", auth(proxyWith(gk, validJSON)))
+	mux.Handle("GET /permissions/{id}", auth(proxyWith(gk, id)))
+	mux.Handle("PUT /permissions/{id}", auth(proxyWith(gk, id, validJSON)))
+	mux.Handle("DELETE /permissions/{id}", auth(proxyWith(gk, id)))
+
+	mux.Handle("GET /sessions/{id}", auth(proxyWith(gk, id)))
+	mux.Handle("DELETE /sessions/{id}", auth(proxyWith(gk, id)))
+
+	mux.Handle("GET /invites", auth(proxyWith(gk)))
+	mux.Handle("GET /invites/{id}", auth(proxyWith(gk, id)))
+	mux.Handle("POST /invites/{id}/accept", auth(proxyWith(gk, id, validJSON)))
+	mux.Handle("POST /invites/{id}/decline", auth(proxyWith(gk, id, validJSON)))
+	mux.Handle("DELETE /invites/{id}", auth(proxyWith(gk, id)))
+
+	// ── Blueprints — user-scoped: /state/{username}/{workspace} ──────────────
+	// JSON validation is omitted for state routes: Terraform state bodies can be
+	// tens of MB and Blueprints validates them directly.
+	userState := []func(http.ResponseWriter, *http.Request) bool{validSlug("username"), validSlug("workspace")}
+	mux.Handle("GET /state/{username}/{workspace}", auth(proxyWith(bp, userState...)))
+	mux.Handle("POST /state/{username}/{workspace}", auth(proxyWith(bp, userState...)))
+	mux.Handle("DELETE /state/{username}/{workspace}", auth(proxyWith(bp, userState...)))
+	mux.Handle("/state/{username}/{workspace}", auth(proxyWith(bp, userState...))) // LOCK / UNLOCK
+
+	// ── Blueprints — org-scoped: /{org}/state/{team}/{workspace} ─────────────
+	orgState := []func(http.ResponseWriter, *http.Request) bool{validSlug("org"), validSlug("team"), validSlug("workspace")}
+	mux.Handle("GET /{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...)))
+	mux.Handle("POST /{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...)))
+	mux.Handle("DELETE /{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...)))
+	mux.Handle("/{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...))) // LOCK / UNLOCK
 
 	port := envOrDefault("PORT", "8082")
 

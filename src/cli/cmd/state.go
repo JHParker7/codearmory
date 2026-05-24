@@ -1,0 +1,140 @@
+package cmd
+
+import (
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/spf13/cobra"
+)
+
+var stateCmd = &cobra.Command{
+	Use:   "state",
+	Short: "Manage Terraform state (user-scoped: /state/{username}/{workspace})",
+}
+
+var orgStateCmd = &cobra.Command{
+	Use:   "org-state",
+	Short: "Manage Terraform state (org-scoped: /{org}/state/{team}/{workspace})",
+}
+
+func readStateFile(file string) ([]byte, error) {
+	switch file {
+	case "", "-":
+		return io.ReadAll(os.Stdin)
+	default:
+		return os.ReadFile(file)
+	}
+}
+
+func init() {
+	// ── User-scoped state ─────────────────────────────────────────────────────
+	var pushFile, lockData string
+
+	pushCmd := &cobra.Command{
+		Use:   "push <username> <workspace>",
+		Short: "Upload Terraform state",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body, err := readStateFile(pushFile)
+			if err != nil {
+				return fmt.Errorf("reading state: %w", err)
+			}
+			return apiCall("POST", "/state/"+args[0]+"/"+args[1], body)
+		},
+	}
+	pushCmd.Flags().StringVarP(&pushFile, "file", "f", "-", "state file path (default: stdin)")
+
+	lockCmd := &cobra.Command{
+		Use:   "lock <username> <workspace>",
+		Short: "Lock a workspace",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body, err := parseData(lockData)
+			if err != nil {
+				return err
+			}
+			return apiCall("LOCK", "/state/"+args[0]+"/"+args[1], body)
+		},
+	}
+	lockCmd.Flags().StringVar(&lockData, "data", "", "lock info JSON or @file")
+
+	stateCmd.AddCommand(
+		&cobra.Command{
+			Use:   "get <username> <workspace>",
+			Short: "Download Terraform state",
+			Args:  cobra.ExactArgs(2),
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/state/"+args[0]+"/"+args[1], nil) },
+		},
+		pushCmd,
+		&cobra.Command{
+			Use:   "delete <username> <workspace>",
+			Short: "Delete Terraform state",
+			Args:  cobra.ExactArgs(2),
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/state/"+args[0]+"/"+args[1], nil) },
+		},
+		lockCmd,
+		&cobra.Command{
+			Use:   "unlock <username> <workspace>",
+			Short: "Unlock a workspace",
+			Args:  cobra.ExactArgs(2),
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("UNLOCK", "/state/"+args[0]+"/"+args[1], nil) },
+		},
+	)
+
+	// ── Org-scoped state ──────────────────────────────────────────────────────
+	var orgPushFile, orgLockData string
+
+	orgPushCmd := &cobra.Command{
+		Use:   "push <org> <team> <workspace>",
+		Short: "Upload Terraform state",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body, err := readStateFile(orgPushFile)
+			if err != nil {
+				return fmt.Errorf("reading state: %w", err)
+			}
+			return apiCall("POST", "/"+args[0]+"/state/"+args[1]+"/"+args[2], body)
+		},
+	}
+	orgPushCmd.Flags().StringVarP(&orgPushFile, "file", "f", "-", "state file path (default: stdin)")
+
+	orgLockCmd := &cobra.Command{
+		Use:   "lock <org> <team> <workspace>",
+		Short: "Lock a workspace",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body, err := parseData(orgLockData)
+			if err != nil {
+				return err
+			}
+			return apiCall("LOCK", "/"+args[0]+"/state/"+args[1]+"/"+args[2], body)
+		},
+	}
+	orgLockCmd.Flags().StringVar(&orgLockData, "data", "", "lock info JSON or @file")
+
+	orgStateCmd.AddCommand(
+		&cobra.Command{
+			Use:   "get <org> <team> <workspace>",
+			Short: "Download Terraform state",
+			Args:  cobra.ExactArgs(3),
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/"+args[0]+"/state/"+args[1]+"/"+args[2], nil) },
+		},
+		orgPushCmd,
+		&cobra.Command{
+			Use:   "delete <org> <team> <workspace>",
+			Short: "Delete Terraform state",
+			Args:  cobra.ExactArgs(3),
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/"+args[0]+"/state/"+args[1]+"/"+args[2], nil) },
+		},
+		orgLockCmd,
+		&cobra.Command{
+			Use:   "unlock <org> <team> <workspace>",
+			Short: "Unlock a workspace",
+			Args:  cobra.ExactArgs(3),
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("UNLOCK", "/"+args[0]+"/state/"+args[1]+"/"+args[2], nil) },
+		},
+	)
+
+	rootCmd.AddCommand(stateCmd, orgStateCmd)
+}

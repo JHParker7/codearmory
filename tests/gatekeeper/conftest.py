@@ -22,6 +22,7 @@ def base_url():
 
 
 def pytest_sessionfinish(session, exitstatus):
+    conn = None
     try:
         conn = connect()
 
@@ -103,7 +104,8 @@ def pytest_sessionfinish(session, exitstatus):
     except Exception as e:
         print(f"Cleanup error: {e}")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 @pytest.fixture(scope="session")
