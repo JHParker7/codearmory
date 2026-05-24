@@ -63,7 +63,8 @@ def flush_redis():
         ["docker", "exec", REDIS_CONTAINER, "redis-cli", "FLUSHALL"],
         capture_output=True, text=True, timeout=5,
     )
-    return r.returncode == 0
+    if r.returncode != 0:
+        raise RuntimeError(f"redis FLUSHALL failed: {r.stderr.strip()}")
 
 
 def redis_info():
@@ -71,6 +72,8 @@ def redis_info():
         ["docker", "exec", REDIS_CONTAINER, "redis-cli", "INFO", "stats"],
         capture_output=True, text=True, timeout=5,
     )
+    if r.returncode != 0:
+        raise RuntimeError(f"redis INFO failed: {r.stderr.strip()}")
     hits = misses = 0
     for line in r.stdout.splitlines():
         if line.startswith("keyspace_hits:"):
