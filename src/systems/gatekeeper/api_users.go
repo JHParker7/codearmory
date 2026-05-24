@@ -350,15 +350,15 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 
 	userID := uuid.New().String()
 
-	permission := Permissions{
+	gatekeeperPerm := Permissions{
 		Name:          fmt.Sprintf("Basic Permissions for user %s", userID),
 		PermissionsID: uuid.New().String(),
 		Service:       "gatekeeper",
-		Actions:       []string{"getUser", "updateUser", "deleteUser"},
-		Resources:     []string{fmt.Sprintf("gatekeeper/users/%s", userID)},
+		Actions:       []string{"getUser", "updateUser", "deleteUser", "createOrg", "createTeam"},
+		Resources:     []string{fmt.Sprintf("gatekeeper/users/%s", userID), "gatekeeper/orgs", "gatekeeper/teams"},
 	}
 
-	if err = permission.Add(ctx); err != nil {
+	if err = gatekeeperPerm.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to create default permission")
 		slog.Error("signup failed: could not create default permission", "user_id", userID, "error", err)
@@ -366,14 +366,36 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.AddEvent("permission.created", trace.WithAttributes(
-		attribute.String("permissions.id", permission.PermissionsID),
-		attribute.String("permissions.service", permission.Service),
+		attribute.String("permissions.id", gatekeeperPerm.PermissionsID),
+		attribute.String("permissions.service", gatekeeperPerm.Service),
 	))
-	slog.Info("default permission created", "user_id", userID, "permissions_id", permission.PermissionsID)
+	slog.Info("default permission created", "user_id", userID, "permissions_id", gatekeeperPerm.PermissionsID)
+
+	blueprintsPerm := Permissions{
+		Name:          fmt.Sprintf("State Permissions for user %s", userID),
+		PermissionsID: uuid.New().String(),
+		Service:       "blueprints",
+		Actions:       []string{"getState", "updateState", "deleteState", "lockState", "unlockState"},
+		Resources:     []string{fmt.Sprintf("blueprints/states/%s/*", req.Username)},
+	}
+
+	if err = blueprintsPerm.Add(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to create default blueprints permission")
+		slog.Error("signup failed: could not create default blueprints permission", "user_id", userID, "error", err)
+		gatekeeperPerm.Remove(ctx) //nolint:errcheck
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	span.AddEvent("permission.created", trace.WithAttributes(
+		attribute.String("permissions.id", blueprintsPerm.PermissionsID),
+		attribute.String("permissions.service", blueprintsPerm.Service),
+	))
+	slog.Info("default blueprints permission created", "user_id", userID, "permissions_id", blueprintsPerm.PermissionsID)
 
 	role := Role{
 		RoleID:         uuid.New().String(),
-		PermissionsIDs: []string{permission.PermissionsID},
+		PermissionsIDs: []string{gatekeeperPerm.PermissionsID, blueprintsPerm.PermissionsID},
 	}
 	if err = role.Add(ctx); err != nil {
 		span.RecordError(err)
@@ -398,9 +420,12 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := user.Add(ctx); err != nil {
-		// Clean up the permission and role that were already committed.
-		if cleanErr := permission.Remove(ctx); cleanErr != nil {
-			slog.Error("signup: failed to clean up orphaned permission", "permissions_id", permission.PermissionsID, "error", cleanErr)
+		// Clean up permissions and role that were already committed.
+		if cleanErr := gatekeeperPerm.Remove(ctx); cleanErr != nil {
+			slog.Error("signup: failed to clean up orphaned permission", "permissions_id", gatekeeperPerm.PermissionsID, "error", cleanErr)
+		}
+		if cleanErr := blueprintsPerm.Remove(ctx); cleanErr != nil {
+			slog.Error("signup: failed to clean up orphaned permission", "permissions_id", blueprintsPerm.PermissionsID, "error", cleanErr)
 		}
 		if cleanErr := role.Remove(ctx); cleanErr != nil {
 			slog.Error("signup: failed to clean up orphaned role", "role_id", role.RoleID, "error", cleanErr)

@@ -196,10 +196,12 @@ func authMiddleware(next http.Handler) http.Handler {
 // strings, wildcard "*", prefix "foo/*", and per-segment wildcards like
 // "foo/*/bar". Returns (false, nil) — not an error — when no match is found.
 func checkPermissions(ctx context.Context, userID string, service string, action string, resource string) (bool, error) {
-	var permissionCheck PermissionsCheck
-	permissionCheck.Action = action
-	permissionCheck.Resource = resource
-	permissionCheck.UserID = userID
+	permissionCheck := PermissionsCheck{
+		PermissionsCheckID: uuid.New().String(),
+		Action:             action,
+		Resource:           resource,
+		UserID:             userID,
+	}
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "checkPermissions")
 	defer span.End()
 	span.SetAttributes(
@@ -484,6 +486,10 @@ func parseECPublicKey(pemStr string) (*ecdsa.PublicKey, error) {
 // If the user has no direct role, one is created first. All writes go through db — pass
 // connect().WithContext(ctx) for non-transactional callers, or a *gorm.DB transaction.
 func grantPermissions(db *gorm.DB, userID, name string, actions []string, resource string) error {
+	return grantServicePermissions(context.Background(), db, "gatekeeper", userID, name, actions, resource)
+}
+
+func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, name string, actions []string, resource string) error {
 	var user User
 	if err := db.Where("user_id = ? AND active = ?", userID, true).First(&user).Error; err != nil {
 		return err
@@ -508,7 +514,7 @@ func grantPermissions(db *gorm.DB, userID, name string, actions []string, resour
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Name:          name,
-		Service:       "gatekeeper",
+		Service:       service,
 		Actions:       actions,
 		Resources:     []string{resource},
 		OwnerID:       userID,
@@ -522,7 +528,7 @@ func grantPermissions(db *gorm.DB, userID, name string, actions []string, resour
 		role.PermissionsIDs = []string{}
 	}
 	role.PermissionsIDs = append(role.PermissionsIDs, perm.PermissionsID)
-	return db.Save(&role).Error
+	return role.Update(ctx)
 }
 
 // parsePagination reads ?limit=N&offset=N from the request. Returns 400 and

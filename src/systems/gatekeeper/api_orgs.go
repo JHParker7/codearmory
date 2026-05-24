@@ -146,6 +146,15 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bpPermName := fmt.Sprintf("%s-%s-blueprints-state", owner.Username, org.OrgName)
+	if err := grantServicePermissions(ctx, connect().WithContext(ctx), "blueprints", userID, bpPermName,
+		[]string{"getState", "updateState", "deleteState", "lockState", "unlockState"},
+		fmt.Sprintf("blueprints/%s/states/*", org.OrgName)); err != nil {
+		slog.Warn("create org: failed to grant blueprints state permission", "caller_id", callerID, "org_id", org.OrgID, "error", err)
+	} else {
+		slog.Info("create org: blueprints state permission granted", "caller_id", callerID, "org_id", org.OrgID)
+	}
+
 	span.SetAttributes(attribute.String("org.id", org.OrgID))
 	span.AddEvent("db.write", trace.WithAttributes(
 		attribute.String("org.id", org.OrgID),
