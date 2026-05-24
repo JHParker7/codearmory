@@ -82,6 +82,7 @@ func storeToken(token string) (string, error) {
 	if err := keyring.Set(keychainService, keychainAccount, token); err == nil {
 		return "keychain", nil
 	}
+	fmt.Fprintf(os.Stderr, "warning: OS keychain unavailable; token stored in plaintext at %s\n", configPath())
 	cfg := loadConfig()
 	cfg.Token = token
 	if err := saveConfig(cfg); err != nil {
