@@ -59,6 +59,21 @@ func init() {
 	}
 	lockCmd.Flags().StringVar(&lockData, "data", "", "lock info JSON or @file")
 
+	var unlockData string
+	unlockCmd := &cobra.Command{
+		Use:   "unlock <username> <workspace>",
+		Short: "Unlock a workspace",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body, err := parseData(unlockData)
+			if err != nil {
+				return err
+			}
+			return apiCall("UNLOCK", "/state/"+args[0]+"/"+args[1], body)
+		},
+	}
+	unlockCmd.Flags().StringVar(&unlockData, "data", "", "lock info JSON or @file (must include matching lock ID)")
+
 	stateCmd.AddCommand(
 		&cobra.Command{
 			Use:   "get <username> <workspace>",
@@ -74,12 +89,7 @@ func init() {
 			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/state/"+args[0]+"/"+args[1], nil) },
 		},
 		lockCmd,
-		&cobra.Command{
-			Use:   "unlock <username> <workspace>",
-			Short: "Unlock a workspace",
-			Args:  cobra.ExactArgs(2),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("UNLOCK", "/state/"+args[0]+"/"+args[1], nil) },
-		},
+		unlockCmd,
 	)
 
 	// ── Org-scoped state ──────────────────────────────────────────────────────
@@ -113,6 +123,21 @@ func init() {
 	}
 	orgLockCmd.Flags().StringVar(&orgLockData, "data", "", "lock info JSON or @file")
 
+	var orgUnlockData string
+	orgUnlockCmd := &cobra.Command{
+		Use:   "unlock <org> <team> <workspace>",
+		Short: "Unlock a workspace",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body, err := parseData(orgUnlockData)
+			if err != nil {
+				return err
+			}
+			return apiCall("UNLOCK", "/"+args[0]+"/state/"+args[1]+"/"+args[2], body)
+		},
+	}
+	orgUnlockCmd.Flags().StringVar(&orgUnlockData, "data", "", "lock info JSON or @file (must include matching lock ID)")
+
 	orgStateCmd.AddCommand(
 		&cobra.Command{
 			Use:   "get <org> <team> <workspace>",
@@ -128,12 +153,7 @@ func init() {
 			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/"+args[0]+"/state/"+args[1]+"/"+args[2], nil) },
 		},
 		orgLockCmd,
-		&cobra.Command{
-			Use:   "unlock <org> <team> <workspace>",
-			Short: "Unlock a workspace",
-			Args:  cobra.ExactArgs(3),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("UNLOCK", "/"+args[0]+"/state/"+args[1]+"/"+args[2], nil) },
-		},
+		orgUnlockCmd,
 	)
 
 	rootCmd.AddCommand(stateCmd, orgStateCmd)
