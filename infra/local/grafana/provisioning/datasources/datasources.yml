@@ -26,6 +26,8 @@ datasources:
         datasourceUid: prometheus
       lokiSearch:
         datasourceUid: loki
+      serviceMap:
+        datasourceUid: prometheus
 
   - name: Loki
     type: loki
