@@ -19,7 +19,7 @@ jobs:
         with:
           go-version: "1.25"
       - name: Run gatekeeper unit tests
-        run: cd src/systems/gatkeeeper; go test .
+        run: cd src/systems/gatekeeeper; go test .
       - name: Run blueprints unit tests
         run: cd src/systems/blueprints; go test .
       - name: Run conductor unit tests
