@@ -32,7 +32,14 @@ def token():
         f"{GATEKEEPER_URL}/login",
         json={"email": EMAIL, "password": PASSWORD},
     )
-    return res.json()["token"]
+    tok = res.json()["token"]
+    # Create the org so the owner gets blueprints state permissions for it.
+    requests.post(
+        f"{GATEKEEPER_URL}/orgs",
+        json={"org_name": ORG},
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    return tok
 
 
 @pytest.fixture(scope="module")

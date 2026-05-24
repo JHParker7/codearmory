@@ -147,9 +147,6 @@ class TestForbidden:
     def test_get_orgs(self, base_url, token):
         self._check(base_url, token, "get", "/orgs", {})
 
-    def test_post_orgs(self, base_url, token):
-        self._check(base_url, token, "post", "/orgs", {"org_name": "x"})
-
     def test_get_org(self, base_url, token):
         self._check(base_url, token, "get", f"/orgs/{rand_id()}")
 
@@ -161,9 +158,6 @@ class TestForbidden:
 
     def test_get_teams(self, base_url, token):
         self._check(base_url, token, "get", "/teams", {})
-
-    def test_post_teams(self, base_url, token):
-        self._check(base_url, token, "post", "/teams", {"team_name": "x"})
 
     def test_get_team(self, base_url, token):
         self._check(base_url, token, "get", f"/teams/{rand_id()}")

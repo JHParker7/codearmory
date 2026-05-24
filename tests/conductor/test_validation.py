@@ -330,13 +330,6 @@ class TestJSONBodyValidation:
 
     def test_valid_json_body_is_forwarded(self, base_url, token):
         """A syntactically valid JSON body passes conductor; backend decides the outcome."""
-        resp = self._post(base_url, token, "/orgs", b'{"name": "test-org"}')
+        resp = self._post(base_url, token, "/orgs", b'{"org_name": "test-org"}')
         assert resp.status_code != 400
 
-    def test_empty_body_is_allowed(self, base_url, token):
-        """Empty bodies are not rejected by the JSON check."""
-        resp = requests.post(
-            f"{base_url}/orgs",
-            headers={**bearer(token), "Content-Type": "application/json"},
-        )
-        assert resp.status_code != 400

@@ -9,7 +9,7 @@ import sqlalchemy as sa
 
 def connect() -> sa.Connection:
     DATABASE_URL = os.getenv(
-        "DATABASE_URL", "postgresql://postgres:test@127.0.0.1:5432/postgres"
+        "DATABASE_URL", "postgresql://postgres:postgres@127.0.0.1:5432/gatekeeper"
     ).replace("postgresql", "postgresql+psycopg2")
     engine = sa.create_engine(DATABASE_URL)
     conn = engine.connect()
@@ -91,8 +91,9 @@ def pytest_sessionfinish(session, exitstatus):
         if org_ids:
             conn.execute(sa.text("DELETE FROM orgs WHERE org_id = ANY(:oids)"), {"oids": org_ids})
 
-        # Delete in FK-safe order: sessions → users → roles → permissions
+        # Delete in FK-safe order: sessions → permissions_checks → users → roles → permissions
         conn.execute(sa.text("DELETE FROM sessions WHERE user_id = ANY(:uids)"), {"uids": user_ids})
+        conn.execute(sa.text("DELETE FROM permissions_checks WHERE user_id = ANY(:uids)"), {"uids": user_ids})
         conn.execute(sa.text("DELETE FROM users WHERE user_id = ANY(:uids)"), {"uids": user_ids})
         all_role_ids = list(set(role_ids + team_role_ids))
         if all_role_ids:

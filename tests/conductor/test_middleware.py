@@ -205,12 +205,12 @@ class TestValidToken:
         )
         body = resp.json()
         assert body["user_id"] == new_user["user_id"]
-        assert body["email"] == new_user["email"]
+        assert body["username"] == new_user["username"]
 
     def test_gatekeeper_permission_denial_is_proxied(self, base_url, token):
         """Conductor forwards 403 from Gatekeeper without interfering."""
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/users/{uuid.uuid4()}",
             headers=bearer(token),
         )
         assert resp.status_code == 403

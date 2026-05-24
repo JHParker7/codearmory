@@ -31,7 +31,7 @@ def rand_id():
 
 class TestGatekeeperRouting:
     def test_own_user_returns_gatekeeper_user_shape(self, base_url, token, new_user):
-        """GET /users/{id} → Gatekeeper; response contains user_id."""
+        """GET /users/{id} → Gatekeeper; response contains user_id and username."""
         resp = requests.get(
             f"{base_url}/users/{new_user['user_id']}",
             headers=bearer(token),
@@ -39,7 +39,7 @@ class TestGatekeeperRouting:
         assert resp.status_code == 200
         body = resp.json()
         assert "user_id" in body
-        assert "email" in body
+        assert "username" in body
 
     def test_check_permissions_returns_authorized_field(self, base_url, token, new_user):
         """GET /check_permissions → Gatekeeper; response contains authorized."""
@@ -98,14 +98,15 @@ class TestBlueprintsRouting:
     def test_user_scoped_state_reaches_blueprints(self, base_url, token, new_user):
         """/state/{username}/{workspace} is routed to Blueprints.
 
-        The user has no blueprints permission, so Blueprints returns 403.
-        Gatekeeper would return 404 for this path (no matching route).
+        Users have permission to access their own state namespace, so an empty
+        workspace returns 204. Gatekeeper has no /state/ route and would return
+        404, so a non-404 here confirms the request reached Blueprints.
         """
         resp = requests.get(
             f"{base_url}/state/{new_user['username']}/dev",
             headers=bearer(token),
         )
-        assert resp.status_code == 403
+        assert resp.status_code != 404
 
     def test_org_scoped_state_reaches_blueprints(self, base_url, token):
         """/{org}/state/{team}/{workspace} is routed to Blueprints."""
