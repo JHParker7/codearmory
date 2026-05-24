@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -64,6 +65,10 @@ func (f *fanoutHandler) WithGroup(name string) slog.Handler {
 // specific variants OTEL_EXPORTER_OTLP_LOGS_ENDPOINT /
 // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).
 func setupOTel(ctx context.Context) (slog.Handler, func(context.Context) error, error) {
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" {
+		return nil, nil, fmt.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT not set")
+	}
+
 	serviceName := os.Getenv("OTEL_SERVICE_NAME")
 	if serviceName == "" {
 		serviceName = "gatekeeper"
