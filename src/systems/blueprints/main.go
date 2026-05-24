@@ -236,6 +236,15 @@ func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey, resour
 		return
 	}
 
+	if cached, ok := stateCacheGet(ctx, workspaceKey); ok {
+		slog.Info("state cache hit", "workspace", workspaceKey)
+		span.SetStatus(codes.Ok, "")
+		meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "found")))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(cached)
+		return
+	}
+
 	var data []byte
 	err := db.QueryRow(ctx, "SELECT data FROM states WHERE workspace = $1", workspaceKey).Scan(&data)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -262,6 +271,7 @@ func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey, resour
 		return
 	}
 
+	stateCacheSet(ctx, workspaceKey, plaintext)
 	slog.Info("state retrieved", "workspace", workspaceKey)
 	span.SetStatus(codes.Ok, "")
 	meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "found")))
@@ -364,6 +374,7 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 		return
 	}
 
+	stateCacheDel(ctx, workspaceKey)
 	slog.Info("state updated", "workspace", workspaceKey)
 	span.SetStatus(codes.Ok, "")
 	meterUpdateState.Add(ctx, 1)
@@ -394,6 +405,7 @@ func handleDeleteState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 		return
 	}
 
+	stateCacheDel(ctx, workspaceKey)
 	slog.Info("state deleted", "workspace", workspaceKey)
 	span.SetStatus(codes.Ok, "")
 	meterDeleteState.Add(ctx, 1)
@@ -609,6 +621,7 @@ func main() {
 		slog.Error("encryption init failed", "error", err)
 		os.Exit(1)
 	}
+	initCache()
 
 	ctx := context.Background()
 
