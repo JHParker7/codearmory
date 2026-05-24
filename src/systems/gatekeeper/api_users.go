@@ -295,6 +295,7 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err := connect().WithContext(ctx).Model(&Session{}).Where("user_id = ?", id).Update("active", false).Error; err != nil {
 		slog.Error("delete user: failed to invalidate sessions", "caller_id", callerID, "target_user_id", id, "error", err)
 	} else {
+		cacheDelUserSessions(ctx, id)
 		span.AddEvent("sessions.invalidated", trace.WithAttributes(attribute.String("user.id", id)))
 		slog.Info("delete user: sessions invalidated", "caller_id", callerID, "target_user_id", id)
 	}

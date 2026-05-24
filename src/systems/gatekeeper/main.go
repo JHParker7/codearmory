@@ -116,6 +116,7 @@ func main() {
 		defer shutdown(context.Background())
 	}
 	initMetrics()
+	initCache()
 
 	wrappedMux := otelhttp.NewHandler(NewLogger(mux), "gatekeeper",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),

@@ -109,6 +109,7 @@ func (user User) Update(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:user:"+user.UserID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -123,6 +124,7 @@ func (user User) Remove(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:user:"+user.UserID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -133,12 +135,19 @@ func (user User) Get(ctx context.Context) (db, error) {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.user.get")
 	defer span.End()
 	span.SetAttributes(attribute.String("user.id", user.UserID))
+	if user.UserID != "" {
+		if cached, ok := cacheGet[User](ctx, "gk:user:"+user.UserID); ok {
+			span.SetStatus(codes.Ok, "")
+			return cached, nil
+		}
+	}
 	var newUser User
 	if err := connectRead().WithContext(ctx).Where("(user_id = ? OR username = ?) AND active = ?", user.UserID, user.Username, true).First(&newUser).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	cacheSet(ctx, "gk:user:"+newUser.UserID, newUser, entityTTL)
 	span.SetStatus(codes.Ok, "")
 	return newUser, nil
 }
@@ -193,6 +202,7 @@ func (org Org) Update(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:org:"+org.OrgID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -207,6 +217,7 @@ func (org Org) Remove(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:org:"+org.OrgID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -216,12 +227,17 @@ func (org Org) Get(ctx context.Context) (db, error) {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.org.get")
 	defer span.End()
 	span.SetAttributes(attribute.String("org.id", org.OrgID))
+	if cached, ok := cacheGet[Org](ctx, "gk:org:"+org.OrgID); ok {
+		span.SetStatus(codes.Ok, "")
+		return cached, nil
+	}
 	var newOrg Org
 	if err := connectRead().WithContext(ctx).First(&newOrg, "org_id = ? AND active = ?", org.OrgID, true).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	cacheSet(ctx, "gk:org:"+newOrg.OrgID, newOrg, entityTTL)
 	span.SetStatus(codes.Ok, "")
 	return newOrg, nil
 }
@@ -276,6 +292,7 @@ func (team Team) Update(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:team:"+team.TeamID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -290,6 +307,7 @@ func (team Team) Remove(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:team:"+team.TeamID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -299,12 +317,17 @@ func (team Team) Get(ctx context.Context) (db, error) {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.team.get")
 	defer span.End()
 	span.SetAttributes(attribute.String("team.id", team.TeamID))
+	if cached, ok := cacheGet[Team](ctx, "gk:team:"+team.TeamID); ok {
+		span.SetStatus(codes.Ok, "")
+		return cached, nil
+	}
 	var newTeam Team
 	if err := connectRead().WithContext(ctx).First(&newTeam, "team_id = ? AND active = ?", team.TeamID, true).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	cacheSet(ctx, "gk:team:"+newTeam.TeamID, newTeam, entityTTL)
 	span.SetStatus(codes.Ok, "")
 	return newTeam, nil
 }
@@ -359,6 +382,7 @@ func (role Role) Update(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:role:"+role.RoleID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -373,6 +397,7 @@ func (role Role) Remove(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:role:"+role.RoleID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -382,12 +407,17 @@ func (role Role) Get(ctx context.Context) (db, error) {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.role.get")
 	defer span.End()
 	span.SetAttributes(attribute.String("role.id", role.RoleID))
+	if cached, ok := cacheGet[Role](ctx, "gk:role:"+role.RoleID); ok {
+		span.SetStatus(codes.Ok, "")
+		return cached, nil
+	}
 	var newRole Role
 	if err := connectRead().WithContext(ctx).First(&newRole, "role_id = ? AND active = ?", role.RoleID, true).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	cacheSet(ctx, "gk:role:"+newRole.RoleID, newRole, entityTTL)
 	span.SetStatus(codes.Ok, "")
 	return newRole, nil
 }
@@ -427,6 +457,7 @@ func (session Session) Add(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheTrackUserSession(ctx, session.UserID, session.SessionID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -442,6 +473,7 @@ func (session Session) Update(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:session:"+session.SessionID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -456,6 +488,7 @@ func (session Session) Remove(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:session:"+session.SessionID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -465,11 +498,18 @@ func (session Session) Get(ctx context.Context) (db, error) {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.session.get")
 	defer span.End()
 	span.SetAttributes(attribute.String("session.id", session.SessionID))
+	if cached, ok := cacheGet[Session](ctx, "gk:session:"+session.SessionID); ok {
+		span.SetStatus(codes.Ok, "")
+		return cached, nil
+	}
 	var newSession Session
 	if err := connectRead().WithContext(ctx).First(&newSession, "session_id = ? AND active = ?", session.SessionID, true).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
+	}
+	if ttl := time.Until(newSession.ExpiresAt); ttl > 0 {
+		cacheSet(ctx, "gk:session:"+newSession.SessionID, newSession, ttl)
 	}
 	span.SetStatus(codes.Ok, "")
 	return newSession, nil
@@ -525,6 +565,7 @@ func (p Permissions) Update(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:perm:"+p.PermissionsID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -539,6 +580,7 @@ func (p Permissions) Remove(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	cacheDel(ctx, "gk:perm:"+p.PermissionsID)
 	span.SetStatus(codes.Ok, "")
 	return nil
 }
@@ -548,12 +590,17 @@ func (p Permissions) Get(ctx context.Context) (db, error) {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.permissions.get")
 	defer span.End()
 	span.SetAttributes(attribute.String("permissions.id", p.PermissionsID))
+	if cached, ok := cacheGet[Permissions](ctx, "gk:perm:"+p.PermissionsID); ok {
+		span.SetStatus(codes.Ok, "")
+		return cached, nil
+	}
 	var newP Permissions
 	if err := connectRead().WithContext(ctx).First(&newP, "permissions_id = ? AND active = ?", p.PermissionsID, true).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	cacheSet(ctx, "gk:perm:"+newP.PermissionsID, newP, entityTTL)
 	span.SetStatus(codes.Ok, "")
 	return newP, nil
 }
