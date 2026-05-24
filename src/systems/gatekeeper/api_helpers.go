@@ -528,7 +528,12 @@ func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, 
 		role.PermissionsIDs = []string{}
 	}
 	role.PermissionsIDs = append(role.PermissionsIDs, perm.PermissionsID)
-	return role.Update(ctx)
+	role.UpdatedAt = time.Now()
+	if err := db.Save(&role).Error; err != nil {
+		return err
+	}
+	cacheDel(ctx, "gk:role:"+role.RoleID)
+	return nil
 }
 
 // parsePagination reads ?limit=N&offset=N from the request. Returns 400 and
