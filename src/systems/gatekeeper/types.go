@@ -94,6 +94,17 @@ type Permissions struct {
 	Active        bool      `json:"active"         gorm:"column:active;default:true"`
 }
 
+// Service is a backend service registered with Gatekeeper. Conductor reads this
+// table to discover available services and their internal endpoint URLs.
+type Service struct {
+	ServiceID string    `json:"service_id" gorm:"column:service_id;primaryKey"`
+	Name      string    `json:"name"       gorm:"column:name;uniqueIndex"`
+	URL       string    `json:"url"        gorm:"column:url"`
+	Active    bool      `json:"active"     gorm:"column:active;default:true"`
+	CreatedAt time.Time `json:"created_at" gorm:"column:created_at"`
+	UpdatedAt time.Time `json:"updated_at" gorm:"column:updated_at"`
+}
+
 // PermissionsCheck is an audit record of a single permission evaluation. Each
 // call to GET /check_permissions that resolves successfully persists one row so
 // that access decisions can be reviewed after the fact.

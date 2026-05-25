@@ -5,8 +5,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
@@ -47,8 +49,37 @@ func NewLogger(handlerToWrap http.Handler) *Logger {
 
 func main() {
 	db := connect()
-	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{})
+	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &Service{})
 	applyForeignKeys(db)
+
+	// Auto-register services declared in SERVICES=name=url,name=url.
+	// Upserts on name so restarts don't create duplicates.
+	if raw := os.Getenv("SERVICES"); raw != "" {
+		for _, entry := range strings.Split(raw, ",") {
+			parts := strings.SplitN(strings.TrimSpace(entry), "=", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				continue
+			}
+			name, svcURL := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+			var svc Service
+			if db.Where("name = ?", name).First(&svc).Error != nil {
+				db.Create(&Service{ServiceID: uuid.New().String(), Name: name, URL: svcURL, Active: true})
+				slog.Info("service auto-registered", "name", name)
+			} else {
+				db.Model(&svc).Updates(map[string]any{"url": svcURL, "active": true})
+				slog.Info("service auto-updated", "name", name)
+			}
+		}
+	}
+
+	// Create the Conductor service account if CONDUCTOR_SERVICE_PASSWORD is set.
+	if pw := os.Getenv("CONDUCTOR_SERVICE_PASSWORD"); pw != "" {
+		email := os.Getenv("CONDUCTOR_SERVICE_EMAIL")
+		if email == "" {
+			email = "conductor@internal"
+		}
+		ensureConductorUser(db, email, pw)
+	}
 
 	mux := http.NewServeMux()
 
@@ -87,6 +118,10 @@ func main() {
 
 	mux.Handle("GET /sessions/{id}", mw(handleGetSession))
 	mux.Handle("DELETE /sessions/{id}", mw(handleDeleteSession))
+
+	mux.Handle("GET /services", mw(handleListServices))
+	mux.Handle("POST /services", mw(handleRegisterService))
+	mux.Handle("DELETE /services/{id}", mw(handleDeleteService))
 
 	mux.Handle("POST /orgs/{id}/invites", mw(handleCreateOrgInvite))
 	mux.Handle("POST /teams/{id}/invites", mw(handleCreateTeamInvite))
