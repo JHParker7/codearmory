@@ -74,7 +74,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 			Labels:    map[string]string{"app": "forge", "execution-id": exec.ExecutionID},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit:            ptr(int32(0)),
+			// BackoffLimit=0: a container failure is a valid result, not something
+			// to retry. Retrying would change the exit code and produce duplicate logs.
+			BackoffLimit: ptr(int32(0)),
+			// TTLSecondsAfterFinished is a safety net: Run() deletes the job
+			// immediately on completion, but if the process crashes before that,
+			// K8s will clean it up after 5 minutes.
 			TTLSecondsAfterFinished: ptr(int32(300)),
 			ActiveDeadlineSeconds:   &exec.TimeoutSecs,
 			Template: corev1.PodTemplateSpec{
@@ -84,6 +89,8 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 				Spec: corev1.PodSpec{
 					RestartPolicy:                corev1.RestartPolicyNever,
 					RuntimeClassName:             r.runtimeClass,
+					// Prevent the pod from inheriting cluster credentials via
+					// the default service account token.
 					AutomountServiceAccountToken: ptr(false),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot:   ptr(true),

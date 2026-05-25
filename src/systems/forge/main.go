@@ -41,6 +41,9 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
+// secret reads a secret from an env var. If NAME_FILE is set, the value is read
+// from that file path instead — the standard convention for Docker secrets and
+// Kubernetes secret volume mounts.
 func secret(name string) string {
 	if path := os.Getenv(name + "_FILE"); path != "" {
 		data, err := os.ReadFile(path)

@@ -83,6 +83,7 @@ func handleSubmit(pool *WorkerPool) http.HandlerFunc {
 			http.Error(w, "image and command are required", http.StatusBadRequest)
 			return
 		}
+		// len==0 means ALLOWED_IMAGES was not set: all images are permitted.
 		if len(allowedImages) > 0 && !allowedImages[req.Image] {
 			http.Error(w, "image not allowed", http.StatusBadRequest)
 			return
