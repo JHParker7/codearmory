@@ -347,6 +347,8 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 	defer tx.Rollback(ctx)
 
 	var existingLock string
+	// FOR UPDATE serializes concurrent requests on the same workspace row, preventing
+	// TOCTOU races between the lock check and the subsequent state write.
 	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
 	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
 		span.RecordError(lockErr)
@@ -479,6 +481,8 @@ func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey, resou
 	defer tx.Rollback(ctx)
 
 	var existingLock string
+	// FOR UPDATE serializes concurrent lock acquisitions on the same workspace, so two
+	// callers racing to lock the same workspace can't both see it as unlocked.
 	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
 	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
 		span.RecordError(lockErr)
@@ -552,6 +556,9 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 	defer tx.Rollback(ctx)
 
 	var existingLock string
+	// FOR UPDATE serializes concurrent unlock attempts on the same workspace row.
+	// ErrNoRows (workspace already unlocked) falls through to a no-op commit, making
+	// unlock idempotent — Terraform expects a 200 even when the lock is already gone.
 	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
 	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
 		span.RecordError(lockErr)
@@ -619,8 +626,9 @@ func orgKey(r *http.Request) (string, string) {
 }
 
 // lockUnlock dispatches LOCK/UNLOCK custom methods to their handlers.
-// Registered without a method prefix so it catches what the method-specific
-// patterns (GET, POST, DELETE) don't.
+// Go's ServeMux only accepts standard HTTP methods as route prefixes, so LOCK
+// and UNLOCK (WebDAV/Terraform protocol) must be caught by a method-agnostic
+// pattern and dispatched manually here.
 func lockUnlock(keyFn func(*http.Request) (string, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		k, res := keyFn(r)
