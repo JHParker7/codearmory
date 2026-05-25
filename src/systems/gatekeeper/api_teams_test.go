@@ -84,7 +84,7 @@ func TestCreateTeam_SetsOwnerTeamId(t *testing.T) {
 func TestCreateTeam_WithExplicitRoleID(t *testing.T) {
 	actor := createAuthorizedUser(t, "createTeam", "gatekeeper/teams")
 
-	existingRole := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{}}
+	existingRole := Role{RoleID: uuid.New().String(), OwnerID: actor.UserID, PermissionsIDs: []string{}}
 	if err := existingRole.Add(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -501,5 +501,54 @@ func TestDeleteTeam_ClearsMembership(t *testing.T) {
 	}
 	if row.(User).TeamID != nil {
 		t.Fatal("expected team_id to be cleared after team deletion")
+	}
+}
+
+func TestUpdateTeam_MissingName(t *testing.T) {
+	team := Team{TeamID: uuid.New().String(), TeamName: "original"}
+	if err := team.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { team.Remove(context.Background()) })
+	actor := createAuthorizedUser(t, "updateTeam", "gatekeeper/teams/"+team.TeamID)
+
+	b, _ := json.Marshal(teamUpdateRequest{TeamName: ""})
+	r := withUserID(httptest.NewRequest(http.MethodPut, "/teams/"+team.TeamID, bytes.NewReader(b)), actor.UserID)
+	r.SetPathValue("id", team.TeamID)
+	w := httptest.NewRecorder()
+	handleUpdateTeam(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty team_name, got %d", w.Code)
+	}
+}
+
+func TestUpdateTeam_InvalidBody(t *testing.T) {
+	team := Team{TeamID: uuid.New().String(), TeamName: "original"}
+	if err := team.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { team.Remove(context.Background()) })
+	actor := createAuthorizedUser(t, "updateTeam", "gatekeeper/teams/"+team.TeamID)
+
+	r := withUserID(httptest.NewRequest(http.MethodPut, "/teams/"+team.TeamID, bytes.NewReader([]byte("not json"))), actor.UserID)
+	r.SetPathValue("id", team.TeamID)
+	w := httptest.NewRecorder()
+	handleUpdateTeam(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid body, got %d", w.Code)
+	}
+}
+
+func TestCreateTeam_InvalidBody(t *testing.T) {
+	actor := createAuthorizedUser(t, "createTeam", "gatekeeper/teams")
+
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/teams", bytes.NewReader([]byte("not json"))), actor.UserID)
+	w := httptest.NewRecorder()
+	handleCreateTeam(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid body, got %d", w.Code)
 	}
 }
