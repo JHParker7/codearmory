@@ -221,3 +221,120 @@ func TestDeletePermissions_Forbidden(t *testing.T) {
 		t.Fatalf("expected 403, got %d", w.Code)
 	}
 }
+
+// --- handleCreatePermissions: empty actions/resources validation ---
+
+func TestCreatePermissions_EmptyActionRejected(t *testing.T) {
+	actor := createAuthorizedUser(t, "createPermissions", "gatekeeper/permissions")
+
+	b, _ := json.Marshal(permissionsRequest{Service: "svc", Actions: []string{"read", ""}, Resources: []string{"res"}})
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/permissions", bytes.NewReader(b)), actor.UserID)
+	w := httptest.NewRecorder()
+	handleCreatePermissions(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty action string, got %d", w.Code)
+	}
+}
+
+func TestCreatePermissions_EmptyResourceRejected(t *testing.T) {
+	actor := createAuthorizedUser(t, "createPermissions", "gatekeeper/permissions")
+
+	b, _ := json.Marshal(permissionsRequest{Service: "svc", Actions: []string{"read"}, Resources: []string{"res", ""}})
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/permissions", bytes.NewReader(b)), actor.UserID)
+	w := httptest.NewRecorder()
+	handleCreatePermissions(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty resource string, got %d", w.Code)
+	}
+}
+
+func TestCreatePermissions_InvalidBody(t *testing.T) {
+	actor := createAuthorizedUser(t, "createPermissions", "gatekeeper/permissions")
+
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/permissions", bytes.NewReader([]byte("not json"))), actor.UserID)
+	w := httptest.NewRecorder()
+	handleCreatePermissions(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid body, got %d", w.Code)
+	}
+}
+
+// --- handleUpdatePermissions: missing service, empty actions/resources ---
+
+func TestUpdatePermissions_MissingService(t *testing.T) {
+	perm := Permissions{PermissionsID: uuid.New().String(), Service: "svc", Actions: []string{"read"}, Resources: []string{"res"}}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+	actor := createAuthorizedUser(t, "updatePermissions", "gatekeeper/permissions/"+perm.PermissionsID)
+
+	b, _ := json.Marshal(permissionsRequest{Actions: []string{"read"}})
+	r := withUserID(httptest.NewRequest(http.MethodPut, "/permissions/"+perm.PermissionsID, bytes.NewReader(b)), actor.UserID)
+	r.SetPathValue("id", perm.PermissionsID)
+	w := httptest.NewRecorder()
+	handleUpdatePermissions(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing service, got %d", w.Code)
+	}
+}
+
+func TestUpdatePermissions_EmptyActionRejected(t *testing.T) {
+	perm := Permissions{PermissionsID: uuid.New().String(), Service: "svc", Actions: []string{"read"}, Resources: []string{"res"}}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+	actor := createAuthorizedUser(t, "updatePermissions", "gatekeeper/permissions/"+perm.PermissionsID)
+
+	b, _ := json.Marshal(permissionsRequest{Service: "svc", Actions: []string{"read", ""}, Resources: []string{"res"}})
+	r := withUserID(httptest.NewRequest(http.MethodPut, "/permissions/"+perm.PermissionsID, bytes.NewReader(b)), actor.UserID)
+	r.SetPathValue("id", perm.PermissionsID)
+	w := httptest.NewRecorder()
+	handleUpdatePermissions(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty action string, got %d", w.Code)
+	}
+}
+
+func TestUpdatePermissions_EmptyResourceRejected(t *testing.T) {
+	perm := Permissions{PermissionsID: uuid.New().String(), Service: "svc", Actions: []string{"read"}, Resources: []string{"res"}}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+	actor := createAuthorizedUser(t, "updatePermissions", "gatekeeper/permissions/"+perm.PermissionsID)
+
+	b, _ := json.Marshal(permissionsRequest{Service: "svc", Actions: []string{"read"}, Resources: []string{"res", ""}})
+	r := withUserID(httptest.NewRequest(http.MethodPut, "/permissions/"+perm.PermissionsID, bytes.NewReader(b)), actor.UserID)
+	r.SetPathValue("id", perm.PermissionsID)
+	w := httptest.NewRecorder()
+	handleUpdatePermissions(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty resource string, got %d", w.Code)
+	}
+}
+
+func TestUpdatePermissions_InvalidBody(t *testing.T) {
+	perm := Permissions{PermissionsID: uuid.New().String(), Service: "svc"}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+	actor := createAuthorizedUser(t, "updatePermissions", "gatekeeper/permissions/"+perm.PermissionsID)
+
+	r := withUserID(httptest.NewRequest(http.MethodPut, "/permissions/"+perm.PermissionsID, bytes.NewReader([]byte("not json"))), actor.UserID)
+	r.SetPathValue("id", perm.PermissionsID)
+	w := httptest.NewRecorder()
+	handleUpdatePermissions(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid body, got %d", w.Code)
+	}
+}

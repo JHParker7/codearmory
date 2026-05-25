@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -65,6 +66,7 @@ func handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("create role: success", "caller_id", callerID, "role_id", role.RoleID, "permissions_count", len(req.PermissionsIDs))
+	writeAudit(ctx, callerID, "user", "role.create", role.RoleID, fmt.Sprintf("permissions_count=%d", len(req.PermissionsIDs)))
 	row, _ := role.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -160,6 +162,7 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("update role: success", "caller_id", callerID, "role_id", id, "permissions_count", len(req.PermissionsIDs))
+	writeAudit(ctx, callerID, "user", "role.update", id, fmt.Sprintf("permissions_count=%d", len(req.PermissionsIDs)))
 	row, _ = role.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(row.(Role))
@@ -204,5 +207,6 @@ func handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("role.id", id)))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("delete role: success", "caller_id", callerID, "role_id", id)
+	writeAudit(ctx, callerID, "user", "role.delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }

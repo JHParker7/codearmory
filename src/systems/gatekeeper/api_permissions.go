@@ -95,6 +95,7 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 	))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("create permissions: success", "caller_id", callerID, "permissions_id", p.PermissionsID, "service", p.Service, "actions", p.Actions, "resources", p.Resources)
+	writeAudit(ctx, callerID, "user", "permission.create", p.PermissionsID, p.Service)
 	row, _ := p.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -218,6 +219,7 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 	))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("update permissions: success", "caller_id", callerID, "permissions_id", id, "new_service", req.Service, "new_actions", req.Actions, "new_resources", req.Resources)
+	writeAudit(ctx, callerID, "user", "permission.update", id, req.Service)
 	row, _ = p.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(row.(Permissions))
@@ -262,5 +264,6 @@ func handleDeletePermissions(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("permissions.id", id)))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("delete permissions: success", "caller_id", callerID, "permissions_id", id)
+	writeAudit(ctx, callerID, "user", "permission.delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }

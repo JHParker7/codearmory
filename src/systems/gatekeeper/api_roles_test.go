@@ -208,3 +208,33 @@ func TestDeleteRole_Forbidden(t *testing.T) {
 		t.Fatalf("expected 403, got %d", w.Code)
 	}
 }
+
+func TestCreateRole_InvalidBody(t *testing.T) {
+	actor := createAuthorizedUser(t, "createRole", "gatekeeper/roles")
+
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/roles", bytes.NewReader([]byte("not json"))), actor.UserID)
+	w := httptest.NewRecorder()
+	handleCreateRole(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid body, got %d", w.Code)
+	}
+}
+
+func TestUpdateRole_InvalidBody(t *testing.T) {
+	role := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{"p-1"}}
+	if err := role.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { role.Remove(context.Background()) })
+	actor := createAuthorizedUser(t, "updateRole", "gatekeeper/roles/"+role.RoleID)
+
+	r := withUserID(httptest.NewRequest(http.MethodPut, "/roles/"+role.RoleID, bytes.NewReader([]byte("not json"))), actor.UserID)
+	r.SetPathValue("id", role.RoleID)
+	w := httptest.NewRecorder()
+	handleUpdateRole(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid body, got %d", w.Code)
+	}
+}

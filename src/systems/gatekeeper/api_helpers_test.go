@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -716,6 +717,263 @@ func TestHandleCheckPermissions_InvalidBody(t *testing.T) {
 	handleCheckPermissions(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// --- parsePagination ---
+
+func TestParsePagination_Defaults(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/items", nil)
+	w := httptest.NewRecorder()
+	limit, offset, ok := parsePagination(w, r)
+	if !ok {
+		t.Fatal("expected ok=true for request with no pagination params")
+	}
+	if limit != 50 {
+		t.Fatalf("expected default limit=50, got %d", limit)
+	}
+	if offset != 0 {
+		t.Fatalf("expected default offset=0, got %d", offset)
+	}
+}
+
+func TestParsePagination_CustomValues(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/items?limit=10&offset=20", nil)
+	w := httptest.NewRecorder()
+	limit, offset, ok := parsePagination(w, r)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if limit != 10 {
+		t.Fatalf("expected limit=10, got %d", limit)
+	}
+	if offset != 20 {
+		t.Fatalf("expected offset=20, got %d", offset)
+	}
+}
+
+func TestParsePagination_LimitCappedAt500(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/items?limit=9999", nil)
+	w := httptest.NewRecorder()
+	limit, _, ok := parsePagination(w, r)
+	if !ok {
+		t.Fatal("expected ok=true for oversized limit")
+	}
+	if limit != 500 {
+		t.Fatalf("expected limit capped at 500, got %d", limit)
+	}
+}
+
+func TestParsePagination_InvalidLimit(t *testing.T) {
+	for _, bad := range []string{"abc", "-1", "0"} {
+		r := httptest.NewRequest(http.MethodGet, "/items?limit="+bad, nil)
+		w := httptest.NewRecorder()
+		_, _, ok := parsePagination(w, r)
+		if ok {
+			t.Fatalf("expected ok=false for limit=%q", bad)
+		}
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for limit=%q, got %d", bad, w.Code)
+		}
+	}
+}
+
+func TestParsePagination_InvalidOffset(t *testing.T) {
+	for _, bad := range []string{"abc", "-5"} {
+		r := httptest.NewRequest(http.MethodGet, "/items?offset="+bad, nil)
+		w := httptest.NewRecorder()
+		_, _, ok := parsePagination(w, r)
+		if ok {
+			t.Fatalf("expected ok=false for offset=%q", bad)
+		}
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for offset=%q, got %d", bad, w.Code)
+		}
+	}
+}
+
+func TestParsePagination_ZeroOffset(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/items?offset=0", nil)
+	w := httptest.NewRecorder()
+	_, offset, ok := parsePagination(w, r)
+	if !ok {
+		t.Fatal("expected ok=true for offset=0")
+	}
+	if offset != 0 {
+		t.Fatalf("expected offset=0, got %d", offset)
+	}
+}
+
+// --- parseECPublicKey ---
+
+func TestParseECPublicKey_Valid(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubBytes, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes}))
+
+	key, err := parseECPublicKey(pemStr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if key == nil {
+		t.Fatal("expected non-nil key")
+	}
+}
+
+func TestParseECPublicKey_EmptyString(t *testing.T) {
+	_, err := parseECPublicKey("")
+	if err == nil {
+		t.Fatal("expected error for empty PEM string")
+	}
+}
+
+func TestParseECPublicKey_InvalidPEM(t *testing.T) {
+	_, err := parseECPublicKey("not-a-pem-block")
+	if err == nil {
+		t.Fatal("expected error for invalid PEM")
+	}
+}
+
+func TestParseECPublicKey_RSAKeyRejected(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubBytes, err := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes}))
+
+	_, err = parseECPublicKey(pemStr)
+	if err == nil {
+		t.Fatal("expected error: RSA key should be rejected as non-ECDSA")
+	}
+}
+
+// --- checkPermissions: wildcard and prefix matching ---
+
+func makePermUser(t *testing.T, service string, actions []string, resources []string) User {
+	t.Helper()
+	perm := Permissions{
+		PermissionsID: uuid.New().String(),
+		Service:       service,
+		Actions:       actions,
+		Resources:     resources,
+	}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatalf("makePermUser perm: %v", err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+
+	role := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{perm.PermissionsID}}
+	if err := role.Add(context.Background()); err != nil {
+		t.Fatalf("makePermUser role: %v", err)
+	}
+	t.Cleanup(func() { role.Remove(context.Background()) })
+
+	u := User{
+		UserID:         uuid.New().String(),
+		Email:          uuid.New().String() + "@test.com",
+		Username:       "user-" + uuid.New().String(),
+		HashedPassword: "hash",
+		RoleID:         &role.RoleID,
+	}
+	if err := u.Add(context.Background()); err != nil {
+		t.Fatalf("makePermUser user: %v", err)
+	}
+	t.Cleanup(func() { u.Remove(context.Background()) })
+	return u
+}
+
+func TestCheckPermissions_GlobalWildcardResource(t *testing.T) {
+	u := makePermUser(t, "svc", []string{"read"}, []string{"*"})
+	ok, err := checkPermissions(context.Background(), u.UserID, "svc", "read", "anything/at/all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected true: resource wildcard '*' should match any path")
+	}
+}
+
+func TestCheckPermissions_PrefixWildcardResource(t *testing.T) {
+	u := makePermUser(t, "svc", []string{"read"}, []string{"blueprints/states/*"})
+	ok, err := checkPermissions(context.Background(), u.UserID, "svc", "read", "blueprints/states/mystate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected true: prefix wildcard should match path under the prefix")
+	}
+}
+
+func TestCheckPermissions_PrefixWildcardNoMatch(t *testing.T) {
+	u := makePermUser(t, "svc", []string{"read"}, []string{"blueprints/states/*"})
+	ok, err := checkPermissions(context.Background(), u.UserID, "svc", "read", "blueprints/other/mystate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("expected false: prefix wildcard should not match a different path prefix")
+	}
+}
+
+func TestCheckPermissions_SegmentWildcardResource(t *testing.T) {
+	// "foo/*/bar" should match "foo/anything/bar" but not "foo/anything/baz".
+	u := makePermUser(t, "svc", []string{"read"}, []string{"foo/*/bar"})
+
+	ok, err := checkPermissions(context.Background(), u.UserID, "svc", "read", "foo/xyz/bar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected true: per-segment wildcard should match")
+	}
+
+	ok2, err := checkPermissions(context.Background(), u.UserID, "svc", "read", "foo/xyz/baz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok2 {
+		t.Fatal("expected false: per-segment wildcard should not match different final segment")
+	}
+}
+
+func TestCheckPermissions_GlobalWildcardAction(t *testing.T) {
+	u := makePermUser(t, "svc", []string{"*"}, []string{"res"})
+	ok, err := checkPermissions(context.Background(), u.UserID, "svc", "deleteEverything", "res")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected true: action wildcard '*' should match any action")
+	}
+}
+
+func TestCheckPermissions_ActionPrefixWildcard(t *testing.T) {
+	u := makePermUser(t, "svc", []string{"get*"}, []string{"res"})
+
+	ok, err := checkPermissions(context.Background(), u.UserID, "svc", "getUser", "res")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected true: action prefix wildcard 'get*' should match 'getUser'")
+	}
+
+	ok2, err := checkPermissions(context.Background(), u.UserID, "svc", "deleteUser", "res")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok2 {
+		t.Fatal("expected false: action prefix wildcard 'get*' should not match 'deleteUser'")
 	}
 }
 
