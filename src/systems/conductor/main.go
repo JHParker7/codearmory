@@ -32,11 +32,23 @@ var (
 
 // ── Service registry cache ────────────────────────────────────────────────────
 
+// endpointEntry is a compiled representation of one endpoint declared by a
+// backend service. pattern is built from the registered path template by
+// replacing {param} segments with [^/]+ so request paths can be matched.
+type endpointEntry struct {
+	method   string
+	pattern  *regexp.Regexp
+	action   string
+	resource string
+}
+
 var (
-	servicesMu  sync.RWMutex
-	servicesMap = map[string]string{}                  // name → URL
-	proxiesMu   sync.RWMutex
-	proxiesMap  = map[string]*httputil.ReverseProxy{} // name → proxy
+	servicesMu   sync.RWMutex
+	servicesMap  = map[string]string{}                  // name → URL
+	proxiesMu    sync.RWMutex
+	proxiesMap   = map[string]*httputil.ReverseProxy{} // name → proxy
+	endpointsMu  sync.RWMutex
+	endpointsMap = map[string][]endpointEntry{}        // name → endpoints
 
 	serviceTokenMu sync.RWMutex
 	serviceToken   string // JWT for the conductor service account
@@ -393,8 +405,14 @@ func refreshServiceCache(ctx context.Context) {
 	}
 
 	var svcs []struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
+		Name      string `json:"name"`
+		URL       string `json:"url"`
+		Endpoints []struct {
+			Method   string `json:"method"`
+			Path     string `json:"path"`
+			Action   string `json:"action"`
+			Resource string `json:"resource"`
+		} `json:"endpoints"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&svcs); err != nil {
 		return
@@ -407,31 +425,44 @@ func refreshServiceCache(ctx context.Context) {
 
 	servicesMu.Lock()
 	proxiesMu.Lock()
-	for name, svcURL := range active {
-		if servicesMap[name] == svcURL {
-			continue
+	endpointsMu.Lock()
+	for _, s := range svcs {
+		if servicesMap[s.Name] != s.URL {
+			u, err := url.Parse(s.URL)
+			if err != nil {
+				slog.Warn("invalid service URL", "name", s.Name, "url", s.URL)
+				continue
+			}
+			proxiesMap[s.Name] = httputil.NewSingleHostReverseProxy(u)
+			servicesMap[s.Name] = s.URL
+			slog.Info("service cache updated", "name", s.Name)
 		}
-		u, err := url.Parse(svcURL)
-		if err != nil {
-			slog.Warn("invalid service URL", "name", name, "url", svcURL)
-			continue
+		entries := make([]endpointEntry, 0, len(s.Endpoints))
+		for _, ep := range s.Endpoints {
+			entries = append(entries, endpointEntry{
+				method:   ep.Method,
+				pattern:  compilePathPattern(ep.Path),
+				action:   ep.Action,
+				resource: ep.Resource,
+			})
 		}
-		proxiesMap[name] = httputil.NewSingleHostReverseProxy(u)
-		servicesMap[name] = svcURL
-		slog.Info("service cache updated", "name", name)
+		endpointsMap[s.Name] = entries
 	}
 	for name := range servicesMap {
 		if _, ok := active[name]; !ok {
 			delete(servicesMap, name)
 			delete(proxiesMap, name)
+			delete(endpointsMap, name)
 			slog.Info("service removed from cache", "name", name)
 		}
 	}
+	endpointsMu.Unlock()
 	proxiesMu.Unlock()
 	servicesMu.Unlock()
 }
 
-// methodToAction maps an HTTP method to the RBAC action used in permission checks.
+// methodToAction maps an HTTP method to a coarse RBAC action used as a fallback
+// when no registered endpoint matches the request path.
 func methodToAction(method string) string {
 	switch method {
 	case http.MethodGet, http.MethodHead:
@@ -443,22 +474,60 @@ func methodToAction(method string) string {
 	}
 }
 
+// compilePathPattern converts a service path template such as /executions/{id}
+// into a regexp that matches concrete paths (e.g. /executions/abc-123).
+// Each {param} segment is replaced with [^/]+ so only a single path segment
+// is consumed per wildcard.
+func compilePathPattern(pattern string) *regexp.Regexp {
+	parts := strings.Split(pattern, "/")
+	for i, p := range parts {
+		if strings.HasPrefix(p, "{") && strings.HasSuffix(p, "}") {
+			parts[i] = `[^/]+`
+		} else {
+			parts[i] = regexp.QuoteMeta(p)
+		}
+	}
+	return regexp.MustCompile(`^` + strings.Join(parts, `/`) + `$`)
+}
+
+// resolveEndpoint finds the registered action and resource for method+path.
+// Falls back to methodToAction and the first path segment when no match exists.
+func resolveEndpoint(entries []endpointEntry, method, path string) (action, resource string) {
+	for _, e := range entries {
+		if e.method == method && e.pattern.MatchString(path) {
+			return e.action, e.resource
+		}
+	}
+	// Fallback: coarse action + first non-empty path segment as resource.
+	action = methodToAction(method)
+	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
+	if len(parts) > 0 && parts[0] != "" {
+		resource = parts[0]
+	} else {
+		resource = "*"
+	}
+	return action, resource
+}
+
 // checkServicePermission calls GET /check_permissions on Gatekeeper to verify
 // the caller has the required action on the target service and resource path.
-func checkServicePermission(r *http.Request, service, resource string) bool {
+// It uses registered endpoint metadata when available, falling back to coarse
+// method-to-action mapping for paths that weren't declared on registration.
+func checkServicePermission(r *http.Request, service, path string) bool {
 	ctx, span := otel.Tracer("conductor").Start(r.Context(), "checkServicePermission")
 	defer span.End()
 
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	res := strings.TrimPrefix(resource, "/")
-	if res == "" {
-		res = "*"
-	}
+	endpointsMu.RLock()
+	entries := endpointsMap[service]
+	endpointsMu.RUnlock()
 
+	action, resource := resolveEndpoint(entries, r.Method, path)
+
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	body, _ := json.Marshal(map[string]string{
 		"service":  service,
-		"action":   methodToAction(r.Method),
-		"resource": res,
+		"action":   action,
+		"resource": resource,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
 	if err != nil {
