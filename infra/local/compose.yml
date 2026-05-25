@@ -39,6 +39,7 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
+      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret
     ports:
       - "8080:8080"
     depends_on:
@@ -94,6 +95,7 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/forge
       RUNTIME: docker
+      GATEKEEPER_URL: http://gatekeeper:8080
       REGISTRY_URL: http://registry:8084
       SERVICE_NAME: forge
       SERVICE_KEY: forge-local-secret
@@ -110,6 +112,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      gatekeeper:
+        condition: service_started
       registry:
         condition: service_started
     restart: on-failure
