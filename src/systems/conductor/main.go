@@ -175,7 +175,15 @@ func newProxy(target string) *httputil.ReverseProxy {
 		slog.Error("invalid proxy target", "url", target, "error", err)
 		os.Exit(1)
 	}
-	return httputil.NewSingleHostReverseProxy(u)
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	base := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		base(req)
+		// X-Service-Key is for direct service-to-service calls only.
+		// Strip it so clients cannot relay a service identity through conductor.
+		req.Header.Del("X-Service-Key")
+	}
+	return proxy
 }
 
 // proxyWith forwards r to p after running all checks in order. Each check is
@@ -374,12 +382,11 @@ func refreshServiceCache(ctx context.Context) {
 	endpointsMu.Lock()
 	for _, s := range svcs {
 		if servicesMap[s.Name] != s.URL {
-			u, err := url.Parse(s.URL)
-			if err != nil {
+			if _, err := url.Parse(s.URL); err != nil {
 				slog.Warn("invalid service URL", "name", s.Name, "url", s.URL)
 				continue
 			}
-			proxiesMap[s.Name] = httputil.NewSingleHostReverseProxy(u)
+			proxiesMap[s.Name] = newProxy(s.URL)
 			servicesMap[s.Name] = s.URL
 			slog.Info("service cache updated", "name", s.Name)
 		}
@@ -540,9 +547,13 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Strip the /{service} prefix before forwarding to the backend.
+	// Strip the /{service} prefix and the user's bearer token before forwarding
+	// to the backend. Backend services should use their own service key for
+	// any calls they make to other services; forwarding the user's token would
+	// let a compromised backend replay it against gatekeeper.
 	r2 := r.Clone(r.Context())
 	r2.URL.Path = restPath
+	r2.Header.Del("Authorization")
 	proxy.ServeHTTP(w, r2)
 }
 
