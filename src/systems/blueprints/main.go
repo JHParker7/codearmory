@@ -683,6 +683,8 @@ func main() {
 	}
 	slog.Info("database pool initialized")
 
+	go registerWithGatekeeper(ctx)
+
 	mux := http.NewServeMux()
 
 	// User-scoped: /state/{username}/{workspace}
