@@ -366,15 +366,19 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 			return
 		}
 		var lockObj map[string]any
-		if json.Unmarshal([]byte(existingLock), &lockObj) == nil {
-			if id, _ := lockObj["ID"].(string); id != lockID {
-				slog.Warn("state update rejected: lock id mismatch", "workspace", workspaceKey)
-				span.SetStatus(codes.Error, "lock id mismatch")
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusConflict)
-				w.Write([]byte(existingLock))
-				return
-			}
+		if err := json.Unmarshal([]byte(existingLock), &lockObj); err != nil {
+			slog.Error("state update rejected: corrupt lock data", "workspace", workspaceKey, "error", err)
+			span.SetStatus(codes.Error, "corrupt lock data")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if id, _ := lockObj["ID"].(string); id != lockID {
+			slog.Warn("state update rejected: lock id mismatch", "workspace", workspaceKey)
+			span.SetStatus(codes.Error, "lock id mismatch")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(existingLock))
+			return
 		}
 	}
 
@@ -561,14 +565,18 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 			}
 		}
 		var lockData map[string]any
-		if json.Unmarshal([]byte(existingLock), &lockData) == nil {
-			storedID, _ := lockData["ID"].(string)
-			if reqID == "" || reqID != storedID {
-				slog.Warn("unlock rejected: lock id mismatch", "workspace", workspaceKey)
-				span.SetStatus(codes.Error, "lock id mismatch")
-				http.Error(w, "lock ID mismatch", http.StatusConflict)
-				return
-			}
+		if err := json.Unmarshal([]byte(existingLock), &lockData); err != nil {
+			slog.Error("unlock rejected: corrupt lock data", "workspace", workspaceKey, "error", err)
+			span.SetStatus(codes.Error, "corrupt lock data")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		storedID, _ := lockData["ID"].(string)
+		if reqID == "" || reqID != storedID {
+			slog.Warn("unlock rejected: lock id mismatch", "workspace", workspaceKey)
+			span.SetStatus(codes.Error, "lock id mismatch")
+			http.Error(w, "lock ID mismatch", http.StatusConflict)
+			return
 		}
 
 		if _, err := tx.Exec(ctx, "DELETE FROM locks WHERE workspace = $1", workspaceKey); err != nil {
