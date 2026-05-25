@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -26,8 +25,10 @@ import (
 )
 
 var (
-	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
-	httpClient    = &http.Client{Timeout: 10 * time.Second}
+	gatekeeperURL  = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	registryURL    = envOrDefault("REGISTRY_URL", "http://localhost:8084")
+	registryKey    = os.Getenv("REGISTRY_READ_KEY")
+	httpClient     = &http.Client{Timeout: 10 * time.Second}
 )
 
 // ── Service registry cache ────────────────────────────────────────────────────
@@ -49,9 +50,6 @@ var (
 	proxiesMap   = map[string]*httputil.ReverseProxy{} // name → proxy
 	endpointsMu  sync.RWMutex
 	endpointsMap = map[string][]endpointEntry{}        // name → endpoints
-
-	serviceTokenMu sync.RWMutex
-	serviceToken   string // JWT for the conductor service account
 )
 
 func envOrDefault(key, def string) string {
@@ -330,58 +328,14 @@ func userMiddleware(next http.Handler) http.Handler {
 
 // ── Service registry ──────────────────────────────────────────────────────────
 
-// loginAsServiceAccount authenticates as the Conductor service user and stores
-// the resulting JWT for use when refreshing the service registry cache.
-func loginAsServiceAccount(ctx context.Context) error {
-	email := os.Getenv("CONDUCTOR_SERVICE_EMAIL")
-	if email == "" {
-		email = "conductor@internal"
-	}
-	password := os.Getenv("CONDUCTOR_SERVICE_PASSWORD")
-	if password == "" {
-		return fmt.Errorf("CONDUCTOR_SERVICE_PASSWORD not set")
-	}
-	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/login", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("login request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
-		return fmt.Errorf("login failed: status %d", resp.StatusCode)
-	}
-	var result struct {
-		Token string `json:"token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Token == "" {
-		return fmt.Errorf("login: empty or malformed token")
-	}
-	serviceTokenMu.Lock()
-	serviceToken = result.Token
-	serviceTokenMu.Unlock()
-	slog.Info("conductor service account authenticated")
-	return nil
-}
-
-// refreshServiceCache fetches GET /services from Gatekeeper and rebuilds the
-// in-memory proxy map. If the service token has expired (401), it re-logs in
-// and skips the current cycle; the next tick will retry.
+// refreshServiceCache fetches GET /services from the registry and rebuilds the
+// in-memory proxy map and endpoint table.
 func refreshServiceCache(ctx context.Context) {
-	serviceTokenMu.RLock()
-	token := serviceToken
-	serviceTokenMu.RUnlock()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/services", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, registryURL+"/services", nil)
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+registryKey)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -390,14 +344,6 @@ func refreshServiceCache(ctx context.Context) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		io.Copy(io.Discard, resp.Body)
-		slog.Warn("service token expired, re-authenticating")
-		if err := loginAsServiceAccount(ctx); err != nil {
-			slog.Error("service account re-login failed", "error", err)
-		}
-		return
-	}
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
 		slog.Warn("service registry refresh: unexpected status", "status", resp.StatusCode)
@@ -619,15 +565,17 @@ func main() {
 	}
 	initMetrics()
 
-	// Login as the service account and warm the cache before serving traffic.
+	// Warm the service cache, retrying until the registry is reachable.
 	for {
-		if err := loginAsServiceAccount(context.Background()); err != nil {
-			slog.Warn("conductor service account login failed, retrying in 5s", "error", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
 		refreshServiceCache(context.Background())
-		break
+		servicesMu.RLock()
+		populated := len(servicesMap) > 0
+		servicesMu.RUnlock()
+		if populated {
+			break
+		}
+		slog.Warn("registry not reachable or empty, retrying in 5s")
+		time.Sleep(5 * time.Second)
 	}
 
 	// Refresh the service registry every 30 seconds.
@@ -700,11 +648,6 @@ func main() {
 	mux.Handle("POST /invites/{id}/accept", auth(proxyWith(gk, id, validJSON)))
 	mux.Handle("POST /invites/{id}/decline", auth(proxyWith(gk, id, validJSON)))
 	mux.Handle("DELETE /invites/{id}", auth(proxyWith(gk, id)))
-
-	// ── Service registry — authenticated; forwarded to Gatekeeper ────────────
-	mux.Handle("GET /services", auth(proxyWith(gk)))
-	mux.Handle("POST /services", auth(proxyWith(gk, validJSON)))
-	mux.Handle("DELETE /services/{id}", auth(proxyWith(gk, id)))
 
 	// ── Dynamic service proxy — catch-all for registered backend services ─────
 	mux.Handle("/{path...}", auth(http.HandlerFunc(handleServiceProxy)))
