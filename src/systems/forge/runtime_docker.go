@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 )
 
 type DockerRuntime struct {
@@ -46,7 +48,11 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 			AttachStderr: true,
 		},
 		&container.HostConfig{
-			NetworkMode:    "none",
+			// NetworkMode=none drops all network interfaces so the container cannot
+			// reach the internet, the host, or other containers.
+			NetworkMode: "none",
+			// ReadonlyRootfs prevents writes to the image layers. /tmp is a writable
+			// tmpfs mount so programs that need a scratch directory still work.
 			ReadonlyRootfs: true,
 			Tmpfs:          map[string]string{"/tmp": "size=64m"},
 			Resources: container.Resources{
@@ -64,19 +70,26 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 	}
 	containerID := resp.ID
 
+	// context.Background() ensures cleanup runs even when ctx is already cancelled
+	// (timeout or user-initiated cancel).
 	defer r.client.ContainerRemove(context.Background(), containerID, container.RemoveOptions{Force: true})
 
 	if err := r.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		return RunResult{}, fmt.Errorf("container start: %w", err)
 	}
 
-	statusCh, errCh := r.client.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
+	// Wrap ctx with the execution's own timeout so the container is stopped and
+	// the result recorded as timed_out rather than running forever.
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, time.Duration(exec.TimeoutSecs)*time.Second)
+	defer timeoutCancel()
+
+	statusCh, errCh := r.client.ContainerWait(timeoutCtx, containerID, container.WaitConditionNotRunning)
 
 	var exitCode int
 	select {
-	case <-ctx.Done():
+	case <-timeoutCtx.Done():
 		r.client.ContainerStop(context.Background(), containerID, container.StopOptions{}) //nolint
-		return RunResult{}, ctx.Err()
+		return RunResult{}, timeoutCtx.Err()
 	case err := <-errCh:
 		if err != nil {
 			return RunResult{}, fmt.Errorf("container wait: %w", err)
@@ -95,17 +108,24 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 func (r *DockerRuntime) collectLogs(containerID string) (stdout, stderr string, err error) {
 	ctx := context.Background()
 
-	fetch := func(stdoutOnly bool) (string, error) {
+	// Docker's ContainerLogs stream is multiplexed: each frame is prefixed with an
+	// 8-byte header (stream type + length). stdcopy.StdCopy strips those headers.
+	// Using plain io.Copy would embed the binary headers in the stored output.
+	fetch := func(showStdout bool) (string, error) {
 		logs, err := r.client.ContainerLogs(ctx, containerID, container.LogsOptions{
-			ShowStdout: stdoutOnly,
-			ShowStderr: !stdoutOnly,
+			ShowStdout: showStdout,
+			ShowStderr: !showStdout,
 		})
 		if err != nil {
 			return "", err
 		}
 		defer logs.Close()
 		var buf bytes.Buffer
-		io.Copy(&buf, io.LimitReader(logs, maxOutputBytes))
+		if showStdout {
+			stdcopy.StdCopy(&buf, io.Discard, io.LimitReader(logs, maxOutputBytes))
+		} else {
+			stdcopy.StdCopy(io.Discard, &buf, io.LimitReader(logs, maxOutputBytes))
+		}
 		return buf.String(), nil
 	}
 

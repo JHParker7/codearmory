@@ -23,7 +23,7 @@ type Runtime interface {
 func newRuntime() (Runtime, error) {
 	rt := os.Getenv("RUNTIME")
 	if rt == "" {
-		rt = "kubernetes"
+		rt = "docker"
 	}
 	switch rt {
 	case "kubernetes":
