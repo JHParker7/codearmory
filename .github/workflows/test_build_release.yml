@@ -60,6 +60,18 @@ jobs:
       - name: Run cli unit tests
         run: cd src/cli; go test .
 
+  forge-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run forge unit tests
+        run: cd src/systems/forge; go test .
+
   integration-tests:
     runs-on: ubuntu-latest
     needs:
@@ -67,6 +79,7 @@ jobs:
       - blueprints-unit-test
       - conductor-unit-test
       - cli-unit-test
+      - forge-unit-test
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -87,7 +100,8 @@ jobs:
             -r tests/gatekeeper/requirements.txt \
             -r tests/conductor/requirements.txt \
             -r tests/blueprints/requirements.txt \
-            -r tests/cli/requirements.txt
+            -r tests/cli/requirements.txt \
+            -r tests/forge/requirements.txt
 
       - name: Build CLI binary
         run: go build -o "${{ runner.temp }}/armory" .
@@ -99,7 +113,7 @@ jobs:
 
       - name: Wait for application services
         run: |
-          for port in 8080 8081 8082; do
+          for port in 8080 8081 8082 8083; do
             echo "Waiting for port $port..."
             timeout 60 bash -c "until curl -s -o /dev/null --max-time 2 http://localhost:$port/; do sleep 1; done"
             echo "Port $port is ready"
@@ -128,6 +142,12 @@ jobs:
           CONDUCTOR_URL: http://localhost:8082
           ARMORY_BIN: ${{ runner.temp }}/armory
         run: pytest tests/cli -v
+
+      - name: Run forge integration tests
+        env:
+          FORGE_URL: http://localhost:8083
+          GATEKEEPER_URL: http://localhost:8080
+        run: pytest tests/forge -v
 
       - name: Show compose logs on failure
         if: failure()
@@ -203,6 +223,15 @@ jobs:
           tags: |
             ghcr.io/code-armory-app/conductor:alpha-${{ needs.release.outputs.new_release_version }}
             ghcr.io/code-armory-app/conductor:alpha-latest
+      - name: Build and push forge
+        uses: docker/build-push-action@v6
+        with:
+          context: src/systems/forge
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/forge:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/forge:alpha-latest
       - name: Build and push gatekeeper integration tests
         uses: docker/build-push-action@v6
         with:
@@ -230,6 +259,15 @@ jobs:
           tags: |
             ghcr.io/code-armory-app/conductor-tests:alpha-${{ needs.release.outputs.new_release_version }}
             ghcr.io/code-armory-app/conductor-tests:alpha-latest
+      - name: Build and push forge integration tests
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/forge
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/forge-tests:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/forge-tests:alpha-latest
 
   build-cli:
     needs: release
