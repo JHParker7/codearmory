@@ -261,6 +261,7 @@ func checkUserExists(ctx context.Context, token, userID string) bool {
 		span.SetStatus(codes.Error, err.Error())
 		return false
 	}
+	// Drain before close so the underlying TCP connection returns to the pool.
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
@@ -274,6 +275,10 @@ func checkUserExists(ctx context.Context, token, userID string) bool {
 	return exists
 }
 
+// userMiddleware validates the caller's JWT by forwarding it to Gatekeeper's
+// GET /users/{id} endpoint. Conductor decodes the payload locally only to extract
+// the user ID for the forwarded request; full signature verification happens inside
+// Gatekeeper's authMiddleware, which has access to the per-session ECDSA public key.
 func userMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("conductor").Start(r.Context(), "userMiddleware")
