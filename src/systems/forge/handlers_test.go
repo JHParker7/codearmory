@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -250,5 +251,130 @@ func TestIsTimed_NilError(t *testing.T) {
 func TestIsTimed_ShortMessage(t *testing.T) {
 	if isTimed(errors.New("tim")) {
 		t.Fatal("expected false for error message shorter than 5 chars")
+	}
+}
+
+func TestIsTimed_ExactlyFiveChars(t *testing.T) {
+	if isTimed(errors.New("timed")) {
+		t.Fatal("expected false for 5-char error (len > 5 requires at least 6)")
+	}
+}
+
+// --- handleSubmit (additional pre-DB paths) ---
+
+func TestHandleSubmit_EmptyCommandSlice(t *testing.T) {
+	initAllowedImages("")
+	pool := &WorkerPool{}
+	r := httptest.NewRequest(http.MethodPost, "/executions",
+		bytes.NewBufferString(`{"image":"alpine:3.19","command":[]}`))
+	r.Header.Set("Authorization", testBearerToken("user-123"))
+	w := httptest.NewRecorder()
+	handleSubmit(pool)(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleSubmit_BodyTooLarge(t *testing.T) {
+	initAllowedImages("")
+	pool := &WorkerPool{}
+	bigBody := bytes.Repeat([]byte("a"), maxBodyBytes+1)
+	r := httptest.NewRequest(http.MethodPost, "/executions", bytes.NewReader(bigBody))
+	r.Header.Set("Authorization", testBearerToken("user-123"))
+	w := httptest.NewRecorder()
+	handleSubmit(pool)(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// --- WorkerPool.Cancel ---
+
+func TestWorkerPool_Cancel_NotFound(t *testing.T) {
+	pool := &WorkerPool{}
+	if pool.Cancel("nonexistent-id") {
+		t.Fatal("expected false for unknown execution ID")
+	}
+}
+
+func TestWorkerPool_Cancel_Found(t *testing.T) {
+	pool := &WorkerPool{}
+	called := false
+	pool.cancels.Store("exec-123", context.CancelFunc(func() { called = true }))
+	if !pool.Cancel("exec-123") {
+		t.Fatal("expected true for known execution ID")
+	}
+	if !called {
+		t.Fatal("expected cancel func to be called")
+	}
+}
+
+// --- envOrDefault ---
+
+func TestEnvOrDefault_Set(t *testing.T) {
+	t.Setenv("TEST_ENV_KEY", "myvalue")
+	if got := envOrDefault("TEST_ENV_KEY", "default"); got != "myvalue" {
+		t.Fatalf("got %q, want %q", got, "myvalue")
+	}
+}
+
+func TestEnvOrDefault_NotSet(t *testing.T) {
+	os.Unsetenv("TEST_ENV_KEY_MISSING")
+	if got := envOrDefault("TEST_ENV_KEY_MISSING", "fallback"); got != "fallback" {
+		t.Fatalf("got %q, want %q", got, "fallback")
+	}
+}
+
+func TestEnvOrDefault_EmptyValue(t *testing.T) {
+	t.Setenv("TEST_ENV_KEY_EMPTY", "")
+	if got := envOrDefault("TEST_ENV_KEY_EMPTY", "fallback"); got != "fallback" {
+		t.Fatalf("got %q, want %q", got, "fallback")
+	}
+}
+
+// --- secret / secretOrDefault ---
+
+func TestSecret_FromEnv(t *testing.T) {
+	t.Setenv("MY_SECRET", "direct-value")
+	if got := secret("MY_SECRET"); got != "direct-value" {
+		t.Fatalf("got %q, want %q", got, "direct-value")
+	}
+}
+
+func TestSecret_FromFile(t *testing.T) {
+	f, err := os.CreateTemp("", "forge-secret-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+	f.WriteString("file-secret-value")
+	f.Close()
+
+	t.Setenv("MY_SECRET_FILE", f.Name())
+	os.Unsetenv("MY_SECRET")
+	if got := secret("MY_SECRET"); got != "file-secret-value" {
+		t.Fatalf("got %q, want %q", got, "file-secret-value")
+	}
+}
+
+func TestSecretOrDefault_Fallback(t *testing.T) {
+	os.Unsetenv("ABSENT_SECRET")
+	os.Unsetenv("ABSENT_SECRET_FILE")
+	if got := secretOrDefault("ABSENT_SECRET", "the-default"); got != "the-default" {
+		t.Fatalf("got %q, want %q", got, "the-default")
+	}
+}
+
+// --- statusResponseWriter ---
+
+func TestStatusResponseWriter_WriteHeader(t *testing.T) {
+	w := httptest.NewRecorder()
+	rw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
+	rw.WriteHeader(http.StatusNotFound)
+	if rw.status != http.StatusNotFound {
+		t.Fatalf("rw.status: got %d, want %d", rw.status, http.StatusNotFound)
+	}
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("underlying recorder: got %d, want %d", w.Code, http.StatusNotFound)
 	}
 }
