@@ -1,5 +1,8 @@
 # CodeArmory
 
+[![CI](https://github.com/code-armory-app/codearmory/actions/workflows/unit_tests.yml/badge.svg)](https://github.com/code-armory-app/codearmory/actions/workflows/unit_tests.yml)
+[![License: ELv2](https://img.shields.io/badge/License-ELv2-blue)](LICENSE)
+
 Infrastructure services for developer platforms.
 
 ## Services
