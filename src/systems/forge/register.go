@@ -28,13 +28,13 @@ var forgeEndpoints = []endpointDef{
 // endpoints so Conductor can enforce the correct RBAC action per route.
 // Retries until successful so a slow Gatekeeper startup doesn't block forge.
 func registerWithGatekeeper(ctx context.Context) {
-	gatekeeperURL := envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	registryURL := envOrDefault("REGISTRY_URL", "http://localhost:8084")
 	serviceName := envOrDefault("SERVICE_NAME", "forge")
 	serviceKey := os.Getenv("SERVICE_KEY")
 	serviceURL := os.Getenv("SERVICE_URL")
 
 	if serviceKey == "" {
-		slog.Warn("SERVICE_KEY not set, skipping gatekeeper registration")
+		slog.Warn("SERVICE_KEY not set, skipping registry registration")
 		return
 	}
 
@@ -58,7 +58,7 @@ func registerWithGatekeeper(ctx context.Context) {
 		default:
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			gatekeeperURL+"/services/register", bytes.NewReader(payload))
+			registryURL+"/services/register", bytes.NewReader(payload))
 		if err != nil {
 			return
 		}

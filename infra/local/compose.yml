@@ -39,15 +39,27 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      SERVICES: blueprints=http://blueprints:8081=blueprints-local-secret,forge=http://forge:8083=forge-local-secret
-      CONDUCTOR_SERVICE_EMAIL: conductor@internal
-      CONDUCTOR_SERVICE_PASSWORD: conductor-local-secret
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+    restart: on-failure
+
+  registry:
+    build:
+      context: ../../src/systems/registry
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/registry
+      ADMIN_KEY: registry-admin-local-secret
+      READ_KEY: registry-read-local-secret
+      SERVICES: blueprints=http://blueprints:8081=blueprints-local-secret,forge=http://forge:8083=forge-local-secret
+    ports:
+      - "8084:8084"
+    depends_on:
+      postgres:
         condition: service_healthy
     restart: on-failure
 
@@ -58,6 +70,7 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/blueprints
       GATEKEEPER_URL: http://gatekeeper:8080
       REDIS_URL: redis://redis:6379/1
+      REGISTRY_URL: http://registry:8084
       SERVICE_NAME: blueprints
       SERVICE_KEY: blueprints-local-secret
       SERVICE_URL: http://blueprints:8081
@@ -71,6 +84,8 @@ services:
         condition: service_healthy
       gatekeeper:
         condition: service_started
+      registry:
+        condition: service_started
     restart: on-failure
 
   forge:
@@ -78,8 +93,8 @@ services:
       context: ../../src/systems/forge
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/forge
-      GATEKEEPER_URL: http://gatekeeper:8080
       RUNTIME: docker
+      REGISTRY_URL: http://registry:8084
       SERVICE_NAME: forge
       SERVICE_KEY: forge-local-secret
       SERVICE_URL: http://forge:8083
@@ -95,7 +110,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      gatekeeper:
+      registry:
         condition: service_started
     restart: on-failure
 
@@ -104,16 +119,14 @@ services:
       context: ../../src/systems/conductor
     environment:
       GATEKEEPER_URL: http://gatekeeper:8080
-      CONDUCTOR_SERVICE_EMAIL: conductor@internal
-      CONDUCTOR_SERVICE_PASSWORD: conductor-local-secret
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_READ_KEY: registry-read-local-secret
     ports:
       - "8082:8082"
     depends_on:
       gatekeeper:
         condition: service_started
-      blueprints:
-        condition: service_started
-      forge:
+      registry:
         condition: service_started
     restart: on-failure
 
