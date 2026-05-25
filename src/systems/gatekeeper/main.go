@@ -2,15 +2,78 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
+
+// seedServiceAccounts reads GATEKEEPER_SERVICES (format "name=key,name=key") and
+// upserts a ServiceAccount row for each entry, re-hashing the key each time so
+// key rotations take effect on restart.
+func seedServiceAccounts(db *gorm.DB) {
+	raw := os.Getenv("GATEKEEPER_SERVICES")
+	if raw == "" {
+		return
+	}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		idx := strings.Index(entry, "=")
+		if idx < 1 || idx == len(entry)-1 {
+			slog.Warn("seedServiceAccounts: invalid entry, expected name=key", "entry", entry)
+			continue
+		}
+		name, key := entry[:idx], entry[idx+1:]
+		hash, err := bcrypt.GenerateFromPassword([]byte(key), bcrypt.DefaultCost)
+		if err != nil {
+			slog.Error("seedServiceAccounts: bcrypt failed", "name", name, "error", err)
+			continue
+		}
+		var existing ServiceAccount
+		err = db.Where("service_name = ?", name).First(&existing).Error
+		if err != nil {
+			svc := ServiceAccount{
+				ServiceAccountID: uuid.New().String(),
+				ServiceName:      name,
+				HashedKey:        string(hash),
+				Active:           true,
+			}
+			if err := db.Create(&svc).Error; err != nil {
+				slog.Error("seedServiceAccounts: create failed", "name", name, "error", err)
+			} else {
+				slog.Info("seedServiceAccounts: created", "name", name)
+			}
+		} else {
+			existing.HashedKey = string(hash)
+			existing.UpdatedAt = time.Now()
+			if err := db.Save(&existing).Error; err != nil {
+				slog.Error("seedServiceAccounts: update failed", "name", name, "error", err)
+			} else {
+				slog.Info("seedServiceAccounts: updated key", "name", name)
+			}
+		}
+	}
+}
+
+const maxBodyBytes = 64 * 1024 // 64 KB — sufficient for any gatekeeper payload
+
+// limitBody caps inbound request bodies to prevent memory-exhaustion via huge payloads.
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 type statusResponseWriter struct {
 	http.ResponseWriter
@@ -47,8 +110,9 @@ func NewLogger(handlerToWrap http.Handler) *Logger {
 
 func main() {
 	db := connect()
-	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{})
+	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{})
 	applyForeignKeys(db)
+	seedServiceAccounts(db)
 
 	mux := http.NewServeMux()
 
@@ -96,6 +160,15 @@ func main() {
 	mux.Handle("POST /invites/{id}/decline", mw(handleDeclineInvite))
 	mux.Handle("DELETE /invites/{id}", mw(handleDeleteInvite))
 
+	mux.Handle("GET /audit-logs", mw(handleListAuditLogs))
+
+	// Service permission requests: POST is service-key authenticated; the rest require user JWT.
+	mux.HandleFunc("POST /service-permission-requests", handleCreateServicePermissionRequest)
+	mux.Handle("GET /service-permission-requests", mw(handleListServicePermissionRequests))
+	mux.Handle("GET /service-permission-requests/{id}", mw(handleGetServicePermissionRequest))
+	mux.Handle("POST /service-permission-requests/{id}/approve", mw(handleApproveServicePermissionRequest))
+	mux.Handle("POST /service-permission-requests/{id}/decline", mw(handleDeclineServicePermissionRequest))
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -118,15 +191,31 @@ func main() {
 	initMetrics()
 	initCache()
 
-	wrappedMux := otelhttp.NewHandler(NewLogger(mux), "gatekeeper",
+	wrappedMux := otelhttp.NewHandler(NewLogger(limitBody(mux)), "gatekeeper",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
 
 	certFile := os.Getenv("TLS_CERT_FILE")
 	keyFile := os.Getenv("TLS_KEY_FILE")
 	if certFile != "" && keyFile != "" {
-		slog.Info("listening with TLS", "port", port)
-		if err := http.ListenAndServeTLS(":"+port, certFile, keyFile, wrappedMux); err != nil {
+		tlsCfg := &tls.Config{}
+		// TLS_CLIENT_AUTH controls whether client certificates are requested.
+		// Set to "require" to enforce mTLS (needed for ClientCertFingerprints binding).
+		// Set to "request" to request but not require a client cert.
+		// Default (unset): no client certificate requested.
+		switch os.Getenv("TLS_CLIENT_AUTH") {
+		case "require":
+			tlsCfg.ClientAuth = tls.RequireAnyClientCert
+		case "request":
+			tlsCfg.ClientAuth = tls.RequestClientCert
+		}
+		srv := &http.Server{
+			Addr:      ":" + port,
+			Handler:   wrappedMux,
+			TLSConfig: tlsCfg,
+		}
+		slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
+		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
@@ -155,6 +244,8 @@ func applyForeignKeys(db *gorm.DB) {
 		`DO $$ BEGIN ALTER TABLE permissions_checks ADD CONSTRAINT fk_permissions_checks_user FOREIGN KEY (user_id) REFERENCES users(user_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE permissions_checks ADD CONSTRAINT fk_permissions_checks_org FOREIGN KEY (org_id) REFERENCES orgs(org_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE permissions_checks ADD CONSTRAINT fk_permissions_checks_team FOREIGN KEY (team_id) REFERENCES teams(team_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE service_accounts ADD CONSTRAINT fk_service_accounts_role FOREIGN KEY (role_id) REFERENCES roles(role_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE service_permission_requests ADD CONSTRAINT fk_service_permission_requests_resolved_by FOREIGN KEY (resolved_by) REFERENCES users(user_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 	}
 	for _, c := range constraints {
 		db.Exec(c)
