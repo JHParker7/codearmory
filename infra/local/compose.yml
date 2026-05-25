@@ -67,18 +67,41 @@ services:
         condition: service_started
     restart: on-failure
 
+  forge:
+    build:
+      context: ../../src/systems/forge
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/forge
+      RUNTIME: docker
+      # ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim
+      # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
+      # K8S_RUNTIME_CLASS: gvisor     # optional: use gVisor for stronger isolation
+    ports:
+      - "8083:8083"
+    volumes:
+      # Mount the Docker socket for the local docker runtime.
+      # Remove this when deploying to Kubernetes (use RUNTIME=kubernetes instead).
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
   conductor:
     build:
       context: ../../src/systems/conductor
     environment:
       GATEKEEPER_URL: http://gatekeeper:8080
       BLUEPRINTS_URL: http://blueprints:8081
+      FORGE_URL: http://forge:8083
     ports:
       - "8082:8082"
     depends_on:
       gatekeeper:
         condition: service_started
       blueprints:
+        condition: service_started
+      forge:
         condition: service_started
     restart: on-failure
 

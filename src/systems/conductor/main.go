@@ -26,6 +26,7 @@ import (
 var (
 	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	blueprintsURL = envOrDefault("BLUEPRINTS_URL", "http://localhost:8081")
+	forgeURL      = envOrDefault("FORGE_URL", "http://localhost:8083")
 	httpClient    = &http.Client{Timeout: 10 * time.Second}
 )
 
@@ -330,6 +331,7 @@ func main() {
 
 	gk := newProxy(gatekeeperURL)
 	bp := newProxy(blueprintsURL)
+	fg := newProxy(forgeURL)
 
 	// auth wraps a handler with the user-existence check.
 	auth := func(h http.Handler) http.Handler { return userMiddleware(h) }
@@ -392,6 +394,12 @@ func main() {
 	mux.Handle("POST /invites/{id}/accept", auth(proxyWith(gk, id, validJSON)))
 	mux.Handle("POST /invites/{id}/decline", auth(proxyWith(gk, id, validJSON)))
 	mux.Handle("DELETE /invites/{id}", auth(proxyWith(gk, id)))
+
+	// ── Forge — sandboxed execution ──────────────────────────────────────────
+	mux.Handle("POST /executions", auth(proxyWith(fg, validJSON)))
+	mux.Handle("GET /executions", auth(proxyWith(fg)))
+	mux.Handle("GET /executions/{id}", auth(proxyWith(fg, id)))
+	mux.Handle("DELETE /executions/{id}", auth(proxyWith(fg, id)))
 
 	// ── Blueprints — user-scoped: /state/{username}/{workspace} ──────────────
 	// JSON validation is omitted for state routes: Terraform state bodies can be
