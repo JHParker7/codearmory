@@ -68,6 +68,9 @@ func (p *WorkerPool) tryOne(ctx context.Context) {
 	var exec Execution
 	var cmdJSON, envJSON []byte
 
+	// FOR UPDATE SKIP LOCKED lets multiple workers run in parallel: each goroutine
+	// locks exactly one pending row and skips any already locked by a sibling,
+	// so workers never block each other on the same row.
 	row := tx.QueryRow(ctx, `
 		SELECT execution_id, user_id, image, command, env, timeout_secs
 		FROM executions
@@ -127,6 +130,7 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 		} else if errors.Is(runErr, context.DeadlineExceeded) || isTimed(runErr) {
 			status = StatusTimedOut
 		} else {
+			slog.Error("worker: runtime error", "execution_id", exec.ExecutionID, "error", runErr)
 			status = StatusFailed
 		}
 	} else if result.ExitCode != 0 {
@@ -136,6 +140,8 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	meterComplete.Add(ctx, 1, metric.WithAttributes(attribute.String("status", status)))
 	slog.Info("worker: execution done", "execution_id", exec.ExecutionID, "status", status, "exit_code", result.ExitCode)
 
+	// context.Background() rather than ctx: the worker ctx may already be cancelled
+	// (shutdown or user cancel), but the result must always be persisted.
 	_, err := p.db.Exec(context.Background(),
 		`UPDATE executions
 		 SET status    = $1,
@@ -151,6 +157,9 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	}
 }
 
+// isTimed reports whether err is a timeout from the Kubernetes runtime.
+// The K8s runtime returns fmt.Errorf("timed out after %ds", ...) which wraps no
+// sentinel, so errors.Is(err, context.DeadlineExceeded) does not match it.
 func isTimed(err error) bool {
 	return err != nil && err.Error() != "" &&
 		len(err.Error()) > 5 && err.Error()[:5] == "timed"
