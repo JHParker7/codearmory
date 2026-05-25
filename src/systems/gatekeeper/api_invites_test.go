@@ -582,3 +582,205 @@ func TestDeleteInvite_NotInviter(t *testing.T) {
 		t.Fatalf("expected 403, got %d", w.Code)
 	}
 }
+
+func TestDeclineInvite_AlreadyDeclined(t *testing.T) {
+	inviter := createTestUser(t)
+	invitee := createTestUser(t)
+
+	org := Org{OrgID: uuid.New().String(), OrgName: "test-org"}
+	if err := org.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { org.Remove(context.Background()) })
+
+	invite := makeOrgInvite(t, inviter.UserID, invitee.Email, org.OrgID, time.Now().Add(7*24*time.Hour), "declined")
+
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/invites/"+invite.InviteID+"/decline", nil), invitee.UserID)
+	r.SetPathValue("id", invite.InviteID)
+	w := httptest.NewRecorder()
+	handleDeclineInvite(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", w.Code)
+	}
+}
+
+func TestDeleteInvite_NotFound(t *testing.T) {
+	inviter := createTestUser(t)
+	id := uuid.New().String()
+
+	r := withUserID(httptest.NewRequest(http.MethodDelete, "/invites/"+id, nil), inviter.UserID)
+	r.SetPathValue("id", id)
+	w := httptest.NewRecorder()
+	handleDeleteInvite(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestAcceptInvite_NotFound(t *testing.T) {
+	actor := createTestUser(t)
+	id := uuid.New().String()
+
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/invites/"+id+"/accept", nil), actor.UserID)
+	r.SetPathValue("id", id)
+	w := httptest.NewRecorder()
+	handleAcceptInvite(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestDeclineInvite_NotFound(t *testing.T) {
+	actor := createTestUser(t)
+	id := uuid.New().String()
+
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/invites/"+id+"/decline", nil), actor.UserID)
+	r.SetPathValue("id", id)
+	w := httptest.NewRecorder()
+	handleDeclineInvite(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+// --- handleListInvites ---
+
+func TestListInvites_Success(t *testing.T) {
+	inviter := createTestUser(t)
+	org := Org{OrgID: uuid.New().String(), OrgName: "list-inv-org"}
+	if err := org.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { org.Remove(context.Background()) })
+
+	makeOrgInvite(t, inviter.UserID, "a@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "pending")
+	makeOrgInvite(t, inviter.UserID, "b@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "pending")
+
+	actor := createAuthorizedUser(t, "listInvite", "gatekeeper/invites")
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/invites?inviter_id="+inviter.UserID, nil), actor.UserID)
+	w := httptest.NewRecorder()
+	handleListInvites(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp []Invite
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(resp) != 2 {
+		t.Fatalf("expected 2 invites, got %d", len(resp))
+	}
+}
+
+func TestListInvites_FilterByStatus(t *testing.T) {
+	inviter := createTestUser(t)
+	org := Org{OrgID: uuid.New().String(), OrgName: "status-inv-org"}
+	if err := org.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { org.Remove(context.Background()) })
+
+	makeOrgInvite(t, inviter.UserID, "a@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "pending")
+	makeOrgInvite(t, inviter.UserID, "b@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "accepted")
+
+	actor := createAuthorizedUser(t, "listInvite", "gatekeeper/invites")
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/invites?inviter_id="+inviter.UserID+"&status=pending", nil), actor.UserID)
+	w := httptest.NewRecorder()
+	handleListInvites(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp []Invite
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if len(resp) != 1 {
+		t.Fatalf("expected 1 invite with status=pending, got %d", len(resp))
+	}
+	if resp[0].Status != "pending" {
+		t.Fatalf("expected status=pending, got %s", resp[0].Status)
+	}
+}
+
+func TestListInvites_Forbidden(t *testing.T) {
+	actor := createTestUser(t)
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/invites", nil), actor.UserID)
+	w := httptest.NewRecorder()
+	handleListInvites(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestListInvites_InvalidLimit(t *testing.T) {
+	actor := createAuthorizedUser(t, "listInvite", "gatekeeper/invites")
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/invites?limit=bad", nil), actor.UserID)
+	w := httptest.NewRecorder()
+	handleListInvites(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// --- handleCreateTeamInvite additional cases ---
+
+func TestCreateTeamInvite_Forbidden(t *testing.T) {
+	team := Team{TeamID: uuid.New().String(), TeamName: "test-team"}
+	if err := team.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { team.Remove(context.Background()) })
+
+	actor := createTestUser(t)
+
+	b, _ := json.Marshal(inviteRequest{Email: "invitee@example.com"})
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/teams/"+team.TeamID+"/invites", bytes.NewReader(b)), actor.UserID)
+	r.SetPathValue("id", team.TeamID)
+	w := httptest.NewRecorder()
+	handleCreateTeamInvite(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestCreateTeamInvite_TeamNotFound(t *testing.T) {
+	teamID := uuid.New().String()
+	actor := createAuthorizedUser(t, "inviteUser", "gatekeeper/teams/"+teamID)
+
+	b, _ := json.Marshal(inviteRequest{Email: "invitee@example.com"})
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/teams/"+teamID+"/invites", bytes.NewReader(b)), actor.UserID)
+	r.SetPathValue("id", teamID)
+	w := httptest.NewRecorder()
+	handleCreateTeamInvite(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestCreateTeamInvite_MissingEmail(t *testing.T) {
+	team := Team{TeamID: uuid.New().String(), TeamName: "test-team"}
+	if err := team.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { team.Remove(context.Background()) })
+
+	actor := createAuthorizedUser(t, "inviteUser", "gatekeeper/teams/"+team.TeamID)
+
+	b, _ := json.Marshal(inviteRequest{Email: ""})
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/teams/"+team.TeamID+"/invites", bytes.NewReader(b)), actor.UserID)
+	r.SetPathValue("id", team.TeamID)
+	w := httptest.NewRecorder()
+	handleCreateTeamInvite(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}

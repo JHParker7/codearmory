@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type inviteRequest struct {
@@ -65,6 +67,7 @@ func createInviteBody(w http.ResponseWriter, r *http.Request, callerID, resource
 	))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("create "+logLabel+" invite: success", "caller_id", callerID, "resource_id", resourceID, "invite_id", invite.InviteID, "invitee_email", req.Email)
+	writeAudit(ctx, callerID, "user", "invite.create", invite.InviteID, invite.InviteeEmail)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -319,18 +322,37 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	caller.UpdatedAt = time.Now()
-	invite.Status = "accepted"
 
 	err = connect().Transaction(func(tx *gorm.DB) error {
+		// Re-read the invite under a write lock to serialise concurrent accept attempts.
+		// Without this, two simultaneous requests could both pass the status check above
+		// and then both commit, assigning the same user to the resource twice.
+		var fresh Invite
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("invite_id = ? AND active = ?", id, true).
+			First(&fresh).Error; err != nil {
+			return err
+		}
+		if fresh.Status != "pending" {
+			return errors.New("invite is not pending")
+		}
+
+		fresh.Status = "accepted"
 		if err := tx.Save(&caller).Error; err != nil {
 			return err
 		}
-		if err := tx.Save(&invite).Error; err != nil {
+		if err := tx.Save(&fresh).Error; err != nil {
 			return err
 		}
-		return grantPermissions(tx, callerID, permName, []string{memberAction}, permResource)
+		return grantPermissions(ctx, tx, callerID, permName, []string{memberAction}, permResource)
 	})
 	if err != nil {
+		if err.Error() == "invite is not pending" {
+			span.SetStatus(codes.Error, "invite not pending")
+			slog.Warn("accept invite: concurrent accept detected", "caller_id", callerID, "invite_id", id)
+			http.Error(w, "invite is not pending", http.StatusConflict)
+			return
+		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
 		slog.Error("accept invite: failed to accept invite atomically", "caller_id", callerID, "invite_id", id, "error", err)
@@ -345,6 +367,7 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 	))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("accept invite: success", "caller_id", callerID, "invite_id", id, "resource_type", invite.ResourceType, "resource_id", invite.ResourceID)
+	writeAudit(ctx, callerID, "user", "invite.accept", id, invite.ResourceType+":"+invite.ResourceID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -404,6 +427,7 @@ func handleDeclineInvite(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("invite.declined", trace.WithAttributes(attribute.String("invite.id", id)))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("decline invite: success", "caller_id", callerID, "invite_id", id)
+	writeAudit(ctx, callerID, "user", "invite.decline", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -447,5 +471,6 @@ func handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("invite.cancelled", trace.WithAttributes(attribute.String("invite.id", id)))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("delete invite: success", "caller_id", callerID, "invite_id", id)
+	writeAudit(ctx, callerID, "user", "invite.cancel", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
