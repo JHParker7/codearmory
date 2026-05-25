@@ -1,3 +1,4 @@
 CREATE DATABASE gatekeeper;
 CREATE DATABASE blueprints;
 CREATE DATABASE forge;
+CREATE DATABASE registry;
