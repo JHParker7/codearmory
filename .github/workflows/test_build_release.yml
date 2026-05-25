@@ -1,4 +1,4 @@
-name: Unit Tests
+name: test_build_release
 
 on:
   push:
