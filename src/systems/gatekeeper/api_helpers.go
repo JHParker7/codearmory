@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -18,6 +21,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
+	"golang.org/x/crypto/bcrypt"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
@@ -453,7 +457,7 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "evaluation error")
 		slog.Error("check_permissions: evaluation error", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "error", err)
-		http.Error(w, "permissions denied", http.StatusBadRequest)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -489,8 +493,8 @@ func parseECPublicKey(pemStr string) (*ecdsa.PublicKey, error) {
 // grantPermissions creates a Permissions record and appends it to userID's direct role.
 // If the user has no direct role, one is created first. All writes go through db — pass
 // connect().WithContext(ctx) for non-transactional callers, or a *gorm.DB transaction.
-func grantPermissions(db *gorm.DB, userID, name string, actions []string, resource string) error {
-	return grantServicePermissions(context.Background(), db, "gatekeeper", userID, name, actions, resource)
+func grantPermissions(ctx context.Context, db *gorm.DB, userID, name string, actions []string, resource string) error {
+	return grantServicePermissions(ctx, db, "gatekeeper", userID, name, actions, resource)
 }
 
 func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, name string, actions []string, resource string) error {
@@ -509,6 +513,7 @@ func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, 
 		if err := db.Save(&user).Error; err != nil {
 			return err
 		}
+		cacheDel(ctx, "gk:user:"+user.UserID)
 	} else {
 		if err := db.Where("role_id = ? AND active = ?", *user.RoleID, true).First(&role).Error; err != nil {
 			return err
@@ -538,6 +543,100 @@ func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, 
 	}
 	cacheDel(ctx, "gk:role:"+role.RoleID)
 	return nil
+}
+
+// writeAudit appends an immutable audit log entry. Failures are logged but
+// never propagate to the caller — a missing audit entry is better than a
+// failed request.
+func writeAudit(ctx context.Context, actorID, actorType, action, resourceID, detail string) {
+	entry := AuditLog{
+		AuditLogID: uuid.New().String(),
+		ActorID:    actorID,
+		ActorType:  actorType,
+		Action:     action,
+		ResourceID: resourceID,
+		Detail:     detail,
+	}
+	if err := entry.Add(ctx); err != nil {
+		slog.Warn("audit log write failed", "action", action, "resource_id", resourceID, "error", err)
+	}
+}
+
+// requireServiceAuth validates the X-Service-Key header (format "name:key") against the
+// stored bcrypt hash for the named ServiceAccount. Returns the account on success.
+func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount, bool) {
+	header := r.Header.Get("X-Service-Key")
+	if header == "" {
+		http.Error(w, "missing X-Service-Key header", http.StatusUnauthorized)
+		return ServiceAccount{}, false
+	}
+	idx := strings.Index(header, ":")
+	if idx < 1 {
+		http.Error(w, "invalid X-Service-Key format, expected name:key", http.StatusUnauthorized)
+		return ServiceAccount{}, false
+	}
+	name, key := header[:idx], header[idx+1:]
+
+	row, err := (ServiceAccount{ServiceName: name}).Get(r.Context())
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return ServiceAccount{}, false
+	}
+	svc := row.(ServiceAccount)
+	if err := bcrypt.CompareHashAndPassword([]byte(svc.HashedKey), []byte(key)); err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return ServiceAccount{}, false
+	}
+
+	// IP allowlist: if the service account has allowed CIDRs configured, the
+	// request source IP must fall within one of them.
+	if len(svc.AllowedCIDRs) > 0 {
+		remoteIP, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			remoteIP = r.RemoteAddr
+		}
+		ip := net.ParseIP(remoteIP)
+		allowed := false
+		for _, cidr := range svc.AllowedCIDRs {
+			_, ipNet, err := net.ParseCIDR(cidr)
+			if err == nil && ip != nil && ipNet.Contains(ip) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			slog.Warn("service auth rejected: source IP not in allowlist", "service", name, "remote_addr", r.RemoteAddr)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return ServiceAccount{}, false
+		}
+	}
+
+	// TLS client certificate binding: if the service account has registered
+	// certificate fingerprints, the client must present a matching certificate.
+	// This requires gatekeeper to be started with mTLS (TLS_CLIENT_AUTH=require).
+	if len(svc.ClientCertFingerprints) > 0 {
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			slog.Warn("service auth rejected: client certificate required but not presented", "service", name)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return ServiceAccount{}, false
+		}
+		sum := sha256.Sum256(r.TLS.PeerCertificates[0].Raw)
+		fingerprint := fmt.Sprintf("%x", sum[:])
+		allowed := false
+		for _, f := range svc.ClientCertFingerprints {
+			if subtle.ConstantTimeCompare([]byte(f), []byte(fingerprint)) == 1 {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			slog.Warn("service auth rejected: client certificate fingerprint not recognised", "service", name)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return ServiceAccount{}, false
+		}
+	}
+
+	return svc, true
 }
 
 // parsePagination reads ?limit=N&offset=N from the request. Returns 400 and

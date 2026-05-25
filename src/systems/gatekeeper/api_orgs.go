@@ -136,7 +136,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	))
 
 	permName := fmt.Sprintf("%s-%s-owners-permissions", owner.Username, org.OrgName)
-	if err := grantPermissions(connect().WithContext(ctx), userID, permName,
+	if err := grantPermissions(ctx, connect().WithContext(ctx), userID, permName,
 		[]string{"getOrg", "updateOrg", "deleteOrg", "inviteUser"},
 		fmt.Sprintf("gatekeeper/orgs/%s", org.OrgID)); err != nil {
 		span.RecordError(err)
