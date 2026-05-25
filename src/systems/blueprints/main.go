@@ -463,6 +463,11 @@ func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey, resou
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if !json.Valid(body) {
+		span.SetStatus(codes.Error, "invalid lock data")
+		http.Error(w, "bad request: lock data must be valid JSON", http.StatusBadRequest)
+		return
+	}
 
 	tx, err := db.Begin(ctx)
 	if err != nil {
