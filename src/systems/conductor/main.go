@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -25,9 +27,19 @@ import (
 
 var (
 	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
-	blueprintsURL = envOrDefault("BLUEPRINTS_URL", "http://localhost:8081")
-	forgeURL      = envOrDefault("FORGE_URL", "http://localhost:8083")
 	httpClient    = &http.Client{Timeout: 10 * time.Second}
+)
+
+// ── Service registry cache ────────────────────────────────────────────────────
+
+var (
+	servicesMu  sync.RWMutex
+	servicesMap = map[string]string{}                  // name → URL
+	proxiesMu   sync.RWMutex
+	proxiesMap  = map[string]*httputil.ReverseProxy{} // name → proxy
+
+	serviceTokenMu sync.RWMutex
+	serviceToken   string // JWT for the conductor service account
 )
 
 func envOrDefault(key, def string) string {
@@ -181,17 +193,6 @@ func validUUID(name string) func(http.ResponseWriter, *http.Request) bool {
 	}
 }
 
-// validSlug returns a check that path value `name` matches the safe slug pattern.
-func validSlug(name string) func(http.ResponseWriter, *http.Request) bool {
-	return func(w http.ResponseWriter, r *http.Request) bool {
-		if slugRE.MatchString(r.PathValue(name)) {
-			return true
-		}
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return false
-	}
-}
-
 // validJSON reads and restores the body for POST/PUT/PATCH requests, rejecting
 // it with 400 if it is not well-formed JSON. Empty bodies are allowed through.
 func validJSON(w http.ResponseWriter, r *http.Request) bool {
@@ -315,6 +316,221 @@ func userMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// ── Service registry ──────────────────────────────────────────────────────────
+
+// loginAsServiceAccount authenticates as the Conductor service user and stores
+// the resulting JWT for use when refreshing the service registry cache.
+func loginAsServiceAccount(ctx context.Context) error {
+	email := os.Getenv("CONDUCTOR_SERVICE_EMAIL")
+	if email == "" {
+		email = "conductor@internal"
+	}
+	password := os.Getenv("CONDUCTOR_SERVICE_PASSWORD")
+	if password == "" {
+		return fmt.Errorf("CONDUCTOR_SERVICE_PASSWORD not set")
+	}
+	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/login", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("login request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return fmt.Errorf("login failed: status %d", resp.StatusCode)
+	}
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Token == "" {
+		return fmt.Errorf("login: empty or malformed token")
+	}
+	serviceTokenMu.Lock()
+	serviceToken = result.Token
+	serviceTokenMu.Unlock()
+	slog.Info("conductor service account authenticated")
+	return nil
+}
+
+// refreshServiceCache fetches GET /services from Gatekeeper and rebuilds the
+// in-memory proxy map. If the service token has expired (401), it re-logs in
+// and skips the current cycle; the next tick will retry.
+func refreshServiceCache(ctx context.Context) {
+	serviceTokenMu.RLock()
+	token := serviceToken
+	serviceTokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/services", nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		slog.Warn("service registry refresh failed", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		io.Copy(io.Discard, resp.Body)
+		slog.Warn("service token expired, re-authenticating")
+		if err := loginAsServiceAccount(ctx); err != nil {
+			slog.Error("service account re-login failed", "error", err)
+		}
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		slog.Warn("service registry refresh: unexpected status", "status", resp.StatusCode)
+		return
+	}
+
+	var svcs []struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&svcs); err != nil {
+		return
+	}
+
+	active := make(map[string]string, len(svcs))
+	for _, s := range svcs {
+		active[s.Name] = s.URL
+	}
+
+	servicesMu.Lock()
+	proxiesMu.Lock()
+	for name, svcURL := range active {
+		if servicesMap[name] == svcURL {
+			continue
+		}
+		u, err := url.Parse(svcURL)
+		if err != nil {
+			slog.Warn("invalid service URL", "name", name, "url", svcURL)
+			continue
+		}
+		proxiesMap[name] = httputil.NewSingleHostReverseProxy(u)
+		servicesMap[name] = svcURL
+		slog.Info("service cache updated", "name", name)
+	}
+	for name := range servicesMap {
+		if _, ok := active[name]; !ok {
+			delete(servicesMap, name)
+			delete(proxiesMap, name)
+			slog.Info("service removed from cache", "name", name)
+		}
+	}
+	proxiesMu.Unlock()
+	servicesMu.Unlock()
+}
+
+// methodToAction maps an HTTP method to the RBAC action used in permission checks.
+func methodToAction(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead:
+		return "read"
+	case http.MethodDelete:
+		return "delete"
+	default:
+		return "write"
+	}
+}
+
+// checkServicePermission calls GET /check_permissions on Gatekeeper to verify
+// the caller has the required action on the target service and resource path.
+func checkServicePermission(r *http.Request, service, resource string) bool {
+	ctx, span := otel.Tracer("conductor").Start(r.Context(), "checkServicePermission")
+	defer span.End()
+
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	res := strings.TrimPrefix(resource, "/")
+	if res == "" {
+		res = "*"
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"service":  service,
+		"action":   methodToAction(r.Method),
+		"resource": res,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
+	if err != nil {
+		span.RecordError(err)
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		span.RecordError(err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		span.SetStatus(codes.Error, "permission denied")
+		return false
+	}
+	var result struct {
+		Authorized bool `json:"authorized"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false
+	}
+	if result.Authorized {
+		span.SetStatus(codes.Ok, "")
+	} else {
+		span.SetStatus(codes.Error, "not authorized")
+	}
+	return result.Authorized
+}
+
+// handleServiceProxy is the dynamic catch-all: it extracts /{service}/{path...},
+// looks the service up in the cache, permission-checks the caller, then forwards.
+func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/")
+	idx := strings.IndexByte(trimmed, '/')
+	var serviceName, restPath string
+	if idx == -1 {
+		serviceName = trimmed
+		restPath = "/"
+	} else {
+		serviceName = trimmed[:idx]
+		restPath = trimmed[idx:]
+	}
+	if serviceName == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	proxiesMu.RLock()
+	proxy, ok := proxiesMap[serviceName]
+	proxiesMu.RUnlock()
+	if !ok {
+		http.Error(w, serviceName+" service is not installed", http.StatusServiceUnavailable)
+		return
+	}
+
+	if !checkServicePermission(r, serviceName, restPath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Strip the /{service} prefix before forwarding to the backend.
+	r2 := r.Clone(r.Context())
+	r2.URL.Path = restPath
+	proxy.ServeHTTP(w, r2)
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
@@ -334,13 +550,29 @@ func main() {
 	}
 	initMetrics()
 
-	gk := newProxy(gatekeeperURL)
-	bp := newProxy(blueprintsURL)
-	fg := newProxy(forgeURL)
+	// Login as the service account and warm the cache before serving traffic.
+	for {
+		if err := loginAsServiceAccount(context.Background()); err != nil {
+			slog.Warn("conductor service account login failed, retrying in 5s", "error", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		refreshServiceCache(context.Background())
+		break
+	}
 
-	// auth wraps a handler with the user-existence check.
+	// Refresh the service registry every 30 seconds.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			refreshServiceCache(context.Background())
+		}
+	}()
+
+	gk := newProxy(gatekeeperURL)
+
 	auth := func(h http.Handler) http.Handler { return userMiddleware(h) }
-	// id is a UUID check on the path value named "id".
 	id := validUUID("id")
 
 	mux := http.NewServeMux()
@@ -400,27 +632,13 @@ func main() {
 	mux.Handle("POST /invites/{id}/decline", auth(proxyWith(gk, id, validJSON)))
 	mux.Handle("DELETE /invites/{id}", auth(proxyWith(gk, id)))
 
-	// ── Forge — sandboxed execution ──────────────────────────────────────────
-	mux.Handle("POST /executions", auth(proxyWith(fg, validJSON)))
-	mux.Handle("GET /executions", auth(proxyWith(fg)))
-	mux.Handle("GET /executions/{id}", auth(proxyWith(fg, id)))
-	mux.Handle("DELETE /executions/{id}", auth(proxyWith(fg, id)))
+	// ── Service registry — authenticated; forwarded to Gatekeeper ────────────
+	mux.Handle("GET /services", auth(proxyWith(gk)))
+	mux.Handle("POST /services", auth(proxyWith(gk, validJSON)))
+	mux.Handle("DELETE /services/{id}", auth(proxyWith(gk, id)))
 
-	// ── Blueprints — user-scoped: /state/{username}/{workspace} ──────────────
-	// JSON validation is omitted for state routes: Terraform state bodies can be
-	// tens of MB and Blueprints validates them directly.
-	userState := []func(http.ResponseWriter, *http.Request) bool{validSlug("username"), validSlug("workspace")}
-	mux.Handle("GET /state/{username}/{workspace}", auth(proxyWith(bp, userState...)))
-	mux.Handle("POST /state/{username}/{workspace}", auth(proxyWith(bp, userState...)))
-	mux.Handle("DELETE /state/{username}/{workspace}", auth(proxyWith(bp, userState...)))
-	mux.Handle("/state/{username}/{workspace}", auth(proxyWith(bp, userState...))) // LOCK / UNLOCK
-
-	// ── Blueprints — org-scoped: /{org}/state/{team}/{workspace} ─────────────
-	orgState := []func(http.ResponseWriter, *http.Request) bool{validSlug("org"), validSlug("team"), validSlug("workspace")}
-	mux.Handle("GET /{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...)))
-	mux.Handle("POST /{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...)))
-	mux.Handle("DELETE /{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...)))
-	mux.Handle("/{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...))) // LOCK / UNLOCK
+	// ── Dynamic service proxy — catch-all for registered backend services ─────
+	mux.Handle("/{path...}", auth(http.HandlerFunc(handleServiceProxy)))
 
 	port := envOrDefault("PORT", "8082")
 

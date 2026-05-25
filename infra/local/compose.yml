@@ -39,6 +39,9 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
+      SERVICES: blueprints=http://blueprints:8081,forge=http://forge:8083
+      CONDUCTOR_SERVICE_EMAIL: conductor@internal
+      CONDUCTOR_SERVICE_PASSWORD: conductor-local-secret
     ports:
       - "8080:8080"
     depends_on:
@@ -92,8 +95,8 @@ services:
       context: ../../src/systems/conductor
     environment:
       GATEKEEPER_URL: http://gatekeeper:8080
-      BLUEPRINTS_URL: http://blueprints:8081
-      FORGE_URL: http://forge:8083
+      CONDUCTOR_SERVICE_EMAIL: conductor@internal
+      CONDUCTOR_SERVICE_PASSWORD: conductor-local-secret
     ports:
       - "8082:8082"
     depends_on:
