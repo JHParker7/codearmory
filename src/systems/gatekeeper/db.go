@@ -508,6 +508,8 @@ func (session Session) Get(ctx context.Context) (db, error) {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	// Cache until the session's own expiry, not the default entityTTL. Using a
+	// longer TTL would let authMiddleware accept already-expired sessions from cache.
 	if ttl := time.Until(newSession.ExpiresAt); ttl > 0 {
 		cacheSet(ctx, "gk:session:"+newSession.SessionID, newSession, ttl)
 	}

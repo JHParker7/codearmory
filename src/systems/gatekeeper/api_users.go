@@ -430,6 +430,9 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		if cleanErr := role.Remove(ctx); cleanErr != nil {
 			slog.Error("signup: failed to clean up orphaned role", "role_id", role.RoleID, "error", cleanErr)
 		}
+		// GORM surfaces the raw DB error string; string-matching "unique" is the
+		// portable way to detect unique constraint violations without importing a
+		// postgres-specific driver package.
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			span.SetStatus(codes.Error, "email or username conflict")
 			slog.Warn("signup failed: email or username already in use", "email", req.Email, "username", req.Username)

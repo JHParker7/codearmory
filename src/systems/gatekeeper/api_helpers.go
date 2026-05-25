@@ -347,6 +347,10 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 	for _, permission := range permissions {
 		resourceMatch := false
 
+		// Three matching strategies, tried in order:
+		//  1. Exact match or global wildcard ("*")
+		//  2. Trailing-star prefix: "blueprints/states/*" matches any path under that prefix
+		//  3. Per-segment wildcard: "blueprints/states/*/locks" matches a specific depth with a wildcard segment
 		if slices.Contains(permission.Resources, resource) || slices.Contains(permission.Resources, "*") {
 			resourceMatch = true
 		} else {
@@ -547,7 +551,7 @@ func parsePagination(w http.ResponseWriter, r *http.Request) (limit, offset int,
 			return 0, 0, false
 		}
 		if n > 500 {
-			n = 500
+			n = 500 // hard cap prevents a single request from dumping the entire table
 		}
 		limit = n
 	}
