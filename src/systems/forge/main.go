@@ -137,6 +137,8 @@ func main() {
 	workers.Start(ctx, 10)
 	slog.Info("worker pool started", "workers", 10)
 
+	go registerWithGatekeeper(ctx)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /executions", handleSubmit(workers))
 	mux.HandleFunc("GET /executions", handleList)
