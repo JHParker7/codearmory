@@ -25,8 +25,9 @@ All configuration is via environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://postgres:test@127.0.0.1:5432/blueprints` | PostgreSQL connection string |
+| `DATABASE_URL` | `postgresql://postgres:postgres@127.0.0.1:5432/blueprints` | PostgreSQL connection string |
 | `GATEKEEPER_URL` | `http://localhost:8080` | Base URL of the Gatekeeper service |
+| `REDIS_URL` | — | Redis connection string (`redis://host:6379/1`). Omit to disable caching. |
 | `ENCRYPTION_KEY` | — | 64-character hex string (32 bytes) for AES-256-GCM at-rest encryption. Omit to store state as plaintext. |
 | `PORT` | `8081` | Port the server listens on |
 | `OTEL_SERVICE_NAME` | `blueprints` | Service name reported in traces and metrics |
@@ -35,6 +36,8 @@ All configuration is via environment variables.
 | `TLS_KEY_FILE` | — | Path to PEM-encoded TLS private key. Required with `TLS_CERT_FILE` to enable HTTPS. |
 | `CA_CERT_FILE` | — | Path to PEM-encoded CA certificate. When set, enables mTLS (requires and verifies client certificates). |
 | `LOG_LEVEL` | `info` | Set to `debug` for verbose output. |
+
+All variables support a `_FILE` suffix variant (e.g. `ENCRYPTION_KEY_FILE`) that reads the value from a file path — useful for Docker secrets and Kubernetes secret mounts.
 
 ## Running locally
 
@@ -122,6 +125,10 @@ Resource paths follow the pattern:
 - Org-scoped: `blueprints/{org}/states/{team}/{workspace}`
 
 Available actions: `getState`, `updateState`, `deleteState`, `lockState`, `unlockState`.
+
+Permissions are granted automatically by Gatekeeper:
+- On **signup**: full access to `blueprints/states/{username}/*`
+- On **org creation**: full access to `blueprints/{org}/states/*` for the org owner
 
 Example — grant a user full access to their own workspaces:
 
