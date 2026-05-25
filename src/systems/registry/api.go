@@ -61,8 +61,12 @@ func requireAdminKey(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // requireReadKey accepts either the read key or the admin key.
+// Both comparisons are always evaluated to prevent the short-circuit from
+// leaking which key was checked first via response timing.
 func requireReadKey(w http.ResponseWriter, r *http.Request) bool {
-	if checkKey(r, os.Getenv("READ_KEY")) || checkKey(r, os.Getenv("ADMIN_KEY")) {
+	readOK := checkKey(r, os.Getenv("READ_KEY"))
+	adminOK := checkKey(r, os.Getenv("ADMIN_KEY"))
+	if readOK || adminOK {
 		return true
 	}
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -228,21 +232,36 @@ func handleServiceSelfRegister(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		slog.Error("self-register: begin tx", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
 	if req.URL != "" {
-		pool.Exec(ctx,
+		tx.Exec(ctx,
 			`UPDATE services SET url = $1, updated_at = now() WHERE service_id = $2`, req.URL, svcID)
 	}
 
-	// Replace endpoints atomically: hard-delete old rows then insert fresh ones.
-	pool.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, svcID)
+	// Replace endpoints atomically inside the transaction: concurrent GET /services
+	// reads will not observe the window between DELETE and INSERT.
+	tx.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, svcID)
 	for _, ep := range req.Endpoints {
 		if ep.Method == "" || ep.Path == "" || ep.Action == "" || ep.Resource == "" {
 			continue
 		}
-		pool.Exec(ctx,
+		tx.Exec(ctx,
 			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource)
 			 VALUES ($1, $2, $3, $4, $5, $6)`,
 			uuid.New().String(), svcID, ep.Method, ep.Path, ep.Action, ep.Resource)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		slog.Error("self-register: commit tx", "name", req.Name, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
 
 	slog.Info("service self-registered", "name", req.Name, "endpoints", len(req.Endpoints))
