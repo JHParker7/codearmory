@@ -335,7 +335,9 @@ func handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
 	// Soft delete does not cascade; clear team_id on members so checkPermissions
 	// doesn't attempt to load the now-inactive team and deny access.
 	var memberIDs []string
-	connect().WithContext(ctx).Model(&User{}).Where("team_id = ?", id).Pluck("user_id", &memberIDs)
+	if err := connect().WithContext(ctx).Model(&User{}).Where("team_id = ?", id).Pluck("user_id", &memberIDs).Error; err != nil {
+		slog.Error("delete team: failed to load member IDs for cache invalidation", "caller_id", callerID, "team_id", id, "error", err)
+	}
 	if err := connect().WithContext(ctx).Model(&User{}).Where("team_id = ?", id).Update("team_id", nil).Error; err != nil {
 		slog.Error("delete team: failed to clear team membership", "caller_id", callerID, "team_id", id, "error", err)
 	} else {
