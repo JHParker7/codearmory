@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -49,24 +50,36 @@ func NewLogger(handlerToWrap http.Handler) *Logger {
 
 func main() {
 	db := connect()
-	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &Service{})
+	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &Service{}, &ServiceEndpoint{})
 	applyForeignKeys(db)
 
-	// Auto-register services declared in SERVICES=name=url,name=url.
+	// Auto-register services declared in SERVICES=name=url=key,name=url=key.
+	// The key is optional; when present it is hashed and stored so the service
+	// can authenticate its own POST /services/register calls.
 	// Upserts on name so restarts don't create duplicates.
 	if raw := os.Getenv("SERVICES"); raw != "" {
 		for _, entry := range strings.Split(raw, ",") {
-			parts := strings.SplitN(strings.TrimSpace(entry), "=", 2)
-			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			parts := strings.SplitN(strings.TrimSpace(entry), "=", 3)
+			if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 				continue
 			}
 			name, svcURL := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+			var keyHash string
+			if len(parts) == 3 && parts[2] != "" {
+				if h, err := bcrypt.GenerateFromPassword([]byte(strings.TrimSpace(parts[2])), bcrypt.DefaultCost); err == nil {
+					keyHash = string(h)
+				}
+			}
 			var svc Service
 			if db.Where("name = ?", name).First(&svc).Error != nil {
-				db.Create(&Service{ServiceID: uuid.New().String(), Name: name, URL: svcURL, Active: true})
+				db.Create(&Service{ServiceID: uuid.New().String(), Name: name, URL: svcURL, ServiceKeyHash: keyHash, Active: true})
 				slog.Info("service auto-registered", "name", name)
 			} else {
-				db.Model(&svc).Updates(map[string]any{"url": svcURL, "active": true})
+				updates := map[string]any{"url": svcURL, "active": true}
+				if keyHash != "" {
+					updates["service_key_hash"] = keyHash
+				}
+				db.Model(&svc).Updates(updates)
 				slog.Info("service auto-updated", "name", name)
 			}
 		}
@@ -122,6 +135,7 @@ func main() {
 	mux.Handle("GET /services", mw(handleListServices))
 	mux.Handle("POST /services", mw(handleRegisterService))
 	mux.Handle("DELETE /services/{id}", mw(handleDeleteService))
+	mux.HandleFunc("POST /services/register", handleServiceSelfRegister)
 
 	mux.Handle("POST /orgs/{id}/invites", mw(handleCreateOrgInvite))
 	mux.Handle("POST /teams/{id}/invites", mw(handleCreateTeamInvite))
