@@ -94,36 +94,6 @@ type Permissions struct {
 	Active        bool      `json:"active"         gorm:"column:active;default:true"`
 }
 
-// Service is a backend service registered with Gatekeeper. Conductor reads this
-// table to discover available services and their internal endpoint URLs.
-// ServiceKeyHash holds a bcrypt hash of the pre-shared key used by the service
-// to authenticate its own self-registration calls (POST /services/register).
-type Service struct {
-	ServiceID      string    `json:"service_id"  gorm:"column:service_id;primaryKey"`
-	Name           string    `json:"name"        gorm:"column:name;uniqueIndex"`
-	URL            string    `json:"url"         gorm:"column:url"`
-	ServiceKeyHash string    `json:"-"           gorm:"column:service_key_hash"`
-	Active         bool      `json:"active"      gorm:"column:active;default:true"`
-	CreatedAt      time.Time `json:"created_at"  gorm:"column:created_at"`
-	UpdatedAt      time.Time `json:"updated_at"  gorm:"column:updated_at"`
-}
-
-// ServiceEndpoint records a single HTTP method+path that a service exposes,
-// along with the RBAC action and resource a caller must hold to use it.
-// Conductor reads these at startup to enforce coarse permission checks before
-// forwarding requests to the backend.
-type ServiceEndpoint struct {
-	EndpointID string    `json:"endpoint_id" gorm:"column:endpoint_id;primaryKey"`
-	ServiceID  string    `json:"service_id"  gorm:"column:service_id;index"`
-	Method     string    `json:"method"      gorm:"column:method"`
-	Path       string    `json:"path"        gorm:"column:path"`
-	Action     string    `json:"action"      gorm:"column:action"`
-	Resource   string    `json:"resource"    gorm:"column:resource"`
-	Active     bool      `json:"active"      gorm:"column:active;default:true"`
-	CreatedAt  time.Time `json:"created_at"  gorm:"column:created_at"`
-	UpdatedAt  time.Time `json:"updated_at"  gorm:"column:updated_at"`
-}
-
 // PermissionsCheck is an audit record of a single permission evaluation. Each
 // call to GET /check_permissions that resolves successfully persists one row so
 // that access decisions can be reviewed after the fact.
