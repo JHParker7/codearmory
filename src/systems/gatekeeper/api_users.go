@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -184,6 +186,7 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("db.write", trace.WithAttributes(attribute.String("user.id", id)))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("update user: success", "caller_id", callerID, "target_user_id", id, "new_email", req.Email, "new_username", req.Username)
+	writeAudit(ctx, callerID, "user", "user.update", id, req.Username)
 	row, _ = u.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(toUserResponse(row.(User)))
@@ -302,6 +305,7 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 
 	span.SetStatus(codes.Ok, "")
 	slog.Info("delete user: success", "caller_id", callerID, "target_user_id", id)
+	writeAudit(ctx, callerID, "user", "user.delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -376,7 +380,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		PermissionsID: uuid.New().String(),
 		Service:       "blueprints",
 		Actions:       []string{"getState", "updateState", "deleteState", "lockState", "unlockState"},
-		Resources:     []string{fmt.Sprintf("blueprints/states/%s/*", req.Username)},
+		Resources:     []string{fmt.Sprintf("blueprints/states/%s/*", userID)},
 	}
 
 	if err = blueprintsPerm.Add(ctx); err != nil {
@@ -455,6 +459,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	meterSignups.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "success")))
 	slog.Info("user created successfully", "user_id", userID, "email", req.Email, "username", req.Username)
+	writeAudit(ctx, userID, "user", "user.signup", userID, req.Username)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -526,7 +531,13 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("keypair.generated")
 
 	sessionID := uuid.New().String()
-	expiresAt := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	ttlHours := 24
+	if v := os.Getenv("SESSION_TTL_HOURS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			ttlHours = n
+		}
+	}
+	expiresAt := time.Now().Add(time.Duration(ttlHours) * time.Hour).UTC().Truncate(time.Second)
 
 	span.SetAttributes(
 		attribute.String("user.id", user.UserID),
@@ -582,6 +593,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	meterLogins.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "success")))
 	slog.Info("login successful", "user_id", user.UserID, "session_id", sessionID, "expires_at", expiresAt)
+	writeAudit(ctx, user.UserID, "user", "session.create", sessionID, user.Username)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": tokenString})
