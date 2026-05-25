@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,6 +253,142 @@ func TestPrintJSON_ValidJSON(t *testing.T) {
 	printJSON([]byte(`{"a":1}`))         // valid — should pretty-print
 	printJSON([]byte(`not json`))        // invalid — should print raw
 	printJSON([]byte{})                  // empty — should be a no-op
+}
+
+// ── parseData stdin branch ────────────────────────────────────────────────────
+
+func TestParseData_StdinDash(t *testing.T) {
+	// Replace stdin with a pipe that contains valid JSON.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old; r.Close() })
+
+	w.WriteString(`{"from":"stdin"}`)
+	w.Close()
+
+	got, err := parseData("-")
+	if err != nil {
+		t.Fatalf("parseData(\"-\"): %v", err)
+	}
+	if string(got) != `{"from":"stdin"}` {
+		t.Errorf("got %q, want {\"from\":\"stdin\"}", got)
+	}
+}
+
+func TestParseData_AtDash(t *testing.T) {
+	// @- is also the stdin indicator.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old; r.Close() })
+
+	w.WriteString(`{"src":"at-dash"}`)
+	w.Close()
+
+	got, err := parseData("@-")
+	if err != nil {
+		t.Fatalf("parseData(\"@-\"): %v", err)
+	}
+	if string(got) != `{"src":"at-dash"}` {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestParseData_StdinInvalidJSON(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old; r.Close() })
+
+	w.WriteString(`not valid json`)
+	w.Close()
+
+	if _, err := parseData("-"); err == nil {
+		t.Fatal("expected error for invalid JSON from stdin, got nil")
+	}
+}
+
+// ── storeToken config-file fallback ──────────────────────────────────────────
+
+func TestStoreToken_FallbackToConfigFile(t *testing.T) {
+	// Force keyring to fail so storeToken falls back to the config file.
+	keyring.MockInitWithError(fmt.Errorf("keyring unavailable"))
+	t.Cleanup(func() { keyring.MockInit() }) // restore to working mock afterwards
+	isolateHome(t)
+	silenceStdout(t) // storeToken writes a warning to stderr; silence for cleanliness
+
+	where, err := storeToken("fallback-token")
+	if err != nil {
+		t.Fatalf("storeToken: %v", err)
+	}
+	if where != configPath() {
+		t.Errorf("where = %q, want configPath = %q", where, configPath())
+	}
+	cfg := loadConfig()
+	if cfg.Token != "fallback-token" {
+		t.Errorf("config token = %q, want fallback-token", cfg.Token)
+	}
+}
+
+func TestStoreToken_FallbackSaveConfigFails(t *testing.T) {
+	// Both keyring and saveConfig fail — storeToken must return an error.
+	keyring.MockInitWithError(fmt.Errorf("keyring unavailable"))
+	t.Cleanup(func() { keyring.MockInit() })
+	isolateHome(t)
+	silenceStdout(t)
+
+	// Make $HOME/.config a regular file so os.MkdirAll (called by saveConfig) fails.
+	home, _ := os.UserHomeDir()
+	cfgParent := filepath.Join(home, ".config")
+	if err := os.WriteFile(cfgParent, []byte("not a dir"), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	_, err := storeToken("doomed-token")
+	if err == nil {
+		t.Fatal("expected error when both keyring and saveConfig fail, got nil")
+	}
+}
+
+func TestSaveConfig_MkdirAllError(t *testing.T) {
+	isolateHome(t)
+
+	// Make $HOME/.config a regular file so MkdirAll can't create the directory.
+	home, _ := os.UserHomeDir()
+	cfgParent := filepath.Join(home, ".config")
+	if err := os.WriteFile(cfgParent, []byte("not a dir"), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if err := saveConfig(cliConfig{Token: "tok"}); err == nil {
+		t.Fatal("expected error when config directory cannot be created, got nil")
+	}
+}
+
+// ── doRequest with invalid URL ────────────────────────────────────────────────
+
+func TestDoRequest_InvalidURL(t *testing.T) {
+	// Force an invalid URL so http.NewRequest returns an error. Control
+	// characters in the path trigger this.
+	flagURL = "http://localhost:9999"
+	flagToken = "tok"
+	t.Cleanup(func() { flagURL = ""; flagToken = "" })
+
+	// A path with a null byte is invalid and causes NewRequest to error.
+	_, err := doRequest("GET", "/path\x00invalid", nil)
+	if err == nil {
+		t.Fatal("expected error for invalid URL, got nil")
+	}
 }
 
 // ── saveConfig JSON structure ─────────────────────────────────────────────────
