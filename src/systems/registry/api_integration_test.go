@@ -23,7 +23,17 @@ func TestMain(m *testing.M) {
 		dbURL = "postgresql://postgres:postgres@localhost:5432/registry"
 	}
 	if p, err := pgxpool.New(context.Background(), dbURL); err == nil {
-		if _, err := p.Exec(context.Background(), createTables); err == nil {
+		ctx := context.Background()
+		schemaOK := true
+		if _, err := p.Exec(ctx, createTables); err != nil {
+			schemaOK = false
+		}
+		if schemaOK {
+			if _, err := p.Exec(ctx, migrateServices); err != nil {
+				schemaOK = false
+			}
+		}
+		if schemaOK {
 			pool = p
 			testDBReady = true
 		} else {
@@ -198,21 +208,15 @@ func TestHandleDeleteService_NotFound(t *testing.T) {
 
 // ── handleServiceSelfRegister ─────────────────────────────────────────────────
 
-func TestHandleServiceSelfRegister_Success(t *testing.T) {
-	requireDB(t)
-
-	name := uuid.New().String()
-	serviceKey := "key-" + uuid.New().String()
-	insertTestService(t, name, serviceKey)
-
+// bootstrapService calls the bootstrap path (service_key) and returns the issued
+// client_id and client_secret. It fails the test if the response is not 200 or
+// the credentials are missing.
+func bootstrapService(t *testing.T, name, serviceKey string) (clientID, clientSecret string) {
+	t.Helper()
 	payload, _ := json.Marshal(map[string]any{
 		"name":        name,
 		"service_key": serviceKey,
 		"url":         "http://updated:9001",
-		"description": "registered",
-		"roles": []map[string]string{
-			{"name": "admin", "description": "Admin"},
-		},
 		"endpoints": []map[string]any{
 			{"method": "GET", "path": "/foo", "action": "read", "resource": "foo"},
 		},
@@ -221,12 +225,32 @@ func TestHandleServiceSelfRegister_Success(t *testing.T) {
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handleServiceSelfRegister(w, r)
-
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("got %d, want 204: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("bootstrap: got %d, want 200: %s", w.Code, w.Body.String())
 	}
+	var creds struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&creds); err != nil {
+		t.Fatalf("bootstrap: decode response: %v", err)
+	}
+	if creds.ClientID == "" || creds.ClientSecret == "" {
+		t.Fatal("bootstrap: expected non-empty client_id and client_secret")
+	}
+	return creds.ClientID, creds.ClientSecret
+}
 
-	// Verify the URL and endpoint were persisted.
+func TestHandleServiceSelfRegister_Bootstrap_Success(t *testing.T) {
+	requireDB(t)
+
+	name := uuid.New().String()
+	serviceKey := "key-" + uuid.New().String()
+	insertTestService(t, name, serviceKey)
+
+	clientID, _ := bootstrapService(t, name, serviceKey)
+
+	// Verify URL and endpoint persisted.
 	var gotURL string
 	pool.QueryRow(context.Background(), `SELECT url FROM services WHERE name = $1`, name).Scan(&gotURL)
 	if gotURL != "http://updated:9001" {
@@ -236,6 +260,65 @@ func TestHandleServiceSelfRegister_Success(t *testing.T) {
 	pool.QueryRow(context.Background(), `SELECT count(*) FROM service_endpoints WHERE service_id = (SELECT service_id FROM services WHERE name = $1)`, name).Scan(&epCount)
 	if epCount != 1 {
 		t.Errorf("endpoint count = %d, want 1", epCount)
+	}
+
+	// Verify client_id stored.
+	var storedClientID string
+	pool.QueryRow(context.Background(), `SELECT client_id FROM services WHERE name = $1`, name).Scan(&storedClientID)
+	if storedClientID != clientID {
+		t.Errorf("client_id in DB = %q, want %q", storedClientID, clientID)
+	}
+}
+
+func TestHandleServiceSelfRegister_KeyReuse_Rejected(t *testing.T) {
+	requireDB(t)
+
+	name := uuid.New().String()
+	serviceKey := "key-" + uuid.New().String()
+	insertTestService(t, name, serviceKey)
+	bootstrapService(t, name, serviceKey) // first use, sets key_used=true
+
+	// Second use of the same service_key must be rejected.
+	payload, _ := json.Marshal(map[string]string{"name": name, "service_key": serviceKey})
+	r := httptest.NewRequest(http.MethodPost, "/services/register", bytes.NewReader(payload))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handleServiceSelfRegister(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401 on key reuse", w.Code)
+	}
+}
+
+func TestHandleServiceSelfRegister_CredentialMode_Success(t *testing.T) {
+	requireDB(t)
+
+	name := uuid.New().String()
+	serviceKey := "key-" + uuid.New().String()
+	insertTestService(t, name, serviceKey)
+	clientID, clientSecret := bootstrapService(t, name, serviceKey)
+
+	// Subsequent registration with client credentials.
+	payload, _ := json.Marshal(map[string]any{
+		"name":          name,
+		"client_id":     clientID,
+		"client_secret": clientSecret,
+		"url":           "http://updated-v2:9002",
+		"endpoints": []map[string]any{
+			{"method": "POST", "path": "/bar", "action": "write", "resource": "bar"},
+		},
+	})
+	r := httptest.NewRequest(http.MethodPost, "/services/register", bytes.NewReader(payload))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handleServiceSelfRegister(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("got %d, want 204: %s", w.Code, w.Body.String())
+	}
+
+	var gotURL string
+	pool.QueryRow(context.Background(), `SELECT url FROM services WHERE name = $1`, name).Scan(&gotURL)
+	if gotURL != "http://updated-v2:9002" {
+		t.Errorf("url = %q, want %q", gotURL, "http://updated-v2:9002")
 	}
 }
 

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -10,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -49,6 +53,20 @@ type serviceWithEndpoints struct {
 	Service
 	Roles     []ServiceRole     `json:"roles"`
 	Endpoints []ServiceEndpoint `json:"endpoints"`
+}
+
+type registerRoleReq struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type registerEndpointReq struct {
+	Method      string `json:"method"`
+	Path        string `json:"path"`
+	Action      string `json:"action"`
+	Resource    string `json:"resource"`
+	Public      bool   `json:"public"`
+	Description string `json:"description"`
 }
 
 // checkKey does a constant-time comparison against a configured API key so the
@@ -224,38 +242,84 @@ func handleDeleteService(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleServiceSelfRegister is called by backend services at startup. They
-// prove identity with their pre-shared service key, update their URL, and
-// replace their endpoint manifest so Conductor always has current metadata.
+// handleServiceSelfRegister is called by backend services at startup.
+//
+// Bootstrap (first call): provide name + service_key. The key is verified once,
+// marked as used, and the service receives a randomly generated client_id and
+// client_secret. The service_key is rejected on any subsequent attempt.
+//
+// Credential mode (subsequent calls): provide name + client_id + client_secret.
+// The service updates its URL and endpoint manifest; returns 204.
 func handleServiceSelfRegister(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name        string `json:"name"`
-		ServiceKey  string `json:"service_key"`
-		URL         string `json:"url"`
-		Description string `json:"description"`
-		Roles       []struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
-		} `json:"roles"`
-		Endpoints []struct {
-			Method      string `json:"method"`
-			Path        string `json:"path"`
-			Action      string `json:"action"`
-			Resource    string `json:"resource"`
-			Public      bool   `json:"public"`
-			Description string `json:"description"`
-		} `json:"endpoints"`
+		Name         string                `json:"name"`
+		ServiceKey   string                `json:"service_key"`
+		ClientID     string                `json:"client_id"`
+		ClientSecret string                `json:"client_secret"`
+		URL          string                `json:"url"`
+		Description  string                `json:"description"`
+		Roles        []registerRoleReq     `json:"roles"`
+		Endpoints    []registerEndpointReq `json:"endpoints"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.ServiceKey == "" {
-		http.Error(w, "name and service_key are required", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+
+	// Credential mode: client_id + client_secret provided.
+	if req.ClientID != "" && req.ClientSecret != "" {
+		var svcID, secretHash string
+		err := pool.QueryRow(ctx,
+			`SELECT service_id, client_secret_hash FROM services WHERE name = $1 AND client_id = $2 AND active = true`,
+			req.Name, req.ClientID).Scan(&svcID, &secretHash)
+		if err != nil || secretHash == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(req.ClientSecret)) != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			slog.Error("self-register: begin tx", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback(ctx) //nolint:errcheck
+		if err := applyManifest(ctx, tx, svcID, req.Name, req.URL, req.Description, req.Roles, req.Endpoints); err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("self-register: commit tx", "name", req.Name, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		slog.Info("service re-registered", "name", req.Name, "endpoints", len(req.Endpoints))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Bootstrap mode: service_key provided (one-time use).
+	if req.ServiceKey == "" {
+		http.Error(w, "service_key or (client_id + client_secret) required", http.StatusBadRequest)
 		return
 	}
 
 	var svcID, keyHash string
-	err := pool.QueryRow(r.Context(),
-		`SELECT service_id, service_key_hash FROM services WHERE name = $1 AND active = true`,
-		req.Name).Scan(&svcID, &keyHash)
+	var keyUsed bool
+	err := pool.QueryRow(ctx,
+		`SELECT service_id, service_key_hash, key_used FROM services WHERE name = $1 AND active = true`,
+		req.Name).Scan(&svcID, &keyHash, &keyUsed)
 	if err != nil || keyHash == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if keyUsed {
+		slog.Warn("bootstrap key reuse attempt", "name", req.Name)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -264,7 +328,21 @@ func handleServiceSelfRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
+	// Generate client credentials.
+	clientID := uuid.New().String()
+	secretBytes := make([]byte, 32)
+	if _, err := rand.Read(secretBytes); err != nil {
+		slog.Error("self-register: rand", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	clientSecret := base64.RawURLEncoding.EncodeToString(secretBytes)
+	secretHash, err := bcrypt.GenerateFromPassword([]byte(clientSecret), bcrypt.DefaultCost)
+	if err != nil {
+		slog.Error("self-register: bcrypt", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -274,45 +352,81 @@ func handleServiceSelfRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	if req.URL != "" {
-		tx.Exec(ctx,
-			`UPDATE services SET url = $1, updated_at = now() WHERE service_id = $2`, req.URL, svcID)
+	if _, err := tx.Exec(ctx,
+		`UPDATE services SET key_used = true, client_id = $1, client_secret_hash = $2, updated_at = now() WHERE service_id = $3`,
+		clientID, string(secretHash), svcID); err != nil {
+		slog.Error("self-register: store credentials", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
-	if req.Description != "" {
-		tx.Exec(ctx,
-			`UPDATE services SET description = $1, updated_at = now() WHERE service_id = $2`, req.Description, svcID)
+	if err := applyManifest(ctx, tx, svcID, req.Name, req.URL, req.Description, req.Roles, req.Endpoints); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
-
-	// Replace roles and endpoints atomically so concurrent GET /services reads
-	// never observe a partial state between DELETE and INSERT.
-	tx.Exec(ctx, `DELETE FROM service_roles WHERE service_id = $1`, svcID)
-	for _, r := range req.Roles {
-		if r.Name == "" {
-			continue
-		}
-		tx.Exec(ctx,
-			`INSERT INTO service_roles (role_id, service_id, name, description)
-			 VALUES ($1, $2, $3, $4)`,
-			uuid.New().String(), svcID, r.Name, r.Description)
-	}
-
-	tx.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, svcID)
-	for _, ep := range req.Endpoints {
-		if ep.Method == "" || ep.Path == "" || ep.Action == "" || ep.Resource == "" {
-			continue
-		}
-		tx.Exec(ctx,
-			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			uuid.New().String(), svcID, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public)
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		slog.Error("self-register: commit tx", "name", req.Name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("service self-registered", "name", req.Name, "endpoints", len(req.Endpoints))
-	w.WriteHeader(http.StatusNoContent)
+	slog.Info("service bootstrap complete — store credentials securely",
+		"name", req.Name,
+		"client_id", clientID,
+		"action", "set CLIENT_ID and CLIENT_SECRET env vars; remove SERVICE_KEY")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"client_id":     clientID,
+		"client_secret": clientSecret,
+	})
+}
+
+// applyManifest updates URL, description, roles, and endpoints atomically
+// within the provided transaction.
+func applyManifest(ctx context.Context, tx pgx.Tx, svcID, name, serviceURL, description string, roles []registerRoleReq, endpoints []registerEndpointReq) error {
+	if serviceURL != "" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE services SET url = $1, updated_at = now() WHERE service_id = $2`, serviceURL, svcID); err != nil {
+			slog.Error("applyManifest: update url", "name", name, "error", err)
+			return err
+		}
+	}
+	if description != "" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE services SET description = $1, updated_at = now() WHERE service_id = $2`, description, svcID); err != nil {
+			slog.Error("applyManifest: update description", "name", name, "error", err)
+			return err
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM service_roles WHERE service_id = $1`, svcID); err != nil {
+		return err
+	}
+	for _, role := range roles {
+		if role.Name == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO service_roles (role_id, service_id, name, description) VALUES ($1, $2, $3, $4)`,
+			uuid.New().String(), svcID, role.Name, role.Description); err != nil {
+			slog.Error("applyManifest: insert role", "name", name, "error", err)
+			return err
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, svcID); err != nil {
+		return err
+	}
+	for _, ep := range endpoints {
+		if ep.Method == "" || ep.Path == "" || ep.Action == "" || ep.Resource == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			uuid.New().String(), svcID, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public); err != nil {
+			slog.Error("applyManifest: insert endpoint", "name", name, "error", err)
+			return err
+		}
+	}
+	return nil
 }

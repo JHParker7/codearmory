@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,14 +19,6 @@ func TestMain(m *testing.M) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-// testToken builds a syntactically valid 3-part JWT whose payload contains
-// only the sub claim set to userID. The signature part is a fake value.
-func testToken(userID string) string {
-	payload, _ := json.Marshal(map[string]string{"sub": userID})
-	enc := base64.RawURLEncoding.EncodeToString(payload)
-	return "eyJhbGciOiJFUzI1NiJ9." + enc + ".fakesig"
-}
 
 const testUUID = "550e8400-e29b-41d4-a716-446655440000"
 
@@ -68,13 +59,19 @@ func withServices(t *testing.T, services map[string]serviceState) {
 	})
 }
 
-// mockGatekeeper creates a test server that responds with statusCode for
-// GET /users/:id requests.
-func mockGatekeeper(t *testing.T, statusCode int) *httptest.Server {
+// mockGatekeeper creates a test server that simulates Gatekeeper's
+// /check_permissions endpoint. authorized controls whether the endpoint
+// responds 200+{"authorized":true} or 401.
+func mockGatekeeper(t *testing.T, authorized bool) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/users/") {
-			w.WriteHeader(statusCode)
+		if r.URL.Path == "/check_permissions" {
+			if authorized {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]bool{"authorized": true})
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -104,63 +101,6 @@ func TestEnvOrDefault_ReturnsDefaultWhenEmpty(t *testing.T) {
 	got := envOrDefault("TEST_KEY_EMPTY_XYZ", "fallback")
 	if got != "fallback" {
 		t.Fatalf("expected %q, got %q", "fallback", got)
-	}
-}
-
-// ── getUserID ─────────────────────────────────────────────────────────────────
-
-func TestGetUserID_ValidToken(t *testing.T) {
-	token := testToken(testUUID)
-	id, ok := getUserID(token)
-	if !ok {
-		t.Fatal("expected ok=true for valid token")
-	}
-	if id != testUUID {
-		t.Fatalf("expected %q, got %q", testUUID, id)
-	}
-}
-
-func TestGetUserID_NonThreePartToken(t *testing.T) {
-	_, ok := getUserID("only.twoparts")
-	if ok {
-		t.Fatal("expected ok=false for non-3-part token")
-	}
-}
-
-func TestGetUserID_BadBase64(t *testing.T) {
-	_, ok := getUserID("header.!!!invalid!!!.sig")
-	if ok {
-		t.Fatal("expected ok=false for bad base64")
-	}
-}
-
-func TestGetUserID_MissingSub(t *testing.T) {
-	payload, _ := json.Marshal(map[string]string{"foo": "bar"})
-	enc := base64.RawURLEncoding.EncodeToString(payload)
-	token := "header." + enc + ".sig"
-	_, ok := getUserID(token)
-	if ok {
-		t.Fatal("expected ok=false when sub is missing")
-	}
-}
-
-func TestGetUserID_EmptySub(t *testing.T) {
-	payload, _ := json.Marshal(map[string]string{"sub": ""})
-	enc := base64.RawURLEncoding.EncodeToString(payload)
-	token := "header." + enc + ".sig"
-	_, ok := getUserID(token)
-	if ok {
-		t.Fatal("expected ok=false when sub is empty")
-	}
-}
-
-func TestGetUserID_NonUUIDSub(t *testing.T) {
-	payload, _ := json.Marshal(map[string]string{"sub": "not-a-uuid"})
-	enc := base64.RawURLEncoding.EncodeToString(payload)
-	token := "header." + enc + ".sig"
-	_, ok := getUserID(token)
-	if ok {
-		t.Fatal("expected ok=false when sub is not a UUID")
 	}
 }
 
@@ -261,36 +201,65 @@ func TestStatusResponseWriter_CapturesStatus(t *testing.T) {
 	}
 }
 
-// ── checkUserExists ───────────────────────────────────────────────────────────
+// ── checkAuth ─────────────────────────────────────────────────────────────────
 
-func TestCheckUserExists_Returns200(t *testing.T) {
-	srv := mockGatekeeper(t, http.StatusOK)
-	defer srv.Close()
-	withGatekeeperURL(t, srv.URL)
+func TestCheckAuth_Allowed(t *testing.T) {
+	gk := mockGatekeeper(t, true)
+	defer gk.Close()
+	withGatekeeperURL(t, gk.URL)
 
-	token := testToken(testUUID)
-	ctx := httptest.NewRequest(http.MethodGet, "/", nil).Context()
-	if !checkUserExists(ctx, token, testUUID) {
-		t.Fatal("expected checkUserExists=true when gatekeeper returns 200")
+	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+
+	if got := checkAuth(r, "testsvc", "read", "foo"); got != authAllowed {
+		t.Fatalf("expected authAllowed, got %d", got)
 	}
 }
 
-func TestCheckUserExists_Returns404(t *testing.T) {
-	srv := mockGatekeeper(t, http.StatusNotFound)
-	defer srv.Close()
-	withGatekeeperURL(t, srv.URL)
+func TestCheckAuth_Unauthorized_NoToken(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
+	// No Authorization header.
+	if got := checkAuth(r, "testsvc", "read", "foo"); got != authUnauthorized {
+		t.Fatalf("expected authUnauthorized, got %d", got)
+	}
+}
 
-	token := testToken(testUUID)
-	ctx := httptest.NewRequest(http.MethodGet, "/", nil).Context()
-	if checkUserExists(ctx, token, testUUID) {
-		t.Fatal("expected checkUserExists=false when gatekeeper returns 404")
+func TestCheckAuth_Unauthorized_GatekeeperRejects(t *testing.T) {
+	gk := mockGatekeeper(t, false)
+	defer gk.Close()
+	withGatekeeperURL(t, gk.URL)
+
+	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
+	r.Header.Set("Authorization", "Bearer badtoken")
+
+	if got := checkAuth(r, "testsvc", "read", "foo"); got != authUnauthorized {
+		t.Fatalf("expected authUnauthorized, got %d", got)
+	}
+}
+
+func TestCheckAuth_Forbidden_NotAuthorized(t *testing.T) {
+	gk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/check_permissions" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]bool{"authorized": false})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer gk.Close()
+	withGatekeeperURL(t, gk.URL)
+
+	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
+	r.Header.Set("Authorization", "Bearer validtoken")
+
+	if got := checkAuth(r, "testsvc", "read", "foo"); got != authForbidden {
+		t.Fatalf("expected authForbidden, got %d", got)
 	}
 }
 
 // ── handleServiceProxy ────────────────────────────────────────────────────────
 
-// mockBackend returns a test server that records whether it was called and
-// echoes back the request path.
+// mockBackend returns a test server that responds 200 OK.
 func mockBackend(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -317,18 +286,13 @@ func TestHandleServiceProxy_UnregisteredPath_Returns404(t *testing.T) {
 }
 
 func TestHandleServiceProxy_ServiceUnavailable_Returns503(t *testing.T) {
-	withEndpoints(t, []endpointEntry{
-		makeEntry(http.MethodGet, "/things", "read", "thing"),
-	})
-	withServices(t, map[string]serviceState{}) // no service entry for "testsvc"
-
-	req := httptest.NewRequest(http.MethodGet, "/things", nil)
-	req.Header.Set("Authorization", "Bearer "+testToken(testUUID))
-	w := httptest.NewRecorder()
-	// userMiddleware would normally run; bypass it by making endpoint public for this test
 	entry := makeEntry(http.MethodGet, "/things", "read", "thing")
 	entry.public = true
 	withEndpoints(t, []endpointEntry{entry})
+	withServices(t, map[string]serviceState{}) // no service entry for "testsvc"
+
+	req := httptest.NewRequest(http.MethodGet, "/things", nil)
+	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
@@ -378,24 +342,53 @@ func TestHandleServiceProxy_PrivateEndpoint_NoToken_Returns401(t *testing.T) {
 	}
 }
 
-func TestHandleServiceProxy_PrivateEndpoint_MalformedToken_Returns401(t *testing.T) {
+func TestHandleServiceProxy_PrivateEndpoint_GatekeeperAllows_Proxies(t *testing.T) {
 	backend := mockBackend(t)
 	defer backend.Close()
 
-	entry := makeEntry(http.MethodGet, "/users", "read", "user")
+	gk := mockGatekeeper(t, true)
+	defer gk.Close()
+	withGatekeeperURL(t, gk.URL)
+
+	entry := makeEntry(http.MethodGet, "/profile", "read", "profile")
 	entry.serviceName = "gatekeeper"
 	withEndpoints(t, []endpointEntry{entry})
 	withServices(t, map[string]serviceState{
-		"gatekeeper": {url: backend.URL, proxy: proxyTo(t, backend.URL)},
+		"gatekeeper": {url: backend.URL, proxy: proxyTo(t, backend.URL), forwardAuth: true},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/users", nil)
-	req.Header.Set("Authorization", "Bearer not.a.valid.uuid.token")
+	req := httptest.NewRequest(http.MethodGet, "/profile", nil)
+	req.Header.Set("Authorization", "Bearer validtoken")
+	w := httptest.NewRecorder()
+	handleServiceProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 when gatekeeper allows, got %d", w.Code)
+	}
+}
+
+func TestHandleServiceProxy_PrivateEndpoint_GatekeeperDenies_Returns401(t *testing.T) {
+	backend := mockBackend(t)
+	defer backend.Close()
+
+	gk := mockGatekeeper(t, false)
+	defer gk.Close()
+	withGatekeeperURL(t, gk.URL)
+
+	entry := makeEntry(http.MethodGet, "/admin", "admin", "resource")
+	entry.serviceName = "testsvc"
+	withEndpoints(t, []endpointEntry{entry})
+	withServices(t, map[string]serviceState{
+		"testsvc": {url: backend.URL, proxy: proxyTo(t, backend.URL)},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.Header.Set("Authorization", "Bearer badtoken")
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
 	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 for malformed token, got %d", w.Code)
+		t.Fatalf("expected 401 when gatekeeper denies, got %d", w.Code)
 	}
 }
 
@@ -403,15 +396,9 @@ func TestHandleServiceProxy_ForwardAuth_PassesToken(t *testing.T) {
 	var receivedAuth string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
-		// Respond to check_permissions
 		if r.URL.Path == "/check_permissions" {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]bool{"authorized": true})
-			return
-		}
-		// Respond to user existence check
-		if strings.HasPrefix(r.URL.Path, "/users/") {
-			w.WriteHeader(http.StatusOK)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -426,9 +413,8 @@ func TestHandleServiceProxy_ForwardAuth_PassesToken(t *testing.T) {
 		"gatekeeper": {url: backend.URL, proxy: proxyTo(t, backend.URL), forwardAuth: true},
 	})
 
-	token := testToken(testUUID)
 	req := httptest.NewRequest(http.MethodGet, "/profile", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer mytoken")
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
@@ -445,25 +431,9 @@ func TestHandleServiceProxy_NoForwardAuth_StripsToken(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	gk := mockGatekeeper(t, http.StatusOK)
+	gk := mockGatekeeper(t, true)
 	defer gk.Close()
 	withGatekeeperURL(t, gk.URL)
-
-	// Extend the mock gatekeeper to handle check_permissions
-	gkFull := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/check_permissions" {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]bool{"authorized": true})
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/users/") {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer gkFull.Close()
-	withGatekeeperURL(t, gkFull.URL)
 
 	entry := makeEntry(http.MethodGet, "/data", "read", "data")
 	entry.serviceName = "datasvc"
@@ -472,13 +442,59 @@ func TestHandleServiceProxy_NoForwardAuth_StripsToken(t *testing.T) {
 		"datasvc": {url: backend.URL, proxy: proxyTo(t, backend.URL), forwardAuth: false},
 	})
 
-	token := testToken(testUUID)
 	req := httptest.NewRequest(http.MethodGet, "/data", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer mytoken")
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
 	if receivedAuth != "" {
 		t.Fatalf("expected Authorization header to be stripped for forward_auth=false, got %q", receivedAuth)
+	}
+}
+
+func TestHandleServiceProxy_SpoofHeaders_Stripped(t *testing.T) {
+	var got struct {
+		xUserID   string
+		xFwdHost  string
+		xRealIP   string
+		xFwdFor   string
+	}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.xUserID = r.Header.Get("X-User-ID")
+		got.xFwdHost = r.Header.Get("X-Forwarded-Host")
+		got.xRealIP = r.Header.Get("X-Real-IP")
+		got.xFwdFor = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	entry := makeEntry(http.MethodGet, "/pub", "read", "pub")
+	entry.public = true
+	entry.serviceName = "testsvc"
+	withEndpoints(t, []endpointEntry{entry})
+	withServices(t, map[string]serviceState{
+		"testsvc": {url: backend.URL, proxy: proxyTo(t, backend.URL)},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/pub", nil)
+	req.Header.Set("X-User-ID", "injected")
+	req.Header.Set("X-Forwarded-Host", "evil.com")
+	req.Header.Set("X-Real-IP", "1.2.3.4")
+	req.Header.Set("X-Forwarded-For", "evil-chain")
+	w := httptest.NewRecorder()
+	handleServiceProxy(w, req)
+
+	if got.xUserID != "" {
+		t.Errorf("X-User-ID should be stripped, got %q", got.xUserID)
+	}
+	if got.xFwdHost != "" {
+		t.Errorf("X-Forwarded-Host should be stripped, got %q", got.xFwdHost)
+	}
+	if got.xRealIP != "" {
+		t.Errorf("X-Real-IP should be stripped, got %q", got.xRealIP)
+	}
+	// X-Forwarded-For should be overwritten with req.RemoteAddr, not the spoofed value.
+	if got.xFwdFor == "evil-chain" {
+		t.Error("X-Forwarded-For should not pass through spoofed value")
 	}
 }

@@ -40,8 +40,6 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
       GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret
-    ports:
-      - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,8 +55,6 @@ services:
       ADMIN_KEY: registry-admin-local-secret
       READ_KEY: registry-read-local-secret
       SERVICES: blueprints=http://blueprints:8081=blueprints-local-secret,forge=http://forge:8083=forge-local-secret
-    ports:
-      - "8084:8084"
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,8 +72,6 @@ services:
       SERVICE_KEY: blueprints-local-secret
       SERVICE_URL: http://blueprints:8081
       # ENCRYPTION_KEY: <64-hex-char key> — omit to store state as plaintext
-    ports:
-      - "8081:8081"
     depends_on:
       postgres:
         condition: service_healthy
@@ -103,8 +97,6 @@ services:
       # ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim
       # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
       # K8S_RUNTIME_CLASS: gvisor     # optional: use gVisor for stronger isolation
-    ports:
-      - "8083:8083"
     volumes:
       # Mount the Docker socket for the local docker runtime.
       # Remove this when deploying to Kubernetes (use RUNTIME=kubernetes instead).

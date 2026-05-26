@@ -20,45 +20,58 @@ func testConfig() ServiceConfig {
 	}
 }
 
-func TestRegisterEmptyServiceKey(t *testing.T) {
-	// Should return immediately without making any HTTP calls.
+// credentialsResponse returns a valid bootstrap 200 response body.
+func credentialsResponse(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"client_id": "cid-123", "client_secret": "sec-abc"})
+}
+
+func TestRegisterNoCredentials(t *testing.T) {
+	// Should return immediately without making any HTTP calls when neither
+	// SERVICE_KEY nor CLIENT_ID+CLIENT_SECRET are set.
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	}))
 	defer srv.Close()
 	t.Setenv("REGISTRY_URL", srv.URL)
+	t.Setenv("CLIENT_ID", "")
+	t.Setenv("CLIENT_SECRET", "")
 
 	Register(context.Background(), testConfig(), "")
 	if called {
-		t.Error("expected no HTTP call when serviceKey is empty")
+		t.Error("expected no HTTP call when no credentials are set")
 	}
 }
 
-func TestRegisterSuccess(t *testing.T) {
+func TestRegisterBootstrap_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+		credentialsResponse(w)
 	}))
 	defer srv.Close()
 	t.Setenv("REGISTRY_URL", srv.URL)
 	t.Setenv("SERVICE_URL", "http://testsvc:8080")
+	t.Setenv("CLIENT_ID", "")
+	t.Setenv("CLIENT_SECRET", "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	Register(ctx, testConfig(), "mykey")
-	// If Register returned without cancellation, the test passes.
 }
 
-func TestRegisterPayloadContents(t *testing.T) {
+func TestRegisterBootstrap_PayloadContents(t *testing.T) {
 	var captured []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		captured, _ = io.ReadAll(r.Body)
-		w.WriteHeader(http.StatusNoContent)
+		credentialsResponse(w)
 	}))
 	defer srv.Close()
 	t.Setenv("REGISTRY_URL", srv.URL)
 	t.Setenv("SERVICE_URL", "http://testsvc:8080")
+	t.Setenv("CLIENT_ID", "")
+	t.Setenv("CLIENT_SECRET", "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -84,17 +97,67 @@ func TestRegisterPayloadContents(t *testing.T) {
 	}
 }
 
+func TestRegisterCredentialMode_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("REGISTRY_URL", srv.URL)
+	t.Setenv("SERVICE_URL", "http://testsvc:8080")
+	t.Setenv("CLIENT_ID", "cid-xyz")
+	t.Setenv("CLIENT_SECRET", "sec-xyz")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	Register(ctx, testConfig(), "") // no service key needed in credential mode
+}
+
+func TestRegisterCredentialMode_PayloadContents(t *testing.T) {
+	var captured []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("REGISTRY_URL", srv.URL)
+	t.Setenv("SERVICE_URL", "http://testsvc:8080")
+	t.Setenv("CLIENT_ID", "cid-xyz")
+	t.Setenv("CLIENT_SECRET", "sec-xyz")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	Register(ctx, testConfig(), "should-be-ignored")
+
+	var payload map[string]any
+	if err := json.Unmarshal(captured, &payload); err != nil {
+		t.Fatalf("invalid JSON payload: %v", err)
+	}
+	if payload["client_id"] != "cid-xyz" {
+		t.Errorf("client_id = %v, want cid-xyz", payload["client_id"])
+	}
+	if payload["client_secret"] != "sec-xyz" {
+		t.Errorf("client_secret = %v, want sec-xyz", payload["client_secret"])
+	}
+	if _, ok := payload["service_key"]; ok {
+		t.Error("service_key should not be present in credential mode payload")
+	}
+}
+
 func TestRegisterServiceNameEnvOverride(t *testing.T) {
 	var gotName string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		gotName, _ = payload["name"].(string)
-		w.WriteHeader(http.StatusNoContent)
+		credentialsResponse(w)
 	}))
 	defer srv.Close()
 	t.Setenv("REGISTRY_URL", srv.URL)
 	t.Setenv("SERVICE_NAME", "overridden")
+	t.Setenv("CLIENT_ID", "")
+	t.Setenv("CLIENT_SECRET", "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -112,13 +175,14 @@ func TestRegisterRetryOnBadStatus(t *testing.T) {
 		if n < 3 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		} else {
-			w.WriteHeader(http.StatusNoContent)
+			credentialsResponse(w)
 		}
 	}))
 	defer srv.Close()
 	t.Setenv("REGISTRY_URL", srv.URL)
+	t.Setenv("CLIENT_ID", "")
+	t.Setenv("CLIENT_SECRET", "")
 
-	// Patch sleep so the test doesn't actually wait 5s per retry.
 	orig := sleepFn
 	sleepFn = func(d time.Duration) {}
 	defer func() { sleepFn = orig }()
@@ -136,11 +200,12 @@ func TestRegisterContextCancellation(t *testing.T) {
 	started := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(started)
-		// Never respond with 204 so Register keeps retrying.
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
 	t.Setenv("REGISTRY_URL", srv.URL)
+	t.Setenv("CLIENT_ID", "")
+	t.Setenv("CLIENT_SECRET", "")
 
 	orig := sleepFn
 	sleepFn = func(d time.Duration) { time.Sleep(10 * time.Millisecond) }

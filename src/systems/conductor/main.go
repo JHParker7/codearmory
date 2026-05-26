@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -114,66 +113,78 @@ func newProxy(target string) *httputil.ReverseProxy {
 	return proxy
 }
 
-// ── User auth ─────────────────────────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────────────────────
 
-// uuidRE matches the UUID format Gatekeeper uses for user IDs.
-var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+type authOutcome int
 
-// getUserID decodes the JWT payload (without signature verification) and returns
-// the sub claim, which Gatekeeper sets to the user's ID.
-func getUserID(token string) (string, bool) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return "", false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", false
-	}
-	var claims struct {
-		Sub string `json:"sub"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil || claims.Sub == "" {
-		return "", false
-	}
-	if !uuidRE.MatchString(claims.Sub) {
-		return "", false
-	}
-	return claims.Sub, true
-}
+const (
+	authAllowed authOutcome = iota
+	authUnauthorized
+	authForbidden
+)
 
-// checkUserExists calls GET /users/{id} on Gatekeeper with the caller's bearer
-// token. Returns true only when Gatekeeper responds 200.
-func checkUserExists(ctx context.Context, token, userID string) bool {
-	ctx, span := otel.Tracer("conductor").Start(ctx, "checkUserExists")
+// checkAuth forwards the caller's Bearer token to Gatekeeper's /check_permissions
+// endpoint and interprets the response. It performs a single round-trip to
+// Gatekeeper, which is responsible for both token validation and RBAC checks.
+func checkAuth(r *http.Request, service, action, resource string) authOutcome {
+	ctx, span := otel.Tracer("conductor").Start(r.Context(), "checkAuth")
 	defer span.End()
-	span.SetAttributes(attribute.String("user.id", userID))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/users/"+url.PathEscape(userID), nil)
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		span.SetStatus(codes.Error, "no bearer token")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "no_token")))
+		return authUnauthorized
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"service":  service,
+		"action":   action,
+		"resource": resource,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return false
+		return authUnauthorized
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", auth)
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return false
+		return authUnauthorized
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 
-	exists := resp.StatusCode == http.StatusOK
-	span.SetAttributes(attribute.Bool("user.exists", exists))
-	if exists {
-		span.SetStatus(codes.Ok, "")
-	} else {
-		span.SetStatus(codes.Error, "user not found or token invalid")
+	if resp.StatusCode == http.StatusUnauthorized {
+		span.SetStatus(codes.Error, "unauthorized")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "unauthorized")))
+		return authUnauthorized
 	}
-	return exists
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		span.SetStatus(codes.Error, "permission denied")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "forbidden")))
+		return authForbidden
+	}
+
+	var result struct {
+		Authorized bool `json:"authorized"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return authForbidden
+	}
+	if !result.Authorized {
+		span.SetStatus(codes.Error, "not authorized")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "forbidden")))
+		return authForbidden
+	}
+	span.SetStatus(codes.Ok, "")
+	meterAllowed.Add(ctx, 1)
+	return authAllowed
 }
 
 // ── Service registry ──────────────────────────────────────────────────────────
@@ -301,52 +312,6 @@ func lookupEndpoint(method, path string) (endpointEntry, bool) {
 	return endpointEntry{}, false
 }
 
-// checkServicePermission calls GET /check_permissions on Gatekeeper to verify
-// the caller has the required action on the target service and resource.
-func checkServicePermission(r *http.Request, service, action, resource string) bool {
-	ctx, span := otel.Tracer("conductor").Start(r.Context(), "checkServicePermission")
-	defer span.End()
-
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	body, _ := json.Marshal(map[string]string{
-		"service":  service,
-		"action":   action,
-		"resource": resource,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
-	if err != nil {
-		span.RecordError(err)
-		return false
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		span.RecordError(err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
-		span.SetStatus(codes.Error, "permission denied")
-		return false
-	}
-	var result struct {
-		Authorized bool `json:"authorized"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false
-	}
-	if result.Authorized {
-		span.SetStatus(codes.Ok, "")
-	} else {
-		span.SetStatus(codes.Error, "not authorized")
-	}
-	return result.Authorized
-}
-
 // handleServiceProxy is the universal handler. It rejects any request whose
 // method+path is not registered in the service registry, enforces user auth on
 // non-public endpoints, checks RBAC permissions, then forwards to the backend.
@@ -366,47 +331,26 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !entry.public {
-		ctx, span := otel.Tracer("conductor").Start(r.Context(), "authCheck")
-
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			span.SetStatus(codes.Error, "no bearer token")
-			meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "no_token")))
-			span.End()
+		switch checkAuth(r, entry.serviceName, entry.action, entry.resource) {
+		case authUnauthorized:
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
-		}
-		token := strings.TrimPrefix(auth, "Bearer ")
-
-		userID, ok := getUserID(token)
-		if !ok {
-			span.SetStatus(codes.Error, "malformed token")
-			meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "malformed_token")))
-			span.End()
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		if !checkUserExists(ctx, token, userID) {
-			span.SetStatus(codes.Error, "user not found")
-			meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "user_not_found")))
-			span.End()
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		span.SetStatus(codes.Ok, "")
-		meterAllowed.Add(ctx, 1)
-		span.End()
-		r = r.WithContext(ctx)
-
-		if !checkServicePermission(r, entry.serviceName, entry.action, entry.resource) {
+		case authForbidden:
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 	}
 
 	r2 := r.Clone(r.Context())
+	// Strip headers that could be used to spoof identity or routing metadata.
+	r2.Header.Del("X-User-ID")
+	r2.Header.Del("X-Forwarded-Host")
+	r2.Header.Del("X-Forwarded-Proto")
+	r2.Header.Del("X-Real-IP")
+	// Replace X-Forwarded-For with only the immediate client address so
+	// downstream services see the real origin, not a client-supplied chain.
+	r2.Header.Set("X-Forwarded-For", r.RemoteAddr)
+
 	// Strip the bearer token before forwarding so backend services cannot replay
 	// it against other services. Services that need to re-verify the caller
 	// (e.g. gatekeeper itself) declare forward_auth=true in the registry.
@@ -419,6 +363,11 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
+	if registryKey == "" {
+		slog.Error("REGISTRY_READ_KEY is not set; refusing to start")
+		os.Exit(1)
+	}
+
 	logLevel := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
 		logLevel = slog.LevelDebug
