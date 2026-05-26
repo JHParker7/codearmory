@@ -14,12 +14,22 @@ import (
 )
 
 type Service struct {
-	ServiceID string    `json:"service_id"`
-	Name      string    `json:"name"`
-	URL       string    `json:"url"`
-	Active    bool      `json:"active"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ServiceID   string    `json:"service_id"`
+	Name        string    `json:"name"`
+	URL         string    `json:"url"`
+	Description string    `json:"description"`
+	ForwardAuth bool      `json:"forward_auth"`
+	Active      bool      `json:"active"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type ServiceRole struct {
+	RoleID      string    `json:"role_id"`
+	ServiceID   string    `json:"service_id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type ServiceEndpoint struct {
@@ -29,6 +39,7 @@ type ServiceEndpoint struct {
 	Path       string    `json:"path"`
 	Action     string    `json:"action"`
 	Resource   string    `json:"resource"`
+	Public     bool      `json:"public"`
 	Active     bool      `json:"active"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
@@ -36,6 +47,7 @@ type ServiceEndpoint struct {
 
 type serviceWithEndpoints struct {
 	Service
+	Roles     []ServiceRole     `json:"roles"`
 	Endpoints []ServiceEndpoint `json:"endpoints"`
 }
 
@@ -80,7 +92,7 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := pool.Query(r.Context(),
-		`SELECT service_id, name, url, active, created_at, updated_at
+		`SELECT service_id, name, url, description, forward_auth, active, created_at, updated_at
 		 FROM services WHERE active = true ORDER BY name`)
 	if err != nil {
 		slog.Error("list services: query", "error", err)
@@ -92,7 +104,7 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 	var svcs []Service
 	for rows.Next() {
 		var s Service
-		if err := rows.Scan(&s.ServiceID, &s.Name, &s.URL, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ServiceID, &s.Name, &s.URL, &s.Description, &s.ForwardAuth, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			continue
 		}
 		svcs = append(svcs, s)
@@ -105,9 +117,22 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 
 	result := make([]serviceWithEndpoints, len(svcs))
 	for i, s := range svcs {
-		result[i] = serviceWithEndpoints{Service: s, Endpoints: []ServiceEndpoint{}}
+		result[i] = serviceWithEndpoints{Service: s, Roles: []ServiceRole{}, Endpoints: []ServiceEndpoint{}}
+
+		roleRows, err := pool.Query(r.Context(),
+			`SELECT role_id, service_id, name, description, created_at
+			 FROM service_roles WHERE service_id = $1 ORDER BY name`, s.ServiceID)
+		if err == nil {
+			for roleRows.Next() {
+				var sr ServiceRole
+				roleRows.Scan(&sr.RoleID, &sr.ServiceID, &sr.Name, &sr.Description, &sr.CreatedAt)
+				result[i].Roles = append(result[i].Roles, sr)
+			}
+			roleRows.Close()
+		}
+
 		epRows, err := pool.Query(r.Context(),
-			`SELECT endpoint_id, service_id, method, path, action, resource, active, created_at, updated_at
+			`SELECT endpoint_id, service_id, method, path, action, resource, public, active, created_at, updated_at
 			 FROM service_endpoints WHERE service_id = $1 AND active = true`, s.ServiceID)
 		if err != nil {
 			continue
@@ -115,7 +140,7 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 		for epRows.Next() {
 			var ep ServiceEndpoint
 			epRows.Scan(&ep.EndpointID, &ep.ServiceID, &ep.Method, &ep.Path,
-				&ep.Action, &ep.Resource, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt)
+				&ep.Action, &ep.Resource, &ep.Public, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt)
 			result[i].Endpoints = append(result[i].Endpoints, ep)
 		}
 		epRows.Close()
@@ -132,9 +157,11 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name       string `json:"name"`
-		URL        string `json:"url"`
-		ServiceKey string `json:"service_key"`
+		Name        string `json:"name"`
+		URL         string `json:"url"`
+		Description string `json:"description"`
+		ServiceKey  string `json:"service_key"`
+		ForwardAuth bool   `json:"forward_auth"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.URL == "" {
 		http.Error(w, "name and url are required", http.StatusBadRequest)
@@ -153,9 +180,9 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 
 	id := uuid.New().String()
 	_, err := pool.Exec(r.Context(),
-		`INSERT INTO services (service_id, name, url, service_key_hash)
-		 VALUES ($1, $2, $3, $4)`,
-		id, req.Name, req.URL, keyHash)
+		`INSERT INTO services (service_id, name, url, description, service_key_hash, forward_auth)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		id, req.Name, req.URL, req.Description, keyHash, req.ForwardAuth)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			http.Error(w, "service already registered", http.StatusConflict)
@@ -168,8 +195,8 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 
 	var svc Service
 	pool.QueryRow(r.Context(),
-		`SELECT service_id, name, url, active, created_at, updated_at FROM services WHERE service_id = $1`, id).
-		Scan(&svc.ServiceID, &svc.Name, &svc.URL, &svc.Active, &svc.CreatedAt, &svc.UpdatedAt)
+		`SELECT service_id, name, url, description, forward_auth, active, created_at, updated_at FROM services WHERE service_id = $1`, id).
+		Scan(&svc.ServiceID, &svc.Name, &svc.URL, &svc.Description, &svc.ForwardAuth, &svc.Active, &svc.CreatedAt, &svc.UpdatedAt)
 
 	slog.Info("service registered", "name", svc.Name)
 	w.Header().Set("Content-Type", "application/json")
@@ -202,14 +229,21 @@ func handleDeleteService(w http.ResponseWriter, r *http.Request) {
 // replace their endpoint manifest so Conductor always has current metadata.
 func handleServiceSelfRegister(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name       string `json:"name"`
-		ServiceKey string `json:"service_key"`
-		URL        string `json:"url"`
-		Endpoints  []struct {
-			Method   string `json:"method"`
-			Path     string `json:"path"`
-			Action   string `json:"action"`
-			Resource string `json:"resource"`
+		Name        string `json:"name"`
+		ServiceKey  string `json:"service_key"`
+		URL         string `json:"url"`
+		Description string `json:"description"`
+		Roles       []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"roles"`
+		Endpoints []struct {
+			Method      string `json:"method"`
+			Path        string `json:"path"`
+			Action      string `json:"action"`
+			Resource    string `json:"resource"`
+			Public      bool   `json:"public"`
+			Description string `json:"description"`
 		} `json:"endpoints"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.ServiceKey == "" {
@@ -244,18 +278,33 @@ func handleServiceSelfRegister(w http.ResponseWriter, r *http.Request) {
 		tx.Exec(ctx,
 			`UPDATE services SET url = $1, updated_at = now() WHERE service_id = $2`, req.URL, svcID)
 	}
+	if req.Description != "" {
+		tx.Exec(ctx,
+			`UPDATE services SET description = $1, updated_at = now() WHERE service_id = $2`, req.Description, svcID)
+	}
 
-	// Replace endpoints atomically inside the transaction: concurrent GET /services
-	// reads will not observe the window between DELETE and INSERT.
+	// Replace roles and endpoints atomically so concurrent GET /services reads
+	// never observe a partial state between DELETE and INSERT.
+	tx.Exec(ctx, `DELETE FROM service_roles WHERE service_id = $1`, svcID)
+	for _, r := range req.Roles {
+		if r.Name == "" {
+			continue
+		}
+		tx.Exec(ctx,
+			`INSERT INTO service_roles (role_id, service_id, name, description)
+			 VALUES ($1, $2, $3, $4)`,
+			uuid.New().String(), svcID, r.Name, r.Description)
+	}
+
 	tx.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, svcID)
 	for _, ep := range req.Endpoints {
 		if ep.Method == "" || ep.Path == "" || ep.Action == "" || ep.Resource == "" {
 			continue
 		}
 		tx.Exec(ctx,
-			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource)
-			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			uuid.New().String(), svcID, ep.Method, ep.Path, ep.Action, ep.Resource)
+			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			uuid.New().String(), svcID, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

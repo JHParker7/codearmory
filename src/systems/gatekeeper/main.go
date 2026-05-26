@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"codearmory.local/svckit/registry"
+	"codearmory.local/svckit/telemetry"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
@@ -169,6 +171,8 @@ func main() {
 	mux.Handle("POST /service-permission-requests/{id}/approve", mw(handleApproveServicePermissionRequest))
 	mux.Handle("POST /service-permission-requests/{id}/decline", mw(handleDeclineServicePermissionRequest))
 
+	go registry.Register(context.Background(), serviceConfig, os.Getenv("SERVICE_KEY"))
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -181,11 +185,11 @@ func main() {
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
 
-	otelHandler, shutdown, err := setupOTel(context.Background())
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), serviceConfig.Name)
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
-		slog.SetDefault(slog.New(&fanoutHandler{handlers: []slog.Handler{jsonHandler, otelHandler}}))
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
 		defer shutdown(context.Background())
 	}
 	initMetrics()

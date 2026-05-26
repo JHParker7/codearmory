@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"codearmory.local/svckit/registry"
+	"codearmory.local/svckit/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -653,11 +655,11 @@ func main() {
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
 
-	otelHandler, shutdown, err := setupOTel(context.Background())
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), serviceConfig.Name)
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
-		slog.SetDefault(slog.New(&fanoutHandler{handlers: []slog.Handler{jsonHandler, otelHandler}}))
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
 		defer shutdown(context.Background())
 	}
 	initMetrics()
@@ -683,7 +685,7 @@ func main() {
 	}
 	slog.Info("database pool initialized")
 
-	go registerWithGatekeeper(ctx)
+	go registry.Register(ctx, serviceConfig, os.Getenv("SERVICE_KEY"))
 
 	mux := http.NewServeMux()
 

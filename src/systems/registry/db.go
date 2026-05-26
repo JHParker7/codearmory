@@ -16,9 +16,20 @@ CREATE TABLE IF NOT EXISTS services (
     name             TEXT        NOT NULL UNIQUE,
     url              TEXT        NOT NULL,
     service_key_hash TEXT        NOT NULL DEFAULT '',
+    description      TEXT        NOT NULL DEFAULT '',
+    forward_auth     BOOLEAN     NOT NULL DEFAULT false,
     active           BOOLEAN     NOT NULL DEFAULT true,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS service_roles (
+    role_id     TEXT        PRIMARY KEY,
+    service_id  TEXT        NOT NULL REFERENCES services(service_id),
+    name        TEXT        NOT NULL,
+    description TEXT        NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (service_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS service_endpoints (
@@ -28,6 +39,7 @@ CREATE TABLE IF NOT EXISTS service_endpoints (
     path        TEXT        NOT NULL,
     action      TEXT        NOT NULL,
     resource    TEXT        NOT NULL,
+    public      BOOLEAN     NOT NULL DEFAULT false,
     active      BOOLEAN     NOT NULL DEFAULT true,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()

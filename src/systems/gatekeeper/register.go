@@ -15,6 +15,6 @@ func init() {
 	var err error
 	serviceConfig, err = registry.LoadConfig(serviceConfigData)
 	if err != nil {
-		panic("blueprints: invalid service.json: " + err.Error())
+		panic("gatekeeper: invalid service.json: " + err.Error())
 	}
 }

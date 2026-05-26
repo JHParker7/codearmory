@@ -14,6 +14,7 @@ import (
 
 func TestMain(m *testing.M) {
 	initMetrics()
+	setupForgeTestDB()
 	os.Exit(m.Run())
 }
 

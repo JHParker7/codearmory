@@ -7,6 +7,8 @@ import (
 	"os"
 	"time"
 
+	"codearmory.local/svckit/registry"
+	"codearmory.local/svckit/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
@@ -102,11 +104,11 @@ func main() {
 
 	ctx := context.Background()
 
-	otelHandler, shutdown, err := setupOTel(ctx)
+	otelHandler, shutdown, err := telemetry.Setup(ctx, serviceConfig.Name)
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
-		slog.SetDefault(slog.New(&fanoutHandler{handlers: []slog.Handler{jsonHandler, otelHandler}}))
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
 		defer shutdown(ctx)
 	}
 	initMetrics()
@@ -137,7 +139,7 @@ func main() {
 	workers.Start(ctx, 10)
 	slog.Info("worker pool started", "workers", 10)
 
-	go registerWithGatekeeper(ctx)
+	go registry.Register(ctx, serviceConfig, os.Getenv("SERVICE_KEY"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /executions", handleSubmit(workers))

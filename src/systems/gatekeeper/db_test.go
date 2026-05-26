@@ -20,7 +20,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	conn.AutoMigrate(&User{}, &Org{}, &Team{}, &Role{}, &Session{}, &Permissions{}, &Invite{})
+	conn.AutoMigrate(&User{}, &Org{}, &Team{}, &Role{}, &Session{}, &Permissions{}, &Invite{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &PermissionsCheck{})
 	gormDB = conn
 	initMetrics()
 	os.Exit(m.Run())

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"codearmory.local/svckit/telemetry"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
@@ -49,11 +50,11 @@ func main() {
 
 	ctx := context.Background()
 
-	otelHandler, shutdown, err := setupOTel(ctx)
+	otelHandler, shutdown, err := telemetry.Setup(ctx, "registry")
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
-		slog.SetDefault(slog.New(&fanoutHandler{handlers: []slog.Handler{jsonHandler, otelHandler}}))
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
 		defer shutdown(ctx)
 	}
 
