@@ -1,0 +1,29 @@
+CodeArmory has been deployed.
+
+  Release:   {{ .Release.Name }}
+  Namespace: {{ .Release.Namespace }}
+
+Conductor is the public-facing API gateway.
+{{- if .Values.conductor.ingress.enabled }}
+  Ingress:   http{{ if .Values.conductor.ingress.tls }}s{{ end }}://{{ (first .Values.conductor.ingress.hosts).host }}
+{{- else if eq .Values.conductor.service.type "LoadBalancer" }}
+  Service type is LoadBalancer — run the following to get the external IP:
+    kubectl get svc {{ include "codearmory.fullname" . }}-conductor -n {{ .Release.Namespace }}
+{{- else }}
+  Access conductor from within the cluster at:
+    http://{{ include "codearmory.fullname" . }}-conductor:{{ .Values.conductor.port }}
+
+  Port-forward for local access:
+    kubectl port-forward svc/{{ include "codearmory.fullname" . }}-conductor {{ .Values.conductor.port }}:{{ .Values.conductor.port }} -n {{ .Release.Namespace }}
+{{- end }}
+
+Before production use, make sure you have set:
+  - gatekeeper.secret.gatekeeperServices   (service auth keys)
+  - registry.secret.adminKey / readKey
+  - blueprints.secret.encryptionKey        (openssl rand -hex 32)
+  - blueprints.secret.gatekeeperServiceKey
+  - conductor.secret.registryReadKey
+  - conductor.secret.conductorForwardKey
+  - forge.secret.conductorForwardKey
+  - forge.secret.gatekeeperServiceKey
+  - postgresql.auth.postgresPassword       (change from default)

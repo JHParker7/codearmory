@@ -1,0 +1,12 @@
+apiVersion: v2
+name: codearmory
+description: Helm chart for the CodeArmory platform (gatekeeper, registry, blueprints, conductor, forge)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+dependencies:
+  - name: postgresql
+    version: ">=15.5.0"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled

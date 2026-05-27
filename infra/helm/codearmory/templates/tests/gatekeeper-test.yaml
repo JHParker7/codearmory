@@ -1,0 +1,29 @@
+{{- if .Values.tests.gatekeeper.enabled }}
+{{- $dbUrl := coalesce .Values.tests.gatekeeper.databaseUrl (ternary (include "codearmory.postgresql.dsn" (list . "gatekeeper")) "" .Values.postgresql.enabled) }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "codearmory.fullname" . }}-test-gatekeeper
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test-gatekeeper
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "10"
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: test
+      image: "{{ .Values.tests.gatekeeper.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.tests.gatekeeper) }}"
+      imagePullPolicy: {{ .Values.imagePullPolicy }}
+      env:
+        - name: API_URL
+          value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+        - name: DATABASE_URL
+          value: {{ $dbUrl | quote }}
+{{- end }}
