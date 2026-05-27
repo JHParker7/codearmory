@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type statusResponseWriter struct {
@@ -61,44 +60,29 @@ func main() {
 	connectDB(ctx)
 	defer pool.Close()
 
-	if _, err := pool.Exec(ctx, createTables); err != nil {
-		slog.Error("failed to create tables", "error", err)
-		os.Exit(1)
-	}
-
-	// Bootstrap services from SERVICES=name=url=key,... env var.
+	// Seed services from SERVICES=name=url,name=url env var.
+	// Format: comma-separated name=url pairs. This is a convenience for initial
+	// setup; services can also be registered via POST /services with the admin key.
 	if raw := os.Getenv("SERVICES"); raw != "" {
 		for _, entry := range strings.Split(raw, ",") {
-			parts := strings.SplitN(strings.TrimSpace(entry), "=", 3)
-			if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			parts := strings.SplitN(strings.TrimSpace(entry), "=", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 				continue
 			}
 			name, svcURL := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-			var keyHash string
-			if len(parts) == 3 && parts[2] != "" {
-				if h, err := bcrypt.GenerateFromPassword([]byte(strings.TrimSpace(parts[2])), bcrypt.DefaultCost); err == nil {
-					keyHash = string(h)
-				}
-			}
 			var existing string
 			err := pool.QueryRow(ctx, `SELECT service_id FROM services WHERE name = $1`, name).Scan(&existing)
 			if err != nil {
 				id := uuid.New().String()
-				pool.Exec(ctx,
-					`INSERT INTO services (service_id, name, url, service_key_hash) VALUES ($1, $2, $3, $4)`,
-					id, name, svcURL, keyHash)
-				slog.Info("service auto-registered", "name", name)
+				pool.Exec(ctx, //nolint:errcheck
+					`INSERT INTO services (service_id, name, url) VALUES ($1, $2, $3)`,
+					id, name, svcURL)
+				slog.Info("service seeded", "name", name)
 			} else {
-				if keyHash != "" {
-					pool.Exec(ctx,
-						`UPDATE services SET url = $1, service_key_hash = $2, active = true, updated_at = now() WHERE name = $3`,
-						svcURL, keyHash, name)
-				} else {
-					pool.Exec(ctx,
-						`UPDATE services SET url = $1, active = true, updated_at = now() WHERE name = $2`,
-						svcURL, name)
-				}
-				slog.Info("service auto-updated", "name", name)
+				pool.Exec(ctx, //nolint:errcheck
+					`UPDATE services SET url = $1, active = true, updated_at = now() WHERE name = $2`,
+					svcURL, name)
+				slog.Info("service updated from seed", "name", name)
 			}
 		}
 	}
@@ -107,7 +91,7 @@ func main() {
 	mux.HandleFunc("GET /services", handleListServices)
 	mux.HandleFunc("POST /services", handleCreateService)
 	mux.HandleFunc("DELETE /services/{id}", handleDeleteService)
-	mux.HandleFunc("POST /services/register", handleServiceSelfRegister)
+	mux.HandleFunc("PUT /services/{id}/endpoints", handleUpdateServiceEndpoints)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -118,8 +102,16 @@ func main() {
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
 
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      wrapped,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
 	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, wrapped); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}

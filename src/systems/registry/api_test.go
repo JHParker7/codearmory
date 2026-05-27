@@ -3,7 +3,6 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -199,41 +198,6 @@ func TestHandleDeleteService_Unauthorized(t *testing.T) {
 	handleDeleteService(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
-	}
-}
-
-// handleServiceSelfRegister decodes the JSON body first (before any DB access),
-// so we can test the 400 path without a database pool.
-
-func TestHandleServiceSelfRegister_MissingName(t *testing.T) {
-	body := `{"service_key":"somekey","url":"http://localhost:9000"}`
-	r := httptest.NewRequest(http.MethodPost, "/services/register", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	handleServiceSelfRegister(w, r)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 when name is missing, got %d", w.Code)
-	}
-}
-
-func TestHandleServiceSelfRegister_MissingServiceKey(t *testing.T) {
-	body := `{"name":"mysvc","url":"http://localhost:9000"}`
-	r := httptest.NewRequest(http.MethodPost, "/services/register", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	handleServiceSelfRegister(w, r)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 when service_key is missing, got %d", w.Code)
-	}
-}
-
-func TestHandleServiceSelfRegister_EmptyBody(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/services/register", strings.NewReader("{}"))
-	r.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	handleServiceSelfRegister(w, r)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for empty JSON body, got %d", w.Code)
 	}
 }
 
