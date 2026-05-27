@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -715,6 +716,13 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 	return svc, true
 }
 
+// rotationMu holds a per-service-name mutex to serialise concurrent rotation
+// requests for the same account. Without this, two simultaneous calls would
+// both pass bcrypt verification against the old key, each generate a different
+// new key, and the loser's stored value would be silently overwritten — leaving
+// that service instance permanently locked out until it is restarted.
+var rotationMu sync.Map
+
 // handleRotateServiceKey generates a new random 32-byte key for the authenticated
 // service account, stores its bcrypt hash, and returns the plaintext new key.
 // The service must present its current key to authenticate; on success it must
@@ -729,6 +737,12 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.SetAttributes(attribute.String("service.name", svc.ServiceName))
+
+	// Serialise concurrent rotations for the same service account.
+	val, _ := rotationMu.LoadOrStore(svc.ServiceName, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
 
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
