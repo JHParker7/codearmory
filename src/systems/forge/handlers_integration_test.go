@@ -61,13 +61,14 @@ func insertExecution(t *testing.T, execID, userID, status string) {
 
 func TestHandleSubmit_Success_DB(t *testing.T) {
 	requireForgeDB(t)
-	initAllowedImages("")
+	initAllowedImages("alpine:3.19")
+	t.Cleanup(func() { initAllowedImages("") })
 
 	userID := "user-" + uuid.New().String()
 	pool := &WorkerPool{}
 	body := bytes.NewBufferString(`{"image":"alpine:3.19","command":["echo","hi"]}`)
 	r := httptest.NewRequest(http.MethodPost, "/executions", body)
-	r.Header.Set("Authorization", testBearerToken(userID))
+	r.Header.Set("X-User-ID", userID)
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 
@@ -100,7 +101,7 @@ func TestHandleGet_NotFound_DB(t *testing.T) {
 	userID := "user-" + uuid.New().String()
 	r := httptest.NewRequest(http.MethodGet, "/executions/no-such-id", nil)
 	r.SetPathValue("id", "no-such-id")
-	r.Header.Set("Authorization", testBearerToken(userID))
+	r.Header.Set("X-User-ID", userID)
 	w := httptest.NewRecorder()
 	handleGet(w, r)
 
@@ -118,7 +119,7 @@ func TestHandleGet_Found_DB(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/executions/"+execID, nil)
 	r.SetPathValue("id", execID)
-	r.Header.Set("Authorization", testBearerToken(userID))
+	r.Header.Set("X-User-ID", userID)
 	w := httptest.NewRecorder()
 	handleGet(w, r)
 
@@ -142,7 +143,7 @@ func TestHandleList_Empty_DB(t *testing.T) {
 	// Use a user ID that is guaranteed to have no executions.
 	userID := "user-" + uuid.New().String()
 	r := httptest.NewRequest(http.MethodGet, "/executions", nil)
-	r.Header.Set("Authorization", testBearerToken(userID))
+	r.Header.Set("X-User-ID", userID)
 	w := httptest.NewRecorder()
 	handleList(w, r)
 
@@ -164,7 +165,7 @@ func TestHandleList_Success_DB(t *testing.T) {
 	insertExecution(t, execID, userID, "pending")
 
 	r := httptest.NewRequest(http.MethodGet, "/executions", nil)
-	r.Header.Set("Authorization", testBearerToken(userID))
+	r.Header.Set("X-User-ID", userID)
 	w := httptest.NewRecorder()
 	handleList(w, r)
 
@@ -190,7 +191,7 @@ func TestHandleCancel_NotFound_DB(t *testing.T) {
 	wp := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodDelete, "/executions/no-such-id", nil)
 	r.SetPathValue("id", "no-such-id")
-	r.Header.Set("Authorization", testBearerToken(userID))
+	r.Header.Set("X-User-ID", userID)
 	w := httptest.NewRecorder()
 	handleCancel(wp)(w, r)
 
@@ -209,7 +210,7 @@ func TestHandleCancel_Pending_DB(t *testing.T) {
 	wp := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodDelete, "/executions/"+execID, nil)
 	r.SetPathValue("id", execID)
-	r.Header.Set("Authorization", testBearerToken(userID))
+	r.Header.Set("X-User-ID", userID)
 	w := httptest.NewRecorder()
 	handleCancel(wp)(w, r)
 
@@ -233,7 +234,7 @@ func TestHandleCancel_AlreadyCompleted_DB(t *testing.T) {
 	wp := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodDelete, "/executions/"+execID, nil)
 	r.SetPathValue("id", execID)
-	r.Header.Set("Authorization", testBearerToken(userID))
+	r.Header.Set("X-User-ID", userID)
 	w := httptest.NewRecorder()
 	handleCancel(wp)(w, r)
 

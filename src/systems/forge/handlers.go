@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
+	"os"
+	"regexp"
+	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -18,40 +24,120 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
+// envKeyRe matches POSIX-compliant environment variable names.
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// blockedEnvKeys is an explicit denylist of names that could redirect interpreter
+// execution or dynamic linker behaviour in user containers.
+var blockedEnvKeys = map[string]bool{
+	"LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "LD_AUDIT": true,
+	"PYTHONSTARTUP": true, "PYTHONPATH": true,
+	"NODE_OPTIONS": true, "NODE_PATH": true,
+	"RUBYOPT": true, "RUBYLIB": true,
+	"PERL5LIB": true, "PERLLIB": true,
+	"JAVA_TOOL_OPTIONS": true, "JAVA_OPTIONS": true, "_JAVA_OPTIONS": true,
+	"DYLD_INSERT_LIBRARIES": true, "DYLD_LIBRARY_PATH": true,
+}
+
+func validateEnvKeys(env map[string]string) error {
+	for k := range env {
+		if !envKeyRe.MatchString(k) {
+			return fmt.Errorf("invalid env key %q: must match [A-Za-z_][A-Za-z0-9_]*", k)
+		}
+		if blockedEnvKeys[k] {
+			return fmt.Errorf("env key %q is not permitted", k)
+		}
+	}
+	return nil
+}
+
+// allowedImages is nil when ALLOWED_IMAGES is not configured → deny all submissions.
 var allowedImages map[string]bool
 
 func initAllowedImages(raw string) {
+	if raw == "" {
+		allowedImages = nil // deny-all when not configured
+		return
+	}
 	allowedImages = make(map[string]bool)
-	for _, img := range strings.Split(raw, ",") {
-		if img = strings.TrimSpace(img); img != "" {
+	for _, img := range splitTrim(raw) {
+		if img != "" {
 			allowedImages[img] = true
 		}
 	}
 }
 
-// extractUserID decodes the JWT payload (without signature verification — that
-// is already done by Conductor via Gatekeeper) and returns the sub claim.
+func splitTrim(s string) []string {
+	parts := make([]string, 0)
+	for _, p := range splitComma(s) {
+		if t := trimSpace(p); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	return parts
+}
+
+func splitComma(s string) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == ',' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, s[start:])
+}
+
+func trimSpace(s string) string {
+	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
+		s = s[1:]
+	}
+	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+var conductorForwardKey = os.Getenv("CONDUCTOR_FORWARD_KEY")
+
+// extractUserID reads the X-User-ID header injected by Conductor after Gatekeeper
+// has authenticated and authorised the request. When CONDUCTOR_FORWARD_KEY is set,
+// the accompanying HMAC token is verified to ensure the header was set by Conductor
+// and not injected by another service on the internal network.
 func extractUserID(r *http.Request) (string, bool) {
-	auth := r.Header.Get("Authorization")
-	token, ok := strings.CutPrefix(auth, "Bearer ")
-	if !ok {
+	id := r.Header.Get("X-User-ID")
+	if id == "" {
 		return "", false
 	}
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return "", false
+	if conductorForwardKey != "" {
+		tok := r.Header.Get("X-Conductor-Token")
+		ts := r.Header.Get("X-Conductor-Timestamp")
+		if tok == "" || ts == "" {
+			slog.Warn("forge: missing X-Conductor-Token or X-Conductor-Timestamp")
+			return "", false
+		}
+		tsInt, err := strconv.ParseInt(ts, 10, 64)
+		if err != nil || abs(time.Now().Unix()-tsInt) > 30 {
+			slog.Warn("forge: X-Conductor-Timestamp out of window or invalid")
+			return "", false
+		}
+		mac := hmac.New(sha256.New, []byte(conductorForwardKey))
+		fmt.Fprintf(mac, "conductor:%s:%s", id, ts)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		if !hmac.Equal([]byte(tok), []byte(expected)) {
+			slog.Warn("forge: X-Conductor-Token HMAC mismatch")
+			return "", false
+		}
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", false
+	return id, true
+}
+
+func abs(n int64) int64 {
+	if n < 0 {
+		return -n
 	}
-	var claims struct {
-		Sub string `json:"sub"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil || claims.Sub == "" {
-		return "", false
-	}
-	return claims.Sub, true
+	return n
 }
 
 // ── Submit ────────────────────────────────────────────────────────────────────
@@ -83,8 +169,8 @@ func handleSubmit(pool *WorkerPool) http.HandlerFunc {
 			http.Error(w, "image and command are required", http.StatusBadRequest)
 			return
 		}
-		// len==0 means ALLOWED_IMAGES was not set: all images are permitted.
-		if len(allowedImages) > 0 && !allowedImages[req.Image] {
+		// allowedImages == nil means ALLOWED_IMAGES was not configured: deny all.
+		if allowedImages == nil || !allowedImages[req.Image] {
 			http.Error(w, "image not allowed", http.StatusBadRequest)
 			return
 		}
@@ -96,6 +182,10 @@ func handleSubmit(pool *WorkerPool) http.HandlerFunc {
 		}
 		if req.Env == nil {
 			req.Env = map[string]string{}
+		}
+		if err := validateEnvKeys(req.Env); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 
 		cmdJSON, _ := json.Marshal(req.Command)

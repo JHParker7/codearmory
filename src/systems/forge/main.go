@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"codearmory.local/svckit/registry"
 	"codearmory.local/svckit/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -139,8 +138,6 @@ func main() {
 	workers.Start(ctx, 10)
 	slog.Info("worker pool started", "workers", 10)
 
-	go registry.Register(ctx, serviceConfig, os.Getenv("SERVICE_KEY"))
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /executions", handleSubmit(workers))
 	mux.HandleFunc("GET /executions", handleList)
@@ -152,8 +149,15 @@ func main() {
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
 
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      wrapped,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
 	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, wrapped); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}

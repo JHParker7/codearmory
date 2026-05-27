@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -18,22 +16,14 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// testBearerToken builds a JWT-shaped token with the given userID as the sub claim.
-// Signature verification is Conductor's job; Forge only decodes the payload.
-func testBearerToken(userID string) string {
-	payload, _ := json.Marshal(map[string]string{"sub": userID})
-	encoded := base64.RawURLEncoding.EncodeToString(payload)
-	return "Bearer eyJhbGciOiJFUzI1NiJ9." + encoded + ".fakesig"
-}
-
 // --- extractUserID ---
 
 func TestExtractUserID_Valid(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/executions", nil)
-	r.Header.Set("Authorization", testBearerToken("user-123"))
+	r.Header.Set("X-User-ID", "user-123")
 	id, ok := extractUserID(r)
 	if !ok {
-		t.Fatal("expected ok=true for valid token")
+		t.Fatal("expected ok=true when X-User-ID is set")
 	}
 	if id != "user-123" {
 		t.Fatalf("got %q, want %q", id, "user-123")
@@ -44,45 +34,16 @@ func TestExtractUserID_NoHeader(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/executions", nil)
 	_, ok := extractUserID(r)
 	if ok {
-		t.Fatal("expected ok=false for missing Authorization header")
+		t.Fatal("expected ok=false when X-User-ID is absent")
 	}
 }
 
-func TestExtractUserID_WrongPrefix(t *testing.T) {
+func TestExtractUserID_EmptyHeader(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/executions", nil)
-	r.Header.Set("Authorization", "Token sometoken")
+	r.Header.Set("X-User-ID", "")
 	_, ok := extractUserID(r)
 	if ok {
-		t.Fatal("expected ok=false for non-Bearer prefix")
-	}
-}
-
-func TestExtractUserID_TwoPartToken(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/executions", nil)
-	r.Header.Set("Authorization", "Bearer header.payload")
-	_, ok := extractUserID(r)
-	if ok {
-		t.Fatal("expected ok=false for JWT with only 2 parts")
-	}
-}
-
-func TestExtractUserID_InvalidBase64(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/executions", nil)
-	r.Header.Set("Authorization", "Bearer header.!!!invalid!!!.sig")
-	_, ok := extractUserID(r)
-	if ok {
-		t.Fatal("expected ok=false for invalid base64 payload")
-	}
-}
-
-func TestExtractUserID_NoSubClaim(t *testing.T) {
-	payload, _ := json.Marshal(map[string]string{"iss": "forge"})
-	encoded := base64.RawURLEncoding.EncodeToString(payload)
-	r := httptest.NewRequest(http.MethodPost, "/executions", nil)
-	r.Header.Set("Authorization", "Bearer header."+encoded+".sig")
-	_, ok := extractUserID(r)
-	if ok {
-		t.Fatal("expected ok=false for JWT with no sub claim")
+		t.Fatal("expected ok=false for empty X-User-ID")
 	}
 }
 
@@ -90,8 +51,8 @@ func TestExtractUserID_NoSubClaim(t *testing.T) {
 
 func TestInitAllowedImages_Empty(t *testing.T) {
 	initAllowedImages("")
-	if len(allowedImages) != 0 {
-		t.Fatalf("expected empty allowlist for empty input, got %v", allowedImages)
+	if allowedImages != nil {
+		t.Fatalf("expected nil allowlist (deny-all) for empty input, got %v", allowedImages)
 	}
 }
 
@@ -122,7 +83,8 @@ func TestInitAllowedImages_Multiple(t *testing.T) {
 // --- handleSubmit (pre-DB validation paths only) ---
 
 func TestHandleSubmit_Unauthorized(t *testing.T) {
-	initAllowedImages("")
+	initAllowedImages("alpine:3.19")
+	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19","command":["echo","hi"]}`))
@@ -134,10 +96,11 @@ func TestHandleSubmit_Unauthorized(t *testing.T) {
 }
 
 func TestHandleSubmit_InvalidJSON(t *testing.T) {
-	initAllowedImages("")
+	initAllowedImages("alpine:3.19")
+	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions", bytes.NewBufferString("not json"))
-	r.Header.Set("Authorization", testBearerToken("user-123"))
+	r.Header.Set("X-User-ID", "user-123")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -146,11 +109,12 @@ func TestHandleSubmit_InvalidJSON(t *testing.T) {
 }
 
 func TestHandleSubmit_MissingImage(t *testing.T) {
-	initAllowedImages("")
+	initAllowedImages("alpine:3.19")
+	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"command":["echo","hi"]}`))
-	r.Header.Set("Authorization", testBearerToken("user-123"))
+	r.Header.Set("X-User-ID", "user-123")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -159,11 +123,12 @@ func TestHandleSubmit_MissingImage(t *testing.T) {
 }
 
 func TestHandleSubmit_MissingCommand(t *testing.T) {
-	initAllowedImages("")
+	initAllowedImages("alpine:3.19")
+	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19"}`))
-	r.Header.Set("Authorization", testBearerToken("user-123"))
+	r.Header.Set("X-User-ID", "user-123")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -177,7 +142,7 @@ func TestHandleSubmit_DisallowedImage(t *testing.T) {
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19","command":["echo","hi"]}`))
-	r.Header.Set("Authorization", testBearerToken("user-123"))
+	r.Header.Set("X-User-ID", "user-123")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -264,11 +229,12 @@ func TestIsTimed_ExactlyFiveChars(t *testing.T) {
 // --- handleSubmit (additional pre-DB paths) ---
 
 func TestHandleSubmit_EmptyCommandSlice(t *testing.T) {
-	initAllowedImages("")
+	initAllowedImages("alpine:3.19")
+	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19","command":[]}`))
-	r.Header.Set("Authorization", testBearerToken("user-123"))
+	r.Header.Set("X-User-ID", "user-123")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -277,11 +243,12 @@ func TestHandleSubmit_EmptyCommandSlice(t *testing.T) {
 }
 
 func TestHandleSubmit_BodyTooLarge(t *testing.T) {
-	initAllowedImages("")
+	initAllowedImages("alpine:3.19")
+	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	bigBody := bytes.Repeat([]byte("a"), maxBodyBytes+1)
 	r := httptest.NewRequest(http.MethodPost, "/executions", bytes.NewReader(bigBody))
-	r.Header.Set("Authorization", testBearerToken("user-123"))
+	r.Header.Set("X-User-ID", "user-123")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
