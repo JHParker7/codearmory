@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"codearmory.local/svckit/registry"
@@ -102,9 +105,10 @@ func main() {
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
 
-	otelHandler, shutdown, err := telemetry.Setup(ctx, serviceConfig.Name)
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), serviceConfig.Name)
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
@@ -163,9 +167,20 @@ func main() {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-	slog.Info("listening", "port", port)
-	if err := srv.ListenAndServe(); err != nil {
-		slog.Error("server error", "error", err)
-		os.Exit(1)
+	go func() {
+		slog.Info("listening", "port", port)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "error", err)
 	}
 }
