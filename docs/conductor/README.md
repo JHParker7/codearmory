@@ -10,29 +10,29 @@ Client
   ▼
 Conductor :8082
   │
-  ├── POST /signup  ──────────────────────────────► Gatekeeper :8080
-  ├── POST /login   ──────────────────────────────► Gatekeeper :8080
-  │
-  └── everything else
+  └── all requests
         │
         ▼
-      userMiddleware
-        │  1. Require Authorization: Bearer <token>
-        │  2. Decode JWT payload → extract sub (user ID)
-        │  3. GET /users/{id} on Gatekeeper with the token
-        │     • 200 → user exists and token is valid → proceed
-        │     • anything else → 401 Unauthorized
+      lookupEndpoint(method, path)
+        │  Match against registered endpoint manifests (from Registry cache)
+        │  → 404 if no match
         │
         ▼
-      permissionMiddleware
-        │  1. Match the request path against registered endpoint manifests
-        │  2. POST /check_permissions on Gatekeeper
-        │     • authorized → forward to backend
-        │     • denied → 403 Forbidden
-        │     • public endpoint → skip permission check
+      auth check (skipped for public endpoints)
+        │  POST /check_permissions on Gatekeeper with the caller's Bearer token
+        │     • 200 + authorized:true → proceed, extract user_id from response
+        │     • 401 → 401 Unauthorized
+        │     • anything else → 403 Forbidden
         │
         ▼
-      reverse proxy → backend service (from registry)
+      header rewrite
+        │  Strip: Authorization (unless forward_auth=true), X-Service-Key,
+        │         X-User-ID, X-Forwarded-Host, X-Forwarded-Proto, X-Real-IP
+        │  Inject: X-User-ID (authenticated), X-Forwarded-For (client IP)
+        │  If CONDUCTOR_FORWARD_KEY set: inject X-Conductor-Token HMAC + X-Conductor-Timestamp
+        │
+        ▼
+      reverse proxy → backend service
 ```
 
 Conductor polls the Registry every 30 seconds to refresh its in-memory service and endpoint cache. Auth headers (`Authorization`, `X-Service-Key`) are stripped before forwarding to backend services. For the Forge execution service, Conductor signs the `X-User-ID` header with an HMAC-SHA256 token so Forge can verify the request came from Conductor.
@@ -50,7 +50,7 @@ Conductor polls the Registry every 30 seconds to refresh its in-memory service a
 | `GATEKEEPER_URL` | `http://localhost:8080` | Base URL of the Gatekeeper service |
 | `REGISTRY_URL` | `http://localhost:8084` | Base URL of the Registry service |
 | `REGISTRY_READ_KEY` | — | **Required.** Shared secret for authenticating reads from the Registry. |
-| `FORGE_INTERNAL_KEY` | — | Shared secret used to sign `X-User-ID` headers forwarded to the Forge service. Should match the value configured on Forge. |
+| `CONDUCTOR_FORWARD_KEY` | — | Shared secret used to sign `X-User-ID` headers forwarded to backend services. When set, Conductor injects `X-Conductor-Token` (HMAC-SHA256) and `X-Conductor-Timestamp` so backends can verify the header was injected by Conductor. Should match the value configured on each backend (e.g. Forge). |
 | `PORT` | `8082` | Port the server listens on |
 | `TLS_CERT_FILE` | — | Path to PEM-encoded TLS certificate. Required with `TLS_KEY_FILE` to enable HTTPS. |
 | `TLS_KEY_FILE` | — | Path to PEM-encoded TLS private key. Required with `TLS_CERT_FILE` to enable HTTPS. |
@@ -105,7 +105,7 @@ Each registered endpoint declares:
 ## Security
 
 - **Auth header stripping** — `Authorization` and `X-Service-Key` headers are removed from requests before forwarding to backend services. Backends must not trust these headers from conductor.
-- **Forge request signing** — Requests routed to Forge carry an `X-User-ID` header signed with HMAC-SHA256 using `FORGE_INTERNAL_KEY`. Forge validates this signature to confirm the request was forwarded by Conductor.
+- **Forward signing** — When `CONDUCTOR_FORWARD_KEY` is set, every forwarded request carries `X-Conductor-Token` (HMAC-SHA256 of `user_id:timestamp`) and `X-Conductor-Timestamp`. Backend services that set `forward_auth=false` can verify these headers to confirm `X-User-ID` was injected by Conductor and has not been tampered with. The token window is 30 seconds.
 - **Permission enforcement** — Every non-public endpoint is permission-checked against Gatekeeper before the request reaches the backend. The action and resource are taken from the registered endpoint manifest, not from the request itself.
 
 ## Metrics
@@ -113,4 +113,4 @@ Each registered endpoint declares:
 | Metric | Description |
 |---|---|
 | `conductor.requests.allowed.total` | Requests that passed the user-existence check |
-| `conductor.requests.rejected.total` | Requests rejected, labelled by `reason`: `no_token`, `malformed_token`, `user_not_found` |
+| `conductor.requests.rejected.total` | Requests rejected, labelled by `reason`: `no_token`, `unauthorized`, `forbidden`, `gatekeeper_error` |
