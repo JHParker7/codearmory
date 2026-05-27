@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"codearmory.local/svckit/registry"
 	"codearmory.local/svckit/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -133,6 +134,12 @@ func main() {
 	slog.Info("runtime initialized", "type", envOrDefault("RUNTIME", "kubernetes"))
 
 	initAllowedImages(os.Getenv("ALLOWED_IMAGES"))
+
+	// Rotate the gatekeeper service key every 25 minutes. GATEKEEPER_SERVICE_KEY
+	// must match the key in GATEKEEPER_SERVICES on gatekeeper. No-op if unset.
+	gatekeeperURL := envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	registry.StartKeyRotation(ctx, gatekeeperURL, serviceConfig.Name,
+		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	workers := newWorkerPool(db, rt)
 	workers.Start(ctx, 10)
