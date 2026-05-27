@@ -13,9 +13,11 @@ Services:
 
 | Service | Port | Description |
 |---------|------|-------------|
-| gatekeeper | 8080 | Application |
-| blueprints | 8081 | Terraform state backend |
+| gatekeeper | 8080 | Auth, RBAC, user management |
+| blueprints | 8081 | OpenTofu/Terraform state backend |
 | conductor | 8082 | API gateway |
+| forge | 8083 | Sandboxed execution service |
+| registry | 8084 | Service discovery and endpoint registry |
 | postgres | 5432 | Primary datastore |
 | redis | 6379 | Permission-check and user cache |
 
@@ -130,5 +132,8 @@ The `replicas` field is omitted from the Deployment intentionally — setting it
 | `REDIS_URL` | No | Redis connection string (`redis://host:6379/0`). Omit to disable caching. |
 | `TLS_CERT_FILE` | No | Path to the PEM-encoded TLS certificate. Required together with `TLS_KEY_FILE` to enable HTTPS. |
 | `TLS_KEY_FILE` | No | Path to the PEM-encoded TLS private key. Required together with `TLS_CERT_FILE` to enable HTTPS. |
+| `TLS_CLIENT_AUTH` | No | Set to `require` to enable mTLS client certificate verification. |
+| `PERMITTED_SERVICES` | No | Comma-separated service name allowlist for `Permissions` records. Defaults to `gatekeeper,blueprints,forge`. |
+| `TRUSTED_PROXY_CIDRS` | No | Comma-separated CIDRs of trusted reverse proxies for real-IP extraction. |
 | `OTEL_SERVICE_NAME` | No | Service name reported in traces and metrics (default: `gatekeeper`) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | OTel Collector HTTP endpoint. Omit to disable telemetry. |

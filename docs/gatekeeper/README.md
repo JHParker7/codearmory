@@ -59,6 +59,9 @@ API_URL=http://localhost:8080 pytest tests/gatekeeper/ -v
 | `REDIS_URL` | No | Redis connection string (`redis://host:6379/0`). Omit to disable caching. |
 | `TLS_CERT_FILE` | No | Path to the PEM-encoded TLS certificate. Required together with `TLS_KEY_FILE` to enable HTTPS. |
 | `TLS_KEY_FILE` | No | Path to the PEM-encoded TLS private key. Required together with `TLS_CERT_FILE` to enable HTTPS. |
+| `TLS_CLIENT_AUTH` | No | Set to `require` to enable mTLS. When set, clients must present a certificate; service accounts can bind to specific fingerprints via `ClientCertFingerprints`. |
+| `PERMITTED_SERVICES` | No | Comma-separated allowlist of service names that may appear in `Permissions` records. Defaults to `gatekeeper,blueprints,forge`. |
+| `TRUSTED_PROXY_CIDRS` | No | Comma-separated CIDRs of trusted reverse proxies. When set, `X-Forwarded-For` is used to extract the real client IP for service-auth IP allowlist checks. |
 | `PORT` | No | Port the server listens on (default: `8080`). |
 | `OTEL_SERVICE_NAME` | No | Service name reported in traces and metrics (default: `gatekeeper`) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | OTel Collector HTTP endpoint. Omit to disable telemetry. |

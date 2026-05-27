@@ -30,7 +30,7 @@ Records are assigned to a `Role` via its `permissions_ids` array. A `Role` is as
 | Create (collection) | `gatekeeper/{type}s` — e.g. `gatekeeper/orgs` |
 | Read / Update / Delete (instance) | `gatekeeper/{type}s/{id}` — e.g. `gatekeeper/orgs/abc-123` |
 
-The `service` field is always `"gatekeeper"` for built-in endpoints. External services can use any string.
+The `service` field is always `"gatekeeper"` for built-in endpoints. External services may use any string that appears in `PERMITTED_SERVICES`.
 
 ## Matching Rules
 
@@ -56,13 +56,32 @@ A requested resource is allowed if any entry in `permission.resources`:
 
 On signup every user automatically receives a `Permissions` record and a `Role` granting:
 
-| Action | Resource |
-|--------|---------|
-| `getUser` | `gatekeeper/users/{user_id}` |
-| `updateUser` | `gatekeeper/users/{user_id}` |
-| `deleteUser` | `gatekeeper/users/{user_id}` |
+| Action | Service | Resource |
+|--------|---------|---------|
+| `getUser`, `updateUser`, `deleteUser` | `gatekeeper` | `gatekeeper/users/{user_id}` |
+| `createOrg` | `gatekeeper` | `gatekeeper/orgs` |
+| `createTeam` | `gatekeeper` | `gatekeeper/teams` |
+| `getState`, `updateState`, `deleteState`, `lockState`, `unlockState` | `blueprints` | `blueprints/states/{user_id}/*` |
 
 All other permissions must be explicitly granted by a user who already holds them.
+
+## Permitted Services
+
+The `service` field in a `Permissions` record must be listed in the `PERMITTED_SERVICES` environment variable (comma-separated). The default allowlist is `gatekeeper,blueprints,forge`. Attempts to create or update a permission record with any other service name are rejected with `400 Bad Request`.
+
+To register a new service:
+
+```bash
+PERMITTED_SERVICES=gatekeeper,blueprints,forge,my-service
+```
+
+## Org-Scoped Permissions
+
+`Permissions` records may carry an `org_id` to scope them to a specific tenant. Cross-tenant injection is prevented at role-mutation time:
+
+- A `Permissions` record with `org_id = A` cannot be added to a role by a caller whose `org_id` is `B`.
+- A caller with no `org_id` cannot use org-scoped permissions at all — only nil-org (personal/system) permissions are accepted.
+- A role's `org_id` can only be set to a value that matches the caller's own `org_id`; it cannot be cleared or reassigned to a foreign org.
 
 ## Owner Permissions
 
