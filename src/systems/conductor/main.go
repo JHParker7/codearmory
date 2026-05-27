@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,10 +16,12 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"codearmory.local/svckit/telemetry"
@@ -411,6 +414,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
 	logLevel := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
 		logLevel = slog.LevelDebug
@@ -429,7 +435,7 @@ func main() {
 
 	// Warm the service cache, retrying until the registry is reachable.
 	for {
-		refreshServiceCache(context.Background())
+		refreshServiceCache(ctx)
 		servicesMu.RLock()
 		populated := len(servicesMap) > 0
 		servicesMu.RUnlock()
@@ -437,15 +443,24 @@ func main() {
 			break
 		}
 		slog.Warn("registry not reachable or empty, retrying in 5s")
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
 	}
 
 	// Refresh the service registry every 30 seconds.
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			refreshServiceCache(context.Background())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				refreshServiceCache(ctx)
+			}
 		}
 	}()
 
@@ -467,17 +482,28 @@ func main() {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-	if certFile != "" && keyFile != "" {
-		slog.Info("listening with TLS", "port", port)
-		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
+
+	go func() {
+		var err error
+		if certFile != "" && keyFile != "" {
+			slog.Info("listening with TLS", "port", port)
+			err = srv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			slog.Info("listening", "port", port)
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
-	} else {
-		slog.Info("listening", "port", port)
-		if err := srv.ListenAndServe(); err != nil {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
-		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "error", err)
 	}
 }
