@@ -3,7 +3,7 @@ module conductor
 go 1.25.6
 
 require (
-	codearmory.local/svckit v0.0.0
+	github.com/code-armory-app/codearmory/src/systems/svckit v0.0.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0
@@ -38,4 +38,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-replace codearmory.local/svckit v0.0.0 => ../svckit

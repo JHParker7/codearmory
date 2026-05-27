@@ -9,4 +9,3 @@ use (
 	./svckit
 )
 
-replace codearmory.local/svckit v0.0.0 => ./svckit

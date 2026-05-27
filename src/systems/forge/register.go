@@ -3,7 +3,7 @@ package main
 import (
 	_ "embed"
 
-	"codearmory.local/svckit/registry"
+	"github.com/code-armory-app/codearmory/src/systems/svckit/registry"
 )
 
 //go:embed service.json

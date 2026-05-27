@@ -1,4 +1,4 @@
-module codearmory.local/svckit
+module github.com/code-armory-app/codearmory/src/systems/svckit
 
 go 1.25.0
 

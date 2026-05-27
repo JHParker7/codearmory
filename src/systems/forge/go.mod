@@ -3,7 +3,7 @@ module forge
 go 1.25.0
 
 require (
-	codearmory.local/svckit v0.0.0
+	github.com/code-armory-app/codearmory/src/systems/svckit v0.0.0
 	github.com/docker/docker v27.3.1+incompatible
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
@@ -91,4 +91,3 @@ require (
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
 
-replace codearmory.local/svckit v0.0.0 => ../svckit

@@ -3,7 +3,7 @@ module gatekeeper
 go 1.25.6
 
 require (
-	codearmory.local/svckit v0.0.0
+	github.com/code-armory-app/codearmory/src/systems/svckit v0.0.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/v9 v9.19.0
@@ -53,4 +53,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-replace codearmory.local/svckit v0.0.0 => ../svckit

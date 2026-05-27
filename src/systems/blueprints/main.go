@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"codearmory.local/svckit/registry"
-	"codearmory.local/svckit/telemetry"
+	"github.com/code-armory-app/codearmory/src/systems/svckit/registry"
+	"github.com/code-armory-app/codearmory/src/systems/svckit/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"

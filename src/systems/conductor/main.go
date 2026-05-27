@@ -24,7 +24,7 @@ import (
 	"syscall"
 	"time"
 
-	"codearmory.local/svckit/telemetry"
+	"github.com/code-armory-app/codearmory/src/systems/svckit/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
