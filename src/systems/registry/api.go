@@ -55,6 +55,9 @@ type serviceWithEndpoints struct {
 	Endpoints []ServiceEndpoint `json:"endpoints"`
 }
 
+// resolveHost is the DNS lookup used by validateServiceURL. Tests can replace it.
+var resolveHost = net.LookupHost
+
 // checkKey does a constant-time comparison against a configured API key so the
 // check is not vulnerable to timing-based enumeration.
 func checkKey(r *http.Request, expected string) bool {
@@ -125,7 +128,7 @@ func validateServiceURL(rawURL string) error {
 
 	// Hostname — resolve and validate every returned address to prevent DNS-based
 	// SSRF (e.g. a public domain resolving to 169.254.169.254).
-	addrs, err := net.LookupHost(host)
+	addrs, err := resolveHost(host)
 	if err != nil {
 		return fmt.Errorf("cannot resolve hostname %q: %w", host, err)
 	}
