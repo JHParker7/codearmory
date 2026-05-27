@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"codearmory.local/svckit/telemetry"
@@ -28,24 +31,30 @@ type ipBucket struct {
 }
 
 // rateLimitMiddleware rejects requests from a single IP that exceed maxAttempts
-// within window. The limiterMap is shared per-endpoint.
-func rateLimitMiddleware(limiterMap *sync.Map, maxAttempts int, window time.Duration, next http.HandlerFunc) http.HandlerFunc {
+// within window. Uses Redis when available (shared across pods); falls back to
+// the in-memory limiterMap when Redis is not configured.
+func rateLimitMiddleware(endpoint string, limiterMap *sync.Map, maxAttempts int, window time.Duration, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
 			ip = r.RemoteAddr
 		}
-		val, _ := limiterMap.LoadOrStore(ip, &ipBucket{})
-		bucket := val.(*ipBucket)
-		bucket.mu.Lock()
-		now := time.Now()
-		if now.Sub(bucket.windowAt) >= window {
-			bucket.count = 0
-			bucket.windowAt = now
+		var allowed bool
+		if redisClient != nil {
+			allowed = redisRateLimit(r.Context(), endpoint, ip, maxAttempts, window)
+		} else {
+			val, _ := limiterMap.LoadOrStore(ip, &ipBucket{})
+			b := val.(*ipBucket)
+			b.mu.Lock()
+			now := time.Now()
+			if now.Sub(b.windowAt) >= window {
+				b.count = 0
+				b.windowAt = now
+			}
+			b.count++
+			allowed = b.count <= maxAttempts
+			b.mu.Unlock()
 		}
-		bucket.count++
-		allowed := bucket.count <= maxAttempts
-		bucket.mu.Unlock()
 		if !allowed {
 			slog.Warn("rate limit exceeded", "ip", ip, "path", r.URL.Path)
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
@@ -151,6 +160,9 @@ func NewLogger(handlerToWrap http.Handler) *Logger {
 }
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
 	db := connect()
 	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{})
 	applyForeignKeys(db)
@@ -159,8 +171,8 @@ func main() {
 	mux := http.NewServeMux()
 
 	// 10 signup attempts per IP per 10 minutes; 5 login attempts per IP per minute.
-	mux.HandleFunc("POST /signup", rateLimitMiddleware(&signupLimiter, 10, 10*time.Minute, handleSignup))
-	mux.HandleFunc("POST /login", rateLimitMiddleware(&loginLimiter, 5, time.Minute, handleLogin))
+	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, 10, 10*time.Minute, handleSignup))
+	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, 5, time.Minute, handleLogin))
 	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
 
 	mw := func(h http.HandlerFunc) http.Handler { return authMiddleware(http.HandlerFunc(h)) }
@@ -245,6 +257,15 @@ func main() {
 
 	certFile := os.Getenv("TLS_CERT_FILE")
 	keyFile := os.Getenv("TLS_KEY_FILE")
+
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      wrappedMux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
 	if certFile != "" && keyFile != "" {
 		tlsCfg := &tls.Config{}
 		// TLS_CLIENT_AUTH controls whether client certificates are requested.
@@ -274,32 +295,31 @@ func main() {
 		case "request":
 			tlsCfg.ClientAuth = tls.RequestClientCert
 		}
-		srv := &http.Server{
-			Addr:         ":" + port,
-			Handler:      wrappedMux,
-			TLSConfig:    tlsCfg,
-			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 15 * time.Second,
-			IdleTimeout:  120 * time.Second,
+		srv.TLSConfig = tlsCfg
+	}
+
+	go func() {
+		var err error
+		if certFile != "" && keyFile != "" {
+			slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
+			err = srv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			slog.Info("listening", "port", port)
+			err = srv.ListenAndServe()
 		}
-		slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
-		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
-	} else {
-		srv := &http.Server{
-			Addr:         ":" + port,
-			Handler:      wrappedMux,
-			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 15 * time.Second,
-			IdleTimeout:  120 * time.Second,
-		}
-		slog.Info("listening", "port", port)
-		if err := srv.ListenAndServe(); err != nil {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
-		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "error", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -71,6 +72,32 @@ func cacheDel(ctx context.Context, keys ...string) {
 	if err := redisClient.Del(ctx, keys...).Err(); err != nil {
 		slog.Warn("cache: del failed", "keys", keys, "error", err)
 	}
+}
+
+// rlScript atomically increments a rate-limit counter and sets its TTL on
+// first use, so the window expires naturally without a separate cleanup pass.
+var rlScript = redis.NewScript(`
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+`)
+
+// redisRateLimit checks whether ip has exceeded maxAttempts within the current
+// fixed window for endpoint. Returns true (allowed) when Redis is unavailable.
+func redisRateLimit(ctx context.Context, endpoint, ip string, maxAttempts int, window time.Duration) bool {
+	if redisClient == nil {
+		return true
+	}
+	secs := int64(window.Seconds())
+	bucket := time.Now().Unix() / secs
+	key := fmt.Sprintf("gk:rl:%s:%s:%d", endpoint, ip, bucket)
+	n, err := rlScript.Run(ctx, redisClient, []string{key}, secs*2).Int64()
+	if err != nil {
+		return true
+	}
+	return n <= int64(maxAttempts)
 }
 
 // cacheTrackUserSession records a session ID under the user's session set so
