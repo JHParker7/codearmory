@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"codearmory.local/svckit/registry"
 	"codearmory.local/svckit/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -683,6 +684,12 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("database pool initialized")
+
+	// Rotate the gatekeeper service key every 25 minutes so credentials are always
+	// short-lived. GATEKEEPER_SERVICE_KEY must match the key in GATEKEEPER_SERVICES
+	// on gatekeeper. The loop is a no-op if the variable is unset.
+	registry.StartKeyRotation(ctx, gatekeeperURL, serviceConfig.Name,
+		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	mux := http.NewServeMux()
 
