@@ -1,4 +1,6 @@
 FROM public.ecr.aws/docker/library/golang:1.26.0-alpine3.23 AS builder
+RUN apk add --no-cache git
+ENV GONOSUMDB=github.com/code-armory-app/codearmory
 WORKDIR /src/forge
 COPY go.mod go.sum ./
 RUN go mod download

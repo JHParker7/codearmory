@@ -6,6 +6,6 @@ use (
 	./forge
 	./gatekeeper
 	./registry
-	./svckit
+	../../../codearmory_sdk
 )
 
