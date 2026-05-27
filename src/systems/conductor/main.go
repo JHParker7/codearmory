@@ -3,18 +3,28 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
+	"codearmory.local/svckit/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -24,9 +34,48 @@ import (
 )
 
 var (
-	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
-	blueprintsURL = envOrDefault("BLUEPRINTS_URL", "http://localhost:8081")
-	httpClient    = &http.Client{Timeout: 10 * time.Second}
+	gatekeeperURL       = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8084")
+	registryKey         = os.Getenv("REGISTRY_READ_KEY")
+	conductorForwardKey = os.Getenv("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
+	httpClient          = &http.Client{Timeout: 10 * time.Second}
+)
+
+// signForwardedUserID generates a short-lived HMAC-SHA256 token binding userID
+// to a 30-second timestamp window. Any backend service with forward_auth=false
+// can verify this token to confirm X-User-ID was injected by conductor.
+func signForwardedUserID(userID string) (token, timestamp string) {
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(conductorForwardKey))
+	fmt.Fprintf(mac, "conductor:%s:%s", userID, ts)
+	return hex.EncodeToString(mac.Sum(nil)), ts
+}
+
+// ── Service registry cache ────────────────────────────────────────────────────
+
+// endpointEntry is a compiled representation of one endpoint declared by a
+// backend service. pattern matches the full request path as registered.
+type endpointEntry struct {
+	method      string
+	pattern     *regexp.Regexp
+	action      string
+	resource    string
+	public      bool   // skip user auth and permission check
+	serviceName string // which service owns this endpoint
+}
+
+// serviceState holds the proxy and per-service routing config for one service.
+type serviceState struct {
+	url         string
+	proxy       *httputil.ReverseProxy
+	forwardAuth bool // whether to forward the caller's Authorization header
+}
+
+var (
+	servicesMu    sync.RWMutex
+	servicesMap   = map[string]serviceState{}
+	endpointsMu   sync.RWMutex
+	endpointsList []endpointEntry
 )
 
 func envOrDefault(key, def string) string {
@@ -34,85 +83,6 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
-}
-
-// ── Input validation ──────────────────────────────────────────────────────────
-
-const bodyMax = 64 * 1024 // 64 KB cap on public-route request bodies
-
-var (
-	// emailRE is a loose format check; full RFC 5322 parsing is left to Gatekeeper.
-	emailRE = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
-	// slugRE allows alphanumeric characters, hyphens, and underscores (1–64 chars).
-	// Used for both username body fields and path segments (username, org, team, workspace).
-	slugRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
-)
-
-// readAndRestore reads the entire request body (up to bodyMax bytes), writes an
-// error response and returns (nil, false) if the limit is exceeded or a read
-// error occurs, and otherwise resets r.Body so the proxy can forward it unchanged.
-func readAndRestore(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, bodyMax)
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-		return nil, false
-	}
-	r.Body = io.NopCloser(bytes.NewReader(data))
-	return data, true
-}
-
-func validateSignupBody(w http.ResponseWriter, r *http.Request) bool {
-	data, ok := readAndRestore(w, r)
-	if !ok {
-		return false
-	}
-	var req struct {
-		Email    string `json:"email"`
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.Unmarshal(data, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return false
-	}
-	if req.Email == "" || req.Username == "" || req.Password == "" {
-		http.Error(w, "email, username, and password are required", http.StatusBadRequest)
-		return false
-	}
-	if !emailRE.MatchString(req.Email) {
-		http.Error(w, "invalid email format", http.StatusBadRequest)
-		return false
-	}
-	if !slugRE.MatchString(req.Username) {
-		http.Error(w, "username must be 1-64 alphanumeric, hyphen, or underscore characters", http.StatusBadRequest)
-		return false
-	}
-	if len(req.Password) < 8 {
-		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
-		return false
-	}
-	return true
-}
-
-func validateLoginBody(w http.ResponseWriter, r *http.Request) bool {
-	data, ok := readAndRestore(w, r)
-	if !ok {
-		return false
-	}
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-	if err := json.Unmarshal(data, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return false
-	}
-	if req.Email == "" || req.Password == "" {
-		http.Error(w, "email and password are required", http.StatusBadRequest)
-		return false
-	}
-	return true
 }
 
 // ── Logger middleware ─────────────────────────────────────────────────────────
@@ -152,166 +122,301 @@ func newProxy(target string) *httputil.ReverseProxy {
 		slog.Error("invalid proxy target", "url", target, "error", err)
 		os.Exit(1)
 	}
-	return httputil.NewSingleHostReverseProxy(u)
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	base := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		base(req)
+		// X-Service-Key is for direct service-to-service calls only.
+		// Strip it so clients cannot relay a service identity through conductor.
+		req.Header.Del("X-Service-Key")
+	}
+	return proxy
 }
 
-// proxyWith forwards r to p after running all checks in order. Each check is
-// responsible for writing its own error response; if any returns false,
-// forwarding is aborted.
-func proxyWith(p *httputil.ReverseProxy, checks ...func(http.ResponseWriter, *http.Request) bool) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for _, check := range checks {
-			if !check(w, r) {
-				return
-			}
-		}
-		p.ServeHTTP(w, r)
-	})
-}
+// ── Auth ──────────────────────────────────────────────────────────────────────
 
-// validUUID returns a check that path value `name` is a well-formed UUID.
-func validUUID(name string) func(http.ResponseWriter, *http.Request) bool {
-	return func(w http.ResponseWriter, r *http.Request) bool {
-		if uuidRE.MatchString(r.PathValue(name)) {
-			return true
-		}
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return false
-	}
-}
+type authOutcome int
 
-// validSlug returns a check that path value `name` matches the safe slug pattern.
-func validSlug(name string) func(http.ResponseWriter, *http.Request) bool {
-	return func(w http.ResponseWriter, r *http.Request) bool {
-		if slugRE.MatchString(r.PathValue(name)) {
-			return true
-		}
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return false
-	}
-}
+const (
+	authAllowed authOutcome = iota
+	authUnauthorized
+	authForbidden
+)
 
-// validJSON reads and restores the body for POST/PUT/PATCH requests, rejecting
-// it with 400 if it is not well-formed JSON. Empty bodies are allowed through.
-func validJSON(w http.ResponseWriter, r *http.Request) bool {
-	switch r.Method {
-	case http.MethodPost, http.MethodPut, http.MethodPatch:
-	default:
-		return true
-	}
-	data, ok := readAndRestore(w, r)
-	if !ok {
-		return false
-	}
-	if len(data) > 0 && !json.Valid(data) {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return false
-	}
-	return true
-}
-
-// ── User existence middleware ─────────────────────────────────────────────────
-
-// uuidRE matches the UUID format Gatekeeper uses for user IDs.
-var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-
-// getUserID decodes the JWT payload (without signature verification) and returns
-// the sub claim, which Gatekeeper sets to the user's ID.
-func getUserID(token string) (string, bool) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return "", false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", false
-	}
-	var claims struct {
-		Sub string `json:"sub"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil || claims.Sub == "" {
-		return "", false
-	}
-	if !uuidRE.MatchString(claims.Sub) {
-		return "", false
-	}
-	return claims.Sub, true
-}
-
-// checkUserExists calls GET /users/{id} on Gatekeeper with the caller's bearer
-// token. Returns true only when Gatekeeper responds 200, which means the token
-// is valid and the user record is active.
-func checkUserExists(ctx context.Context, token, userID string) bool {
-	ctx, span := otel.Tracer("conductor").Start(ctx, "checkUserExists")
+// checkAuth forwards the caller's Bearer token to Gatekeeper's POST /check_permissions
+// endpoint and interprets the response. Returns the outcome and, on success, the
+// authenticated user ID extracted from Gatekeeper's response body.
+func checkAuth(r *http.Request, service, action, resource string) (authOutcome, string) {
+	ctx, span := otel.Tracer("conductor").Start(r.Context(), "checkAuth")
 	defer span.End()
-	span.SetAttributes(attribute.String("user.id", userID))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/users/"+url.PathEscape(userID), nil)
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		span.SetStatus(codes.Error, "no bearer token")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "no_token")))
+		return authUnauthorized, ""
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"service":  service,
+		"action":   action,
+		"resource": resource,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return false
+		return authUnauthorized, ""
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", auth)
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return false
+		return authUnauthorized, ""
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 
-	exists := resp.StatusCode == http.StatusOK
-	span.SetAttributes(attribute.Bool("user.exists", exists))
-	if exists {
-		span.SetStatus(codes.Ok, "")
-	} else {
-		span.SetStatus(codes.Error, "user not found or token invalid")
+	if resp.StatusCode == http.StatusUnauthorized {
+		span.SetStatus(codes.Error, "unauthorized")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "unauthorized")))
+		return authUnauthorized, ""
 	}
-	return exists
+	if resp.StatusCode >= 500 {
+		io.Copy(io.Discard, resp.Body)
+		span.SetStatus(codes.Error, "gatekeeper error")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "gatekeeper_error")))
+		return authForbidden, ""
+	}
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		span.SetStatus(codes.Error, "permission denied")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "forbidden")))
+		return authForbidden, ""
+	}
+
+	var result struct {
+		Authorized bool   `json:"authorized"`
+		UserID     string `json:"user_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return authForbidden, ""
+	}
+	if !result.Authorized {
+		span.SetStatus(codes.Error, "not authorized")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "forbidden")))
+		return authForbidden, ""
+	}
+	span.SetStatus(codes.Ok, "")
+	meterAllowed.Add(ctx, 1)
+	return authAllowed, result.UserID
 }
 
-func userMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, span := otel.Tracer("conductor").Start(r.Context(), "userMiddleware")
-		defer span.End()
-		r = r.WithContext(ctx)
+// ── Service registry ──────────────────────────────────────────────────────────
 
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			span.SetStatus(codes.Error, "no bearer token")
-			meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "no_token")))
+// refreshServiceCache fetches GET /services from the registry and rebuilds the
+// in-memory proxy map and endpoint list.
+func refreshServiceCache(ctx context.Context) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, registryURL+"/services", nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+registryKey)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		slog.Warn("service registry refresh failed", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		slog.Warn("service registry refresh: unexpected status", "status", resp.StatusCode)
+		return
+	}
+
+	var svcs []struct {
+		Name        string `json:"name"`
+		URL         string `json:"url"`
+		ForwardAuth bool   `json:"forward_auth"`
+		Endpoints   []struct {
+			Method   string `json:"method"`
+			Path     string `json:"path"`
+			Action   string `json:"action"`
+			Resource string `json:"resource"`
+			Public   bool   `json:"public"`
+		} `json:"endpoints"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&svcs); err != nil {
+		return
+	}
+
+	servicesMu.RLock()
+	oldServices := make(map[string]serviceState, len(servicesMap))
+	for k, v := range servicesMap {
+		oldServices[k] = v
+	}
+	servicesMu.RUnlock()
+
+	newServices := make(map[string]serviceState, len(svcs))
+	var newEndpoints []endpointEntry
+
+	for _, s := range svcs {
+		if _, err := url.Parse(s.URL); err != nil {
+			slog.Warn("invalid service URL", "name", s.Name, "url", s.URL)
+			continue
+		}
+
+		var proxy *httputil.ReverseProxy
+		if old, ok := oldServices[s.Name]; ok && old.url == s.URL {
+			proxy = old.proxy
+		} else {
+			proxy = newProxy(s.URL)
+			slog.Info("service cache updated", "name", s.Name)
+		}
+
+		newServices[s.Name] = serviceState{
+			url:         s.URL,
+			proxy:       proxy,
+			forwardAuth: s.ForwardAuth,
+		}
+
+		for _, ep := range s.Endpoints {
+			newEndpoints = append(newEndpoints, endpointEntry{
+				method:      ep.Method,
+				pattern:     compilePathPattern(ep.Path),
+				action:      ep.Action,
+				resource:    ep.Resource,
+				public:      ep.Public,
+				serviceName: s.Name,
+			})
+		}
+	}
+
+	for name := range oldServices {
+		if _, ok := newServices[name]; !ok {
+			slog.Info("service removed from cache", "name", name)
+		}
+	}
+
+	servicesMu.Lock()
+	servicesMap = newServices
+	servicesMu.Unlock()
+
+	endpointsMu.Lock()
+	endpointsList = newEndpoints
+	endpointsMu.Unlock()
+}
+
+// compilePathPattern converts a path template such as /users/{id} into a
+// regexp that matches concrete paths. Each {param} segment is replaced with
+// [^/]+ so only a single path segment is consumed per wildcard.
+func compilePathPattern(pattern string) *regexp.Regexp {
+	parts := strings.Split(pattern, "/")
+	for i, p := range parts {
+		if strings.HasPrefix(p, "{") && strings.HasSuffix(p, "}") {
+			parts[i] = `[^/]+`
+		} else {
+			parts[i] = regexp.QuoteMeta(p)
+		}
+	}
+	return regexp.MustCompile(`^` + strings.Join(parts, `/`) + `$`)
+}
+
+// lookupEndpoint finds the registered endpoint for method+path across all
+// services. Returns the entry and true on match, zero value and false otherwise.
+func lookupEndpoint(method, path string) (endpointEntry, bool) {
+	endpointsMu.RLock()
+	defer endpointsMu.RUnlock()
+	for _, e := range endpointsList {
+		if e.method == method && e.pattern.MatchString(path) {
+			return e, true
+		}
+	}
+	return endpointEntry{}, false
+}
+
+// handleServiceProxy is the universal handler. It rejects any request whose
+// method+path is not registered in the service registry, enforces user auth on
+// non-public endpoints, checks RBAC permissions, then forwards to the backend.
+func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
+	entry, ok := lookupEndpoint(r.Method, r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	servicesMu.RLock()
+	svc, ok := servicesMap[entry.serviceName]
+	servicesMu.RUnlock()
+	if !ok {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var userID string
+	if !entry.public {
+		var outcome authOutcome
+		outcome, userID = checkAuth(r, entry.serviceName, entry.action, entry.resource)
+		switch outcome {
+		case authUnauthorized:
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
-		}
-		token := strings.TrimPrefix(auth, "Bearer ")
-
-		userID, ok := getUserID(token)
-		if !ok {
-			span.SetStatus(codes.Error, "malformed token")
-			meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "malformed_token")))
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		case authForbidden:
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+	}
 
-		if !checkUserExists(ctx, token, userID) {
-			span.SetStatus(codes.Error, "user not found")
-			meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "user_not_found")))
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+	r2 := r.Clone(r.Context())
+	// Strip headers that could be used to spoof identity or routing metadata.
+	r2.Header.Del("X-User-ID")
+	r2.Header.Del("X-Forwarded-Host")
+	r2.Header.Del("X-Forwarded-Proto")
+	r2.Header.Del("X-Real-IP")
+
+	// Inject the authenticated user ID so backends don't need to decode the JWT.
+	// When CONDUCTOR_FORWARD_KEY is set, also inject an HMAC token so any
+	// forward_auth=false backend can verify X-User-ID was set by conductor.
+	if userID != "" {
+		r2.Header.Set("X-User-ID", userID)
+		if !svc.forwardAuth && conductorForwardKey != "" {
+			tok, ts := signForwardedUserID(userID)
+			r2.Header.Set("X-Conductor-Token", tok)
+			r2.Header.Set("X-Conductor-Timestamp", ts)
 		}
+	}
 
-		span.SetStatus(codes.Ok, "")
-		meterAllowed.Add(ctx, 1)
-		next.ServeHTTP(w, r)
-	})
+	// Replace X-Forwarded-For with only the immediate client IP (strip port).
+	clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		clientIP = r.RemoteAddr
+	}
+	r2.Header.Set("X-Forwarded-For", clientIP)
+
+	// Strip the bearer token before forwarding so backend services cannot replay
+	// it against other services. Services that need to re-verify the caller
+	// (e.g. gatekeeper itself) declare forward_auth=true in the registry.
+	if !svc.forwardAuth {
+		r2.Header.Del("Authorization")
+	}
+	svc.proxy.ServeHTTP(w, r2)
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
+	if registryKey == "" {
+		slog.Error("REGISTRY_READ_KEY is not set; refusing to start")
+		os.Exit(1)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
 	logLevel := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
 		logLevel = slog.LevelDebug
@@ -319,95 +424,48 @@ func main() {
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
 
-	otelHandler, shutdown, err := setupOTel(context.Background())
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "conductor")
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
-		slog.SetDefault(slog.New(&fanoutHandler{handlers: []slog.Handler{jsonHandler, otelHandler}}))
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
 		defer shutdown(context.Background())
 	}
 	initMetrics()
 
-	gk := newProxy(gatekeeperURL)
-	bp := newProxy(blueprintsURL)
+	// Warm the service cache, retrying until the registry is reachable.
+	for {
+		refreshServiceCache(ctx)
+		servicesMu.RLock()
+		populated := len(servicesMap) > 0
+		servicesMu.RUnlock()
+		if populated {
+			break
+		}
+		slog.Warn("registry not reachable or empty, retrying in 5s")
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
 
-	// auth wraps a handler with the user-existence check.
-	auth := func(h http.Handler) http.Handler { return userMiddleware(h) }
-	// id is a UUID check on the path value named "id".
-	id := validUUID("id")
+	// Refresh the service registry every 30 seconds.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				refreshServiceCache(ctx)
+			}
+		}
+	}()
 
 	mux := http.NewServeMux()
-
-	// ── Public routes — validated then forwarded to Gatekeeper ───────────────
-	mux.Handle("POST /signup", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !validateSignupBody(w, r) {
-			return
-		}
-		gk.ServeHTTP(w, r)
-	}))
-	mux.Handle("POST /login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !validateLoginBody(w, r) {
-			return
-		}
-		gk.ServeHTTP(w, r)
-	}))
-
-	// ── Gatekeeper — authenticated routes ────────────────────────────────────
-	mux.Handle("GET /check_permissions", auth(proxyWith(gk)))
-
-	mux.Handle("GET /users", auth(proxyWith(gk)))
-	mux.Handle("GET /users/{id}", auth(proxyWith(gk, id)))
-	mux.Handle("PUT /users/{id}", auth(proxyWith(gk, id, validJSON)))
-	mux.Handle("DELETE /users/{id}", auth(proxyWith(gk, id)))
-
-	mux.Handle("GET /orgs", auth(proxyWith(gk)))
-	mux.Handle("POST /orgs", auth(proxyWith(gk, validJSON)))
-	mux.Handle("GET /orgs/{id}", auth(proxyWith(gk, id)))
-	mux.Handle("PUT /orgs/{id}", auth(proxyWith(gk, id, validJSON)))
-	mux.Handle("DELETE /orgs/{id}", auth(proxyWith(gk, id)))
-	mux.Handle("POST /orgs/{id}/invites", auth(proxyWith(gk, id, validJSON)))
-
-	mux.Handle("GET /teams", auth(proxyWith(gk)))
-	mux.Handle("POST /teams", auth(proxyWith(gk, validJSON)))
-	mux.Handle("GET /teams/{id}", auth(proxyWith(gk, id)))
-	mux.Handle("PUT /teams/{id}", auth(proxyWith(gk, id, validJSON)))
-	mux.Handle("DELETE /teams/{id}", auth(proxyWith(gk, id)))
-	mux.Handle("POST /teams/{id}/invites", auth(proxyWith(gk, id, validJSON)))
-
-	mux.Handle("POST /roles", auth(proxyWith(gk, validJSON)))
-	mux.Handle("GET /roles/{id}", auth(proxyWith(gk, id)))
-	mux.Handle("PUT /roles/{id}", auth(proxyWith(gk, id, validJSON)))
-	mux.Handle("DELETE /roles/{id}", auth(proxyWith(gk, id)))
-
-	mux.Handle("POST /permissions", auth(proxyWith(gk, validJSON)))
-	mux.Handle("GET /permissions/{id}", auth(proxyWith(gk, id)))
-	mux.Handle("PUT /permissions/{id}", auth(proxyWith(gk, id, validJSON)))
-	mux.Handle("DELETE /permissions/{id}", auth(proxyWith(gk, id)))
-
-	mux.Handle("GET /sessions/{id}", auth(proxyWith(gk, id)))
-	mux.Handle("DELETE /sessions/{id}", auth(proxyWith(gk, id)))
-
-	mux.Handle("GET /invites", auth(proxyWith(gk)))
-	mux.Handle("GET /invites/{id}", auth(proxyWith(gk, id)))
-	mux.Handle("POST /invites/{id}/accept", auth(proxyWith(gk, id, validJSON)))
-	mux.Handle("POST /invites/{id}/decline", auth(proxyWith(gk, id, validJSON)))
-	mux.Handle("DELETE /invites/{id}", auth(proxyWith(gk, id)))
-
-	// ── Blueprints — user-scoped: /state/{username}/{workspace} ──────────────
-	// JSON validation is omitted for state routes: Terraform state bodies can be
-	// tens of MB and Blueprints validates them directly.
-	userState := []func(http.ResponseWriter, *http.Request) bool{validSlug("username"), validSlug("workspace")}
-	mux.Handle("GET /state/{username}/{workspace}", auth(proxyWith(bp, userState...)))
-	mux.Handle("POST /state/{username}/{workspace}", auth(proxyWith(bp, userState...)))
-	mux.Handle("DELETE /state/{username}/{workspace}", auth(proxyWith(bp, userState...)))
-	mux.Handle("/state/{username}/{workspace}", auth(proxyWith(bp, userState...))) // LOCK / UNLOCK
-
-	// ── Blueprints — org-scoped: /{org}/state/{team}/{workspace} ─────────────
-	orgState := []func(http.ResponseWriter, *http.Request) bool{validSlug("org"), validSlug("team"), validSlug("workspace")}
-	mux.Handle("GET /{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...)))
-	mux.Handle("POST /{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...)))
-	mux.Handle("DELETE /{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...)))
-	mux.Handle("/{org}/state/{team}/{workspace}", auth(proxyWith(bp, orgState...))) // LOCK / UNLOCK
+	mux.Handle("/{path...}", http.HandlerFunc(handleServiceProxy))
 
 	port := envOrDefault("PORT", "8082")
 
@@ -417,17 +475,35 @@ func main() {
 
 	certFile := os.Getenv("TLS_CERT_FILE")
 	keyFile := os.Getenv("TLS_KEY_FILE")
-	if certFile != "" && keyFile != "" {
-		slog.Info("listening with TLS", "port", port)
-		if err := http.ListenAndServeTLS(":"+port, certFile, keyFile, wrappedMux); err != nil {
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      wrappedMux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	go func() {
+		var err error
+		if certFile != "" && keyFile != "" {
+			slog.Info("listening with TLS", "port", port)
+			err = srv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			slog.Info("listening", "port", port)
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
-	} else {
-		slog.Info("listening", "port", port)
-		if err := http.ListenAndServe(":"+port, wrappedMux); err != nil {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
-		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "error", err)
 	}
 }

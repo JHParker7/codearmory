@@ -1,0 +1,267 @@
+nameOverride: ""
+fullnameOverride: ""
+
+# Default image tag applied to all services when the per-service tag is empty.
+imageTag: latest
+imagePullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# ── Gatekeeper ────────────────────────────────────────────────────────────────
+gatekeeper:
+  image:
+    repository: codearmory/gatekeeper
+    tag: ""
+  replicaCount: 1
+  port: 8080
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    logLevel: info
+    # Comma-separated list of service names permitted to register.
+    permittedServices: "gatekeeper,blueprints,forge"
+    # Comma-separated CIDRs of trusted reverse proxies (optional).
+    trustedProxyCIDRs: ""
+    # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
+    databaseUrl: ""
+    # Redis URL. Auto-constructed from gatekeeper.redis when left empty.
+    # Override to use an external Redis instance.
+    redisUrl: ""
+    # Comma-separated "name=key" pairs for service-to-service authentication,
+    # e.g. "blueprints=<key>,forge=<key>". Keys must match the gatekeeperServiceKey
+    # values set in blueprints.secret and forge.secret.
+    gatekeeperServices: ""
+  redis:
+    enabled: true
+    image:
+      repository: redis
+      tag: "7-alpine"
+    resources:
+      requests:
+        cpu: 50m
+        memory: 32Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
+    # Size of the in-memory tmpfs volume mounted at /data.
+    dataSizeLimit: 64Mi
+
+# ── Registry ──────────────────────────────────────────────────────────────────
+registry:
+  image:
+    repository: codearmory/registry
+    tag: ""
+  replicaCount: 1
+  port: 8084
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    # Auto-populated as "blueprints=http://<fullname>-blueprints:8081,forge=http://<fullname>-forge:8083"
+    # when left empty. Override to use custom service URLs.
+    services: ""
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Bearer token for write (admin) operations — required.
+    adminKey: ""
+    # Bearer token for read operations — must match conductor.secret.registryReadKey.
+    readKey: ""
+
+# ── Blueprints ────────────────────────────────────────────────────────────────
+blueprints:
+  enabled: true
+  image:
+    repository: codearmory/blueprints
+    tag: ""
+  replicaCount: 1
+  port: 8081
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Redis URL. Auto-constructed from blueprints.redis when left empty.
+    # Override to use an external Redis instance.
+    redisUrl: ""
+    # 64-character hex string for AES-256-GCM encryption of Terraform state.
+    # Generate with: openssl rand -hex 32
+    # Required — blueprints will refuse to start without this.
+    encryptionKey: ""
+    # Must match the blueprints entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+  redis:
+    enabled: true
+    image:
+      repository: redis
+      tag: "7-alpine"
+    resources:
+      requests:
+        cpu: 50m
+        memory: 32Mi
+      limits:
+        cpu: 250m
+        memory: 128Mi
+    # Size of the in-memory tmpfs volume mounted at /data.
+    dataSizeLimit: 64Mi
+
+# ── Conductor ─────────────────────────────────────────────────────────────────
+conductor:
+  image:
+    repository: codearmory/conductor
+    tag: ""
+  replicaCount: 1
+  port: 8082
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # Must match registry.secret.readKey.
+    registryReadKey: ""
+    # Shared HMAC signing key for X-Conductor-Token headers.
+    # Must match forge.secret.conductorForwardKey.
+    conductorForwardKey: ""
+  service:
+    type: ClusterIP
+    # Set to LoadBalancer to expose conductor directly without an ingress.
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: codearmory.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+# ── Forge ─────────────────────────────────────────────────────────────────────
+forge:
+  enabled: true
+  image:
+    repository: codearmory/forge
+    tag: ""
+  replicaCount: 1
+  port: 8083
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    logLevel: info
+    # Container runtime: "kubernetes" (recommended) or "docker".
+    # When set to "docker", mount the Docker socket via forge.dockerSocket.
+    runtime: kubernetes
+    # Comma-separated list of container images forge is permitted to run.
+    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim"
+    # Kubernetes namespace in which forge creates sandbox Jobs.
+    k8sNamespace: forge
+    # Optional RuntimeClass for stronger isolation (e.g. "gvisor").
+    k8sRuntimeClass: ""
+    # Resource limits applied to each sandbox container.
+    containerMemoryLimit: "256Mi"
+    containerCpuLimit: "500m"
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Must match conductor.secret.conductorForwardKey.
+    conductorForwardKey: ""
+    # Must match the forge entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  # Mount the Docker socket when forge.env.runtime is "docker".
+  dockerSocket:
+    enabled: false
+    path: /var/run/docker.sock
+
+# ── Integration tests (helm test) ────────────────────────────────────────────
+# Run with: helm test <release>
+# Each suite maps to a test image built from tests/<suite>/Dockerfile.
+# Image tags fall back to the top-level imageTag when left empty.
+tests:
+  gatekeeper:
+    enabled: true
+    image:
+      repository: codearmory/test-gatekeeper
+      tag: ""
+    # DATABASE_URL for post-test cleanup. Auto-constructed from postgresql when empty.
+    databaseUrl: ""
+  blueprints:
+    # Also requires blueprints.enabled to be true.
+    enabled: true
+    image:
+      repository: codearmory/test-blueprints
+      tag: ""
+  conductor:
+    enabled: true
+    image:
+      repository: codearmory/test-conductor
+      tag: ""
+    # DATABASE_URL for post-test cleanup (targets the gatekeeper db).
+    # Auto-constructed from postgresql when empty.
+    databaseUrl: ""
+  forge:
+    # Also requires forge.enabled to be true.
+    enabled: true
+    image:
+      repository: codearmory/test-forge
+      tag: ""
+  registry:
+    enabled: true
+    image:
+      repository: codearmory/test-registry
+      tag: ""
+
+# ── PostgreSQL (Bitnami subchart) ─────────────────────────────────────────────
+postgresql:
+  enabled: true
+  auth:
+    # Superuser password used for all service database connections by default.
+    # For production, create per-service users and set explicit databaseUrl values.
+    postgresPassword: "changeme"
+    # Leave username/password empty to use the postgres superuser.
+    username: ""
+    password: ""
+  primary:
+    initdb:
+      scripts:
+        init.sql: |
+          CREATE DATABASE gatekeeper;
+          CREATE DATABASE blueprints;
+          CREATE DATABASE forge;
+          CREATE DATABASE registry;

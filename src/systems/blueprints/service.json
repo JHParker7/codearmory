@@ -1,0 +1,26 @@
+{
+  "name": "blueprints",
+  "description": "OpenTofu/Terraform remote state storage",
+  "roles": [
+    {
+      "name": "state-writer",
+      "description": "Can read, write and lock state files"
+    },
+    {
+      "name": "state-reader",
+      "description": "Read-only access to state files"
+    }
+  ],
+  "endpoints": [
+    { "method": "GET",    "path": "/state/{username}/{workspace}",        "action": "readState",   "resource": "state", "description": "Get user workspace state" },
+    { "method": "POST",   "path": "/state/{username}/{workspace}",        "action": "writeState",  "resource": "state", "description": "Update user workspace state" },
+    { "method": "DELETE", "path": "/state/{username}/{workspace}",        "action": "deleteState", "resource": "state", "description": "Delete user workspace state" },
+    { "method": "LOCK",   "path": "/state/{username}/{workspace}",        "action": "lockState",   "resource": "state", "description": "Lock user workspace state" },
+    { "method": "UNLOCK", "path": "/state/{username}/{workspace}",        "action": "lockState",   "resource": "state", "description": "Unlock user workspace state" },
+    { "method": "GET",    "path": "/{org}/state/{team}/{workspace}",      "action": "readState",   "resource": "state", "description": "Get org workspace state" },
+    { "method": "POST",   "path": "/{org}/state/{team}/{workspace}",      "action": "writeState",  "resource": "state", "description": "Update org workspace state" },
+    { "method": "DELETE", "path": "/{org}/state/{team}/{workspace}",      "action": "deleteState", "resource": "state", "description": "Delete org workspace state" },
+    { "method": "LOCK",   "path": "/{org}/state/{team}/{workspace}",      "action": "lockState",   "resource": "state", "description": "Lock org workspace state" },
+    { "method": "UNLOCK", "path": "/{org}/state/{team}/{workspace}",      "action": "lockState",   "resource": "state", "description": "Unlock org workspace state" }
+  ]
+}

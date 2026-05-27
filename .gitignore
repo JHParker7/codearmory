@@ -24,3 +24,6 @@ load-tests/package-lock.json
 .env
 .vscode/
 .continue/
+
+# Local security notes — never commit
+SECURITY_FINDINGS.md

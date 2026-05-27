@@ -1,0 +1,35 @@
+{{- if and .Values.forge.enabled .Values.forge.serviceAccount.create }}
+# Role in the sandbox namespace allows forge to create and manage execution Jobs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "codearmory.fullname" . }}-forge
+  namespace: {{ .Values.forge.env.k8sNamespace }}
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: forge
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "codearmory.fullname" . }}-forge
+  namespace: {{ .Values.forge.env.k8sNamespace }}
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: forge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "codearmory.fullname" . }}-forge
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "codearmory.forge.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

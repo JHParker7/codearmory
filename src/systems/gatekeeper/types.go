@@ -1,6 +1,10 @@
 package main
 
-import "time"
+import (
+	"context"
+	"errors"
+	"time"
+)
 
 // Org represents a tenant organisation. All roles and users belong to an org.
 type Org struct {
@@ -52,11 +56,12 @@ type User struct {
 	Active         bool      `gorm:"column:active;default:true"`
 }
 
-// Session holds an active JWT for a User along with the public key used to
-// verify the token signature.
+// Session holds the per-session ECDSA public key used to verify the JWT signature.
+// The JWT itself is never stored — authMiddleware re-validates the signature on
+// each request using the stored PubKey, so retaining the token would be redundant
+// and would expose all active sessions on a database breach.
 type Session struct {
 	SessionID string    `gorm:"column:session_id;primaryKey"`
-	JWT       string    `gorm:"column:jwt"`
 	CreatedAt time.Time `gorm:"column:created_at"`
 	UpdatedAt time.Time `gorm:"column:updated_at"`
 	UserID    string    `gorm:"column:user_id"`
@@ -93,6 +98,63 @@ type Permissions struct {
 	OrgID         *string   `json:"org_id"         gorm:"column:org_id"`
 	Active        bool      `json:"active"         gorm:"column:active;default:true"`
 }
+
+// ServiceAccount represents a non-user service identity with a hashed key and
+// an associated role. Permissions are added to the role via ServicePermissionRequest.
+//
+// Network binding fields (both optional; nil / empty slice means "no restriction"):
+//
+//   - AllowedCIDRs: if non-empty, the source IP of every authenticated request
+//     must fall within at least one of these CIDR ranges.
+//   - ClientCertFingerprints: if non-empty, mutual TLS must be enabled on the
+//     gatekeeper server and the presented client certificate's SHA-256 fingerprint
+//     (lower-case hex of DER bytes) must match one of these values.
+//
+// MAC-address binding is not supported at the HTTP layer: MAC addresses do not
+// cross IP routers and are not visible to the server in normal deployments.
+type ServiceAccount struct {
+	ServiceAccountID       string   `json:"service_account_id"        gorm:"column:service_account_id;primaryKey"`
+	CreatedAt              time.Time `json:"created_at"               gorm:"column:created_at"`
+	UpdatedAt              time.Time `json:"updated_at"               gorm:"column:updated_at"`
+	ServiceName            string   `json:"service_name"              gorm:"column:service_name;uniqueIndex"`
+	HashedKey              string   `json:"-"                         gorm:"column:hashed_key"`
+	RoleID                 *string  `json:"role_id"                   gorm:"column:role_id"`
+	AllowedCIDRs           []string `json:"allowed_cidrs,omitempty"   gorm:"column:allowed_cidrs;serializer:json"`
+	ClientCertFingerprints []string `json:"client_cert_fingerprints,omitempty" gorm:"column:client_cert_fingerprints;serializer:json"`
+	Active                 bool     `json:"active"                    gorm:"column:active;default:true"`
+}
+
+// ServicePermissionRequest is a pending request from a service to add a permission
+// to its service role. Status transitions: pending → approved | declined.
+type ServicePermissionRequest struct {
+	RequestID   string     `json:"request_id"   gorm:"column:request_id;primaryKey"`
+	CreatedAt   time.Time  `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"   gorm:"column:updated_at"`
+	ServiceName string     `json:"service_name" gorm:"column:service_name"`
+	Name        string     `json:"name"         gorm:"column:name"`
+	Service     string     `json:"service"      gorm:"column:service"`
+	Actions     []string   `json:"actions"      gorm:"column:actions;serializer:json"`
+	Resources   []string   `json:"resources"    gorm:"column:resources;serializer:json"`
+	Status      string     `json:"status"       gorm:"column:status;default:pending"`
+	ResolvedBy  *string    `json:"resolved_by"  gorm:"column:resolved_by"`
+	ResolvedAt  *time.Time `json:"resolved_at"  gorm:"column:resolved_at"`
+	Active      bool       `json:"active"       gorm:"column:active;default:true"`
+}
+
+// AuditLog is an append-only record of mutations to access-control entities.
+// Rows are never updated or soft-deleted; the table acts as an immutable ledger.
+type AuditLog struct {
+	AuditLogID string    `json:"audit_log_id" gorm:"column:audit_log_id;primaryKey"`
+	CreatedAt  time.Time `json:"created_at"   gorm:"column:created_at;autoCreateTime"`
+	ActorID    string    `json:"actor_id"     gorm:"column:actor_id"`   // user_id or service_name
+	ActorType  string    `json:"actor_type"   gorm:"column:actor_type"` // "user" | "service"
+	Action     string    `json:"action"       gorm:"column:action"`     // e.g. "role.update"
+	ResourceID string    `json:"resource_id"  gorm:"column:resource_id"`
+	Detail     string    `json:"detail"       gorm:"column:detail"`
+}
+
+func (AuditLog) Update(_ context.Context) error { return errors.New("audit logs are immutable") }
+func (AuditLog) Remove(_ context.Context) error { return errors.New("audit logs are immutable") }
 
 // PermissionsCheck is an audit record of a single permission evaluation. Each
 // call to GET /check_permissions that resolves successfully persists one row so

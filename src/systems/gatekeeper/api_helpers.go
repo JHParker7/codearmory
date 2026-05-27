@@ -3,21 +3,29 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
+	"golang.org/x/crypto/bcrypt"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
@@ -161,7 +169,7 @@ func authMiddleware(next http.Handler) http.Handler {
 				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 			}
 			return pubKey, nil
-		})
+		}, jwt.WithIssuer("gatekeeper"), jwt.WithIssuedAt())
 		if err != nil || !verified.Valid {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "token signature invalid")
@@ -347,6 +355,10 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 	for _, permission := range permissions {
 		resourceMatch := false
 
+		// Three matching strategies, tried in order:
+		//  1. Exact match or global wildcard ("*")
+		//  2. Trailing-star prefix: "blueprints/states/*" matches any path under that prefix
+		//  3. Per-segment wildcard: "blueprints/states/*/locks" matches a specific depth with a wildcard segment
 		if slices.Contains(permission.Resources, resource) || slices.Contains(permission.Resources, "*") {
 			resourceMatch = true
 		} else {
@@ -449,7 +461,7 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "evaluation error")
 		slog.Error("check_permissions: evaluation error", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "error", err)
-		http.Error(w, "permissions denied", http.StatusBadRequest)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -462,7 +474,7 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	meterPermissionChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", isAllowed)))
 	slog.Info("check_permissions result", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
-	json.NewEncoder(w).Encode(map[string]bool{"authorized": isAllowed})
+	json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": userID})
 }
 
 // parseECPublicKey decodes a PEM-encoded PKIX public key and asserts it is ECDSA.
@@ -485,8 +497,8 @@ func parseECPublicKey(pemStr string) (*ecdsa.PublicKey, error) {
 // grantPermissions creates a Permissions record and appends it to userID's direct role.
 // If the user has no direct role, one is created first. All writes go through db — pass
 // connect().WithContext(ctx) for non-transactional callers, or a *gorm.DB transaction.
-func grantPermissions(db *gorm.DB, userID, name string, actions []string, resource string) error {
-	return grantServicePermissions(context.Background(), db, "gatekeeper", userID, name, actions, resource)
+func grantPermissions(ctx context.Context, db *gorm.DB, userID, name string, actions []string, resource string) error {
+	return grantServicePermissions(ctx, db, "gatekeeper", userID, name, actions, resource)
 }
 
 func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, name string, actions []string, resource string) error {
@@ -505,6 +517,7 @@ func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, 
 		if err := db.Save(&user).Error; err != nil {
 			return err
 		}
+		cacheDel(ctx, "gk:user:"+user.UserID)
 	} else {
 		if err := db.Where("role_id = ? AND active = ?", *user.RoleID, true).First(&role).Error; err != nil {
 			return err
@@ -536,6 +549,236 @@ func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, 
 	return nil
 }
 
+// validatePermissionIDs checks that every ID in the list exists as an active
+// Permissions record and, when callerOrgID is non-nil, that each record belongs
+// to the same org as the caller. This prevents role poisoning via cross-tenant
+// permission injection.
+func validatePermissionIDs(ctx context.Context, ids []string, callerOrgID *string) error {
+	for _, id := range ids {
+		row, err := (Permissions{PermissionsID: id}).Get(ctx)
+		if err != nil {
+			return fmt.Errorf("permission %s not found", id)
+		}
+		p := row.(Permissions)
+		// Fail-closed: org-scoped permissions are rejected when the caller has no org
+		// or belongs to a different org. Nil p.OrgID (personal/system permissions)
+		// are always allowed.
+		if p.OrgID != nil && (callerOrgID == nil || *p.OrgID != *callerOrgID) {
+			return fmt.Errorf("permission %s belongs to a different org", id)
+		}
+	}
+	return nil
+}
+
+// writeAudit appends an immutable audit log entry. Failures are logged but
+// never propagate to the caller — a missing audit entry is better than a
+// failed request.
+func writeAudit(ctx context.Context, actorID, actorType, action, resourceID, detail string) {
+	entry := AuditLog{
+		AuditLogID: uuid.New().String(),
+		ActorID:    actorID,
+		ActorType:  actorType,
+		Action:     action,
+		ResourceID: resourceID,
+		Detail:     detail,
+	}
+	if err := entry.Add(ctx); err != nil {
+		slog.Warn("audit log write failed", "action", action, "resource_id", resourceID, "error", err)
+	}
+}
+
+// trustedProxyNets is populated once at startup from TRUSTED_PROXY_CIDRS.
+// When non-empty, realClientIP extracts the IP from X-Forwarded-For after
+// confirming that the immediate peer (r.RemoteAddr) is a trusted proxy.
+var trustedProxyNets []*net.IPNet
+
+func initTrustedProxies() {
+	raw := os.Getenv("TRUSTED_PROXY_CIDRS")
+	for _, cidr := range strings.Split(raw, ",") {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(cidr)
+		if err == nil {
+			trustedProxyNets = append(trustedProxyNets, n)
+		}
+	}
+}
+
+// realClientIP returns the originating client IP. When the immediate peer is a
+// trusted proxy (per TRUSTED_PROXY_CIDRS), the leftmost IP in X-Forwarded-For
+// is used; otherwise r.RemoteAddr is returned directly.
+func realClientIP(r *http.Request) string {
+	peerIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peerIP = r.RemoteAddr
+	}
+	if len(trustedProxyNets) == 0 {
+		return peerIP
+	}
+	peer := net.ParseIP(peerIP)
+	isTrusted := false
+	for _, n := range trustedProxyNets {
+		if n.Contains(peer) {
+			isTrusted = true
+			break
+		}
+	}
+	if !isTrusted {
+		return peerIP
+	}
+	// Extract the leftmost (originating) IP from X-Forwarded-For.
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return peerIP
+	}
+	parts := strings.SplitN(xff, ",", 2)
+	if ip := strings.TrimSpace(parts[0]); ip != "" {
+		return ip
+	}
+	return peerIP
+}
+
+// requireServiceAuth validates the X-Service-Key header (format "name:key") against the
+// stored bcrypt hash for the named ServiceAccount. Returns the account on success.
+func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount, bool) {
+	header := r.Header.Get("X-Service-Key")
+	if header == "" {
+		http.Error(w, "missing X-Service-Key header", http.StatusUnauthorized)
+		return ServiceAccount{}, false
+	}
+	idx := strings.Index(header, ":")
+	if idx < 1 {
+		http.Error(w, "invalid X-Service-Key format, expected name:key", http.StatusUnauthorized)
+		return ServiceAccount{}, false
+	}
+	name, key := header[:idx], header[idx+1:]
+
+	row, err := (ServiceAccount{ServiceName: name}).Get(r.Context())
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return ServiceAccount{}, false
+	}
+	svc := row.(ServiceAccount)
+	if err := bcrypt.CompareHashAndPassword([]byte(svc.HashedKey), []byte(key)); err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return ServiceAccount{}, false
+	}
+
+	// IP allowlist: if the service account has allowed CIDRs configured, the
+	// request source IP must fall within one of them. When TRUSTED_PROXY_CIDRS is
+	// configured, the real client IP is extracted from X-Forwarded-For after
+	// verifying that the immediate peer is a trusted proxy.
+	if len(svc.AllowedCIDRs) > 0 {
+		clientIP := realClientIP(r)
+		ip := net.ParseIP(clientIP)
+		allowed := false
+		for _, cidr := range svc.AllowedCIDRs {
+			_, ipNet, err := net.ParseCIDR(cidr)
+			if err == nil && ip != nil && ipNet.Contains(ip) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			slog.Warn("service auth rejected: source IP not in allowlist", "service", name, "client_ip", clientIP)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return ServiceAccount{}, false
+		}
+	}
+
+	// TLS client certificate binding: if the service account has registered
+	// certificate fingerprints, the client must present a matching certificate.
+	// This requires gatekeeper to be started with mTLS (TLS_CLIENT_AUTH=require).
+	if len(svc.ClientCertFingerprints) > 0 {
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			slog.Warn("service auth rejected: client certificate required but not presented", "service", name)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return ServiceAccount{}, false
+		}
+		sum := sha256.Sum256(r.TLS.PeerCertificates[0].Raw)
+		fingerprint := fmt.Sprintf("%x", sum[:])
+		allowed := false
+		for _, f := range svc.ClientCertFingerprints {
+			if subtle.ConstantTimeCompare([]byte(f), []byte(fingerprint)) == 1 {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			slog.Warn("service auth rejected: client certificate fingerprint not recognised", "service", name)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return ServiceAccount{}, false
+		}
+	}
+
+	return svc, true
+}
+
+// rotationMu holds a per-service-name mutex to serialise concurrent rotation
+// requests for the same account. Without this, two simultaneous calls would
+// both pass bcrypt verification against the old key, each generate a different
+// new key, and the loser's stored value would be silently overwritten — leaving
+// that service instance permanently locked out until it is restarted.
+var rotationMu sync.Map
+
+// handleRotateServiceKey generates a new random 32-byte key for the authenticated
+// service account, stores its bcrypt hash, and returns the plaintext new key.
+// The service must present its current key to authenticate; on success it must
+// immediately start using the returned key for all subsequent requests.
+func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleRotateServiceKey")
+	defer span.End()
+
+	svc, ok := requireServiceAuth(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "service auth failed")
+		return
+	}
+	span.SetAttributes(attribute.String("service.name", svc.ServiceName))
+
+	// Serialise concurrent rotations for the same service account.
+	val, _ := rotationMu.LoadOrStore(svc.ServiceName, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "rand failed")
+		slog.Error("rotate service key: rand failed", "service", svc.ServiceName, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	newKey := hex.EncodeToString(raw)
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newKey), 12)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "bcrypt failed")
+		slog.Error("rotate service key: bcrypt failed", "service", svc.ServiceName, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	svc.HashedKey = string(hash)
+	if err := svc.Update(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db update failed")
+		slog.Error("rotate service key: db update failed", "service", svc.ServiceName, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	span.SetStatus(codes.Ok, "")
+	slog.Info("service key rotated", "service", svc.ServiceName)
+	writeAudit(ctx, svc.ServiceName, "service", "service_account.rotate_key", svc.ServiceAccountID, svc.ServiceName)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"key": newKey})
+}
+
 // parsePagination reads ?limit=N&offset=N from the request. Returns 400 and
 // false if limit is present but not a positive integer.
 func parsePagination(w http.ResponseWriter, r *http.Request) (limit, offset int, ok bool) {
@@ -547,7 +790,7 @@ func parsePagination(w http.ResponseWriter, r *http.Request) (limit, offset int,
 			return 0, 0, false
 		}
 		if n > 500 {
-			n = 500
+			n = 500 // hard cap prevents a single request from dumping the entire table
 		}
 		limit = n
 	}

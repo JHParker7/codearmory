@@ -28,7 +28,7 @@ All configuration is via environment variables.
 | `DATABASE_URL` | `postgresql://postgres:postgres@127.0.0.1:5432/blueprints` | PostgreSQL connection string |
 | `GATEKEEPER_URL` | `http://localhost:8080` | Base URL of the Gatekeeper service |
 | `REDIS_URL` | — | Redis connection string (`redis://host:6379/1`). Omit to disable caching. |
-| `ENCRYPTION_KEY` | — | 64-character hex string (32 bytes) for AES-256-GCM at-rest encryption. Omit to store state as plaintext. |
+| `ENCRYPTION_KEY` | — | **Required.** 64-character hex string (32 bytes) for AES-256-GCM at-rest encryption. Generate with: `openssl rand -hex 32`. Blueprints refuses to start without this key. |
 | `PORT` | `8081` | Port the server listens on |
 | `OTEL_SERVICE_NAME` | `blueprints` | Service name reported in traces and metrics |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTel Collector HTTP endpoint. Omit to disable telemetry. |

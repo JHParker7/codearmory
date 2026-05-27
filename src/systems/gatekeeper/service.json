@@ -1,0 +1,66 @@
+{
+  "name": "gatekeeper",
+  "description": "Authentication, authorization and identity management",
+  "roles": [
+    {
+      "name": "admin",
+      "description": "Full administrative access to all gatekeeper resources"
+    },
+    {
+      "name": "member",
+      "description": "Standard authenticated user access"
+    }
+  ],
+  "endpoints": [
+    { "method": "POST", "path": "/signup", "action": "signup", "resource": "gatekeeper/auth", "public": true, "description": "Create a new user account" },
+    { "method": "POST", "path": "/login",  "action": "login",  "resource": "gatekeeper/auth", "public": true, "description": "Authenticate and receive a session token" },
+
+    { "method": "GET",    "path": "/check_permissions",  "action": "checkPermissions", "resource": "gatekeeper/permissions", "description": "Verify a user's RBAC permissions" },
+
+    { "method": "GET",    "path": "/users",       "action": "listUsers",  "resource": "gatekeeper/users", "description": "List all users" },
+    { "method": "GET",    "path": "/users/{id}",  "action": "getUser",    "resource": "gatekeeper/users", "description": "Get a user by ID" },
+    { "method": "PUT",    "path": "/users/{id}",  "action": "updateUser", "resource": "gatekeeper/users", "description": "Update a user" },
+    { "method": "DELETE", "path": "/users/{id}",  "action": "deleteUser", "resource": "gatekeeper/users", "description": "Delete a user" },
+
+    { "method": "POST",   "path": "/orgs",             "action": "createOrg",  "resource": "gatekeeper/orgs", "description": "Create an organisation" },
+    { "method": "GET",    "path": "/orgs",             "action": "listOrgs",   "resource": "gatekeeper/orgs", "description": "List organisations" },
+    { "method": "GET",    "path": "/orgs/{id}",        "action": "getOrg",     "resource": "gatekeeper/orgs", "description": "Get an organisation" },
+    { "method": "PUT",    "path": "/orgs/{id}",        "action": "updateOrg",  "resource": "gatekeeper/orgs", "description": "Update an organisation" },
+    { "method": "DELETE", "path": "/orgs/{id}",        "action": "deleteOrg",  "resource": "gatekeeper/orgs", "description": "Delete an organisation" },
+    { "method": "POST",   "path": "/orgs/{id}/invites","action": "createInvite","resource": "gatekeeper/orgs", "description": "Invite a user to an organisation" },
+
+    { "method": "POST",   "path": "/teams",              "action": "createTeam",  "resource": "gatekeeper/teams", "description": "Create a team" },
+    { "method": "GET",    "path": "/teams",              "action": "listTeams",   "resource": "gatekeeper/teams", "description": "List teams" },
+    { "method": "GET",    "path": "/teams/{id}",         "action": "getTeam",     "resource": "gatekeeper/teams", "description": "Get a team" },
+    { "method": "PUT",    "path": "/teams/{id}",         "action": "updateTeam",  "resource": "gatekeeper/teams", "description": "Update a team" },
+    { "method": "DELETE", "path": "/teams/{id}",         "action": "deleteTeam",  "resource": "gatekeeper/teams", "description": "Delete a team" },
+    { "method": "POST",   "path": "/teams/{id}/invites", "action": "createInvite","resource": "gatekeeper/teams", "description": "Invite a user to a team" },
+
+    { "method": "POST",   "path": "/roles",      "action": "createRole", "resource": "gatekeeper/roles", "description": "Create a role" },
+    { "method": "GET",    "path": "/roles/{id}", "action": "getRole",    "resource": "gatekeeper/roles", "description": "Get a role" },
+    { "method": "PUT",    "path": "/roles/{id}", "action": "updateRole", "resource": "gatekeeper/roles", "description": "Update a role" },
+    { "method": "DELETE", "path": "/roles/{id}", "action": "deleteRole", "resource": "gatekeeper/roles", "description": "Delete a role" },
+
+    { "method": "POST",   "path": "/permissions",      "action": "createPermissions", "resource": "gatekeeper/permissions", "description": "Create a permission" },
+    { "method": "GET",    "path": "/permissions/{id}", "action": "getPermissions",    "resource": "gatekeeper/permissions", "description": "Get a permission" },
+    { "method": "PUT",    "path": "/permissions/{id}", "action": "updatePermissions", "resource": "gatekeeper/permissions", "description": "Update a permission" },
+    { "method": "DELETE", "path": "/permissions/{id}", "action": "deletePermissions", "resource": "gatekeeper/permissions", "description": "Delete a permission" },
+
+    { "method": "GET",    "path": "/sessions/{id}", "action": "getSession",    "resource": "gatekeeper/sessions", "description": "Get a session" },
+    { "method": "DELETE", "path": "/sessions/{id}", "action": "deleteSession", "resource": "gatekeeper/sessions", "description": "Revoke a session" },
+
+    { "method": "GET",    "path": "/invites",              "action": "listInvites",   "resource": "gatekeeper/invites", "description": "List pending invites" },
+    { "method": "GET",    "path": "/invites/{id}",         "action": "getInvite",     "resource": "gatekeeper/invites", "description": "Get an invite" },
+    { "method": "POST",   "path": "/invites/{id}/accept",  "action": "acceptInvite",  "resource": "gatekeeper/invites", "description": "Accept an invite" },
+    { "method": "POST",   "path": "/invites/{id}/decline", "action": "declineInvite", "resource": "gatekeeper/invites", "description": "Decline an invite" },
+    { "method": "DELETE", "path": "/invites/{id}",         "action": "deleteInvite",  "resource": "gatekeeper/invites", "description": "Cancel an invite" },
+
+    { "method": "GET",  "path": "/audit-logs", "action": "listAuditLogs", "resource": "gatekeeper/audit-logs", "description": "List audit log entries" },
+
+    { "method": "POST", "path": "/service-permission-requests",              "action": "createServicePermissionRequest",  "resource": "gatekeeper/service-permission-requests", "description": "Request permissions for a service account" },
+    { "method": "GET",  "path": "/service-permission-requests",              "action": "listServicePermissionRequests",   "resource": "gatekeeper/service-permission-requests", "description": "List service permission requests" },
+    { "method": "GET",  "path": "/service-permission-requests/{id}",         "action": "getServicePermissionRequest",     "resource": "gatekeeper/service-permission-requests", "description": "Get a service permission request" },
+    { "method": "POST", "path": "/service-permission-requests/{id}/approve", "action": "approveServicePermissionRequest","resource": "gatekeeper/service-permission-requests", "description": "Approve a service permission request" },
+    { "method": "POST", "path": "/service-permission-requests/{id}/decline", "action": "declineServicePermissionRequest","resource": "gatekeeper/service-permission-requests", "description": "Decline a service permission request" }
+  ]
+}

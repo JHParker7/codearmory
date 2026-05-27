@@ -1,0 +1,20 @@
+{{- if .Values.blueprints.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "codearmory.fullname" . }}-blueprints
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: blueprints
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.blueprints.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: {{ include "codearmory.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: blueprints
+{{- end }}

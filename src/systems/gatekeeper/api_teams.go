@@ -121,6 +121,26 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 
 	roleID := req.RoleID
 
+	if roleID != nil {
+		// Verify the supplied role exists and is owned by the caller to prevent
+		// a user from inheriting permissions from a role they do not control.
+		roleRow, err := (Role{RoleID: *roleID}).Get(ctx)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "role not found")
+			slog.Warn("create team: supplied role_id not found", "caller_id", callerID, "role_id", *roleID)
+			http.Error(w, "role not found", http.StatusNotFound)
+			return
+		}
+		existingRole := roleRow.(Role)
+		if existingRole.OwnerID != callerID {
+			span.SetStatus(codes.Error, "role not owned by caller")
+			slog.Warn("create team: caller does not own the supplied role", "caller_id", callerID, "role_id", *roleID, "role_owner_id", existingRole.OwnerID)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+
 	if roleID == nil {
 		teamRole := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{}, OrgID: callerOrgID, OwnerID: callerID}
 		if err := teamRole.Add(ctx); err != nil {
@@ -177,7 +197,7 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	))
 
 	permName := fmt.Sprintf("%s-%s-owners-permissions", owner.Username, team.TeamName)
-	if err := grantPermissions(connect().WithContext(ctx), callerID, permName,
+	if err := grantPermissions(ctx, connect().WithContext(ctx), callerID, permName,
 		[]string{"getTeam", "updateTeam", "deleteTeam", "inviteUser"},
 		fmt.Sprintf("gatekeeper/teams/%s", team.TeamID)); err != nil {
 		span.RecordError(err)
@@ -335,7 +355,9 @@ func handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
 	// Soft delete does not cascade; clear team_id on members so checkPermissions
 	// doesn't attempt to load the now-inactive team and deny access.
 	var memberIDs []string
-	connect().WithContext(ctx).Model(&User{}).Where("team_id = ?", id).Pluck("user_id", &memberIDs)
+	if err := connect().WithContext(ctx).Model(&User{}).Where("team_id = ?", id).Pluck("user_id", &memberIDs).Error; err != nil {
+		slog.Error("delete team: failed to load member IDs for cache invalidation", "caller_id", callerID, "team_id", id, "error", err)
+	}
 	if err := connect().WithContext(ctx).Model(&User{}).Where("team_id = ?", id).Update("team_id", nil).Error; err != nil {
 		slog.Error("delete team: failed to clear team membership", "caller_id", callerID, "team_id", id, "error", err)
 	} else {

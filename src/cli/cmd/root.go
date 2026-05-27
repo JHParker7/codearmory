@@ -45,6 +45,8 @@ func loadConfig() cliConfig {
 
 func saveConfig(cfg cliConfig) error {
 	path := configPath()
+	// 0700/0600: restrict directory and file to owner only so other users on
+	// the same machine cannot read the stored token.
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}

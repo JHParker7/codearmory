@@ -9,8 +9,8 @@ services:
     volumes:
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # No host port binding — postgres is only reachable by services on this
+    # internal network. Expose on the host only for local debugging if needed.
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres"]
       interval: 5s
@@ -22,8 +22,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    # No host port binding — redis is only reachable by services on this network.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -39,12 +38,24 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-    ports:
-      - "8080:8080"
+      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+    restart: on-failure
+
+  registry:
+    build:
+      context: ../../src/systems/registry
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/registry
+      ADMIN_KEY: registry-admin-local-secret
+      READ_KEY: registry-read-local-secret
+      SERVICES: blueprints=http://blueprints:8081,forge=http://forge:8083
+    depends_on:
+      postgres:
         condition: service_healthy
     restart: on-failure
 
@@ -55,15 +66,45 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/blueprints
       GATEKEEPER_URL: http://gatekeeper:8080
       REDIS_URL: redis://redis:6379/1
-      # ENCRYPTION_KEY: <64-hex-char key> — omit to store state as plaintext
-    ports:
-      - "8081:8081"
+      # Generate with: openssl rand -hex 32
+      # Required — blueprints will refuse to start without this key.
+      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      # Must match the blueprints entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: blueprints-local-secret
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       gatekeeper:
+        condition: service_started
+      registry:
+        condition: service_started
+    restart: on-failure
+
+  forge:
+    build:
+      context: ../../src/systems/forge
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/forge
+      RUNTIME: docker
+      GATEKEEPER_URL: http://gatekeeper:8080
+      ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim
+      CONDUCTOR_FORWARD_KEY: forge-conductor-shared-local-secret
+      # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: forge-local-secret
+      # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
+      # K8S_RUNTIME_CLASS: gvisor     # optional: use gVisor for stronger isolation
+    volumes:
+      # Mount the Docker socket for the local docker runtime.
+      # Remove this when deploying to Kubernetes (use RUNTIME=kubernetes instead).
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_started
+      registry:
         condition: service_started
     restart: on-failure
 
@@ -72,13 +113,15 @@ services:
       context: ../../src/systems/conductor
     environment:
       GATEKEEPER_URL: http://gatekeeper:8080
-      BLUEPRINTS_URL: http://blueprints:8081
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_READ_KEY: registry-read-local-secret
+      CONDUCTOR_FORWARD_KEY: forge-conductor-shared-local-secret
     ports:
       - "8082:8082"
     depends_on:
       gatekeeper:
         condition: service_started
-      blueprints:
+      registry:
         condition: service_started
     restart: on-failure
 

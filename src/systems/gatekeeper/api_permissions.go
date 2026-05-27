@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -11,6 +13,25 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// permittedServices is the allowlist of service names that can be used in
+// Permissions records. Populated once at startup from PERMITTED_SERVICES
+// (comma-separated) or defaulting to the known built-in services.
+var permittedServices map[string]bool
+
+func initPermittedServices() {
+	raw := os.Getenv("PERMITTED_SERVICES")
+	if raw == "" {
+		raw = "gatekeeper,blueprints,forge"
+	}
+	permittedServices = make(map[string]bool)
+	for _, s := range strings.Split(raw, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			permittedServices[s] = true
+		}
+	}
+}
 
 type permissionsRequest struct {
 	Name      string   `json:"name"`
@@ -46,6 +67,12 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "missing service")
 		slog.Warn("create permissions: missing service", "caller_id", callerID)
 		http.Error(w, "service is required", http.StatusBadRequest)
+		return
+	}
+	if !permittedServices[req.Service] {
+		span.SetStatus(codes.Error, "unknown service")
+		slog.Warn("create permissions: service not in allowlist", "caller_id", callerID, "service", req.Service)
+		http.Error(w, "service not permitted", http.StatusBadRequest)
 		return
 	}
 	for _, a := range req.Actions {
@@ -95,6 +122,7 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 	))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("create permissions: success", "caller_id", callerID, "permissions_id", p.PermissionsID, "service", p.Service, "actions", p.Actions, "resources", p.Resources)
+	writeAudit(ctx, callerID, "user", "permission.create", p.PermissionsID, p.Service)
 	row, _ := p.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -168,6 +196,12 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service is required", http.StatusBadRequest)
 		return
 	}
+	if !permittedServices[req.Service] {
+		span.SetStatus(codes.Error, "unknown service")
+		slog.Warn("update permissions: service not in allowlist", "caller_id", callerID, "permissions_id", id, "service", req.Service)
+		http.Error(w, "service not permitted", http.StatusBadRequest)
+		return
+	}
 	for _, a := range req.Actions {
 		if a == "" {
 			span.SetStatus(codes.Error, "empty action")
@@ -218,6 +252,7 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 	))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("update permissions: success", "caller_id", callerID, "permissions_id", id, "new_service", req.Service, "new_actions", req.Actions, "new_resources", req.Resources)
+	writeAudit(ctx, callerID, "user", "permission.update", id, req.Service)
 	row, _ = p.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(row.(Permissions))
@@ -262,5 +297,6 @@ func handleDeletePermissions(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("permissions.id", id)))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("delete permissions: success", "caller_id", callerID, "permissions_id", id)
+	writeAudit(ctx, callerID, "user", "permission.delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }

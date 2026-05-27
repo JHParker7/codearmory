@@ -1,0 +1,36 @@
+{{- if .Values.conductor.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "codearmory.fullname" . }}-conductor
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: conductor
+  {{- with .Values.conductor.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.conductor.ingress.className }}
+  ingressClassName: {{ .Values.conductor.ingress.className }}
+  {{- end }}
+  {{- with .Values.conductor.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.conductor.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "codearmory.fullname" $ }}-conductor
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

@@ -110,3 +110,34 @@ func TestDeleteSession_Forbidden(t *testing.T) {
 		t.Fatalf("expected 403, got %d", w.Code)
 	}
 }
+
+// --- toSessionResponse ---
+
+func TestGetSession_ResponseOmitsJWTAndPubKey(t *testing.T) {
+	u := createTestUser(t)
+	_, session := makeSession(t, u.UserID, makeExpiry())
+	actor := createAuthorizedUser(t, "getSession", "gatekeeper/sessions/"+session.SessionID)
+
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/sessions/"+session.SessionID, nil), actor.UserID)
+	r.SetPathValue("id", session.SessionID)
+	w := httptest.NewRecorder()
+	handleGetSession(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if _, ok := raw["jwt"]; ok {
+		t.Fatal("response must not include jwt")
+	}
+	if _, ok := raw["pub_key"]; ok {
+		t.Fatal("response must not include pub_key")
+	}
+	// session_id must be present.
+	if _, ok := raw["session_id"]; !ok {
+		t.Fatal("response must include session_id")
+	}
+}

@@ -12,9 +12,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
+	"codearmory.local/svckit/registry"
+	"codearmory.local/svckit/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -186,7 +190,7 @@ func checkPermissions(ctx context.Context, token, resource, action string) bool 
 		"resource": resource,
 		"action":   action,
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -347,6 +351,8 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 	defer tx.Rollback(ctx)
 
 	var existingLock string
+	// FOR UPDATE serializes concurrent requests on the same workspace row, preventing
+	// TOCTOU races between the lock check and the subsequent state write.
 	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
 	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
 		span.RecordError(lockErr)
@@ -366,15 +372,19 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 			return
 		}
 		var lockObj map[string]any
-		if json.Unmarshal([]byte(existingLock), &lockObj) == nil {
-			if id, _ := lockObj["ID"].(string); id != lockID {
-				slog.Warn("state update rejected: lock id mismatch", "workspace", workspaceKey)
-				span.SetStatus(codes.Error, "lock id mismatch")
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusConflict)
-				w.Write([]byte(existingLock))
-				return
-			}
+		if err := json.Unmarshal([]byte(existingLock), &lockObj); err != nil {
+			slog.Error("state update rejected: corrupt lock data", "workspace", workspaceKey, "error", err)
+			span.SetStatus(codes.Error, "corrupt lock data")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if id, _ := lockObj["ID"].(string); id != lockID {
+			slog.Warn("state update rejected: lock id mismatch", "workspace", workspaceKey)
+			span.SetStatus(codes.Error, "lock id mismatch")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(existingLock))
+			return
 		}
 	}
 
@@ -459,6 +469,11 @@ func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey, resou
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if !json.Valid(body) {
+		span.SetStatus(codes.Error, "invalid lock data")
+		http.Error(w, "bad request: lock data must be valid JSON", http.StatusBadRequest)
+		return
+	}
 
 	tx, err := db.Begin(ctx)
 	if err != nil {
@@ -470,6 +485,8 @@ func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey, resou
 	defer tx.Rollback(ctx)
 
 	var existingLock string
+	// FOR UPDATE serializes concurrent lock acquisitions on the same workspace, so two
+	// callers racing to lock the same workspace can't both see it as unlocked.
 	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
 	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
 		span.RecordError(lockErr)
@@ -543,6 +560,9 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 	defer tx.Rollback(ctx)
 
 	var existingLock string
+	// FOR UPDATE serializes concurrent unlock attempts on the same workspace row.
+	// ErrNoRows (workspace already unlocked) falls through to a no-op commit, making
+	// unlock idempotent — Terraform expects a 200 even when the lock is already gone.
 	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
 	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
 		span.RecordError(lockErr)
@@ -561,14 +581,18 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 			}
 		}
 		var lockData map[string]any
-		if json.Unmarshal([]byte(existingLock), &lockData) == nil {
-			storedID, _ := lockData["ID"].(string)
-			if reqID == "" || reqID != storedID {
-				slog.Warn("unlock rejected: lock id mismatch", "workspace", workspaceKey)
-				span.SetStatus(codes.Error, "lock id mismatch")
-				http.Error(w, "lock ID mismatch", http.StatusConflict)
-				return
-			}
+		if err := json.Unmarshal([]byte(existingLock), &lockData); err != nil {
+			slog.Error("unlock rejected: corrupt lock data", "workspace", workspaceKey, "error", err)
+			span.SetStatus(codes.Error, "corrupt lock data")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		storedID, _ := lockData["ID"].(string)
+		if reqID == "" || reqID != storedID {
+			slog.Warn("unlock rejected: lock id mismatch", "workspace", workspaceKey)
+			span.SetStatus(codes.Error, "lock id mismatch")
+			http.Error(w, "lock ID mismatch", http.StatusConflict)
+			return
 		}
 
 		if _, err := tx.Exec(ctx, "DELETE FROM locks WHERE workspace = $1", workspaceKey); err != nil {
@@ -606,8 +630,9 @@ func orgKey(r *http.Request) (string, string) {
 }
 
 // lockUnlock dispatches LOCK/UNLOCK custom methods to their handlers.
-// Registered without a method prefix so it catches what the method-specific
-// patterns (GET, POST, DELETE) don't.
+// Go's ServeMux only accepts standard HTTP methods as route prefixes, so LOCK
+// and UNLOCK (WebDAV/Terraform protocol) must be caught by a method-agnostic
+// pattern and dispatched manually here.
 func lockUnlock(keyFn func(*http.Request) (string, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		k, res := keyFn(r)
@@ -625,6 +650,9 @@ func lockUnlock(keyFn func(*http.Request) (string, string)) http.HandlerFunc {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
 	logLevel := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
 		logLevel = slog.LevelDebug
@@ -632,11 +660,11 @@ func main() {
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
 
-	otelHandler, shutdown, err := setupOTel(context.Background())
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), serviceConfig.Name)
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
-		slog.SetDefault(slog.New(&fanoutHandler{handlers: []slog.Handler{jsonHandler, otelHandler}}))
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
 		defer shutdown(context.Background())
 	}
 	initMetrics()
@@ -646,8 +674,6 @@ func main() {
 		os.Exit(1)
 	}
 	initCache()
-
-	ctx := context.Background()
 
 	db, err = pgxpool.New(ctx, secretOrDefault("DATABASE_URL", "postgresql://postgres:test@127.0.0.1:5432/blueprints"))
 	if err != nil {
@@ -661,6 +687,12 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("database pool initialized")
+
+	// Rotate the gatekeeper service key every 25 minutes so credentials are always
+	// short-lived. GATEKEEPER_SERVICE_KEY must match the key in GATEKEEPER_SERVICES
+	// on gatekeeper. The loop is a no-op if the variable is unset.
+	registry.StartKeyRotation(ctx, gatekeeperURL, serviceConfig.Name,
+		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	mux := http.NewServeMux()
 
@@ -704,6 +736,14 @@ func main() {
 	keyFile := os.Getenv("TLS_KEY_FILE")
 	caFile := os.Getenv("CA_CERT_FILE")
 
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      wrappedMux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
 	if certFile != "" && keyFile != "" {
 		tlsConfig := &tls.Config{}
 		if caFile != "" {
@@ -717,17 +757,30 @@ func main() {
 			tlsConfig.ClientCAs = caPool
 			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 		}
-		server := &http.Server{Addr: ":" + port, Handler: wrappedMux, TLSConfig: tlsConfig}
-		slog.Info("listening with TLS", "port", port)
-		if err := server.ListenAndServeTLS(certFile, keyFile); err != nil {
+		srv.TLSConfig = tlsConfig
+	}
+
+	go func() {
+		var err error
+		if certFile != "" && keyFile != "" {
+			slog.Info("listening with TLS", "port", port)
+			err = srv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			slog.Info("listening", "port", port)
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
-	} else {
-		slog.Info("listening", "port", port)
-		if err := http.ListenAndServe(":"+port, wrappedMux); err != nil {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
-		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "error", err)
 	}
 }

@@ -20,9 +20,11 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	conn.AutoMigrate(&User{}, &Org{}, &Team{}, &Role{}, &Session{}, &Permissions{}, &Invite{})
+	conn.AutoMigrate(&User{}, &Org{}, &Team{}, &Role{}, &Session{}, &Permissions{}, &Invite{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &PermissionsCheck{})
 	gormDB = conn
 	initMetrics()
+	os.Setenv("PERMITTED_SERVICES", "gatekeeper,blueprints,forge,svc,my-service,other-service,team-service,direct-service,test-service")
+	initPermittedServices()
 	os.Exit(m.Run())
 }
 
@@ -468,7 +470,6 @@ func TestSessionCreate(t *testing.T) {
 	testUser := createTestUser(t)
 	testSession := Session{
 		SessionID: uuid.New().String(),
-		JWT:       "test.jwt.token",
 		UserID:    testUser.UserID,
 		ExpiresAt: time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second),
 		PubKey:    "test-pub-key",
@@ -494,7 +495,6 @@ func TestSessionDelete(t *testing.T) {
 	testUser := createTestUser(t)
 	testSession := Session{
 		SessionID: uuid.New().String(),
-		JWT:       "test.jwt.token",
 		UserID:    testUser.UserID,
 		ExpiresAt: time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second),
 		PubKey:    "test-pub-key",
@@ -514,11 +514,11 @@ func TestSessionDelete(t *testing.T) {
 func TestSessionList(t *testing.T) {
 	testUser := createTestUser(t)
 	s1 := Session{
-		SessionID: uuid.New().String(), JWT: "token-1", UserID: testUser.UserID,
+		SessionID: uuid.New().String(), UserID: testUser.UserID,
 		ExpiresAt: time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second), PubKey: "key-1",
 	}
 	s2 := Session{
-		SessionID: uuid.New().String(), JWT: "token-2", UserID: testUser.UserID,
+		SessionID: uuid.New().String(), UserID: testUser.UserID,
 		ExpiresAt: time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second), PubKey: "key-2",
 	}
 	t.Cleanup(func() { s1.Remove(context.Background()); s2.Remove(context.Background()) })
@@ -556,7 +556,6 @@ func TestSessionUpdate(t *testing.T) {
 	testUser := createTestUser(t)
 	testSession := Session{
 		SessionID: uuid.New().String(),
-		JWT:       "test.jwt.token",
 		UserID:    testUser.UserID,
 		ExpiresAt: time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second),
 		PubKey:    "test-pub-key",
@@ -576,7 +575,7 @@ func TestSessionUpdate(t *testing.T) {
 	if newSession != testSession {
 		t.Fatalf("got session %v, want %v", newSession, testSession)
 	}
-	testSession.JWT = "updated.jwt.token"
+	testSession.PubKey = "updated-pub-key"
 	if err := testSession.Update(context.Background()); err != nil {
 		t.Fatal(err)
 	}

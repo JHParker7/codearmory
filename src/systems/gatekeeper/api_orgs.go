@@ -136,7 +136,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	))
 
 	permName := fmt.Sprintf("%s-%s-owners-permissions", owner.Username, org.OrgName)
-	if err := grantPermissions(connect().WithContext(ctx), userID, permName,
+	if err := grantPermissions(ctx, connect().WithContext(ctx), userID, permName,
 		[]string{"getOrg", "updateOrg", "deleteOrg", "inviteUser"},
 		fmt.Sprintf("gatekeeper/orgs/%s", org.OrgID)); err != nil {
 		span.RecordError(err)
@@ -149,7 +149,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	bpPermName := fmt.Sprintf("%s-%s-blueprints-state", owner.Username, org.OrgName)
 	if err := grantServicePermissions(ctx, connect().WithContext(ctx), "blueprints", userID, bpPermName,
 		[]string{"getState", "updateState", "deleteState", "lockState", "unlockState"},
-		fmt.Sprintf("blueprints/%s/states/*", org.OrgName)); err != nil {
+		fmt.Sprintf("blueprints/orgs/%s/states/*", org.OrgID)); err != nil {
 		slog.Warn("create org: failed to grant blueprints state permission", "caller_id", callerID, "org_id", org.OrgID, "error", err)
 	} else {
 		slog.Info("create org: blueprints state permission granted", "caller_id", callerID, "org_id", org.OrgID)
@@ -314,5 +314,6 @@ func handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 
 	span.SetStatus(codes.Ok, "")
 	slog.Info("delete org: success", "caller_id", callerID, "org_id", id)
+	writeAudit(ctx, callerID, "user", "org.delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }

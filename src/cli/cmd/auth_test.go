@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -131,5 +133,90 @@ func TestAuthStatus_NoError(t *testing.T) {
 
 	if err := authStatusCmd.RunE(authStatusCmd, nil); err != nil {
 		t.Fatalf("status: %v", err)
+	}
+}
+
+func TestAuthStatus_FlagToken(t *testing.T) {
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	t.Cleanup(func() { flagToken = ""; flagURL = "" })
+	flagToken = "my-flag-token-that-is-long-enough"
+	flagURL = "http://test:8082"
+	silenceStdout(t)
+
+	if err := authStatusCmd.RunE(authStatusCmd, nil); err != nil {
+		t.Fatalf("status with --token flag: %v", err)
+	}
+}
+
+func TestAuthStatus_EnvToken(t *testing.T) {
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "env-token-long-enough-to-slice")
+	t.Cleanup(func() { flagToken = ""; flagURL = "" })
+	flagToken = ""
+	flagURL = "http://test:8082"
+	silenceStdout(t)
+
+	if err := authStatusCmd.RunE(authStatusCmd, nil); err != nil {
+		t.Fatalf("status with env token: %v", err)
+	}
+}
+
+func TestAuthStatus_KeychainToken(t *testing.T) {
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	t.Cleanup(func() { flagToken = ""; flagURL = "" })
+	flagToken = ""
+	flagURL = "http://test:8082"
+	keyring.Set(keychainService, keychainAccount, "keychain-token-long-enough") //nolint:errcheck
+	silenceStdout(t)
+
+	if err := authStatusCmd.RunE(authStatusCmd, nil); err != nil {
+		t.Fatalf("status with keychain token: %v", err)
+	}
+}
+
+func TestAuthStatus_ConfigFileToken(t *testing.T) {
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	t.Cleanup(func() { flagToken = ""; flagURL = "" })
+	flagToken = ""
+	flagURL = "http://test:8082"
+	// No keychain token, but a config-file token.
+	saveConfig(cliConfig{Token: "config-file-token-long-enough", URL: "http://test:8082"}) //nolint:errcheck
+	silenceStdout(t)
+
+	if err := authStatusCmd.RunE(authStatusCmd, nil); err != nil {
+		t.Fatalf("status with config-file token: %v", err)
+	}
+}
+
+func TestLogin_StoreTokenError(t *testing.T) {
+	// Force both keyring and saveConfig to fail so loginCmd.RunE returns
+	// "saving token: ..." error (covering auth.go:35-37).
+	keyring.MockInitWithError(fmt.Errorf("keyring unavailable"))
+	t.Cleanup(func() { keyring.MockInit() })
+	isolateHome(t)
+	silenceStdout(t)
+
+	// Make $HOME/.config a regular file to cause saveConfig / MkdirAll to fail.
+	home, _ := os.UserHomeDir()
+	cfgParent := home + "/.config"
+	if err := os.WriteFile(cfgParent, []byte("not a dir"), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	srv, _ := recordingServer(t, http.StatusOK, `{"token":"jwt-from-server"}`)
+	setupCLINoToken(t, srv)
+
+	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
+	loginCmd.Flags().Set("password", "supersecret")   //nolint:errcheck
+
+	if err := loginCmd.RunE(loginCmd, nil); err == nil {
+		t.Fatal("expected error when token cannot be stored, got nil")
 	}
 }

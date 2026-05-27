@@ -453,3 +453,71 @@ func TestListOrgs_InvalidLimit(t *testing.T) {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
+
+func TestDeleteOrg_ClearsMembership(t *testing.T) {
+	org := Org{OrgID: uuid.New().String(), OrgName: "membership-org"}
+	if err := org.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { org.Remove(context.Background()) })
+
+	member := User{
+		UserID:         uuid.New().String(),
+		Email:          uuid.New().String() + "@test.com",
+		Username:       "member-" + uuid.New().String(),
+		HashedPassword: "hash",
+		OrgID:          &org.OrgID,
+	}
+	if err := member.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { member.Remove(context.Background()) })
+
+	actor := createAuthorizedUser(t, "deleteOrg", "gatekeeper/orgs/"+org.OrgID)
+	r := withUserID(httptest.NewRequest(http.MethodDelete, "/orgs/"+org.OrgID, nil), actor.UserID)
+	r.SetPathValue("id", org.OrgID)
+	w := httptest.NewRecorder()
+	handleDeleteOrg(w, r)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+
+	row, err := (User{UserID: member.UserID}).Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.(User).OrgID != nil {
+		t.Fatal("expected org_id to be cleared after org deletion")
+	}
+}
+
+func TestCreateOrg_InvalidBody(t *testing.T) {
+	actor := createAuthorizedUser(t, "createOrg", "gatekeeper/orgs")
+
+	r := withUserID(httptest.NewRequest(http.MethodPost, "/orgs", bytes.NewReader([]byte("not json"))), actor.UserID)
+	w := httptest.NewRecorder()
+	handleCreateOrg(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUpdateOrg_InvalidBody(t *testing.T) {
+	org := Org{OrgID: uuid.New().String(), OrgName: "original"}
+	if err := org.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { org.Remove(context.Background()) })
+	actor := createAuthorizedUser(t, "updateOrg", "gatekeeper/orgs/"+org.OrgID)
+
+	r := withUserID(httptest.NewRequest(http.MethodPut, "/orgs/"+org.OrgID, bytes.NewReader([]byte("not json"))), actor.UserID)
+	r.SetPathValue("id", org.OrgID)
+	w := httptest.NewRecorder()
+	handleUpdateOrg(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
