@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -711,6 +713,56 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 	}
 
 	return svc, true
+}
+
+// handleRotateServiceKey generates a new random 32-byte key for the authenticated
+// service account, stores its bcrypt hash, and returns the plaintext new key.
+// The service must present its current key to authenticate; on success it must
+// immediately start using the returned key for all subsequent requests.
+func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleRotateServiceKey")
+	defer span.End()
+
+	svc, ok := requireServiceAuth(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "service auth failed")
+		return
+	}
+	span.SetAttributes(attribute.String("service.name", svc.ServiceName))
+
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "rand failed")
+		slog.Error("rotate service key: rand failed", "service", svc.ServiceName, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	newKey := hex.EncodeToString(raw)
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newKey), 12)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "bcrypt failed")
+		slog.Error("rotate service key: bcrypt failed", "service", svc.ServiceName, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	svc.HashedKey = string(hash)
+	if err := svc.Update(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db update failed")
+		slog.Error("rotate service key: db update failed", "service", svc.ServiceName, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	span.SetStatus(codes.Ok, "")
+	slog.Info("service key rotated", "service", svc.ServiceName)
+	writeAudit(ctx, svc.ServiceName, "service", "service_account.rotate_key", svc.ServiceAccountID, svc.ServiceName)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"key": newKey})
 }
 
 // parsePagination reads ?limit=N&offset=N from the request. Returns 400 and

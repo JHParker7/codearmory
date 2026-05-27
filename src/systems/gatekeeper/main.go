@@ -59,8 +59,8 @@ var loginLimiter sync.Map  // per-IP login attempt buckets
 var signupLimiter sync.Map // per-IP signup attempt buckets
 
 // seedServiceAccounts reads GATEKEEPER_SERVICES (format "name=key,name=key") and
-// upserts a ServiceAccount row for each entry, re-hashing the key each time so
-// key rotations take effect on restart.
+// upserts a ServiceAccount row for each entry with a fresh bcrypt hash. This sets
+// the initial key; services rotate their keys at runtime via POST /service-accounts/rotate-key.
 func seedServiceAccounts(db *gorm.DB) {
 	raw := secret("GATEKEEPER_SERVICES")
 	if raw == "" {
@@ -204,6 +204,9 @@ func main() {
 	mux.Handle("DELETE /invites/{id}", mw(handleDeleteInvite))
 
 	mux.Handle("GET /audit-logs", mw(handleListAuditLogs))
+
+	// Key rotation: service-key authenticated; generates a new key server-side and returns it.
+	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)
 
 	// Service permission requests: POST is service-key authenticated; the rest require user JWT.
 	mux.HandleFunc("POST /service-permission-requests", handleCreateServicePermissionRequest)
