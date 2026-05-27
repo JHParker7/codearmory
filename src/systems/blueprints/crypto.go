@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 )
 
 var encKey []byte
@@ -19,8 +20,8 @@ var encKey []byte
 func initEncryption() error {
 	raw := secret("ENCRYPTION_KEY")
 	if raw == "" {
-		slog.Warn("ENCRYPTION_KEY / ENCRYPTION_KEY_FILE not set: state data will be stored as plaintext")
-		return nil
+		slog.Error("ENCRYPTION_KEY / ENCRYPTION_KEY_FILE is not set; refusing to start without encryption to protect state secrets")
+		os.Exit(1)
 	}
 	key, err := hex.DecodeString(raw)
 	if err != nil {

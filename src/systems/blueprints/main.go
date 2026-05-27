@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"codearmory.local/svckit/registry"
 	"codearmory.local/svckit/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -188,7 +187,7 @@ func checkPermissions(ctx context.Context, token, resource, action string) bool 
 		"resource": resource,
 		"action":   action,
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -685,8 +684,6 @@ func main() {
 	}
 	slog.Info("database pool initialized")
 
-	go registry.Register(ctx, serviceConfig, os.Getenv("SERVICE_KEY"))
-
 	mux := http.NewServeMux()
 
 	// User-scoped: /state/{username}/{workspace}
@@ -742,15 +739,29 @@ func main() {
 			tlsConfig.ClientCAs = caPool
 			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 		}
-		server := &http.Server{Addr: ":" + port, Handler: wrappedMux, TLSConfig: tlsConfig}
+		server := &http.Server{
+			Addr:         ":" + port,
+			Handler:      wrappedMux,
+			TLSConfig:    tlsConfig,
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 60 * time.Second,
+			IdleTimeout:  120 * time.Second,
+		}
 		slog.Info("listening with TLS", "port", port)
 		if err := server.ListenAndServeTLS(certFile, keyFile); err != nil {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
 	} else {
+		server := &http.Server{
+			Addr:         ":" + port,
+			Handler:      wrappedMux,
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 60 * time.Second,
+			IdleTimeout:  120 * time.Second,
+		}
 		slog.Info("listening", "port", port)
-		if err := http.ListenAndServe(":"+port, wrappedMux); err != nil {
+		if err := server.ListenAndServe(); err != nil {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
