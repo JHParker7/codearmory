@@ -12,7 +12,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"codearmory.local/svckit/registry"
@@ -648,6 +650,9 @@ func lockUnlock(keyFn func(*http.Request) (string, string)) http.HandlerFunc {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
 	logLevel := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
 		logLevel = slog.LevelDebug
@@ -669,8 +674,6 @@ func main() {
 		os.Exit(1)
 	}
 	initCache()
-
-	ctx := context.Background()
 
 	db, err = pgxpool.New(ctx, secretOrDefault("DATABASE_URL", "postgresql://postgres:test@127.0.0.1:5432/blueprints"))
 	if err != nil {
@@ -733,6 +736,14 @@ func main() {
 	keyFile := os.Getenv("TLS_KEY_FILE")
 	caFile := os.Getenv("CA_CERT_FILE")
 
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      wrappedMux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
 	if certFile != "" && keyFile != "" {
 		tlsConfig := &tls.Config{}
 		if caFile != "" {
@@ -746,31 +757,30 @@ func main() {
 			tlsConfig.ClientCAs = caPool
 			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 		}
-		server := &http.Server{
-			Addr:         ":" + port,
-			Handler:      wrappedMux,
-			TLSConfig:    tlsConfig,
-			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 60 * time.Second,
-			IdleTimeout:  120 * time.Second,
+		srv.TLSConfig = tlsConfig
+	}
+
+	go func() {
+		var err error
+		if certFile != "" && keyFile != "" {
+			slog.Info("listening with TLS", "port", port)
+			err = srv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			slog.Info("listening", "port", port)
+			err = srv.ListenAndServe()
 		}
-		slog.Info("listening with TLS", "port", port)
-		if err := server.ListenAndServeTLS(certFile, keyFile); err != nil {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
-	} else {
-		server := &http.Server{
-			Addr:         ":" + port,
-			Handler:      wrappedMux,
-			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 60 * time.Second,
-			IdleTimeout:  120 * time.Second,
-		}
-		slog.Info("listening", "port", port)
-		if err := server.ListenAndServe(); err != nil {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
-		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "error", err)
 	}
 }
