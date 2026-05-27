@@ -69,6 +69,8 @@ services:
       # Generate with: openssl rand -hex 32
       # Required — blueprints will refuse to start without this key.
       ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      # Must match the blueprints entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: blueprints-local-secret
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,6 +91,8 @@ services:
       GATEKEEPER_URL: http://gatekeeper:8080
       ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim
       CONDUCTOR_FORWARD_KEY: forge-conductor-shared-local-secret
+      # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: forge-local-secret
       # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
       # K8S_RUNTIME_CLASS: gvisor     # optional: use gVisor for stronger isolation
     volumes:
