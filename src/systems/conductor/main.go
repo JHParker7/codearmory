@@ -3,14 +3,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,11 +31,22 @@ import (
 )
 
 var (
-	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
-	registryURL   = envOrDefault("REGISTRY_URL", "http://localhost:8084")
-	registryKey   = os.Getenv("REGISTRY_READ_KEY")
-	httpClient    = &http.Client{Timeout: 10 * time.Second}
+	gatekeeperURL       = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8084")
+	registryKey         = os.Getenv("REGISTRY_READ_KEY")
+	conductorForwardKey = os.Getenv("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
+	httpClient          = &http.Client{Timeout: 10 * time.Second}
 )
+
+// signForwardedUserID generates a short-lived HMAC-SHA256 token binding userID
+// to a 30-second timestamp window. Any backend service with forward_auth=false
+// can verify this token to confirm X-User-ID was injected by conductor.
+func signForwardedUserID(userID string) (token, timestamp string) {
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(conductorForwardKey))
+	fmt.Fprintf(mac, "conductor:%s:%s", userID, ts)
+	return hex.EncodeToString(mac.Sum(nil)), ts
+}
 
 // ── Service registry cache ────────────────────────────────────────────────────
 
@@ -123,10 +140,10 @@ const (
 	authForbidden
 )
 
-// checkAuth forwards the caller's Bearer token to Gatekeeper's /check_permissions
-// endpoint and interprets the response. It performs a single round-trip to
-// Gatekeeper, which is responsible for both token validation and RBAC checks.
-func checkAuth(r *http.Request, service, action, resource string) authOutcome {
+// checkAuth forwards the caller's Bearer token to Gatekeeper's POST /check_permissions
+// endpoint and interprets the response. Returns the outcome and, on success, the
+// authenticated user ID extracted from Gatekeeper's response body.
+func checkAuth(r *http.Request, service, action, resource string) (authOutcome, string) {
 	ctx, span := otel.Tracer("conductor").Start(r.Context(), "checkAuth")
 	defer span.End()
 
@@ -134,7 +151,7 @@ func checkAuth(r *http.Request, service, action, resource string) authOutcome {
 	if !strings.HasPrefix(auth, "Bearer ") {
 		span.SetStatus(codes.Error, "no bearer token")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "no_token")))
-		return authUnauthorized
+		return authUnauthorized, ""
 	}
 
 	body, _ := json.Marshal(map[string]string{
@@ -142,11 +159,11 @@ func checkAuth(r *http.Request, service, action, resource string) authOutcome {
 		"action":   action,
 		"resource": resource,
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return authUnauthorized
+		return authUnauthorized, ""
 	}
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
@@ -155,36 +172,43 @@ func checkAuth(r *http.Request, service, action, resource string) authOutcome {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return authUnauthorized
+		return authUnauthorized, ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		span.SetStatus(codes.Error, "unauthorized")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "unauthorized")))
-		return authUnauthorized
+		return authUnauthorized, ""
+	}
+	if resp.StatusCode >= 500 {
+		io.Copy(io.Discard, resp.Body)
+		span.SetStatus(codes.Error, "gatekeeper error")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "gatekeeper_error")))
+		return authForbidden, ""
 	}
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
 		span.SetStatus(codes.Error, "permission denied")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "forbidden")))
-		return authForbidden
+		return authForbidden, ""
 	}
 
 	var result struct {
-		Authorized bool `json:"authorized"`
+		Authorized bool   `json:"authorized"`
+		UserID     string `json:"user_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return authForbidden
+		return authForbidden, ""
 	}
 	if !result.Authorized {
 		span.SetStatus(codes.Error, "not authorized")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "forbidden")))
-		return authForbidden
+		return authForbidden, ""
 	}
 	span.SetStatus(codes.Ok, "")
 	meterAllowed.Add(ctx, 1)
-	return authAllowed
+	return authAllowed, result.UserID
 }
 
 // ── Service registry ──────────────────────────────────────────────────────────
@@ -326,12 +350,15 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	svc, ok := servicesMap[entry.serviceName]
 	servicesMu.RUnlock()
 	if !ok {
-		http.Error(w, entry.serviceName+" service is not available", http.StatusServiceUnavailable)
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
+	var userID string
 	if !entry.public {
-		switch checkAuth(r, entry.serviceName, entry.action, entry.resource) {
+		var outcome authOutcome
+		outcome, userID = checkAuth(r, entry.serviceName, entry.action, entry.resource)
+		switch outcome {
 		case authUnauthorized:
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -347,9 +374,25 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	r2.Header.Del("X-Forwarded-Host")
 	r2.Header.Del("X-Forwarded-Proto")
 	r2.Header.Del("X-Real-IP")
-	// Replace X-Forwarded-For with only the immediate client address so
-	// downstream services see the real origin, not a client-supplied chain.
-	r2.Header.Set("X-Forwarded-For", r.RemoteAddr)
+
+	// Inject the authenticated user ID so backends don't need to decode the JWT.
+	// When CONDUCTOR_FORWARD_KEY is set, also inject an HMAC token so any
+	// forward_auth=false backend can verify X-User-ID was set by conductor.
+	if userID != "" {
+		r2.Header.Set("X-User-ID", userID)
+		if !svc.forwardAuth && conductorForwardKey != "" {
+			tok, ts := signForwardedUserID(userID)
+			r2.Header.Set("X-Conductor-Token", tok)
+			r2.Header.Set("X-Conductor-Timestamp", ts)
+		}
+	}
+
+	// Replace X-Forwarded-For with only the immediate client IP (strip port).
+	clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		clientIP = r.RemoteAddr
+	}
+	r2.Header.Set("X-Forwarded-For", clientIP)
 
 	// Strip the bearer token before forwarding so backend services cannot replay
 	// it against other services. Services that need to re-verify the caller
@@ -417,15 +460,22 @@ func main() {
 
 	certFile := os.Getenv("TLS_CERT_FILE")
 	keyFile := os.Getenv("TLS_KEY_FILE")
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      wrappedMux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
 	if certFile != "" && keyFile != "" {
 		slog.Info("listening with TLS", "port", port)
-		if err := http.ListenAndServeTLS(":"+port, certFile, keyFile, wrappedMux); err != nil {
+		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
 	} else {
 		slog.Info("listening", "port", port)
-		if err := http.ListenAndServe(":"+port, wrappedMux); err != nil {
+		if err := srv.ListenAndServe(); err != nil {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}

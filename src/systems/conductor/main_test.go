@@ -60,15 +60,15 @@ func withServices(t *testing.T, services map[string]serviceState) {
 }
 
 // mockGatekeeper creates a test server that simulates Gatekeeper's
-// /check_permissions endpoint. authorized controls whether the endpoint
-// responds 200+{"authorized":true} or 401.
+// POST /check_permissions endpoint. authorized controls whether it returns
+// 200+{"authorized":true,"user_id":"test-user"} or 401.
 func mockGatekeeper(t *testing.T, authorized bool) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/check_permissions" {
+		if r.URL.Path == "/check_permissions" && r.Method == http.MethodPost {
 			if authorized {
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]bool{"authorized": true})
+				json.NewEncoder(w).Encode(map[string]any{"authorized": true, "user_id": "test-user"})
 				return
 			}
 			w.WriteHeader(http.StatusUnauthorized)
@@ -211,7 +211,7 @@ func TestCheckAuth_Allowed(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer sometoken")
 
-	if got := checkAuth(r, "testsvc", "read", "foo"); got != authAllowed {
+	if got, _ := checkAuth(r, "testsvc", "read", "foo"); got != authAllowed {
 		t.Fatalf("expected authAllowed, got %d", got)
 	}
 }
@@ -219,7 +219,7 @@ func TestCheckAuth_Allowed(t *testing.T) {
 func TestCheckAuth_Unauthorized_NoToken(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	// No Authorization header.
-	if got := checkAuth(r, "testsvc", "read", "foo"); got != authUnauthorized {
+	if got, _ := checkAuth(r, "testsvc", "read", "foo"); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized, got %d", got)
 	}
 }
@@ -232,7 +232,7 @@ func TestCheckAuth_Unauthorized_GatekeeperRejects(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer badtoken")
 
-	if got := checkAuth(r, "testsvc", "read", "foo"); got != authUnauthorized {
+	if got, _ := checkAuth(r, "testsvc", "read", "foo"); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized, got %d", got)
 	}
 }
@@ -252,7 +252,7 @@ func TestCheckAuth_Forbidden_NotAuthorized(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer validtoken")
 
-	if got := checkAuth(r, "testsvc", "read", "foo"); got != authForbidden {
+	if got, _ := checkAuth(r, "testsvc", "read", "foo"); got != authForbidden {
 		t.Fatalf("expected authForbidden, got %d", got)
 	}
 }
