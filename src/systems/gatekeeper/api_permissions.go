@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -11,6 +13,25 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// permittedServices is the allowlist of service names that can be used in
+// Permissions records. Populated once at startup from PERMITTED_SERVICES
+// (comma-separated) or defaulting to the known built-in services.
+var permittedServices map[string]bool
+
+func initPermittedServices() {
+	raw := os.Getenv("PERMITTED_SERVICES")
+	if raw == "" {
+		raw = "gatekeeper,blueprints,forge"
+	}
+	permittedServices = make(map[string]bool)
+	for _, s := range strings.Split(raw, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			permittedServices[s] = true
+		}
+	}
+}
 
 type permissionsRequest struct {
 	Name      string   `json:"name"`
@@ -46,6 +67,12 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "missing service")
 		slog.Warn("create permissions: missing service", "caller_id", callerID)
 		http.Error(w, "service is required", http.StatusBadRequest)
+		return
+	}
+	if !permittedServices[req.Service] {
+		span.SetStatus(codes.Error, "unknown service")
+		slog.Warn("create permissions: service not in allowlist", "caller_id", callerID, "service", req.Service)
+		http.Error(w, "service not permitted", http.StatusBadRequest)
 		return
 	}
 	for _, a := range req.Actions {
@@ -167,6 +194,12 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "missing service")
 		slog.Warn("update permissions: missing service", "caller_id", callerID, "permissions_id", id)
 		http.Error(w, "service is required", http.StatusBadRequest)
+		return
+	}
+	if !permittedServices[req.Service] {
+		span.SetStatus(codes.Error, "unknown service")
+		slog.Warn("update permissions: service not in allowlist", "caller_id", callerID, "permissions_id", id, "service", req.Service)
+		http.Error(w, "service not permitted", http.StatusBadRequest)
 		return
 	}
 	for _, a := range req.Actions {

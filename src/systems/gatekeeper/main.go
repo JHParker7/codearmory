@@ -3,13 +3,15 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
-	"codearmory.local/svckit/registry"
 	"codearmory.local/svckit/telemetry"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -18,11 +20,49 @@ import (
 	"gorm.io/gorm"
 )
 
+// ipBucket is a fixed-window counter used for per-IP rate limiting.
+type ipBucket struct {
+	mu       sync.Mutex
+	count    int
+	windowAt time.Time
+}
+
+// rateLimitMiddleware rejects requests from a single IP that exceed maxAttempts
+// within window. The limiterMap is shared per-endpoint.
+func rateLimitMiddleware(limiterMap *sync.Map, maxAttempts int, window time.Duration, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
+		val, _ := limiterMap.LoadOrStore(ip, &ipBucket{})
+		bucket := val.(*ipBucket)
+		bucket.mu.Lock()
+		now := time.Now()
+		if now.Sub(bucket.windowAt) >= window {
+			bucket.count = 0
+			bucket.windowAt = now
+		}
+		bucket.count++
+		allowed := bucket.count <= maxAttempts
+		bucket.mu.Unlock()
+		if !allowed {
+			slog.Warn("rate limit exceeded", "ip", ip, "path", r.URL.Path)
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+		next(w, r)
+	}
+}
+
+var loginLimiter sync.Map  // per-IP login attempt buckets
+var signupLimiter sync.Map // per-IP signup attempt buckets
+
 // seedServiceAccounts reads GATEKEEPER_SERVICES (format "name=key,name=key") and
 // upserts a ServiceAccount row for each entry, re-hashing the key each time so
 // key rotations take effect on restart.
 func seedServiceAccounts(db *gorm.DB) {
-	raw := os.Getenv("GATEKEEPER_SERVICES")
+	raw := secret("GATEKEEPER_SERVICES")
 	if raw == "" {
 		return
 	}
@@ -34,7 +74,7 @@ func seedServiceAccounts(db *gorm.DB) {
 			continue
 		}
 		name, key := entry[:idx], entry[idx+1:]
-		hash, err := bcrypt.GenerateFromPassword([]byte(key), bcrypt.DefaultCost)
+		hash, err := bcrypt.GenerateFromPassword([]byte(key), 12)
 		if err != nil {
 			slog.Error("seedServiceAccounts: bcrypt failed", "name", name, "error", err)
 			continue
@@ -118,9 +158,10 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /signup", handleSignup)
-	mux.HandleFunc("POST /login", handleLogin)
-	mux.Handle("GET /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
+	// 10 signup attempts per IP per 10 minutes; 5 login attempts per IP per minute.
+	mux.HandleFunc("POST /signup", rateLimitMiddleware(&signupLimiter, 10, 10*time.Minute, handleSignup))
+	mux.HandleFunc("POST /login", rateLimitMiddleware(&loginLimiter, 5, time.Minute, handleLogin))
+	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
 
 	mw := func(h http.HandlerFunc) http.Handler { return authMiddleware(http.HandlerFunc(h)) }
 
@@ -171,8 +212,6 @@ func main() {
 	mux.Handle("POST /service-permission-requests/{id}/approve", mw(handleApproveServicePermissionRequest))
 	mux.Handle("POST /service-permission-requests/{id}/decline", mw(handleDeclineServicePermissionRequest))
 
-	go registry.Register(context.Background(), serviceConfig, os.Getenv("SERVICE_KEY"))
-
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -194,6 +233,8 @@ func main() {
 	}
 	initMetrics()
 	initCache()
+	initPermittedServices()
+	initTrustedProxies()
 
 	wrappedMux := otelhttp.NewHandler(NewLogger(limitBody(mux)), "gatekeeper",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
@@ -205,18 +246,38 @@ func main() {
 		tlsCfg := &tls.Config{}
 		// TLS_CLIENT_AUTH controls whether client certificates are requested.
 		// Set to "require" to enforce mTLS (needed for ClientCertFingerprints binding).
+		//   Requires TLS_CLIENT_CA_FILE to be set; clients must present a cert signed by that CA.
 		// Set to "request" to request but not require a client cert.
 		// Default (unset): no client certificate requested.
 		switch os.Getenv("TLS_CLIENT_AUTH") {
 		case "require":
-			tlsCfg.ClientAuth = tls.RequireAnyClientCert
+			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+			if caFile == "" {
+				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+				os.Exit(1)
+			}
+			caCert, err := os.ReadFile(caFile)
+			if err != nil {
+				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
+				os.Exit(1)
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caCert) {
+				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
+				os.Exit(1)
+			}
+			tlsCfg.ClientCAs = caPool
+			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 		case "request":
 			tlsCfg.ClientAuth = tls.RequestClientCert
 		}
 		srv := &http.Server{
-			Addr:      ":" + port,
-			Handler:   wrappedMux,
-			TLSConfig: tlsCfg,
+			Addr:         ":" + port,
+			Handler:      wrappedMux,
+			TLSConfig:    tlsCfg,
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 15 * time.Second,
+			IdleTimeout:  120 * time.Second,
 		}
 		slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
 		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
@@ -224,8 +285,15 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
+		srv := &http.Server{
+			Addr:         ":" + port,
+			Handler:      wrappedMux,
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 15 * time.Second,
+			IdleTimeout:  120 * time.Second,
+		}
 		slog.Info("listening", "port", port)
-		if err := http.ListenAndServe(":"+port, wrappedMux); err != nil {
+		if err := srv.ListenAndServe(); err != nil {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}

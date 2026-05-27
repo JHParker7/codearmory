@@ -708,6 +708,37 @@ func (invite Invite) List(ctx context.Context, limit, offset int) ([]db, error) 
 	return result, nil
 }
 
+// listInvitesForCaller returns active invites where callerID is the inviter or
+// callerEmail is the invitee. Optional filters narrow the result further.
+func listInvitesForCaller(ctx context.Context, callerID, callerEmail, inviteID, resourceType, resourceID, status string, limit, offset int) ([]db, error) {
+	q := connectRead().WithContext(ctx).
+		Where("active = ? AND (inviter_id = ? OR invitee_email = ?)", true, callerID, callerEmail)
+	if inviteID != "" {
+		q = q.Where("invite_id = ?", inviteID)
+	}
+	if resourceType != "" {
+		q = q.Where("resource_type = ?", resourceType)
+	}
+	if resourceID != "" {
+		q = q.Where("resource_id = ?", resourceID)
+	}
+	if status != "" {
+		q = q.Where("status = ?", status)
+	}
+	if limit > 0 {
+		q = q.Limit(limit).Offset(offset)
+	}
+	var invites []Invite
+	if err := q.Find(&invites).Error; err != nil {
+		return nil, err
+	}
+	result := make([]db, len(invites))
+	for i, inv := range invites {
+		result[i] = inv
+	}
+	return result, nil
+}
+
 // Add inserts the service account.
 func (svc ServiceAccount) Add(ctx context.Context) error {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.service_account.add")

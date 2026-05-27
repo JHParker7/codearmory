@@ -44,11 +44,21 @@ func handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.Int("role.permissions_count", len(req.PermissionsIDs)))
 
 	orgID := req.OrgID
-	if orgID == nil {
-		callerRow, err := (User{UserID: callerID}).Get(ctx)
-		if err == nil {
-			orgID = callerRow.(User).OrgID
-		}
+	callerRow, err := (User{UserID: callerID}).Get(ctx)
+	if err == nil && orgID == nil {
+		orgID = callerRow.(User).OrgID
+	}
+	callerOrgID := (*string)(nil)
+	if err == nil {
+		callerOrgID = callerRow.(User).OrgID
+	}
+
+	// Validate that every supplied permission ID exists and belongs to the caller's org.
+	if err := validatePermissionIDs(ctx, req.PermissionsIDs, callerOrgID); err != nil {
+		span.SetStatus(codes.Error, "invalid permission id")
+		slog.Warn("create role: "+err.Error(), "caller_id", callerID)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	role := Role{RoleID: uuid.New().String(), PermissionsIDs: req.PermissionsIDs, OrgID: orgID, OwnerID: callerID}
@@ -147,8 +157,30 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("role.id", id)))
 
 	role := row.(Role)
+
+	// Validate permission IDs before updating — prevent cross-tenant role poisoning.
+	callerRow, cerr := (User{UserID: callerID}).Get(ctx)
+	var callerOrgID *string
+	if cerr == nil {
+		callerOrgID = callerRow.(User).OrgID
+	}
+	if err := validatePermissionIDs(ctx, req.PermissionsIDs, callerOrgID); err != nil {
+		span.SetStatus(codes.Error, "invalid permission id")
+		slog.Warn("update role: "+err.Error(), "caller_id", callerID, "role_id", id)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	role.PermissionsIDs = req.PermissionsIDs
-	role.OrgID = req.OrgID
+	if req.OrgID != nil {
+		if callerOrgID == nil || *req.OrgID != *callerOrgID {
+			span.SetStatus(codes.Error, "forbidden")
+			slog.Warn("update role: org_id does not match caller's org", "caller_id", callerID, "role_id", id)
+			http.Error(w, "org_id must match caller's org", http.StatusForbidden)
+			return
+		}
+		role.OrgID = req.OrgID
+	}
 	if err := role.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
@@ -196,6 +228,18 @@ func handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("role.id", id)))
+
+	// Refuse deletion while users or teams still reference this role to prevent
+	// access disruption (those users would lose all permissions on next auth check).
+	var userCount, teamCount int64
+	connect().WithContext(ctx).Model(&User{}).Where("role_id = ? AND active = ?", id, true).Count(&userCount)
+	connect().WithContext(ctx).Model(&Team{}).Where("role_id = ? AND active = ?", id, true).Count(&teamCount)
+	if userCount > 0 || teamCount > 0 {
+		span.SetStatus(codes.Error, "role still in use")
+		slog.Warn("delete role: role still referenced", "caller_id", callerID, "role_id", id, "users", userCount, "teams", teamCount)
+		http.Error(w, "role is still assigned to users or teams", http.StatusConflict)
+		return
+	}
 
 	if err := row.(Role).Remove(ctx); err != nil {
 		span.RecordError(err)

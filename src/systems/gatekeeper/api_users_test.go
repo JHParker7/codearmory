@@ -82,7 +82,7 @@ func TestHandleSignup_Success(t *testing.T) {
 }
 
 func TestHandleSignup_MissingEmail(t *testing.T) {
-	b, _ := json.Marshal(signupRequest{Username: "user", Password: "pass"})
+	b, _ := json.Marshal(signupRequest{Username: "user", Password: "testpass1"})
 	r := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewReader(b))
 	w := httptest.NewRecorder()
 	handleSignup(w, r)
@@ -92,7 +92,7 @@ func TestHandleSignup_MissingEmail(t *testing.T) {
 }
 
 func TestHandleSignup_MissingUsername(t *testing.T) {
-	b, _ := json.Marshal(signupRequest{Email: "x@test.com", Password: "pass"})
+	b, _ := json.Marshal(signupRequest{Email: "x@test.com", Password: "testpass1"})
 	r := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewReader(b))
 	w := httptest.NewRecorder()
 	handleSignup(w, r)
@@ -123,7 +123,7 @@ func TestHandleSignup_InvalidBody(t *testing.T) {
 func TestHandleSignup_DuplicateEmail(t *testing.T) {
 	email := uuid.New().String() + "@test.com"
 
-	b1, _ := json.Marshal(signupRequest{Email: email, Username: "user-" + uuid.New().String(), Password: "pass"})
+	b1, _ := json.Marshal(signupRequest{Email: email, Username: "user-" + uuid.New().String(), Password: "testpass1"})
 	r1 := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewReader(b1))
 	w1 := httptest.NewRecorder()
 	handleSignup(w1, r1)
@@ -134,7 +134,7 @@ func TestHandleSignup_DuplicateEmail(t *testing.T) {
 	json.Unmarshal(w1.Body.Bytes(), &resp)
 	t.Cleanup(func() { cleanupSignup(t, resp.UserID) })
 
-	b2, _ := json.Marshal(signupRequest{Email: email, Username: "user-" + uuid.New().String(), Password: "pass"})
+	b2, _ := json.Marshal(signupRequest{Email: email, Username: "user-" + uuid.New().String(), Password: "testpass1"})
 	r2 := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewReader(b2))
 	w2 := httptest.NewRecorder()
 	handleSignup(w2, r2)
@@ -191,7 +191,7 @@ func TestHandleLogin_UserNotFound(t *testing.T) {
 func TestHandleLogin_MissingFields(t *testing.T) {
 	cases := []loginRequest{
 		{Email: "x@test.com"},
-		{Password: "pass"},
+		{Password: "testpass1"},
 		{},
 	}
 	for _, body := range cases {
@@ -647,7 +647,7 @@ func TestHandleSignup_DuplicateUsername(t *testing.T) {
 	b1, _ := json.Marshal(signupRequest{
 		Email:    uuid.New().String() + "@test.com",
 		Username: username,
-		Password: "pass",
+		Password: "testpass1",
 	})
 	r1 := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewReader(b1))
 	w1 := httptest.NewRecorder()
@@ -662,7 +662,7 @@ func TestHandleSignup_DuplicateUsername(t *testing.T) {
 	b2, _ := json.Marshal(signupRequest{
 		Email:    uuid.New().String() + "@test.com",
 		Username: username,
-		Password: "pass",
+		Password: "testpass1",
 	})
 	r2 := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewReader(b2))
 	w2 := httptest.NewRecorder()

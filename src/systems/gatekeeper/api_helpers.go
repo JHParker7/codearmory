@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -165,7 +166,7 @@ func authMiddleware(next http.Handler) http.Handler {
 				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 			}
 			return pubKey, nil
-		})
+		}, jwt.WithIssuer("gatekeeper"), jwt.WithIssuedAt())
 		if err != nil || !verified.Valid {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "token signature invalid")
@@ -470,7 +471,7 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	meterPermissionChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", isAllowed)))
 	slog.Info("check_permissions result", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
-	json.NewEncoder(w).Encode(map[string]bool{"authorized": isAllowed})
+	json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": userID})
 }
 
 // parseECPublicKey decodes a PEM-encoded PKIX public key and asserts it is ECDSA.
@@ -545,6 +546,27 @@ func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, 
 	return nil
 }
 
+// validatePermissionIDs checks that every ID in the list exists as an active
+// Permissions record and, when callerOrgID is non-nil, that each record belongs
+// to the same org as the caller. This prevents role poisoning via cross-tenant
+// permission injection.
+func validatePermissionIDs(ctx context.Context, ids []string, callerOrgID *string) error {
+	for _, id := range ids {
+		row, err := (Permissions{PermissionsID: id}).Get(ctx)
+		if err != nil {
+			return fmt.Errorf("permission %s not found", id)
+		}
+		p := row.(Permissions)
+		// Fail-closed: org-scoped permissions are rejected when the caller has no org
+		// or belongs to a different org. Nil p.OrgID (personal/system permissions)
+		// are always allowed.
+		if p.OrgID != nil && (callerOrgID == nil || *p.OrgID != *callerOrgID) {
+			return fmt.Errorf("permission %s belongs to a different org", id)
+		}
+	}
+	return nil
+}
+
 // writeAudit appends an immutable audit log entry. Failures are logged but
 // never propagate to the caller — a missing audit entry is better than a
 // failed request.
@@ -560,6 +582,59 @@ func writeAudit(ctx context.Context, actorID, actorType, action, resourceID, det
 	if err := entry.Add(ctx); err != nil {
 		slog.Warn("audit log write failed", "action", action, "resource_id", resourceID, "error", err)
 	}
+}
+
+// trustedProxyNets is populated once at startup from TRUSTED_PROXY_CIDRS.
+// When non-empty, realClientIP extracts the IP from X-Forwarded-For after
+// confirming that the immediate peer (r.RemoteAddr) is a trusted proxy.
+var trustedProxyNets []*net.IPNet
+
+func initTrustedProxies() {
+	raw := os.Getenv("TRUSTED_PROXY_CIDRS")
+	for _, cidr := range strings.Split(raw, ",") {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(cidr)
+		if err == nil {
+			trustedProxyNets = append(trustedProxyNets, n)
+		}
+	}
+}
+
+// realClientIP returns the originating client IP. When the immediate peer is a
+// trusted proxy (per TRUSTED_PROXY_CIDRS), the leftmost IP in X-Forwarded-For
+// is used; otherwise r.RemoteAddr is returned directly.
+func realClientIP(r *http.Request) string {
+	peerIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peerIP = r.RemoteAddr
+	}
+	if len(trustedProxyNets) == 0 {
+		return peerIP
+	}
+	peer := net.ParseIP(peerIP)
+	isTrusted := false
+	for _, n := range trustedProxyNets {
+		if n.Contains(peer) {
+			isTrusted = true
+			break
+		}
+	}
+	if !isTrusted {
+		return peerIP
+	}
+	// Extract the leftmost (originating) IP from X-Forwarded-For.
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return peerIP
+	}
+	parts := strings.SplitN(xff, ",", 2)
+	if ip := strings.TrimSpace(parts[0]); ip != "" {
+		return ip
+	}
+	return peerIP
 }
 
 // requireServiceAuth validates the X-Service-Key header (format "name:key") against the
@@ -589,13 +664,12 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 	}
 
 	// IP allowlist: if the service account has allowed CIDRs configured, the
-	// request source IP must fall within one of them.
+	// request source IP must fall within one of them. When TRUSTED_PROXY_CIDRS is
+	// configured, the real client IP is extracted from X-Forwarded-For after
+	// verifying that the immediate peer is a trusted proxy.
 	if len(svc.AllowedCIDRs) > 0 {
-		remoteIP, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			remoteIP = r.RemoteAddr
-		}
-		ip := net.ParseIP(remoteIP)
+		clientIP := realClientIP(r)
+		ip := net.ParseIP(clientIP)
 		allowed := false
 		for _, cidr := range svc.AllowedCIDRs {
 			_, ipNet, err := net.ParseCIDR(cidr)
@@ -605,7 +679,7 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 			}
 		}
 		if !allowed {
-			slog.Warn("service auth rejected: source IP not in allowlist", "service", name, "remote_addr", r.RemoteAddr)
+			slog.Warn("service auth rejected: source IP not in allowlist", "service", name, "client_ip", clientIP)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return ServiceAccount{}, false
 		}

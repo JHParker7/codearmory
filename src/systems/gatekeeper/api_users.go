@@ -143,7 +143,6 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.SetAttributes(
-		attribute.String("new.email", req.Email),
 		attribute.String("new.username", req.Username),
 		attribute.Bool("password.change_requested", req.Password != ""),
 	)
@@ -164,8 +163,16 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	u.Firstname = req.Firstname
 	u.Lastname = req.Lastname
 	if req.Password != "" {
+		if len(req.Password) < 8 {
+			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+			return
+		}
+		if len(req.Password) > 128 {
+			http.Error(w, "password must not exceed 128 characters", http.StatusBadRequest)
+			return
+		}
 		slog.Info("update user: changing password", "caller_id", callerID, "target_user_id", id)
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "bcrypt failure")
@@ -335,14 +342,21 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "email, username, and password are required", http.StatusBadRequest)
 		return
 	}
+	if len(req.Password) < 8 {
+		span.SetStatus(codes.Error, "password too short")
+		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+	if len(req.Password) > 128 {
+		span.SetStatus(codes.Error, "password too long")
+		http.Error(w, "password must not exceed 128 characters", http.StatusBadRequest)
+		return
+	}
 
-	span.SetAttributes(
-		attribute.String("user.email", req.Email),
-		attribute.String("user.username", req.Username),
-	)
-	slog.Info("creating new user", "email", req.Email, "username", req.Username)
+	span.SetAttributes(attribute.String("user.username", req.Username))
+	slog.Info("creating new user", "username", req.Username)
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "bcrypt failure")
@@ -454,7 +468,6 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("user.id", userID))
 	span.AddEvent("user.created", trace.WithAttributes(
 		attribute.String("user.id", userID),
-		attribute.String("user.email", req.Email),
 	))
 	span.SetStatus(codes.Ok, "")
 	meterSignups.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "success")))
@@ -498,13 +511,17 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	span.SetAttributes(attribute.String("user.email", req.Email))
-	slog.Info("attempting login", "email", req.Email)
+	slog.Debug("attempting login")
+
+	// dummyHash is a pre-computed bcrypt hash used to keep the response time
+	// constant whether or not the email exists, preventing user enumeration via timing.
+	const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 
 	var user User
 	if err := connect().WithContext(ctx).Where("email = ? AND active = ?", req.Email, true).First(&user).Error; err != nil {
+		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(req.Password)) //nolint:errcheck
 		span.SetStatus(codes.Error, "user not found")
-		slog.Warn("login failed: user not found or inactive", "email", req.Email)
+		slog.Warn("login failed: user not found or inactive")
 		meterLogins.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "failure")))
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
@@ -531,9 +548,13 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("keypair.generated")
 
 	sessionID := uuid.New().String()
+	const maxTTLHours = 720 // 30 days
 	ttlHours := 24
 	if v := os.Getenv("SESSION_TTL_HOURS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > maxTTLHours {
+				n = maxTTLHours
+			}
 			ttlHours = n
 		}
 	}
@@ -548,6 +569,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	tokenString, err := jwt.NewWithClaims(jwt.SigningMethodES256, authClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "gatekeeper",
 			Subject:   user.UserID,
 			ID:        sessionID,
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
@@ -575,7 +597,6 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	session := Session{
 		SessionID: sessionID,
-		JWT:       tokenString,
 		UserID:    user.UserID,
 		ExpiresAt: expiresAt,
 		PubKey:    string(pubKeyPEM),
@@ -592,7 +613,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	))
 	span.SetStatus(codes.Ok, "")
 	meterLogins.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "success")))
-	slog.Info("login successful", "user_id", user.UserID, "session_id", sessionID, "expires_at", expiresAt)
+	slog.Info("login successful", "user_id", user.UserID, "session_id", sessionID)
 	writeAudit(ctx, user.UserID, "user", "session.create", sessionID, user.Username)
 
 	w.Header().Set("Content-Type", "application/json")

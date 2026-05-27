@@ -56,11 +56,12 @@ type User struct {
 	Active         bool      `gorm:"column:active;default:true"`
 }
 
-// Session holds an active JWT for a User along with the public key used to
-// verify the token signature.
+// Session holds the per-session ECDSA public key used to verify the JWT signature.
+// The JWT itself is never stored — authMiddleware re-validates the signature on
+// each request using the stored PubKey, so retaining the token would be redundant
+// and would expose all active sessions on a database breach.
 type Session struct {
 	SessionID string    `gorm:"column:session_id;primaryKey"`
-	JWT       string    `gorm:"column:jwt"`
 	CreatedAt time.Time `gorm:"column:created_at"`
 	UpdatedAt time.Time `gorm:"column:updated_at"`
 	UserID    string    `gorm:"column:user_id"`

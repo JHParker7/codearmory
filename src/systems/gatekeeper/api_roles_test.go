@@ -14,7 +14,13 @@ import (
 func TestCreateRole_Success(t *testing.T) {
 	actor := createAuthorizedUser(t, "createRole", "gatekeeper/roles")
 
-	b, _ := json.Marshal(roleRequest{PermissionsIDs: []string{"p-1"}})
+	perm := Permissions{PermissionsID: uuid.New().String(), Service: "svc", Actions: []string{"read"}, Resources: []string{"res"}}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+
+	b, _ := json.Marshal(roleRequest{PermissionsIDs: []string{perm.PermissionsID}})
 	r := withUserID(httptest.NewRequest(http.MethodPost, "/roles", bytes.NewReader(b)), actor.UserID)
 	w := httptest.NewRecorder()
 	handleCreateRole(w, r)
@@ -99,14 +105,24 @@ func TestGetRole_Forbidden(t *testing.T) {
 }
 
 func TestUpdateRole_Success(t *testing.T) {
-	role := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{"p-1"}}
+	p1 := Permissions{PermissionsID: uuid.New().String(), Service: "svc", Actions: []string{"read"}, Resources: []string{"res1"}}
+	p2 := Permissions{PermissionsID: uuid.New().String(), Service: "svc", Actions: []string{"write"}, Resources: []string{"res2"}}
+	for _, p := range []Permissions{p1, p2} {
+		if err := p.Add(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		p := p
+		t.Cleanup(func() { p.Remove(context.Background()) })
+	}
+
+	role := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{p1.PermissionsID}}
 	if err := role.Add(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { role.Remove(context.Background()) })
 	actor := createAuthorizedUser(t, "updateRole", "gatekeeper/roles/"+role.RoleID)
 
-	b, _ := json.Marshal(roleRequest{PermissionsIDs: []string{"p-1", "p-2"}})
+	b, _ := json.Marshal(roleRequest{PermissionsIDs: []string{p1.PermissionsID, p2.PermissionsID}})
 	r := withUserID(httptest.NewRequest(http.MethodPut, "/roles/"+role.RoleID, bytes.NewReader(b)), actor.UserID)
 	r.SetPathValue("id", role.RoleID)
 	w := httptest.NewRecorder()
@@ -119,6 +135,26 @@ func TestUpdateRole_Success(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	if len(resp.PermissionsIDs) != 2 {
 		t.Fatalf("expected 2 permissions_ids, got %d", len(resp.PermissionsIDs))
+	}
+}
+
+func TestUpdateRole_OrgIDMustMatchCaller(t *testing.T) {
+	role := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{}}
+	if err := role.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { role.Remove(context.Background()) })
+	actor := createAuthorizedUser(t, "updateRole", "gatekeeper/roles/"+role.RoleID)
+
+	foreignOrgID := uuid.New().String()
+	b, _ := json.Marshal(roleRequest{PermissionsIDs: []string{}, OrgID: &foreignOrgID})
+	r := withUserID(httptest.NewRequest(http.MethodPut, "/roles/"+role.RoleID, bytes.NewReader(b)), actor.UserID)
+	r.SetPathValue("id", role.RoleID)
+	w := httptest.NewRecorder()
+	handleUpdateRole(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when org_id does not match caller's org, got %d", w.Code)
 	}
 }
 

@@ -115,6 +115,7 @@ func makeSession(t *testing.T, userID string, expiresAt time.Time) (string, Sess
 	sessionID := uuid.New().String()
 	tokenStr, err := jwtlib.NewWithClaims(jwtlib.SigningMethodES256, authClaims{
 		RegisteredClaims: jwtlib.RegisteredClaims{
+			Issuer:    "gatekeeper",
 			Subject:   userID,
 			ID:        sessionID,
 			ExpiresAt: jwtlib.NewNumericDate(expiresAt),
@@ -129,7 +130,6 @@ func makeSession(t *testing.T, userID string, expiresAt time.Time) (string, Sess
 
 	s := Session{
 		SessionID: sessionID,
-		JWT:       tokenStr,
 		UserID:    userID,
 		ExpiresAt: expiresAt.UTC().Truncate(time.Second),
 		PubKey:    pubPEM,
@@ -607,11 +607,11 @@ func TestHandleCheckPermissions_NoRole(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var resp map[string]bool
+	var resp map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if resp["authorized"] {
+	if resp["authorized"].(bool) {
 		t.Fatalf("expected authorized:false for user with no role, got %v", resp)
 	}
 }
@@ -654,11 +654,11 @@ func TestHandleCheckPermissions_Authorized(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var resp map[string]bool
+	var resp map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if !resp["authorized"] {
+	if !resp["authorized"].(bool) {
 		t.Fatalf("expected authorized:true, got %v", resp)
 	}
 }
@@ -701,11 +701,11 @@ func TestHandleCheckPermissions_NotAuthorized(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var resp map[string]bool
+	var resp map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if resp["authorized"] {
+	if resp["authorized"].(bool) {
 		t.Fatalf("expected authorized:false, got %v", resp)
 	}
 }
@@ -717,6 +717,65 @@ func TestHandleCheckPermissions_InvalidBody(t *testing.T) {
 	handleCheckPermissions(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// --- validatePermissionIDs ---
+
+func TestValidatePermissionIDs_OrgScopedRejectedForNoOrgCaller(t *testing.T) {
+	orgID := uuid.New().String()
+	perm := Permissions{
+		PermissionsID: uuid.New().String(),
+		Service:       "svc",
+		Actions:       []string{"read"},
+		Resources:     []string{"res"},
+		OrgID:         &orgID,
+	}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+
+	// nil callerOrgID: caller has no org; should be rejected for an org-scoped permission
+	if err := validatePermissionIDs(context.Background(), []string{perm.PermissionsID}, nil); err == nil {
+		t.Fatal("expected error: org-scoped permission should be rejected for a no-org caller")
+	}
+}
+
+func TestValidatePermissionIDs_NilOrgPermAllowedForNoOrgCaller(t *testing.T) {
+	perm := Permissions{
+		PermissionsID: uuid.New().String(),
+		Service:       "svc",
+		Actions:       []string{"read"},
+		Resources:     []string{"res"},
+	}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+
+	if err := validatePermissionIDs(context.Background(), []string{perm.PermissionsID}, nil); err != nil {
+		t.Fatalf("unexpected error: nil-org permission should be allowed for a no-org caller: %v", err)
+	}
+}
+
+func TestValidatePermissionIDs_CrossOrgRejected(t *testing.T) {
+	orgA := uuid.New().String()
+	orgB := uuid.New().String()
+	perm := Permissions{
+		PermissionsID: uuid.New().String(),
+		Service:       "svc",
+		Actions:       []string{"read"},
+		Resources:     []string{"res"},
+		OrgID:         &orgA,
+	}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+
+	if err := validatePermissionIDs(context.Background(), []string{perm.PermissionsID}, &orgB); err == nil {
+		t.Fatal("expected error: permission from org A should be rejected for caller in org B")
 	}
 }
 

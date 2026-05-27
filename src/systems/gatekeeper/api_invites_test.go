@@ -650,18 +650,18 @@ func TestDeclineInvite_NotFound(t *testing.T) {
 // --- handleListInvites ---
 
 func TestListInvites_Success(t *testing.T) {
-	inviter := createTestUser(t)
+	// actor is the inviter so the caller-scoped query returns their own invites
+	actor := createAuthorizedUser(t, "listInvite", "gatekeeper/invites")
 	org := Org{OrgID: uuid.New().String(), OrgName: "list-inv-org"}
 	if err := org.Add(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { org.Remove(context.Background()) })
 
-	makeOrgInvite(t, inviter.UserID, "a@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "pending")
-	makeOrgInvite(t, inviter.UserID, "b@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "pending")
+	makeOrgInvite(t, actor.UserID, "a@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "pending")
+	makeOrgInvite(t, actor.UserID, "b@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "pending")
 
-	actor := createAuthorizedUser(t, "listInvite", "gatekeeper/invites")
-	r := withUserID(httptest.NewRequest(http.MethodGet, "/invites?inviter_id="+inviter.UserID, nil), actor.UserID)
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/invites", nil), actor.UserID)
 	w := httptest.NewRecorder()
 	handleListInvites(w, r)
 
@@ -678,18 +678,17 @@ func TestListInvites_Success(t *testing.T) {
 }
 
 func TestListInvites_FilterByStatus(t *testing.T) {
-	inviter := createTestUser(t)
+	actor := createAuthorizedUser(t, "listInvite", "gatekeeper/invites")
 	org := Org{OrgID: uuid.New().String(), OrgName: "status-inv-org"}
 	if err := org.Add(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { org.Remove(context.Background()) })
 
-	makeOrgInvite(t, inviter.UserID, "a@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "pending")
-	makeOrgInvite(t, inviter.UserID, "b@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "accepted")
+	makeOrgInvite(t, actor.UserID, "a@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "pending")
+	makeOrgInvite(t, actor.UserID, "b@example.com", org.OrgID, time.Now().Add(7*24*time.Hour), "accepted")
 
-	actor := createAuthorizedUser(t, "listInvite", "gatekeeper/invites")
-	r := withUserID(httptest.NewRequest(http.MethodGet, "/invites?inviter_id="+inviter.UserID+"&status=pending", nil), actor.UserID)
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/invites?status=pending", nil), actor.UserID)
 	w := httptest.NewRecorder()
 	handleListInvites(w, r)
 
