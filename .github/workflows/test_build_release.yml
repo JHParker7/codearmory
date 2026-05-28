@@ -114,6 +114,9 @@ jobs:
         run: go build -o "${{ runner.temp }}/armory" .
         working-directory: src/cli
 
+      - name: Export docker socket GID for forge
+        run: echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" >> $GITHUB_ENV
+
       - name: Deploy compose stack
         run: docker compose --profile test build && docker compose up -d --build --wait
         working-directory: infra/local

@@ -63,7 +63,10 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/registry
       ADMIN_KEY: registry-admin-local-secret
       READ_KEY: registry-read-local-secret
-      SERVICES: blueprints=http://blueprints:8081,forge=http://forge:8083
+      SERVICES: blueprints=http://blueprints:8081,forge=http://forge:8083,gatekeeper=http://gatekeeper:8080
+      MANIFEST_FILE: /etc/registry/manifest.json
+    volumes:
+      - ./registry-manifest.json:/etc/registry/manifest.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,7 +101,6 @@ services:
       RUNTIME: docker
       GATEKEEPER_URL: http://gatekeeper:8080
       ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim
-      CONDUCTOR_FORWARD_KEY: forge-conductor-shared-local-secret
       # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: forge-local-secret
       # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
@@ -107,6 +109,10 @@ services:
       # Mount the Docker socket for the local docker runtime.
       # Remove this when deploying to Kubernetes (use RUNTIME=kubernetes instead).
       - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      # Add the host docker group so the svc user can reach the Docker socket.
+      # Set DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) before running compose.
+      - "${DOCKER_GID:?DOCKER_GID must be set to the host docker group GID (stat -c '%g' /var/run/docker.sock)}"
     depends_on:
       postgres:
         condition: service_healthy
