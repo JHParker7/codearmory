@@ -625,11 +625,6 @@ func userKey(r *http.Request) (string, string) {
 	return u + "/" + w, "blueprints/states/" + u + "/" + w
 }
 
-func orgKey(r *http.Request) (string, string) {
-	o, t, w := r.PathValue("org"), r.PathValue("team"), r.PathValue("workspace")
-	return o + "/" + t + "/" + w, "blueprints/" + o + "/states/" + t + "/" + w
-}
-
 // lockUnlock dispatches LOCK/UNLOCK custom methods to their handlers.
 // Go's ServeMux only accepts standard HTTP methods as route prefixes, so LOCK
 // and UNLOCK (WebDAV/Terraform protocol) must be caught by a method-agnostic
@@ -661,7 +656,7 @@ func main() {
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
 
-	otelHandler, shutdown, err := telemetry.Setup(context.Background(), serviceConfig.Name)
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "blueprints")
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
@@ -692,7 +687,7 @@ func main() {
 	// Rotate the gatekeeper service key every 25 minutes so credentials are always
 	// short-lived. GATEKEEPER_SERVICE_KEY must match the key in GATEKEEPER_SERVICES
 	// on gatekeeper. The loop is a no-op if the variable is unset.
-	registry.StartKeyRotation(ctx, gatekeeperURL, serviceConfig.Name,
+	registry.StartKeyRotation(ctx, gatekeeperURL, "blueprints",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	mux := http.NewServeMux()
@@ -711,21 +706,6 @@ func main() {
 		handleDeleteState(w, r, k, res)
 	})
 	mux.HandleFunc("/state/{username}/{workspace}", lockUnlock(userKey))
-
-	// Org-scoped: /{org}/state/{team}/{workspace}
-	mux.HandleFunc("GET /{org}/state/{team}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
-		k, res := orgKey(r)
-		handleGetState(w, r, k, res)
-	})
-	mux.HandleFunc("POST /{org}/state/{team}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
-		k, res := orgKey(r)
-		handleUpdateState(w, r, k, res)
-	})
-	mux.HandleFunc("DELETE /{org}/state/{team}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
-		k, res := orgKey(r)
-		handleDeleteState(w, r, k, res)
-	})
-	mux.HandleFunc("/{org}/state/{team}/{workspace}", lockUnlock(orgKey))
 
 	port := envOrDefault("PORT", "8081")
 

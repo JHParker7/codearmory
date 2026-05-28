@@ -54,16 +54,11 @@
     "forward_auth": true,
     "service_key": "blueprints-registry-local-secret",
     "endpoints": [
-      { "method": "GET",    "path": "/state/{username}/{workspace}",          "action": "getState",    "resource": "blueprints/states/{username}/{workspace}" },
-      { "method": "POST",   "path": "/state/{username}/{workspace}",          "action": "updateState", "resource": "blueprints/states/{username}/{workspace}" },
-      { "method": "DELETE", "path": "/state/{username}/{workspace}",          "action": "deleteState", "resource": "blueprints/states/{username}/{workspace}" },
-      { "method": "LOCK",   "path": "/state/{username}/{workspace}",          "action": "lockState",   "resource": "blueprints/states/{username}/{workspace}" },
-      { "method": "UNLOCK", "path": "/state/{username}/{workspace}",          "action": "unlockState", "resource": "blueprints/states/{username}/{workspace}" },
-      { "method": "GET",    "path": "/{org}/state/{team}/{workspace}",        "action": "getState",    "resource": "blueprints/{org}/states/{team}/{workspace}" },
-      { "method": "POST",   "path": "/{org}/state/{team}/{workspace}",        "action": "updateState", "resource": "blueprints/{org}/states/{team}/{workspace}" },
-      { "method": "DELETE", "path": "/{org}/state/{team}/{workspace}",        "action": "deleteState", "resource": "blueprints/{org}/states/{team}/{workspace}" },
-      { "method": "LOCK",   "path": "/{org}/state/{team}/{workspace}",        "action": "lockState",   "resource": "blueprints/{org}/states/{team}/{workspace}" },
-      { "method": "UNLOCK", "path": "/{org}/state/{team}/{workspace}",        "action": "unlockState", "resource": "blueprints/{org}/states/{team}/{workspace}" }
+      { "method": "GET",    "path": "/state/{username}/{workspace}", "action": "getState",    "resource": "blueprints/states/{username}/{workspace}" },
+      { "method": "POST",   "path": "/state/{username}/{workspace}", "action": "updateState", "resource": "blueprints/states/{username}/{workspace}" },
+      { "method": "DELETE", "path": "/state/{username}/{workspace}", "action": "deleteState", "resource": "blueprints/states/{username}/{workspace}" },
+      { "method": "LOCK",   "path": "/state/{username}/{workspace}", "action": "lockState",   "resource": "blueprints/states/{username}/{workspace}" },
+      { "method": "UNLOCK", "path": "/state/{username}/{workspace}", "action": "unlockState", "resource": "blueprints/states/{username}/{workspace}" }
     ]
   },
   {
