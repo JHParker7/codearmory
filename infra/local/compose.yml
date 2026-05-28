@@ -40,6 +40,10 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
       GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret
+      SIGNUP_RATE_LIMIT: "1000"
+      SIGNUP_RATE_WINDOW: 1h
+      LOGIN_RATE_LIMIT: "1000"
+      LOGIN_RATE_WINDOW: 1h
     depends_on:
       postgres:
         condition: service_healthy
