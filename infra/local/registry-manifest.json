@@ -54,11 +54,11 @@
     "forward_auth": true,
     "service_key": "blueprints-registry-local-secret",
     "endpoints": [
-      { "method": "GET",    "path": "/state/{username}/{workspace}", "action": "getState",    "resource": "states/{username}/{workspace}" },
-      { "method": "POST",   "path": "/state/{username}/{workspace}", "action": "updateState", "resource": "states/{username}/{workspace}" },
-      { "method": "DELETE", "path": "/state/{username}/{workspace}", "action": "deleteState", "resource": "states/{username}/{workspace}" },
-      { "method": "LOCK",   "path": "/state/{username}/{workspace}", "action": "lockState",   "resource": "states/{username}/{workspace}" },
-      { "method": "UNLOCK", "path": "/state/{username}/{workspace}", "action": "unlockState", "resource": "states/{username}/{workspace}" }
+      { "method": "GET",    "path": "/state/{username}/{workspace}", "action": "getState",    "resource": "blueprints/states/{username}/{workspace}" },
+      { "method": "POST",   "path": "/state/{username}/{workspace}", "action": "updateState", "resource": "blueprints/states/{username}/{workspace}" },
+      { "method": "DELETE", "path": "/state/{username}/{workspace}", "action": "deleteState", "resource": "blueprints/states/{username}/{workspace}" },
+      { "method": "LOCK",   "path": "/state/{username}/{workspace}", "action": "lockState",   "resource": "blueprints/states/{username}/{workspace}" },
+      { "method": "UNLOCK", "path": "/state/{username}/{workspace}", "action": "unlockState", "resource": "blueprints/states/{username}/{workspace}" }
     ]
   },
   {

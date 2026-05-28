@@ -394,7 +394,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		PermissionsID: uuid.New().String(),
 		Service:       "blueprints",
 		Actions:       []string{"getState", "updateState", "deleteState", "lockState", "unlockState"},
-		Resources:     []string{fmt.Sprintf("states/%s/*", req.Username)},
+		Resources:     []string{fmt.Sprintf("blueprints/states/%s/*", req.Username)},
 	}
 
 	if err = blueprintsPerm.Add(ctx); err != nil {

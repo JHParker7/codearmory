@@ -90,11 +90,11 @@ terraform {
 
 Blueprints delegates all authorization to Gatekeeper. The required Gatekeeper permission records use `service: "blueprints"`.
 
-Resource paths follow the pattern `states/{username}/{workspace}`. Conductor strips the `/blueprints` prefix before forwarding, so the resource path the backend sees — and that gatekeeper checks against — does not include the service name.
+Resource paths follow the pattern `blueprints/states/{username}/{workspace}`.
 
 Available actions: `getState`, `updateState`, `deleteState`, `lockState`, `unlockState`.
 
-On **signup**, Gatekeeper automatically grants the new user full access to `states/{username}/*`.
+On **signup**, Gatekeeper automatically grants the new user full access to `blueprints/states/{username}/*`.
 
 Example — grant a user full access to their own workspaces:
 
@@ -102,7 +102,7 @@ Example — grant a user full access to their own workspaces:
 {
   "service": "blueprints",
   "actions": ["getState", "updateState", "deleteState", "lockState", "unlockState"],
-  "resources": ["states/alice/*"]
+  "resources": ["blueprints/states/alice/*"]
 }
 ```
 
