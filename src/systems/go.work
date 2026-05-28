@@ -6,6 +6,5 @@ use (
 	./forge
 	./gatekeeper
 	./registry
-	../../../codearmory_sdk
 )
 
