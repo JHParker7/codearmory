@@ -11,7 +11,7 @@ Client
 Conductor :8082
   │
   ├── block list check
-  │     Source IP blocked after 3 post-auth failures? → 403 Forbidden
+  │     Source IP blocked after 10 conductor-level 401s? → 403 Forbidden
   │
   ▼
   lookupEndpoint(method, path)
@@ -39,7 +39,9 @@ Conductor :8082
     │
     └── if conductor rejects the request (401):
           log failure + increment source IP suspect counter
-          → block IP after 5 failures (1 hour)
+          → block IP after 10 failures (1 hour)
+        if conductor accepts the request:
+          reset source IP suspect counter
 ```
 
 Conductor polls the Registry every 30 seconds to refresh its in-memory service and endpoint cache. JWT signature verification is delegated to Gatekeeper via the user-existence call; Conductor never verifies signatures itself. Backend services that declare `forward_auth=true` receive the original `Authorization` header so they can call Gatekeeper for fine-grained permission checks.
@@ -108,7 +110,7 @@ Each registered endpoint declares:
 - **Permission enforcement** — Backend services that need per-resource access control must call Gatekeeper's `POST /check_permissions` themselves, using the forwarded `Authorization` header (set `forward_auth=true` in the registry so Conductor passes it through).
 - **Auth header stripping** — For `forward_auth=false` services, `Authorization` is removed before forwarding so backends cannot replay it against other services. `X-Service-Key`, `X-User-ID`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Real-IP` are always stripped from incoming requests.
 - **Forward signing** — When `CONDUCTOR_FORWARD_KEY` is set, every forwarded request carries `X-Conductor-Token` (HMAC-SHA256 of `conductor:{user_id}:{timestamp}`) and `X-Conductor-Timestamp`. Backend services with `forward_auth=false` can verify these to confirm `X-User-ID` was injected by Conductor and not spoofed. The token window is 30 seconds.
-- **Source IP block list** — If Conductor itself rejects requests from a source IP with 401 (no token, malformed token, or Gatekeeper denies the user) five times, the IP is blocked for one hour. Only conductor-level rejections are counted; backend permission failures are not, since those are expected when a valid user accesses a resource they don't have rights to.
+- **Source IP block list** — If Conductor rejects requests from a source IP with 401 ten times, the IP is blocked for one hour. The counter resets whenever a request from that IP authenticates successfully, so a legitimate user who recovers from a mistake is not penalised. Once an IP is blocked, a subsequent successful request does not unblock it — the full hour must elapse. Only conductor-level rejections count; backend permission failures (403 from the service) do not.
 
 ## Metrics
 
