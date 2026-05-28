@@ -76,11 +76,9 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/blueprints
       GATEKEEPER_URL: http://gatekeeper:8080
       REDIS_URL: redis://redis:6379/1
-      # Generate with: openssl rand -hex 32
-      # Required — blueprints will refuse to start without this key.
-      ENCRYPTION_KEY: 63de148c1b136fb8074e474d80d3c3d436b31caf6da4d55f650d9a9b81caa78a
       # Must match the blueprints entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: blueprints-local-secret
+    entrypoint: ["/bin/sh", "-c", "ENCRYPTION_KEY=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n') exec ./blueprints"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,6 +139,11 @@ services:
     environment:
       API_URL: http://gatekeeper:8080
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gatekeeper
+    depends_on:
+      gatekeeper:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     profiles: [test]
     restart: no
 
@@ -150,6 +153,11 @@ services:
     environment:
       BLUEPRINTS_URL: http://blueprints:8081
       GATEKEEPER_URL: http://gatekeeper:8080
+    depends_on:
+      blueprints:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
     profiles: [test]
     restart: no
 
@@ -160,6 +168,9 @@ services:
       REGISTRY_URL: http://registry:8084
       REGISTRY_ADMIN_KEY: registry-admin-local-secret
       REGISTRY_READ_KEY: registry-read-local-secret
+    depends_on:
+      registry:
+        condition: service_started
     profiles: [test]
     restart: no
 
@@ -169,6 +180,11 @@ services:
     environment:
       CONDUCTOR_URL: http://conductor:8082
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gatekeeper
+    depends_on:
+      conductor:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     profiles: [test]
     restart: no
 
@@ -178,6 +194,11 @@ services:
     environment:
       FORGE_URL: http://forge:8083
       GATEKEEPER_URL: http://gatekeeper:8080
+    depends_on:
+      forge:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
     profiles: [test]
     restart: no
 
