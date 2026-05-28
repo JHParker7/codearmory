@@ -1,6 +1,6 @@
 # Conductor
 
-API gateway that routes authenticated requests to backend services registered in the [Registry](../registry/README.md). Every request passes through user authentication before being forwarded; permission checks use the endpoint manifest registered by each backend service.
+Lightweight API gateway. Conductor acts as an identity filter — it verifies that every caller is a real, active user and then forwards the request to the appropriate backend. Permission checks are the responsibility of each backend service, not Conductor.
 
 ## How it works
 
@@ -10,32 +10,39 @@ Client
   ▼
 Conductor :8082
   │
-  └── all requests
-        │
-        ▼
-      lookupEndpoint(method, path)
-        │  Match against registered endpoint manifests (from Registry cache)
-        │  → 404 if no match
-        │
-        ▼
-      auth check (skipped for public endpoints)
-        │  POST /check_permissions on Gatekeeper with the caller's Bearer token
-        │     • 200 + authorized:true → proceed, extract user_id from response
-        │     • 401 → 401 Unauthorized
-        │     • anything else → 403 Forbidden
-        │
-        ▼
-      header rewrite
-        │  Strip: Authorization (unless forward_auth=true), X-Service-Key,
-        │         X-User-ID, X-Forwarded-Host, X-Forwarded-Proto, X-Real-IP
-        │  Inject: X-User-ID (authenticated), X-Forwarded-For (client IP)
-        │  If CONDUCTOR_FORWARD_KEY set: inject X-Conductor-Token HMAC + X-Conductor-Timestamp
-        │
-        ▼
-      reverse proxy → backend service
+  ├── block list check
+  │     Source IP blocked after 3 post-auth failures? → 403 Forbidden
+  │
+  ▼
+  lookupEndpoint(method, path)
+    │  Match against registered endpoint manifests (from Registry cache)
+    │  → 404 if no match
+    │
+    ▼
+  user auth (skipped for public endpoints)
+    │  1. Decode JWT payload → extract user_id (sub claim)
+    │  2. GET /users/{id} on Gatekeeper with the caller's Bearer token
+    │        Gatekeeper verifies the JWT signature here
+    │     • 200 → user exists and token is valid; proceed
+    │     • 401 → 401 Unauthorized
+    │     • anything else → 403 Forbidden
+    │
+    ▼
+  header rewrite
+    │  Strip: Authorization (unless forward_auth=true), X-Service-Key,
+    │         X-User-ID, X-Forwarded-Host, X-Forwarded-Proto, X-Real-IP
+    │  Inject: X-User-ID (authenticated user_id), X-Forwarded-For (client IP)
+    │  If CONDUCTOR_FORWARD_KEY set: inject X-Conductor-Token HMAC + X-Conductor-Timestamp
+    │
+    ▼
+  reverse proxy → backend service
+    │
+    └── if service returns 401 after conductor auth passed:
+          log failure + increment source IP suspect counter
+          → block IP after 3 failures (1 hour)
 ```
 
-Conductor polls the Registry every 30 seconds to refresh its in-memory service and endpoint cache. Auth headers (`Authorization`, `X-Service-Key`) are stripped before forwarding to backend services. For the Forge execution service, Conductor signs the `X-User-ID` header with an HMAC-SHA256 token so Forge can verify the request came from Conductor.
+Conductor polls the Registry every 30 seconds to refresh its in-memory service and endpoint cache. JWT signature verification is delegated to Gatekeeper via the user-existence call; Conductor never verifies signatures itself. Backend services that declare `forward_auth=true` receive the original `Authorization` header so they can call Gatekeeper for fine-grained permission checks.
 
 ## Requirements
 
@@ -85,32 +92,28 @@ docker run -p 8082:8082 \
 
 Conductor routes requests dynamically based on the endpoint manifests registered by each backend service. On startup and every 30 seconds, it fetches the current service list from the Registry and builds a reverse proxy per service.
 
-Two endpoints bypass the service registry and are handled statically:
-
-| Path | Backend | Auth |
-|---|---|---|
-| `POST /signup` | Gatekeeper | None |
-| `POST /login` | Gatekeeper | None |
-
-All other requests are matched against registered endpoint patterns. If no match is found, conductor returns `404 Not Found`.
+All requests are matched against registered endpoint patterns. If no match is found, conductor returns `404 Not Found`. If a path matches a registered service prefix but no specific endpoint within that service, conductor returns `404 Not Found` (not 503 — the service is reachable, the path just isn't registered).
 
 ### Endpoint matching
 
 Each registered endpoint declares:
 - `method` — HTTP method (`GET`, `POST`, etc.)
 - `path` — path pattern (supports `{param}` placeholders compiled to regexps)
-- `action` + `resource` — the Gatekeeper permission required
-- `public` — whether to skip the permission check (auth still required unless the path is also listed as an anonymous bypass)
+- `action` + `resource` — the permission the backend service will check with Gatekeeper
+- `public` — if `true`, conductor forwards the request without any user auth check
 
 ## Security
 
-- **Auth header stripping** — `Authorization` and `X-Service-Key` headers are removed from requests before forwarding to backend services. Backends must not trust these headers from conductor.
-- **Forward signing** — When `CONDUCTOR_FORWARD_KEY` is set, every forwarded request carries `X-Conductor-Token` (HMAC-SHA256 of `user_id:timestamp`) and `X-Conductor-Timestamp`. Backend services that set `forward_auth=false` can verify these headers to confirm `X-User-ID` was injected by Conductor and has not been tampered with. The token window is 30 seconds.
-- **Permission enforcement** — Every non-public endpoint is permission-checked against Gatekeeper before the request reaches the backend. The action and resource are taken from the registered endpoint manifest, not from the request itself.
+- **Identity filter** — Conductor's auth check confirms the user exists and the JWT is valid by calling Gatekeeper's `GET /users/{id}`. It does not evaluate permissions; that is the backend service's responsibility.
+- **Permission enforcement** — Backend services that need per-resource access control must call Gatekeeper's `POST /check_permissions` themselves, using the forwarded `Authorization` header (set `forward_auth=true` in the registry so Conductor passes it through).
+- **Auth header stripping** — For `forward_auth=false` services, `Authorization` is removed before forwarding so backends cannot replay it against other services. `X-Service-Key`, `X-User-ID`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Real-IP` are always stripped from incoming requests.
+- **Forward signing** — When `CONDUCTOR_FORWARD_KEY` is set, every forwarded request carries `X-Conductor-Token` (HMAC-SHA256 of `conductor:{user_id}:{timestamp}`) and `X-Conductor-Timestamp`. Backend services with `forward_auth=false` can verify these to confirm `X-User-ID` was injected by Conductor and not spoofed. The token window is 30 seconds.
+- **Source IP block list** — If a source IP's requests pass Conductor's user-auth check but are then rejected by the backend with 401 three times, the IP is blocked for one hour. This catches replay attacks and token-forgery probes that slip past the user-existence filter.
 
 ## Metrics
 
 | Metric | Description |
 |---|---|
 | `conductor.requests.allowed.total` | Requests that passed the user-existence check |
-| `conductor.requests.rejected.total` | Requests rejected, labelled by `reason`: `no_token`, `unauthorized`, `forbidden`, `gatekeeper_error` |
+| `conductor.requests.rejected.total` | Requests rejected by the user-existence check, labelled by `reason`: `no_token`, `malformed_token`, `unauthorized`, `user_not_found`, `gatekeeper_error` |
+| `conductor.ips.blocked.total` | Source IPs added to the block list, labelled by `source_ip` |
