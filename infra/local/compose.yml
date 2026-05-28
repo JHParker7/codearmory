@@ -126,5 +126,51 @@ services:
         condition: service_started
     restart: on-failure
 
+  gatekeeper-integration-tests:
+    build:
+      context: ../../tests/gatekeeper
+    environment:
+      API_URL: http://gatekeeper:8080
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gatekeeper
+    profiles: [test]
+    restart: no
+
+  blueprints-integration-tests:
+    build:
+      context: ../../tests/blueprints
+    environment:
+      BLUEPRINTS_URL: http://blueprints:8081
+      GATEKEEPER_URL: http://gatekeeper:8080
+    profiles: [test]
+    restart: no
+
+  registry-integration-tests:
+    build:
+      context: ../../tests/registry
+    environment:
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_ADMIN_KEY: registry-admin-local-secret
+      REGISTRY_READ_KEY: registry-read-local-secret
+    profiles: [test]
+    restart: no
+
+  conductor-integration-tests:
+    build:
+      context: ../../tests/conductor
+    environment:
+      CONDUCTOR_URL: http://conductor:8082
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gatekeeper
+    profiles: [test]
+    restart: no
+
+  forge-integration-tests:
+    build:
+      context: ../../tests/forge
+    environment:
+      FORGE_URL: http://forge:8083
+      GATEKEEPER_URL: http://gatekeeper:8080
+    profiles: [test]
+    restart: no
+
 volumes:
   postgres_data:
