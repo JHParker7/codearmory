@@ -622,7 +622,7 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 
 func userKey(r *http.Request) (string, string) {
 	u, w := r.PathValue("username"), r.PathValue("workspace")
-	return u + "/" + w, "blueprints/states/" + u + "/" + w
+	return u + "/" + w, "states/" + u + "/" + w
 }
 
 // lockUnlock dispatches LOCK/UNLOCK custom methods to their handlers.

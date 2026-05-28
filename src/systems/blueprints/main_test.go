@@ -107,8 +107,8 @@ func TestUserKey(t *testing.T) {
 	if k != "alice/dev" {
 		t.Fatalf("workspace key: got %q, want %q", k, "alice/dev")
 	}
-	if res != "blueprints/states/alice/dev" {
-		t.Fatalf("resource: got %q, want %q", res, "blueprints/states/alice/dev")
+	if res != "states/alice/dev" {
+		t.Fatalf("resource: got %q, want %q", res, "states/alice/dev")
 	}
 }
 

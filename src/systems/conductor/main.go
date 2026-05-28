@@ -686,12 +686,10 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 
 // handleServiceProxy is the universal handler. It uses hybrid routing:
 //  1. If the first path segment is a registered service name, strip it and look
-//     up the remaining path within that service's endpoints. Returns 503 if the
+//     up the remaining path within that service's endpoints. Returns 404 if the
 //     service is registered but the specific endpoint is not found.
 //  2. Otherwise, try matching the full path against all registered endpoints.
 //     Returns 404 if no match is found.
-//
-// For non-public endpoints, RBAC is enforced via Gatekeeper before forwarding.
 func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	if ip := sourceIP(r); isBlocked(ip) {
 		slog.Warn("request rejected: source IP is blocked", "source_ip", ip, "path", r.URL.Path)
