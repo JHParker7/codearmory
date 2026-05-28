@@ -1,15 +1,14 @@
 """Integration tests for conductor's request routing.
 
-Conductor routes based on path:
-  - POST /signup, POST /login        → Gatekeeper (no auth check)
-  - /state/{username}/{workspace}    → Blueprints (after user check)
-  - /{org}/state/{team}/{workspace}  → Blueprints (after user check)
-  - everything else                  → Gatekeeper (after user check)
+Conductor routes based on path prefix:
+  - POST /signup, POST /login            → Gatekeeper (no auth check)
+  - /blueprints/state/{username}/{...}   → Blueprints (after user-existence check)
+  - /forge/executions/{...}              → Forge (after user-existence check)
+  - /gatekeeper/{...} or bare paths      → Gatekeeper (after user-existence check)
 
-Routing is verified by inspecting the response shape. Gatekeeper returns a
-JSON body with resource-specific fields (/users → user_id, etc.) and returns
-404 for unknown paths. Blueprints has no /users route and returns 403 for
-state paths where the caller lacks a blueprints permission.
+The service name is stripped before forwarding, so /blueprints/state/alice/dev
+becomes /state/alice/dev when it reaches Blueprints. Permission checks are
+performed by each backend, not by conductor.
 """
 
 import uuid
@@ -40,20 +39,6 @@ class TestGatekeeperRouting:
         body = resp.json()
         assert "user_id" in body
         assert "username" in body
-
-    def test_check_permissions_returns_authorized_field(self, base_url, token, new_user):
-        """POST /check_permissions → Gatekeeper; response contains authorized."""
-        resp = requests.post(
-            f"{base_url}/check_permissions",
-            json={
-                "service": "gatekeeper",
-                "resource": f"gatekeeper/users/{new_user['user_id']}",
-                "action": "getUser",
-            },
-            headers=bearer(token),
-        )
-        assert resp.status_code == 200
-        assert resp.json()["authorized"] is True
 
     def test_unknown_path_returns_gatekeeper_404(self, base_url, token):
         """An unregistered path is forwarded to Gatekeeper, which returns 404."""
@@ -88,10 +73,9 @@ class TestGatekeeperRouting:
 # ---------------------------------------------------------------------------
 # Blueprints routes
 # ---------------------------------------------------------------------------
-# These tests require Blueprints to be running. Blueprints checks permissions
-# via Gatekeeper and returns 403 when the caller lacks blueprints/* permissions.
-# Gatekeeper has no /state/ routes and would return 404, so a 403 here confirms
-# the request reached Blueprints.
+# These tests require Blueprints to be running. Blueprints calls Gatekeeper for
+# permission checks and returns 403 when the caller lacks the required permission.
+# Conductor strips the /blueprints prefix before forwarding.
 
 
 class TestBlueprintsRouting:
@@ -107,14 +91,6 @@ class TestBlueprintsRouting:
             headers=bearer(token),
         )
         assert resp.status_code != 404
-
-    def test_org_scoped_state_reaches_blueprints(self, base_url, token):
-        """/{org}/state/{team}/{workspace} is routed to Blueprints."""
-        resp = requests.get(
-            f"{base_url}/acme/state/platform/prod",
-            headers=bearer(token),
-        )
-        assert resp.status_code == 403
 
     def test_deep_user_scoped_path_reaches_blueprints(self, base_url, token, new_user):
         resp = requests.get(

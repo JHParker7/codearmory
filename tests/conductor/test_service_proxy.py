@@ -1,12 +1,12 @@
 """Integration tests for conductor's dynamic service proxy.
 
-Conductor has a /{path...} catch-all route that:
-  1. Extracts the first path segment as the service name.
-  2. Looks up the service URL in the registry.
-  3. Calls GET /check_permissions on gatekeeper before forwarding.
-  4. Returns 503 if the service is not registered.
-  5. Returns 403 if the permission check fails.
-  6. Forwards the request (and response) to the upstream service.
+Conductor routes /{service}/{path} requests by:
+  1. Extracting the first path segment as the service name.
+  2. Looking up the service URL in the registry cache (refreshed every 30s).
+  3. Verifying the caller is a real user via GET /users/{id} on Gatekeeper.
+  4. Stripping the service prefix and forwarding the remaining path to the backend.
+  5. Each backend is responsible for its own permission checks via Gatekeeper.
+  6. Returns 404 if the service or endpoint is not registered.
 
 Registry is pre-seeded (infra/local/compose.yml) with:
   - "blueprints" → http://blueprints:8081
