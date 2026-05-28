@@ -922,13 +922,22 @@ class TestRole:
         assert resp.status_code == 200
 
     def test_update_permissions_ids_reflected(self, base_url, admin_token, role):
-        fake_pid = rand_id()
-        resp = requests.put(
-            f"{base_url}/roles/{role['role_id']}",
-            json={"permissions_ids": [fake_pid]},
+        perm = requests.post(
+            f"{base_url}/permissions",
+            json={"service": "forge"},
             headers=bearer(admin_token["token"]),
         )
-        assert fake_pid in resp.json()["permissions_ids"]
+        assert perm.status_code == 201
+        pid = perm.json()["permissions_id"]
+
+        resp = requests.put(
+            f"{base_url}/roles/{role['role_id']}",
+            json={"permissions_ids": [pid]},
+            headers=bearer(admin_token["token"]),
+        )
+        assert pid in resp.json()["permissions_ids"]
+
+        requests.delete(f"{base_url}/permissions/{pid}", headers=bearer(admin_token["token"]))
 
     def test_update_nonexistent_returns_404(self, base_url, admin_token):
         fake_id = rand_id()
@@ -974,7 +983,7 @@ class TestPermissions:
     def perm(self, base_url, admin_token):
         resp = requests.post(
             f"{base_url}/permissions",
-            json={"service": "test-svc", "actions": ["read"], "resources": ["res"]},
+            json={"service": "forge", "actions": ["read"], "resources": ["res"]},
             headers=bearer(admin_token["token"]),
         )
         assert resp.status_code == 201
@@ -989,7 +998,7 @@ class TestPermissions:
     def test_create_returns_201(self, base_url, admin_token):
         resp = requests.post(
             f"{base_url}/permissions",
-            json={"service": "svc", "actions": ["read"], "resources": ["res"]},
+            json={"service": "forge", "actions": ["read"], "resources": ["res"]},
             headers=bearer(admin_token["token"]),
         )
         assert resp.status_code == 201
@@ -1002,7 +1011,7 @@ class TestPermissions:
     def test_create_returns_permissions_id(self, base_url, admin_token):
         resp = requests.post(
             f"{base_url}/permissions",
-            json={"service": "svc"},
+            json={"service": "forge"},
             headers=bearer(admin_token["token"]),
         )
         pid = resp.json().get("permissions_id")
@@ -1047,7 +1056,7 @@ class TestPermissions:
     def test_update_returns_200(self, base_url, admin_token, perm):
         resp = requests.put(
             f"{base_url}/permissions/{perm['permissions_id']}",
-            json={"service": "updated-svc", "actions": ["write"], "resources": ["res"]},
+            json={"service": "forge", "actions": ["write"], "resources": ["res"]},
             headers=bearer(admin_token["token"]),
         )
         assert resp.status_code == 200
@@ -1056,14 +1065,14 @@ class TestPermissions:
         resp = requests.put(
             f"{base_url}/permissions/{perm['permissions_id']}",
             json={
-                "service": "new-svc",
+                "service": "blueprints",
                 "actions": ["read", "write"],
                 "resources": ["res"],
             },
             headers=bearer(admin_token["token"]),
         )
         body = resp.json()
-        assert body["service"] == "new-svc"
+        assert body["service"] == "blueprints"
         assert "write" in body["actions"]
 
     def test_update_missing_service_returns_400(self, base_url, admin_token, perm):
@@ -1079,7 +1088,7 @@ class TestPermissions:
 
         resp = requests.put(
             f"{base_url}/permissions/{fake_id}",
-            json={"service": "svc"},
+            json={"service": "forge"},
             headers=bearer(admin_token["token"]),
         )
         assert resp.status_code == 404
@@ -1087,7 +1096,7 @@ class TestPermissions:
     def test_delete_returns_204(self, base_url, admin_token):
         resp = requests.post(
             f"{base_url}/permissions",
-            json={"service": "del-svc"},
+            json={"service": "forge"},
             headers=bearer(admin_token["token"]),
         )
         pid = resp.json()["permissions_id"]
@@ -1099,7 +1108,7 @@ class TestPermissions:
     def test_deleted_permissions_returns_404_on_get(self, base_url, admin_token):
         resp = requests.post(
             f"{base_url}/permissions",
-            json={"service": "del-404-svc"},
+            json={"service": "forge"},
             headers=bearer(admin_token["token"]),
         )
         pid = resp.json()["permissions_id"]

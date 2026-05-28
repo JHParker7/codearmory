@@ -112,14 +112,14 @@ class TestLoginInvalidCredentials:
 
 class TestAuthMiddleware:
     def test_no_authorization_header_returns_401(self, base_url):
-        resp = requests.get(
+        resp = requests.post(
             f"{base_url}/check_permissions",
             json={"service": "svc", "resource": "res", "action": "act"},
         )
         assert resp.status_code == 401
 
     def test_malformed_bearer_returns_401(self, base_url):
-        resp = requests.get(
+        resp = requests.post(
             f"{base_url}/check_permissions",
             json={"service": "svc", "resource": "res", "action": "act"},
             headers={"Authorization": "notbearer"},
@@ -127,7 +127,7 @@ class TestAuthMiddleware:
         assert resp.status_code == 401
 
     def test_invalid_token_returns_401(self, base_url):
-        resp = requests.get(
+        resp = requests.post(
             f"{base_url}/check_permissions",
             json={"service": "svc", "resource": "res", "action": "act"},
             headers={"Authorization": "Bearer invalidtoken"},
@@ -135,7 +135,7 @@ class TestAuthMiddleware:
         assert resp.status_code == 401
 
     def test_valid_token_returns_200(self, base_url, token):
-        resp = requests.get(
+        resp = requests.post(
             f"{base_url}/check_permissions",
             json={"service": "svc", "resource": "res", "action": "act"},
             headers={"Authorization": f"Bearer {token}"},
@@ -143,7 +143,7 @@ class TestAuthMiddleware:
         assert resp.status_code == 200
 
     def test_response_contains_authorized_field(self, base_url, token):
-        resp = requests.get(
+        resp = requests.post(
             f"{base_url}/check_permissions",
             json={"service": "svc", "resource": "res", "action": "act"},
             headers={"Authorization": f"Bearer {token}"},
@@ -154,7 +154,7 @@ class TestAuthMiddleware:
 
 class TestCheckPermissions:
     def test_invalid_body_returns_400(self, base_url, token):
-        resp = requests.get(
+        resp = requests.post(
             f"{base_url}/check_permissions",
             data="not json",
             headers={
@@ -165,7 +165,7 @@ class TestCheckPermissions:
         assert resp.status_code == 400
 
     def test_nonmatching_service_returns_authorized_false(self, base_url, token):
-        resp = requests.get(
+        resp = requests.post(
             f"{base_url}/check_permissions",
             json={"service": "unknown", "resource": "unknown", "action": "unknown"},
             headers={"Authorization": f"Bearer {token}"},
@@ -176,7 +176,7 @@ class TestCheckPermissions:
     def test_matching_permission_returns_authorized_true(
         self, base_url, token, new_user
     ):
-        resp = requests.get(
+        resp = requests.post(
             f"{base_url}/check_permissions",
             json={
                 "service": "gatekeeper",
@@ -189,7 +189,7 @@ class TestCheckPermissions:
         assert resp.json()["authorized"] is True
 
     def test_content_type_is_json(self, base_url, token):
-        resp = requests.get(
+        resp = requests.post(
             f"{base_url}/check_permissions",
             json={"service": "svc", "resource": "res", "action": "act"},
             headers={"Authorization": f"Bearer {token}"},

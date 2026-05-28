@@ -49,6 +49,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: on-failure
 
   registry:
@@ -82,7 +87,7 @@ services:
       redis:
         condition: service_healthy
       gatekeeper:
-        condition: service_started
+        condition: service_healthy
       registry:
         condition: service_started
     restart: on-failure
@@ -108,7 +113,7 @@ services:
       postgres:
         condition: service_healthy
       gatekeeper:
-        condition: service_started
+        condition: service_healthy
       registry:
         condition: service_started
     restart: on-failure
@@ -125,7 +130,7 @@ services:
       - "8082:8082"
     depends_on:
       gatekeeper:
-        condition: service_started
+        condition: service_healthy
       registry:
         condition: service_started
     restart: on-failure
