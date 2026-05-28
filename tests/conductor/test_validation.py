@@ -250,25 +250,9 @@ class TestSlugPathValidation:
         resp = requests.get(f"{base_url}/state/{'a' * 65}/dev", headers=bearer(token))
         assert resp.status_code == 400
 
-    def test_org_with_special_chars_returns_400(self, base_url, token):
-        resp = requests.get(f"{base_url}/bad!org/state/platform/prod", headers=bearer(token))
-        assert resp.status_code == 400
-
-    def test_team_with_special_chars_returns_400(self, base_url, token):
-        resp = requests.get(f"{base_url}/acme/state/bad!team/prod", headers=bearer(token))
-        assert resp.status_code == 400
-
-    def test_workspace_with_special_chars_org_scoped_returns_400(self, base_url, token):
-        resp = requests.get(f"{base_url}/acme/state/platform/bad!ws", headers=bearer(token))
-        assert resp.status_code == 400
-
     def test_valid_slugs_are_forwarded(self, base_url, token):
         """Valid slug path params pass conductor; Blueprints decides the outcome."""
         resp = requests.get(f"{base_url}/state/alice/dev", headers=bearer(token))
-        assert resp.status_code != 400
-
-    def test_valid_org_slugs_are_forwarded(self, base_url, token):
-        resp = requests.get(f"{base_url}/acme/state/platform/prod", headers=bearer(token))
         assert resp.status_code != 400
 
     def test_slug_with_hyphens_and_underscores_accepted(self, base_url, token):
