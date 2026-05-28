@@ -277,7 +277,7 @@ func checkUserAuth(r *http.Request) (authOutcome, string) {
 	case resp.StatusCode == http.StatusUnauthorized:
 		span.SetStatus(codes.Error, "unauthorized")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "unauthorized")))
-		return authUnauthorized, ""
+		return authUnauthorized, userID
 	case resp.StatusCode >= 500:
 		span.SetStatus(codes.Error, "gatekeeper error")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "gatekeeper_error")))
@@ -306,6 +306,8 @@ var (
 	blockedIPs  = map[string]time.Time{}
 )
 
+func suspectKey(ip, userID string) string { return ip + "::" + userID }
+
 // sourceIP returns the immediate peer IP from r.RemoteAddr, stripping the port.
 func sourceIP(r *http.Request) string {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -315,51 +317,56 @@ func sourceIP(r *http.Request) string {
 	return ip
 }
 
-// isBlocked reports whether ip is on the block list and has not yet expired.
-func isBlocked(ip string) bool {
+// isBlocked reports whether the (ip, userID) pair is on the block list and has
+// not yet expired.
+func isBlocked(ip, userID string) bool {
+	key := suspectKey(ip, userID)
 	suspectMu.Lock()
 	defer suspectMu.Unlock()
-	until, ok := blockedIPs[ip]
+	until, ok := blockedIPs[key]
 	if !ok {
 		return false
 	}
 	if time.Now().After(until) {
-		delete(blockedIPs, ip)
-		delete(suspectHits, ip)
+		delete(blockedIPs, key)
+		delete(suspectHits, key)
 		return false
 	}
 	return true
 }
 
-// resetSuspect clears the failure counter for ip on a successful authentication,
-// so legitimate users who recover from a mistake are not penalised.
-func resetSuspect(ip string) {
+// resetSuspect clears the failure counter for (ip, userID) on a successful
+// authentication, so legitimate users who recover from a mistake are not penalised.
+func resetSuspect(ip, userID string) {
 	suspectMu.Lock()
 	defer suspectMu.Unlock()
-	delete(suspectHits, ip)
+	delete(suspectHits, suspectKey(ip, userID))
 }
 
-// recordSuspect logs a post-auth failure (user passed conductor's filter but was
-// rejected by the backend service) and blocks the source IP after suspectThreshold
-// failures.
+// recordSuspect logs an auth failure for a real credential and blocks the
+// (ip, userID) pair after suspectThreshold failures. Only called when a
+// well-formed JWT was presented so missing/malformed tokens don't count.
 func recordSuspect(ip, userID, method, path string) {
+	key := suspectKey(ip, userID)
 	suspectMu.Lock()
 	defer suspectMu.Unlock()
-	if _, already := blockedIPs[ip]; already {
+	if _, already := blockedIPs[key]; already {
 		return
 	}
-	suspectHits[ip]++
-	n := suspectHits[ip]
+	suspectHits[key]++
+	n := suspectHits[key]
 	slog.Warn("user passed conductor auth but failed service validation",
 		"source_ip", ip, "user_id", userID,
 		"method", method, "path", path, "failure_count", n)
 	if n >= suspectThreshold {
 		until := time.Now().Add(blockDuration)
-		blockedIPs[ip] = until
-		slog.Warn("source IP added to block list",
+		blockedIPs[key] = until
+		slog.Warn("(IP, userID) pair added to block list",
 			"source_ip", ip, "user_id", userID, "blocked_until", until)
 		meterBlocked.Add(context.Background(), 1,
-			metric.WithAttributes(attribute.String("source_ip", ip)))
+			metric.WithAttributes(
+				attribute.String("source_ip", ip),
+				attribute.String("user_id", userID)))
 	}
 }
 
@@ -632,14 +639,16 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		outcome, userID = checkUserAuth(r)
 		switch outcome {
 		case authUnauthorized:
-			recordSuspect(sourceIP(r), userID, r.Method, r.URL.Path)
+			if userID != "" {
+				recordSuspect(sourceIP(r), userID, r.Method, r.URL.Path)
+			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		case authForbidden:
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		default:
-			resetSuspect(sourceIP(r))
+			resetSuspect(sourceIP(r), userID)
 		}
 	}
 
@@ -691,10 +700,19 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 //  2. Otherwise, try matching the full path against all registered endpoints.
 //     Returns 404 if no match is found.
 func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
-	if ip := sourceIP(r); isBlocked(ip) {
-		slog.Warn("request rejected: source IP is blocked", "source_ip", ip, "path", r.URL.Path)
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+	ip := sourceIP(r)
+	// Decode (but don't verify) the JWT to enable the per-(IP, userID) block
+	// check before paying routing / auth cost. Missing or malformed tokens skip
+	// the check — they'll be rejected by checkUserAuth anyway.
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		if uid, ok := getUserID(strings.TrimPrefix(auth, "Bearer ")); ok {
+			if isBlocked(ip, uid) {
+				slog.Warn("request rejected: (IP, userID) pair is blocked",
+					"source_ip", ip, "user_id", uid, "path", r.URL.Path)
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
 	}
 
 	path := r.URL.Path

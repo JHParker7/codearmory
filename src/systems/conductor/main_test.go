@@ -258,77 +258,80 @@ func TestCheckUserAuth_Unauthorized_GatekeeperRejects(t *testing.T) {
 // ── block list ────────────────────────────────────────────────────────────────
 
 func TestBlockList_NotBlockedInitially(t *testing.T) {
-	if isBlocked("1.2.3.4") {
-		t.Fatal("IP should not be blocked before any failures")
+	if isBlocked("1.2.3.4", testUUID) {
+		t.Fatal("(IP, userID) pair should not be blocked before any failures")
 	}
 }
 
 func TestBlockList_BlocksAfterThreshold(t *testing.T) {
 	ip := "10.0.0.1"
+	key := suspectKey(ip, testUUID)
 	// Reset state before test.
 	suspectMu.Lock()
-	delete(suspectHits, ip)
-	delete(blockedIPs, ip)
+	delete(suspectHits, key)
+	delete(blockedIPs, key)
 	suspectMu.Unlock()
 
 	for i := 0; i < suspectThreshold; i++ {
 		recordSuspect(ip, testUUID, http.MethodGet, "/secret")
 	}
-	if !isBlocked(ip) {
-		t.Fatalf("IP should be blocked after %d failures", suspectThreshold)
+	if !isBlocked(ip, testUUID) {
+		t.Fatalf("(IP, userID) pair should be blocked after %d failures", suspectThreshold)
 	}
 
 	// Clean up.
 	suspectMu.Lock()
-	delete(suspectHits, ip)
-	delete(blockedIPs, ip)
+	delete(suspectHits, key)
+	delete(blockedIPs, key)
 	suspectMu.Unlock()
 }
 
 func TestBlockList_NotBlockedBelowThreshold(t *testing.T) {
 	ip := "10.0.0.2"
+	key := suspectKey(ip, testUUID)
 	suspectMu.Lock()
-	delete(suspectHits, ip)
-	delete(blockedIPs, ip)
+	delete(suspectHits, key)
+	delete(blockedIPs, key)
 	suspectMu.Unlock()
 
 	for i := 0; i < suspectThreshold-1; i++ {
 		recordSuspect(ip, testUUID, http.MethodGet, "/secret")
 	}
-	if isBlocked(ip) {
-		t.Fatalf("IP should not be blocked after only %d failures", suspectThreshold-1)
+	if isBlocked(ip, testUUID) {
+		t.Fatalf("(IP, userID) pair should not be blocked after only %d failures", suspectThreshold-1)
 	}
 
 	suspectMu.Lock()
-	delete(suspectHits, ip)
-	delete(blockedIPs, ip)
+	delete(suspectHits, key)
+	delete(blockedIPs, key)
 	suspectMu.Unlock()
 }
 
 func TestBlockList_ResetClearsCounter(t *testing.T) {
 	ip := "10.0.0.3"
+	key := suspectKey(ip, testUUID)
 	suspectMu.Lock()
-	delete(suspectHits, ip)
-	delete(blockedIPs, ip)
+	delete(suspectHits, key)
+	delete(blockedIPs, key)
 	suspectMu.Unlock()
 
 	// Accumulate failures below the threshold.
 	for i := 0; i < suspectThreshold-1; i++ {
 		recordSuspect(ip, testUUID, http.MethodGet, "/secret")
 	}
-	resetSuspect(ip)
+	resetSuspect(ip, testUUID)
 
 	// After a reset, the full threshold must be reached again before blocking.
 	for i := 0; i < suspectThreshold-1; i++ {
 		recordSuspect(ip, testUUID, http.MethodGet, "/secret")
 	}
-	if isBlocked(ip) {
-		t.Fatal("IP should not be blocked: counter was reset by a successful auth")
+	if isBlocked(ip, testUUID) {
+		t.Fatal("(IP, userID) pair should not be blocked: counter was reset by a successful auth")
 	}
 
 	suspectMu.Lock()
-	delete(suspectHits, ip)
-	delete(blockedIPs, ip)
+	delete(suspectHits, key)
+	delete(blockedIPs, key)
 	suspectMu.Unlock()
 }
 
