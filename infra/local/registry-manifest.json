@@ -8,7 +8,6 @@
     "endpoints": [
       { "method": "POST",   "path": "/signup",                               "action": "signup",            "resource": "gatekeeper/users",            "public": true  },
       { "method": "POST",   "path": "/login",                                "action": "login",             "resource": "gatekeeper/users",            "public": true  },
-      { "method": "POST",   "path": "/check_permissions",                    "action": "checkPermissions",  "resource": "gatekeeper/permissions",      "public": true  },
       { "method": "GET",    "path": "/users",                                "action": "listUser",          "resource": "gatekeeper/users"             },
       { "method": "GET",    "path": "/users/{id}",                           "action": "getUser",           "resource": "gatekeeper/users/{id}"        },
       { "method": "PUT",    "path": "/users/{id}",                           "action": "updateUser",        "resource": "gatekeeper/users/{id}"        },
