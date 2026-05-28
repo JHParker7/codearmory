@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -378,7 +379,7 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
-		if id, _ := lockObj["ID"].(string); id != lockID {
+		if id, _ := lockObj["ID"].(string); subtle.ConstantTimeCompare([]byte(id), []byte(lockID)) != 1 {
 			slog.Warn("state update rejected: lock id mismatch", "workspace", workspaceKey)
 			span.SetStatus(codes.Error, "lock id mismatch")
 			w.Header().Set("Content-Type", "application/json")

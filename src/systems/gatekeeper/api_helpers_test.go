@@ -10,8 +10,10 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -1033,6 +1035,135 @@ func TestCheckPermissions_ActionPrefixWildcard(t *testing.T) {
 	}
 	if ok2 {
 		t.Fatal("expected false: action prefix wildcard 'get*' should not match 'deleteUser'")
+	}
+}
+
+func TestCheckPermissions_PrefixWildcardNoSlashIsNotWildcard(t *testing.T) {
+	// "blueprints/states*" must NOT be treated as a prefix wildcard — the "*" is
+	// only meaningful when preceded by "/" to prevent overmatch against sibling paths.
+	u := makePermUser(t, "svc", []string{"read"}, []string{"blueprints/states*"})
+
+	// The exact stored value "blueprints/states*" should not match "blueprints/states/mystate"
+	// via prefix logic; it can only match as an exact resource string.
+	ok, err := checkPermissions(context.Background(), u.UserID, "svc", "read", "blueprints/states/mystate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("expected false: 'blueprints/states*' without '/' before '*' must not prefix-match 'blueprints/states/mystate'")
+	}
+}
+
+func TestCheckPermissions_PrefixWildcardExactPrefixNoMatch(t *testing.T) {
+	// "blueprints/states/*" should NOT match the bare prefix "blueprints/states" itself
+	// (no trailing slash) — only paths strictly under it.
+	u := makePermUser(t, "svc", []string{"read"}, []string{"blueprints/states/*"})
+
+	ok, err := checkPermissions(context.Background(), u.UserID, "svc", "read", "blueprints/states")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("expected false: 'blueprints/states/*' should not match bare 'blueprints/states'")
+	}
+}
+
+func TestCheckPermissions_PrefixWildcardSiblingNoMatch(t *testing.T) {
+	// "blueprints/states/*" must not match "blueprints/states_admin/foo" even though
+	// the old (buggy) HasPrefix("blueprints/states/") logic would match it.
+	u := makePermUser(t, "svc", []string{"read"}, []string{"blueprints/states/*"})
+
+	ok, err := checkPermissions(context.Background(), u.UserID, "svc", "read", "blueprints/states_admin/foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("expected false: 'blueprints/states/*' must not match sibling path 'blueprints/states_admin/foo'")
+	}
+}
+
+// --- realClientIP and rate limiter proxy-awareness ---
+
+func TestRealClientIP_NoTrustedProxies(t *testing.T) {
+	orig := trustedProxyNets
+	t.Cleanup(func() { trustedProxyNets = orig })
+	trustedProxyNets = nil
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "1.2.3.4:5678"
+	r.Header.Set("X-Forwarded-For", "9.9.9.9")
+	if got := realClientIP(r); got != "1.2.3.4" {
+		t.Fatalf("expected RemoteAddr when no trusted proxies, got %q", got)
+	}
+}
+
+func TestRealClientIP_TrustedProxyUsesXFF(t *testing.T) {
+	orig := trustedProxyNets
+	t.Cleanup(func() { trustedProxyNets = orig })
+	_, proxyNet, _ := net.ParseCIDR("127.0.0.1/32")
+	trustedProxyNets = []*net.IPNet{proxyNet}
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:9999"
+	r.Header.Set("X-Forwarded-For", "203.0.113.7")
+	if got := realClientIP(r); got != "203.0.113.7" {
+		t.Fatalf("expected XFF IP from trusted proxy, got %q", got)
+	}
+}
+
+func TestRealClientIP_UntrustedPeerIgnoresXFF(t *testing.T) {
+	orig := trustedProxyNets
+	t.Cleanup(func() { trustedProxyNets = orig })
+	_, proxyNet, _ := net.ParseCIDR("10.0.0.0/8")
+	trustedProxyNets = []*net.IPNet{proxyNet}
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "1.2.3.4:5678" // not in trusted CIDR
+	r.Header.Set("X-Forwarded-For", "9.9.9.9")
+	if got := realClientIP(r); got != "1.2.3.4" {
+		t.Fatalf("expected RemoteAddr for untrusted peer, got %q", got)
+	}
+}
+
+func TestRateLimitMiddleware_RespectsTrustedProxy(t *testing.T) {
+	// Two distinct clients (different XFF IPs) behind the same trusted proxy
+	// must be rate-limited independently. Without using realClientIP they would
+	// share the same bucket (the proxy's RemoteAddr) and the second client's
+	// first request would be rejected after the first client fills the bucket.
+	orig := trustedProxyNets
+	t.Cleanup(func() { trustedProxyNets = orig })
+	_, proxyNet, _ := net.ParseCIDR("127.0.0.1/32")
+	trustedProxyNets = []*net.IPNet{proxyNet}
+
+	var limiterMap sync.Map
+	h := rateLimitMiddleware("test", &limiterMap, 2, time.Minute,
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	doReq := func(xff string) int {
+		r := httptest.NewRequest("POST", "/login", nil)
+		r.RemoteAddr = "127.0.0.1:12345"
+		r.Header.Set("X-Forwarded-For", xff)
+		w := httptest.NewRecorder()
+		h(w, r)
+		return w.Code
+	}
+
+	// Client A exhausts its bucket (2 requests).
+	if c := doReq("10.0.0.1"); c != http.StatusOK {
+		t.Fatalf("A req1: want 200, got %d", c)
+	}
+	if c := doReq("10.0.0.1"); c != http.StatusOK {
+		t.Fatalf("A req2: want 200, got %d", c)
+	}
+
+	// Client B is a different IP — its bucket is untouched, so this must succeed.
+	if c := doReq("10.0.0.2"); c != http.StatusOK {
+		t.Fatalf("B req1: want 200 (separate bucket), got %d", c)
+	}
+
+	// Client A is now over-limit.
+	if c := doReq("10.0.0.1"); c != http.StatusTooManyRequests {
+		t.Fatalf("A req3: want 429, got %d", c)
 	}
 }
 

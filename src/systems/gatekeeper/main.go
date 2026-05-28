@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,10 +35,7 @@ type ipBucket struct {
 // the in-memory limiterMap when Redis is not configured.
 func rateLimitMiddleware(endpoint string, limiterMap *sync.Map, maxAttempts int, window time.Duration, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr
-		}
+		ip := realClientIP(r)
 		var allowed bool
 		if redisClient != nil {
 			allowed = redisRateLimit(r.Context(), endpoint, ip, maxAttempts, window)
