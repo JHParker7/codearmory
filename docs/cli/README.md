@@ -1,6 +1,6 @@
 # Armory CLI
 
-Command-line client for the CodeArmory platform. All commands talk to [Conductor](../conductor/README.md), which routes requests to Gatekeeper and Blueprints.
+Command-line client for the CodeArmory platform. All commands talk to [Conductor](../conductor/README.md), which verifies the caller's identity and routes requests to the appropriate backend service.
 
 ## Installation
 
