@@ -296,7 +296,7 @@ func checkUserAuth(r *http.Request) (authOutcome, string) {
 // ── Suspicious-activity block list ───────────────────────────────────────────
 
 const (
-	suspectThreshold = 3
+	suspectThreshold = 10
 	blockDuration    = time.Hour
 )
 
@@ -329,6 +329,14 @@ func isBlocked(ip string) bool {
 		return false
 	}
 	return true
+}
+
+// resetSuspect clears the failure counter for ip on a successful authentication,
+// so legitimate users who recover from a mistake are not penalised.
+func resetSuspect(ip string) {
+	suspectMu.Lock()
+	defer suspectMu.Unlock()
+	delete(suspectHits, ip)
 }
 
 // recordSuspect logs a post-auth failure (user passed conductor's filter but was
@@ -624,11 +632,14 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		outcome, userID = checkUserAuth(r)
 		switch outcome {
 		case authUnauthorized:
+			recordSuspect(sourceIP(r), userID, r.Method, r.URL.Path)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		case authForbidden:
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
+		default:
+			resetSuspect(sourceIP(r))
 		}
 	}
 
@@ -670,14 +681,7 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		r2.Header.Del("Authorization")
 	}
 
-	// Capture the backend response status. A 401 from a service after conductor
-	// successfully authenticated the user means the user_id passed our filter but
-	// was rejected by deeper service validation — track these for block-list purposes.
-	rw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
-	svc.proxy.ServeHTTP(rw, r2)
-	if rw.status == http.StatusUnauthorized && userID != "" {
-		recordSuspect(sourceIP(r), userID, r.Method, r.URL.Path)
-	}
+	svc.proxy.ServeHTTP(w, r2)
 }
 
 // handleServiceProxy is the universal handler. It uses hybrid routing:

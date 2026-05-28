@@ -305,6 +305,33 @@ func TestBlockList_NotBlockedBelowThreshold(t *testing.T) {
 	suspectMu.Unlock()
 }
 
+func TestBlockList_ResetClearsCounter(t *testing.T) {
+	ip := "10.0.0.3"
+	suspectMu.Lock()
+	delete(suspectHits, ip)
+	delete(blockedIPs, ip)
+	suspectMu.Unlock()
+
+	// Accumulate failures below the threshold.
+	for i := 0; i < suspectThreshold-1; i++ {
+		recordSuspect(ip, testUUID, http.MethodGet, "/secret")
+	}
+	resetSuspect(ip)
+
+	// After a reset, the full threshold must be reached again before blocking.
+	for i := 0; i < suspectThreshold-1; i++ {
+		recordSuspect(ip, testUUID, http.MethodGet, "/secret")
+	}
+	if isBlocked(ip) {
+		t.Fatal("IP should not be blocked: counter was reset by a successful auth")
+	}
+
+	suspectMu.Lock()
+	delete(suspectHits, ip)
+	delete(blockedIPs, ip)
+	suspectMu.Unlock()
+}
+
 // ── handleServiceProxy ────────────────────────────────────────────────────────
 
 // mockBackend returns a test server that responds 200 OK.
