@@ -7,7 +7,9 @@ import (
 	"io"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 )
@@ -37,6 +39,18 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 	envList := make([]string, 0, len(exec.Env))
 	for k, v := range exec.Env {
 		envList = append(envList, k+"="+v)
+	}
+
+	if _, err := r.client.ImageInspect(ctx, exec.Image); err != nil {
+		if !cerrdefs.IsNotFound(err) {
+			return RunResult{}, fmt.Errorf("image inspect: %w", err)
+		}
+		reader, pullErr := r.client.ImagePull(ctx, exec.Image, image.PullOptions{})
+		if pullErr != nil {
+			return RunResult{}, fmt.Errorf("image pull: %w", pullErr)
+		}
+		io.Copy(io.Discard, reader)
+		reader.Close()
 	}
 
 	resp, err := r.client.ContainerCreate(ctx,
