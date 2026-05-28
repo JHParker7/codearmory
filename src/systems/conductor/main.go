@@ -94,10 +94,11 @@ type serviceState struct {
 	forwardAuth bool // whether to forward the caller's Authorization header
 }
 
+// routingMu protects both servicesMap and endpointsList under a single lock so
+// readers always see a consistent pair — updates swap both atomically.
 var (
-	servicesMu    sync.RWMutex
+	routingMu     sync.RWMutex
 	servicesMap   = map[string]serviceState{}
-	endpointsMu   sync.RWMutex
 	endpointsList []endpointEntry
 )
 
@@ -164,8 +165,8 @@ func resolveResource(template string, paramNames, paramValues []string) string {
 // lookupEndpointFull finds the best matching endpoint for method+path across all
 // services, and returns any captured path-param values.
 func lookupEndpointFull(method, path string) (endpointEntry, []string, bool) {
-	endpointsMu.RLock()
-	defer endpointsMu.RUnlock()
+	routingMu.RLock()
+	defer routingMu.RUnlock()
 	for _, e := range endpointsList {
 		if e.method != method {
 			continue
@@ -179,8 +180,8 @@ func lookupEndpointFull(method, path string) (endpointEntry, []string, bool) {
 
 // lookupEndpointForService finds a matching endpoint restricted to a specific service.
 func lookupEndpointForService(method, path, service string) (endpointEntry, []string, bool) {
-	endpointsMu.RLock()
-	defer endpointsMu.RUnlock()
+	routingMu.RLock()
+	defer routingMu.RUnlock()
 	for _, e := range endpointsList {
 		if e.serviceName != service || e.method != method {
 			continue
@@ -330,12 +331,12 @@ func refreshServiceCache(ctx context.Context) {
 		return
 	}
 
-	servicesMu.RLock()
+	routingMu.RLock()
 	oldServices := make(map[string]serviceState, len(servicesMap))
 	for k, v := range servicesMap {
 		oldServices[k] = v
 	}
-	servicesMu.RUnlock()
+	routingMu.RUnlock()
 
 	newServices := make(map[string]serviceState, len(svcs))
 	var newEndpoints []endpointEntry
@@ -379,13 +380,10 @@ func refreshServiceCache(ctx context.Context) {
 		}
 	}
 
-	servicesMu.Lock()
+	routingMu.Lock()
 	servicesMap = newServices
-	servicesMu.Unlock()
-
-	endpointsMu.Lock()
 	endpointsList = newEndpoints
-	endpointsMu.Unlock()
+	routingMu.Unlock()
 }
 
 // compilePathPattern converts a path template such as /users/{id} into a
@@ -406,8 +404,8 @@ func compilePathPattern(pattern string) *regexp.Regexp {
 // lookupEndpoint finds the registered endpoint for method+path across all
 // services. Returns the entry and true on match, zero value and false otherwise.
 func lookupEndpoint(method, path string) (endpointEntry, bool) {
-	endpointsMu.RLock()
-	defer endpointsMu.RUnlock()
+	routingMu.RLock()
+	defer routingMu.RUnlock()
 	for _, e := range endpointsList {
 		if e.method == method && e.pattern.MatchString(path) {
 			return e, true
@@ -530,9 +528,9 @@ func validateSignupBody(body []byte) error {
 // auth/RBAC, and forwards to the backend. strippedPath is the path to forward
 // (may differ from r.URL.Path when a service-name prefix was stripped).
 func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, paramValues []string, strippedPath string) {
-	servicesMu.RLock()
+	routingMu.RLock()
 	svc, ok := servicesMap[entry.serviceName]
-	servicesMu.RUnlock()
+	routingMu.RUnlock()
 	if !ok {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
@@ -634,14 +632,14 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 		svcName := trimmed[:slashIdx]
 		restPath := path[slashIdx+1:] // e.g. /state/alice/dev
 
-		servicesMu.RLock()
+		routingMu.RLock()
 		_, svcRegistered := servicesMap[svcName]
-		servicesMu.RUnlock()
+		routingMu.RUnlock()
 
 		if svcRegistered {
 			entry, paramVals, ok := lookupEndpointForService(r.Method, restPath, svcName)
 			if !ok {
-				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+				http.NotFound(w, r)
 				return
 			}
 			routeAndProxy(w, r, entry, paramVals, restPath)
@@ -688,9 +686,9 @@ func main() {
 	// Warm the service cache, retrying until the registry is reachable.
 	for {
 		refreshServiceCache(ctx)
-		servicesMu.RLock()
+		routingMu.RLock()
 		populated := len(servicesMap) > 0
-		servicesMu.RUnlock()
+		routingMu.RUnlock()
 		if populated {
 			break
 		}

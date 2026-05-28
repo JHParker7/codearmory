@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Service struct {
@@ -57,6 +58,19 @@ type serviceWithEndpoints struct {
 
 // resolveHost is the DNS lookup used by validateServiceURL. Tests can replace it.
 var resolveHost = net.LookupHost
+
+// hashServiceKey bcrypt-hashes a plaintext service key for storage.
+// Returns an empty string and no error when key is empty (no key configured).
+func hashServiceKey(key string) (string, error) {
+	if key == "" {
+		return "", nil
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(key), 12)
+	if err != nil {
+		return "", err
+	}
+	return string(h), nil
+}
 
 // checkKey does a constant-time comparison against a configured API key so the
 // check is not vulnerable to timing-based enumeration.
@@ -127,12 +141,14 @@ func validateServiceURL(rawURL string) error {
 	}
 
 	// Hostname — resolve and validate every returned address to prevent DNS-based
-	// SSRF (e.g. a public domain resolving to 169.254.169.254). If the hostname
-	// can't be resolved at registration time (e.g. internal .local names in
-	// Docker), allow it — an unresolvable host can't be reached for SSRF.
+	// SSRF (e.g. a public domain resolving to 169.254.169.254). Fail closed: if
+	// the hostname can't be resolved we reject it rather than allow it, since an
+	// unresolvable name today could resolve to a private address tomorrow.
+	// Internal service URLs (e.g. Docker service names) should be pre-seeded via
+	// SERVICES env var or MANIFEST_FILE, which bypass this validation.
 	addrs, err := resolveHost(host)
 	if err != nil {
-		return nil
+		return fmt.Errorf("hostname %q could not be resolved: %w", host, err)
 	}
 	for _, addr := range addrs {
 		ip := net.ParseIP(addr)
@@ -239,11 +255,18 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	hashedKey, err := hashServiceKey(req.ServiceKey)
+	if err != nil {
+		slog.Error("create service: hash key", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
 	id := uuid.New().String()
-	_, err := pool.Exec(r.Context(),
+	_, err = pool.Exec(r.Context(),
 		`INSERT INTO services (service_id, name, url, description, forward_auth, service_key)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		id, req.Name, req.URL, req.Description, req.ForwardAuth, req.ServiceKey)
+		id, req.Name, req.URL, req.Description, req.ForwardAuth, hashedKey)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -304,7 +327,7 @@ func handleServiceRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if subtle.ConstantTimeCompare([]byte(req.ServiceKey), []byte(storedKey)) != 1 {
+	if err := bcrypt.CompareHashAndPassword([]byte(storedKey), []byte(req.ServiceKey)); err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

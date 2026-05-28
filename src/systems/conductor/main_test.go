@@ -34,28 +34,28 @@ func withGatekeeperURL(t *testing.T, u string) {
 // withEndpoints replaces the global endpointsList for the duration of the test.
 func withEndpoints(t *testing.T, entries []endpointEntry) {
 	t.Helper()
-	endpointsMu.Lock()
+	routingMu.Lock()
 	orig := endpointsList
 	endpointsList = entries
-	endpointsMu.Unlock()
+	routingMu.Unlock()
 	t.Cleanup(func() {
-		endpointsMu.Lock()
+		routingMu.Lock()
 		endpointsList = orig
-		endpointsMu.Unlock()
+		routingMu.Unlock()
 	})
 }
 
 // withServices replaces the global servicesMap for the duration of the test.
 func withServices(t *testing.T, services map[string]serviceState) {
 	t.Helper()
-	servicesMu.Lock()
+	routingMu.Lock()
 	orig := servicesMap
 	servicesMap = services
-	servicesMu.Unlock()
+	routingMu.Unlock()
 	t.Cleanup(func() {
-		servicesMu.Lock()
+		routingMu.Lock()
 		servicesMap = orig
-		servicesMu.Unlock()
+		routingMu.Unlock()
 	})
 }
 

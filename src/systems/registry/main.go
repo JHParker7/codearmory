@@ -73,15 +73,21 @@ func loadManifest(ctx context.Context, path string) {
 		return
 	}
 	for _, e := range entries {
+		hashedKey, err := hashServiceKey(e.ServiceKey)
+		if err != nil {
+			slog.Error("manifest: failed to hash service key", "name", e.Name, "error", err)
+			continue
+		}
+
 		var serviceID string
-		err := pool.QueryRow(ctx, `SELECT service_id FROM services WHERE name = $1`, e.Name).Scan(&serviceID)
+		err = pool.QueryRow(ctx, `SELECT service_id FROM services WHERE name = $1`, e.Name).Scan(&serviceID)
 		if err != nil {
 			// Service doesn't exist: insert it.
 			serviceID = uuid.New().String()
 			if _, err := pool.Exec(ctx,
 				`INSERT INTO services (service_id, name, url, description, forward_auth, service_key)
 				 VALUES ($1, $2, $3, $4, $5, $6)`,
-				serviceID, e.Name, e.URL, e.Description, e.ForwardAuth, e.ServiceKey); err != nil {
+				serviceID, e.Name, e.URL, e.Description, e.ForwardAuth, hashedKey); err != nil {
 				slog.Error("manifest: failed to insert service", "name", e.Name, "error", err)
 				continue
 			}
@@ -90,7 +96,7 @@ func loadManifest(ctx context.Context, path string) {
 			// Service exists: update URL, description, and service_key.
 			if _, err := pool.Exec(ctx,
 				`UPDATE services SET url = $1, description = $2, forward_auth = $3, service_key = $4, active = true, updated_at = now() WHERE service_id = $5`,
-				e.URL, e.Description, e.ForwardAuth, e.ServiceKey, serviceID); err != nil {
+				e.URL, e.Description, e.ForwardAuth, hashedKey, serviceID); err != nil {
 				slog.Error("manifest: failed to update service", "name", e.Name, "error", err)
 				continue
 			}

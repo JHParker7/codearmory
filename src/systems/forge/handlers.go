@@ -40,7 +40,7 @@ func validateEnvKeys(env map[string]string) error {
 		if !envKeyRe.MatchString(k) {
 			return fmt.Errorf("invalid env key %q: must match [A-Za-z_][A-Za-z0-9_]*", k)
 		}
-		if blockedEnvKeys[k] {
+		if blockedEnvKeys[strings.ToUpper(k)] {
 			return fmt.Errorf("env key %q is not permitted", k)
 		}
 	}
@@ -131,6 +131,12 @@ func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return "", false
+	}
+	if resp.StatusCode >= 500 {
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		slog.Error("forge: gatekeeper unavailable", "status", resp.StatusCode)
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return "", false
 	}
 

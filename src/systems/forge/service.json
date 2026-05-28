@@ -12,9 +12,9 @@
     }
   ],
   "endpoints": [
-    { "method": "POST",   "path": "/executions",      "action": "createExecution", "resource": "executions", "description": "Submit a new code execution" },
-    { "method": "GET",    "path": "/executions",      "action": "listExecution",   "resource": "executions", "description": "List executions" },
-    { "method": "GET",    "path": "/executions/{id}", "action": "getExecution",    "resource": "executions", "description": "Get an execution by ID" },
-    { "method": "DELETE", "path": "/executions/{id}", "action": "deleteExecution", "resource": "executions", "description": "Cancel or delete an execution" }
+    { "method": "POST",   "path": "/executions",      "action": "createExecution", "resource": "forge/executions", "description": "Submit a new code execution" },
+    { "method": "GET",    "path": "/executions",      "action": "listExecution",   "resource": "forge/executions", "description": "List executions" },
+    { "method": "GET",    "path": "/executions/{id}", "action": "getExecution",    "resource": "forge/executions", "description": "Get an execution by ID" },
+    { "method": "DELETE", "path": "/executions/{id}", "action": "deleteExecution", "resource": "forge/executions", "description": "Cancel or delete an execution" }
   ]
 }
