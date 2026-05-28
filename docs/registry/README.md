@@ -6,8 +6,7 @@ Service discovery and endpoint registry. Stores the URL, routing metadata, and e
 
 ```
 Services (blueprints, forge, …)
-  │  On startup: POST /services/register (self-registration with service_key)
-  │  (or seed via SERVICES env var / MANIFEST_FILE / admin API)
+  │  Registered via SERVICES env var, MANIFEST_FILE, or admin API
   │
   ▼
 Registry :8084
@@ -80,7 +79,6 @@ Pass the key as `Authorization: Bearer <key>`.
 |--------|------|------|-------------|
 | `GET` | `/services` | Read | List all active services with their endpoint manifests |
 | `POST` | `/services` | Admin | Register a new service |
-| `POST` | `/services/register` | Service key | Self-registration: update URL and replace endpoint manifest |
 | `DELETE` | `/services/{id}` | Admin | Soft-delete a service |
 | `PUT` | `/services/{id}/endpoints` | Admin | Replace the endpoint manifest for a service |
 
@@ -106,33 +104,6 @@ curl -X POST http://registry:8084/services \
 | `url` | string | Yes | Base URL of the service. Must use `http` or `https`; loopback, link-local, and RFC-1918 addresses are rejected. |
 | `description` | string | No | Human-readable description |
 | `forward_auth` | bool | No | If `true`, Conductor forwards the caller's `Authorization` header to the backend. If `false` (default), Conductor strips the bearer token and injects `X-User-ID` instead. |
-| `service_key` | string | No | Plaintext key the service uses to authenticate self-registration requests (`POST /services/register`). Stored as a bcrypt hash; the plaintext is never retained. |
-
-### Service self-registration
-
-Services call this endpoint at startup to update their URL and push their endpoint manifest. Authentication uses the service's own key (set when the service was created via `POST /services`), not the admin key.
-
-```bash
-curl -X POST http://registry:8084/services/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "inventory",
-    "service_key": "your-service-key",
-    "url": "http://inventory:8085",
-    "endpoints": [
-      {
-        "method": "GET",
-        "path": "/items",
-        "action": "listItem",
-        "resource": "inventory/items",
-        "public": false
-      }
-    ]
-  }'
-```
-
-`url` is optional — omit it to update only the endpoint manifest without changing the service URL. This call replaces the entire endpoint manifest for the service.
-
 ### Update endpoint manifest
 
 The endpoint manifest tells Conductor which HTTP method/path combinations are valid and what Gatekeeper permission to check for each.

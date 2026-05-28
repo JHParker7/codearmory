@@ -115,7 +115,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	otelHandler, shutdown, err := telemetry.Setup(context.Background(), serviceConfig.Name)
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "forge")
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
@@ -148,7 +148,7 @@ func main() {
 
 	// Rotate the gatekeeper service key every 25 minutes. GATEKEEPER_SERVICE_KEY
 	// must match the key in GATEKEEPER_SERVICES on gatekeeper. No-op if unset.
-	registry.StartKeyRotation(ctx, gatekeeperURL, serviceConfig.Name,
+	registry.StartKeyRotation(ctx, gatekeeperURL, "forge",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	workers := newWorkerPool(db, rt)

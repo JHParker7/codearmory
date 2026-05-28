@@ -254,7 +254,7 @@ func main() {
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
 
-	otelHandler, shutdown, err := telemetry.Setup(context.Background(), serviceConfig.Name)
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "gatekeeper")
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {

@@ -174,7 +174,6 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /services", handleListServices)
 	mux.HandleFunc("POST /services", handleCreateService)
-	mux.HandleFunc("POST /services/register", handleServiceRegister)
 	mux.HandleFunc("DELETE /services/{id}", handleDeleteService)
 	mux.HandleFunc("PUT /services/{id}/endpoints", handleUpdateServiceEndpoints)
 
