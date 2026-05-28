@@ -64,10 +64,6 @@ docker run -p 8081:8081 \
 
 ## API
 
-Blueprints supports two workspace scoping modes:
-
-### User-scoped workspaces
-
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/state/{username}/{workspace}` | Fetch state (204 if none exists) |
@@ -76,19 +72,7 @@ Blueprints supports two workspace scoping modes:
 | `LOCK` | `/state/{username}/{workspace}` | Acquire workspace lock |
 | `UNLOCK` | `/state/{username}/{workspace}` | Release workspace lock |
 
-### Org-scoped workspaces
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/{org}/state/{team}/{workspace}` | Fetch state (204 if none exists) |
-| `POST` | `/{org}/state/{team}/{workspace}` | Store/update state |
-| `DELETE` | `/{org}/state/{team}/{workspace}` | Delete state |
-| `LOCK` | `/{org}/state/{team}/{workspace}` | Acquire workspace lock |
-| `UNLOCK` | `/{org}/state/{team}/{workspace}` | Release workspace lock |
-
 ## Terraform configuration
-
-### User-scoped
 
 ```hcl
 terraform {
@@ -102,33 +86,15 @@ terraform {
 }
 ```
 
-### Org-scoped
-
-```hcl
-terraform {
-  backend "http" {
-    address        = "http://blueprints:8081/acme/state/platform/prod"
-    lock_address   = "http://blueprints:8081/acme/state/platform/prod"
-    unlock_address = "http://blueprints:8081/acme/state/platform/prod"
-    username       = "alice@example.com"
-    password       = "your-password"
-  }
-}
-```
-
 ## Permissions
 
 Blueprints delegates all authorization to Gatekeeper. The required Gatekeeper permission records use `service: "blueprints"`.
 
-Resource paths follow the pattern:
-- User-scoped: `blueprints/states/{username}/{workspace}`
-- Org-scoped: `blueprints/{org}/states/{team}/{workspace}`
+Resource paths follow the pattern `blueprints/states/{username}/{workspace}`.
 
 Available actions: `getState`, `updateState`, `deleteState`, `lockState`, `unlockState`.
 
-Permissions are granted automatically by Gatekeeper:
-- On **signup**: full access to `blueprints/states/{username}/*`
-- On **org creation**: full access to `blueprints/{org}/states/*` for the org owner
+On **signup**, Gatekeeper automatically grants the new user full access to `blueprints/states/{username}/*`.
 
 Example — grant a user full access to their own workspaces:
 
