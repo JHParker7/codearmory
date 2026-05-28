@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -151,17 +152,6 @@ func parseParamNames(pattern string) []string {
 	return names
 }
 
-// resolveResource substitutes captured path param values into a resource template.
-func resolveResource(template string, paramNames, paramValues []string) string {
-	r := template
-	for i, name := range paramNames {
-		if i < len(paramValues) {
-			r = strings.ReplaceAll(r, "{"+name+"}", paramValues[i])
-		}
-	}
-	return r
-}
-
 // lookupEndpointFull finds the best matching endpoint for method+path across all
 // services, and returns any captured path-param values.
 func lookupEndpointFull(method, path string) (endpointEntry, []string, bool) {
@@ -220,11 +210,34 @@ const (
 	authForbidden
 )
 
-// checkAuth forwards the caller's Bearer token to Gatekeeper's POST /check_permissions
-// endpoint and interprets the response. Returns the outcome and, on success, the
-// authenticated user ID extracted from Gatekeeper's response body.
-func checkAuth(r *http.Request, service, action, resource string) (authOutcome, string) {
-	ctx, span := otel.Tracer("conductor").Start(r.Context(), "checkAuth")
+// getUserID decodes the JWT payload (without signature verification — that
+// happens inside Gatekeeper when we call GET /users/{id}) and returns the sub
+// claim, which Gatekeeper sets to the user's UUID.
+func getUserID(token string) (string, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", false
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Sub == "" {
+		return "", false
+	}
+	return canonicalUUID(claims.Sub)
+}
+
+// checkUserAuth verifies that the caller has a valid, active account.
+// It decodes the JWT locally to extract the user ID, then calls Gatekeeper's
+// GET /users/{id} endpoint — which performs full JWT signature verification —
+// to confirm the user exists and the token is genuine.
+// Permission checking is left to each backend service.
+func checkUserAuth(r *http.Request) (authOutcome, string) {
+	ctx, span := otel.Tracer("conductor").Start(r.Context(), "checkUserAuth")
 	defer span.End()
 
 	auth := r.Header.Get("Authorization")
@@ -234,19 +247,22 @@ func checkAuth(r *http.Request, service, action, resource string) (authOutcome, 
 		return authUnauthorized, ""
 	}
 
-	body, _ := json.Marshal(map[string]string{
-		"service":  service,
-		"action":   action,
-		"resource": resource,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
+	userID, ok := getUserID(strings.TrimPrefix(auth, "Bearer "))
+	if !ok {
+		span.SetStatus(codes.Error, "malformed token")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "malformed_token")))
+		return authUnauthorized, ""
+	}
+	span.SetAttributes(attribute.String("user.id", userID))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		gatekeeperURL+"/users/"+url.PathEscape(userID), nil)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return authUnauthorized, ""
 	}
 	req.Header.Set("Authorization", auth)
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -254,41 +270,89 @@ func checkAuth(r *http.Request, service, action, resource string) (authOutcome, 
 		span.SetStatus(codes.Error, err.Error())
 		return authUnauthorized, ""
 	}
-	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized {
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
 		span.SetStatus(codes.Error, "unauthorized")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "unauthorized")))
 		return authUnauthorized, ""
-	}
-	if resp.StatusCode >= 500 {
-		io.Copy(io.Discard, resp.Body)
+	case resp.StatusCode >= 500:
 		span.SetStatus(codes.Error, "gatekeeper error")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "gatekeeper_error")))
 		return authForbidden, ""
-	}
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
-		span.SetStatus(codes.Error, "permission denied")
-		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "forbidden")))
+	case resp.StatusCode != http.StatusOK:
+		span.SetStatus(codes.Error, "user not found")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "user_not_found")))
 		return authForbidden, ""
 	}
 
-	var result struct {
-		Authorized bool   `json:"authorized"`
-		UserID     string `json:"user_id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return authForbidden, ""
-	}
-	if !result.Authorized {
-		span.SetStatus(codes.Error, "not authorized")
-		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "forbidden")))
-		return authForbidden, ""
-	}
 	span.SetStatus(codes.Ok, "")
 	meterAllowed.Add(ctx, 1)
-	return authAllowed, result.UserID
+	return authAllowed, userID
+}
+
+// ── Suspicious-activity block list ───────────────────────────────────────────
+
+const (
+	suspectThreshold = 3
+	blockDuration    = time.Hour
+)
+
+var (
+	suspectMu   sync.Mutex
+	suspectHits = map[string]int{}
+	blockedIPs  = map[string]time.Time{}
+)
+
+// sourceIP returns the immediate peer IP from r.RemoteAddr, stripping the port.
+func sourceIP(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
+}
+
+// isBlocked reports whether ip is on the block list and has not yet expired.
+func isBlocked(ip string) bool {
+	suspectMu.Lock()
+	defer suspectMu.Unlock()
+	until, ok := blockedIPs[ip]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		delete(blockedIPs, ip)
+		delete(suspectHits, ip)
+		return false
+	}
+	return true
+}
+
+// recordSuspect logs a post-auth failure (user passed conductor's filter but was
+// rejected by the backend service) and blocks the source IP after suspectThreshold
+// failures.
+func recordSuspect(ip, userID, method, path string) {
+	suspectMu.Lock()
+	defer suspectMu.Unlock()
+	if _, already := blockedIPs[ip]; already {
+		return
+	}
+	suspectHits[ip]++
+	n := suspectHits[ip]
+	slog.Warn("user passed conductor auth but failed service validation",
+		"source_ip", ip, "user_id", userID,
+		"method", method, "path", path, "failure_count", n)
+	if n >= suspectThreshold {
+		until := time.Now().Add(blockDuration)
+		blockedIPs[ip] = until
+		slog.Warn("source IP added to block list",
+			"source_ip", ip, "user_id", userID, "blocked_until", until)
+		meterBlocked.Add(context.Background(), 1,
+			metric.WithAttributes(attribute.String("source_ip", ip)))
+	}
 }
 
 // ── Service registry ──────────────────────────────────────────────────────────
@@ -554,12 +618,10 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		r.ContentLength = int64(len(body))
 	}
 
-	resource := resolveResource(entry.resource, entry.paramNames, paramValues)
-
 	var userID string
 	if !entry.public {
 		var outcome authOutcome
-		outcome, userID = checkAuth(r, entry.serviceName, entry.action, resource)
+		outcome, userID = checkUserAuth(r)
 		switch outcome {
 		case authUnauthorized:
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -599,12 +661,7 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		}
 	}
 
-	// Replace X-Forwarded-For with only the immediate client IP (strip port).
-	clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		clientIP = r.RemoteAddr
-	}
-	r2.Header.Set("X-Forwarded-For", clientIP)
+	r2.Header.Set("X-Forwarded-For", sourceIP(r))
 
 	// Strip the bearer token before forwarding so backend services cannot replay
 	// it against other services. Services that need to re-verify the caller
@@ -612,7 +669,15 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 	if !svc.forwardAuth {
 		r2.Header.Del("Authorization")
 	}
-	svc.proxy.ServeHTTP(w, r2)
+
+	// Capture the backend response status. A 401 from a service after conductor
+	// successfully authenticated the user means the user_id passed our filter but
+	// was rejected by deeper service validation — track these for block-list purposes.
+	rw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
+	svc.proxy.ServeHTTP(rw, r2)
+	if rw.status == http.StatusUnauthorized && userID != "" {
+		recordSuspect(sourceIP(r), userID, r.Method, r.URL.Path)
+	}
 }
 
 // handleServiceProxy is the universal handler. It uses hybrid routing:
@@ -624,6 +689,12 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 //
 // For non-public endpoints, RBAC is enforced via Gatekeeper before forwarding.
 func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
+	if ip := sourceIP(r); isBlocked(ip) {
+		slog.Warn("request rejected: source IP is blocked", "source_ip", ip, "path", r.URL.Path)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	path := r.URL.Path
 
 	// Step 1: service-name prefix routing (e.g. /blueprints/state/... or /forge/executions)

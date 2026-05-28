@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -59,16 +60,22 @@ func withServices(t *testing.T, services map[string]serviceState) {
 	})
 }
 
+// makeTestJWT returns a minimal JWT-shaped token whose payload contains sub=id.
+// The header and signature are stubs; only the payload is meaningful for tests.
+func makeTestJWT(id string) string {
+	payload, _ := json.Marshal(map[string]string{"sub": id})
+	return "eyJhbGciOiJFUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
 // mockGatekeeper creates a test server that simulates Gatekeeper's
-// POST /check_permissions endpoint. authorized controls whether it returns
-// 200+{"authorized":true,"user_id":"test-user"} or 401.
+// GET /users/{id} endpoint. authorized controls whether it returns 200 or 401.
 func mockGatekeeper(t *testing.T, authorized bool) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/check_permissions" && r.Method == http.MethodPost {
+		if strings.HasPrefix(r.URL.Path, "/users/") && r.Method == http.MethodGet {
 			if authorized {
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{"authorized": true, "user_id": "test-user"})
+				json.NewEncoder(w).Encode(map[string]string{"user_id": testUUID})
 				return
 			}
 			w.WriteHeader(http.StatusUnauthorized)
@@ -201,60 +208,101 @@ func TestStatusResponseWriter_CapturesStatus(t *testing.T) {
 	}
 }
 
-// ── checkAuth ─────────────────────────────────────────────────────────────────
+// ── checkUserAuth ─────────────────────────────────────────────────────────────
 
-func TestCheckAuth_Allowed(t *testing.T) {
+func TestCheckUserAuth_Allowed(t *testing.T) {
 	gk := mockGatekeeper(t, true)
 	defer gk.Close()
 	withGatekeeperURL(t, gk.URL)
 
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
-	r.Header.Set("Authorization", "Bearer sometoken")
+	r.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 
-	if got, _ := checkAuth(r, "testsvc", "read", "foo"); got != authAllowed {
+	got, id := checkUserAuth(r)
+	if got != authAllowed {
 		t.Fatalf("expected authAllowed, got %d", got)
+	}
+	if id != testUUID {
+		t.Fatalf("expected user_id %q, got %q", testUUID, id)
 	}
 }
 
-func TestCheckAuth_Unauthorized_NoToken(t *testing.T) {
+func TestCheckUserAuth_Unauthorized_NoToken(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
-	// No Authorization header.
-	if got, _ := checkAuth(r, "testsvc", "read", "foo"); got != authUnauthorized {
+	if got, _ := checkUserAuth(r); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized, got %d", got)
 	}
 }
 
-func TestCheckAuth_Unauthorized_GatekeeperRejects(t *testing.T) {
+func TestCheckUserAuth_Unauthorized_MalformedToken(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
+	r.Header.Set("Authorization", "Bearer notajwt")
+	if got, _ := checkUserAuth(r); got != authUnauthorized {
+		t.Fatalf("expected authUnauthorized for malformed JWT, got %d", got)
+	}
+}
+
+func TestCheckUserAuth_Unauthorized_GatekeeperRejects(t *testing.T) {
 	gk := mockGatekeeper(t, false)
 	defer gk.Close()
 	withGatekeeperURL(t, gk.URL)
 
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
-	r.Header.Set("Authorization", "Bearer badtoken")
+	r.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 
-	if got, _ := checkAuth(r, "testsvc", "read", "foo"); got != authUnauthorized {
-		t.Fatalf("expected authUnauthorized, got %d", got)
+	if got, _ := checkUserAuth(r); got != authUnauthorized {
+		t.Fatalf("expected authUnauthorized when gatekeeper rejects, got %d", got)
 	}
 }
 
-func TestCheckAuth_Forbidden_NotAuthorized(t *testing.T) {
-	gk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/check_permissions" {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]bool{"authorized": false})
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer gk.Close()
-	withGatekeeperURL(t, gk.URL)
+// ── block list ────────────────────────────────────────────────────────────────
 
-	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
-	r.Header.Set("Authorization", "Bearer validtoken")
-
-	if got, _ := checkAuth(r, "testsvc", "read", "foo"); got != authForbidden {
-		t.Fatalf("expected authForbidden, got %d", got)
+func TestBlockList_NotBlockedInitially(t *testing.T) {
+	if isBlocked("1.2.3.4") {
+		t.Fatal("IP should not be blocked before any failures")
 	}
+}
+
+func TestBlockList_BlocksAfterThreshold(t *testing.T) {
+	ip := "10.0.0.1"
+	// Reset state before test.
+	suspectMu.Lock()
+	delete(suspectHits, ip)
+	delete(blockedIPs, ip)
+	suspectMu.Unlock()
+
+	for i := 0; i < suspectThreshold; i++ {
+		recordSuspect(ip, testUUID, http.MethodGet, "/secret")
+	}
+	if !isBlocked(ip) {
+		t.Fatalf("IP should be blocked after %d failures", suspectThreshold)
+	}
+
+	// Clean up.
+	suspectMu.Lock()
+	delete(suspectHits, ip)
+	delete(blockedIPs, ip)
+	suspectMu.Unlock()
+}
+
+func TestBlockList_NotBlockedBelowThreshold(t *testing.T) {
+	ip := "10.0.0.2"
+	suspectMu.Lock()
+	delete(suspectHits, ip)
+	delete(blockedIPs, ip)
+	suspectMu.Unlock()
+
+	for i := 0; i < suspectThreshold-1; i++ {
+		recordSuspect(ip, testUUID, http.MethodGet, "/secret")
+	}
+	if isBlocked(ip) {
+		t.Fatalf("IP should not be blocked after only %d failures", suspectThreshold-1)
+	}
+
+	suspectMu.Lock()
+	delete(suspectHits, ip)
+	delete(blockedIPs, ip)
+	suspectMu.Unlock()
 }
 
 // ── handleServiceProxy ────────────────────────────────────────────────────────
@@ -358,7 +406,7 @@ func TestHandleServiceProxy_PrivateEndpoint_GatekeeperAllows_Proxies(t *testing.
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/profile", nil)
-	req.Header.Set("Authorization", "Bearer validtoken")
+	req.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
@@ -383,7 +431,7 @@ func TestHandleServiceProxy_PrivateEndpoint_GatekeeperDenies_Returns401(t *testi
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
-	req.Header.Set("Authorization", "Bearer badtoken")
+	req.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
@@ -396,11 +444,6 @@ func TestHandleServiceProxy_ForwardAuth_PassesToken(t *testing.T) {
 	var receivedAuth string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
-		if r.URL.Path == "/check_permissions" {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]bool{"authorized": true})
-			return
-		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer backend.Close()
@@ -414,7 +457,7 @@ func TestHandleServiceProxy_ForwardAuth_PassesToken(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/profile", nil)
-	req.Header.Set("Authorization", "Bearer mytoken")
+	req.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
@@ -443,7 +486,7 @@ func TestHandleServiceProxy_NoForwardAuth_StripsToken(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/data", nil)
-	req.Header.Set("Authorization", "Bearer mytoken")
+	req.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
