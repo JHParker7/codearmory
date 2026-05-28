@@ -17,10 +17,13 @@ CREATE TABLE IF NOT EXISTS services (
     url          TEXT        NOT NULL,
     description  TEXT        NOT NULL DEFAULT '',
     forward_auth BOOLEAN     NOT NULL DEFAULT false,
+    service_key  TEXT        NOT NULL DEFAULT '',
     active       BOOLEAN     NOT NULL DEFAULT true,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE services ADD COLUMN IF NOT EXISTS service_key TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS service_roles (
     role_id     TEXT        PRIMARY KEY,

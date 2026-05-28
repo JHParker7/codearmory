@@ -127,10 +127,12 @@ func validateServiceURL(rawURL string) error {
 	}
 
 	// Hostname — resolve and validate every returned address to prevent DNS-based
-	// SSRF (e.g. a public domain resolving to 169.254.169.254).
+	// SSRF (e.g. a public domain resolving to 169.254.169.254). If the hostname
+	// can't be resolved at registration time (e.g. internal .local names in
+	// Docker), allow it — an unresolvable host can't be reached for SSRF.
 	addrs, err := resolveHost(host)
 	if err != nil {
-		return fmt.Errorf("cannot resolve hostname %q: %w", host, err)
+		return nil
 	}
 	for _, addr := range addrs {
 		ip := net.ParseIP(addr)
@@ -226,6 +228,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		URL         string `json:"url"`
 		Description string `json:"description"`
 		ForwardAuth bool   `json:"forward_auth"`
+		ServiceKey  string `json:"service_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.URL == "" {
 		http.Error(w, "name and url are required", http.StatusBadRequest)
@@ -238,9 +241,9 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 
 	id := uuid.New().String()
 	_, err := pool.Exec(r.Context(),
-		`INSERT INTO services (service_id, name, url, description, forward_auth)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		id, req.Name, req.URL, req.Description, req.ForwardAuth)
+		`INSERT INTO services (service_id, name, url, description, forward_auth, service_key)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		id, req.Name, req.URL, req.Description, req.ForwardAuth, req.ServiceKey)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -265,6 +268,90 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(svc)
+}
+
+// handleServiceRegister is called by services at startup to update their URL
+// and replace their endpoint manifest. Authenticated by the service's own key
+// (set when the service was created via POST /services).
+func handleServiceRegister(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name       string `json:"name"`
+		ServiceKey string `json:"service_key"`
+		URL        string `json:"url"`
+		Endpoints  []struct {
+			Method   string `json:"method"`
+			Path     string `json:"path"`
+			Action   string `json:"action"`
+			Resource string `json:"resource"`
+			Public   bool   `json:"public"`
+		} `json:"endpoints"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" || req.ServiceKey == "" {
+		http.Error(w, "name and service_key are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	var serviceID, storedKey string
+	if err := pool.QueryRow(ctx,
+		`SELECT service_id, service_key FROM services WHERE name = $1 AND active = true`, req.Name).
+		Scan(&serviceID, &storedKey); err != nil {
+		http.Error(w, "service not found", http.StatusNotFound)
+		return
+	}
+
+	if subtle.ConstantTimeCompare([]byte(req.ServiceKey), []byte(storedKey)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if req.URL != "" {
+		if err := validateServiceURL(req.URL); err != nil {
+			http.Error(w, "invalid url: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, err := tx.Exec(ctx, `UPDATE services SET url = $1, updated_at = now() WHERE service_id = $2`, req.URL, serviceID); err != nil {
+			slog.Error("service register: update url", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, serviceID); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	for _, ep := range req.Endpoints {
+		if ep.Method == "" || ep.Path == "" || ep.Action == "" || ep.Resource == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			uuid.New().String(), serviceID, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public); err != nil {
+			slog.Error("service register: insert endpoint", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		slog.Error("service register: commit", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	slog.Info("service self-registered", "name", req.Name, "service_id", serviceID)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleDeleteService soft-deletes a service by ID (admin key required).

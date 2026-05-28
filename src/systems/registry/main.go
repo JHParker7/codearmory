@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -40,6 +41,74 @@ func (l *logger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"trace_id", sc.TraceID().String(),
 		"span_id", sc.SpanID().String(),
 	)
+}
+
+type manifestEntry struct {
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	Description string `json:"description"`
+	ForwardAuth bool   `json:"forward_auth"`
+	ServiceKey  string `json:"service_key"`
+	Endpoints   []struct {
+		Method   string `json:"method"`
+		Path     string `json:"path"`
+		Action   string `json:"action"`
+		Resource string `json:"resource"`
+		Public   bool   `json:"public"`
+	} `json:"endpoints"`
+}
+
+// loadManifest reads a JSON manifest file and upserts service+endpoint definitions.
+// Existing endpoints for each service are replaced; the service URL and service_key
+// are updated if the service already exists.
+func loadManifest(ctx context.Context, path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.Error("manifest: failed to read file", "path", path, "error", err)
+		return
+	}
+	var entries []manifestEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		slog.Error("manifest: failed to parse JSON", "path", path, "error", err)
+		return
+	}
+	for _, e := range entries {
+		var serviceID string
+		err := pool.QueryRow(ctx, `SELECT service_id FROM services WHERE name = $1`, e.Name).Scan(&serviceID)
+		if err != nil {
+			// Service doesn't exist: insert it.
+			serviceID = uuid.New().String()
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO services (service_id, name, url, description, forward_auth, service_key)
+				 VALUES ($1, $2, $3, $4, $5, $6)`,
+				serviceID, e.Name, e.URL, e.Description, e.ForwardAuth, e.ServiceKey); err != nil {
+				slog.Error("manifest: failed to insert service", "name", e.Name, "error", err)
+				continue
+			}
+			slog.Info("manifest: service created", "name", e.Name)
+		} else {
+			// Service exists: update URL, description, and service_key.
+			if _, err := pool.Exec(ctx,
+				`UPDATE services SET url = $1, description = $2, forward_auth = $3, service_key = $4, active = true, updated_at = now() WHERE service_id = $5`,
+				e.URL, e.Description, e.ForwardAuth, e.ServiceKey, serviceID); err != nil {
+				slog.Error("manifest: failed to update service", "name", e.Name, "error", err)
+				continue
+			}
+			slog.Info("manifest: service updated", "name", e.Name)
+		}
+		// Replace endpoints.
+		pool.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, serviceID) //nolint:errcheck
+		pool.Exec(ctx, `DELETE FROM service_roles WHERE service_id = $1`, serviceID)     //nolint:errcheck
+		for _, ep := range e.Endpoints {
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				uuid.New().String(), serviceID, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public); err != nil {
+				slog.Error("manifest: failed to insert endpoint", "service", e.Name, "path", ep.Path, "error", err)
+			}
+		}
+		slog.Info("manifest: endpoints registered", "name", e.Name, "count", len(e.Endpoints))
+	}
 }
 
 func main() {
@@ -91,9 +160,15 @@ func main() {
 		}
 	}
 
+	// Load endpoint manifest from MANIFEST_FILE if configured.
+	if manifestPath := os.Getenv("MANIFEST_FILE"); manifestPath != "" {
+		loadManifest(ctx, manifestPath)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /services", handleListServices)
 	mux.HandleFunc("POST /services", handleCreateService)
+	mux.HandleFunc("POST /services/register", handleServiceRegister)
 	mux.HandleFunc("DELETE /services/{id}", handleDeleteService)
 	mux.HandleFunc("PUT /services/{id}/endpoints", handleUpdateServiceEndpoints)
 
