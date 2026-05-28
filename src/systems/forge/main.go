@@ -17,7 +17,14 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-var db *pgxpool.Pool
+var (
+	db             *pgxpool.Pool
+	gatekeeperURL  = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	forgeHTTPClient = &http.Client{
+		Transport: otelhttp.NewTransport(http.DefaultTransport),
+		Timeout:   10 * time.Second,
+	}
+)
 
 const createTables = `
 CREATE TABLE IF NOT EXISTS executions (
@@ -141,7 +148,6 @@ func main() {
 
 	// Rotate the gatekeeper service key every 25 minutes. GATEKEEPER_SERVICE_KEY
 	// must match the key in GATEKEEPER_SERVICES on gatekeeper. No-op if unset.
-	gatekeeperURL := envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	registry.StartKeyRotation(ctx, gatekeeperURL, serviceConfig.Name,
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 

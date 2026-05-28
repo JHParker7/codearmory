@@ -10,40 +10,69 @@ import (
 	"testing"
 )
 
+// fakeGatekeeper spins up a test gatekeeper that always returns the given status
+// and body, then overrides the package-level gatekeeperURL for the test duration.
+func fakeGatekeeper(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		w.Write([]byte(body)) //nolint:errcheck
+	}))
+	orig := gatekeeperURL
+	gatekeeperURL = srv.URL
+	t.Cleanup(func() {
+		gatekeeperURL = orig
+		srv.Close()
+	})
+	return srv
+}
+
 func TestMain(m *testing.M) {
 	initMetrics()
 	setupForgeTestDB()
 	os.Exit(m.Run())
 }
 
-// --- extractUserID ---
+// --- checkGatekeeper ---
 
-func TestExtractUserID_Valid(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/executions", nil)
-	r.Header.Set("X-User-ID", "user-123")
-	id, ok := extractUserID(r)
+func TestCheckGatekeeper_NoToken(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/executions", nil)
+	w := httptest.NewRecorder()
+	_, ok := checkGatekeeper(r.Context(), w, r, "listExecution", "forge/executions")
+	if ok {
+		t.Fatal("expected ok=false when no Bearer token")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestCheckGatekeeper_Authorized(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-abc"}`)
+	r := httptest.NewRequest(http.MethodGet, "/executions", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	id, ok := checkGatekeeper(r.Context(), w, r, "listExecution", "forge/executions")
 	if !ok {
-		t.Fatal("expected ok=true when X-User-ID is set")
+		t.Fatalf("expected ok=true, got false (status %d)", w.Code)
 	}
-	if id != "user-123" {
-		t.Fatalf("got %q, want %q", id, "user-123")
-	}
-}
-
-func TestExtractUserID_NoHeader(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/executions", nil)
-	_, ok := extractUserID(r)
-	if ok {
-		t.Fatal("expected ok=false when X-User-ID is absent")
+	if id != "user-abc" {
+		t.Fatalf("got %q, want %q", id, "user-abc")
 	}
 }
 
-func TestExtractUserID_EmptyHeader(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/executions", nil)
-	r.Header.Set("X-User-ID", "")
-	_, ok := extractUserID(r)
+func TestCheckGatekeeper_Forbidden(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":false,"user_id":"user-abc"}`)
+	r := httptest.NewRequest(http.MethodGet, "/executions", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	_, ok := checkGatekeeper(r.Context(), w, r, "listExecution", "forge/executions")
 	if ok {
-		t.Fatal("expected ok=false for empty X-User-ID")
+		t.Fatal("expected ok=false when not authorized")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
 	}
 }
 
@@ -96,11 +125,12 @@ func TestHandleSubmit_Unauthorized(t *testing.T) {
 }
 
 func TestHandleSubmit_InvalidJSON(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions", bytes.NewBufferString("not json"))
-	r.Header.Set("X-User-ID", "user-123")
+	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -109,12 +139,13 @@ func TestHandleSubmit_InvalidJSON(t *testing.T) {
 }
 
 func TestHandleSubmit_MissingImage(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"command":["echo","hi"]}`))
-	r.Header.Set("X-User-ID", "user-123")
+	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -123,12 +154,13 @@ func TestHandleSubmit_MissingImage(t *testing.T) {
 }
 
 func TestHandleSubmit_MissingCommand(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19"}`))
-	r.Header.Set("X-User-ID", "user-123")
+	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -137,12 +169,13 @@ func TestHandleSubmit_MissingCommand(t *testing.T) {
 }
 
 func TestHandleSubmit_DisallowedImage(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("ubuntu:22.04")
 	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19","command":["echo","hi"]}`))
-	r.Header.Set("X-User-ID", "user-123")
+	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -229,12 +262,13 @@ func TestIsTimed_ExactlyFiveChars(t *testing.T) {
 // --- handleSubmit (additional pre-DB paths) ---
 
 func TestHandleSubmit_EmptyCommandSlice(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19","command":[]}`))
-	r.Header.Set("X-User-ID", "user-123")
+	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
@@ -243,12 +277,13 @@ func TestHandleSubmit_EmptyCommandSlice(t *testing.T) {
 }
 
 func TestHandleSubmit_BodyTooLarge(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
 	pool := &WorkerPool{}
 	bigBody := bytes.Repeat([]byte("a"), maxBodyBytes+1)
 	r := httptest.NewRequest(http.MethodPost, "/executions", bytes.NewReader(bigBody))
-	r.Header.Set("X-User-ID", "user-123")
+	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
 	handleSubmit(pool)(w, r)
 	if w.Code != http.StatusBadRequest {
