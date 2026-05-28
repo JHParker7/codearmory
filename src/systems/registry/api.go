@@ -106,8 +106,9 @@ func requireReadKey(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// validateServiceURL rejects URLs that target loopback or RFC-1918 addresses
-// to prevent SSRF via the service registry.
+// validateServiceURL rejects URLs that target loopback, link-local, or any
+// private/reserved address (IPv4 RFC-1918, IPv6 ULA fc00::/7, etc.) to prevent
+// SSRF via the service registry.
 func validateServiceURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -118,20 +119,11 @@ func validateServiceURL(rawURL string) error {
 	}
 	host := u.Hostname()
 
-	// checkIP validates a single parsed IP against the blocked ranges.
+	// checkIP rejects any address that is loopback, link-local, or private.
+	// net.IP.IsPrivate covers IPv4 RFC-1918 and IPv6 ULA (fc00::/7).
 	checkIP := func(ip net.IP) error {
-		if ip.IsLoopback() {
-			return fmt.Errorf("URL must not target loopback address")
-		}
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			return fmt.Errorf("URL must not target link-local address")
-		}
-		privateRanges := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
-		for _, cidr := range privateRanges {
-			_, network, _ := net.ParseCIDR(cidr)
-			if network.Contains(ip) {
-				return fmt.Errorf("URL must not target private network address")
-			}
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
+			return fmt.Errorf("URL must not target a private or reserved address")
 		}
 		return nil
 	}
