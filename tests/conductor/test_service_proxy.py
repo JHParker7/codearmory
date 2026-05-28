@@ -31,13 +31,13 @@ def rand_id():
 
 
 class TestUnregisteredService:
-    def test_unknown_service_returns_503(self, base_url, token):
-        """A service name not in the registry returns 503 from conductor."""
+    def test_unknown_service_returns_404(self, base_url, token):
+        """A path whose first segment is not a registered service returns 404 from conductor."""
         resp = requests.get(
             f"{base_url}/unknown-svc/foo",
             headers=bearer(token),
         )
-        assert resp.status_code == 503
+        assert resp.status_code == 404
 
     def test_empty_service_name_returns_404(self, base_url, token):
         """A request with no service segment (bare /) returns 404."""

@@ -78,7 +78,7 @@ class TestMissingAuth:
         self._assert_401(base_url, "get", f"/users/{rand_id()}")
 
     def test_no_header_on_check_permissions(self, base_url):
-        self._assert_401(base_url, "get", "/check_permissions")
+        self._assert_401(base_url, "post", "/check_permissions")
 
     def test_no_header_on_get_orgs(self, base_url):
         self._assert_401(base_url, "get", "/orgs")
@@ -216,7 +216,7 @@ class TestValidToken:
         assert resp.status_code == 403
 
     def test_check_permissions_is_proxied(self, base_url, token):
-        resp = requests.get(
+        resp = requests.post(
             f"{base_url}/check_permissions",
             json={"service": "svc", "resource": "res", "action": "act"},
             headers=bearer(token),

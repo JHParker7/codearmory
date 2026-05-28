@@ -42,8 +42,8 @@ class TestGatekeeperRouting:
         assert "username" in body
 
     def test_check_permissions_returns_authorized_field(self, base_url, token, new_user):
-        """GET /check_permissions → Gatekeeper; response contains authorized."""
-        resp = requests.get(
+        """POST /check_permissions → Gatekeeper; response contains authorized."""
+        resp = requests.post(
             f"{base_url}/check_permissions",
             json={
                 "service": "gatekeeper",
