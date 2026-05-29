@@ -179,7 +179,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8084"
+		port = "8082"
 	}
 
 	wrapped := otelhttp.NewHandler(&logger{mux}, "registry",

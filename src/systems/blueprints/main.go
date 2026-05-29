@@ -32,7 +32,7 @@ import (
 
 var (
 	db            *pgxpool.Pool
-	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
 	httpClient    = &http.Client{
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 		Timeout:   10 * time.Second,
@@ -707,7 +707,7 @@ func main() {
 	})
 	mux.HandleFunc("/state/{username}/{workspace}", lockUnlock(userKey))
 
-	port := envOrDefault("PORT", "8081")
+	port := envOrDefault("PORT", "8084")
 
 	wrappedMux := otelhttp.NewHandler(newLogger(mux), "blueprints",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),

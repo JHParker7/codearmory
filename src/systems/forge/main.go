@@ -19,7 +19,7 @@ import (
 
 var (
 	db             *pgxpool.Pool
-	gatekeeperURL  = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	gatekeeperURL  = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
 	forgeHTTPClient = &http.Client{
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 		Timeout:   10 * time.Second,

@@ -24,7 +24,7 @@ import (
 var (
 	db               *gorm.DB
 	gatekeeperClient *gk.Client
-	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
 	httpClient    = &http.Client{
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 		Timeout:   10 * time.Second,

@@ -24,7 +24,7 @@ import (
 var (
 	db               *gorm.DB
 	gatekeeperClient *gk.Client
-	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
 	hooksTriggerKey = os.Getenv("HOOKS_TRIGGER_KEY")
 	// serviceURLs maps registered service names to their base URLs.
 	// Populated at startup from SERVICES (format: "name=url,name=url,...").

@@ -35,8 +35,8 @@ import (
 )
 
 var (
-	gatekeeperURL       = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
-	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8084")
+	gatekeeperURL       = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
+	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8082")
 	registryKey         = os.Getenv("REGISTRY_READ_KEY")
 	conductorForwardKey = os.Getenv("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
 	httpClient          = &http.Client{Timeout: 10 * time.Second}
@@ -808,7 +808,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/{path...}", http.HandlerFunc(handleServiceProxy))
 
-	port := envOrDefault("PORT", "8082")
+	port := envOrDefault("PORT", "8080")
 
 	wrappedMux := otelhttp.NewHandler(newLogger(mux), "conductor",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),

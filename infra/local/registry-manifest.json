@@ -1,7 +1,7 @@
 [
   {
     "name": "gatekeeper",
-    "url": "http://gatekeeper:8080",
+    "url": "http://gatekeeper:8081",
     "description": "Authentication, authorisation and user management",
     "forward_auth": true,
     "service_key": "gatekeeper-registry-local-secret",
@@ -48,7 +48,7 @@
   },
   {
     "name": "blueprints",
-    "url": "http://blueprints:8081",
+    "url": "http://blueprints:8084",
     "description": "OpenTofu/Terraform remote state storage",
     "forward_auth": true,
     "service_key": "blueprints-registry-local-secret",

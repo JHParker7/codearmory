@@ -24,7 +24,7 @@ import (
 var (
 	db               *gorm.DB
 	gatekeeperClient *gk.Client
-	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
 	workflowsURL    = envOrDefault("WORKFLOWS_URL", "http://localhost:8085")
 	hooksTriggerKey = os.Getenv("HOOKS_TRIGGER_KEY")
 	httpClient      = &http.Client{

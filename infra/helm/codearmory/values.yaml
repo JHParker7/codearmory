@@ -12,7 +12,7 @@ gatekeeper:
     repository: codearmory/gatekeeper
     tag: ""
   replicaCount: 1
-  port: 8080
+  port: 8081
   resources:
     requests:
       cpu: 100m
@@ -59,7 +59,7 @@ registry:
     repository: codearmory/registry
     tag: ""
   replicaCount: 1
-  port: 8084
+  port: 8082
   resources:
     requests:
       cpu: 50m
@@ -69,7 +69,7 @@ registry:
       memory: 128Mi
   env:
     logLevel: info
-    # Auto-populated as "blueprints=http://<fullname>-blueprints:8081,forge=http://<fullname>-forge:8083,
+    # Auto-populated as "blueprints=http://<fullname>-blueprints:8084,forge=http://<fullname>-forge:8083,
     # workflows=http://<fullname>-workflows:8085,tickets=http://<fullname>-tickets:8086,
     # hooks=http://<fullname>-hooks:8087" when left empty. Override to use custom service URLs.
     services: ""
@@ -89,7 +89,7 @@ blueprints:
     repository: codearmory/blueprints
     tag: ""
   replicaCount: 1
-  port: 8081
+  port: 8084
   resources:
     requests:
       cpu: 100m
@@ -133,7 +133,7 @@ conductor:
     repository: codearmory/conductor
     tag: ""
   replicaCount: 1
-  port: 8082
+  port: 8080
   resources:
     requests:
       cpu: 50m
@@ -228,7 +228,7 @@ workflows:
   env:
     logLevel: info
     # Comma-separated "name=url" pairs of services that workflow steps may call.
-    # Auto-populated as "forge=http://<fullname>-forge:8083,blueprints=http://<fullname>-blueprints:8081"
+    # Auto-populated as "forge=http://<fullname>-forge:8083,blueprints=http://<fullname>-blueprints:8084"
     # when left empty. Override to add custom services or change URLs.
     services: ""
     otelEndpoint: ""
