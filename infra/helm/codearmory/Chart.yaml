@@ -1,6 +1,6 @@
 apiVersion: v2
 name: codearmory
-description: Helm chart for the CodeArmory platform (gatekeeper, registry, blueprints, conductor, forge)
+description: Helm chart for the CodeArmory platform (gatekeeper, registry, blueprints, conductor, forge, workflows, tickets, hooks)
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

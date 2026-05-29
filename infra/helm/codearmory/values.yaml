@@ -23,7 +23,7 @@ gatekeeper:
   env:
     logLevel: info
     # Comma-separated list of service names permitted to register.
-    permittedServices: "gatekeeper,blueprints,forge"
+    permittedServices: "gatekeeper,blueprints,forge,workflows,tickets,hooks"
     # Comma-separated CIDRs of trusted reverse proxies (optional).
     trustedProxyCIDRs: ""
     # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
@@ -35,8 +35,8 @@ gatekeeper:
     # Override to use an external Redis instance.
     redisUrl: ""
     # Comma-separated "name=key" pairs for service-to-service authentication,
-    # e.g. "blueprints=<key>,forge=<key>". Keys must match the gatekeeperServiceKey
-    # values set in blueprints.secret and forge.secret.
+    # e.g. "blueprints=<key>,forge=<key>,workflows=<key>,tickets=<key>,hooks=<key>".
+    # Keys must match the gatekeeperServiceKey values set in each service's secret.
     gatekeeperServices: ""
   redis:
     enabled: true
@@ -69,8 +69,9 @@ registry:
       memory: 128Mi
   env:
     logLevel: info
-    # Auto-populated as "blueprints=http://<fullname>-blueprints:8081,forge=http://<fullname>-forge:8083"
-    # when left empty. Override to use custom service URLs.
+    # Auto-populated as "blueprints=http://<fullname>-blueprints:8081,forge=http://<fullname>-forge:8083,
+    # workflows=http://<fullname>-workflows:8085,tickets=http://<fullname>-tickets:8086,
+    # hooks=http://<fullname>-hooks:8087" when left empty. Override to use custom service URLs.
     services: ""
     otelEndpoint: ""
   secret:
@@ -209,6 +210,88 @@ forge:
     enabled: false
     path: /var/run/docker.sock
 
+# ── Workflows ─────────────────────────────────────────────────────────────────
+workflows:
+  enabled: true
+  image:
+    repository: codearmory/workflows
+    tag: ""
+  replicaCount: 1
+  port: 8085
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    logLevel: info
+    # Comma-separated "name=url" pairs of services that workflow steps may call.
+    # Auto-populated as "forge=http://<fullname>-forge:8083,blueprints=http://<fullname>-blueprints:8081"
+    # when left empty. Override to add custom services or change URLs.
+    services: ""
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Must match the workflows entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+    # Shared HMAC secret with the hooks service for authenticating internal trigger requests.
+    # Must match hooks.secret.hooksTriggerKey. Generate with: openssl rand -hex 32
+    hooksTriggerKey: ""
+
+# ── Tickets ───────────────────────────────────────────────────────────────────
+tickets:
+  enabled: true
+  image:
+    repository: codearmory/tickets
+    tag: ""
+  replicaCount: 1
+  port: 8086
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Must match the tickets entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+
+# ── Hooks ─────────────────────────────────────────────────────────────────────
+hooks:
+  enabled: true
+  image:
+    repository: codearmory/hooks
+    tag: ""
+  replicaCount: 1
+  port: 8087
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Must match the hooks entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+    # Shared HMAC secret with the workflows service for signing internal trigger requests.
+    # Must match workflows.secret.hooksTriggerKey. Generate with: openssl rand -hex 32
+    hooksTriggerKey: ""
+
 # ── Integration tests (helm test) ────────────────────────────────────────────
 # Run with: helm test <release>
 # Each suite maps to a test image built from tests/<suite>/Dockerfile.
@@ -246,6 +329,24 @@ tests:
     image:
       repository: codearmory/test-registry
       tag: ""
+  workflows:
+    # Also requires workflows.enabled to be true.
+    enabled: true
+    image:
+      repository: codearmory/test-workflows
+      tag: ""
+  tickets:
+    # Also requires tickets.enabled to be true.
+    enabled: true
+    image:
+      repository: codearmory/test-tickets
+      tag: ""
+  hooks:
+    # Also requires hooks.enabled and workflows.enabled to be true.
+    enabled: true
+    image:
+      repository: codearmory/test-hooks
+      tag: ""
 
 # ── PostgreSQL (Bitnami subchart) ─────────────────────────────────────────────
 postgresql:
@@ -265,3 +366,6 @@ postgresql:
           CREATE DATABASE blueprints;
           CREATE DATABASE forge;
           CREATE DATABASE registry;
+          CREATE DATABASE workflows;
+          CREATE DATABASE tickets;
+          CREATE DATABASE hooks;
