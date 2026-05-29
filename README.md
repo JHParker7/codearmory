@@ -1,7 +1,7 @@
 # CodeArmory
 
 [![CI](https://github.com/code-armory-app/codearmory/actions/workflows/test_build_release.yml/badge.svg)](https://github.com/code-armory-app/codearmory/actions/workflows/unit_tests.yml)
-[![License: ELv2](https://img.shields.io/badge/License-ELv2-blue)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.22-00ADD8)](https://go.dev)
 [![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange)](../../releases)
 
@@ -199,7 +199,7 @@ ghcr.io/code-armory-app/tickets:alpha-latest
 
 ## Licence
 
-CodeArmory is licensed under the [Elastic License 2.0](LICENSE) (ELv2). You can use it, self-host it, and modify it freely. The one restriction: you may not offer CodeArmory itself as a managed service to third parties. If you want to embed it in a product or have a use case that doesn't fit ELv2, get in touch.
+CodeArmory is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0). You can use it, self-host it, modify it, and distribute it freely. If you run a modified version over a network, you must make the source available to users of that service. See the [LICENSE](LICENSE) file for the full terms.
 
 ---
 
