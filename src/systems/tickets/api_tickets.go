@@ -365,7 +365,14 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get updated ticket", http.StatusInternalServerError)
 		return
 	}
-	t.Comments = existing.Comments
+	t.Comments, err = listComments(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db list comments failed")
+		slog.Error("update ticket: list comments", "ticket_id", id, "user_id", userID, "error", err)
+		http.Error(w, "failed to get updated ticket", http.StatusInternalServerError)
+		return
+	}
 
 	span.SetStatus(codes.Ok, "")
 	slog.Info("ticket updated", "ticket_id", id, "user_id", userID, "status", req.Status)
