@@ -144,7 +144,7 @@ curl -X POST http://localhost:8087/rules \
 | `secret` | string | No | HMAC-SHA256 secret for verifying `X-Hub-Signature-256`. Never returned in API responses. |
 | `input_mapping` | object | No | Maps workflow input keys to webhook payload fields. See below. |
 
-The `secret` field is write-only — it is stored but never returned in API responses. To rotate a secret, `PUT` the rule with the new secret value. Send an empty string to leave the existing secret unchanged.
+The `secret` field is write-only — it is stored but never returned in API responses. On update: omit the field (or send JSON `null`) to leave the existing secret unchanged; send `""` to clear it; send a non-empty string to replace it.
 
 ### Input mapping
 
