@@ -22,7 +22,7 @@ var permittedServices map[string]bool
 func initPermittedServices() {
 	raw := os.Getenv("PERMITTED_SERVICES")
 	if raw == "" {
-		raw = "gatekeeper,blueprints,forge"
+		raw = "gatekeeper,blueprints,forge,workflows"
 	}
 	permittedServices = make(map[string]bool)
 	for _, s := range strings.Split(raw, ",") {

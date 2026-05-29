@@ -476,7 +476,12 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	meterPermissionChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", isAllowed)))
 	slog.Info("check_permissions result", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
-	json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": userID})
+
+	var orgID *string
+	if userRow, err := (User{UserID: userID}).Get(r.Context()); err == nil {
+		orgID = userRow.(User).OrgID
+	}
+	json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": userID, "org_id": orgID})
 }
 
 // parseECPublicKey decodes a PEM-encoded PKIX public key and asserts it is ECDSA.

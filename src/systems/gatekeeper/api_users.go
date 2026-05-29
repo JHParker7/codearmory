@@ -433,14 +433,41 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	))
 	slog.Info("default forge permission created", "user_id", userID, "permissions_id", forgePerm.PermissionsID)
 
+	workflowsPerm := Permissions{
+		Name:          fmt.Sprintf("Workflows Permissions for user %s", req.Username),
+		PermissionsID: uuid.New().String(),
+		Service:       "workflows",
+		Resources:     []string{"workflows/workflows", "workflows/workflows/*", "workflows/runs", "workflows/runs/*"},
+		Actions:       []string{"createWorkflow", "listWorkflow", "getWorkflow", "updateWorkflow", "deleteWorkflow", "triggerRun", "listRun", "getRun", "cancelRun"},
+	}
+	if err = workflowsPerm.Add(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to create default workflows permission")
+		slog.Error("signup failed: could not create default workflows permission", "user_id", userID, "error", err)
+		gatekeeperPerm.Remove(ctx) //nolint:errcheck
+		blueprintsPerm.Remove(ctx) //nolint:errcheck
+		forgePerm.Remove(ctx)      //nolint:errcheck
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	span.AddEvent("permission.created", trace.WithAttributes(
+		attribute.String("permissions.id", workflowsPerm.PermissionsID),
+		attribute.String("permissions.service", workflowsPerm.Service),
+	))
+	slog.Info("default workflows permission created", "user_id", userID, "permissions_id", workflowsPerm.PermissionsID)
+
 	role := Role{
 		RoleID:         uuid.New().String(),
-		PermissionsIDs: []string{gatekeeperPerm.PermissionsID, blueprintsPerm.PermissionsID, forgePerm.PermissionsID},
+		PermissionsIDs: []string{gatekeeperPerm.PermissionsID, blueprintsPerm.PermissionsID, forgePerm.PermissionsID, workflowsPerm.PermissionsID},
 	}
 	if err = role.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to create default role")
 		slog.Error("signup failed: could not create default role", "user_id", userID, "error", err)
+		gatekeeperPerm.Remove(ctx) //nolint:errcheck
+		blueprintsPerm.Remove(ctx) //nolint:errcheck
+		forgePerm.Remove(ctx)      //nolint:errcheck
+		workflowsPerm.Remove(ctx)  //nolint:errcheck
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
