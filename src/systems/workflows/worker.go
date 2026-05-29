@@ -175,7 +175,8 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token st
 		attribute.String("status", finalStatus),
 	))
 	p.db.Exec(context.Background(), //nolint:errcheck
-		`UPDATE workflow_runs SET status=$1, ended_at=now(), token=null WHERE run_id=$2`,
+		`UPDATE workflow_runs SET status=$1, ended_at=now(), token=null
+		 WHERE run_id=$2 AND status='running'`,
 		finalStatus, runID,
 	)
 	slog.Info("worker: run finished", "run_id", runID, "status", finalStatus)
@@ -220,7 +221,9 @@ func (p *WorkerPool) executeStep(ctx context.Context, token string, step Workflo
 	if bodyReader != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	for k, v := range step.Headers {
 		req.Header.Set(k, substitute(v, inputs))
 	}

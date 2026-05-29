@@ -226,8 +226,6 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		pool.Cancel(id)
-
 		tag, err := db.Exec(context.Background(),
 			`UPDATE workflow_runs SET status='cancelled', ended_at=now(), token=null
 			 WHERE run_id=$1 AND status IN ('pending', 'running')`, id,
@@ -241,6 +239,10 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 			http.Error(w, "run is not in a cancellable state", http.StatusConflict)
 			return
 		}
+		// Signal the worker goroutine to stop early; the DB write above is the
+		// authoritative cancellation. This is best-effort — the worker may have
+		// already finished before the signal arrives.
+		pool.Cancel(id)
 
 		span.SetStatus(codes.Ok, "")
 		slog.Info("workflow run cancelled", "run_id", id, "user_id", userID)
