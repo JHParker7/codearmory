@@ -456,18 +456,43 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	))
 	slog.Info("default workflows permission created", "user_id", userID, "permissions_id", workflowsPerm.PermissionsID)
 
+	ticketsPerm := Permissions{
+		Name:          fmt.Sprintf("Tickets Permissions for user %s", req.Username),
+		PermissionsID: uuid.New().String(),
+		Service:       "tickets",
+		Resources:     []string{"tickets/tickets", "tickets/tickets/*"},
+		Actions:       []string{"createTicket", "listTicket", "getTicket", "updateTicket", "deleteTicket", "createComment", "deleteComment"},
+	}
+	if err = ticketsPerm.Add(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to create default tickets permission")
+		slog.Error("signup failed: could not create default tickets permission", "user_id", userID, "error", err)
+		gatekeeperPerm.Remove(ctx)  //nolint:errcheck
+		blueprintsPerm.Remove(ctx)  //nolint:errcheck
+		forgePerm.Remove(ctx)       //nolint:errcheck
+		workflowsPerm.Remove(ctx)   //nolint:errcheck
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	span.AddEvent("permission.created", trace.WithAttributes(
+		attribute.String("permissions.id", ticketsPerm.PermissionsID),
+		attribute.String("permissions.service", ticketsPerm.Service),
+	))
+	slog.Info("default tickets permission created", "user_id", userID, "permissions_id", ticketsPerm.PermissionsID)
+
 	role := Role{
 		RoleID:         uuid.New().String(),
-		PermissionsIDs: []string{gatekeeperPerm.PermissionsID, blueprintsPerm.PermissionsID, forgePerm.PermissionsID, workflowsPerm.PermissionsID},
+		PermissionsIDs: []string{gatekeeperPerm.PermissionsID, blueprintsPerm.PermissionsID, forgePerm.PermissionsID, workflowsPerm.PermissionsID, ticketsPerm.PermissionsID},
 	}
 	if err = role.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to create default role")
 		slog.Error("signup failed: could not create default role", "user_id", userID, "error", err)
-		gatekeeperPerm.Remove(ctx) //nolint:errcheck
-		blueprintsPerm.Remove(ctx) //nolint:errcheck
-		forgePerm.Remove(ctx)      //nolint:errcheck
-		workflowsPerm.Remove(ctx)  //nolint:errcheck
+		gatekeeperPerm.Remove(ctx)  //nolint:errcheck
+		blueprintsPerm.Remove(ctx)  //nolint:errcheck
+		forgePerm.Remove(ctx)       //nolint:errcheck
+		workflowsPerm.Remove(ctx)   //nolint:errcheck
+		ticketsPerm.Remove(ctx)     //nolint:errcheck
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -496,6 +521,12 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		}
 		if cleanErr := forgePerm.Remove(ctx); cleanErr != nil {
 			slog.Error("signup: failed to clean up orphaned permission", "permissions_id", forgePerm.PermissionsID, "error", cleanErr)
+		}
+		if cleanErr := workflowsPerm.Remove(ctx); cleanErr != nil {
+			slog.Error("signup: failed to clean up orphaned permission", "permissions_id", workflowsPerm.PermissionsID, "error", cleanErr)
+		}
+		if cleanErr := ticketsPerm.Remove(ctx); cleanErr != nil {
+			slog.Error("signup: failed to clean up orphaned permission", "permissions_id", ticketsPerm.PermissionsID, "error", cleanErr)
 		}
 		if cleanErr := role.Remove(ctx); cleanErr != nil {
 			slog.Error("signup: failed to clean up orphaned role", "role_id", role.RoleID, "error", cleanErr)
