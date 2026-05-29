@@ -6,6 +6,7 @@ use (
 	./forge
 	./gatekeeper
 	./registry
+	./tickets
 	./workflows
 )
 

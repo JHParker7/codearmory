@@ -39,7 +39,7 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret
+      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret
       SIGNUP_RATE_LIMIT: "1000"
       SIGNUP_RATE_WINDOW: 1h
       LOGIN_RATE_LIMIT: "1000"
@@ -146,7 +146,6 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/workflows
       GATEKEEPER_URL: http://gatekeeper:8080
       SERVICES: forge=http://forge:8083,blueprints=http://blueprints:8081,registry=http://registry:8084,conductor=http://conductor:8082
-      # Must match the workflows entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: workflows-local-secret
     ports:
       - "8085:8085"
@@ -157,6 +156,22 @@ services:
         condition: service_healthy
       forge:
         condition: service_started
+    restart: on-failure
+
+  tickets:
+    build:
+      context: ../../src/systems/tickets
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/tickets
+      GATEKEEPER_URL: http://gatekeeper:8080
+      GATEKEEPER_SERVICE_KEY: tickets-local-secret
+    ports:
+      - "8086:8086"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
     restart: on-failure
 
   gatekeeper-integration-tests:
@@ -236,6 +251,20 @@ services:
       GATEKEEPER_URL: http://gatekeeper:8080
     depends_on:
       workflows:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  tickets-integration-tests:
+    build:
+      context: ../../tests/tickets
+    environment:
+      TICKETS_URL: http://tickets:8086
+      GATEKEEPER_URL: http://gatekeeper:8080
+    depends_on:
+      tickets:
         condition: service_started
       gatekeeper:
         condition: service_healthy

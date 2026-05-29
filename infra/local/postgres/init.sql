@@ -3,3 +3,4 @@ CREATE DATABASE blueprints;
 CREATE DATABASE forge;
 CREATE DATABASE registry;
 CREATE DATABASE workflows;
+CREATE DATABASE tickets;
