@@ -62,17 +62,20 @@ On signup every user automatically receives a `Permissions` record and a `Role` 
 | `createOrg` | `gatekeeper` | `gatekeeper/orgs` |
 | `createTeam` | `gatekeeper` | `gatekeeper/teams` |
 | `getState`, `updateState`, `deleteState`, `lockState`, `unlockState` | `blueprints` | `states/{username}/*` |
+| `createWorkflow`, `listWorkflow`, `getWorkflow`, `updateWorkflow`, `deleteWorkflow`, `triggerRun`, `listRun`, `getRun`, `cancelRun` | `workflows` | `workflows/workflows`, `workflows/workflows/*`, `workflows/runs`, `workflows/runs/*` |
+| `createTicket`, `listTicket`, `getTicket`, `updateTicket`, `deleteTicket`, `createComment`, `deleteComment` | `tickets` | `tickets/tickets`, `tickets/tickets/*` |
+| `createRule`, `listRule`, `getRule`, `updateRule`, `deleteRule`, `listEvent`, `getEvent` | `hooks` | `hooks/rules`, `hooks/rules/*`, `hooks/events`, `hooks/events/*` |
 
 All other permissions must be explicitly granted by a user who already holds them.
 
 ## Permitted Services
 
-The `service` field in a `Permissions` record must be listed in the `PERMITTED_SERVICES` environment variable (comma-separated). The default allowlist is `gatekeeper,blueprints,forge`. Attempts to create or update a permission record with any other service name are rejected with `400 Bad Request`.
+The `service` field in a `Permissions` record must be listed in the `PERMITTED_SERVICES` environment variable (comma-separated). The default allowlist is `gatekeeper,blueprints,forge,workflows,tickets,hooks`. Attempts to create or update a permission record with any other service name are rejected with `400 Bad Request`.
 
 To register a new service:
 
 ```bash
-PERMITTED_SERVICES=gatekeeper,blueprints,forge,my-service
+PERMITTED_SERVICES=gatekeeper,blueprints,forge,workflows,tickets,hooks,my-service
 ```
 
 ## Org-Scoped Permissions
