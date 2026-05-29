@@ -19,8 +19,9 @@ import (
 )
 
 var (
-	db            *pgxpool.Pool
-	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	db              *pgxpool.Pool
+	gatekeeperURL   = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	hooksTriggerKey = os.Getenv("HOOKS_TRIGGER_KEY")
 	// serviceURLs maps registered service names to their base URLs.
 	// Populated at startup from SERVICES (format: "name=url,name=url,...").
 	serviceURLs = map[string]string{}
@@ -212,6 +213,7 @@ func main() {
 	mux.HandleFunc("DELETE /workflows/{id}", handleDeleteWorkflow)
 
 	mux.HandleFunc("POST /workflows/{id}/runs", handleTriggerRun)
+	mux.HandleFunc("POST /internal/workflows/{id}/runs", handleInternalTriggerRun)
 	mux.HandleFunc("GET /runs", handleListRuns)
 	mux.HandleFunc("GET /runs/{id}", handleGetRun)
 	mux.HandleFunc("DELETE /runs/{id}", handleCancelRun(workers))
