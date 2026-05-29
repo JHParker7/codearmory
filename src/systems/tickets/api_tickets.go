@@ -285,6 +285,8 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
 		slog.Error("update ticket: fetch error", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return

@@ -260,6 +260,8 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
 		slog.Error("update rule: fetch error", "rule_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get rule", http.StatusInternalServerError)
 		return

@@ -44,6 +44,8 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "workflow not found", http.StatusNotFound)
 			return
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
 		slog.Error("trigger run: get workflow", "workflow_id", workflowID, "error", err)
 		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
 		return
@@ -71,6 +73,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		Status:      StatusPending,
 		Inputs:      req.Inputs,
 		Token:       token,
+		StepRuns:    []WorkflowStepRun{},
 		CreatedAt:   time.Now().UTC(),
 	}
 
@@ -121,6 +124,9 @@ func handleListRuns(w http.ResponseWriter, r *http.Request) {
 	if runs == nil {
 		runs = []WorkflowRun{}
 	}
+	for i := range runs {
+		runs[i].StepRuns = []WorkflowStepRun{}
+	}
 
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
@@ -159,6 +165,8 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 		        response_status, response_body, started_at, ended_at
 		 FROM workflow_step_runs WHERE run_id=? ORDER BY step_index`, id,
 	).Scan(&stepRuns).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db query step runs failed")
 		slog.Error("get run: step runs query", "run_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get run steps", http.StatusInternalServerError)
 		return
@@ -191,6 +199,8 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 				http.Error(w, "run not found", http.StatusNotFound)
 				return
 			}
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "db error")
 			slog.Error("cancel run: get run", "run_id", id, "user_id", userID, "error", err)
 			http.Error(w, "failed to get run", http.StatusInternalServerError)
 			return
@@ -200,7 +210,7 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		result := db.WithContext(context.Background()).Exec(
+		result := db.WithContext(ctx).Exec(
 			"UPDATE workflow_runs SET status='cancelled', ended_at=now(), token=NULL WHERE run_id=? AND status IN ('pending','running')", id,
 		)
 		if result.Error != nil {

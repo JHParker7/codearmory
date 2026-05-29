@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,7 +45,7 @@ func secret(name string) string {
 			slog.Error("cannot read secret file", "var", name+"_FILE", "path", path, "error", err)
 			os.Exit(1)
 		}
-		return string(data)
+		return strings.TrimRight(string(data), "\n")
 	}
 	return os.Getenv(name)
 }
@@ -106,7 +107,7 @@ func main() {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
 		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
-		defer shutdown(ctx)
+		defer shutdown(context.Background())
 	}
 	initMetrics()
 

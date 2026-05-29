@@ -28,8 +28,8 @@ type Ticket struct {
 	TicketID         string          `json:"ticket_id"          gorm:"column:ticket_id;primaryKey"`
 	Title            string          `json:"title"              gorm:"column:title"`
 	Description      string          `json:"description"        gorm:"column:description;default:''"`
-	Status           string          `json:"status"             gorm:"column:status;default:open"`
-	Priority         string          `json:"priority"           gorm:"column:priority;default:medium"`
+	Status           string          `json:"status"             gorm:"column:status;default:'open'"`
+	Priority         string          `json:"priority"           gorm:"column:priority;default:'medium'"`
 	CreatedBy        string          `json:"created_by"         gorm:"column:created_by"`
 	OrgID            string          `json:"org_id"             gorm:"column:org_id;default:''"`
 	AssigneeID       *string         `json:"assignee_id,omitempty"        gorm:"column:assignee_id"`

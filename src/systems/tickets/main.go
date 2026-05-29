@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -106,7 +105,7 @@ func main() {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {
 		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
-		defer shutdown(ctx)
+		defer shutdown(context.Background())
 	}
 	initMetrics()
 
@@ -115,7 +114,7 @@ func main() {
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
+		slog.Error("failed to connect to database", "error", err)
 		os.Exit(1)
 	}
 	db = conn

@@ -60,7 +60,7 @@ type WorkflowRun struct {
 	WorkflowID  string            `json:"workflow_id"  gorm:"column:workflow_id"`
 	TriggeredBy string            `json:"triggered_by" gorm:"column:triggered_by"`
 	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
-	Status      string            `json:"status"       gorm:"column:status;default:pending"`
+	Status      string            `json:"status"       gorm:"column:status;default:'pending'"`
 	CurrentStep int               `json:"current_step" gorm:"column:current_step;default:0"`
 	Inputs      map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
 	Token       string            `json:"-"            gorm:"column:token"`
@@ -78,7 +78,7 @@ type WorkflowStepRun struct {
 	RunID          string     `json:"run_id"                    gorm:"column:run_id"`
 	StepIndex      int        `json:"step_index"                gorm:"column:step_index"`
 	StepName       string     `json:"step_name"                 gorm:"column:step_name"`
-	Status         string     `json:"status"                    gorm:"column:status;default:pending"`
+	Status         string     `json:"status"                    gorm:"column:status;default:'pending'"`
 	ResponseStatus *int       `json:"response_status,omitempty" gorm:"column:response_status"`
 	ResponseBody   *string    `json:"response_body,omitempty"   gorm:"column:response_body"`
 	StartedAt      *time.Time `json:"started_at,omitempty"      gorm:"column:started_at"`
