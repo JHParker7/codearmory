@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"crypto/tls"
+	"crypto/x509"
 	"os"
 	"os/signal"
 	"regexp"
@@ -25,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -35,11 +38,13 @@ import (
 )
 
 var (
-	gatekeeperURL       = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
-	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8082")
-	registryKey         = os.Getenv("REGISTRY_READ_KEY")
+	gatekeeperURL       = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8084")
 	conductorForwardKey = os.Getenv("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
 	httpClient          = &http.Client{Timeout: 10 * time.Second}
+	// getRegistryKey returns the current rotating service key used to authenticate
+	// conductor's requests to the registry. Set in main() via StartKeyRotation.
+	getRegistryKey func() string
 )
 
 const maxRequestBodyBytes = 64 * 1024
@@ -379,7 +384,7 @@ func refreshServiceCache(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+registryKey)
+	req.Header.Set("X-Service-Key", "conductor:"+getRegistryKey())
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -749,9 +754,22 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+func secret(name string) string {
+	if path := os.Getenv(name + "_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Error("cannot read secret file", "var", name+"_FILE", "path", path, "error", err)
+			os.Exit(1)
+		}
+		return strings.TrimRight(string(data), "\n")
+	}
+	return os.Getenv(name)
+}
+
 func main() {
-	if registryKey == "" {
-		slog.Error("REGISTRY_READ_KEY is not set; refusing to start")
+	initialRegistryKey := secret("REGISTRY_SERVICE_KEY")
+	if initialRegistryKey == "" {
+		slog.Error("REGISTRY_SERVICE_KEY is not set; refusing to start")
 		os.Exit(1)
 	}
 
@@ -773,6 +791,10 @@ func main() {
 		defer shutdown(context.Background())
 	}
 	initMetrics()
+
+	// Rotate conductor's registry service key every 25 minutes so the credential
+	// is always short-lived. The key is used in X-Service-Key on every GET /services call.
+	getRegistryKey = registry.StartKeyRotation(ctx, registryURL, "conductor", initialRegistryKey, 25*time.Minute)
 
 	// Warm the service cache, retrying until the registry is reachable.
 	for {
@@ -824,10 +846,37 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	if certFile != "" && keyFile != "" {
+		tlsCfg := &tls.Config{}
+		switch os.Getenv("TLS_CLIENT_AUTH") {
+		case "require":
+			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+			if caFile == "" {
+				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+				os.Exit(1)
+			}
+			caCert, err := os.ReadFile(caFile)
+			if err != nil {
+				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
+				os.Exit(1)
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caCert) {
+				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
+				os.Exit(1)
+			}
+			tlsCfg.ClientCAs = caPool
+			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+		case "request":
+			tlsCfg.ClientAuth = tls.RequestClientCert
+		}
+		srv.TLSConfig = tlsCfg
+	}
+
 	go func() {
 		var err error
 		if certFile != "" && keyFile != "" {
-			slog.Info("listening with TLS", "port", port)
+			slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
 			err = srv.ListenAndServeTLS(certFile, keyFile)
 		} else {
 			slog.Info("listening", "port", port)

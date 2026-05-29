@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -18,13 +20,39 @@ import (
 )
 
 var (
-	db             *pgxpool.Pool
-	gatekeeperURL  = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
-	forgeHTTPClient = &http.Client{
-		Transport: otelhttp.NewTransport(http.DefaultTransport),
+	db              *pgxpool.Pool
+	gatekeeperURL   = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	forgeHTTPClient *http.Client
+)
+
+// initHTTPClient builds an instrumented HTTP client. When TLS_CLIENT_CERT_FILE and
+// TLS_CLIENT_KEY_FILE are set, the client presents a certificate on outbound TLS
+// connections — required when calling services with TLS_CLIENT_AUTH=require.
+func initHTTPClient() *http.Client {
+	tlsCfg := &tls.Config{}
+	if certFile, keyFile := os.Getenv("TLS_CLIENT_CERT_FILE"), os.Getenv("TLS_CLIENT_KEY_FILE"); certFile != "" && keyFile != "" {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			slog.Error("failed to load client TLS certificate", "error", err)
+			os.Exit(1)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+	if caFile := os.Getenv("TLS_CA_FILE"); caFile != "" {
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			slog.Error("failed to read TLS_CA_FILE", "error", err)
+			os.Exit(1)
+		}
+		caPool := x509.NewCertPool()
+		caPool.AppendCertsFromPEM(caCert)
+		tlsCfg.RootCAs = caPool
+	}
+	return &http.Client{
+		Transport: otelhttp.NewTransport(&http.Transport{TLSClientConfig: tlsCfg}),
 		Timeout:   10 * time.Second,
 	}
-)
+}
 
 const createTables = `
 CREATE TABLE IF NOT EXISTS executions (
@@ -123,6 +151,7 @@ func main() {
 		defer shutdown(ctx)
 	}
 	initMetrics()
+	forgeHTTPClient = initHTTPClient()
 
 	db, err = pgxpool.New(ctx, secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/forge"))
 	if err != nil {
@@ -166,6 +195,8 @@ func main() {
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
 
+	certFile := os.Getenv("TLS_CERT_FILE")
+	keyFile := os.Getenv("TLS_KEY_FILE")
 	srv := &http.Server{
 		Addr:         ":" + port,
 		Handler:      wrapped,
@@ -173,9 +204,42 @@ func main() {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
+	if certFile != "" && keyFile != "" {
+		tlsCfg := &tls.Config{}
+		switch os.Getenv("TLS_CLIENT_AUTH") {
+		case "require":
+			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+			if caFile == "" {
+				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+				os.Exit(1)
+			}
+			caCert, err := os.ReadFile(caFile)
+			if err != nil {
+				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
+				os.Exit(1)
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caCert) {
+				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
+				os.Exit(1)
+			}
+			tlsCfg.ClientCAs = caPool
+			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+		case "request":
+			tlsCfg.ClientAuth = tls.RequestClientCert
+		}
+		srv.TLSConfig = tlsCfg
+	}
 	go func() {
-		slog.Info("listening", "port", port)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if certFile != "" && keyFile != "" {
+			slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
+			err = srv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			slog.Info("listening", "port", port)
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}

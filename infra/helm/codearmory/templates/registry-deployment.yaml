@@ -56,6 +56,8 @@ spec:
               value: {{ .Values.registry.port | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.registry.env.logLevel | quote }}
+            - name: GATEKEEPER_URL
+              value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
             - name: SERVICES
               value: {{ $services | quote }}
             {{- if .Values.registry.env.otelEndpoint }}
@@ -67,16 +69,26 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-registry
                   key: database-url
-            - name: ADMIN_KEY
+            - name: GATEKEEPER_SERVICE_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-registry
-                  key: admin-key
-            - name: READ_KEY
+                  key: gatekeeper-service-key
+            - name: REGISTRY_SERVICE_ACCOUNTS
               valueFrom:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-registry
-                  key: read-key
+                  key: service-accounts
+            - name: REGISTRY_ADMIN_ACCOUNTS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-registry
+                  key: admin-accounts
+            {{- include "codearmory.tls.envs" .Values.registry.tls | nindent 12 }}
+          {{- with (include "codearmory.tls.volumeMounts" .Values.registry.tls) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             tcpSocket:
               port: http
@@ -89,3 +101,7 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.registry.resources | nindent 12 }}
+      {{- with (include "codearmory.tls.volumes" .Values.registry.tls) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}

@@ -19,10 +19,12 @@ Conductor is the public-facing API gateway.
 
 Before production use, make sure you have set:
   - gatekeeper.secret.gatekeeperServices        (service auth keys for all services)
-  - registry.secret.adminKey / readKey
+  - registry.secret.gatekeeperServiceKey
+  - registry.secret.serviceAccounts            (e.g. "conductor=<key>")
+  - registry.secret.adminAccounts              (e.g. "admin=<key>")
+  - conductor.secret.registryServiceKey        (must match registry.secret.serviceAccounts entry)
   - blueprints.secret.encryptionKey             (openssl rand -hex 32)
   - blueprints.secret.gatekeeperServiceKey
-  - conductor.secret.registryReadKey
   - conductor.secret.conductorForwardKey
   - forge.secret.conductorForwardKey
   - forge.secret.gatekeeperServiceKey

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -72,38 +70,48 @@ func hashServiceKey(key string) (string, error) {
 	return string(h), nil
 }
 
-// checkKey does a constant-time comparison against a configured API key so the
-// check is not vulnerable to timing-based enumeration.
-func checkKey(r *http.Request, expected string) bool {
-	if expected == "" {
-		return false
-	}
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
+// requireReadAuth verifies X-Service-Key against registry_service_accounts.
+// Any valid service account (any role) is accepted.
+func requireReadAuth(w http.ResponseWriter, r *http.Request) bool {
+	return requireAuthWithRole(w, r, "")
 }
 
-func requireAdminKey(w http.ResponseWriter, r *http.Request) bool {
-	if checkKey(r, os.Getenv("ADMIN_KEY")) {
-		return true
-	}
-	http.Error(w, "unauthorized", http.StatusUnauthorized)
-	return false
+// requireAdminAuth verifies X-Service-Key and requires role=admin.
+func requireAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+	return requireAuthWithRole(w, r, "admin")
 }
 
-// requireReadKey accepts either the read key or the admin key.
-// Both comparisons are always evaluated to prevent the short-circuit from
-// leaking which key was checked first via response timing.
-func requireReadKey(w http.ResponseWriter, r *http.Request) bool {
-	readOK := checkKey(r, os.Getenv("READ_KEY"))
-	adminOK := checkKey(r, os.Getenv("ADMIN_KEY"))
-	if readOK || adminOK {
-		return true
+func requireAuthWithRole(w http.ResponseWriter, r *http.Request, requiredRole string) bool {
+	header := r.Header.Get("X-Service-Key")
+	if header == "" {
+		http.Error(w, "missing X-Service-Key header", http.StatusUnauthorized)
+		return false
 	}
-	http.Error(w, "unauthorized", http.StatusUnauthorized)
-	return false
+	idx := strings.Index(header, ":")
+	if idx < 1 {
+		http.Error(w, "invalid X-Service-Key format, expected name:key", http.StatusUnauthorized)
+		return false
+	}
+	name, key := header[:idx], header[idx+1:]
+
+	var hashedKey, role string
+	err := pool.QueryRow(r.Context(),
+		`SELECT hashed_key, role FROM registry_service_accounts WHERE name = $1`,
+		name,
+	).Scan(&hashedKey, &role)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hashedKey), []byte(key)) != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	if requiredRole != "" && role != requiredRole {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // validateServiceURL rejects URLs that target loopback, link-local, or any
@@ -156,7 +164,7 @@ func validateServiceURL(rawURL string) error {
 
 // handleListServices returns all active services with their endpoint manifests.
 func handleListServices(w http.ResponseWriter, r *http.Request) {
-	if !requireReadKey(w, r) {
+	if !requireReadAuth(w, r) {
 		return
 	}
 
@@ -228,7 +236,7 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateService registers a new service entry (admin key required).
 func handleCreateService(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminKey(w, r) {
+	if !requireAdminAuth(w, r) {
 		return
 	}
 	var req struct {
@@ -287,7 +295,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteService soft-deletes a service by ID (admin key required).
 func handleDeleteService(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminKey(w, r) {
+	if !requireAdminAuth(w, r) {
 		return
 	}
 	id := r.PathValue("id")
@@ -308,7 +316,7 @@ func handleDeleteService(w http.ResponseWriter, r *http.Request) {
 // handleUpdateServiceEndpoints replaces the full endpoint manifest for a service
 // (admin key required). Used to seed endpoint definitions without self-registration.
 func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminKey(w, r) {
+	if !requireAdminAuth(w, r) {
 		return
 	}
 	id := r.PathValue("id")

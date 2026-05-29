@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS service_endpoints (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS registry_service_accounts (
+    account_id  TEXT        PRIMARY KEY,
+    name        TEXT        NOT NULL UNIQUE,
+    hashed_key  TEXT        NOT NULL,
+    role        TEXT        NOT NULL DEFAULT 'read',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `
 
 func connectDB(ctx context.Context) {

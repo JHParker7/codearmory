@@ -44,6 +44,7 @@ func fakeService(t *testing.T, name string, handler http.HandlerFunc) *httptest.
 
 func TestMain(m *testing.M) {
 	initMetrics()
+	httpClient = initHTTPClient()
 	gatekeeperClient = newGatekeeperClient()
 	os.Exit(m.Run())
 }

@@ -30,6 +30,7 @@ func fakeGatekeeper(t *testing.T, status int, body string) *httptest.Server {
 
 func TestMain(m *testing.M) {
 	initMetrics()
+	forgeHTTPClient = initHTTPClient()
 	setupForgeTestDB()
 	os.Exit(m.Run())
 }

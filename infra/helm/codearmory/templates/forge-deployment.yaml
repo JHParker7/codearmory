@@ -84,10 +84,15 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-forge
                   key: gatekeeper-service-key
-          {{- if and (eq .Values.forge.env.runtime "docker") .Values.forge.dockerSocket.enabled }}
+            {{- include "codearmory.tls.envs" .Values.forge.tls | nindent 12 }}
+          {{- $tlsMounts := include "codearmory.tls.volumeMounts" .Values.forge.tls }}
+          {{- if or (and (eq .Values.forge.env.runtime "docker") .Values.forge.dockerSocket.enabled) $tlsMounts }}
           volumeMounts:
+            {{- if and (eq .Values.forge.env.runtime "docker") .Values.forge.dockerSocket.enabled }}
             - name: docker-socket
               mountPath: /var/run/docker.sock
+            {{- end }}
+            {{- $tlsMounts | nindent 12 }}
           {{- end }}
           livenessProbe:
             tcpSocket:
@@ -101,11 +106,15 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.forge.resources | nindent 12 }}
-      {{- if and (eq .Values.forge.env.runtime "docker") .Values.forge.dockerSocket.enabled }}
+      {{- $tlsVols := include "codearmory.tls.volumes" .Values.forge.tls }}
+      {{- if or (and (eq .Values.forge.env.runtime "docker") .Values.forge.dockerSocket.enabled) $tlsVols }}
       volumes:
+        {{- if and (eq .Values.forge.env.runtime "docker") .Values.forge.dockerSocket.enabled }}
         - name: docker-socket
           hostPath:
             path: {{ .Values.forge.dockerSocket.path }}
             type: Socket
+        {{- end }}
+        {{- $tlsVols | nindent 8 }}
       {{- end }}
 {{- end }}

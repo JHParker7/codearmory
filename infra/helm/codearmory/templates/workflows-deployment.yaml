@@ -70,6 +70,11 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-workflows
                   key: hooks-trigger-key
+            {{- include "codearmory.tls.envs" .Values.workflows.tls | nindent 12 }}
+          {{- with (include "codearmory.tls.volumeMounts" .Values.workflows.tls) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             tcpSocket:
               port: http
@@ -82,4 +87,8 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.workflows.resources | nindent 12 }}
+      {{- with (include "codearmory.tls.volumes" .Values.workflows.tls) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
 {{- end }}

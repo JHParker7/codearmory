@@ -77,10 +77,19 @@ registry:
   secret:
     # PostgreSQL DSN. Auto-constructed when left empty.
     databaseUrl: ""
-    # Bearer token for write (admin) operations — required.
-    adminKey: ""
-    # Bearer token for read operations — must match conductor.secret.registryReadKey.
-    readKey: ""
+    # Must match the registry entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+    # Comma-separated "name=key" pairs for read-only service accounts (e.g. Conductor).
+    # Must match conductor.secret.registryServiceKey. Generate with: openssl rand -hex 32
+    serviceAccounts: ""
+    # Comma-separated "name=key" pairs for admin service accounts (e.g. CI pipelines).
+    adminAccounts: ""
+  tls:
+    certSecret: ""     # Kubernetes TLS secret (tls.crt + tls.key) for server TLS
+    clientAuth: ""     # "require" or "request" — enables mTLS on incoming connections
+    caSecret: ""       # Secret containing ca.crt used to verify client certificates
+    clientCertSecret: "" # TLS secret (tls.crt + tls.key) presented on outbound calls
+    caBundle: ""       # Secret containing ca.crt used to verify outbound server certs
 
 # ── Blueprints ────────────────────────────────────────────────────────────────
 blueprints:
@@ -145,11 +154,19 @@ conductor:
     logLevel: info
     otelEndpoint: ""
   secret:
-    # Must match registry.secret.readKey.
-    registryReadKey: ""
+    # Initial service key for conductor's account in the registry.
+    # Must match the conductor entry in registry.secret.serviceAccounts.
+    # Rotated automatically every 25 minutes via POST /service-accounts/rotate-key on registry.
+    registryServiceKey: ""
     # Shared HMAC signing key for X-Conductor-Token headers.
     # Must match forge.secret.conductorForwardKey.
     conductorForwardKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
   service:
     type: ClusterIP
     # Set to LoadBalancer to expose conductor directly without an ingress.
@@ -201,6 +218,12 @@ forge:
     conductorForwardKey: ""
     # Must match the forge entry in gatekeeper.secret.gatekeeperServices.
     gatekeeperServiceKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
   serviceAccount:
     create: true
     name: ""
@@ -240,6 +263,12 @@ workflows:
     # Shared HMAC secret with the hooks service for authenticating internal trigger requests.
     # Must match hooks.secret.hooksTriggerKey. Generate with: openssl rand -hex 32
     hooksTriggerKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
 
 # ── Tickets ───────────────────────────────────────────────────────────────────
 tickets:
@@ -264,6 +293,12 @@ tickets:
     databaseUrl: ""
     # Must match the tickets entry in gatekeeper.secret.gatekeeperServices.
     gatekeeperServiceKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
 
 # ── Hooks ─────────────────────────────────────────────────────────────────────
 hooks:
@@ -291,6 +326,12 @@ hooks:
     # Shared HMAC secret with the workflows service for signing internal trigger requests.
     # Must match workflows.secret.hooksTriggerKey. Generate with: openssl rand -hex 32
     hooksTriggerKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
 
 # ── Integration tests (helm test) ────────────────────────────────────────────
 # Run with: helm test <release>

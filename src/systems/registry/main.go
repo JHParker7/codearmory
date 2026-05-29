@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -9,14 +13,40 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/crypto/bcrypt"
 )
+
+var (
+	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+)
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func secret(name string) string {
+	if path := os.Getenv(name + "_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Error("cannot read secret file", "var", name+"_FILE", "path", path, "error", err)
+			os.Exit(1)
+		}
+		return strings.TrimRight(string(data), "\n")
+	}
+	return os.Getenv(name)
+}
 
 type statusResponseWriter struct {
 	http.ResponseWriter
@@ -43,6 +73,121 @@ func (l *logger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
+// seedServiceAccounts upserts service accounts from a "name=key" comma-separated
+// string with the given role. On every startup the hash is refreshed from the
+// env var so that a restarted Registry re-synchronises with clients that are
+// about to rotate using their initial key.
+func seedServiceAccounts(ctx context.Context, raw, role string) {
+	if raw == "" {
+		return
+	}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		idx := strings.Index(entry, "=")
+		if idx < 1 || idx == len(entry)-1 {
+			slog.Warn("seedServiceAccounts: invalid entry, expected name=key", "entry", entry, "role", role)
+			continue
+		}
+		name, key := entry[:idx], entry[idx+1:]
+		hash, err := bcrypt.GenerateFromPassword([]byte(key), 12)
+		if err != nil {
+			slog.Error("seedServiceAccounts: bcrypt failed", "name", name, "error", err)
+			continue
+		}
+
+		var existing string
+		scanErr := pool.QueryRow(ctx,
+			`SELECT account_id FROM registry_service_accounts WHERE name = $1`, name,
+		).Scan(&existing)
+		if scanErr != nil {
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO registry_service_accounts (account_id, name, hashed_key, role)
+				 VALUES ($1, $2, $3, $4)`,
+				uuid.New().String(), name, string(hash), role,
+			); err != nil {
+				slog.Error("seedServiceAccounts: insert failed", "name", name, "error", err)
+			} else {
+				slog.Info("seedServiceAccounts: created", "name", name, "role", role)
+			}
+		} else {
+			if _, err := pool.Exec(ctx,
+				`UPDATE registry_service_accounts SET hashed_key = $1, role = $2, updated_at = now()
+				 WHERE name = $3`,
+				string(hash), role, name,
+			); err != nil {
+				slog.Error("seedServiceAccounts: update failed", "name", name, "error", err)
+			} else {
+				slog.Info("seedServiceAccounts: updated key", "name", name, "role", role)
+			}
+		}
+	}
+}
+
+// rotationMu serialises concurrent rotate-key calls for the same account name.
+var rotationMu sync.Map
+
+// handleRotateServiceKey generates a new random key for the authenticated service
+// account, stores its bcrypt hash, and returns the plaintext new key.
+// The client must present its current key to authenticate; on success it must
+// immediately start using the returned key for all subsequent requests.
+func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
+	header := r.Header.Get("X-Service-Key")
+	if header == "" {
+		http.Error(w, "missing X-Service-Key header", http.StatusUnauthorized)
+		return
+	}
+	idx := strings.Index(header, ":")
+	if idx < 1 {
+		http.Error(w, "invalid X-Service-Key format, expected name:key", http.StatusUnauthorized)
+		return
+	}
+	name, key := header[:idx], header[idx+1:]
+
+	var hashedKey string
+	if err := pool.QueryRow(r.Context(),
+		`SELECT hashed_key FROM registry_service_accounts WHERE name = $1`, name,
+	).Scan(&hashedKey); err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hashedKey), []byte(key)) != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	val, _ := rotationMu.LoadOrStore(name, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		slog.Error("rotate service key: rand failed", "service", name, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	newKey := hex.EncodeToString(raw)
+	newHash, err := bcrypt.GenerateFromPassword([]byte(newKey), 12)
+	if err != nil {
+		slog.Error("rotate service key: bcrypt failed", "service", name, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := pool.Exec(r.Context(),
+		`UPDATE registry_service_accounts SET hashed_key = $1, updated_at = now() WHERE name = $2`,
+		string(newHash), name,
+	); err != nil {
+		slog.Error("rotate service key: db update failed", "service", name, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("registry service key rotated", "service", name)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"key": newKey}) //nolint:errcheck
+}
+
 type manifestEntry struct {
 	Name        string `json:"name"`
 	URL         string `json:"url"`
@@ -58,9 +203,6 @@ type manifestEntry struct {
 	} `json:"endpoints"`
 }
 
-// loadManifest reads a JSON manifest file and upserts service+endpoint definitions.
-// Existing endpoints for each service are replaced; the service URL and service_key
-// are updated if the service already exists.
 func loadManifest(ctx context.Context, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -82,7 +224,6 @@ func loadManifest(ctx context.Context, path string) {
 		var serviceID string
 		err = pool.QueryRow(ctx, `SELECT service_id FROM services WHERE name = $1`, e.Name).Scan(&serviceID)
 		if err != nil {
-			// Service doesn't exist: insert it.
 			serviceID = uuid.New().String()
 			if _, err := pool.Exec(ctx,
 				`INSERT INTO services (service_id, name, url, description, forward_auth, service_key)
@@ -93,7 +234,6 @@ func loadManifest(ctx context.Context, path string) {
 			}
 			slog.Info("manifest: service created", "name", e.Name)
 		} else {
-			// Service exists: update URL, description, and service_key.
 			if _, err := pool.Exec(ctx,
 				`UPDATE services SET url = $1, description = $2, forward_auth = $3, service_key = $4, active = true, updated_at = now() WHERE service_id = $5`,
 				e.URL, e.Description, e.ForwardAuth, hashedKey, serviceID); err != nil {
@@ -102,7 +242,6 @@ func loadManifest(ctx context.Context, path string) {
 			}
 			slog.Info("manifest: service updated", "name", e.Name)
 		}
-		// Replace endpoints.
 		pool.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, serviceID) //nolint:errcheck
 		pool.Exec(ctx, `DELETE FROM service_roles WHERE service_id = $1`, serviceID)     //nolint:errcheck
 		for _, ep := range e.Endpoints {
@@ -139,9 +278,12 @@ func main() {
 	connectDB(ctx)
 	defer pool.Close()
 
-	// Seed services from SERVICES=name=url,name=url env var.
-	// Format: comma-separated name=url pairs. This is a convenience for initial
-	// setup; services can also be registered via POST /services with the admin key.
+	// Seed service accounts. Read accounts (e.g. Conductor) from REGISTRY_SERVICE_ACCOUNTS=name=key.
+	// Admin accounts (e.g. CI pipelines) from REGISTRY_ADMIN_ACCOUNTS=name=key.
+	seedServiceAccounts(ctx, os.Getenv("REGISTRY_SERVICE_ACCOUNTS"), "read")
+	seedServiceAccounts(ctx, os.Getenv("REGISTRY_ADMIN_ACCOUNTS"), "admin")
+
+	// Seed service definitions from SERVICES=name=url,... env var.
 	if raw := os.Getenv("SERVICES"); raw != "" {
 		for _, entry := range strings.Split(raw, ",") {
 			parts := strings.SplitN(strings.TrimSpace(entry), "=", 2)
@@ -166,25 +308,29 @@ func main() {
 		}
 	}
 
-	// Load endpoint manifest from MANIFEST_FILE if configured.
 	if manifestPath := os.Getenv("MANIFEST_FILE"); manifestPath != "" {
 		loadManifest(ctx, manifestPath)
 	}
 
+	// Register Registry itself as a Gatekeeper service account so its identity rotates.
+	registry.StartKeyRotation(ctx, gatekeeperURL, "registry",
+		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
+
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /services", handleListServices)
 	mux.HandleFunc("POST /services", handleCreateService)
 	mux.HandleFunc("DELETE /services/{id}", handleDeleteService)
 	mux.HandleFunc("PUT /services/{id}/endpoints", handleUpdateServiceEndpoints)
+	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8082"
-	}
-
+	port := envOrDefault("PORT", "8084")
 	wrapped := otelhttp.NewHandler(&logger{mux}, "registry",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
+
+	certFile := os.Getenv("TLS_CERT_FILE")
+	keyFile := os.Getenv("TLS_KEY_FILE")
 
 	srv := &http.Server{
 		Addr:         ":" + port,
@@ -194,9 +340,43 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	if certFile != "" && keyFile != "" {
+		tlsCfg := &tls.Config{}
+		switch os.Getenv("TLS_CLIENT_AUTH") {
+		case "require":
+			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+			if caFile == "" {
+				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+				os.Exit(1)
+			}
+			caCert, err := os.ReadFile(caFile)
+			if err != nil {
+				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
+				os.Exit(1)
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caCert) {
+				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
+				os.Exit(1)
+			}
+			tlsCfg.ClientCAs = caPool
+			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+		case "request":
+			tlsCfg.ClientAuth = tls.RequestClientCert
+		}
+		srv.TLSConfig = tlsCfg
+	}
+
 	go func() {
-		slog.Info("listening", "port", port)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if certFile != "" && keyFile != "" {
+			slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
+			err = srv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			slog.Info("listening", "port", port)
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
