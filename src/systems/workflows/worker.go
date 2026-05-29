@@ -13,19 +13,18 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"gorm.io/gorm"
 )
 
 // WorkerPool runs workflow runs from the pending queue in PostgreSQL.
 type WorkerPool struct {
-	db      *pgxpool.Pool
+	db      *gorm.DB
 	cancels sync.Map // runID -> context.CancelFunc
 }
 
-func newWorkerPool(db *pgxpool.Pool) *WorkerPool {
+func newWorkerPool(db *gorm.DB) *WorkerPool {
 	return &WorkerPool{db: db}
 }
 
@@ -60,51 +59,44 @@ func (p *WorkerPool) loop(ctx context.Context) {
 }
 
 func (p *WorkerPool) tryOne(ctx context.Context) {
-	tx, err := p.db.Begin(ctx)
-	if err != nil {
+	tx := p.db.WithContext(ctx).Begin()
+	if tx.Error != nil {
 		return
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer tx.Rollback() //nolint:errcheck
 
-	var runID, workflowID, token string
-	var inputsJSON []byte
-
+	type runPickup struct {
+		RunID      string
+		WorkflowID string
+		Inputs     []byte
+		Token      string
+	}
+	var pickup runPickup
 	// FOR UPDATE SKIP LOCKED: each worker locks one pending run; siblings skip it.
-	row := tx.QueryRow(ctx, `
+	result := tx.Raw(`
 		SELECT run_id, workflow_id, inputs, token
 		FROM workflow_runs
 		WHERE status = 'pending'
 		ORDER BY created_at
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED
-	`)
-	err = row.Scan(&runID, &workflowID, &inputsJSON, &token)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return
-	}
-	if err != nil {
-		slog.Error("worker: scan pending run", "error", err)
+	`).Scan(&pickup)
+	if result.Error != nil || result.RowsAffected == 0 {
 		return
 	}
 
 	var inputs map[string]string
-	if err := json.Unmarshal(inputsJSON, &inputs); err != nil {
-		slog.Error("worker: unmarshal inputs", "run_id", runID, "error", err)
+	if err := json.Unmarshal(pickup.Inputs, &inputs); err != nil {
+		slog.Error("worker: unmarshal inputs", "run_id", pickup.RunID, "error", err)
 		return
 	}
 
-	_, err = tx.Exec(ctx,
-		`UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=$1`, runID,
-	)
-	if err != nil {
-		slog.Error("worker: mark running", "run_id", runID, "error", err)
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
+	tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", pickup.RunID)
+	if err := tx.Commit().Error; err != nil {
 		return
 	}
 
-	p.executeRun(ctx, runID, workflowID, token, inputs)
+	p.executeRun(ctx, pickup.RunID, pickup.WorkflowID, pickup.Token, inputs)
 }
 
 func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token string, inputs map[string]string) {
@@ -137,8 +129,8 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token st
 			finalStatus = StatusFailed
 			break
 		}
-		p.db.Exec(context.Background(), //nolint:errcheck
-			`UPDATE workflow_runs SET current_step=$1 WHERE run_id=$2`, i, runID)
+		db.WithContext(context.Background()).Exec( //nolint:errcheck
+			"UPDATE workflow_runs SET current_step=? WHERE run_id=?", i, runID)
 
 		respStatus, respBody, stepErr := p.executeStep(runCtx, token, step, inputs)
 
@@ -174,9 +166,8 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token st
 		attribute.String("workflow.id", workflowID),
 		attribute.String("status", finalStatus),
 	))
-	p.db.Exec(context.Background(), //nolint:errcheck
-		`UPDATE workflow_runs SET status=$1, ended_at=now(), token=null
-		 WHERE run_id=$2 AND status='running'`,
+	db.WithContext(context.Background()).Exec( //nolint:errcheck
+		"UPDATE workflow_runs SET status=?, ended_at=now(), token=NULL WHERE run_id=? AND status='running'",
 		finalStatus, runID,
 	)
 	slog.Info("worker: run finished", "run_id", runID, "status", finalStatus)
@@ -264,26 +255,25 @@ func substitute(s string, inputs map[string]string) string {
 }
 
 func (p *WorkerPool) startStepRun(runID, stepRunID string, index int, name string) error {
-	_, err := p.db.Exec(context.Background(),
+	return db.Exec(
 		`INSERT INTO workflow_step_runs (step_run_id, run_id, step_index, step_name, status, started_at)
-		 VALUES ($1, $2, $3, $4, 'running', now())`,
+		 VALUES (?, ?, ?, ?, 'running', now())`,
 		stepRunID, runID, index, name,
-	)
-	return err
+	).Error
 }
 
 func (p *WorkerPool) finishStepRun(stepRunID, status string, respStatus *int, respBody *string) {
-	p.db.Exec(context.Background(), //nolint:errcheck
+	db.WithContext(context.Background()).Exec( //nolint:errcheck
 		`UPDATE workflow_step_runs
-		 SET status=$1, response_status=$2, response_body=$3, ended_at=now()
-		 WHERE step_run_id=$4`,
+		 SET status=?, response_status=?, response_body=?, ended_at=now()
+		 WHERE step_run_id=?`,
 		status, respStatus, respBody, stepRunID,
 	)
 }
 
 func (p *WorkerPool) failRun(runID string) {
-	p.db.Exec(context.Background(), //nolint:errcheck
-		`UPDATE workflow_runs SET status='failed', ended_at=now(), token=null WHERE run_id=$1`, runID,
+	db.WithContext(context.Background()).Exec( //nolint:errcheck
+		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL WHERE run_id=?", runID,
 	)
 	slog.Warn("worker: run failed before first step", "run_id", runID)
 }

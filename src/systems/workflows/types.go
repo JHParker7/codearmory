@@ -39,43 +39,50 @@ type WorkflowStep struct {
 
 // Workflow is a named, ordered sequence of steps.
 type Workflow struct {
-	WorkflowID  string         `json:"workflow_id"`
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	CreatedBy   string         `json:"created_by"`
-	OrgID       string         `json:"org_id"`
-	Steps       []WorkflowStep `json:"steps"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	Active      bool           `json:"active"`
+	WorkflowID  string         `json:"workflow_id"  gorm:"column:workflow_id;primaryKey"`
+	Name        string         `json:"name"         gorm:"column:name"`
+	Description string         `json:"description"  gorm:"column:description;default:''"`
+	CreatedBy   string         `json:"created_by"   gorm:"column:created_by"`
+	OrgID       string         `json:"org_id"       gorm:"column:org_id;default:''"`
+	Steps       []WorkflowStep `json:"steps"        gorm:"column:steps;serializer:json"`
+	CreatedAt   time.Time      `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"   gorm:"column:updated_at"`
+	Active      bool           `json:"-"            gorm:"column:active;default:true"`
 }
+
+func (Workflow) TableName() string { return "workflows" }
 
 // WorkflowRun is a single triggered execution of a Workflow.
 // Token holds the caller's Bearer JWT, forwarded to each step's target service.
 // It is cleared once the run reaches a terminal state.
 type WorkflowRun struct {
-	RunID       string            `json:"run_id"`
-	WorkflowID  string            `json:"workflow_id"`
-	TriggeredBy string            `json:"triggered_by"`
-	OrgID       string            `json:"org_id"`
-	Status      string            `json:"status"`
-	CurrentStep int               `json:"current_step"`
-	Inputs      map[string]string `json:"inputs"`
-	StepRuns    []WorkflowStepRun `json:"step_runs"`
-	CreatedAt   time.Time         `json:"created_at"`
-	StartedAt   *time.Time        `json:"started_at,omitempty"`
-	EndedAt     *time.Time        `json:"ended_at,omitempty"`
+	RunID       string            `json:"run_id"       gorm:"column:run_id;primaryKey"`
+	WorkflowID  string            `json:"workflow_id"  gorm:"column:workflow_id"`
+	TriggeredBy string            `json:"triggered_by" gorm:"column:triggered_by"`
+	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
+	Status      string            `json:"status"       gorm:"column:status;default:pending"`
+	CurrentStep int               `json:"current_step" gorm:"column:current_step;default:0"`
+	Inputs      map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
+	Token       string            `json:"-"            gorm:"column:token"`
+	StepRuns    []WorkflowStepRun `json:"step_runs"    gorm:"-"`
+	CreatedAt   time.Time         `json:"created_at"   gorm:"column:created_at"`
+	StartedAt   *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`
+	EndedAt     *time.Time        `json:"ended_at,omitempty"   gorm:"column:ended_at"`
 }
+
+func (WorkflowRun) TableName() string { return "workflow_runs" }
 
 // WorkflowStepRun is the execution record for one step within a WorkflowRun.
 type WorkflowStepRun struct {
-	StepRunID      string     `json:"step_run_id"`
-	RunID          string     `json:"run_id"`
-	StepIndex      int        `json:"step_index"`
-	StepName       string     `json:"step_name"`
-	Status         string     `json:"status"`
-	ResponseStatus *int       `json:"response_status,omitempty"`
-	ResponseBody   *string    `json:"response_body,omitempty"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	EndedAt        *time.Time `json:"ended_at,omitempty"`
+	StepRunID      string     `json:"step_run_id"               gorm:"column:step_run_id;primaryKey"`
+	RunID          string     `json:"run_id"                    gorm:"column:run_id"`
+	StepIndex      int        `json:"step_index"                gorm:"column:step_index"`
+	StepName       string     `json:"step_name"                 gorm:"column:step_name"`
+	Status         string     `json:"status"                    gorm:"column:status;default:pending"`
+	ResponseStatus *int       `json:"response_status,omitempty" gorm:"column:response_status"`
+	ResponseBody   *string    `json:"response_body,omitempty"   gorm:"column:response_body"`
+	StartedAt      *time.Time `json:"started_at,omitempty"      gorm:"column:started_at"`
+	EndedAt        *time.Time `json:"ended_at,omitempty"        gorm:"column:ended_at"`
 }
+
+func (WorkflowStepRun) TableName() string { return "workflow_step_runs" }

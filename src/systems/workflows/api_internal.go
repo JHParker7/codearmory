@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -13,11 +14,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"gorm.io/gorm"
 )
 
 // verifyHooksTrigger validates the HMAC-SHA256 token produced by the hooks
@@ -79,7 +80,7 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 
 	wf, err := getWorkflow(ctx, workflowID)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "workflow not found", http.StatusNotFound)
 			return
 		}
@@ -90,7 +91,6 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inputsJSON, _ := json.Marshal(req.Inputs)
 	run := WorkflowRun{
 		RunID:       uuid.New().String(),
 		WorkflowID:  wf.WorkflowID,
@@ -98,15 +98,11 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 		OrgID:       req.OrgID,
 		Status:      StatusPending,
 		Inputs:      req.Inputs,
+		Token:       "",
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	_, err = db.Exec(ctx,
-		`INSERT INTO workflow_runs (run_id, workflow_id, triggered_by, org_id, inputs, token)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		run.RunID, run.WorkflowID, run.TriggeredBy, run.OrgID, inputsJSON, "",
-	)
-	if err != nil {
+	if err := db.WithContext(ctx).Create(&run).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("internal trigger: db error", "workflow_id", workflowID, "error", err)

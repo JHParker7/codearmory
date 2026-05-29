@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,10 +14,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"gorm.io/gorm"
 )
 
 // checkGatekeeper calls gatekeeper's /check_permissions endpoint using the
@@ -164,13 +165,6 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stepsJSON, err := json.Marshal(steps)
-	if err != nil {
-		slog.Error("create workflow: marshal steps", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
 	wf := Workflow{
 		WorkflowID:  uuid.New().String(),
 		Name:        req.Name,
@@ -183,12 +177,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		Active:      true,
 	}
 
-	_, err = db.Exec(ctx,
-		`INSERT INTO workflows (workflow_id, name, description, created_by, org_id, steps)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		wf.WorkflowID, wf.Name, wf.Description, wf.CreatedBy, wf.OrgID, stepsJSON,
-	)
-	if err != nil {
+	if err := db.WithContext(ctx).Create(&wf).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("create workflow: db error", "error", err)
@@ -214,29 +203,20 @@ func handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := db.Query(ctx,
-		`SELECT workflow_id, name, description, created_by, org_id, steps, created_at, updated_at, active
-		 FROM workflows
-		 WHERE active = true AND (created_by = $1 OR (org_id != '' AND org_id = $2))
-		 ORDER BY created_at DESC LIMIT 100`,
-		userID, orgID,
-	)
-	if err != nil {
+	var wfs []Workflow
+	if err := db.WithContext(ctx).
+		Where("active=? AND (created_by=? OR (org_id!='' AND org_id=?))", true, userID, orgID).
+		Order("created_at desc").
+		Limit(100).
+		Find(&wfs).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		slog.Error("list workflows: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list workflows", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
-
-	wfs, err := scanWorkflows(rows)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "scan failed")
-		slog.Error("list workflows: scan error", "user_id", userID, "error", err)
-		http.Error(w, "failed to list workflows", http.StatusInternalServerError)
-		return
+	if wfs == nil {
+		wfs = []Workflow{}
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -257,7 +237,7 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	wf, err := getWorkflow(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "workflow not found", http.StatusNotFound)
 			return
 		}
@@ -290,7 +270,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	existing, err := getWorkflow(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "workflow not found", http.StatusNotFound)
 			return
 		}
@@ -325,12 +305,14 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = db.Exec(ctx,
-		`UPDATE workflows SET name=$1, description=$2, steps=$3, updated_at=now()
-		 WHERE workflow_id=$4 AND active=true`,
-		req.Name, req.Description, stepsJSON, id,
-	)
-	if err != nil {
+	if err := db.WithContext(ctx).Model(&Workflow{}).
+		Where("workflow_id=? AND active=?", id, true).
+		Updates(map[string]any{
+			"name":        req.Name,
+			"description": req.Description,
+			"steps":       string(stepsJSON),
+			"updated_at":  time.Now().UTC(),
+		}).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
 		slog.Error("update workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
@@ -365,7 +347,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	wf, err := getWorkflow(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "workflow not found", http.StatusNotFound)
 			return
 		}
@@ -380,12 +362,13 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err = db.Exec(ctx,
-		`UPDATE workflows SET active=false, updated_at=now() WHERE workflow_id=$1 AND active=true`, id,
-	); err != nil {
-		span.RecordError(err)
+	result := db.WithContext(ctx).Model(&Workflow{}).
+		Where("workflow_id=? AND active=?", id, true).
+		Updates(map[string]any{"active": false, "updated_at": time.Now().UTC()})
+	if result.Error != nil {
+		span.RecordError(result.Error)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
+		slog.Error("delete workflow: db error", "workflow_id", id, "user_id", userID, "error", result.Error)
 		http.Error(w, "failed to delete workflow", http.StatusInternalServerError)
 		return
 	}
@@ -397,43 +380,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 
 // getWorkflow fetches a single active workflow by ID.
 func getWorkflow(ctx context.Context, id string) (Workflow, error) {
-	row := db.QueryRow(ctx,
-		`SELECT workflow_id, name, description, created_by, org_id, steps, created_at, updated_at, active
-		 FROM workflows WHERE workflow_id=$1 AND active=true`, id,
-	)
-	return scanWorkflow(row)
-}
-
-func scanWorkflow(row pgx.Row) (Workflow, error) {
 	var wf Workflow
-	var stepsJSON []byte
-	err := row.Scan(&wf.WorkflowID, &wf.Name, &wf.Description, &wf.CreatedBy,
-		&wf.OrgID, &stepsJSON, &wf.CreatedAt, &wf.UpdatedAt, &wf.Active)
-	if err != nil {
-		return wf, err
-	}
-	if err := json.Unmarshal(stepsJSON, &wf.Steps); err != nil {
-		return wf, err
-	}
-	return wf, nil
-}
-
-func scanWorkflows(rows pgx.Rows) ([]Workflow, error) {
-	var wfs []Workflow
-	for rows.Next() {
-		var wf Workflow
-		var stepsJSON []byte
-		if err := rows.Scan(&wf.WorkflowID, &wf.Name, &wf.Description, &wf.CreatedBy,
-			&wf.OrgID, &stepsJSON, &wf.CreatedAt, &wf.UpdatedAt, &wf.Active); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(stepsJSON, &wf.Steps); err != nil {
-			return nil, err
-		}
-		wfs = append(wfs, wf)
-	}
-	if wfs == nil {
-		wfs = []Workflow{}
-	}
-	return wfs, rows.Err()
+	result := db.WithContext(ctx).Where("workflow_id=? AND active=?", id, true).First(&wf)
+	return wf, result.Error
 }

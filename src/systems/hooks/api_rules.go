@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,10 +12,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"gorm.io/gorm"
 )
 
 // checkGatekeeper calls gatekeeper's /check_permissions endpoint using the
@@ -144,13 +145,7 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		req.InputMapping = map[string]string{}
 	}
 
-	mappingJSON, err := json.Marshal(req.InputMapping)
-	if err != nil {
-		slog.Error("create rule: marshal input_mapping", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
+	now := time.Now().UTC()
 	rule := PipelineRule{
 		RuleID:       uuid.New().String(),
 		Name:         req.Name,
@@ -158,25 +153,19 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		Events:       req.Events,
 		RefFilter:    req.RefFilter,
 		WorkflowID:   req.WorkflowID,
+		Secret:       req.Secret,
 		InputMapping: req.InputMapping,
 		CreatedBy:    userID,
 		OrgID:        orgID,
 		Active:       true,
-		CreatedAt:    time.Now().UTC(),
-		UpdatedAt:    time.Now().UTC(),
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 
-	_, err = db.Exec(ctx,
-		`INSERT INTO pipeline_rules
-		     (rule_id, name, repo, events, ref_filter, workflow_id, secret, input_mapping, created_by, org_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		rule.RuleID, rule.Name, rule.Repo, rule.Events, rule.RefFilter,
-		rule.WorkflowID, req.Secret, mappingJSON, rule.CreatedBy, rule.OrgID,
-	)
-	if err != nil {
-		span.RecordError(err)
+	if result := db.WithContext(ctx).Create(&rule); result.Error != nil {
+		span.RecordError(result.Error)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create rule: db error", "error", err)
+		slog.Error("create rule: db error", "error", result.Error)
 		http.Error(w, "failed to create rule", http.StatusInternalServerError)
 		return
 	}
@@ -199,29 +188,21 @@ func handleListRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := db.Query(ctx,
-		`SELECT rule_id, name, repo, events, ref_filter, workflow_id, input_mapping, created_by, org_id, active, created_at, updated_at
-		 FROM pipeline_rules
-		 WHERE active = true AND (created_by = $1 OR (org_id != '' AND org_id = $2))
-		 ORDER BY created_at DESC LIMIT 100`,
-		userID, orgID,
-	)
-	if err != nil {
-		span.RecordError(err)
+	var rules []PipelineRule
+	result := db.WithContext(ctx).
+		Where("active=? AND (created_by=? OR (org_id!='' AND org_id=?))", true, userID, orgID).
+		Order("created_at DESC").
+		Limit(100).
+		Find(&rules)
+	if result.Error != nil {
+		span.RecordError(result.Error)
 		span.SetStatus(codes.Error, "db query failed")
-		slog.Error("list rules: db error", "user_id", userID, "error", err)
+		slog.Error("list rules: db error", "user_id", userID, "error", result.Error)
 		http.Error(w, "failed to list rules", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
-
-	rules, err := scanRules(rows)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "scan failed")
-		slog.Error("list rules: scan error", "user_id", userID, "error", err)
-		http.Error(w, "failed to list rules", http.StatusInternalServerError)
-		return
+	if rules == nil {
+		rules = []PipelineRule{}
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -242,7 +223,7 @@ func handleGetRule(w http.ResponseWriter, r *http.Request) {
 
 	rule, err := getRule(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
 		}
@@ -275,7 +256,7 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 
 	existing, err := getRule(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
 		}
@@ -313,32 +294,24 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		req.InputMapping = map[string]string{}
 	}
 
-	mappingJSON, err := json.Marshal(req.InputMapping)
-	if err != nil {
-		slog.Error("update rule: marshal input_mapping", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+	// secret update semantics: nil = leave unchanged, "" = clear, non-empty = replace.
+	// Apply the new field values to the existing record.
+	existing.Name = req.Name
+	existing.Repo = req.Repo
+	existing.Events = req.Events
+	existing.RefFilter = req.RefFilter
+	existing.WorkflowID = req.WorkflowID
+	existing.InputMapping = req.InputMapping
+	existing.UpdatedAt = time.Now().UTC()
+
+	if req.Secret != nil {
+		existing.Secret = req.Secret
 	}
 
-	// secret update semantics: nil = leave unchanged, "" = clear, non-empty = replace.
-	var newSecret *string
-	if req.Secret != nil && *req.Secret != "" {
-		newSecret = req.Secret
-	}
-	_, err = db.Exec(ctx,
-		`UPDATE pipeline_rules
-		 SET name=$1, repo=$2, events=$3, ref_filter=$4, workflow_id=$5,
-		     input_mapping=$6,
-		     secret = CASE WHEN $7 THEN $8 ELSE secret END,
-		     updated_at=now()
-		 WHERE rule_id=$9 AND active=true`,
-		req.Name, req.Repo, req.Events, req.RefFilter, req.WorkflowID,
-		mappingJSON, req.Secret != nil, newSecret, id,
-	)
-	if err != nil {
-		span.RecordError(err)
+	if result := db.WithContext(ctx).Save(&existing); result.Error != nil {
+		span.RecordError(result.Error)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update rule: db error", "rule_id", id, "user_id", userID, "error", err)
+		slog.Error("update rule: db error", "rule_id", id, "user_id", userID, "error", result.Error)
 		http.Error(w, "failed to update rule", http.StatusInternalServerError)
 		return
 	}
@@ -370,7 +343,7 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 
 	rule, err := getRule(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
 		}
@@ -385,12 +358,13 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err = db.Exec(ctx,
-		`UPDATE pipeline_rules SET active=false, updated_at=now() WHERE rule_id=$1 AND active=true`, id,
-	); err != nil {
-		span.RecordError(err)
+	result := db.WithContext(ctx).Model(&PipelineRule{}).
+		Where("rule_id=? AND active=?", id, true).
+		Updates(map[string]any{"active": false, "updated_at": time.Now()})
+	if result.Error != nil {
+		span.RecordError(result.Error)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete rule: db error", "rule_id", id, "user_id", userID, "error", err)
+		slog.Error("delete rule: db error", "rule_id", id, "user_id", userID, "error", result.Error)
 		http.Error(w, "failed to delete rule", http.StatusInternalServerError)
 		return
 	}
@@ -402,55 +376,9 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 
 // getRule fetches a single active pipeline rule by ID (without secret).
 func getRule(ctx context.Context, id string) (PipelineRule, error) {
-	row := db.QueryRow(ctx,
-		`SELECT rule_id, name, repo, events, ref_filter, workflow_id, input_mapping, created_by, org_id, active, created_at, updated_at
-		 FROM pipeline_rules WHERE rule_id=$1 AND active=true`, id,
-	)
-	return scanRule(row)
-}
-
-func scanRule(row pgx.Row) (PipelineRule, error) {
 	var rule PipelineRule
-	var mappingJSON []byte
-	var refFilter *string
-	err := row.Scan(&rule.RuleID, &rule.Name, &rule.Repo, &rule.Events, &refFilter,
-		&rule.WorkflowID, &mappingJSON, &rule.CreatedBy, &rule.OrgID, &rule.Active,
-		&rule.CreatedAt, &rule.UpdatedAt)
-	if err != nil {
-		return rule, err
-	}
-	if refFilter != nil {
-		rule.RefFilter = *refFilter
-	}
-	if err := json.Unmarshal(mappingJSON, &rule.InputMapping); err != nil {
-		return rule, err
-	}
-	return rule, nil
-}
-
-func scanRules(rows pgx.Rows) ([]PipelineRule, error) {
-	var rules []PipelineRule
-	for rows.Next() {
-		var rule PipelineRule
-		var mappingJSON []byte
-		var refFilter *string
-		if err := rows.Scan(&rule.RuleID, &rule.Name, &rule.Repo, &rule.Events, &refFilter,
-			&rule.WorkflowID, &mappingJSON, &rule.CreatedBy, &rule.OrgID, &rule.Active,
-			&rule.CreatedAt, &rule.UpdatedAt); err != nil {
-			return nil, err
-		}
-		if refFilter != nil {
-			rule.RefFilter = *refFilter
-		}
-		if err := json.Unmarshal(mappingJSON, &rule.InputMapping); err != nil {
-			return nil, err
-		}
-		rules = append(rules, rule)
-	}
-	if rules == nil {
-		rules = []PipelineRule{}
-	}
-	return rules, rows.Err()
+	result := db.WithContext(ctx).Where("rule_id=? AND active=?", id, true).First(&rule)
+	return rule, result.Error
 }
 
 // nullableString returns nil for an empty string so the DB column stores NULL.

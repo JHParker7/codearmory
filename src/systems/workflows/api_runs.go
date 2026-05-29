@@ -3,16 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"gorm.io/gorm"
 )
 
 type triggerRunRequest struct {
@@ -39,7 +40,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 
 	wf, err := getWorkflow(ctx, workflowID)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "workflow not found", http.StatusNotFound)
 			return
 		}
@@ -60,7 +61,6 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		req.Inputs = map[string]string{}
 	}
 
-	inputsJSON, _ := json.Marshal(req.Inputs)
 	token := bearerToken(r)
 
 	run := WorkflowRun{
@@ -70,15 +70,11 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		OrgID:       orgID,
 		Status:      StatusPending,
 		Inputs:      req.Inputs,
+		Token:       token,
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	_, err = db.Exec(ctx,
-		`INSERT INTO workflow_runs (run_id, workflow_id, triggered_by, org_id, inputs, token)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		run.RunID, run.WorkflowID, run.TriggeredBy, run.OrgID, inputsJSON, token,
-	)
-	if err != nil {
+	if err := db.WithContext(ctx).Create(&run).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("trigger run: db error", "workflow_id", workflowID, "user_id", userID, "error", err)
@@ -108,39 +104,22 @@ func handleListRuns(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	workflowID := q.Get("workflow_id")
 
-	var rows pgx.Rows
-	var err error
+	query := db.WithContext(ctx).
+		Where("triggered_by=? OR (org_id != '' AND org_id = ?)", userID, orgID)
 	if workflowID != "" {
-		rows, err = db.Query(ctx,
-			`SELECT run_id, workflow_id, triggered_by, org_id, status, current_step, inputs, created_at, started_at, ended_at
-			 FROM workflow_runs
-			 WHERE (triggered_by=$1 OR (org_id != '' AND org_id = $2)) AND workflow_id=$3
-			 ORDER BY created_at DESC LIMIT 100`,
-			userID, orgID, workflowID,
-		)
-	} else {
-		rows, err = db.Query(ctx,
-			`SELECT run_id, workflow_id, triggered_by, org_id, status, current_step, inputs, created_at, started_at, ended_at
-			 FROM workflow_runs
-			 WHERE triggered_by=$1 OR (org_id != '' AND org_id = $2)
-			 ORDER BY created_at DESC LIMIT 100`,
-			userID, orgID,
-		)
+		query = query.Where("workflow_id=?", workflowID)
 	}
-	if err != nil {
+
+	var runs []WorkflowRun
+	if err := query.Order("created_at DESC").Limit(100).Find(&runs).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		slog.Error("list runs: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list runs", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
-
-	runs, err := scanRuns(rows)
-	if err != nil {
-		slog.Error("list runs: scan error", "user_id", userID, "error", err)
-		http.Error(w, "failed to list runs", http.StatusInternalServerError)
-		return
+	if runs == nil {
+		runs = []WorkflowRun{}
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -161,7 +140,7 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 
 	run, err := getRun(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "run not found", http.StatusNotFound)
 			return
 		}
@@ -174,25 +153,20 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stepRows, err := db.Query(ctx,
+	var stepRuns []WorkflowStepRun
+	if err := db.WithContext(ctx).Raw(
 		`SELECT step_run_id, run_id, step_index, step_name, status,
 		        response_status, response_body, started_at, ended_at
-		 FROM workflow_step_runs WHERE run_id=$1 ORDER BY step_index`,
-		id,
-	)
-	if err != nil {
+		 FROM workflow_step_runs WHERE run_id=? ORDER BY step_index`, id,
+	).Scan(&stepRuns).Error; err != nil {
 		slog.Error("get run: step runs query", "run_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get run steps", http.StatusInternalServerError)
 		return
 	}
-	defer stepRows.Close()
-
-	run.StepRuns, err = scanStepRuns(stepRows)
-	if err != nil {
-		slog.Error("get run: step runs scan", "run_id", id, "user_id", userID, "error", err)
-		http.Error(w, "failed to get run steps", http.StatusInternalServerError)
-		return
+	if stepRuns == nil {
+		stepRuns = []WorkflowStepRun{}
 	}
+	run.StepRuns = stepRuns
 
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
@@ -213,7 +187,7 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 
 		run, err := getRun(ctx, id)
 		if err != nil {
-			if err == pgx.ErrNoRows {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
 				http.Error(w, "run not found", http.StatusNotFound)
 				return
 			}
@@ -226,16 +200,15 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		tag, err := db.Exec(context.Background(),
-			`UPDATE workflow_runs SET status='cancelled', ended_at=now(), token=null
-			 WHERE run_id=$1 AND status IN ('pending', 'running')`, id,
+		result := db.WithContext(context.Background()).Exec(
+			"UPDATE workflow_runs SET status='cancelled', ended_at=now(), token=NULL WHERE run_id=? AND status IN ('pending','running')", id,
 		)
-		if err != nil {
-			slog.Error("cancel run: db update", "run_id", id, "user_id", userID, "error", err)
+		if result.Error != nil {
+			slog.Error("cancel run: db update", "run_id", id, "user_id", userID, "error", result.Error)
 			http.Error(w, "failed to cancel run", http.StatusInternalServerError)
 			return
 		}
-		if tag.RowsAffected() == 0 {
+		if result.RowsAffected == 0 {
 			http.Error(w, "run is not in a cancellable state", http.StatusConflict)
 			return
 		}
@@ -251,59 +224,7 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 }
 
 func getRun(ctx context.Context, id string) (WorkflowRun, error) {
-	row := db.QueryRow(ctx,
-		`SELECT run_id, workflow_id, triggered_by, org_id, status, current_step, inputs, created_at, started_at, ended_at
-		 FROM workflow_runs WHERE run_id=$1`, id,
-	)
-	return scanRun(row)
-}
-
-func scanRun(row pgx.Row) (WorkflowRun, error) {
 	var run WorkflowRun
-	var inputsJSON []byte
-	err := row.Scan(&run.RunID, &run.WorkflowID, &run.TriggeredBy, &run.OrgID, &run.Status,
-		&run.CurrentStep, &inputsJSON, &run.CreatedAt, &run.StartedAt, &run.EndedAt)
-	if err != nil {
-		return run, err
-	}
-	if err := json.Unmarshal(inputsJSON, &run.Inputs); err != nil {
-		return run, err
-	}
-	return run, nil
-}
-
-func scanRuns(rows pgx.Rows) ([]WorkflowRun, error) {
-	var runs []WorkflowRun
-	for rows.Next() {
-		var run WorkflowRun
-		var inputsJSON []byte
-		if err := rows.Scan(&run.RunID, &run.WorkflowID, &run.TriggeredBy, &run.OrgID, &run.Status,
-			&run.CurrentStep, &inputsJSON, &run.CreatedAt, &run.StartedAt, &run.EndedAt); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(inputsJSON, &run.Inputs); err != nil {
-			return nil, err
-		}
-		runs = append(runs, run)
-	}
-	if runs == nil {
-		runs = []WorkflowRun{}
-	}
-	return runs, rows.Err()
-}
-
-func scanStepRuns(rows pgx.Rows) ([]WorkflowStepRun, error) {
-	var steps []WorkflowStepRun
-	for rows.Next() {
-		var s WorkflowStepRun
-		if err := rows.Scan(&s.StepRunID, &s.RunID, &s.StepIndex, &s.StepName,
-			&s.Status, &s.ResponseStatus, &s.ResponseBody, &s.StartedAt, &s.EndedAt); err != nil {
-			return nil, err
-		}
-		steps = append(steps, s)
-	}
-	if steps == nil {
-		steps = []WorkflowStepRun{}
-	}
-	return steps, rows.Err()
+	result := db.WithContext(ctx).Where("run_id=?", id).First(&run)
+	return run, result.Error
 }

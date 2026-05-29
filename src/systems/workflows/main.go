@@ -13,13 +13,15 @@ import (
 
 	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var (
-	db              *pgxpool.Pool
+	db              *gorm.DB
 	gatekeeperURL   = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	hooksTriggerKey = os.Getenv("HOOKS_TRIGGER_KEY")
 	// serviceURLs maps registered service names to their base URLs.
@@ -30,57 +32,6 @@ var (
 		Timeout:   10 * time.Second,
 	}
 )
-
-const createTables = `
-CREATE TABLE IF NOT EXISTS workflows (
-    workflow_id  TEXT        PRIMARY KEY,
-    name         TEXT        NOT NULL,
-    description  TEXT        NOT NULL DEFAULT '',
-    created_by   TEXT        NOT NULL,
-    org_id       TEXT        NOT NULL DEFAULT '',
-    steps        JSONB       NOT NULL DEFAULT '[]',
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    active       BOOL        NOT NULL DEFAULT true
-);
-CREATE INDEX IF NOT EXISTS workflows_created_by ON workflows (created_by);
-CREATE INDEX IF NOT EXISTS workflows_org_id ON workflows (org_id) WHERE org_id != '';
-
-CREATE TABLE IF NOT EXISTS workflow_runs (
-    run_id       TEXT        PRIMARY KEY,
-    workflow_id  TEXT        NOT NULL REFERENCES workflows(workflow_id),
-    triggered_by TEXT        NOT NULL,
-    org_id       TEXT        NOT NULL DEFAULT '',
-    status       TEXT        NOT NULL DEFAULT 'pending',
-    current_step INT         NOT NULL DEFAULT 0,
-    inputs       JSONB       NOT NULL DEFAULT '{}',
-    token        TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    started_at   TIMESTAMPTZ,
-    ended_at     TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS workflow_runs_workflow_id ON workflow_runs (workflow_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS workflow_runs_triggered_by ON workflow_runs (triggered_by, created_at DESC);
-CREATE INDEX IF NOT EXISTS workflow_runs_org_id ON workflow_runs (org_id, created_at DESC) WHERE org_id != '';
-CREATE INDEX IF NOT EXISTS workflow_runs_pending ON workflow_runs (status) WHERE status IN ('pending', 'running');
-
--- Idempotent migrations for existing deployments.
-ALTER TABLE workflows ADD COLUMN IF NOT EXISTS org_id TEXT NOT NULL DEFAULT '';
-ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS org_id TEXT NOT NULL DEFAULT '';
-
-CREATE TABLE IF NOT EXISTS workflow_step_runs (
-    step_run_id     TEXT        PRIMARY KEY,
-    run_id          TEXT        NOT NULL REFERENCES workflow_runs(run_id),
-    step_index      INT         NOT NULL,
-    step_name       TEXT        NOT NULL,
-    status          TEXT        NOT NULL DEFAULT 'pending',
-    response_status INT,
-    response_body   TEXT,
-    started_at      TIMESTAMPTZ,
-    ended_at        TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS workflow_step_runs_run_id ON workflow_step_runs (run_id, step_index);
-`
 
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -182,18 +133,20 @@ func main() {
 	}
 	initMetrics()
 
-	db, err = pgxpool.New(ctx, secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/workflows"))
+	dsn := secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/workflows")
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		slog.Error("failed to connect to database", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
 
-	if _, err := db.Exec(ctx, createTables); err != nil {
-		slog.Error("failed to create tables", "error", err)
+	if err := db.AutoMigrate(&Workflow{}, &WorkflowRun{}, &WorkflowStepRun{}); err != nil {
+		slog.Error("failed to run AutoMigrate", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("database pool initialized")
+	slog.Info("database initialized")
 
 	initServices()
 	registry.StartKeyRotation(ctx, gatekeeperURL, "workflows",

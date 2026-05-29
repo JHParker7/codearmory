@@ -3,15 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"gorm.io/gorm"
 )
 
 type addCommentRequest struct {
@@ -31,7 +32,7 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 
 	t, err := getTicket(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
@@ -59,12 +60,9 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 		TicketID:  id,
 		AuthorID:  userID,
 		Body:      req.Body,
+		Active:    true,
 	}
-	_, err = db.Exec(ctx,
-		`INSERT INTO ticket_comments (comment_id, ticket_id, author_id, body) VALUES ($1,$2,$3,$4)`,
-		c.CommentID, c.TicketID, c.AuthorID, c.Body,
-	)
-	if err != nil {
+	if err := db.WithContext(ctx).Create(&c).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("add comment: db error", "ticket_id", id, "user_id", userID, "error", err)
@@ -73,12 +71,8 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Refresh comment timestamps from DB.
-	row := db.QueryRow(ctx,
-		`SELECT comment_id, ticket_id, author_id, body, created_at, updated_at
-		 FROM ticket_comments WHERE comment_id=$1`, c.CommentID,
-	)
-	if err := row.Scan(&c.CommentID, &c.TicketID, &c.AuthorID, &c.Body, &c.CreatedAt, &c.UpdatedAt); err != nil {
-		slog.Warn("add comment: refresh scan failed", "comment_id", c.CommentID, "error", err)
+	if err := db.WithContext(ctx).Where("comment_id=?", c.CommentID).First(&c).Error; err != nil {
+		slog.Warn("add comment: refresh failed", "comment_id", c.CommentID, "error", err)
 	}
 
 	meterCommentsAdded.Add(ctx, 1, metric.WithAttributes(attribute.String("ticket.id", id)))
@@ -104,7 +98,7 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 
 	t, err := getTicket(ctx, ticketID)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
@@ -118,13 +112,9 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Only the comment author or a ticket owner/org-member can delete.
-	var authorID string
-	err = db.QueryRow(ctx,
-		`SELECT author_id FROM ticket_comments WHERE comment_id=$1 AND ticket_id=$2 AND active=true`,
-		commentID, ticketID,
-	).Scan(&authorID)
-	if err != nil {
-		if err == pgx.ErrNoRows {
+	var existing TicketComment
+	if err := db.WithContext(ctx).Where("comment_id=? AND ticket_id=? AND active=?", commentID, ticketID, true).First(&existing).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "comment not found", http.StatusNotFound)
 			return
 		}
@@ -133,15 +123,12 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Ticket owners/org-members can moderate; author can always delete their own.
-	if authorID != userID && !canAccessTicket(t, userID, orgID) {
+	if existing.AuthorID != userID && !canAccessTicket(t, userID, orgID) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
-	if _, err = db.Exec(ctx,
-		`UPDATE ticket_comments SET active=false, updated_at=now() WHERE comment_id=$1 AND active=true`,
-		commentID,
-	); err != nil {
+	if err := db.WithContext(ctx).Model(&TicketComment{}).Where("comment_id=? AND active=?", commentID, true).Update("active", false).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
 		slog.Error("delete comment: db error", "comment_id", commentID, "user_id", userID, "error", err)
@@ -155,26 +142,12 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func listComments(ctx context.Context, ticketID string) ([]TicketComment, error) {
-	rows, err := db.Query(ctx,
-		`SELECT comment_id, ticket_id, author_id, body, created_at, updated_at
-		 FROM ticket_comments WHERE ticket_id=$1 AND active=true ORDER BY created_at`,
-		ticketID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var comments []TicketComment
-	for rows.Next() {
-		var c TicketComment
-		if err := rows.Scan(&c.CommentID, &c.TicketID, &c.AuthorID, &c.Body, &c.CreatedAt, &c.UpdatedAt); err != nil {
-			return nil, err
-		}
-		comments = append(comments, c)
+	if err := db.WithContext(ctx).Where("ticket_id=? AND active=?", ticketID, true).Order("created_at").Find(&comments).Error; err != nil {
+		return nil, err
 	}
 	if comments == nil {
 		comments = []TicketComment{}
 	}
-	return comments, rows.Err()
+	return comments, nil
 }

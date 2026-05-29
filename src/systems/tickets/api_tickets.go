@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,11 +13,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"gorm.io/gorm"
 )
 
 // checkGatekeeper calls gatekeeper's /check_permissions endpoint using the
@@ -143,19 +144,13 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		WorkflowID:       req.WorkflowID,
 		RunID:            req.RunID,
 		ForgeExecutionID: req.ForgeExecutionID,
+		Active:           true,
 		Comments:         []TicketComment{},
 		CreatedAt:        time.Now().UTC(),
 		UpdatedAt:        time.Now().UTC(),
 	}
 
-	_, err := db.Exec(ctx,
-		`INSERT INTO tickets (ticket_id, title, description, status, priority, created_by, org_id,
-		                      assignee_id, workflow_id, run_id, forge_execution_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-		t.TicketID, t.Title, t.Description, t.Status, t.Priority, t.CreatedBy, t.OrgID,
-		t.AssigneeID, t.WorkflowID, t.RunID, t.ForgeExecutionID,
-	)
-	if err != nil {
+	if err := db.WithContext(ctx).Create(&t).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("create ticket: db error", "user_id", userID, "error", err)
@@ -196,45 +191,33 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Nullable params: pass nil to skip a filter (NULL = $n is always false in SQL,
-	// so `($3::text IS NULL OR col = $3)` skips the filter when $3 is nil).
-	var statusArg, priorityArg, assigneeArg *string
+	query := db.WithContext(ctx).
+		Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID)
+
 	if statusFilter != "" {
-		statusArg = &statusFilter
+		query = query.Where("status = ?", statusFilter)
 	}
 	if priorityFilter != "" {
-		priorityArg = &priorityFilter
+		query = query.Where("priority = ?", priorityFilter)
 	}
 	if assigneeFilter != "" {
-		assigneeArg = &assigneeFilter
+		query = query.Where("assignee_id = ?", assigneeFilter)
 	}
 
-	rows, err := db.Query(ctx,
-		`SELECT ticket_id, title, description, status, priority, created_by, org_id,
-		        assignee_id, workflow_id, run_id, forge_execution_id, created_at, updated_at
-		 FROM tickets
-		 WHERE active = true
-		   AND (created_by = $1 OR (org_id != '' AND org_id = $2))
-		   AND ($3::text IS NULL OR status = $3)
-		   AND ($4::text IS NULL OR priority = $4)
-		   AND ($5::text IS NULL OR assignee_id = $5)
-		 ORDER BY created_at DESC LIMIT 100`,
-		userID, orgID, statusArg, priorityArg, assigneeArg,
-	)
-	if err != nil {
+	var tickets []Ticket
+	if err := query.Order("created_at DESC").Limit(100).Find(&tickets).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		slog.Error("list tickets: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list tickets", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
 
-	tickets, err := scanTickets(rows)
-	if err != nil {
-		slog.Error("list tickets: scan error", "user_id", userID, "error", err)
-		http.Error(w, "failed to list tickets", http.StatusInternalServerError)
-		return
+	for i := range tickets {
+		tickets[i].Comments = []TicketComment{}
+	}
+	if tickets == nil {
+		tickets = []Ticket{}
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -255,7 +238,7 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 
 	t, err := getTicket(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
@@ -298,7 +281,7 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 
 	existing, err := getTicket(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
@@ -335,15 +318,17 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = db.Exec(ctx,
-		`UPDATE tickets
-		 SET title=$1, description=$2, status=$3, priority=$4,
-		     assignee_id=$5, workflow_id=$6, run_id=$7, forge_execution_id=$8, updated_at=now()
-		 WHERE ticket_id=$9 AND active=true`,
-		req.Title, req.Description, req.Status, req.Priority,
-		req.AssigneeID, req.WorkflowID, req.RunID, req.ForgeExecutionID, id,
-	)
-	if err != nil {
+	if err := db.WithContext(ctx).Model(&Ticket{}).Where("ticket_id=? AND active=?", id, true).Updates(map[string]any{
+		"title":              req.Title,
+		"description":        req.Description,
+		"status":             req.Status,
+		"priority":           req.Priority,
+		"assignee_id":        req.AssigneeID,
+		"workflow_id":        req.WorkflowID,
+		"run_id":             req.RunID,
+		"forge_execution_id": req.ForgeExecutionID,
+		"updated_at":         time.Now().UTC(),
+	}).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
 		slog.Error("update ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
@@ -393,7 +378,7 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 
 	t, err := getTicket(ctx, id)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
@@ -408,9 +393,7 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err = db.Exec(ctx,
-		`UPDATE tickets SET active=false, updated_at=now() WHERE ticket_id=$1 AND active=true`, id,
-	); err != nil {
+	if err := db.WithContext(ctx).Model(&Ticket{}).Where("ticket_id=? AND active=?", id, true).Update("active", false).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
 		slog.Error("delete ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
@@ -426,47 +409,10 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 // ── DB helpers ────────────────────────────────────────────────────────────────
 
 func getTicket(ctx context.Context, id string) (Ticket, error) {
-	row := db.QueryRow(ctx,
-		`SELECT ticket_id, title, description, status, priority, created_by, org_id,
-		        assignee_id, workflow_id, run_id, forge_execution_id, created_at, updated_at
-		 FROM tickets WHERE ticket_id=$1 AND active=true`, id,
-	)
-	return scanTicket(row)
-}
-
-func scanTicket(row pgx.Row) (Ticket, error) {
 	var t Ticket
-	err := row.Scan(
-		&t.TicketID, &t.Title, &t.Description, &t.Status, &t.Priority,
-		&t.CreatedBy, &t.OrgID,
-		&t.AssigneeID, &t.WorkflowID, &t.RunID, &t.ForgeExecutionID,
-		&t.CreatedAt, &t.UpdatedAt,
-	)
-	if err != nil {
+	if err := db.WithContext(ctx).Where("ticket_id=? AND active=?", id, true).First(&t).Error; err != nil {
 		return t, err
 	}
 	t.Comments = []TicketComment{}
 	return t, nil
 }
-
-func scanTickets(rows pgx.Rows) ([]Ticket, error) {
-	var tickets []Ticket
-	for rows.Next() {
-		var t Ticket
-		if err := rows.Scan(
-			&t.TicketID, &t.Title, &t.Description, &t.Status, &t.Priority,
-			&t.CreatedBy, &t.OrgID,
-			&t.AssigneeID, &t.WorkflowID, &t.RunID, &t.ForgeExecutionID,
-			&t.CreatedAt, &t.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		t.Comments = []TicketComment{}
-		tickets = append(tickets, t)
-	}
-	if tickets == nil {
-		tickets = []Ticket{}
-	}
-	return tickets, rows.Err()
-}
-

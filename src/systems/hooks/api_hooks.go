@@ -41,13 +41,6 @@ func signTrigger(workflowID, triggeredBy string) (token, timestamp string) {
 	return hex.EncodeToString(mac.Sum(nil)), ts
 }
 
-// ruleWithSecret is used when scanning rows for webhook processing so that the
-// HMAC secret can be read without exposing it through the PipelineRule type.
-type ruleWithSecret struct {
-	PipelineRule
-	secret *string
-}
-
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("hooks").Start(r.Context(), "handleWebhook")
 	defer span.End()
@@ -93,60 +86,39 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		"pusher":  payload.Pusher,
 		"message": payload.Message,
 	}
-	payloadJSON, _ := json.Marshal(payloadMap)
 
 	eventID := uuid.New().String()
-	if _, err := db.Exec(ctx,
-		`INSERT INTO hook_events (event_id, repo, event_type, ref, payload, status)
-		 VALUES ($1, $2, $3, $4, $5, 'received')`,
-		eventID, payload.Repo, payload.Event, payload.Ref, payloadJSON,
-	); err != nil {
-		span.RecordError(err)
+	newEvent := HookEvent{
+		EventID:   eventID,
+		Repo:      payload.Repo,
+		EventType: payload.Event,
+		Ref:       payload.Ref,
+		Payload:   payloadMap,
+		Status:    "received",
+		CreatedAt: time.Now().UTC(),
+	}
+	if result := db.WithContext(ctx).Create(&newEvent); result.Error != nil {
+		span.RecordError(result.Error)
 		span.SetStatus(codes.Error, "db insert event failed")
-		slog.Error("webhook: insert event", "error", err)
+		slog.Error("webhook: insert event", "error", result.Error)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	// Query matching active rules for this repo + event type.
-	rows, err := db.Query(ctx,
+	// Use raw SQL because ANY(events) is postgres-specific.
+	var matchedRules []PipelineRule
+	if result := db.WithContext(ctx).Raw(
 		`SELECT rule_id, name, repo, events, ref_filter, workflow_id, secret, input_mapping, created_by, org_id
 		 FROM pipeline_rules
-		 WHERE repo = $1 AND active = true AND $2 = ANY(events)`,
+		 WHERE repo = ? AND active = true AND ? = ANY(events)`,
 		payload.Repo, payload.Event,
-	)
-	if err != nil {
-		span.RecordError(err)
+	).Scan(&matchedRules); result.Error != nil {
+		span.RecordError(result.Error)
 		span.SetStatus(codes.Error, "db query rules failed")
-		slog.Error("webhook: query rules", "error", err)
+		slog.Error("webhook: query rules", "error", result.Error)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
-	}
-	defer rows.Close()
-
-	var matchedRules []ruleWithSecret
-	for rows.Next() {
-		var rws ruleWithSecret
-		var mappingJSON []byte
-		var refFilter *string
-		if err := rows.Scan(
-			&rws.RuleID, &rws.Name, &rws.Repo, &rws.Events, &refFilter,
-			&rws.WorkflowID, &rws.secret, &mappingJSON, &rws.CreatedBy, &rws.OrgID,
-		); err != nil {
-			slog.Error("webhook: scan rule", "error", err)
-			continue
-		}
-		if refFilter != nil {
-			rws.RefFilter = *refFilter
-		}
-		if err := json.Unmarshal(mappingJSON, &rws.InputMapping); err != nil {
-			slog.Error("webhook: unmarshal input_mapping", "rule_id", rws.RuleID, "error", err)
-			continue
-		}
-		matchedRules = append(matchedRules, rws)
-	}
-	if err := rows.Err(); err != nil {
-		slog.Error("webhook: rows error", "error", err)
 	}
 
 	var triggers []HookTrigger
@@ -161,9 +133,9 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 		// HMAC verification: if the rule has a secret, the caller must supply
 		// X-Hub-Signature-256: sha256=<hex(HMAC-SHA256(secret, body))>.
-		if rws.secret != nil && *rws.secret != "" {
+		if rws.Secret != nil && *rws.Secret != "" {
 			sigHeader := r.Header.Get("X-Hub-Signature-256")
-			expected := "sha256=" + computeHMAC(*rws.secret, rawBody)
+			expected := "sha256=" + computeHMAC(*rws.Secret, rawBody)
 			if !hmac.Equal([]byte(sigHeader), []byte(expected)) {
 				slog.Warn("webhook: HMAC mismatch, skipping rule",
 					"rule_id", rws.RuleID, "event_id", eventID)
@@ -218,13 +190,8 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 		// Persist the trigger record (fire-and-forget after response is sent).
 		go func(t HookTrigger) {
-			_, err := db.Exec(context.Background(),
-				`INSERT INTO hook_triggers (trigger_id, event_id, rule_id, workflow_id, run_id, status, error)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				t.TriggerID, t.EventID, t.RuleID, t.WorkflowID, t.RunID, t.Status, t.Error,
-			)
-			if err != nil {
-				slog.Error("webhook: insert trigger", "trigger_id", t.TriggerID, "error", err)
+			if result := db.Create(&t); result.Error != nil {
+				slog.Error("webhook: insert trigger", "trigger_id", t.TriggerID, "error", result.Error)
 			}
 		}(trig)
 	}
@@ -245,12 +212,11 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Update the hook_events row (fire-and-forget).
 	go func() {
-		_, err := db.Exec(context.Background(),
-			`UPDATE hook_events SET rules_matched=$1, status=$2 WHERE event_id=$3`,
+		if result := db.Exec(
+			`UPDATE hook_events SET rules_matched=?, status=? WHERE event_id=?`,
 			total, eventStatus, eventID,
-		)
-		if err != nil {
-			slog.Error("webhook: update event status", "event_id", eventID, "error", err)
+		); result.Error != nil {
+			slog.Error("webhook: update event status", "event_id", eventID, "error", result.Error)
 		}
 	}()
 

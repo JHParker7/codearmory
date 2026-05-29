@@ -12,13 +12,15 @@ import (
 
 	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var (
-	db              *pgxpool.Pool
+	db              *gorm.DB
 	gatekeeperURL   = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	workflowsURL    = envOrDefault("WORKFLOWS_URL", "http://localhost:8085")
 	hooksTriggerKey = os.Getenv("HOOKS_TRIGGER_KEY")
@@ -27,54 +29,6 @@ var (
 		Timeout:   10 * time.Second,
 	}
 )
-
-const createTables = `
-CREATE TABLE IF NOT EXISTS pipeline_rules (
-    rule_id       TEXT        PRIMARY KEY,
-    name          TEXT        NOT NULL,
-    repo          TEXT        NOT NULL,
-    events        TEXT[]      NOT NULL,
-    ref_filter    TEXT,
-    workflow_id   TEXT        NOT NULL,
-    secret        TEXT,
-    input_mapping JSONB       NOT NULL DEFAULT '{}',
-    created_by    TEXT        NOT NULL,
-    org_id        TEXT        NOT NULL DEFAULT '',
-    active        BOOL        NOT NULL DEFAULT true,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS pipeline_rules_repo ON pipeline_rules (repo, active);
-CREATE INDEX IF NOT EXISTS pipeline_rules_org ON pipeline_rules (org_id) WHERE org_id != '';
-
-CREATE TABLE IF NOT EXISTS hook_events (
-    event_id      TEXT        PRIMARY KEY,
-    repo          TEXT        NOT NULL,
-    event_type    TEXT        NOT NULL,
-    ref           TEXT        NOT NULL DEFAULT '',
-    payload       JSONB       NOT NULL DEFAULT '{}',
-    rules_matched INT         NOT NULL DEFAULT 0,
-    status        TEXT        NOT NULL DEFAULT 'received',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS hook_events_created_at ON hook_events (created_at DESC);
-
-CREATE TABLE IF NOT EXISTS hook_triggers (
-    trigger_id    TEXT        PRIMARY KEY,
-    event_id      TEXT        NOT NULL REFERENCES hook_events(event_id),
-    rule_id       TEXT        NOT NULL,
-    workflow_id   TEXT        NOT NULL,
-    run_id        TEXT,
-    status        TEXT        NOT NULL DEFAULT 'pending',
-    error         TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS hook_triggers_event ON hook_triggers (event_id);
-
-ALTER TABLE pipeline_rules ADD COLUMN IF NOT EXISTS org_id TEXT NOT NULL DEFAULT '';
-ALTER TABLE pipeline_rules ADD COLUMN IF NOT EXISTS secret TEXT;
-ALTER TABLE pipeline_rules ADD COLUMN IF NOT EXISTS input_mapping JSONB NOT NULL DEFAULT '{}';
-`
 
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -156,18 +110,26 @@ func main() {
 	}
 	initMetrics()
 
-	db, err = pgxpool.New(ctx, secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/hooks"))
+	dsn := secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/hooks")
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		slog.Error("failed to connect to database", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
 
-	if _, err := db.Exec(ctx, createTables); err != nil {
-		slog.Error("failed to create tables", "error", err)
+	// Safely migrate existing TEXT[] events column to JSONB.
+	func() {
+		defer func() { recover() }() //nolint:errcheck
+		db.Exec("ALTER TABLE pipeline_rules ALTER COLUMN events TYPE jsonb USING to_jsonb(events) WHERE pg_typeof(events)::text = 'text[]'")
+	}()
+
+	if err := db.AutoMigrate(&PipelineRule{}, &HookEvent{}, &HookTrigger{}); err != nil {
+		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("database pool initialized")
+	slog.Info("database initialized")
 
 	registry.StartKeyRotation(ctx, gatekeeperURL, "hooks",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)

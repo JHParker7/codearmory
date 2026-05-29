@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,59 +14,21 @@ import (
 
 	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 var (
-	db            *pgxpool.Pool
+	db            *gorm.DB
 	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	httpClient    = &http.Client{
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 		Timeout:   10 * time.Second,
 	}
 )
-
-const createTables = `
-CREATE TABLE IF NOT EXISTS tickets (
-    ticket_id           TEXT        PRIMARY KEY,
-    title               TEXT        NOT NULL,
-    description         TEXT        NOT NULL DEFAULT '',
-    status              TEXT        NOT NULL DEFAULT 'open',
-    priority            TEXT        NOT NULL DEFAULT 'medium',
-    created_by          TEXT        NOT NULL,
-    org_id              TEXT        NOT NULL DEFAULT '',
-    assignee_id         TEXT,
-    workflow_id         TEXT,
-    run_id              TEXT,
-    forge_execution_id  TEXT,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    active              BOOL        NOT NULL DEFAULT true
-);
-CREATE INDEX IF NOT EXISTS tickets_created_by ON tickets (created_by, created_at DESC);
-CREATE INDEX IF NOT EXISTS tickets_org_id ON tickets (org_id, created_at DESC) WHERE org_id != '';
-CREATE INDEX IF NOT EXISTS tickets_status ON tickets (status) WHERE active = true;
-
-CREATE TABLE IF NOT EXISTS ticket_comments (
-    comment_id  TEXT        PRIMARY KEY,
-    ticket_id   TEXT        NOT NULL REFERENCES tickets(ticket_id),
-    author_id   TEXT        NOT NULL,
-    body        TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    active      BOOL        NOT NULL DEFAULT true
-);
-CREATE INDEX IF NOT EXISTS ticket_comments_ticket_id ON ticket_comments (ticket_id, created_at);
-
--- Idempotent migrations for existing deployments.
-ALTER TABLE tickets ADD COLUMN IF NOT EXISTS org_id TEXT NOT NULL DEFAULT '';
-ALTER TABLE tickets ADD COLUMN IF NOT EXISTS assignee_id TEXT;
-ALTER TABLE tickets ADD COLUMN IF NOT EXISTS workflow_id TEXT;
-ALTER TABLE tickets ADD COLUMN IF NOT EXISTS run_id TEXT;
-ALTER TABLE tickets ADD COLUMN IF NOT EXISTS forge_execution_id TEXT;
-`
 
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -147,18 +110,21 @@ func main() {
 	}
 	initMetrics()
 
-	db, err = pgxpool.New(ctx, secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/tickets"))
+	dsn := secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/tickets")
+	conn, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
-		slog.Error("failed to connect to database", "error", err)
+		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	db = conn
 
-	if _, err := db.Exec(ctx, createTables); err != nil {
-		slog.Error("failed to create tables", "error", err)
+	if err := db.AutoMigrate(&Ticket{}, &TicketComment{}); err != nil {
+		slog.Error("failed to migrate tables", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("database pool initialized")
+	slog.Info("database initialized")
 
 	registry.StartKeyRotation(ctx, gatekeeperURL, "tickets",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
