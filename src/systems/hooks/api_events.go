@@ -15,7 +15,7 @@ func handleListEvents(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("hooks").Start(r.Context(), "handleListEvents")
 	defer span.End()
 
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "listEvent", "hooks/events")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listEvent", "hooks/events")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -70,7 +70,7 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "getEvent", "hooks/events/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getEvent", "hooks/events/"+id)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return

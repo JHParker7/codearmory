@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -17,65 +15,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"gorm.io/gorm"
 )
-
-// checkGatekeeper calls gatekeeper's /check_permissions endpoint using the
-// caller's Bearer token. Returns the user_id, org_id and true when authorised.
-// org_id is empty when the user has no org.
-func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request, action, resource string) (userID, orgID string, ok bool) {
-	token, hasBearerPrefix := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !hasBearerPrefix || token == "" {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return "", "", false
-	}
-
-	body, _ := json.Marshal(map[string]string{
-		"service":  "hooks",
-		"resource": resource,
-		"action":   action,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
-	if err != nil {
-		slog.Error("hooks: failed to build gatekeeper request", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return "", "", false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		slog.Error("hooks: gatekeeper check_permissions failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return "", "", false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return "", "", false
-	}
-	if resp.StatusCode >= 500 {
-		io.Copy(io.Discard, resp.Body) //nolint:errcheck
-		slog.Error("hooks: gatekeeper unavailable", "status", resp.StatusCode)
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return "", "", false
-	}
-
-	var result struct {
-		Authorized bool    `json:"authorized"`
-		UserID     string  `json:"user_id"`
-		OrgID      *string `json:"org_id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || !result.Authorized {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return "", "", false
-	}
-	org := ""
-	if result.OrgID != nil {
-		org = *result.OrgID
-	}
-	return result.UserID, org, true
-}
 
 // canAccessRule returns true when the caller owns the rule or shares its org.
 func canAccessRule(rule PipelineRule, userID, orgID string) bool {
@@ -113,7 +52,7 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("hooks").Start(r.Context(), "handleCreateRule")
 	defer span.End()
 
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "createRule", "hooks/rules")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createRule", "hooks/rules")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -182,7 +121,7 @@ func handleListRules(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("hooks").Start(r.Context(), "handleListRules")
 	defer span.End()
 
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "listRule", "hooks/rules")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRule", "hooks/rules")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -215,7 +154,7 @@ func handleGetRule(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "getRule", "hooks/rules/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRule", "hooks/rules/"+id)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -248,7 +187,7 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "updateRule", "hooks/rules/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateRule", "hooks/rules/"+id)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -337,7 +276,7 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "deleteRule", "hooks/rules/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteRule", "hooks/rules/"+id)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return

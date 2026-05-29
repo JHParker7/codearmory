@@ -16,25 +16,26 @@ func fakeGatekeeper(t *testing.T, status int, body string) {
 		w.WriteHeader(status)
 		w.Write([]byte(body)) //nolint:errcheck
 	}))
-	orig := gatekeeperURL
-	gatekeeperURL = srv.URL
+	orig := gatekeeperClient.URL
+	gatekeeperClient.URL = srv.URL
 	t.Cleanup(func() {
-		gatekeeperURL = orig
+		gatekeeperClient.URL = orig
 		srv.Close()
 	})
 }
 
 func TestMain(m *testing.M) {
 	initMetrics()
+	gatekeeperClient = newGatekeeperClient()
 	os.Exit(m.Run())
 }
 
-// ── checkGatekeeper ───────────────────────────────────────────────────────────
+// ── CheckPermissions ──────────────────────────────────────────────────────────
 
 func TestCheckGatekeeper_NoToken(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/tickets", nil)
 	w := httptest.NewRecorder()
-	_, _, ok := checkGatekeeper(r.Context(), w, r, "listTicket", "tickets/tickets")
+	_, _, ok := gatekeeperClient.CheckPermissions(r.Context(), w, r, "listTicket", "tickets/tickets")
 	if ok {
 		t.Fatal("expected ok=false with no Bearer token")
 	}
@@ -48,7 +49,7 @@ func TestCheckGatekeeper_Authorized(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/tickets", nil)
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
-	id, org, ok := checkGatekeeper(r.Context(), w, r, "listTicket", "tickets/tickets")
+	id, org, ok := gatekeeperClient.CheckPermissions(r.Context(), w, r, "listTicket", "tickets/tickets")
 	if !ok {
 		t.Fatalf("expected ok=true (status %d: %s)", w.Code, w.Body.String())
 	}
@@ -65,7 +66,7 @@ func TestCheckGatekeeper_Forbidden(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/tickets", nil)
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
-	_, _, ok := checkGatekeeper(r.Context(), w, r, "listTicket", "tickets/tickets")
+	_, _, ok := gatekeeperClient.CheckPermissions(r.Context(), w, r, "listTicket", "tickets/tickets")
 	if ok {
 		t.Fatal("expected ok=false when not authorized")
 	}
@@ -75,14 +76,14 @@ func TestCheckGatekeeper_Forbidden(t *testing.T) {
 }
 
 func TestCheckGatekeeper_GatekeeperDown(t *testing.T) {
-	orig := gatekeeperURL
-	gatekeeperURL = "http://127.0.0.1:1"
-	t.Cleanup(func() { gatekeeperURL = orig })
+	orig := gatekeeperClient.URL
+	gatekeeperClient.URL = "http://127.0.0.1:1"
+	t.Cleanup(func() { gatekeeperClient.URL = orig })
 
 	r := httptest.NewRequest(http.MethodGet, "/tickets", nil)
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
-	_, _, ok := checkGatekeeper(r.Context(), w, r, "listTicket", "tickets/tickets")
+	_, _, ok := gatekeeperClient.CheckPermissions(r.Context(), w, r, "listTicket", "tickets/tickets")
 	if ok {
 		t.Fatal("expected ok=false when gatekeeper is unreachable")
 	}

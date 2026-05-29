@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	gk "github.com/code-armory-app/codearmory_sdk/gatekeeper"
 	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -21,8 +22,9 @@ import (
 )
 
 var (
-	db              *gorm.DB
-	gatekeeperURL   = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	db               *gorm.DB
+	gatekeeperClient *gk.Client
+	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	hooksTriggerKey = os.Getenv("HOOKS_TRIGGER_KEY")
 	// serviceURLs maps registered service names to their base URLs.
 	// Populated at startup from SERVICES (format: "name=url,name=url,...").
@@ -32,6 +34,10 @@ var (
 		Timeout:   10 * time.Second,
 	}
 )
+
+func newGatekeeperClient() *gk.Client {
+	return &gk.Client{URL: gatekeeperURL, Service: "workflows", HTTPClient: httpClient}
+}
 
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -149,6 +155,7 @@ func main() {
 	slog.Info("database initialized")
 
 	initServices()
+	gatekeeperClient = newGatekeeperClient()
 	registry.StartKeyRotation(ctx, gatekeeperURL, "workflows",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 

@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -19,65 +17,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"gorm.io/gorm"
 )
-
-// checkGatekeeper calls gatekeeper's /check_permissions endpoint using the
-// caller's Bearer token. Returns the user_id, org_id and true when authorised.
-// org_id is empty when the user has no org.
-func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request, action, resource string) (userID, orgID string, ok bool) {
-	token, hasBearerPrefix := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !hasBearerPrefix || token == "" {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return "", "", false
-	}
-
-	body, _ := json.Marshal(map[string]string{
-		"service":  "workflows",
-		"resource": resource,
-		"action":   action,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
-	if err != nil {
-		slog.Error("workflows: failed to build gatekeeper request", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return "", "", false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		slog.Error("workflows: gatekeeper check_permissions failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return "", "", false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return "", "", false
-	}
-	if resp.StatusCode >= 500 {
-		io.Copy(io.Discard, resp.Body) //nolint:errcheck
-		slog.Error("workflows: gatekeeper unavailable", "status", resp.StatusCode)
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return "", "", false
-	}
-
-	var result struct {
-		Authorized bool    `json:"authorized"`
-		UserID     string  `json:"user_id"`
-		OrgID      *string `json:"org_id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || !result.Authorized {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return "", "", false
-	}
-	org := ""
-	if result.OrgID != nil {
-		org = *result.OrgID
-	}
-	return result.UserID, org, true
-}
 
 // canAccessWorkflow returns true when the caller owns the workflow or shares its org.
 func canAccessWorkflow(wf Workflow, userID, orgID string) bool {
@@ -143,7 +82,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("workflows").Start(r.Context(), "handleCreateWorkflow")
 	defer span.End()
 
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "createWorkflow", "workflows/workflows")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createWorkflow", "workflows/workflows")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -197,7 +136,7 @@ func handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("workflows").Start(r.Context(), "handleListWorkflows")
 	defer span.End()
 
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "listWorkflow", "workflows/workflows")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listWorkflow", "workflows/workflows")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -229,7 +168,7 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "getWorkflow", "workflows/workflows/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getWorkflow", "workflows/workflows/"+id)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -262,7 +201,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "updateWorkflow", "workflows/workflows/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateWorkflow", "workflows/workflows/"+id)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -339,7 +278,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "deleteWorkflow", "workflows/workflows/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteWorkflow", "workflows/workflows/"+id)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return

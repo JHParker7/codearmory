@@ -32,7 +32,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	workflowID := r.PathValue("id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "triggerRun", "workflows/runs")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "triggerRun", "workflows/runs")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -98,7 +98,7 @@ func handleListRuns(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("workflows").Start(r.Context(), "handleListRuns")
 	defer span.End()
 
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "listRun", "workflows/runs")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRun", "workflows/runs")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -138,7 +138,7 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "getRun", "workflows/runs/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRun", "workflows/runs/"+id)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -187,7 +187,7 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 		defer span.End()
 
 		id := r.PathValue("id")
-		userID, orgID, ok := checkGatekeeper(ctx, w, r, "cancelRun", "workflows/runs/"+id)
+		userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "cancelRun", "workflows/runs/"+id)
 		if !ok {
 			span.SetStatus(codes.Error, "forbidden")
 			return

@@ -24,7 +24,7 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "createComment", "tickets/tickets/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createComment", "tickets/tickets/"+id)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -90,7 +90,7 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 
 	ticketID := r.PathValue("id")
 	commentID := r.PathValue("comment_id")
-	userID, orgID, ok := checkGatekeeper(ctx, w, r, "deleteComment", "tickets/tickets/"+ticketID+"/comments/"+commentID)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteComment", "tickets/tickets/"+ticketID+"/comments/"+commentID)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
