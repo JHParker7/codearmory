@@ -39,7 +39,7 @@ def service(registry_url, admin_headers):
     unique_suffix = uuid.uuid4().hex[:8]
     payload = {
         "name": f"test-svc-{unique_suffix}",
-        "url": f"http://test-svc-{unique_suffix}.local",
+        "url": "http://203.0.113.1:9000",
     }
     resp = requests.post(
         f"{registry_url}/services",

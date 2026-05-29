@@ -97,7 +97,7 @@ class TestListServices:
 class TestCreateService:
     def test_returns_201(self, registry_url, admin_headers):
         unique = uuid.uuid4().hex[:8]
-        payload = {"name": f"create-test-{unique}", "url": f"http://create-{unique}.local"}
+        payload = {"name": f"create-test-{unique}", "url": "http://203.0.113.1:9000"}
         resp = requests.post(f"{registry_url}/services", json=payload, headers=admin_headers)
         service_id = resp.json().get("service_id", "")
         # Teardown
@@ -107,7 +107,7 @@ class TestCreateService:
 
     def test_response_contains_service_id(self, registry_url, admin_headers):
         unique = uuid.uuid4().hex[:8]
-        payload = {"name": f"id-test-{unique}", "url": f"http://id-{unique}.local"}
+        payload = {"name": f"id-test-{unique}", "url": "http://203.0.113.1:9000"}
         resp = requests.post(f"{registry_url}/services", json=payload, headers=admin_headers)
         body = resp.json()
         service_id = body.get("service_id", "")
@@ -120,7 +120,7 @@ class TestCreateService:
     def test_response_reflects_name_and_url(self, registry_url, admin_headers):
         unique = uuid.uuid4().hex[:8]
         name = f"reflect-test-{unique}"
-        url = f"http://reflect-{unique}.local"
+        url = "http://203.0.113.1:9000"
         payload = {"name": name, "url": url}
         resp = requests.post(f"{registry_url}/services", json=payload, headers=admin_headers)
         body = resp.json()
@@ -134,7 +134,7 @@ class TestCreateService:
     def test_missing_name_returns_400(self, registry_url, admin_headers):
         resp = requests.post(
             f"{registry_url}/services",
-            json={"url": "http://no-name.local"},
+            json={"url": "http://203.0.113.1:9000"},
             headers=admin_headers,
         )
         assert resp.status_code == 400
@@ -151,7 +151,7 @@ class TestCreateService:
         # service fixture already created a service; post with the same name.
         resp = requests.post(
             f"{registry_url}/services",
-            json={"name": service["name"], "url": "http://duplicate.local"},
+            json={"name": service["name"], "url": "http://203.0.113.1:9000"},
             headers=admin_headers,
         )
         assert resp.status_code == 409
@@ -165,7 +165,7 @@ class TestCreateService:
 class TestDeleteService:
     def test_returns_204(self, registry_url, admin_headers):
         unique = uuid.uuid4().hex[:8]
-        payload = {"name": f"delete-me-{unique}", "url": f"http://delete-me-{unique}.local"}
+        payload = {"name": f"delete-me-{unique}", "url": "http://203.0.113.1:9000"}
         create_resp = requests.post(f"{registry_url}/services", json=payload, headers=admin_headers)
         assert create_resp.status_code == 201
         service_id = create_resp.json()["service_id"]
@@ -175,7 +175,7 @@ class TestDeleteService:
 
     def test_deleted_service_not_in_list(self, registry_url, admin_headers, read_headers):
         unique = uuid.uuid4().hex[:8]
-        payload = {"name": f"gone-{unique}", "url": f"http://gone-{unique}.local"}
+        payload = {"name": f"gone-{unique}", "url": "http://203.0.113.1:9000"}
         create_resp = requests.post(f"{registry_url}/services", json=payload, headers=admin_headers)
         assert create_resp.status_code == 201
         service_id = create_resp.json()["service_id"]
@@ -194,7 +194,7 @@ class TestDeleteService:
 
     def test_double_delete_returns_404(self, registry_url, admin_headers):
         unique = uuid.uuid4().hex[:8]
-        payload = {"name": f"double-del-{unique}", "url": f"http://double-del-{unique}.local"}
+        payload = {"name": f"double-del-{unique}", "url": "http://203.0.113.1:9000"}
         create_resp = requests.post(f"{registry_url}/services", json=payload, headers=admin_headers)
         assert create_resp.status_code == 201
         service_id = create_resp.json()["service_id"]
