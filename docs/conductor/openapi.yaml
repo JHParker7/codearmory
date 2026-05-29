@@ -1,0 +1,213 @@
+openapi: 3.1.0
+info:
+  title: Conductor — API Gateway
+  description: |
+    Reverse proxy and API gateway. Routes incoming requests to registered backend
+    services, verifies caller identity with Gatekeeper, and enforces endpoint-level
+    RBAC based on the manifest published by each service to the Registry.
+
+    ## Routing
+
+    Conductor supports two path formats:
+
+    | Format | Example | Behaviour |
+    |--------|---------|-----------|
+    | Service-prefixed | `/forge/executions` | Routes to the `forge` service at path `/executions` |
+    | Full path | `/executions` | Matched against all registered endpoint patterns |
+
+    The routing table is refreshed from the Registry every 30 seconds.
+
+    ## Authentication
+
+    Conductor authenticates the caller's Bearer token by calling
+    `GET {GATEKEEPER_URL}/users/{user_id}` (decoded from the JWT subject). Invalid
+    or expired tokens are rejected with `401 Unauthorized`.
+
+    For non-public endpoints, Conductor then calls Gatekeeper's
+    `POST /check_permissions` to verify the caller has the action+resource
+    permission declared in the matched endpoint's manifest entry.
+
+    ## Header injection
+
+    | Header | When | Description |
+    |--------|------|-------------|
+    | `Authorization` | `forward_auth = true` on the target service | Original Bearer token forwarded unchanged |
+    | `X-User-ID` | `forward_auth = false` | Caller's user ID, HMAC-signed with `CONDUCTOR_FORWARD_KEY` |
+    | `X-User-ID-Timestamp` | `forward_auth = false` | Unix timestamp used in the HMAC signature |
+
+    ## Request body validation
+
+    All request bodies are capped at 64 KB. The `POST /signup` and `POST /login`
+    bodies forwarded to Gatekeeper are additionally validated for required fields.
+
+    ## Suspicious activity blocking
+
+    Repeated authentication failures from the same IP address trigger automatic
+    blocking. Blocked IPs receive `403 Forbidden` on all requests.
+  version: 1.0.0
+  contact:
+    email: jhp1403@gmail.com
+
+servers:
+  - url: http://localhost:8082
+    description: Local development server
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      operationId: healthz
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+
+  /{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        schema:
+          type: string
+        description: |
+          Any path. Matched against registered endpoint patterns from the Registry.
+          Use either the service-prefixed form (`/forge/executions`) or the bare
+          service path (`/executions`) — Conductor tries both.
+
+    get:
+      summary: Proxy GET request
+      operationId: proxyGet
+      description: Proxies a GET request to the matched backend service after auth and RBAC checks.
+      responses:
+        '200':
+          description: Response from the backend service
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+    post:
+      summary: Proxy POST request
+      operationId: proxyPost
+      description: Proxies a POST request to the matched backend service after auth and RBAC checks.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Response from the backend service
+        '201':
+          description: Resource created on the backend service
+        '202':
+          description: Request accepted by the backend service
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+    put:
+      summary: Proxy PUT request
+      operationId: proxyPut
+      description: Proxies a PUT request to the matched backend service after auth and RBAC checks.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Response from the backend service
+        '204':
+          description: Update accepted, no content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+    delete:
+      summary: Proxy DELETE request
+      operationId: proxyDelete
+      description: Proxies a DELETE request to the matched backend service after auth and RBAC checks.
+      responses:
+        '200':
+          description: Response from the backend service
+        '204':
+          description: Resource deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Conflict returned by the backend service
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Token issued by the Gatekeeper service.
+        Conductor verifies the token by calling `GET {GATEKEEPER_URL}/users/{user_id}`.
+
+  responses:
+    BadRequest:
+      description: Request body failed validation
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    Unauthorized:
+      description: |
+        Missing, invalid, or expired Bearer token — or the caller's IP is blocked
+        due to repeated authentication failures.
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    Forbidden:
+      description: Caller lacks the permission required by the matched endpoint
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    NotFound:
+      description: No registered endpoint matched the request path and method
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    BadGateway:
+      description: The backend service is unreachable or returned an unexpected error
+      content:
+        text/plain:
+          schema:
+            type: string
