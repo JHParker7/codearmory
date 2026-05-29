@@ -17,6 +17,12 @@ import (
 var testDBReady bool
 
 func TestMain(m *testing.M) {
+	// Stub DNS so tests don't need real hostname resolution.
+	// Returns a public IP that passes SSRF validation.
+	resolveHost = func(host string) ([]string, error) {
+		return []string{"93.184.216.34"}, nil
+	}
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgresql://postgres:postgres@localhost:5432/registry"

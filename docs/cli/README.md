@@ -1,6 +1,6 @@
 # Armory CLI
 
-Command-line client for the CodeArmory platform. All commands talk to [Conductor](../conductor/README.md), which routes requests to Gatekeeper and Blueprints.
+Command-line client for the CodeArmory platform. All commands talk to [Conductor](../conductor/README.md), which verifies the caller's identity and routes requests to the appropriate backend service.
 
 ## Installation
 
@@ -150,7 +150,7 @@ armory state unlock alice dev --data '{"ID":"abc123"}'
 | `invites decline <id>` | Decline an invite |
 | `invites delete <id>` | Revoke an invite |
 
-### `state` (user-scoped)
+### `state`
 
 Manages Terraform state at `/state/{username}/{workspace}`.
 
@@ -161,17 +161,5 @@ Manages Terraform state at `/state/{username}/{workspace}`.
 | `state delete <username> <workspace>` | Delete state |
 | `state lock <username> <workspace> [--data <json\|@file>]` | Acquire workspace lock |
 | `state unlock <username> <workspace> [--data <json\|@file>]` | Release workspace lock |
-
-### `org-state` (org-scoped)
-
-Manages Terraform state at `/{org}/state/{team}/{workspace}`.
-
-| Command | Description |
-|---------|-------------|
-| `org-state get <org> <team> <workspace>` | Fetch state |
-| `org-state post <org> <team> <workspace>` | Store state |
-| `org-state delete <org> <team> <workspace>` | Delete state |
-| `org-state lock <org> <team> <workspace> [--data <json\|@file>]` | Acquire workspace lock |
-| `org-state unlock <org> <team> <workspace> [--data <json\|@file>]` | Release workspace lock |
 
 The `--data` flag on `lock` and `unlock` accepts a JSON string or a `@filename` to read from a file. The lock ID in the data must match the ID of the current lock when unlocking.

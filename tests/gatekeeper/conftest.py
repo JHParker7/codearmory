@@ -78,28 +78,43 @@ def pytest_sessionfinish(session, exitstatus):
             {"uids": user_ids, "emails": user_emails},
         )
 
-        # Clear user membership FKs so org/team rows can be deleted
+        # Step 1: delete all permissions_checks that reference test data, commit
+        # immediately so this survives even if later deletes fail.
+        conn.execute(sa.text("DELETE FROM sessions WHERE user_id = ANY(:uids)"), {"uids": user_ids})
+        conn.execute(sa.text("DELETE FROM permissions_checks WHERE user_id = ANY(:uids)"), {"uids": user_ids})
+        if team_ids:
+            conn.execute(sa.text("DELETE FROM permissions_checks WHERE team_id = ANY(:tids)"), {"tids": team_ids})
+        if org_ids:
+            conn.execute(sa.text("DELETE FROM permissions_checks WHERE org_id = ANY(:oids)"), {"oids": org_ids})
+        conn.commit()
+
+        # Step 2: clear membership / ownership FKs, then delete orgs and teams.
         conn.execute(sa.text("UPDATE users SET org_id = NULL WHERE user_id = ANY(:uids)"), {"uids": user_ids})
         conn.execute(sa.text("UPDATE users SET team_id = NULL WHERE user_id = ANY(:uids)"), {"uids": user_ids})
-
-        # Break ownership FKs on teams/orgs before deleting the owning users
         conn.execute(sa.text("UPDATE teams SET owner_id = NULL WHERE owner_id = ANY(:uids)"), {"uids": user_ids})
         conn.execute(sa.text("UPDATE orgs SET owner_id = NULL WHERE owner_id = ANY(:uids)"), {"uids": user_ids})
-
         if team_ids:
             conn.execute(sa.text("DELETE FROM teams WHERE team_id = ANY(:tids)"), {"tids": team_ids})
         if org_ids:
+            conn.execute(sa.text("UPDATE roles SET org_id = NULL WHERE org_id = ANY(:oids)"), {"oids": org_ids})
             conn.execute(sa.text("DELETE FROM orgs WHERE org_id = ANY(:oids)"), {"oids": org_ids})
 
-        # Delete in FK-safe order: sessions → permissions_checks → users → roles → permissions
-        conn.execute(sa.text("DELETE FROM sessions WHERE user_id = ANY(:uids)"), {"uids": user_ids})
-        conn.execute(sa.text("DELETE FROM permissions_checks WHERE user_id = ANY(:uids)"), {"uids": user_ids})
+        conn.execute(
+            sa.text("UPDATE service_permission_requests SET resolved_by = NULL WHERE resolved_by = ANY(:uids)"),
+            {"uids": user_ids},
+        )
         conn.execute(sa.text("DELETE FROM users WHERE user_id = ANY(:uids)"), {"uids": user_ids})
         all_role_ids = list(set(role_ids + team_role_ids))
         if all_role_ids:
             conn.execute(sa.text("DELETE FROM roles WHERE role_id = ANY(:rids)"), {"rids": all_role_ids})
         if perm_ids:
             conn.execute(sa.text("DELETE FROM permissions WHERE permissions_id = ANY(:pids)"), {"pids": perm_ids})
+
+        # Clean up service permission requests created by the test service accounts.
+        conn.execute(
+            sa.text("UPDATE service_permission_requests SET active = false WHERE service_name = ANY(:names)"),
+            {"names": ["blueprints", "forge"]},
+        )
 
         conn.commit()
     except Exception as e:

@@ -1,20 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"regexp"
-	"strconv"
-	"time"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -44,7 +40,7 @@ func validateEnvKeys(env map[string]string) error {
 		if !envKeyRe.MatchString(k) {
 			return fmt.Errorf("invalid env key %q: must match [A-Za-z_][A-Za-z0-9_]*", k)
 		}
-		if blockedEnvKeys[k] {
+		if blockedEnvKeys[strings.ToUpper(k)] {
 			return fmt.Errorf("env key %q is not permitted", k)
 		}
 	}
@@ -99,45 +95,61 @@ func trimSpace(s string) string {
 	return s
 }
 
-var conductorForwardKey = os.Getenv("CONDUCTOR_FORWARD_KEY")
-
-// extractUserID reads the X-User-ID header injected by Conductor after Gatekeeper
-// has authenticated and authorised the request. When CONDUCTOR_FORWARD_KEY is set,
-// the accompanying HMAC token is verified to ensure the header was set by Conductor
-// and not injected by another service on the internal network.
-func extractUserID(r *http.Request) (string, bool) {
-	id := r.Header.Get("X-User-ID")
-	if id == "" {
+// checkGatekeeper calls gatekeeper's /check_permissions endpoint with the Bearer
+// token from the incoming request. It returns the user_id and true when the
+// caller is authorised; it writes an HTTP error and returns false otherwise.
+// Forge calls gatekeeper directly so that auth is enforced even if a compromised
+// conductor strips or forges the X-User-ID header.
+func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request, action, resource string) (string, bool) {
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || token == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return "", false
 	}
-	if conductorForwardKey != "" {
-		tok := r.Header.Get("X-Conductor-Token")
-		ts := r.Header.Get("X-Conductor-Timestamp")
-		if tok == "" || ts == "" {
-			slog.Warn("forge: missing X-Conductor-Token or X-Conductor-Timestamp")
-			return "", false
-		}
-		tsInt, err := strconv.ParseInt(ts, 10, 64)
-		if err != nil || abs(time.Now().Unix()-tsInt) > 30 {
-			slog.Warn("forge: X-Conductor-Timestamp out of window or invalid")
-			return "", false
-		}
-		mac := hmac.New(sha256.New, []byte(conductorForwardKey))
-		fmt.Fprintf(mac, "conductor:%s:%s", id, ts)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if !hmac.Equal([]byte(tok), []byte(expected)) {
-			slog.Warn("forge: X-Conductor-Token HMAC mismatch")
-			return "", false
-		}
-	}
-	return id, true
-}
 
-func abs(n int64) int64 {
-	if n < 0 {
-		return -n
+	body, _ := json.Marshal(map[string]string{
+		"service":  "forge",
+		"resource": resource,
+		"action":   action,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
+	if err != nil {
+		slog.Error("forge: failed to build gatekeeper request", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return "", false
 	}
-	return n
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := forgeHTTPClient.Do(req)
+	if err != nil {
+		slog.Error("forge: gatekeeper check_permissions failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return "", false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return "", false
+	}
+	if resp.StatusCode >= 500 {
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		slog.Error("forge: gatekeeper unavailable", "status", resp.StatusCode)
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return "", false
+	}
+
+	var result struct {
+		Authorized bool   `json:"authorized"`
+		UserID     string `json:"user_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || !result.Authorized {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return "", false
+	}
+
+	return result.UserID, true
 }
 
 // ── Submit ────────────────────────────────────────────────────────────────────
@@ -147,9 +159,8 @@ func handleSubmit(pool *WorkerPool) http.HandlerFunc {
 		ctx, span := otel.Tracer("forge").Start(r.Context(), "handleSubmit")
 		defer span.End()
 
-		userID, ok := extractUserID(r)
+		userID, ok := checkGatekeeper(ctx, w, r, "createExecution", "forge/executions")
 		if !ok {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
@@ -221,12 +232,11 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("forge").Start(r.Context(), "handleGet")
 	defer span.End()
 
-	userID, ok := extractUserID(r)
+	executionID := r.PathValue("id")
+	userID, ok := checkGatekeeper(ctx, w, r, "getExecution", "forge/executions/"+executionID)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	executionID := r.PathValue("id")
 
 	exec, err := getExecution(ctx, executionID, userID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -250,9 +260,8 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("forge").Start(r.Context(), "handleList")
 	defer span.End()
 
-	userID, ok := extractUserID(r)
+	userID, ok := checkGatekeeper(ctx, w, r, "listExecution", "forge/executions")
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -292,12 +301,11 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		ctx, span := otel.Tracer("forge").Start(r.Context(), "handleCancel")
 		defer span.End()
 
-		userID, ok := extractUserID(r)
+		executionID := r.PathValue("id")
+		userID, ok := checkGatekeeper(ctx, w, r, "deleteExecution", "forge/executions/"+executionID)
 		if !ok {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		executionID := r.PathValue("id")
 
 		exec, err := getExecution(ctx, executionID, userID)
 		if errors.Is(err, pgx.ErrNoRows) {

@@ -1,3 +1,4 @@
+# config not for production use. set up to test integration tests on PRs
 services:
   # ── Database ──────────────────────────────────────────────────────────────────
 
@@ -39,11 +40,20 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
       GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret
+      SIGNUP_RATE_LIMIT: "1000"
+      SIGNUP_RATE_WINDOW: 1h
+      LOGIN_RATE_LIMIT: "1000"
+      LOGIN_RATE_WINDOW: 1h
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: on-failure
 
   registry:
@@ -53,7 +63,10 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/registry
       ADMIN_KEY: registry-admin-local-secret
       READ_KEY: registry-read-local-secret
-      SERVICES: blueprints=http://blueprints:8081,forge=http://forge:8083
+      SERVICES: blueprints=http://blueprints:8081,forge=http://forge:8083,gatekeeper=http://gatekeeper:8080
+      MANIFEST_FILE: /etc/registry/manifest.json
+    volumes:
+      - ./registry-manifest.json:/etc/registry/manifest.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -66,18 +79,16 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/blueprints
       GATEKEEPER_URL: http://gatekeeper:8080
       REDIS_URL: redis://redis:6379/1
-      # Generate with: openssl rand -hex 32
-      # Required — blueprints will refuse to start without this key.
-      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
       # Must match the blueprints entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: blueprints-local-secret
+    entrypoint: ["/bin/sh", "-c", "ENCRYPTION_KEY=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n') exec ./blueprints"]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       gatekeeper:
-        condition: service_started
+        condition: service_healthy
       registry:
         condition: service_started
     restart: on-failure
@@ -90,7 +101,6 @@ services:
       RUNTIME: docker
       GATEKEEPER_URL: http://gatekeeper:8080
       ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim
-      CONDUCTOR_FORWARD_KEY: forge-conductor-shared-local-secret
       # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: forge-local-secret
       # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
@@ -99,11 +109,15 @@ services:
       # Mount the Docker socket for the local docker runtime.
       # Remove this when deploying to Kubernetes (use RUNTIME=kubernetes instead).
       - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      # Add the host docker group so the svc user can reach the Docker socket.
+      # Set DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) before running compose.
+      - "${DOCKER_GID:?DOCKER_GID must be set to the host docker group GID (stat -c '%g' /var/run/docker.sock)}"
     depends_on:
       postgres:
         condition: service_healthy
       gatekeeper:
-        condition: service_started
+        condition: service_healthy
       registry:
         condition: service_started
     restart: on-failure
@@ -120,10 +134,79 @@ services:
       - "8082:8082"
     depends_on:
       gatekeeper:
-        condition: service_started
+        condition: service_healthy
       registry:
         condition: service_started
     restart: on-failure
+
+  gatekeeper-integration-tests:
+    build:
+      context: ../../tests/gatekeeper
+    environment:
+      API_URL: http://gatekeeper:8080
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gatekeeper
+    depends_on:
+      gatekeeper:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  blueprints-integration-tests:
+    build:
+      context: ../../tests/blueprints
+    environment:
+      BLUEPRINTS_URL: http://blueprints:8081
+      GATEKEEPER_URL: http://gatekeeper:8080
+    depends_on:
+      blueprints:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  registry-integration-tests:
+    build:
+      context: ../../tests/registry
+    environment:
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_ADMIN_KEY: registry-admin-local-secret
+      REGISTRY_READ_KEY: registry-read-local-secret
+    depends_on:
+      registry:
+        condition: service_started
+    profiles: [test]
+    restart: no
+
+  conductor-integration-tests:
+    build:
+      context: ../../tests/conductor
+    environment:
+      CONDUCTOR_URL: http://conductor:8082
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gatekeeper
+    depends_on:
+      conductor:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  forge-integration-tests:
+    build:
+      context: ../../tests/forge
+    environment:
+      FORGE_URL: http://forge:8083
+      GATEKEEPER_URL: http://gatekeeper:8080
+    depends_on:
+      forge:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
 
 volumes:
   postgres_data:

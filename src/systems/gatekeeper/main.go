@@ -6,16 +6,16 @@ import (
 	"crypto/x509"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"codearmory.local/svckit/telemetry"
+	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
@@ -35,10 +35,7 @@ type ipBucket struct {
 // the in-memory limiterMap when Redis is not configured.
 func rateLimitMiddleware(endpoint string, limiterMap *sync.Map, maxAttempts int, window time.Duration, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ip, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ip = r.RemoteAddr
-		}
+		ip := realClientIP(r)
 		var allowed bool
 		if redisClient != nil {
 			allowed = redisRateLimit(r.Context(), endpoint, ip, maxAttempts, window)
@@ -66,6 +63,24 @@ func rateLimitMiddleware(endpoint string, limiterMap *sync.Map, maxAttempts int,
 
 var loginLimiter sync.Map  // per-IP login attempt buckets
 var signupLimiter sync.Map // per-IP signup attempt buckets
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
 
 // seedServiceAccounts reads GATEKEEPER_SERVICES (format "name=key,name=key") and
 // upserts a ServiceAccount row for each entry with a fresh bcrypt hash. This sets
@@ -170,9 +185,9 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// 10 signup attempts per IP per 10 minutes; 5 login attempts per IP per minute.
-	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, 10, 10*time.Minute, handleSignup))
-	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, 5, time.Minute, handleLogin))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, envInt("SIGNUP_RATE_LIMIT", 10), envDuration("SIGNUP_RATE_WINDOW", 10*time.Minute), handleSignup))
+	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleLogin))
 	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
 
 	mw := func(h http.HandlerFunc) http.Handler { return authMiddleware(http.HandlerFunc(h)) }
@@ -239,7 +254,7 @@ func main() {
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
 
-	otelHandler, shutdown, err := telemetry.Setup(context.Background(), serviceConfig.Name)
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "gatekeeper")
 	if err != nil {
 		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
 	} else {

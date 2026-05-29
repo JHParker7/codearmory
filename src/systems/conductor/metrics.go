@@ -8,6 +8,7 @@ import (
 var (
 	meterAllowed  metric.Int64Counter
 	meterRejected metric.Int64Counter
+	meterBlocked  metric.Int64Counter
 )
 
 func initMetrics() {
@@ -20,5 +21,9 @@ func initMetrics() {
 	meterRejected, _ = meter.Int64Counter(
 		"conductor.requests.rejected.total",
 		metric.WithDescription("Requests rejected by the user-existence check"),
+	)
+	meterBlocked, _ = meter.Int64Counter(
+		"conductor.ips.blocked.total",
+		metric.WithDescription("Source IPs added to the block list after repeated post-auth failures"),
 	)
 }

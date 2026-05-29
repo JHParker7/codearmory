@@ -14,9 +14,6 @@ EMAIL = "tf_backend_test@example.com"
 PASSWORD = "tf_backend_pass"
 USERNAME = "tf_backend_tester"
 
-ORG = "test-org"
-TEAM = "test-team"
-
 OTHER_EMAIL = "tf_backend_other@example.com"
 OTHER_PASSWORD = "tf_backend_other_pass"
 OTHER_USERNAME = "tf_backend_other_tester"
@@ -32,14 +29,7 @@ def token():
         f"{GATEKEEPER_URL}/login",
         json={"email": EMAIL, "password": PASSWORD},
     )
-    tok = res.json()["token"]
-    # Create the org so the owner gets blueprints state permissions for it.
-    requests.post(
-        f"{GATEKEEPER_URL}/orgs",
-        json={"org_name": ORG},
-        headers={"Authorization": f"Bearer {tok}"},
-    )
-    return tok
+    return res.json()["token"]
 
 
 @pytest.fixture(scope="module")
@@ -199,107 +189,3 @@ def test_cross_user_access_returns_403(other_bearer, workspace):
     assert res.status_code == 403
 
 
-# ── Org-scoped routes ─────────────────────────────────────────────────────────
-
-def test_org_unauthenticated_request_returns_401(workspace):
-    res = requests.get(f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}")
-    assert res.status_code == 401
-
-
-def test_org_get_empty_state_returns_204(bearer, workspace):
-    res = requests.get(f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer)
-    assert res.status_code == 204
-
-
-def test_org_state_lifecycle(bearer, workspace):
-    res = requests.get(f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer)
-    assert res.status_code == 204
-
-    res = requests.post(f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=STATE)
-    assert res.status_code == 200
-
-    res = requests.get(f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer)
-    assert res.status_code == 200
-    assert res.json()["version"] == 4
-
-    res = requests.delete(f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer)
-    assert res.status_code == 200
-
-    res = requests.get(f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer)
-    assert res.status_code == 204
-
-
-def test_org_lock_unlock_cycle(bearer, workspace):
-    lock = lock_body()
-    lock_data = json.loads(lock)
-
-    res = requests.request("LOCK", f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=lock)
-    assert res.status_code == 200
-
-    res = requests.request("LOCK", f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=lock)
-    assert res.status_code == 423
-    assert res.json()["ID"] == lock_data["ID"]
-
-    res = requests.request("UNLOCK", f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=lock)
-    assert res.status_code == 200
-
-    res = requests.request("LOCK", f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=lock)
-    assert res.status_code == 200
-
-    requests.request("UNLOCK", f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=lock)
-
-
-def test_org_update_state_rejected_with_wrong_lock_id(bearer, workspace):
-    lock = lock_body()
-
-    requests.request("LOCK", f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=lock)
-
-    res = requests.post(
-        f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}?ID=wrong-id",
-        headers=bearer,
-        data=STATE,
-    )
-    assert res.status_code == 409
-
-    requests.request("UNLOCK", f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=lock)
-
-
-def test_org_update_state_accepted_with_correct_lock_id(bearer, workspace):
-    lock = lock_body()
-    lock_data = json.loads(lock)
-
-    requests.request("LOCK", f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=lock)
-
-    res = requests.post(
-        f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}?ID={lock_data['ID']}",
-        headers=bearer,
-        data=STATE,
-    )
-    assert res.status_code == 200
-
-    requests.request("UNLOCK", f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=lock)
-
-
-def test_org_unlock_without_lock_returns_200(bearer, workspace):
-    res = requests.request("UNLOCK", f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer, data=lock_body())
-    assert res.status_code == 200
-
-
-def test_org_delete_nonexistent_state_returns_200(bearer, workspace):
-    res = requests.delete(f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer)
-    assert res.status_code == 200
-
-
-def test_org_cross_user_access_returns_403(other_bearer, workspace):
-    res = requests.get(f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=other_bearer)
-    assert res.status_code == 403
-
-
-def test_user_workspace_isolated_from_org_workspace(bearer, workspace):
-    res = requests.post(f"{BLUEPRINTS_URL}/state/{USERNAME}/{workspace}", headers=bearer, data=STATE)
-    assert res.status_code == 200
-
-    res = requests.get(f"{BLUEPRINTS_URL}/{ORG}/state/{TEAM}/{workspace}", headers=bearer)
-    assert res.status_code == 204
-
-    requests.delete(f"{BLUEPRINTS_URL}/state/{USERNAME}/{workspace}", headers=bearer)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Service struct {
@@ -55,6 +56,22 @@ type serviceWithEndpoints struct {
 	Endpoints []ServiceEndpoint `json:"endpoints"`
 }
 
+// resolveHost is the DNS lookup used by validateServiceURL. Tests can replace it.
+var resolveHost = net.LookupHost
+
+// hashServiceKey bcrypt-hashes a plaintext service key for storage.
+// Returns an empty string and no error when key is empty (no key configured).
+func hashServiceKey(key string) (string, error) {
+	if key == "" {
+		return "", nil
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(key), 12)
+	if err != nil {
+		return "", err
+	}
+	return string(h), nil
+}
+
 // checkKey does a constant-time comparison against a configured API key so the
 // check is not vulnerable to timing-based enumeration.
 func checkKey(r *http.Request, expected string) bool {
@@ -89,8 +106,9 @@ func requireReadKey(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// validateServiceURL rejects URLs that target loopback or RFC-1918 addresses
-// to prevent SSRF via the service registry.
+// validateServiceURL rejects URLs that target loopback, link-local, or any
+// private/reserved address (IPv4 RFC-1918, IPv6 ULA fc00::/7, etc.) to prevent
+// SSRF via the service registry.
 func validateServiceURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -101,20 +119,11 @@ func validateServiceURL(rawURL string) error {
 	}
 	host := u.Hostname()
 
-	// checkIP validates a single parsed IP against the blocked ranges.
+	// checkIP rejects any address that is loopback, link-local, or private.
+	// net.IP.IsPrivate covers IPv4 RFC-1918 and IPv6 ULA (fc00::/7).
 	checkIP := func(ip net.IP) error {
-		if ip.IsLoopback() {
-			return fmt.Errorf("URL must not target loopback address")
-		}
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			return fmt.Errorf("URL must not target link-local address")
-		}
-		privateRanges := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
-		for _, cidr := range privateRanges {
-			_, network, _ := net.ParseCIDR(cidr)
-			if network.Contains(ip) {
-				return fmt.Errorf("URL must not target private network address")
-			}
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
+			return fmt.Errorf("URL must not target a private or reserved address")
 		}
 		return nil
 	}
@@ -124,10 +133,14 @@ func validateServiceURL(rawURL string) error {
 	}
 
 	// Hostname — resolve and validate every returned address to prevent DNS-based
-	// SSRF (e.g. a public domain resolving to 169.254.169.254).
-	addrs, err := net.LookupHost(host)
+	// SSRF (e.g. a public domain resolving to 169.254.169.254). Fail closed: if
+	// the hostname can't be resolved we reject it rather than allow it, since an
+	// unresolvable name today could resolve to a private address tomorrow.
+	// Internal service URLs (e.g. Docker service names) should be pre-seeded via
+	// SERVICES env var or MANIFEST_FILE, which bypass this validation.
+	addrs, err := resolveHost(host)
 	if err != nil {
-		return fmt.Errorf("cannot resolve hostname %q: %w", host, err)
+		return fmt.Errorf("hostname %q could not be resolved: %w", host, err)
 	}
 	for _, addr := range addrs {
 		ip := net.ParseIP(addr)
@@ -223,6 +236,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		URL         string `json:"url"`
 		Description string `json:"description"`
 		ForwardAuth bool   `json:"forward_auth"`
+		ServiceKey  string `json:"service_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.URL == "" {
 		http.Error(w, "name and url are required", http.StatusBadRequest)
@@ -233,11 +247,18 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	hashedKey, err := hashServiceKey(req.ServiceKey)
+	if err != nil {
+		slog.Error("create service: hash key", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
 	id := uuid.New().String()
-	_, err := pool.Exec(r.Context(),
-		`INSERT INTO services (service_id, name, url, description, forward_auth)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		id, req.Name, req.URL, req.Description, req.ForwardAuth)
+	_, err = pool.Exec(r.Context(),
+		`INSERT INTO services (service_id, name, url, description, forward_auth, service_key)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		id, req.Name, req.URL, req.Description, req.ForwardAuth, hashedKey)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {

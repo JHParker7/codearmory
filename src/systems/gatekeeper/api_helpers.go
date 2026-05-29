@@ -357,15 +357,17 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 
 		// Three matching strategies, tried in order:
 		//  1. Exact match or global wildcard ("*")
-		//  2. Trailing-star prefix: "blueprints/states/*" matches any path under that prefix
+		//  2. Trailing-star prefix: "blueprints/states/*" matches any path under that prefix.
+		//     The "*" MUST be preceded by "/" — patterns like "blueprints/states*" are not
+		//     treated as wildcards to prevent overmatch against adjacent path names.
 		//  3. Per-segment wildcard: "blueprints/states/*/locks" matches a specific depth with a wildcard segment
 		if slices.Contains(permission.Resources, resource) || slices.Contains(permission.Resources, "*") {
 			resourceMatch = true
 		} else {
 			for _, allowedResource := range permission.Resources {
-				if len(allowedResource) > 0 && allowedResource[len(allowedResource)-1] == '*' {
-					prefix := allowedResource[:len(allowedResource)-1]
-					if strings.HasPrefix(resource, prefix) {
+				if strings.HasSuffix(allowedResource, "/*") {
+					prefix := allowedResource[:len(allowedResource)-2] // strip "/*"
+					if strings.HasPrefix(resource, prefix+"/") {
 						resourceMatch = true
 					}
 				}

@@ -6,8 +6,7 @@ Service discovery and endpoint registry. Stores the URL, routing metadata, and e
 
 ```
 Services (blueprints, forge, …)
-  │  On startup: PUT /services/{id}/endpoints
-  │  (seed via SERVICES env var or admin API)
+  │  Registered via SERVICES env var, MANIFEST_FILE, or admin API
   │
   ▼
 Registry :8084
@@ -105,7 +104,6 @@ curl -X POST http://registry:8084/services \
 | `url` | string | Yes | Base URL of the service. Must use `http` or `https`; loopback, link-local, and RFC-1918 addresses are rejected. |
 | `description` | string | No | Human-readable description |
 | `forward_auth` | bool | No | If `true`, Conductor forwards the caller's `Authorization` header to the backend. If `false` (default), Conductor strips the bearer token and injects `X-User-ID` instead. |
-
 ### Update endpoint manifest
 
 The endpoint manifest tells Conductor which HTTP method/path combinations are valid and what Gatekeeper permission to check for each.
@@ -163,7 +161,7 @@ When registering or updating a service URL, the Registry validates that the targ
 - Loopback addresses (`127.0.0.0/8`, `::1`) are rejected
 - Link-local addresses (`169.254.0.0/16`, `fe80::/10`) are rejected
 - RFC-1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) are rejected
-- DNS hostnames are resolved at registration time and all returned addresses are validated
+- DNS hostnames are resolved at registration time and all returned addresses are validated; hostnames that cannot be resolved are rejected (fail-closed). Internal service URLs that use Docker or Kubernetes DNS names should be pre-seeded via `SERVICES` env var or `MANIFEST_FILE`, which bypass this check.
 
 ## Schema
 

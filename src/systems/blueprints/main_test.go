@@ -95,7 +95,7 @@ func TestSecretOrDefaultUsesSecret(t *testing.T) {
 	}
 }
 
-// ── userKey / orgKey ──────────────────────────────────────────────────────────
+// ── userKey ───────────────────────────────────────────────────────────────────
 
 func TestUserKey(t *testing.T) {
 	r := httptest.NewRequest("GET", "/state/alice/dev", nil)
@@ -107,23 +107,8 @@ func TestUserKey(t *testing.T) {
 	if k != "alice/dev" {
 		t.Fatalf("workspace key: got %q, want %q", k, "alice/dev")
 	}
-	if res != "blueprints/states/alice/dev" {
-		t.Fatalf("resource: got %q, want %q", res, "blueprints/states/alice/dev")
-	}
-}
-
-func TestOrgKey(t *testing.T) {
-	r := httptest.NewRequest("GET", "/acme/state/infra/prod", nil)
-	r.SetPathValue("org", "acme")
-	r.SetPathValue("team", "infra")
-	r.SetPathValue("workspace", "prod")
-
-	k, res := orgKey(r)
-	if k != "acme/infra/prod" {
-		t.Fatalf("workspace key: got %q, want %q", k, "acme/infra/prod")
-	}
-	if res != "blueprints/acme/states/infra/prod" {
-		t.Fatalf("resource: got %q, want %q", res, "blueprints/acme/states/infra/prod")
+	if res != "states/alice/dev" {
+		t.Fatalf("resource: got %q, want %q", res, "states/alice/dev")
 	}
 }
 

@@ -105,10 +105,15 @@ func handleListInvites(w http.ResponseWriter, r *http.Request) {
 	// Resolve the caller's email to scope the invite list to invites they sent
 	// or received. This prevents any user with listInvite from enumerating all
 	// invitee emails across the system.
-	callerEmail := ""
-	if callerRow, err := (User{UserID: callerID}).Get(ctx); err == nil {
-		callerEmail = callerRow.(User).Email
+	callerRow, err := (User{UserID: callerID}).Get(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "caller not found")
+		slog.Warn("list invites: failed to fetch caller", "caller_id", callerID, "error", err)
+		http.Error(w, "failed to list invites", http.StatusInternalServerError)
+		return
 	}
+	callerEmail := callerRow.(User).Email
 
 	q := r.URL.Query()
 	// Honour optional query-param filters but always constrain to the caller's scope.
@@ -303,6 +308,9 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Derive permission strings from the outer (non-locked) caller read; username
+	// is immutable so this is safe. The definitive membership check runs inside
+	// the transaction under SELECT FOR UPDATE on the user row.
 	var memberAction, permResource, permName string
 	switch invite.ResourceType {
 	case "org":
@@ -312,7 +320,6 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "you already belong to an org; leave it before accepting this invite", http.StatusConflict)
 			return
 		}
-		caller.OrgID = &invite.ResourceID
 		memberAction = "getOrg"
 		permResource = fmt.Sprintf("gatekeeper/orgs/%s", invite.ResourceID)
 		permName = fmt.Sprintf("%s-org-member-read", caller.Username)
@@ -323,7 +330,6 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "you already belong to a team; leave it before accepting this invite", http.StatusConflict)
 			return
 		}
-		caller.TeamID = &invite.ResourceID
 		memberAction = "getTeam"
 		permResource = fmt.Sprintf("gatekeeper/teams/%s", invite.ResourceID)
 		permName = fmt.Sprintf("%s-team-member-read", caller.Username)
@@ -334,12 +340,8 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	caller.UpdatedAt = time.Now()
-
 	err = connect().Transaction(func(tx *gorm.DB) error {
-		// Re-read the invite under a write lock to serialise concurrent accept attempts.
-		// Without this, two simultaneous requests could both pass the status check above
-		// and then both commit, assigning the same user to the resource twice.
+		// Lock the invite row to serialise concurrent accept attempts on the same invite.
 		var fresh Invite
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("invite_id = ? AND active = ?", id, true).
@@ -350,8 +352,30 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 			return errors.New("invite is not pending")
 		}
 
+		// Lock the user row to prevent two concurrent accepts of different invites
+		// for the same user from both passing the membership check and committing.
+		var freshCaller User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("user_id = ? AND active = ?", callerID, true).
+			First(&freshCaller).Error; err != nil {
+			return err
+		}
+		switch invite.ResourceType {
+		case "org":
+			if freshCaller.OrgID != nil && *freshCaller.OrgID != invite.ResourceID {
+				return errors.New("already in org")
+			}
+			freshCaller.OrgID = &invite.ResourceID
+		case "team":
+			if freshCaller.TeamID != nil && *freshCaller.TeamID != invite.ResourceID {
+				return errors.New("already in team")
+			}
+			freshCaller.TeamID = &invite.ResourceID
+		}
+		freshCaller.UpdatedAt = time.Now()
+
 		fresh.Status = "accepted"
-		if err := tx.Save(&caller).Error; err != nil {
+		if err := tx.Save(&freshCaller).Error; err != nil {
 			return err
 		}
 		if err := tx.Save(&fresh).Error; err != nil {
@@ -360,18 +384,28 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 		return grantPermissions(ctx, tx, callerID, permName, []string{memberAction}, permResource)
 	})
 	if err != nil {
-		if err.Error() == "invite is not pending" {
+		switch err.Error() {
+		case "invite is not pending":
 			span.SetStatus(codes.Error, "invite not pending")
 			slog.Warn("accept invite: concurrent accept detected", "caller_id", callerID, "invite_id", id)
 			http.Error(w, "invite is not pending", http.StatusConflict)
-			return
+		case "already in org", "already in team":
+			span.SetStatus(codes.Error, err.Error())
+			slog.Warn("accept invite: membership conflict inside tx", "caller_id", callerID, "invite_id", id, "detail", err)
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "db update failed")
+			slog.Error("accept invite: failed to accept invite atomically", "caller_id", callerID, "invite_id", id, "error", err)
+			http.Error(w, "failed to accept invite", http.StatusInternalServerError)
 		}
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("accept invite: failed to accept invite atomically", "caller_id", callerID, "invite_id", id, "error", err)
-		http.Error(w, "failed to accept invite", http.StatusInternalServerError)
 		return
 	}
+	// Evict the user cache after the transaction commits. grantPermissions also
+	// evicts inside the transaction (before commit), which can create a brief
+	// window where a concurrent read re-populates the cache with stale pre-commit
+	// state. This post-commit eviction ensures the cache is correct.
+	cacheDel(ctx, "gk:user:"+callerID)
 
 	span.AddEvent("invite.accepted", trace.WithAttributes(
 		attribute.String("invite.id", id),

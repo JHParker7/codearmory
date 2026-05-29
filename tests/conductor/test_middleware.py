@@ -1,11 +1,15 @@
 """Integration tests for conductor's user-existence middleware.
 
 Conductor forwards POST /signup and POST /login to Gatekeeper without any
-auth check. Every other path goes through userMiddleware, which:
+auth check. Every other non-public path goes through checkUserAuth, which:
   1. Requires an Authorization: Bearer <token> header.
   2. Decodes the JWT payload to extract the sub (user ID).
-  3. Calls GET /users/{id} on Gatekeeper with the same token.
+  3. Calls GET /users/{id} on Gatekeeper to verify the token signature and
+     confirm the user is active.
   4. Returns 401 if any of those steps fail; otherwise forwards the request.
+     On success, resets the source IP's failure counter.
+  5. After 10 consecutive 401s from the same source IP, that IP is blocked
+     for one hour (all requests return 403).
 """
 
 import base64
@@ -77,9 +81,6 @@ class TestMissingAuth:
     def test_no_header_on_get_user(self, base_url):
         self._assert_401(base_url, "get", f"/users/{rand_id()}")
 
-    def test_no_header_on_check_permissions(self, base_url):
-        self._assert_401(base_url, "get", "/check_permissions")
-
     def test_no_header_on_get_orgs(self, base_url):
         self._assert_401(base_url, "get", "/orgs")
 
@@ -88,9 +89,6 @@ class TestMissingAuth:
 
     def test_no_header_on_state_route(self, base_url):
         self._assert_401(base_url, "get", f"/state/alice/dev")
-
-    def test_no_header_on_org_state_route(self, base_url):
-        self._assert_401(base_url, "get", f"/acme/state/platform/prod")
 
     def test_non_bearer_scheme_returns_401(self, base_url):
         resp = requests.get(
@@ -214,16 +212,6 @@ class TestValidToken:
             headers=bearer(token),
         )
         assert resp.status_code == 403
-
-    def test_check_permissions_is_proxied(self, base_url, token):
-        resp = requests.get(
-            f"{base_url}/check_permissions",
-            json={"service": "svc", "resource": "res", "action": "act"},
-            headers=bearer(token),
-        )
-        assert resp.status_code == 200
-        assert "authorized" in resp.json()
-
 
 # ---------------------------------------------------------------------------
 # Deleted user — token is rejected after account removal

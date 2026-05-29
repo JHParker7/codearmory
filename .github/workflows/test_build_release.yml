@@ -72,6 +72,18 @@ jobs:
       - name: Run forge unit tests
         run: cd src/systems/forge; go test .
 
+  registry-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run registry unit tests
+        run: cd src/systems/registry; go test .
+
   integration-tests:
     runs-on: ubuntu-latest
     needs:
@@ -80,6 +92,7 @@ jobs:
       - conductor-unit-test
       - cli-unit-test
       - forge-unit-test
+      - registry-unit-test
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -94,48 +107,34 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Python dependencies
-        run: |
-          pip install \
-            -r tests/gatekeeper/requirements.txt \
-            -r tests/conductor/requirements.txt \
-            -r tests/blueprints/requirements.txt \
-            -r tests/cli/requirements.txt \
-            -r tests/forge/requirements.txt
+      - name: Install CLI test dependencies
+        run: pip install -r tests/cli/requirements.txt
 
       - name: Build CLI binary
         run: go build -o "${{ runner.temp }}/armory" .
         working-directory: src/cli
 
+      - name: Export docker socket GID for forge
+        run: echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" >> $GITHUB_ENV
+
       - name: Deploy compose stack
-        run: docker compose up -d --build --wait
+        run: docker compose --profile test build && docker compose up -d --build --wait
         working-directory: infra/local
 
-      - name: Wait for application services
-        run: |
-          for port in 8080 8081 8082 8083; do
-            echo "Waiting for port $port..."
-            timeout 60 bash -c "until curl -s -o /dev/null --max-time 2 http://localhost:$port/; do sleep 1; done"
-            echo "Port $port is ready"
-          done
+      - name: Wait for conductor
+        run: timeout 120 bash -c "until curl -s -o /dev/null --max-time 2 http://localhost:8082/; do sleep 1; done"
 
       - name: Run gatekeeper integration tests
-        env:
-          API_URL: http://localhost:8080
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gatekeeper
-        run: pytest tests/gatekeeper -v
+        run: docker compose run --no-deps --rm gatekeeper-integration-tests
+        working-directory: infra/local
 
       - name: Run blueprints integration tests
-        env:
-          BLUEPRINTS_URL: http://localhost:8081
-          GATEKEEPER_URL: http://localhost:8080
-        run: pytest tests/blueprints -v
+        run: docker compose run --no-deps --rm blueprints-integration-tests
+        working-directory: infra/local
 
       - name: Run conductor integration tests
-        env:
-          CONDUCTOR_URL: http://localhost:8082
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gatekeeper
-        run: pytest tests/conductor -v
+        run: docker compose run --no-deps --rm conductor-integration-tests
+        working-directory: infra/local
 
       - name: Run CLI integration tests
         env:
@@ -144,10 +143,12 @@ jobs:
         run: pytest tests/cli -v
 
       - name: Run forge integration tests
-        env:
-          FORGE_URL: http://localhost:8083
-          GATEKEEPER_URL: http://localhost:8080
-        run: pytest tests/forge -v
+        run: docker compose run --no-deps --rm forge-integration-tests
+        working-directory: infra/local
+
+      - name: Run registry integration tests
+        run: docker compose run --no-deps --rm registry-integration-tests
+        working-directory: infra/local
 
       - name: Show compose logs on failure
         if: failure()
@@ -232,6 +233,15 @@ jobs:
           tags: |
             ghcr.io/code-armory-app/forge:alpha-${{ needs.release.outputs.new_release_version }}
             ghcr.io/code-armory-app/forge:alpha-latest
+      - name: Build and push registry
+        uses: docker/build-push-action@v6
+        with:
+          context: src/systems/registry
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/registry:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/registry:alpha-latest
       - name: Build and push gatekeeper integration tests
         uses: docker/build-push-action@v6
         with:
@@ -268,6 +278,15 @@ jobs:
           tags: |
             ghcr.io/code-armory-app/forge-tests:alpha-${{ needs.release.outputs.new_release_version }}
             ghcr.io/code-armory-app/forge-tests:alpha-latest
+      - name: Build and push registry integration tests
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/registry
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/registry-tests:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/registry-tests:alpha-latest
 
   build-cli:
     needs: release
