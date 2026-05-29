@@ -4,6 +4,7 @@ src/systems/blueprints/blueprints
 src/systems/conductor/conductor
 src/systems/workflows/workflows
 src/systems/tickets/tickets
+src/systems/hooks/hooks
 src/cli/armory
 
 # SQLite databases
