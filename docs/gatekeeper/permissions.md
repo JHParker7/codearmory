@@ -61,7 +61,7 @@ On signup every user automatically receives a `Permissions` record and a `Role` 
 | `getUser`, `updateUser`, `deleteUser` | `gatekeeper` | `gatekeeper/users/{user_id}` |
 | `createOrg` | `gatekeeper` | `gatekeeper/orgs` |
 | `createTeam` | `gatekeeper` | `gatekeeper/teams` |
-| `getState`, `updateState`, `deleteState`, `lockState`, `unlockState` | `blueprints` | `blueprints/states/{user_id}/*` |
+| `getState`, `updateState`, `deleteState`, `lockState`, `unlockState` | `blueprints` | `states/{username}/*` |
 
 All other permissions must be explicitly granted by a user who already holds them.
 

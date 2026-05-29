@@ -34,6 +34,7 @@ Conductor :8082
 | `ADMIN_KEY` | — | **Required.** Bearer token for write operations (create/delete services, update endpoints) |
 | `READ_KEY` | — | **Required.** Bearer token for read operations (`GET /services`). Also accepted by all write endpoints. |
 | `SERVICES` | — | Comma-separated `name=url` pairs to seed on startup (e.g. `blueprints=http://blueprints:8081,forge=http://forge:8083`). Idempotent — updates the URL if the service already exists. |
+| `MANIFEST_FILE` | — | Path to a JSON manifest file that seeds full service definitions (URL, endpoints, `service_key`) on startup. Bypasses SSRF validation — use only for trusted internal service URLs (e.g. Docker Compose or Kubernetes service names). |
 | `PORT` | `8084` | Port the server listens on |
 | `OTEL_SERVICE_NAME` | `registry` | Service name reported in traces and metrics |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTel Collector HTTP endpoint. Omit to disable telemetry. |
@@ -92,7 +93,8 @@ curl -X POST http://registry:8084/services \
     "name": "inventory",
     "url": "http://inventory:8085",
     "description": "Inventory service",
-    "forward_auth": false
+    "forward_auth": false,
+    "service_key": "optional-shared-secret"
   }'
 ```
 
@@ -101,9 +103,10 @@ curl -X POST http://registry:8084/services \
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Unique service name. Used as the routing key in Conductor. |
-| `url` | string | Yes | Base URL of the service. Must use `http` or `https`; loopback, link-local, and RFC-1918 addresses are rejected. |
+| `url` | string | Yes | Base URL of the service. Must use `http` or `https`; loopback, link-local, RFC-1918, and IPv6 ULA addresses are rejected. |
 | `description` | string | No | Human-readable description |
 | `forward_auth` | bool | No | If `true`, Conductor forwards the caller's `Authorization` header to the backend. If `false` (default), Conductor strips the bearer token and injects `X-User-ID` instead. |
+| `service_key` | string | No | Optional shared secret for service identity. Bcrypt-hashed before storage; not returned in API responses. |
 ### Update endpoint manifest
 
 The endpoint manifest tells Conductor which HTTP method/path combinations are valid and what Gatekeeper permission to check for each.
@@ -161,13 +164,14 @@ When registering or updating a service URL, the Registry validates that the targ
 - Loopback addresses (`127.0.0.0/8`, `::1`) are rejected
 - Link-local addresses (`169.254.0.0/16`, `fe80::/10`) are rejected
 - RFC-1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) are rejected
+- IPv6 ULA ranges (`fc00::/7`) are rejected
 - DNS hostnames are resolved at registration time and all returned addresses are validated; hostnames that cannot be resolved are rejected (fail-closed). Internal service URLs that use Docker or Kubernetes DNS names should be pre-seeded via `SERVICES` env var or `MANIFEST_FILE`, which bypass this check.
 
 ## Schema
 
 | Table | Primary Key | Description |
 |-------|-------------|-------------|
-| `services` | `service_id` | Registered services |
+| `services` | `service_id` | Registered services. Includes `service_key` (bcrypt hash, not returned in API responses). |
 | `service_roles` | `role_id` | Named roles associated with a service |
 | `service_endpoints` | `endpoint_id` | Endpoint manifests per service |
 

@@ -86,7 +86,7 @@ Quick reference:
 |--------|------|------|-------------|
 | `POST` | `/signup` | — | Create account |
 | `POST` | `/login` | — | Authenticate, get JWT |
-| `GET` | `/check_permissions` | ✓ | Check caller's permission |
+| `POST` | `/check_permissions` | ✓ (service-to-service) | Check caller's permission — called directly by backends (e.g. Blueprints, Forge); not routed through Conductor |
 | `GET` | `/users` | ✓ | List users |
 | `GET` `PUT` `DELETE` | `/users/{id}` | ✓ | User management |
 | `POST` | `/orgs` | ✓ | Create org |
@@ -118,9 +118,9 @@ All protected endpoints require `Authorization: Bearer <token>` and enforce RBAC
 
 - `getUser`, `updateUser`, `deleteUser` on their own user resource
 - `createOrg` on `gatekeeper/orgs`, `createTeam` on `gatekeeper/teams`
-- `getState`, `updateState`, `deleteState`, `lockState`, `unlockState` on `blueprints/states/{username}/*`
+- `getState`, `updateState`, `deleteState`, `lockState`, `unlockState` on `states/{username}/*`
 
-All other permissions must be explicitly granted. When a user creates an org, they additionally receive full state access on `blueprints/{org}/states/*`.
+All other permissions must be explicitly granted.
 
 Invite endpoints are accessible only to the inviter and the invitee. Accepting an org invite sets `org_id` on the invitee's user record; accepting a team invite sets `team_id`.
 
