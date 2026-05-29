@@ -772,5 +772,3 @@ func TestStateCmd_Unlock_InvalidData_RunE(t *testing.T) {
 	}
 }
 
-// ── Org-state command RunE ────────────────────────────────────────────────────
-

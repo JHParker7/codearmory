@@ -1194,3 +1194,28 @@ class TestSession:
             f"{base_url}/sessions/{session_id}", headers=bearer(admin_token["token"])
         )
         assert resp.status_code == 404
+
+
+class TestAuditLogs:
+    def test_no_auth_returns_401(self, base_url):
+        resp = requests.get(f"{base_url}/audit-logs")
+        assert resp.status_code == 401
+
+    def test_unprivileged_user_returns_403(self, base_url, token):
+        resp = requests.get(f"{base_url}/audit-logs", headers=bearer(token))
+        assert resp.status_code == 403
+
+    def test_admin_can_list(self, base_url, admin_token):
+        resp = requests.get(f"{base_url}/audit-logs", headers=bearer(admin_token["token"]))
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_response_contains_expected_fields(self, base_url, admin_token):
+        resp = requests.get(f"{base_url}/audit-logs", headers=bearer(admin_token["token"]))
+        assert resp.status_code == 200
+        logs = resp.json()
+        if logs:
+            entry = logs[0]
+            assert "audit_log_id" in entry
+            assert "action" in entry
+            assert "actor_id" in entry

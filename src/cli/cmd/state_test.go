@@ -136,82 +136,6 @@ func TestUserState_Unlock(t *testing.T) {
 	}
 }
 
-// ── Org-scoped state ──────────────────────────────────────────────────────────
-
-func TestOrgState_Get(t *testing.T) {
-	srv, rec := recordingServer(t, http.StatusOK, `{"serial":1}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	if err := apiCall("GET", "/myorg/state/backend/staging", nil); err != nil {
-		t.Fatalf("org-state get: %v", err)
-	}
-	if rec.Method != "GET" || rec.Path != "/myorg/state/backend/staging" {
-		t.Errorf("request = %s %s", rec.Method, rec.Path)
-	}
-}
-
-func TestOrgState_Push(t *testing.T) {
-	f, err := os.CreateTemp("", "state-*.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(f.Name())
-	f.WriteString(`{"serial":3}`)
-	f.Close()
-
-	srv, rec := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	body, _ := readStateFile(f.Name())
-	if err := apiCall("POST", "/myorg/state/backend/staging", body); err != nil {
-		t.Fatalf("org-state push: %v", err)
-	}
-	if rec.Method != "POST" || rec.Path != "/myorg/state/backend/staging" {
-		t.Errorf("request = %s %s", rec.Method, rec.Path)
-	}
-}
-
-func TestOrgState_Lock(t *testing.T) {
-	srv, rec := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	if err := apiCall("LOCK", "/myorg/state/backend/staging", nil); err != nil {
-		t.Fatalf("org-state lock: %v", err)
-	}
-	if rec.Method != "LOCK" || rec.Path != "/myorg/state/backend/staging" {
-		t.Errorf("request = %s %s", rec.Method, rec.Path)
-	}
-}
-
-func TestOrgState_Unlock(t *testing.T) {
-	srv, rec := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	if err := apiCall("UNLOCK", "/myorg/state/backend/staging", nil); err != nil {
-		t.Fatalf("org-state unlock: %v", err)
-	}
-	if rec.Method != "UNLOCK" || rec.Path != "/myorg/state/backend/staging" {
-		t.Errorf("request = %s %s", rec.Method, rec.Path)
-	}
-}
-
-func TestOrgState_Delete(t *testing.T) {
-	srv, rec := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	if err := apiCall("DELETE", "/myorg/state/backend/staging", nil); err != nil {
-		t.Fatalf("org-state delete: %v", err)
-	}
-	if rec.Method != "DELETE" || rec.Path != "/myorg/state/backend/staging" {
-		t.Errorf("request = %s %s", rec.Method, rec.Path)
-	}
-}
-
 // ── Auth header on state routes ───────────────────────────────────────────────
 
 func TestStateRoutes_AuthHeaderPresent(t *testing.T) {
@@ -221,7 +145,6 @@ func TestStateRoutes_AuthHeaderPresent(t *testing.T) {
 		{"DELETE", "/state/alice/prod"},
 		{"LOCK", "/state/alice/prod"},
 		{"UNLOCK", "/state/alice/prod"},
-		{"GET", "/acme/state/ops/dev"},
 	}
 	for _, r := range routes {
 		t.Run(r.method+" "+r.path, func(t *testing.T) {

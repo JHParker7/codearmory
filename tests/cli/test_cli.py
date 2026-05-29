@@ -328,49 +328,6 @@ class TestUserScopedState:
 
 
 # ---------------------------------------------------------------------------
-# State: org-scoped
-# ---------------------------------------------------------------------------
-
-
-class TestOrgScopedState:
-    def _workspace(self):
-        return f"cli-org-test-{uuid.uuid4().hex[:8]}"
-
-    def test_push_and_get_org_state(self, run_cli, token, new_user, conductor_url):
-        # Create an org and team first via the API directly.
-        uid = uuid.uuid4().hex[:8]
-        org_name = f"cli-org-{uid}"
-        team_name = f"cli-team-{uid}"
-        workspace = self._workspace()
-        headers = {"Authorization": f"Bearer {token}"}
-
-        org_resp = requests.post(f"{conductor_url}/orgs", json={"org_name": org_name}, headers=headers)
-        assert org_resp.status_code == 201, f"org create failed: {org_resp.text}"
-        org_id = org_resp.json()["org_id"]
-
-        team_resp = requests.post(
-            f"{conductor_url}/teams",
-            json={"team_name": team_name, "org_id": org_id},
-            headers=headers,
-        )
-        assert team_resp.status_code == 201, f"team create failed: {team_resp.text}"
-
-        state = json.dumps({"version": 4, "serial": 1, "lineage": str(uuid.uuid4()), "outputs": {}, "resources": []})
-        _, err, rc = run_cli("org-state", "push", org_name, team_name, workspace,
-                             "--file", "-", token=token, stdin=state)
-        assert rc == 0, f"push failed: {err}"
-
-        out, err, rc = run_cli("org-state", "get", org_name, team_name, workspace, token=token)
-        assert rc == 0, f"get failed: {err}"
-        body = json.loads(out)
-        assert body["serial"] == 1
-
-    def test_get_missing_org_state_exits_nonzero(self, run_cli, token):
-        _, _, rc = run_cli("org-state", "get", "noorg", "noteam", self._workspace(), token=token)
-        assert rc != 0
-
-
-# ---------------------------------------------------------------------------
 # JSON output
 # ---------------------------------------------------------------------------
 

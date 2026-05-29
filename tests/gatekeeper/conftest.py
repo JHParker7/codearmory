@@ -101,6 +101,12 @@ def pytest_sessionfinish(session, exitstatus):
         if perm_ids:
             conn.execute(sa.text("DELETE FROM permissions WHERE permissions_id = ANY(:pids)"), {"pids": perm_ids})
 
+        # Clean up service permission requests created by the test service accounts.
+        conn.execute(
+            sa.text("UPDATE service_permission_requests SET active = false WHERE service_name = ANY(:names)"),
+            {"names": ["blueprints", "forge"]},
+        )
+
         conn.commit()
     except Exception as e:
         print(f"Cleanup error: {e}")
