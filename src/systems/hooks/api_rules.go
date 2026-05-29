@@ -100,7 +100,11 @@ type createRuleRequest struct {
 	Events       []string          `json:"events"`
 	RefFilter    string            `json:"ref_filter"`
 	WorkflowID   string            `json:"workflow_id"`
-	Secret       string            `json:"secret"`
+	// Secret is write-only (never returned in responses).
+	// On create: omit or set to "" for no secret; set a non-empty string to require HMAC.
+	// On update: omit the field (JSON null) to leave the existing secret unchanged;
+	// send "" to clear it; send a non-empty string to replace it.
+	Secret       *string           `json:"secret"`
 	InputMapping map[string]string `json:"input_mapping"`
 }
 
@@ -167,7 +171,7 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		     (rule_id, name, repo, events, ref_filter, workflow_id, secret, input_mapping, created_by, org_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		rule.RuleID, rule.Name, rule.Repo, rule.Events, rule.RefFilter,
-		rule.WorkflowID, nullableString(req.Secret), mappingJSON, rule.CreatedBy, rule.OrgID,
+		rule.WorkflowID, req.Secret, mappingJSON, rule.CreatedBy, rule.OrgID,
 	)
 	if err != nil {
 		span.RecordError(err)
@@ -316,13 +320,20 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// secret update semantics: nil = leave unchanged, "" = clear, non-empty = replace.
+	var newSecret *string
+	if req.Secret != nil && *req.Secret != "" {
+		newSecret = req.Secret
+	}
 	_, err = db.Exec(ctx,
 		`UPDATE pipeline_rules
 		 SET name=$1, repo=$2, events=$3, ref_filter=$4, workflow_id=$5,
-		     input_mapping=$6, secret=COALESCE(NULLIF($7, ''), secret), updated_at=now()
-		 WHERE rule_id=$8 AND active=true`,
+		     input_mapping=$6,
+		     secret = CASE WHEN $7 THEN $8 ELSE secret END,
+		     updated_at=now()
+		 WHERE rule_id=$9 AND active=true`,
 		req.Name, req.Repo, req.Events, req.RefFilter, req.WorkflowID,
-		mappingJSON, req.Secret, id,
+		mappingJSON, req.Secret != nil, newSecret, id,
 	)
 	if err != nil {
 		span.RecordError(err)

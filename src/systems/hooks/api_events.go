@@ -128,19 +128,35 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the caller can access at least one of the triggered rules.
-	accessible := false
-	for _, trig := range triggers {
-		rule, err := getRule(ctx, trig.RuleID)
-		if err != nil {
-			continue
-		}
-		if canAccessRule(rule, userID, orgID) {
-			accessible = true
-			break
+	// Verify the caller can access at least one of the triggered rules, using a
+	// single JOIN query instead of N per-trigger lookups.
+	var accessCount int
+	if err := db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM hook_triggers ht
+		 JOIN pipeline_rules pr ON pr.rule_id = ht.rule_id
+		 WHERE ht.event_id = $1
+		   AND (pr.created_by = $2 OR (pr.org_id != '' AND pr.org_id = $3))`,
+		id, userID, orgID,
+	).Scan(&accessCount); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db access check failed")
+		slog.Error("get event: access check", "event_id", id, "user_id", userID, "error", err)
+		http.Error(w, "failed to get event", http.StatusInternalServerError)
+		return
+	}
+	// Fallback for events that matched no rules (status='received'): check
+	// whether the caller has any active rule for this repo.
+	if accessCount == 0 {
+		if err := db.QueryRow(ctx,
+			`SELECT COUNT(*) FROM pipeline_rules
+			 WHERE repo = $1 AND active = true
+			   AND (created_by = $2 OR (org_id != '' AND org_id = $3))`,
+			event.Repo, userID, orgID,
+		).Scan(&accessCount); err != nil {
+			slog.Warn("get event: repo fallback check failed", "event_id", id, "error", err)
 		}
 	}
-	if !accessible {
+	if accessCount == 0 {
 		http.Error(w, "event not found", http.StatusNotFound)
 		return
 	}
