@@ -1,9 +1,6 @@
 FROM public.ecr.aws/docker/library/golang:1.26.0-alpine3.23 AS builder
 RUN apk add --no-cache git
 ENV GONOSUMDB=github.com/code-armory-app
-WORKDIR /src
-COPY --from=sdk . /src/codearmory_sdk
-RUN printf 'go 1.26\n\nuse (\n\t./codearmory_sdk\n\t./workflows\n)\n' > /src/go.work
 WORKDIR /src/workflows
 COPY go.mod go.sum ./
 RUN go mod download
