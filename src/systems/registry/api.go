@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -419,3 +421,112 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ── System health ─────────────────────────────────────────────────────────────
+
+var registryHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
+var (
+	healthMu    sync.RWMutex
+	healthCache map[string]serviceHealth
+)
+
+type serviceHealth struct {
+	Status    string    `json:"status"`
+	Error     string    `json:"error,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
+}
+
+// startHealthCollector queries active services from the DB every 30 seconds,
+// calls /healthz on each concurrently, and caches the results for handleSystemHealth.
+func startHealthCollector(ctx context.Context) {
+	collect := func() {
+		rows, err := pool.Query(ctx, `SELECT name, url FROM services WHERE active = true`)
+		if err != nil {
+			slog.Warn("health collector: db query failed", "error", err)
+			return
+		}
+		type svc struct{ name, url string }
+		var svcs []svc
+		for rows.Next() {
+			var s svc
+			if err := rows.Scan(&s.name, &s.url); err == nil {
+				svcs = append(svcs, s)
+			}
+		}
+		rows.Close()
+
+		results := make(map[string]serviceHealth, len(svcs))
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for _, s := range svcs {
+			wg.Add(1)
+			go func(name, svcURL string) {
+				defer wg.Done()
+				hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				now := time.Now().UTC()
+				req, err := http.NewRequestWithContext(hctx, http.MethodGet, svcURL+"/healthz", nil)
+				if err != nil {
+					mu.Lock()
+					results[name] = serviceHealth{Status: "unhealthy", Error: err.Error(), CheckedAt: now}
+					mu.Unlock()
+					return
+				}
+				resp, err := registryHTTPClient.Do(req)
+				if err != nil {
+					mu.Lock()
+					results[name] = serviceHealth{Status: "unhealthy", Error: err.Error(), CheckedAt: now}
+					mu.Unlock()
+					return
+				}
+				resp.Body.Close()
+				mu.Lock()
+				if resp.StatusCode == http.StatusOK {
+					results[name] = serviceHealth{Status: "healthy", CheckedAt: now}
+				} else {
+					results[name] = serviceHealth{Status: "unhealthy", Error: fmt.Sprintf("status %d", resp.StatusCode), CheckedAt: now}
+				}
+				mu.Unlock()
+			}(s.name, s.url)
+		}
+		wg.Wait()
+
+		healthMu.Lock()
+		healthCache = results
+		healthMu.Unlock()
+	}
+
+	go func() {
+		collect()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				collect()
+			}
+		}
+	}()
+}
+
+func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
+	healthMu.RLock()
+	cache := healthCache
+	healthMu.RUnlock()
+
+	overall := "healthy"
+	for _, h := range cache {
+		if h.Status != "healthy" {
+			overall = "degraded"
+			break
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(struct { //nolint:errcheck
+		Status   string                   `json:"status"`
+		Services map[string]serviceHealth `json:"services"`
+	}{Status: overall, Services: cache})
+}

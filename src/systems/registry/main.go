@@ -316,8 +316,11 @@ func main() {
 	registry.StartKeyRotation(ctx, gatekeeperURL, "registry",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
+	startHealthCollector(ctx)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /system_health", handleSystemHealth)
 	mux.HandleFunc("GET /services", handleListServices)
 	mux.HandleFunc("POST /services", handleCreateService)
 	mux.HandleFunc("DELETE /services/{id}", handleDeleteService)
