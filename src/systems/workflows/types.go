@@ -47,7 +47,7 @@ type Workflow struct {
 	Steps       []WorkflowStep `json:"steps"        gorm:"column:steps;serializer:json"`
 	CreatedAt   time.Time      `json:"created_at"   gorm:"column:created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"   gorm:"column:updated_at"`
-	Active      bool           `json:"-"            gorm:"column:active;default:true"`
+	Active      bool           `json:"active"       gorm:"column:active;default:true"`
 }
 
 func (Workflow) TableName() string { return "workflows" }

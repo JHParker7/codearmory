@@ -18,7 +18,7 @@ type PipelineRule struct {
 	InputMapping map[string]string `json:"input_mapping"  gorm:"column:input_mapping;serializer:json"`
 	CreatedBy    string            `json:"created_by"     gorm:"column:created_by"`
 	OrgID        string            `json:"org_id"         gorm:"column:org_id;default:''"`
-	Active       bool              `json:"-"              gorm:"column:active;default:true"`
+	Active       bool              `json:"active"         gorm:"column:active;default:true"`
 	CreatedAt    time.Time         `json:"created_at"     gorm:"column:created_at"`
 	UpdatedAt    time.Time         `json:"updated_at"     gorm:"column:updated_at"`
 }

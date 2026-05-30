@@ -111,7 +111,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if result := db.WithContext(ctx).Raw(
 		`SELECT rule_id, name, repo, events, ref_filter, workflow_id, secret, input_mapping, created_by, org_id
 		 FROM pipeline_rules
-		 WHERE repo = ? AND active = true AND ? = ANY(events)`,
+		 WHERE repo = ? AND active = true AND events::jsonb @> jsonb_build_array(?::text)`,
 		payload.Repo, payload.Event,
 	).Scan(&matchedRules); result.Error != nil {
 		span.RecordError(result.Error)
