@@ -1,10 +1,12 @@
 FROM public.ecr.aws/docker/library/golang:1.26.0-alpine3.23 AS builder
 RUN apk add --no-cache git
 ENV GONOSUMDB=github.com/code-armory-app
+WORKDIR /src
+COPY --from=sdk . /src/codearmory_sdk
+RUN printf 'go 1.26\n\nuse (\n\t./codearmory_sdk\n\t./tickets\n)\n' > /src/go.work
 WORKDIR /src/tickets
 COPY go.mod go.sum ./
 RUN go mod download
-
 COPY . .
 RUN CGO_ENABLED=0 go build -o tickets .
 

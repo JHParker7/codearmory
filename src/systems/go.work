@@ -1,7 +1,6 @@
 go 1.25.6
 
 use (
-	../../../codearmory_sdk
 	./blueprints
 	./conductor
 	./forge
@@ -11,4 +10,3 @@ use (
 	./tickets
 	./workflows
 )
-

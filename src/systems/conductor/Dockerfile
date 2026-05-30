@@ -14,5 +14,5 @@ WORKDIR /home/svc/
 COPY --from=builder /src/conductor/conductor .
 RUN chown svc:svc ./conductor
 USER svc
-EXPOSE 8082
+EXPOSE 8080
 CMD ["./conductor"]
