@@ -61,8 +61,8 @@ services:
       context: ../../src/systems/registry
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/registry
-      ADMIN_KEY: registry-admin-local-secret
-      READ_KEY: registry-read-local-secret
+      REGISTRY_SERVICE_ACCOUNTS: conductor=registry-read-local-secret
+      REGISTRY_ADMIN_ACCOUNTS: registry-admin=registry-admin-local-secret
       SERVICES: blueprints=http://blueprints:8084,forge=http://forge:8083,gatekeeper=http://gatekeeper:8081
       MANIFEST_FILE: /etc/registry/manifest.json
     volumes:
@@ -127,8 +127,8 @@ services:
       context: ../../src/systems/conductor
     environment:
       GATEKEEPER_URL: http://gatekeeper:8081
-      REGISTRY_URL: http://registry:8082
-      REGISTRY_READ_KEY: registry-read-local-secret
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_SERVICE_KEY: registry-read-local-secret
       CONDUCTOR_FORWARD_KEY: forge-conductor-shared-local-secret
     ports:
       - "8080:8080"
@@ -142,10 +142,12 @@ services:
   workflows:
     build:
       context: ../../src/systems/workflows
+      additional_contexts:
+        sdk: ../../../codearmory_sdk
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/workflows
       GATEKEEPER_URL: http://gatekeeper:8081
-      SERVICES: forge=http://forge:8083,blueprints=http://blueprints:8084,registry=http://registry:8082,conductor=http://conductor:8080
+      SERVICES: forge=http://forge:8083,blueprints=http://blueprints:8084,registry=http://registry:8084,conductor=http://conductor:8080
       GATEKEEPER_SERVICE_KEY: workflows-local-secret
       HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
     ports:
@@ -162,6 +164,8 @@ services:
   tickets:
     build:
       context: ../../src/systems/tickets
+      additional_contexts:
+        sdk: ../../../codearmory_sdk
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/tickets
       GATEKEEPER_URL: http://gatekeeper:8081
@@ -207,9 +211,9 @@ services:
     build:
       context: ../../tests/registry
     environment:
-      REGISTRY_URL: http://registry:8082
-      REGISTRY_ADMIN_KEY: registry-admin-local-secret
-      REGISTRY_READ_KEY: registry-read-local-secret
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_ADMIN_KEY: registry-admin:registry-admin-local-secret
+      REGISTRY_READ_KEY: conductor:registry-read-local-secret
     depends_on:
       registry:
         condition: service_started
@@ -261,6 +265,8 @@ services:
   hooks:
     build:
       context: ../../src/systems/hooks
+      additional_contexts:
+        sdk: ../../../codearmory_sdk
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/hooks
       GATEKEEPER_URL: http://gatekeeper:8081

@@ -69,7 +69,9 @@ Every request enters through Conductor. Backend services delegate auth to Gateke
 
 ```bash
 git clone https://github.com/code-armory-app/codearmory
-cd codearmory/infra/local && docker compose up --build
+cd codearmory/infra/local
+export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+docker compose up --build
 ```
 
 Starts PostgreSQL, Redis, and all eight services. API gateway at `http://localhost:8080`.
@@ -217,11 +219,26 @@ Pull requests are welcome. For anything beyond a small fix, open an issue first 
 # Unit tests
 cd src/systems/<service> && go test ./...
 
-# Integration tests (requires running stack)
-pip install -r tests/<service>/requirements.txt && pytest tests/<service>/ -v
-
 # Install commit hooks (Conventional Commits + secret scanning)
 pip install pre-commit && pre-commit install --hook-type commit-msg
+```
+
+**Integration tests** run against a live stack via Docker. Start the stack first, then run any service's tests individually:
+
+```bash
+cd infra/local
+export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+docker compose up --build -d
+
+# Run one service's integration tests
+docker compose --profile test run --rm gatekeeper-integration-tests
+docker compose --profile test run --rm blueprints-integration-tests
+docker compose --profile test run --rm registry-integration-tests
+docker compose --profile test run --rm conductor-integration-tests
+docker compose --profile test run --rm forge-integration-tests
+docker compose --profile test run --rm workflows-integration-tests
+docker compose --profile test run --rm tickets-integration-tests
+docker compose --profile test run --rm hooks-integration-tests
 ```
 
 ---
