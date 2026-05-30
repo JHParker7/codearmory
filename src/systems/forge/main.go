@@ -185,6 +185,7 @@ func main() {
 	slog.Info("worker pool started", "workers", 10)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /executions", handleSubmit(workers))
 	mux.HandleFunc("GET /executions", handleList)
 	mux.HandleFunc("GET /executions/{id}", handleGet)

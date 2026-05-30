@@ -702,6 +702,72 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 //  1. If the first path segment is a registered service name, strip it and look
 //     up the remaining path within that service's endpoints. Returns 404 if the
 //     service is registered but the specific endpoint is not found.
+// handleSystemHealth calls /healthz on every registered service concurrently and
+// returns a JSON summary of each service's status plus an overall status field.
+func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
+	routingMu.RLock()
+	services := make(map[string]string, len(servicesMap))
+	for name, svc := range servicesMap {
+		services[name] = svc.url
+	}
+	routingMu.RUnlock()
+
+	type result struct {
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+
+	results := make(map[string]result, len(services))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for name, svcURL := range services {
+		wg.Add(1)
+		go func(name, svcURL string) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, svcURL+"/healthz", nil)
+			if err != nil {
+				mu.Lock()
+				results[name] = result{Status: "unhealthy", Error: err.Error()}
+				mu.Unlock()
+				return
+			}
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				mu.Lock()
+				results[name] = result{Status: "unhealthy", Error: err.Error()}
+				mu.Unlock()
+				return
+			}
+			resp.Body.Close()
+			mu.Lock()
+			if resp.StatusCode == http.StatusOK {
+				results[name] = result{Status: "healthy"}
+			} else {
+				results[name] = result{Status: "unhealthy", Error: fmt.Sprintf("status %d", resp.StatusCode)}
+			}
+			mu.Unlock()
+		}(name, svcURL)
+	}
+	wg.Wait()
+
+	overall := "healthy"
+	for _, r := range results {
+		if r.Status != "healthy" {
+			overall = "degraded"
+			break
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(struct {
+		Status   string            `json:"status"`
+		Services map[string]result `json:"services"`
+	}{Status: overall, Services: results})
+}
+
 //  2. Otherwise, try matching the full path against all registered endpoints.
 //     Returns 404 if no match is found.
 func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
@@ -828,6 +894,8 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /system_health", handleSystemHealth)
 	mux.Handle("/{path...}", http.HandlerFunc(handleServiceProxy))
 
 	port := envOrDefault("PORT", "8080")

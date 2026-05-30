@@ -691,6 +691,7 @@ func main() {
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	// User-scoped: /state/{username}/{workspace}
 	mux.HandleFunc("GET /state/{username}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
