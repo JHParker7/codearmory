@@ -52,13 +52,45 @@ Usage: {{ include "codearmory.imageTag" (list . .Values.gatekeeper) }}
 {{- end }}
 
 {{/*
-Construct a PostgreSQL DSN for a named database.
+Construct a PostgreSQL DSN for a named database. Used only by test pods that need
+a render-time URL; prefer codearmory.postgresql.env for service deployments.
 Usage: {{ include "codearmory.postgresql.dsn" (list . "gatekeeper") }}
 */}}
 {{- define "codearmory.postgresql.dsn" -}}
 {{- $root := index . 0 -}}
 {{- $db := index . 1 -}}
 {{- printf "postgres://postgres:%s@%s-postgresql:5432/%s" ($root.Values.postgresql.auth.postgresPassword | urlquery) $root.Release.Name $db -}}
+{{- end }}
+
+{{/*
+Inject DATABASE_URL (and PGPASSWORD) for a service container.
+When postgresql.enabled=true the Bitnami subchart auto-generates the password and
+stores it in <release>-postgresql; PGPASSWORD sources it at pod startup so no
+password is embedded in values.yaml or in any rendered Secret template.
+When postgresql.enabled=false the value comes from the service-specific Secret.
+Usage: {{- include "codearmory.postgresql.env" (list . "gatekeeper" "gatekeeper" (include "codearmory.fullname" .)) | nindent 12 }}
+  args: root, service-name, db-name, fullname
+*/}}
+{{- define "codearmory.postgresql.env" -}}
+{{- $root := index . 0 -}}
+{{- $svc  := index . 1 -}}
+{{- $db   := index . 2 -}}
+{{- $full := index . 3 -}}
+{{- if $root.Values.postgresql.enabled }}
+- name: PGPASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ $root.Release.Name }}-postgresql
+      key: postgres-password
+- name: DATABASE_URL
+  value: {{ printf "postgres://postgres:$(PGPASSWORD)@%s-postgresql:5432/%s" $root.Release.Name $db | quote }}
+{{- else }}
+- name: DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ $full }}-{{ $svc }}
+      key: database-url
+{{- end }}
 {{- end }}
 
 {{/*

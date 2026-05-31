@@ -54,11 +54,7 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.hooks.env.otelEndpoint | quote }}
             {{- end }}
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $fullname }}-hooks
-                  key: database-url
+            {{- include "codearmory.postgresql.env" (list . "hooks" "hooks" $fullname) | nindent 12 }}
             - name: GATEKEEPER_SERVICE_KEY
               valueFrom:
                 secretKeyRef:

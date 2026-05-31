@@ -1,5 +1,4 @@
 {{- if .Values.tests.conductor.enabled }}
-{{- $dbUrl := coalesce .Values.tests.conductor.databaseUrl (ternary (include "codearmory.postgresql.dsn" (list . "gatekeeper")) "" .Values.postgresql.enabled) }}
 apiVersion: v1
 kind: Pod
 metadata:
@@ -24,6 +23,5 @@ spec:
       env:
         - name: CONDUCTOR_URL
           value: "http://{{ include "codearmory.fullname" . }}-conductor:{{ .Values.conductor.port }}"
-        - name: DATABASE_URL
-          value: {{ $dbUrl | quote }}
+        {{- include "codearmory.postgresql.env" (list . "gatekeeper" "gatekeeper" (include "codearmory.fullname" .)) | nindent 8 }}
 {{- end }}

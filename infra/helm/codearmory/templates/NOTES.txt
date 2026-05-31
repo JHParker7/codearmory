@@ -33,4 +33,4 @@ Before production use, make sure you have set:
   - tickets.secret.gatekeeperServiceKey
   - hooks.secret.gatekeeperServiceKey
   - hooks.secret.hooksTriggerKey                (must match workflows.secret.hooksTriggerKey)
-  - postgresql.auth.postgresPassword            (change from default)
+  - postgresql.auth.postgresPassword            (optional — auto-generated when empty)

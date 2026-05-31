@@ -69,11 +69,7 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.forge.env.otelEndpoint | quote }}
             {{- end }}
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "codearmory.fullname" . }}-forge
-                  key: database-url
+            {{- include "codearmory.postgresql.env" (list . "forge" "forge" (include "codearmory.fullname" .)) | nindent 12 }}
             - name: CONDUCTOR_FORWARD_KEY
               valueFrom:
                 secretKeyRef:

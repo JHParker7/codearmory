@@ -38,6 +38,9 @@ gatekeeper:
     # e.g. "blueprints=<key>,forge=<key>,workflows=<key>,tickets=<key>,hooks=<key>".
     # Keys must match the gatekeeperServiceKey values set in each service's secret.
     gatekeeperServices: ""
+    # Read key gatekeeper uses to fetch default grants from the registry.
+    # Must match an entry in registry.secret.serviceAccounts.
+    registryServiceKey: ""
   redis:
     enabled: true
     image:
@@ -79,8 +82,9 @@ registry:
     databaseUrl: ""
     # Must match the registry entry in gatekeeper.secret.gatekeeperServices.
     gatekeeperServiceKey: ""
-    # Comma-separated "name=key" pairs for read-only service accounts (e.g. Conductor).
-    # Must match conductor.secret.registryServiceKey. Generate with: openssl rand -hex 32
+    # Comma-separated "name=key" pairs for read-only service accounts (e.g. Conductor, Gatekeeper).
+    # Must match conductor.secret.registryServiceKey and gatekeeper.secret.registryServiceKey.
+    # Generate with: openssl rand -hex 32
     serviceAccounts: ""
     # Comma-separated "name=key" pairs for admin service accounts (e.g. CI pipelines).
     adminAccounts: ""
@@ -202,7 +206,7 @@ forge:
     # When set to "docker", mount the Docker socket via forge.dockerSocket.
     runtime: kubernetes
     # Comma-separated list of container images forge is permitted to run.
-    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim"
+    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25"
     # Kubernetes namespace in which forge creates sandbox Jobs.
     k8sNamespace: forge
     # Optional RuntimeClass for stronger isolation (e.g. "gvisor").
@@ -393,9 +397,11 @@ tests:
 postgresql:
   enabled: true
   auth:
-    # Superuser password used for all service database connections by default.
-    # For production, create per-service users and set explicit databaseUrl values.
-    postgresPassword: "changeme"
+    # Superuser password. Leave empty to let the subchart auto-generate a random
+    # password on first install (stored only in the cluster Secret, never in git).
+    # Set explicitly only if you need a specific password or are migrating an
+    # existing cluster. For production, create per-service users with explicit databaseUrl.
+    postgresPassword: ""
     # Leave username/password empty to use the postgres superuser.
     username: ""
     password: ""

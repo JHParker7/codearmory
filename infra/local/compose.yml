@@ -6,7 +6,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - postgres_data:/var/lib/postgresql/data
@@ -37,9 +37,11 @@ services:
     build:
       context: ../../src/systems/gatekeeper
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
       GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,hooks=hooks-local-secret
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
       SIGNUP_RATE_LIMIT: "1000"
       SIGNUP_RATE_WINDOW: 1h
       LOGIN_RATE_LIMIT: "1000"
@@ -49,6 +51,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      registry:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8081/healthz"]
       interval: 5s
@@ -60,8 +64,8 @@ services:
     build:
       context: ../../src/systems/registry
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/registry
-      REGISTRY_SERVICE_ACCOUNTS: conductor=registry-read-local-secret
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/registry
+      REGISTRY_SERVICE_ACCOUNTS: conductor=registry-read-local-secret,workflows=workflows-registry-local-secret,gatekeeper=gatekeeper-registry-read-local-secret
       REGISTRY_ADMIN_ACCOUNTS: registry-admin=registry-admin-local-secret
       SERVICES: blueprints=http://blueprints:8084,forge=http://forge:8083,gatekeeper=http://gatekeeper:8081
       MANIFEST_FILE: /etc/registry/manifest.json
@@ -76,7 +80,7 @@ services:
     build:
       context: ../../src/systems/blueprints
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/blueprints
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/blueprints
       GATEKEEPER_URL: http://gatekeeper:8081
       REDIS_URL: redis://redis:6379/1
       # Must match the blueprints entry in gatekeeper's GATEKEEPER_SERVICES.
@@ -97,10 +101,10 @@ services:
     build:
       context: ../../src/systems/forge
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/forge
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/forge
       RUNTIME: docker
       GATEKEEPER_URL: http://gatekeeper:8081
-      ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim
+      ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25
       # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: forge-local-secret
       # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
@@ -145,9 +149,11 @@ services:
       additional_contexts:
         sdk: ../../../codearmory_sdk
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/workflows
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/workflows
       GATEKEEPER_URL: http://gatekeeper:8081
-      SERVICES: forge=http://forge:8083,blueprints=http://blueprints:8084,registry=http://registry:8084,conductor=http://conductor:8080
+      SERVICES: blueprints=http://blueprints:8084,registry=http://registry:8084,conductor=http://conductor:8080,hooks=http://hooks:8087
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_SERVICE_KEY: workflows-registry-local-secret
       GATEKEEPER_SERVICE_KEY: workflows-local-secret
       HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
     ports:
@@ -157,6 +163,8 @@ services:
         condition: service_healthy
       gatekeeper:
         condition: service_healthy
+      registry:
+        condition: service_started
       forge:
         condition: service_started
     restart: on-failure
@@ -167,7 +175,7 @@ services:
       additional_contexts:
         sdk: ../../../codearmory_sdk
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/tickets
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/tickets
       GATEKEEPER_URL: http://gatekeeper:8081
       GATEKEEPER_SERVICE_KEY: tickets-local-secret
     ports:
@@ -184,7 +192,7 @@ services:
       context: ../../tests/gatekeeper
     environment:
       API_URL: http://gatekeeper:8081
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gatekeeper
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
     depends_on:
       gatekeeper:
         condition: service_healthy
@@ -225,7 +233,7 @@ services:
       context: ../../tests/conductor
     environment:
       CONDUCTOR_URL: http://conductor:8080
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gatekeeper
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
     depends_on:
       conductor:
         condition: service_started
@@ -268,11 +276,15 @@ services:
       additional_contexts:
         sdk: ../../../codearmory_sdk
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/hooks
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/hooks
       GATEKEEPER_URL: http://gatekeeper:8081
       WORKFLOWS_URL: http://workflows:8085
       GATEKEEPER_SERVICE_KEY: hooks-local-secret
       HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
+      # GitHub App integration (optional — configure to enable check runs)
+      # GITHUB_APP_ID: ""
+      # GITHUB_APP_PRIVATE_KEY: ""       # PEM content or use GITHUB_APP_PRIVATE_KEY_FILE
+      # GITHUB_APP_WEBHOOK_SECRET: ""
     ports:
       - "8087:8087"
     depends_on:
@@ -314,6 +326,20 @@ services:
         condition: service_healthy
     profiles: [test]
     restart: no
+
+  mcp:
+    build:
+      context: ../../src/systems/mcp
+    environment:
+      CODEARMORY_URL: http://conductor:8080
+      # CODEARMORY_TOKEN: set this to a valid bearer token before use
+    stdin_open: true
+    tty: true
+    depends_on:
+      conductor:
+        condition: service_started
+    profiles: [mcp]
+    restart: "no"
 
 volumes:
   postgres_data:

@@ -51,11 +51,7 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.blueprints.env.otelEndpoint | quote }}
             {{- end }}
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "codearmory.fullname" . }}-blueprints
-                  key: database-url
+            {{- include "codearmory.postgresql.env" (list . "blueprints" "blueprints" (include "codearmory.fullname" .)) | nindent 12 }}
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
