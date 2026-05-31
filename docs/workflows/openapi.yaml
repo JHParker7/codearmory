@@ -162,7 +162,7 @@ paths:
     get:
       summary: Get step
       operationId: getStep
-      description: Permission: `getStep` on `workflows/steps/{id}`.
+      description: "Permission: `getStep` on `workflows/steps/{id}`."
       responses:
         '200':
           description: Step definition
