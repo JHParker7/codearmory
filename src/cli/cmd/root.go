@@ -199,5 +199,6 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&flagURL, "url", "", "conductor base URL (overrides CODEARMORY_URL and config)")
-	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "", "bearer token (overrides CODEARMORY_TOKEN and config)")
+	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "", "bearer token (prefer CODEARMORY_TOKEN env var)")
+	rootCmd.PersistentFlags().MarkHidden("token") //nolint:errcheck
 }
