@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -89,7 +88,7 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:        time.Now().UTC(),
 	}
 
-	if err := db.WithContext(ctx).Create(&t).Error; err != nil {
+	if err := t.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("create ticket: db error", "user_id", userID, "error", err)
@@ -130,33 +129,13 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := db.WithContext(ctx).
-		Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID)
-
-	if statusFilter != "" {
-		query = query.Where("status = ?", statusFilter)
-	}
-	if priorityFilter != "" {
-		query = query.Where("priority = ?", priorityFilter)
-	}
-	if assigneeFilter != "" {
-		query = query.Where("assignee_id = ?", assigneeFilter)
-	}
-
-	var tickets []Ticket
-	if err := query.Order("created_at DESC").Limit(100).Find(&tickets).Error; err != nil {
+	tickets, err := listTickets(ctx, userID, orgID, statusFilter, priorityFilter, assigneeFilter)
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		slog.Error("list tickets: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list tickets", http.StatusInternalServerError)
 		return
-	}
-
-	for i := range tickets {
-		tickets[i].Comments = []TicketComment{}
-	}
-	if tickets == nil {
-		tickets = []Ticket{}
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -259,17 +238,18 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.WithContext(ctx).Model(&Ticket{}).Where("ticket_id=? AND active=?", id, true).Updates(map[string]any{
-		"title":              req.Title,
-		"description":        req.Description,
-		"status":             req.Status,
-		"priority":           req.Priority,
-		"assignee_id":        req.AssigneeID,
-		"workflow_id":        req.WorkflowID,
-		"run_id":             req.RunID,
-		"forge_execution_id": req.ForgeExecutionID,
-		"updated_at":         time.Now().UTC(),
-	}).Error; err != nil {
+	wasTerminal := existing.Status == StatusResolved || existing.Status == StatusClosed
+
+	existing.Title = req.Title
+	existing.Description = req.Description
+	existing.Status = req.Status
+	existing.Priority = req.Priority
+	existing.AssigneeID = req.AssigneeID
+	existing.WorkflowID = req.WorkflowID
+	existing.RunID = req.RunID
+	existing.ForgeExecutionID = req.ForgeExecutionID
+
+	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
 		slog.Error("update ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
@@ -277,7 +257,6 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wasTerminal := existing.Status == StatusResolved || existing.Status == StatusClosed
 	nowTerminal := req.Status == StatusResolved || req.Status == StatusClosed
 	if !wasTerminal && nowTerminal {
 		meterTicketsResolved.Add(ctx, 1, metric.WithAttributes(attribute.String("status", req.Status)))
@@ -334,7 +313,7 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.WithContext(ctx).Model(&Ticket{}).Where("ticket_id=? AND active=?", id, true).Update("active", false).Error; err != nil {
+	if err := t.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
 		slog.Error("delete ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
@@ -345,15 +324,4 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	slog.Info("ticket deleted", "ticket_id", id, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// ── DB helpers ────────────────────────────────────────────────────────────────
-
-func getTicket(ctx context.Context, id string) (Ticket, error) {
-	var t Ticket
-	if err := db.WithContext(ctx).Where("ticket_id=? AND active=?", id, true).First(&t).Error; err != nil {
-		return t, err
-	}
-	t.Comments = []TicketComment{}
-	return t, nil
 }

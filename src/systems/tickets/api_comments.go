@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -62,7 +61,7 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 		Body:      req.Body,
 		Active:    true,
 	}
-	if err := db.WithContext(ctx).Create(&c).Error; err != nil {
+	if err := c.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("add comment: db error", "ticket_id", id, "user_id", userID, "error", err)
@@ -71,7 +70,9 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Refresh comment timestamps from DB.
-	if err := db.WithContext(ctx).Where("comment_id=?", c.CommentID).First(&c).Error; err != nil {
+	if refreshed, err := refreshComment(ctx, c.CommentID); err == nil {
+		c = refreshed
+	} else {
 		slog.Warn("add comment: refresh failed", "comment_id", c.CommentID, "error", err)
 	}
 
@@ -112,8 +113,8 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Only the comment author or a ticket owner/org-member can delete.
-	var existing TicketComment
-	if err := db.WithContext(ctx).Where("comment_id=? AND ticket_id=? AND active=?", commentID, ticketID, true).First(&existing).Error; err != nil {
+	existing, err := getComment(ctx, commentID, ticketID)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "comment not found", http.StatusNotFound)
 			return
@@ -128,7 +129,7 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.WithContext(ctx).Model(&TicketComment{}).Where("comment_id=? AND active=?", commentID, true).Update("active", false).Error; err != nil {
+	if err := existing.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
 		slog.Error("delete comment: db error", "comment_id", commentID, "user_id", userID, "error", err)
@@ -139,15 +140,4 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	slog.Info("comment deleted", "comment_id", commentID, "ticket_id", ticketID, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func listComments(ctx context.Context, ticketID string) ([]TicketComment, error) {
-	var comments []TicketComment
-	if err := db.WithContext(ctx).Where("ticket_id=? AND active=?", ticketID, true).Order("created_at").Find(&comments).Error; err != nil {
-		return nil, err
-	}
-	if comments == nil {
-		comments = []TicketComment{}
-	}
-	return comments, nil
 }

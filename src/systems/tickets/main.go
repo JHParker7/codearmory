@@ -18,13 +18,9 @@ import (
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 var (
-	db               *gorm.DB
 	gatekeeperClient *gk.Client
 	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	httpClient       *http.Client
@@ -141,17 +137,7 @@ func main() {
 	initMetrics()
 	httpClient = initHTTPClient()
 
-	dsn := secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/tickets")
-	conn, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
-	if err != nil {
-		slog.Error("failed to connect to database", "error", err)
-		os.Exit(1)
-	}
-	db = conn
-
-	if err := db.AutoMigrate(&Ticket{}, &TicketComment{}); err != nil {
+	if err := connect().AutoMigrate(&Ticket{}, &TicketComment{}); err != nil {
 		slog.Error("failed to migrate tables", "error", err)
 		os.Exit(1)
 	}
