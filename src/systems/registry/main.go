@@ -188,6 +188,20 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"key": newKey}) //nolint:errcheck
 }
 
+type manifestActionEntry struct {
+	Name           string          `json:"name"`
+	Method         string          `json:"method"`
+	Path           string          `json:"path"`
+	BodyTransforms json.RawMessage `json:"body_transforms,omitempty"`
+	Async          json.RawMessage `json:"async,omitempty"`
+}
+
+type manifestDefaultGrant struct {
+	GrantOn   string   `json:"grant_on"`
+	Actions   []string `json:"actions"`
+	Resources []string `json:"resources"`
+}
+
 type manifestEntry struct {
 	Name        string `json:"name"`
 	URL         string `json:"url"`
@@ -201,6 +215,8 @@ type manifestEntry struct {
 		Resource string `json:"resource"`
 		Public   bool   `json:"public"`
 	} `json:"endpoints"`
+	Actions       []manifestActionEntry  `json:"actions"`
+	DefaultGrants []manifestDefaultGrant `json:"default_grants"`
 }
 
 func loadManifest(ctx context.Context, path string) {
@@ -242,8 +258,10 @@ func loadManifest(ctx context.Context, path string) {
 			}
 			slog.Info("manifest: service updated", "name", e.Name)
 		}
-		pool.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, serviceID) //nolint:errcheck
-		pool.Exec(ctx, `DELETE FROM service_roles WHERE service_id = $1`, serviceID)     //nolint:errcheck
+		pool.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, serviceID)      //nolint:errcheck
+		pool.Exec(ctx, `DELETE FROM service_roles WHERE service_id = $1`, serviceID)         //nolint:errcheck
+		pool.Exec(ctx, `DELETE FROM service_actions WHERE service_id = $1`, serviceID)       //nolint:errcheck
+		pool.Exec(ctx, `DELETE FROM service_default_grants WHERE service_id = $1`, serviceID) //nolint:errcheck
 		for _, ep := range e.Endpoints {
 			if _, err := pool.Exec(ctx,
 				`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public)
@@ -253,6 +271,37 @@ func loadManifest(ctx context.Context, path string) {
 			}
 		}
 		slog.Info("manifest: endpoints registered", "name", e.Name, "count", len(e.Endpoints))
+		for _, a := range e.Actions {
+			if a.Name == "" || a.Method == "" || a.Path == "" {
+				continue
+			}
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO service_actions (action_id, service_id, name, method, path, body_transforms, async_config)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				uuid.New().String(), serviceID, a.Name, a.Method, a.Path,
+				jsonbOrNil(a.BodyTransforms), jsonbOrNil(a.Async)); err != nil {
+				slog.Error("manifest: failed to insert action", "service", e.Name, "action", a.Name, "error", err)
+			}
+		}
+		if len(e.Actions) > 0 {
+			slog.Info("manifest: actions registered", "name", e.Name, "count", len(e.Actions))
+		}
+		for _, g := range e.DefaultGrants {
+			if g.GrantOn == "" || len(g.Actions) == 0 || len(g.Resources) == 0 {
+				continue
+			}
+			actionsJSON, _ := json.Marshal(g.Actions)
+			resourcesJSON, _ := json.Marshal(g.Resources)
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO service_default_grants (grant_id, service_id, grant_on, actions, resources)
+				 VALUES ($1, $2, $3, $4, $5)`,
+				uuid.New().String(), serviceID, g.GrantOn, actionsJSON, resourcesJSON); err != nil {
+				slog.Error("manifest: failed to insert default grant", "service", e.Name, "grant_on", g.GrantOn, "error", err)
+			}
+		}
+		if len(e.DefaultGrants) > 0 {
+			slog.Info("manifest: default grants registered", "name", e.Name, "count", len(e.DefaultGrants))
+		}
 	}
 }
 
@@ -325,6 +374,8 @@ func main() {
 	mux.HandleFunc("POST /services", handleCreateService)
 	mux.HandleFunc("DELETE /services/{id}", handleDeleteService)
 	mux.HandleFunc("PUT /services/{id}/endpoints", handleUpdateServiceEndpoints)
+	mux.HandleFunc("GET /default-grants", handleListDefaultGrants)
+	mux.HandleFunc("GET /actions", handleListActions)
 	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)
 
 	port := envOrDefault("PORT", "8084")

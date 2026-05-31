@@ -44,6 +44,23 @@
       { "method": "GET",    "path": "/service-permission-requests/{id}",     "action": "getSPR",            "resource": "gatekeeper/service-permission-requests/{id}" },
       { "method": "POST",   "path": "/service-permission-requests/{id}/approve", "action": "approveSPR",   "resource": "gatekeeper/service-permission-requests/{id}" },
       { "method": "POST",   "path": "/service-permission-requests/{id}/decline", "action": "declineSPR",   "resource": "gatekeeper/service-permission-requests/{id}" }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["getUser", "updateUser", "deleteUser", "createOrg", "createTeam"],
+        "resources": ["gatekeeper/users/{user_id}", "gatekeeper/orgs", "gatekeeper/teams"]
+      },
+      {
+        "grant_on": "org",
+        "actions": ["getOrg", "updateOrg", "deleteOrg", "inviteUser"],
+        "resources": ["gatekeeper/orgs/{org_id}"]
+      },
+      {
+        "grant_on": "team",
+        "actions": ["getTeam", "updateTeam", "deleteTeam", "inviteUser"],
+        "resources": ["gatekeeper/teams/{team_id}"]
+      }
     ]
   },
   {
@@ -58,6 +75,13 @@
       { "method": "DELETE", "path": "/state/{username}/{workspace}", "action": "deleteState", "resource": "states/{username}/{workspace}" },
       { "method": "LOCK",   "path": "/state/{username}/{workspace}", "action": "lockState",   "resource": "states/{username}/{workspace}" },
       { "method": "UNLOCK", "path": "/state/{username}/{workspace}", "action": "unlockState", "resource": "states/{username}/{workspace}" }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["getState", "updateState", "deleteState", "lockState", "unlockState"],
+        "resources": ["states/{username}/*"]
+      }
     ]
   },
   {
@@ -71,6 +95,120 @@
       { "method": "GET",    "path": "/executions",      "action": "listExecution",   "resource": "forge/executions" },
       { "method": "GET",    "path": "/executions/{id}", "action": "getExecution",    "resource": "forge/executions/{id}" },
       { "method": "DELETE", "path": "/executions/{id}", "action": "deleteExecution", "resource": "forge/executions/{id}" }
+    ],
+    "actions": [
+      {
+        "name": "forge/run",
+        "method": "POST",
+        "path": "/executions",
+        "body_transforms": [
+          { "from_key": "run", "to_key": "command", "wrap": ["bash", "-c"] }
+        ],
+        "async": {
+          "id_field": "execution_id",
+          "poll_path": "/executions/{id}",
+          "poll_interval_secs": 2,
+          "status_field": "status",
+          "success_states": ["completed"],
+          "failure_states": ["failed", "timed_out"],
+          "cancel_states": ["cancelled"],
+          "output_field": "stdout",
+          "error_fields": ["stderr"]
+        }
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createExecution", "listExecution", "getExecution", "deleteExecution"],
+        "resources": ["forge/executions", "forge/executions/*"]
+      }
+    ]
+  },
+  {
+    "name": "workflows",
+    "url": "http://workflows:8085",
+    "description": "CI/CD pipeline orchestration",
+    "forward_auth": true,
+    "service_key": "workflows-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/steps",      "action": "createStep", "resource": "workflows/steps" },
+      { "method": "GET",    "path": "/steps",      "action": "listStep",   "resource": "workflows/steps" },
+      { "method": "GET",    "path": "/steps/{id}", "action": "getStep",    "resource": "workflows/steps/{id}" },
+      { "method": "PUT",    "path": "/steps/{id}", "action": "updateStep", "resource": "workflows/steps/{id}" },
+      { "method": "DELETE", "path": "/steps/{id}", "action": "deleteStep", "resource": "workflows/steps/{id}" },
+      { "method": "POST",   "path": "/workflows",           "action": "createWorkflow", "resource": "workflows/workflows" },
+      { "method": "GET",    "path": "/workflows",           "action": "listWorkflow",   "resource": "workflows/workflows" },
+      { "method": "GET",    "path": "/workflows/{id}",      "action": "getWorkflow",    "resource": "workflows/workflows/{id}" },
+      { "method": "PUT",    "path": "/workflows/{id}",      "action": "updateWorkflow", "resource": "workflows/workflows/{id}" },
+      { "method": "DELETE", "path": "/workflows/{id}",      "action": "deleteWorkflow", "resource": "workflows/workflows/{id}" },
+      { "method": "POST",   "path": "/workflows/{id}/runs", "action": "triggerRun",     "resource": "workflows/runs" },
+      { "method": "GET",    "path": "/runs",                "action": "listRun",        "resource": "workflows/runs" },
+      { "method": "GET",    "path": "/runs/{id}",           "action": "getRun",         "resource": "workflows/runs/{id}" },
+      { "method": "DELETE", "path": "/runs/{id}",           "action": "cancelRun",      "resource": "workflows/runs/{id}" },
+      { "method": "GET",    "path": "/actions",             "action": "listAction",     "resource": "workflows/actions" }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createWorkflow", "listWorkflow", "getWorkflow", "updateWorkflow", "deleteWorkflow", "triggerRun", "listRun", "getRun", "cancelRun"],
+        "resources": ["workflows/workflows", "workflows/workflows/*", "workflows/runs", "workflows/runs/*"]
+      }
+    ]
+  },
+  {
+    "name": "tickets",
+    "url": "http://tickets:8086",
+    "description": "Issue and task tracking",
+    "forward_auth": true,
+    "service_key": "tickets-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/tickets",                            "action": "createTicket",  "resource": "tickets/tickets"                           },
+      { "method": "GET",    "path": "/tickets",                            "action": "listTicket",    "resource": "tickets/tickets"                           },
+      { "method": "GET",    "path": "/tickets/{id}",                       "action": "getTicket",     "resource": "tickets/tickets/{id}"                      },
+      { "method": "PUT",    "path": "/tickets/{id}",                       "action": "updateTicket",  "resource": "tickets/tickets/{id}"                      },
+      { "method": "DELETE", "path": "/tickets/{id}",                       "action": "deleteTicket",  "resource": "tickets/tickets/{id}"                      },
+      { "method": "POST",   "path": "/tickets/{id}/comments",              "action": "createComment", "resource": "tickets/tickets/{id}"                      },
+      { "method": "DELETE", "path": "/tickets/{id}/comments/{comment_id}", "action": "deleteComment", "resource": "tickets/tickets/{id}/comments/{comment_id}" }
+    ],
+    "actions": [
+      {
+        "name": "tickets/create",
+        "method": "POST",
+        "path": "/tickets"
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createTicket", "listTicket", "getTicket", "updateTicket", "deleteTicket", "createComment", "deleteComment"],
+        "resources": ["tickets/tickets", "tickets/tickets/*"]
+      }
+    ]
+  },
+  {
+    "name": "hooks",
+    "url": "http://hooks:8087",
+    "description": "Webhook ingestion and pipeline rule management",
+    "forward_auth": true,
+    "service_key": "hooks-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/hooks",        "action": "receiveHook",       "resource": "hooks/hooks", "public": true },
+      { "method": "POST",   "path": "/hooks/github", "action": "receiveGithubHook", "resource": "hooks/hooks", "public": true },
+      { "method": "POST",   "path": "/rules",       "action": "createRule",  "resource": "hooks/rules"       },
+      { "method": "GET",    "path": "/rules",       "action": "listRule",    "resource": "hooks/rules"       },
+      { "method": "GET",    "path": "/rules/{id}",  "action": "getRule",     "resource": "hooks/rules/{id}"  },
+      { "method": "PUT",    "path": "/rules/{id}",  "action": "updateRule",  "resource": "hooks/rules/{id}"  },
+      { "method": "DELETE", "path": "/rules/{id}",  "action": "deleteRule",  "resource": "hooks/rules/{id}"  },
+      { "method": "GET",    "path": "/events",      "action": "listEvent",   "resource": "hooks/events"      },
+      { "method": "GET",    "path": "/events/{id}", "action": "getEvent",    "resource": "hooks/events/{id}" }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createRule", "listRule", "getRule", "updateRule", "deleteRule", "listEvent", "getEvent"],
+        "resources": ["hooks/rules", "hooks/rules/*", "hooks/events", "hooks/events/*"]
+      }
     ]
   }
 ]

@@ -52,12 +52,53 @@ type ServiceEndpoint struct {
 
 type serviceWithEndpoints struct {
 	Service
-	Roles     []ServiceRole     `json:"roles"`
-	Endpoints []ServiceEndpoint `json:"endpoints"`
+	Roles         []ServiceRole        `json:"roles"`
+	Endpoints     []ServiceEndpoint    `json:"endpoints"`
+	DefaultGrants []ServiceDefaultGrant `json:"default_grants,omitempty"`
+}
+
+// ServiceDefaultGrant is a permission template a service declares for new
+// users, orgs, or teams. Gatekeeper reads these at startup and applies them
+// when creating new principals.
+type ServiceDefaultGrant struct {
+	GrantID     string    `json:"grant_id"`
+	ServiceID   string    `json:"service_id"`
+	ServiceName string    `json:"service_name"`
+	GrantOn     string    `json:"grant_on"` // "user", "org", or "team"
+	Actions     []string  `json:"actions"`
+	Resources   []string  `json:"resources"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// ServiceAction is a callable workflow action registered by a service.
+// BodyTransforms and AsyncConfig are stored as raw JSONB and passed through.
+type ServiceAction struct {
+	ActionID       string          `json:"action_id"`
+	ServiceID      string          `json:"service_id"`
+	ServiceName    string          `json:"service_name"`
+	ServiceURL     string          `json:"service_url"`
+	Name           string          `json:"name"`
+	Method         string          `json:"method"`
+	Path           string          `json:"path"`
+	BodyTransforms json.RawMessage `json:"body_transforms,omitempty"`
+	AsyncConfig    json.RawMessage `json:"async,omitempty"`
+	Active         bool            `json:"active"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
 // resolveHost is the DNS lookup used by validateServiceURL. Tests can replace it.
 var resolveHost = net.LookupHost
+
+// jsonbOrNil returns nil when raw is empty or the JSON null literal,
+// so that pgx inserts a SQL NULL into a JSONB column instead of the string "null".
+func jsonbOrNil(raw json.RawMessage) interface{} {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	return []byte(raw)
+}
 
 // hashServiceKey bcrypt-hashes a plaintext service key for storage.
 // Returns an empty string and no error when key is empty (no key configured).
@@ -162,6 +203,59 @@ func validateServiceURL(rawURL string) error {
 		}
 	}
 	return nil
+}
+
+// handleListActions returns all active workflow actions joined with their service URLs.
+func handleListActions(w http.ResponseWriter, r *http.Request) {
+	if !requireReadAuth(w, r) {
+		return
+	}
+
+	rows, err := pool.Query(r.Context(), `
+		SELECT sa.action_id, sa.service_id, s.name, s.url,
+		       sa.name, sa.method, sa.path,
+		       sa.body_transforms, sa.async_config,
+		       sa.active, sa.created_at, sa.updated_at
+		FROM service_actions sa
+		JOIN services s ON sa.service_id = s.service_id
+		WHERE sa.active = true AND s.active = true
+		ORDER BY sa.name
+	`)
+	if err != nil {
+		slog.Error("list actions: query", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var actions []ServiceAction
+	for rows.Next() {
+		var a ServiceAction
+		var bodyTransforms, asyncConfig []byte
+		if err := rows.Scan(
+			&a.ActionID, &a.ServiceID, &a.ServiceName, &a.ServiceURL,
+			&a.Name, &a.Method, &a.Path,
+			&bodyTransforms, &asyncConfig,
+			&a.Active, &a.CreatedAt, &a.UpdatedAt,
+		); err != nil {
+			slog.Error("list actions: scan", "error", err)
+			continue
+		}
+		a.BodyTransforms = json.RawMessage(bodyTransforms)
+		a.AsyncConfig = json.RawMessage(asyncConfig)
+		actions = append(actions, a)
+	}
+	if rows.Err() != nil {
+		slog.Error("list actions: rows", "error", rows.Err())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if actions == nil {
+		actions = []ServiceAction{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(actions) //nolint:errcheck
 }
 
 // handleListServices returns all active services with their endpoint manifests.
@@ -337,6 +431,18 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 			Resource string `json:"resource"`
 			Public   bool   `json:"public"`
 		} `json:"endpoints"`
+		Actions []struct {
+			Name           string          `json:"name"`
+			Method         string          `json:"method"`
+			Path           string          `json:"path"`
+			BodyTransforms json.RawMessage `json:"body_transforms,omitempty"`
+			Async          json.RawMessage `json:"async,omitempty"`
+		} `json:"actions"`
+		DefaultGrants []struct {
+			GrantOn   string   `json:"grant_on"`
+			Actions   []string `json:"actions"`
+			Resources []string `json:"resources"`
+		} `json:"default_grants"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -413,12 +519,94 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if _, err := tx.Exec(ctx, `DELETE FROM service_actions WHERE service_id = $1`, id); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	for _, a := range req.Actions {
+		if a.Name == "" || a.Method == "" || a.Path == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO service_actions (action_id, service_id, name, method, path, body_transforms, async_config)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			uuid.New().String(), id, a.Name, a.Method, a.Path,
+			jsonbOrNil(a.BodyTransforms), jsonbOrNil(a.Async)); err != nil {
+			slog.Error("update endpoints: insert action", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if len(req.DefaultGrants) > 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM service_default_grants WHERE service_id = $1`, id); err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		for _, g := range req.DefaultGrants {
+			if g.GrantOn == "" || len(g.Actions) == 0 || len(g.Resources) == 0 {
+				continue
+			}
+			actionsJSON, _ := json.Marshal(g.Actions)
+			resourcesJSON, _ := json.Marshal(g.Resources)
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO service_default_grants (grant_id, service_id, grant_on, actions, resources)
+				 VALUES ($1, $2, $3, $4, $5)`,
+				uuid.New().String(), id, g.GrantOn, actionsJSON, resourcesJSON); err != nil {
+				slog.Error("update endpoints: insert default grant", "error", err)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		slog.Error("update endpoints: commit", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListDefaultGrants returns all active default grants across all services,
+// enriched with the service name so callers don't need a second lookup.
+// Requires a valid read service key.
+func handleListDefaultGrants(w http.ResponseWriter, r *http.Request) {
+	if !requireReadAuth(w, r) {
+		return
+	}
+	rows, err := pool.Query(r.Context(),
+		`SELECT g.grant_id, g.service_id, s.name, g.grant_on, g.actions, g.resources, g.created_at, g.updated_at
+		 FROM service_default_grants g
+		 JOIN services s ON s.service_id = g.service_id AND s.active = true
+		 ORDER BY s.name, g.grant_on`,
+	)
+	if err != nil {
+		slog.Error("list default grants: db", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var grants []ServiceDefaultGrant
+	for rows.Next() {
+		var g ServiceDefaultGrant
+		var actionsRaw, resourcesRaw []byte
+		if err := rows.Scan(&g.GrantID, &g.ServiceID, &g.ServiceName, &g.GrantOn,
+			&actionsRaw, &resourcesRaw, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			slog.Error("list default grants: scan", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		json.Unmarshal(actionsRaw, &g.Actions)     //nolint:errcheck
+		json.Unmarshal(resourcesRaw, &g.Resources) //nolint:errcheck
+		grants = append(grants, g)
+	}
+	if grants == nil {
+		grants = []ServiceDefaultGrant{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(grants) //nolint:errcheck
 }
 
 // ── System health ─────────────────────────────────────────────────────────────
