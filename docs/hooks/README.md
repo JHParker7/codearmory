@@ -36,14 +36,56 @@ Rules and event history are accessible via authenticated REST API.
 | `OTEL_SERVICE_NAME` | `hooks` | OTel service name |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTel Collector HTTP endpoint. Omit to disable. |
 | `LOG_LEVEL` | `info` | Set to `debug` for verbose output. |
+| `GITHUB_APP_ID` | — | GitHub App ID (integer). When set, enables the `POST /hooks/github` webhook receiver. |
+| `GITHUB_APP_PRIVATE_KEY` | — | PEM-encoded RSA private key for the GitHub App (PKCS1 or PKCS8). Required when `GITHUB_APP_ID` is set. Supports `_FILE` suffix. |
+| `GITHUB_APP_WEBHOOK_SECRET` | — | HMAC-SHA256 secret used to verify GitHub App webhook payloads (`X-Hub-Signature-256`). Required when `GITHUB_APP_ID` is set. |
+| `GITHUB_API_URL` | `https://api.github.com` | Override the GitHub API base URL. Useful for GitHub Enterprise. |
 
 All variables support a `_FILE` suffix variant (e.g. `DATABASE_URL_FILE`) that reads the value from a file path — useful for Docker secrets and Kubernetes secret mounts.
+
+## GitHub App integration
+
+When `GITHUB_APP_ID` is set at startup, the service registers a second webhook receiver at `POST /hooks/github` that is purpose-built for GitHub App installations.
+
+**How it works:**
+
+```
+GitHub App (installed on repo)
+  │
+  └── POST /hooks/github ──────────────────► Hooks :8087
+        │  1. Verify X-Hub-Signature-256 HMAC against GITHUB_APP_WEBHOOK_SECRET
+        │  2. Handle ping / installation events silently
+        │  3. Normalise push or pull_request payload → webhookPayload
+        │  4. Match active pipeline rules (same logic as POST /hooks)
+        │  5. For each successful dispatch with a run ID:
+        │     a. Exchange App JWT for an installation access token
+        │     b. Create a GitHub Check Run in "in_progress" status
+        │     c. Spawn background goroutine that polls the run every 15 s
+        │        and updates the check run to success/failure/cancelled/timed_out
+        └── Return 200 with HookEvent (always)
+```
+
+**Private key format:** PKCS1 (`-----BEGIN RSA PRIVATE KEY-----`) or PKCS8 (`-----BEGIN PRIVATE KEY-----`). Pass it via `GITHUB_APP_PRIVATE_KEY` or `GITHUB_APP_PRIVATE_KEY_FILE`.
+
+**Supported event types:** `push`, `pull_request`. Unsupported types are acknowledged with 200 and ignored.
+
+**Polling timeout:** background goroutines time out after 2 hours and mark the check run `timed_out`.
 
 ## API
 
 ### Webhook receiver (unauthenticated)
 
 `POST /hooks` — receives generic webhook events. No bearer token required; per-rule HMAC verification is used instead.
+
+### GitHub App webhook receiver (unauthenticated, optional)
+
+`POST /hooks/github` — GitHub App webhook receiver. Only registered when `GITHUB_APP_ID` is set.
+
+Verifies the `X-Hub-Signature-256` HMAC header using `GITHUB_APP_WEBHOOK_SECRET`. Handles `push` and `pull_request` event types; all other types (including `ping`, `installation`, `installation_repositories`) are acknowledged and ignored.
+
+On a successful rule match, creates a GitHub Check Run via the Checks API (using a per-installation access token obtained from the App JWT) and asynchronously polls the workflow run every 15 seconds until it reaches a terminal state, then marks the check run accordingly (`success`, `failure`, `cancelled`, or `timed_out`).
+
+Always returns `200` after processing; partial failures are recorded in the event log.
 
 **Payload:**
 

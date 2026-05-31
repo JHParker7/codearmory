@@ -8,14 +8,13 @@ info:
 
     ## Authentication
 
-    Two static API keys are used — no JWT or Gatekeeper involvement:
+    Service account keys are used — no JWT or Gatekeeper involvement.
+    Pass the key as `X-Service-Key: name:key`.
 
-    | Key | Endpoints |
-    |-----|-----------|
-    | `READ_KEY` | `GET /services` |
-    | `ADMIN_KEY` | All endpoints (also accepted on read-only endpoints) |
-
-    Pass the key as `Authorization: Bearer <key>`.
+    | Role | Endpoints |
+    |------|-----------|
+    | Read (any valid service account) | `GET /services`, `GET /actions`, `GET /default-grants` |
+    | Admin | All endpoints |
 
     ## SSRF protection
 
@@ -31,7 +30,7 @@ servers:
     description: Local development server
 
 security:
-  - adminKey: []
+  - serviceKey: []
 
 paths:
   /healthz:
@@ -43,13 +42,56 @@ paths:
         '200':
           description: Service is healthy
 
+  /actions:
+    get:
+      summary: List workflow actions
+      operationId: listActions
+      security:
+        - serviceKey: []
+      description: |
+        Returns all active workflow actions across all active services, enriched
+        with the service name and URL. Consumed by the Workflows service at startup
+        to build its action catalog.
+      responses:
+        '200':
+          description: Active workflow actions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServiceAction'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /default-grants:
+    get:
+      summary: List default permission grants
+      operationId: listDefaultGrants
+      security:
+        - serviceKey: []
+      description: |
+        Returns all active default permission grants declared by services.
+        Consumed by Gatekeeper at startup to determine which permissions to apply
+        when creating new users, orgs, or teams.
+      responses:
+        '200':
+          description: Active default grants
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServiceDefaultGrant'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /services:
     get:
       summary: List services
       operationId: listServices
       security:
-        - readKey: []
-        - adminKey: []
+        - serviceKey: []
       description: |
         Returns all active services with their role definitions and endpoint
         manifests. Used by Conductor to build its routing table.
@@ -68,6 +110,8 @@ paths:
     post:
       summary: Register service
       operationId: createService
+      security:
+        - serviceKey: []
       description: |
         Registers a new service. The `name` must be unique. The `url` must use
         `http` or `https` and must not resolve to a private or reserved address.
@@ -104,6 +148,8 @@ paths:
     delete:
       summary: Delete service
       operationId: deleteService
+      security:
+        - serviceKey: []
       description: Soft-deletes the service. It is excluded from all subsequent list responses.
       responses:
         '204':
@@ -120,13 +166,17 @@ paths:
     put:
       summary: Update endpoint manifest
       operationId: updateServiceEndpoints
+      security:
+        - serviceKey: []
       description: |
-        Replaces the full endpoint manifest (roles + endpoints) for the service.
-        Optionally updates `url` and `description`.
+        Replaces the full endpoint manifest (roles, endpoints, actions, and default
+        grants) for the service atomically. Optionally updates `url` and `description`.
 
-        All previous roles and endpoints for the service are deleted and replaced
-        atomically. Endpoints with an empty `method`, `path`, `action`, or
-        `resource` are silently skipped.
+        All previous roles, endpoints, actions, and default grants for the service
+        are deleted and replaced. Endpoints with an empty `method`, `path`, `action`,
+        or `resource` are silently skipped. Actions with an empty `name`, `method`,
+        or `path` are silently skipped. Default grants with an empty `grant_on` or
+        empty `actions`/`resources` arrays are silently skipped.
       requestBody:
         required: true
         content:
@@ -145,14 +195,14 @@ paths:
 
 components:
   securitySchemes:
-    readKey:
-      type: http
-      scheme: bearer
-      description: Read-only API key (`READ_KEY`). Accepted on GET /services only.
-    adminKey:
-      type: http
-      scheme: bearer
-      description: Admin API key (`ADMIN_KEY`). Accepted on all endpoints.
+    serviceKey:
+      type: apiKey
+      in: header
+      name: X-Service-Key
+      description: |
+        Service account key in `name:key` format. Read-role accounts are accepted
+        on `GET /services`, `GET /actions`, and `GET /default-grants`. Admin-role
+        accounts are required for all write operations.
 
   parameters:
     Id:
@@ -266,6 +316,96 @@ components:
           format: date-time
           readOnly: true
 
+    ServiceAction:
+      type: object
+      description: A callable workflow action registered by a service
+      properties:
+        action_id:
+          type: string
+          format: uuid
+          readOnly: true
+        service_id:
+          type: string
+          format: uuid
+          readOnly: true
+        service_name:
+          type: string
+          readOnly: true
+          example: forge
+        service_url:
+          type: string
+          format: uri
+          readOnly: true
+          example: http://forge:8083
+        name:
+          type: string
+          description: Unique action name used by the Workflows engine
+          example: forge/run
+        method:
+          type: string
+          example: POST
+        path:
+          type: string
+          example: /executions
+        body_transforms:
+          description: JSONB field transform rules applied before calling the service
+          nullable: true
+        async:
+          description: JSONB async polling configuration for long-running actions
+          nullable: true
+        active:
+          type: boolean
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    ServiceDefaultGrant:
+      type: object
+      description: |
+        A permission template declared by a service. Gatekeeper applies matching
+        grants when creating new users, orgs, or teams.
+      properties:
+        grant_id:
+          type: string
+          format: uuid
+          readOnly: true
+        service_id:
+          type: string
+          format: uuid
+          readOnly: true
+        service_name:
+          type: string
+          readOnly: true
+          example: forge
+        grant_on:
+          type: string
+          enum: [user, org, team]
+          description: Principal type that receives this grant on creation
+        actions:
+          type: array
+          items:
+            type: string
+          example: [createExecution]
+        resources:
+          type: array
+          items:
+            type: string
+          example: [forge/executions]
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
     ServiceWithEndpoints:
       allOf:
         - $ref: '#/components/schemas/Service'
@@ -279,6 +419,11 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/ServiceEndpoint'
+            default_grants:
+              type: array
+              items:
+                $ref: '#/components/schemas/ServiceDefaultGrant'
+              description: Present when the service has declared default grants
 
     CreateServiceRequest:
       type: object
@@ -355,6 +500,57 @@ components:
                 type: boolean
                 default: false
           description: Replaces all existing endpoints. Entries missing required fields are skipped.
+        actions:
+          type: array
+          items:
+            type: object
+            required:
+              - name
+              - method
+              - path
+            properties:
+              name:
+                type: string
+                description: Unique action name (e.g. `forge/run`)
+                example: forge/run
+              method:
+                type: string
+                example: POST
+              path:
+                type: string
+                example: /executions
+              body_transforms:
+                description: JSONB field transform rules
+                nullable: true
+              async:
+                description: JSONB async polling configuration
+                nullable: true
+          description: Replaces all existing actions. Entries missing required fields are skipped.
+        default_grants:
+          type: array
+          items:
+            type: object
+            required:
+              - grant_on
+              - actions
+              - resources
+            properties:
+              grant_on:
+                type: string
+                enum: [user, org, team]
+              actions:
+                type: array
+                items:
+                  type: string
+                minItems: 1
+              resources:
+                type: array
+                items:
+                  type: string
+                minItems: 1
+          description: |
+            Replaces all existing default grants when non-empty.
+            Entries with an empty `grant_on` or empty `actions`/`resources` arrays are skipped.
 
   responses:
     BadRequest:
