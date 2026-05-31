@@ -43,8 +43,15 @@ func handleListTeams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Always scope results to the caller's own org regardless of any ?org_id= param.
+	var callerOrgID *string
+	if callerRow, err := (User{UserID: callerID}).Get(ctx); err == nil {
+		callerOrgID = callerRow.(User).OrgID
+	}
+
 	q := r.URL.Query()
 	var filter Team
+	filter.OrgID = callerOrgID
 	if v := q.Get("team_id"); v != "" {
 		filter.TeamID = v
 	}
@@ -53,10 +60,6 @@ func handleListTeams(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := q.Get("owner_id"); v != "" {
 		filter.OwnerID = v
-	}
-	if v := q.Get("org_id"); v != "" {
-		s := v
-		filter.OrgID = &s
 	}
 	if v := q.Get("role_id"); v != "" {
 		s := v
@@ -196,15 +199,24 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		attribute.String("user.id", callerID),
 	))
 
-	permName := fmt.Sprintf("%s-%s-owners-permissions", owner.Username, team.TeamName)
-	if err := grantPermissions(ctx, connect().WithContext(ctx), callerID, permName,
-		[]string{"getTeam", "updateTeam", "deleteTeam", "inviteUser"},
-		fmt.Sprintf("gatekeeper/teams/%s", team.TeamID)); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to grant owner permissions")
-		slog.Error("create team: failed to grant owner permissions", "caller_id", callerID, "team_id", team.TeamID, "error", err)
-		http.Error(w, "failed to give owner permissions", http.StatusInternalServerError)
-		return
+	templateVars := map[string]string{
+		"team_id":  team.TeamID,
+		"user_id":  callerID,
+		"username": owner.Username,
+	}
+	db := connect().WithContext(ctx)
+	for _, grant := range defaultGrantsFor("team") {
+		permName := fmt.Sprintf("%s-%s %s permissions", owner.Username, team.TeamName, grant.ServiceName)
+		resources := applyGrantTemplates(grant.Resources, templateVars)
+		for _, resource := range resources {
+			if err := grantServicePermissions(ctx, db, grant.ServiceName, callerID, permName, grant.Actions, resource); err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "failed to grant owner permissions")
+				slog.Error("create team: failed to grant owner permissions", "caller_id", callerID, "team_id", team.TeamID, "service", grant.ServiceName, "error", err)
+				http.Error(w, "failed to give owner permissions", http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	span.SetStatus(codes.Ok, "")

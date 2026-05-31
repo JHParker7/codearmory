@@ -62,6 +62,12 @@ func handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := row.(Session)
+	if s.UserID != callerID {
+		span.SetStatus(codes.Error, "forbidden: session belongs to another user")
+		slog.Warn("get session: cross-user attempt", "caller_id", callerID, "session_id", id, "session_user_id", s.UserID)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	span.AddEvent("db.read", trace.WithAttributes(
 		attribute.String("session.id", id),
 		attribute.String("session.user_id", s.UserID),
@@ -100,9 +106,16 @@ func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
+	s := row.(Session)
+	if s.UserID != callerID {
+		span.SetStatus(codes.Error, "forbidden: session belongs to another user")
+		slog.Warn("delete session: cross-user attempt", "caller_id", callerID, "session_id", id, "session_user_id", s.UserID)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("session.id", id)))
 
-	if err := row.(Session).Remove(ctx); err != nil {
+	if err := s.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
 		slog.Error("delete session: db error", "caller_id", callerID, "session_id", id, "error", err)

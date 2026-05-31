@@ -38,16 +38,17 @@ func handleListOrgs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := r.URL.Query()
+	// Always scope results to the caller's own org.
 	var filter Org
-	if v := q.Get("org_id"); v != "" {
-		filter.OrgID = v
+	if callerRow, err := (User{UserID: callerID}).Get(ctx); err == nil {
+		if oid := callerRow.(User).OrgID; oid != nil {
+			filter.OrgID = *oid
+		}
 	}
+
+	q := r.URL.Query()
 	if v := q.Get("org_name"); v != "" {
 		filter.OrgName = v
-	}
-	if v := q.Get("owner_id"); v != "" {
-		filter.OwnerID = v
 	}
 
 	rows, err := filter.List(ctx, limit, offset)
@@ -135,15 +136,24 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		attribute.String("user.id", userID),
 	))
 
-	permName := fmt.Sprintf("%s-%s-owners-permissions", owner.Username, org.OrgName)
-	if err := grantPermissions(ctx, connect().WithContext(ctx), userID, permName,
-		[]string{"getOrg", "updateOrg", "deleteOrg", "inviteUser"},
-		fmt.Sprintf("gatekeeper/orgs/%s", org.OrgID)); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to grant owner permissions")
-		slog.Error("create org: failed to grant owner permissions", "caller_id", callerID, "org_id", org.OrgID, "error", err)
-		http.Error(w, "failed to give owner permissions", http.StatusInternalServerError)
-		return
+	templateVars := map[string]string{
+		"org_id":   org.OrgID,
+		"user_id":  userID,
+		"username": owner.Username,
+	}
+	db := connect().WithContext(ctx)
+	for _, grant := range defaultGrantsFor("org") {
+		permName := fmt.Sprintf("%s-%s %s permissions", owner.Username, org.OrgName, grant.ServiceName)
+		resources := applyGrantTemplates(grant.Resources, templateVars)
+		for _, resource := range resources {
+			if err := grantServicePermissions(ctx, db, grant.ServiceName, userID, permName, grant.Actions, resource); err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "failed to grant owner permissions")
+				slog.Error("create org: failed to grant owner permissions", "caller_id", callerID, "org_id", org.OrgID, "service", grant.ServiceName, "error", err)
+				http.Error(w, "failed to give owner permissions", http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	span.SetAttributes(attribute.String("org.id", org.OrgID))

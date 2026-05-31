@@ -178,10 +178,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
+	initSecretsEncryption()
+
 	db := connect()
-	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{})
+	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{})
 	applyForeignKeys(db)
 	seedServiceAccounts(db)
+
+	if registryURL := os.Getenv("REGISTRY_URL"); registryURL != "" {
+		serviceKey := "gatekeeper:" + secret("REGISTRY_SERVICE_KEY")
+		startDefaultGrantPoller(ctx, registryURL, serviceKey)
+	} else {
+		slog.Warn("REGISTRY_URL not set — default grants will not be loaded from registry; signup permissions will be minimal")
+	}
 
 	mux := http.NewServeMux()
 
@@ -231,6 +240,16 @@ func main() {
 	mux.Handle("DELETE /invites/{id}", mw(handleDeleteInvite))
 
 	mux.Handle("GET /audit-logs", mw(handleListAuditLogs))
+
+	// Secrets: user-authenticated CRUD (values write-only) + internal resolve for the workflow worker.
+	mux.Handle("POST /secrets", mw(handleCreateSecret))
+	mux.Handle("GET /secrets", mw(handleListSecrets))
+	mux.Handle("PUT /secrets/{id}", mw(handleUpdateSecret))
+	mux.Handle("DELETE /secrets/{id}", mw(handleDeleteSecret))
+	mux.Handle("GET /orgs/{id}/secret-provider", mw(handleGetSecretProvider))
+	mux.Handle("PUT /orgs/{id}/secret-provider", mw(handleSetSecretProvider))
+	mux.Handle("DELETE /orgs/{id}/secret-provider", mw(handleDeleteSecretProvider))
+	mux.HandleFunc("POST /internal/secrets/resolve", handleResolveSecrets)
 
 	// Key rotation: service-key authenticated; generates a new key server-side and returns it.
 	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)

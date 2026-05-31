@@ -20,11 +20,28 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	conn.AutoMigrate(&User{}, &Org{}, &Team{}, &Role{}, &Session{}, &Permissions{}, &Invite{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &PermissionsCheck{})
+	conn.AutoMigrate(&User{}, &Org{}, &Team{}, &Role{}, &Session{}, &Permissions{}, &Invite{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &PermissionsCheck{}, &Secret{}, &OrgSecretProvider{})
 	gormDB = conn
 	initMetrics()
 	os.Setenv("PERMITTED_SERVICES", "gatekeeper,blueprints,forge,svc,my-service,other-service,team-service,direct-service,test-service")
 	initPermittedServices()
+
+	// Initialise AES-256-GCM with a fixed test key so secret handler tests can encrypt/decrypt.
+	os.Setenv("GATEKEEPER_SECRETS_KEY", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	initSecretsEncryption()
+
+	// Seed gatekeeper's own default grants so org/team creation tests can grant owner permissions.
+	defaultGrantsMu.Lock()
+	cachedGrants = []DefaultGrant{
+		{ServiceName: "gatekeeper", GrantOn: "org",
+			Actions:   []string{"getOrg", "updateOrg", "deleteOrg", "inviteUser"},
+			Resources: []string{"gatekeeper/orgs/{org_id}"}},
+		{ServiceName: "gatekeeper", GrantOn: "team",
+			Actions:   []string{"getTeam", "updateTeam", "deleteTeam", "inviteUser"},
+			Resources: []string{"gatekeeper/teams/{team_id}"}},
+	}
+	defaultGrantsMu.Unlock()
+
 	os.Exit(m.Run())
 }
 

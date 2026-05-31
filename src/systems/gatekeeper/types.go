@@ -172,3 +172,31 @@ type PermissionsCheck struct {
 	Granted            bool      `json:"granted"              gorm:"column:granted"`
 	Active             bool      `json:"active"               gorm:"column:active;default:true"`
 }
+
+// Secret holds an AES-256-GCM encrypted value scoped to an org.
+// The plaintext value is never returned by the API (write-only).
+type Secret struct {
+	SecretID   string    `json:"secret_id"  gorm:"column:secret_id;primaryKey"`
+	OrgID      string    `json:"org_id"     gorm:"column:org_id;not null"`
+	Name       string    `json:"name"       gorm:"column:name;not null"`
+	Ciphertext []byte    `json:"-"          gorm:"column:ciphertext;not null"`
+	CreatedBy  string    `json:"created_by" gorm:"column:created_by"`
+	Active     bool      `json:"active"     gorm:"column:active;default:true"`
+	CreatedAt  time.Time `json:"created_at" gorm:"column:created_at"`
+	UpdatedAt  time.Time `json:"updated_at" gorm:"column:updated_at"`
+}
+
+func (Secret) TableName() string { return "secrets" }
+
+// OrgSecretProvider records which secrets backend an org uses.
+// Provider is one of: builtin, doppler, vault, aws_sm.
+// Config holds encrypted JSON with provider-specific credentials.
+type OrgSecretProvider struct {
+	OrgID     string    `json:"org_id"    gorm:"column:org_id;primaryKey"`
+	Provider  string    `json:"provider"  gorm:"column:provider;not null"`
+	Config    []byte    `json:"-"         gorm:"column:config"`
+	CreatedAt time.Time `json:"created_at" gorm:"column:created_at"`
+	UpdatedAt time.Time `json:"updated_at" gorm:"column:updated_at"`
+}
+
+func (OrgSecretProvider) TableName() string { return "org_secret_providers" }

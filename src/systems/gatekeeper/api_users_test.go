@@ -553,8 +553,12 @@ func TestListUsers_Success(t *testing.T) {
 	}
 	t.Cleanup(func() { u2.Remove(context.Background()) })
 
+	// The handler scopes listing to the caller's own org, so put actor in the same org.
 	actor := createAuthorizedUser(t, "listUser", "gatekeeper/users")
-	r := withUserID(httptest.NewRequest(http.MethodGet, "/users?org_id="+orgID, nil), actor.UserID)
+	connect().WithContext(context.Background()).Model(&User{}).
+		Where("user_id = ?", actor.UserID).Update("org_id", orgID) //nolint:errcheck
+
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/users", nil), actor.UserID)
 	w := httptest.NewRecorder()
 	handleListUsers(w, r)
 
@@ -565,8 +569,8 @@ func TestListUsers_Success(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if len(resp) != 2 {
-		t.Fatalf("expected 2 users, got %d", len(resp))
+	if len(resp) != 3 { // actor + u1 + u2
+		t.Fatalf("expected 3 users in org, got %d", len(resp))
 	}
 }
 
