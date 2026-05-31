@@ -91,6 +91,13 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.OrgID != "" && wf.OrgID != req.OrgID {
+		span.SetStatus(codes.Error, "cross-org trigger denied")
+		slog.Warn("internal trigger: org mismatch", "workflow_id", workflowID, "workflow_org", wf.OrgID, "req_org", req.OrgID)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	run := WorkflowRun{
 		RunID:       uuid.New().String(),
 		WorkflowID:  wf.WorkflowID,
@@ -102,7 +109,7 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	if err := db.WithContext(ctx).Create(&run).Error; err != nil {
+	if err := run.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("internal trigger: db error", "workflow_id", workflowID, "error", err)
@@ -116,5 +123,77 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 	slog.Info("workflow run triggered by hooks", "run_id", run.RunID, "workflow_id", wf.WorkflowID, "triggered_by", req.TriggeredBy)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(run) //nolint:errcheck
+}
+
+// verifyHooksWorkflowCheck validates the HMAC for a workflow ownership check
+// from the hooks service. The token covers "hooks-check:{workflowID}:{timestamp}".
+func verifyHooksWorkflowCheck(workflowID, token, timestamp string) bool {
+	if hooksTriggerKey == "" {
+		return false
+	}
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || math.Abs(float64(time.Now().Unix()-ts)) > 30 {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(hooksTriggerKey))
+	fmt.Fprintf(mac, "hooks-check:%s:%s", workflowID, timestamp)
+	return hmac.Equal([]byte(token), []byte(hex.EncodeToString(mac.Sum(nil))))
+}
+
+// handleInternalGetWorkflow returns the org_id of a workflow to an authenticated
+// hooks-service ownership check request.
+func handleInternalGetWorkflow(w http.ResponseWriter, r *http.Request) {
+	workflowID := r.PathValue("id")
+	if !verifyHooksWorkflowCheck(workflowID, r.Header.Get("X-Hooks-Token"), r.Header.Get("X-Hooks-Timestamp")) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	wf, err := getWorkflow(r.Context(), workflowID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"org_id": wf.OrgID}) //nolint:errcheck
+}
+
+// verifyHooksPoll validates the HMAC-SHA256 token used by the hooks service to
+// poll run status. The token covers "hooks-poll:{runID}:{timestamp}".
+func verifyHooksPoll(runID, token, timestamp string) bool {
+	if hooksTriggerKey == "" {
+		return false
+	}
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || math.Abs(float64(time.Now().Unix()-ts)) > 30 {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(hooksTriggerKey))
+	fmt.Fprintf(mac, "hooks-poll:%s:%s", runID, timestamp)
+	return hmac.Equal([]byte(token), []byte(hex.EncodeToString(mac.Sum(nil))))
+}
+
+// handleInternalGetRun returns the current status of a workflow run to an
+// authenticated hooks-service poll request.
+func handleInternalGetRun(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("id")
+	if !verifyHooksPoll(runID, r.Header.Get("X-Hooks-Token"), r.Header.Get("X-Hooks-Timestamp")) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var run WorkflowRun
+	if err := connect().WithContext(r.Context()).Where("run_id = ?", runID).First(&run).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(run) //nolint:errcheck
 }

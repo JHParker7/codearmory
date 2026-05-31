@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,20 +20,23 @@ import (
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 var (
-	db               *gorm.DB
 	gatekeeperClient *gk.Client
 	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	hooksTriggerKey  = os.Getenv("HOOKS_TRIGGER_KEY")
+
 	// serviceURLs maps registered service names to their base URLs.
-	// Populated at startup from SERVICES (format: "name=url,name=url,...").
-	serviceURLs = map[string]string{}
-	httpClient  *http.Client
+	// Seeded at startup from SERVICES env var and updated every 5 min from the registry.
+	serviceURLsMu sync.RWMutex
+	serviceURLs   = map[string]string{}
+
+	// actionCatalog maps action names to their definitions, polled from the registry.
+	actionCatalogMu sync.RWMutex
+	actionCatalog   = map[string]ActionDef{}
+
+	httpClient *http.Client
 )
 
 func initHTTPClient() *http.Client {
@@ -90,9 +95,11 @@ func secretOrDefault(name, def string) string {
 	return def
 }
 
-// initServices parses SERVICES (format: "name=url,name=url,...") into serviceURLs.
-// Gatekeeper is always pre-populated so steps can call it without explicit registration.
+// initServices seeds serviceURLs from the SERVICES env var and always pre-populates
+// gatekeeper. The registry catalog poller adds/updates entries as services register.
 func initServices() {
+	serviceURLsMu.Lock()
+	defer serviceURLsMu.Unlock()
 	serviceURLs["gatekeeper"] = gatekeeperURL
 	raw := os.Getenv("SERVICES")
 	if raw == "" {
@@ -108,6 +115,79 @@ func initServices() {
 		serviceURLs[strings.TrimSpace(name)] = strings.TrimSpace(url)
 	}
 	slog.Info("services registered", "count", len(serviceURLs))
+}
+
+// startCatalogPoller fetches the action catalog from the registry immediately
+// and then refreshes it every 5 minutes so newly registered services are picked
+// up without restarting workflows.
+func startCatalogPoller(ctx context.Context) {
+	refreshCatalog(ctx)
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				refreshCatalog(ctx)
+			}
+		}
+	}()
+}
+
+func refreshCatalog(ctx context.Context) {
+	registryURL := envOrDefault("REGISTRY_URL", "")
+	registryKey := secret("REGISTRY_SERVICE_KEY")
+	if registryURL == "" || registryKey == "" {
+		slog.Debug("catalog refresh skipped: REGISTRY_URL or REGISTRY_SERVICE_KEY not set")
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, registryURL+"/actions", nil)
+	if err != nil {
+		slog.Warn("catalog refresh: build request", "error", err)
+		return
+	}
+	req.Header.Set("X-Service-Key", "workflows:"+registryKey)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		slog.Warn("catalog refresh: request failed", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("catalog refresh: unexpected status", "status", resp.StatusCode)
+		return
+	}
+
+	var actions []ActionDef
+	if err := json.NewDecoder(resp.Body).Decode(&actions); err != nil {
+		slog.Warn("catalog refresh: decode failed", "error", err)
+		return
+	}
+
+	newCatalog := make(map[string]ActionDef, len(actions))
+	for _, a := range actions {
+		newCatalog[a.Name] = a
+	}
+
+	actionCatalogMu.Lock()
+	actionCatalog = newCatalog
+	actionCatalogMu.Unlock()
+
+	// Also update serviceURLs with any new service URLs from the catalog.
+	serviceURLsMu.Lock()
+	for _, a := range actions {
+		if a.ServiceName != "" && a.ServiceURL != "" {
+			serviceURLs[a.ServiceName] = a.ServiceURL
+		}
+	}
+	serviceURLsMu.Unlock()
+
+	slog.Info("catalog refreshed", "actions", len(actions))
 }
 
 type statusResponseWriter struct {
@@ -165,16 +245,7 @@ func main() {
 	initMetrics()
 	httpClient = initHTTPClient()
 
-	dsn := secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/workflows")
-	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
-	if err != nil {
-		slog.Error("failed to connect to database", "error", err)
-		os.Exit(1)
-	}
-
-	if err := db.AutoMigrate(&Workflow{}, &WorkflowRun{}, &WorkflowStepRun{}); err != nil {
+	if err := connect().AutoMigrate(&Step{}, &Workflow{}, &WorkflowRun{}, &WorkflowStepRun{}); err != nil {
 		slog.Error("failed to run AutoMigrate", "error", err)
 		os.Exit(1)
 	}
@@ -185,12 +256,21 @@ func main() {
 	registry.StartKeyRotation(ctx, gatekeeperURL, "workflows",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
-	workers := newWorkerPool(db)
+	startCatalogPoller(ctx)
+
+	workers := newWorkerPool()
 	workers.Start(ctx, 5)
 	slog.Info("worker pool started", "workers", 5)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /actions", handleListActions)
+
+	mux.HandleFunc("POST /steps", handleCreateStep)
+	mux.HandleFunc("GET /steps", handleListSteps)
+	mux.HandleFunc("GET /steps/{id}", handleGetStep)
+	mux.HandleFunc("PUT /steps/{id}", handleUpdateStep)
+	mux.HandleFunc("DELETE /steps/{id}", handleDeleteStep)
 
 	mux.HandleFunc("POST /workflows", handleCreateWorkflow)
 	mux.HandleFunc("GET /workflows", handleListWorkflows)
@@ -200,6 +280,8 @@ func main() {
 
 	mux.HandleFunc("POST /workflows/{id}/runs", handleTriggerRun)
 	mux.HandleFunc("POST /internal/workflows/{id}/runs", handleInternalTriggerRun)
+	mux.HandleFunc("GET /internal/workflows/{id}", handleInternalGetWorkflow)
+	mux.HandleFunc("GET /internal/runs/{id}", handleInternalGetRun)
 	mux.HandleFunc("GET /runs", handleListRuns)
 	mux.HandleFunc("GET /runs/{id}", handleGetRun)
 	mux.HandleFunc("DELETE /runs/{id}", handleCancelRun(workers))

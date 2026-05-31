@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,28 +16,49 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	"gorm.io/gorm"
 )
+
+// stepGroup is a set of steps that execute together (sequential = 1 step, parallel = N steps).
+type stepGroup struct {
+	steps   []WorkflowStep
+	indices []int
+}
+
+func groupSteps(steps []WorkflowStep) []stepGroup {
+	var groups []stepGroup
+	i := 0
+	for i < len(steps) {
+		ws := steps[i]
+		if ws.ParallelGroup == nil {
+			groups = append(groups, stepGroup{steps: []WorkflowStep{ws}, indices: []int{i}})
+			i++
+			continue
+		}
+		g := *ws.ParallelGroup
+		var grp stepGroup
+		for i < len(steps) && steps[i].ParallelGroup != nil && *steps[i].ParallelGroup == g {
+			grp.steps = append(grp.steps, steps[i])
+			grp.indices = append(grp.indices, i)
+			i++
+		}
+		groups = append(groups, grp)
+	}
+	return groups
+}
 
 // WorkerPool runs workflow runs from the pending queue in PostgreSQL.
 type WorkerPool struct {
-	db      *gorm.DB
 	cancels sync.Map // runID -> context.CancelFunc
 }
 
-func newWorkerPool(db *gorm.DB) *WorkerPool {
-	return &WorkerPool{db: db}
-}
+func newWorkerPool() *WorkerPool { return &WorkerPool{} }
 
-// Start launches n worker goroutines that poll for pending runs.
 func (p *WorkerPool) Start(ctx context.Context, n int) {
 	for range n {
 		go p.loop(ctx)
 	}
 }
 
-// Cancel signals the active goroutine for runID to stop after the current step.
-// Returns false if the run is not currently being executed.
 func (p *WorkerPool) Cancel(runID string) bool {
 	if fn, ok := p.cancels.Load(runID); ok {
 		fn.(context.CancelFunc)()
@@ -59,7 +81,7 @@ func (p *WorkerPool) loop(ctx context.Context) {
 }
 
 func (p *WorkerPool) tryOne(ctx context.Context) {
-	tx := p.db.WithContext(ctx).Begin()
+	tx := connect().WithContext(ctx).Begin()
 	if tx.Error != nil {
 		return
 	}
@@ -72,7 +94,6 @@ func (p *WorkerPool) tryOne(ctx context.Context) {
 		Token      string
 	}
 	var pickup runPickup
-	// FOR UPDATE SKIP LOCKED: each worker locks one pending run; siblings skip it.
 	result := tx.Raw(`
 		SELECT run_id, workflow_id, inputs, token
 		FROM workflow_runs
@@ -117,80 +138,123 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token st
 	}
 
 	finalStatus := StatusCompleted
-	for i, step := range wf.Steps {
+	for _, group := range groupSteps(wf.Steps) {
 		if runCtx.Err() != nil {
 			finalStatus = StatusCancelled
 			break
 		}
 
-		stepRunID := uuid.New().String()
-		if err := p.startStepRun(runID, stepRunID, i, step.Name); err != nil {
-			slog.Error("worker: start step run", "run_id", runID, "step", i, "error", err)
-			finalStatus = StatusFailed
-			break
-		}
-		db.WithContext(context.Background()).Exec( //nolint:errcheck
-			"UPDATE workflow_runs SET current_step=? WHERE run_id=?", i, runID)
+		connect().WithContext(context.Background()).Exec( //nolint:errcheck
+			"UPDATE workflow_runs SET current_step=? WHERE run_id=?", group.indices[0], runID)
 
-		respStatus, respBody, stepErr := p.executeStep(runCtx, token, step, inputs)
-
-		if stepErr != nil {
-			if errors.Is(stepErr, context.Canceled) {
-				p.finishStepRun(stepRunID, StatusCancelled, nil, strPtr(stepErr.Error()))
-				finalStatus = StatusCancelled
-			} else {
-				p.finishStepRun(stepRunID, StatusFailed, nil, strPtr(stepErr.Error()))
+		if len(group.steps) == 1 {
+			ws := group.steps[0]
+			i := group.indices[0]
+			stepRunID := uuid.New().String()
+			if err := p.startStepRun(runID, stepRunID, i, ws.Name); err != nil {
+				slog.Error("worker: start step run", "run_id", runID, "step", i, "error", err)
 				finalStatus = StatusFailed
+				break
 			}
+			output, stepErr := p.executeStep(runCtx, token, ws.Step, inputs)
+			if stepErr != nil {
+				if errors.Is(stepErr, context.Canceled) {
+					p.finishStepRun(stepRunID, StatusCancelled, strPtr(stepErr.Error()))
+					finalStatus = StatusCancelled
+				} else {
+					p.finishStepRun(stepRunID, StatusFailed, strPtr(stepErr.Error()))
+					finalStatus = StatusFailed
+				}
+				break
+			}
+			meterStepsCompleted.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("workflow.id", workflowID),
+				attribute.String("status", StatusCompleted),
+			))
+			p.finishStepRun(stepRunID, StatusCompleted, strPtr(output))
+			slog.Info("worker: step completed", "run_id", runID, "step", i, "action", ws.Action)
+			continue
+		}
+
+		// Parallel group.
+		type parallelResult struct {
+			stepRunID string
+			action    string
+			stepIdx   int
+			output    string
+			err       error
+		}
+
+		stepRunIDs := make([]string, len(group.steps))
+		for j, ws := range group.steps {
+			sid := uuid.New().String()
+			stepRunIDs[j] = sid
+			if err := p.startStepRun(runID, sid, group.indices[j], ws.Name); err != nil {
+				slog.Error("worker: start parallel step run", "run_id", runID, "step", group.indices[j], "error", err)
+				finalStatus = StatusFailed
+				break
+			}
+		}
+		if finalStatus != StatusCompleted {
 			break
 		}
 
-		stepStatus := statusForResponse(step, respStatus)
-		meterStepsCompleted.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("workflow.id", workflowID),
-			attribute.String("status", stepStatus),
-		))
-		p.finishStepRun(stepRunID, stepStatus, &respStatus, &respBody)
+		results := make(chan parallelResult, len(group.steps))
+		for j, ws := range group.steps {
+			go func(j int, ws WorkflowStep) {
+				out, err := p.executeStep(runCtx, token, ws.Step, inputs)
+				results <- parallelResult{stepRunIDs[j], ws.Action, group.indices[j], out, err}
+			}(j, ws)
+		}
 
-		if stepStatus != StatusCompleted {
-			slog.Info("worker: step failed", "run_id", runID, "step", i,
-				"service", step.Service, "response_status", respStatus)
-			finalStatus = StatusFailed
+		groupFailed := false
+		for range group.steps {
+			r := <-results
+			if r.err != nil {
+				var status string
+				if errors.Is(r.err, context.Canceled) {
+					status = StatusCancelled
+					if finalStatus == StatusCompleted {
+						finalStatus = StatusCancelled
+					}
+				} else {
+					status = StatusFailed
+					finalStatus = StatusFailed
+				}
+				p.finishStepRun(r.stepRunID, status, strPtr(r.err.Error()))
+				slog.Info("worker: parallel step failed", "run_id", runID, "step", r.stepIdx, "action", r.action, "error", r.err)
+				groupFailed = true
+			} else {
+				meterStepsCompleted.Add(ctx, 1, metric.WithAttributes(
+					attribute.String("workflow.id", workflowID),
+					attribute.String("status", StatusCompleted),
+				))
+				p.finishStepRun(r.stepRunID, StatusCompleted, strPtr(r.output))
+				slog.Info("worker: parallel step completed", "run_id", runID, "step", r.stepIdx, "action", r.action)
+			}
+		}
+		if groupFailed {
 			break
 		}
-		slog.Info("worker: step completed", "run_id", runID, "step", i,
-			"service", step.Service, "response_status", respStatus)
 	}
 
 	meterRunsCompleted.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("workflow.id", workflowID),
 		attribute.String("status", finalStatus),
 	))
-	db.WithContext(context.Background()).Exec( //nolint:errcheck
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck
 		"UPDATE workflow_runs SET status=?, ended_at=now(), token=NULL WHERE run_id=? AND status='running'",
 		finalStatus, runID,
 	)
 	slog.Info("worker: run finished", "run_id", runID, "status", finalStatus)
 }
 
-// executeStep resolves the target service URL, substitutes ${KEY} placeholders
-// from inputs, and makes the HTTP request. Returns the response status code,
-// truncated response body, and any transport-level error.
-func (p *WorkerPool) executeStep(ctx context.Context, token string, step WorkflowStep, inputs map[string]string) (int, string, error) {
-	baseURL, ok := serviceURLs[step.Service]
-	if !ok {
-		return 0, "", fmt.Errorf("unknown service %q — register it via SERVICES env var", step.Service)
-	}
-
-	method := strings.ToUpper(step.Method)
-	if method == "" {
-		method = http.MethodPost
-	}
-
-	path := substitute(step.Path, inputs)
-	url := strings.TrimRight(baseURL, "/") + path
-
-	timeout := step.TimeoutSecs
+// executeStep dispatches a step to either the http escape-hatch or the registry
+// action catalog. Returns the step output and a non-nil error on failure.
+// context.Canceled means the run was cancelled.
+func (p *WorkerPool) executeStep(ctx context.Context, token string, step Step, inputs map[string]string) (string, error) {
+	with := substituteWith(step.With, inputs)
+	timeout := step.Timeout
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	} else if timeout > maxTimeout {
@@ -199,15 +263,204 @@ func (p *WorkerPool) executeStep(ctx context.Context, token string, step Workflo
 	stepCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	var bodyReader io.Reader
-	if len(step.Body) > 0 {
-		substituted := substitute(string(step.Body), inputs)
-		bodyReader = strings.NewReader(substituted)
+	if step.Action == ActionHTTP {
+		return p.executeHTTP(stepCtx, token, with)
 	}
 
-	req, err := http.NewRequestWithContext(stepCtx, method, url, bodyReader)
+	actionCatalogMu.RLock()
+	def, ok := actionCatalog[step.Action]
+	actionCatalogMu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("unknown action %q — register it in the service catalog or use the http escape hatch", step.Action)
+	}
+	return p.executeAction(stepCtx, token, def, with)
+}
+
+// executeAction dispatches a catalog action: applies body transforms, sends the
+// HTTP request, then polls if the action is async.
+func (p *WorkerPool) executeAction(ctx context.Context, token string, def ActionDef, with map[string]any) (string, error) {
+	body := make(map[string]any, len(with))
+	for k, v := range with {
+		body[k] = v
+	}
+	for _, t := range def.BodyTransforms {
+		val, exists := body[t.FromKey]
+		if !exists {
+			continue
+		}
+		delete(body, t.FromKey)
+		if len(t.Wrap) > 0 {
+			if s, ok := val.(string); ok {
+				wrapped := make([]any, len(t.Wrap)+1)
+				for i, w := range t.Wrap {
+					wrapped[i] = w
+				}
+				wrapped[len(t.Wrap)] = s
+				body[t.ToKey] = wrapped
+			} else {
+				body[t.ToKey] = val
+			}
+		} else {
+			body[t.ToKey] = val
+		}
+	}
+
+	payload, err := json.Marshal(body)
 	if err != nil {
-		return 0, "", fmt.Errorf("build request: %w", err)
+		return "", fmt.Errorf("marshal %s payload: %w", def.Name, err)
+	}
+
+	url := strings.TrimRight(def.ServiceURL, "/") + def.Path
+	req, err := http.NewRequestWithContext(ctx, def.Method, url, bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("build %s request: %w", def.Name, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", def.Name, err)
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	resp.Body.Close()
+
+	if def.Async == nil {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return string(respBody), fmt.Errorf("%s returned %d: %s", def.Name, resp.StatusCode, strings.TrimSpace(string(respBody)))
+		}
+		return string(respBody), nil
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("%s returned %d: %s", def.Name, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var submission map[string]any
+	if err := json.Unmarshal(respBody, &submission); err != nil {
+		return "", fmt.Errorf("%s: parse submission response: %w", def.Name, err)
+	}
+	idVal, ok := submission[def.Async.IDField]
+	if !ok {
+		return "", fmt.Errorf("%s: submission response missing field %q", def.Name, def.Async.IDField)
+	}
+	jobID, ok := idVal.(string)
+	if !ok || jobID == "" {
+		return "", fmt.Errorf("%s: async ID field %q is not a string", def.Name, def.Async.IDField)
+	}
+	return p.pollAction(ctx, token, def, jobID)
+}
+
+// pollAction polls the job status URL until a terminal state is reached or the
+// context is cancelled.
+func (p *WorkerPool) pollAction(ctx context.Context, token string, def ActionDef, jobID string) (string, error) {
+	interval := time.Duration(def.Async.PollIntervalSecs) * time.Second
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	pollURL := strings.TrimRight(def.ServiceURL, "/") + strings.ReplaceAll(def.Async.PollPath, "{id}", jobID)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-ticker.C:
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
+		if err != nil {
+			return "", fmt.Errorf("build poll request: %w", err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			continue // transient — keep polling
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		resp.Body.Close()
+
+		var result map[string]any
+		if err := json.Unmarshal(body, &result); err != nil {
+			continue
+		}
+		status, _ := result[def.Async.StatusField].(string)
+
+		for _, s := range def.Async.SuccessStates {
+			if status == s {
+				out := ""
+				if def.Async.OutputField != "" {
+					if v, ok := result[def.Async.OutputField]; ok {
+						out, _ = v.(string)
+					}
+				}
+				return out, nil
+			}
+		}
+		for _, s := range def.Async.FailureStates {
+			if status == s {
+				var parts []string
+				if def.Async.OutputField != "" {
+					if v, ok := result[def.Async.OutputField]; ok {
+						if sv, ok := v.(string); ok && sv != "" {
+							parts = append(parts, sv)
+						}
+					}
+				}
+				for _, f := range def.Async.ErrorFields {
+					if v, ok := result[f]; ok {
+						if sv, ok := v.(string); ok && sv != "" {
+							parts = append(parts, sv)
+						}
+					}
+				}
+				exitCode := result["exit_code"]
+				return strings.Join(parts, "\n"), fmt.Errorf("%s %s (exit code: %v)", def.Name, status, exitCode)
+			}
+		}
+		for _, s := range def.Async.CancelStates {
+			if status == s {
+				return "", context.Canceled
+			}
+		}
+		// pending/running — keep polling
+	}
+}
+
+// executeHTTP performs a raw HTTP call. All HTTP parameters come from With:
+// service, method, path, body (any), headers (map), expected_status (int).
+func (p *WorkerPool) executeHTTP(ctx context.Context, token string, with map[string]any) (string, error) {
+	service := withString(with, "service")
+	serviceURLsMu.RLock()
+	baseURL, ok := serviceURLs[service]
+	serviceURLsMu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("unknown service %q — register it via SERVICES env var", service)
+	}
+
+	method := strings.ToUpper(withString(with, "method"))
+	if method == "" {
+		method = http.MethodPost
+	}
+	path := withString(with, "path")
+	url := strings.TrimRight(baseURL, "/") + path
+
+	var bodyReader io.Reader
+	if rawBody, ok := with["body"]; ok && rawBody != nil {
+		bodyJSON, err := json.Marshal(rawBody)
+		if err == nil && string(bodyJSON) != "null" {
+			bodyReader = strings.NewReader(string(bodyJSON))
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
 	}
 	if bodyReader != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -215,34 +468,36 @@ func (p *WorkerPool) executeStep(ctx context.Context, token string, step Workflo
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	for k, v := range step.Headers {
-		req.Header.Set(k, substitute(v, inputs))
+	reservedHeaders := map[string]bool{
+		"authorization": true,
+		"x-service-key": true,
+		"cookie":        true,
+		"x-user-id":    true,
+	}
+	for k, v := range withStringMap(with, "headers") {
+		if !reservedHeaders[strings.ToLower(k)] {
+			req.Header.Set(k, v)
+		}
 	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return 0, "", fmt.Errorf("%s %s: %w", method, url, err)
+		return "", fmt.Errorf("%s %s: %w", method, url, err)
 	}
-	defer resp.Body.Close()
-
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	return resp.StatusCode, string(raw), nil
-}
+	resp.Body.Close()
 
-// statusForResponse decides whether the step succeeded based on the HTTP
-// response code. If ExpectedStatus is set, it must match exactly. Otherwise
-// any 2xx counts as success.
-func statusForResponse(step WorkflowStep, code int) string {
-	if step.ExpectedStatus != 0 {
-		if code == step.ExpectedStatus {
-			return StatusCompleted
+	expectedStatus := int(withInt64(with, "expected_status"))
+	if expectedStatus != 0 {
+		if resp.StatusCode != expectedStatus {
+			return string(raw), fmt.Errorf("expected status %d, got %d: %s", expectedStatus, resp.StatusCode, strings.TrimSpace(string(raw)))
 		}
-		return StatusFailed
+		return string(raw), nil
 	}
-	if code >= 200 && code < 300 {
-		return StatusCompleted
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return string(raw), fmt.Errorf("%s %s returned %d: %s", method, url, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
-	return StatusFailed
+	return string(raw), nil
 }
 
 // substitute replaces all ${KEY} occurrences in s with the corresponding value
@@ -255,24 +510,22 @@ func substitute(s string, inputs map[string]string) string {
 }
 
 func (p *WorkerPool) startStepRun(runID, stepRunID string, index int, name string) error {
-	return db.Exec(
+	return connect().Exec(
 		`INSERT INTO workflow_step_runs (step_run_id, run_id, step_index, step_name, status, started_at)
 		 VALUES (?, ?, ?, ?, 'running', now())`,
 		stepRunID, runID, index, name,
 	).Error
 }
 
-func (p *WorkerPool) finishStepRun(stepRunID, status string, respStatus *int, respBody *string) {
-	db.WithContext(context.Background()).Exec( //nolint:errcheck
-		`UPDATE workflow_step_runs
-		 SET status=?, response_status=?, response_body=?, ended_at=now()
-		 WHERE step_run_id=?`,
-		status, respStatus, respBody, stepRunID,
+func (p *WorkerPool) finishStepRun(stepRunID, status string, output *string) {
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck
+		`UPDATE workflow_step_runs SET status=?, response_body=?, ended_at=now() WHERE step_run_id=?`,
+		status, output, stepRunID,
 	)
 }
 
 func (p *WorkerPool) failRun(runID string) {
-	db.WithContext(context.Background()).Exec( //nolint:errcheck
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck
 		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL WHERE run_id=?", runID,
 	)
 	slog.Warn("worker: run failed before first step", "run_id", runID)

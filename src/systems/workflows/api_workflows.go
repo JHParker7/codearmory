@@ -1,13 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,64 +17,40 @@ import (
 	"gorm.io/gorm"
 )
 
-// canAccessWorkflow returns true when the caller owns the workflow or shares its org.
+var validMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE"}
+
+// handleListActions returns the current in-memory action catalog loaded from the registry.
+func handleListActions(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := gatekeeperClient.CheckPermissions(r.Context(), w, r, "listAction", "workflows/actions"); !ok {
+		return
+	}
+
+	actionCatalogMu.RLock()
+	catalog := make([]ActionDef, 0, len(actionCatalog))
+	for _, def := range actionCatalog {
+		catalog = append(catalog, def)
+	}
+	actionCatalogMu.RUnlock()
+
+	sort.Slice(catalog, func(i, j int) bool { return catalog[i].Name < catalog[j].Name })
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(catalog) //nolint:errcheck
+}
+
 func canAccessWorkflow(wf Workflow, userID, orgID string) bool {
 	return wf.CreatedBy == userID || (orgID != "" && wf.OrgID == orgID)
 }
 
-// bearerToken extracts the raw Bearer token from the request without validation.
 func bearerToken(r *http.Request) string {
 	token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	return token
 }
 
-var validMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE"}
-
 type createWorkflowRequest struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Steps       []WorkflowStep `json:"steps"`
-}
-
-// validateSteps normalises and validates the step list, returning an error
-// message ready to send as an HTTP 400 body, or "" on success.
-func validateSteps(steps []WorkflowStep) ([]WorkflowStep, string) {
-	if len(steps) == 0 {
-		return nil, "at least one step is required"
-	}
-	if len(steps) > maxSteps {
-		return nil, fmt.Sprintf("maximum %d steps allowed", maxSteps)
-	}
-	out := make([]WorkflowStep, len(steps))
-	copy(out, steps)
-	for i, s := range out {
-		if s.Service == "" {
-			return nil, fmt.Sprintf("step %d: service is required", i)
-		}
-		if s.Path == "" || !strings.HasPrefix(s.Path, "/") {
-			return nil, fmt.Sprintf("step %d: path must be set and start with '/'", i)
-		}
-		method := strings.ToUpper(s.Method)
-		if method == "" {
-			method = "POST"
-		}
-		if !slices.Contains(validMethods, method) {
-			return nil, fmt.Sprintf("step %d: method %q is not allowed", i, s.Method)
-		}
-		out[i].Method = method
-		if s.Name == "" {
-			out[i].Name = fmt.Sprintf("step-%d", i)
-		}
-		if s.TimeoutSecs <= 0 {
-			out[i].TimeoutSecs = defaultTimeout
-		} else if s.TimeoutSecs > maxTimeout {
-			out[i].TimeoutSecs = maxTimeout
-		}
-		if out[i].Headers == nil {
-			out[i].Headers = map[string]string{}
-		}
-	}
-	return out, ""
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Steps       []WorkflowStepRef `json:"steps,omitempty"`
 }
 
 func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -98,31 +73,59 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
-	steps, errMsg := validateSteps(req.Steps)
-	if errMsg != "" {
-		http.Error(w, errMsg, http.StatusBadRequest)
+	if len(req.Steps) > maxSteps {
+		http.Error(w, fmt.Sprintf("maximum %d steps allowed", maxSteps), http.StatusBadRequest)
 		return
 	}
+	for i, ref := range req.Steps {
+		if ref.StepID == "" {
+			http.Error(w, fmt.Sprintf("step %d: step_id is required", i), http.StatusBadRequest)
+			return
+		}
+		if ref.ParallelGroup != nil && *ref.ParallelGroup < 0 {
+			http.Error(w, fmt.Sprintf("step %d: parallel_group must be non-negative", i), http.StatusBadRequest)
+			return
+		}
+	}
 
+	// Validate all referenced steps exist and are accessible.
+	if err := validateStepRefs(ctx, req.Steps, userID, orgID, w); err != nil {
+		return // response already written
+	}
+
+	refs := req.Steps
+	if refs == nil {
+		refs = []WorkflowStepRef{}
+	}
 	wf := Workflow{
 		WorkflowID:  uuid.New().String(),
 		Name:        req.Name,
 		Description: req.Description,
 		CreatedBy:   userID,
 		OrgID:       orgID,
-		Steps:       steps,
+		Active:      true,
+		StepRefs:    refs,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
-		Active:      true,
 	}
 
-	if err := db.WithContext(ctx).Create(&wf).Error; err != nil {
+	if err := wf.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("create workflow: db error", "error", err)
 		http.Error(w, "failed to create workflow", http.StatusInternalServerError)
 		return
 	}
+
+	steps, err := enrichStepRefs(ctx, wf.StepRefs)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "enrich steps failed")
+		slog.Error("create workflow: enrich steps", "error", err)
+		http.Error(w, "failed to create workflow", http.StatusInternalServerError)
+		return
+	}
+	wf.Steps = steps
 
 	span.SetAttributes(attribute.String("workflow.id", wf.WorkflowID))
 	span.SetStatus(codes.Ok, "")
@@ -142,20 +145,16 @@ func handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var wfs []Workflow
-	if err := db.WithContext(ctx).
-		Where("active=? AND (created_by=? OR (org_id!='' AND org_id=?))", true, userID, orgID).
-		Order("created_at desc").
-		Limit(100).
-		Find(&wfs).Error; err != nil {
+	wfs, err := listWorkflows(ctx, userID, orgID)
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		slog.Error("list workflows: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list workflows", http.StatusInternalServerError)
 		return
 	}
-	if wfs == nil {
-		wfs = []Workflow{}
+	for i := range wfs {
+		wfs[i].Steps = []WorkflowStep{}
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -231,27 +230,33 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
-	steps, errMsg := validateSteps(req.Steps)
-	if errMsg != "" {
-		http.Error(w, errMsg, http.StatusBadRequest)
+	if len(req.Steps) > maxSteps {
+		http.Error(w, fmt.Sprintf("maximum %d steps allowed", maxSteps), http.StatusBadRequest)
+		return
+	}
+	for i, ref := range req.Steps {
+		if ref.StepID == "" {
+			http.Error(w, fmt.Sprintf("step %d: step_id is required", i), http.StatusBadRequest)
+			return
+		}
+		if ref.ParallelGroup != nil && *ref.ParallelGroup < 0 {
+			http.Error(w, fmt.Sprintf("step %d: parallel_group must be non-negative", i), http.StatusBadRequest)
+			return
+		}
+	}
+	if err := validateStepRefs(ctx, req.Steps, userID, orgID, w); err != nil {
 		return
 	}
 
-	stepsJSON, err := json.Marshal(steps)
-	if err != nil {
-		slog.Error("update workflow: marshal steps", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+	refs := req.Steps
+	if refs == nil {
+		refs = []WorkflowStepRef{}
 	}
+	existing.Name = req.Name
+	existing.Description = req.Description
+	existing.StepRefs = refs
 
-	if err := db.WithContext(ctx).Model(&Workflow{}).
-		Where("workflow_id=? AND active=?", id, true).
-		Updates(map[string]any{
-			"name":        req.Name,
-			"description": req.Description,
-			"steps":       string(stepsJSON),
-			"updated_at":  time.Now().UTC(),
-		}).Error; err != nil {
+	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
 		slog.Error("update workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
@@ -263,7 +268,6 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db fetch after update failed")
-		slog.Error("update workflow: fetch after update", "workflow_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get updated workflow", http.StatusInternalServerError)
 		return
 	}
@@ -301,13 +305,10 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := db.WithContext(ctx).Model(&Workflow{}).
-		Where("workflow_id=? AND active=?", id, true).
-		Updates(map[string]any{"active": false, "updated_at": time.Now().UTC()})
-	if result.Error != nil {
-		span.RecordError(result.Error)
+	if err := wf.Remove(ctx); err != nil {
+		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete workflow: db error", "workflow_id", id, "user_id", userID, "error", result.Error)
+		slog.Error("delete workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete workflow", http.StatusInternalServerError)
 		return
 	}
@@ -315,11 +316,4 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	slog.Info("workflow deleted", "workflow_id", id, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// getWorkflow fetches a single active workflow by ID.
-func getWorkflow(ctx context.Context, id string) (Workflow, error) {
-	var wf Workflow
-	result := db.WithContext(ctx).Where("workflow_id=? AND active=?", id, true).First(&wf)
-	return wf, result.Error
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,118 +110,51 @@ func TestCheckGatekeeper_GatekeeperDown(t *testing.T) {
 	}
 }
 
-// ── validateSteps ─────────────────────────────────────────────────────────────
+// ── validateStepRequest ───────────────────────────────────────────────────────
 
-func TestValidateSteps_Empty(t *testing.T) {
-	_, msg := validateSteps(nil)
-	if msg == "" {
-		t.Fatal("expected error for nil steps")
-	}
-	_, msg = validateSteps([]WorkflowStep{})
-	if msg == "" {
-		t.Fatal("expected error for empty steps")
+func TestValidateStepRequest_MissingName(t *testing.T) {
+	msg := validateStepRequest(createStepRequest{Action: "forge/run", With: map[string]any{"image": "ubuntu:22.04", "run": "go test ./..."}})
+	if !strings.Contains(msg, "name") {
+		t.Fatalf("expected name error, got %q", msg)
 	}
 }
 
-func TestValidateSteps_MissingService(t *testing.T) {
-	_, msg := validateSteps([]WorkflowStep{
-		{Path: "/foo", Method: "GET"},
-	})
+func TestValidateStepRequest_MissingAction(t *testing.T) {
+	msg := validateStepRequest(createStepRequest{Name: "build"})
+	if !strings.Contains(msg, "action") {
+		t.Fatalf("expected action error, got %q", msg)
+	}
+}
+
+func TestValidateStepRequest_CatalogActionValid(t *testing.T) {
+	// Catalog-registered actions (e.g. forge/run, tickets/create) are accepted at
+	// step creation time; their With fields are validated at execution time.
+	msg := validateStepRequest(createStepRequest{Name: "build", Action: "forge/run", With: map[string]any{"image": "ubuntu:22.04", "run": "go test ./..."}})
+	if msg != "" {
+		t.Fatalf("unexpected error: %s", msg)
+	}
+}
+
+func TestValidateStepRequest_UnknownActionAccepted(t *testing.T) {
+	// Any non-empty action string is accepted at step creation time; the worker
+	// validates against the catalog at execution time.
+	msg := validateStepRequest(createStepRequest{Name: "build", Action: "some/future-service"})
+	if msg != "" {
+		t.Fatalf("expected no error for unknown action, got %q", msg)
+	}
+}
+
+func TestValidateStepRequest_HTTPMissingService(t *testing.T) {
+	msg := validateStepRequest(createStepRequest{Name: "call", Action: ActionHTTP, With: map[string]any{"path": "/foo"}})
 	if !strings.Contains(msg, "service") {
 		t.Fatalf("expected service error, got %q", msg)
 	}
 }
 
-func TestValidateSteps_MissingPath(t *testing.T) {
-	_, msg := validateSteps([]WorkflowStep{
-		{Service: "forge", Method: "GET"},
-	})
+func TestValidateStepRequest_HTTPMissingPath(t *testing.T) {
+	msg := validateStepRequest(createStepRequest{Name: "call", Action: ActionHTTP, With: map[string]any{"service": "forge"}})
 	if !strings.Contains(msg, "path") {
 		t.Fatalf("expected path error, got %q", msg)
-	}
-}
-
-func TestValidateSteps_PathMustStartWithSlash(t *testing.T) {
-	_, msg := validateSteps([]WorkflowStep{
-		{Service: "forge", Path: "executions", Method: "GET"},
-	})
-	if !strings.Contains(msg, "path") {
-		t.Fatalf("expected path error, got %q", msg)
-	}
-}
-
-func TestValidateSteps_InvalidMethod(t *testing.T) {
-	_, msg := validateSteps([]WorkflowStep{
-		{Service: "forge", Path: "/executions", Method: "CONNECT"},
-	})
-	if !strings.Contains(msg, "method") {
-		t.Fatalf("expected method error, got %q", msg)
-	}
-}
-
-func TestValidateSteps_DefaultsApplied(t *testing.T) {
-	steps, msg := validateSteps([]WorkflowStep{
-		{Service: "forge", Path: "/executions"},
-	})
-	if msg != "" {
-		t.Fatalf("unexpected error: %s", msg)
-	}
-	if steps[0].Method != "POST" {
-		t.Errorf("default method = %q, want POST", steps[0].Method)
-	}
-	if steps[0].TimeoutSecs != defaultTimeout {
-		t.Errorf("default timeout = %d, want %d", steps[0].TimeoutSecs, defaultTimeout)
-	}
-	if steps[0].Name != "step-0" {
-		t.Errorf("default name = %q, want step-0", steps[0].Name)
-	}
-	if steps[0].Headers == nil {
-		t.Error("headers should be initialised to empty map, got nil")
-	}
-}
-
-func TestValidateSteps_MethodNormalised(t *testing.T) {
-	steps, msg := validateSteps([]WorkflowStep{
-		{Service: "forge", Path: "/executions", Method: "post"},
-	})
-	if msg != "" {
-		t.Fatalf("unexpected error: %s", msg)
-	}
-	if steps[0].Method != "POST" {
-		t.Errorf("method = %q, want POST", steps[0].Method)
-	}
-}
-
-func TestValidateSteps_TimeoutClamped(t *testing.T) {
-	steps, _ := validateSteps([]WorkflowStep{
-		{Service: "svc", Path: "/p", TimeoutSecs: maxTimeout + 100},
-	})
-	if steps[0].TimeoutSecs != maxTimeout {
-		t.Errorf("timeout = %d, want %d", steps[0].TimeoutSecs, maxTimeout)
-	}
-}
-
-func TestValidateSteps_TooMany(t *testing.T) {
-	many := make([]WorkflowStep, maxSteps+1)
-	for i := range many {
-		many[i] = WorkflowStep{Service: "s", Path: "/p"}
-	}
-	_, msg := validateSteps(many)
-	if msg == "" {
-		t.Fatal("expected error for too many steps")
-	}
-}
-
-func TestValidateSteps_Valid(t *testing.T) {
-	steps, msg := validateSteps([]WorkflowStep{
-		{Name: "deploy", Service: "forge", Path: "/executions", Method: "POST", TimeoutSecs: 60},
-		{Service: "blueprints", Path: "/states/my-stack", Method: "GET"},
-	})
-	if msg != "" {
-		t.Fatalf("unexpected error: %s", msg)
-	}
-	if len(steps) != 2 {
-		t.Fatalf("expected 2 steps, got %d", len(steps))
 	}
 }
 
@@ -263,39 +195,57 @@ func TestSubstitute_EmptyInputs(t *testing.T) {
 	}
 }
 
-// ── statusForResponse ─────────────────────────────────────────────────────────
+// ── executeHTTP (http action) ─────────────────────────────────────────────────
 
-func TestStatusForResponse_2xxSuccess(t *testing.T) {
-	for _, code := range []int{200, 201, 202, 204} {
-		step := WorkflowStep{}
-		got := statusForResponse(step, code)
-		if got != StatusCompleted {
-			t.Errorf("code %d: got %q, want completed", code, got)
-		}
+func TestExecuteHTTP_2xxSuccess(t *testing.T) {
+	pool := &WorkerPool{}
+	fakeService(t, "svc", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/ok", "method": "GET"}}
+	_, err := pool.executeStep(context.Background(), "", step, nil)
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
 	}
 }
 
-func TestStatusForResponse_4xxFailed(t *testing.T) {
-	for _, code := range []int{400, 401, 403, 404, 500} {
-		step := WorkflowStep{}
-		got := statusForResponse(step, code)
-		if got != StatusFailed {
-			t.Errorf("code %d: got %q, want failed", code, got)
-		}
+func TestExecuteHTTP_4xxFails(t *testing.T) {
+	pool := &WorkerPool{}
+	fakeService(t, "svc", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/bad", "method": "GET"}}
+	_, err := pool.executeStep(context.Background(), "", step, nil)
+	if err == nil {
+		t.Fatal("expected error for 4xx response")
 	}
 }
 
-func TestStatusForResponse_ExactMatchSuccess(t *testing.T) {
-	step := WorkflowStep{ExpectedStatus: 201}
-	if got := statusForResponse(step, 201); got != StatusCompleted {
-		t.Errorf("got %q, want completed", got)
+func TestExecuteHTTP_ExactMatchSuccess(t *testing.T) {
+	pool := &WorkerPool{}
+	fakeService(t, "svc", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	step := Step{Action: ActionHTTP, With: map[string]any{
+		"service": "svc", "path": "/create", "method": "POST", "expected_status": float64(201),
+	}}
+	_, err := pool.executeStep(context.Background(), "", step, nil)
+	if err != nil {
+		t.Fatalf("expected success for exact match 201, got %v", err)
 	}
 }
 
-func TestStatusForResponse_ExactMatchFail(t *testing.T) {
-	step := WorkflowStep{ExpectedStatus: 201}
-	if got := statusForResponse(step, 200); got != StatusFailed {
-		t.Errorf("got %q, want failed", got)
+func TestExecuteHTTP_ExactMatchFail(t *testing.T) {
+	pool := &WorkerPool{}
+	fakeService(t, "svc", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	step := Step{Action: ActionHTTP, With: map[string]any{
+		"service": "svc", "path": "/create", "method": "POST", "expected_status": float64(201),
+	}}
+	_, err := pool.executeStep(context.Background(), "", step, nil)
+	if err == nil {
+		t.Fatal("expected error when status 200 != expected 201")
 	}
 }
 
@@ -361,38 +311,44 @@ func TestWorkerPool_Cancel_Found(t *testing.T) {
 	}
 }
 
-// ── executeStep ───────────────────────────────────────────────────────────────
+// ── executeStep (http action) ─────────────────────────────────────────────────
 
-func TestExecuteStep_UnknownService(t *testing.T) {
+func TestExecuteStep_UnknownAction(t *testing.T) {
 	pool := &WorkerPool{}
-	step := WorkflowStep{Service: "unknown-service", Path: "/foo", Method: "GET"}
-	_, _, err := pool.executeStep(context.Background(), "tok", step, nil)
+	step := Step{Action: "unknown/action"}
+	_, err := pool.executeStep(context.Background(), "tok", step, nil)
+	if err == nil || !strings.Contains(err.Error(), "unknown action") {
+		t.Fatalf("expected unknown action error, got %v", err)
+	}
+}
+
+func TestExecuteStep_HTTPUnknownService(t *testing.T) {
+	pool := &WorkerPool{}
+	step := Step{Action: ActionHTTP, With: map[string]any{"service": "no-such-svc", "path": "/foo"}}
+	_, err := pool.executeStep(context.Background(), "tok", step, nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown service") {
 		t.Fatalf("expected unknown service error, got %v", err)
 	}
 }
 
-func TestExecuteStep_Success(t *testing.T) {
+func TestExecuteStep_HTTPSuccess(t *testing.T) {
 	pool := &WorkerPool{}
 	fakeService(t, "mysvc", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
 	})
 
-	step := WorkflowStep{Service: "mysvc", Path: "/health", Method: "GET"}
-	code, body, err := pool.executeStep(context.Background(), "tok", step, nil)
+	step := Step{Action: ActionHTTP, With: map[string]any{"service": "mysvc", "path": "/health", "method": "GET"}}
+	body, err := pool.executeStep(context.Background(), "tok", step, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if code != http.StatusOK {
-		t.Errorf("code = %d, want 200", code)
 	}
 	if !strings.Contains(body, "ok") {
 		t.Errorf("body = %q, missing expected content", body)
 	}
 }
 
-func TestExecuteStep_SubstitutesInputsInPath(t *testing.T) {
+func TestExecuteStep_HTTPSubstitutesInputsInPath(t *testing.T) {
 	pool := &WorkerPool{}
 	var capturedPath string
 	fakeService(t, "svc", func(w http.ResponseWriter, r *http.Request) {
@@ -400,14 +356,14 @@ func TestExecuteStep_SubstitutesInputsInPath(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	step := WorkflowStep{Service: "svc", Path: "/items/${ITEM_ID}", Method: "GET"}
+	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/items/${ITEM_ID}", "method": "GET"}}
 	pool.executeStep(context.Background(), "tok", step, map[string]string{"ITEM_ID": "abc-123"}) //nolint:errcheck
 	if capturedPath != "/items/abc-123" {
 		t.Errorf("path = %q, want /items/abc-123", capturedPath)
 	}
 }
 
-func TestExecuteStep_ForwardsAuthHeader(t *testing.T) {
+func TestExecuteStep_HTTPForwardsAuthHeader(t *testing.T) {
 	pool := &WorkerPool{}
 	var capturedAuth string
 	fakeService(t, "svc", func(w http.ResponseWriter, r *http.Request) {
@@ -415,14 +371,14 @@ func TestExecuteStep_ForwardsAuthHeader(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	step := WorkflowStep{Service: "svc", Path: "/endpoint", Method: "GET"}
+	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/endpoint", "method": "GET"}}
 	pool.executeStep(context.Background(), "my-token", step, nil) //nolint:errcheck
 	if capturedAuth != "Bearer my-token" {
 		t.Errorf("Authorization = %q, want \"Bearer my-token\"", capturedAuth)
 	}
 }
 
-func TestExecuteStep_SendsBody(t *testing.T) {
+func TestExecuteStep_HTTPSendsBody(t *testing.T) {
 	pool := &WorkerPool{}
 	var capturedBody []byte
 	fakeService(t, "svc", func(w http.ResponseWriter, r *http.Request) {
@@ -430,21 +386,21 @@ func TestExecuteStep_SendsBody(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 	})
 
-	body := json.RawMessage(`{"image":"alpine:3.19"}`)
-	step := WorkflowStep{Service: "svc", Path: "/run", Method: "POST", Body: body}
-	code, _, err := pool.executeStep(context.Background(), "tok", step, nil)
+	step := Step{Action: ActionHTTP, With: map[string]any{
+		"service": "svc", "path": "/run", "method": "POST",
+		"body": map[string]any{"image": "alpine:3.19"},
+		"expected_status": float64(201),
+	}}
+	_, err := pool.executeStep(context.Background(), "tok", step, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if code != http.StatusCreated {
-		t.Errorf("code = %d, want 201", code)
 	}
 	if !strings.Contains(string(capturedBody), "alpine:3.19") {
 		t.Errorf("body %q missing expected content", string(capturedBody))
 	}
 }
 
-func TestExecuteStep_SubstitutesInputsInBody(t *testing.T) {
+func TestExecuteStep_HTTPSubstitutesInputsInBody(t *testing.T) {
 	pool := &WorkerPool{}
 	var capturedBodyBytes []byte
 	fakeService(t, "svc", func(w http.ResponseWriter, r *http.Request) {
@@ -452,8 +408,10 @@ func TestExecuteStep_SubstitutesInputsInBody(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	body := json.RawMessage(`{"tag":"${IMAGE_TAG}"}`)
-	step := WorkflowStep{Service: "svc", Path: "/deploy", Method: "POST", Body: body}
+	step := Step{Action: ActionHTTP, With: map[string]any{
+		"service": "svc", "path": "/deploy", "method": "POST",
+		"body": map[string]any{"tag": "${IMAGE_TAG}"},
+	}}
 	pool.executeStep(context.Background(), "tok", step, map[string]string{"IMAGE_TAG": "v1.2.3"}) //nolint:errcheck
 	if !strings.Contains(string(capturedBodyBytes), "v1.2.3") {
 		t.Errorf("body %q missing substituted value", string(capturedBodyBytes))
@@ -484,7 +442,7 @@ func TestHandleCreateWorkflow_InvalidBody(t *testing.T) {
 
 func TestHandleCreateWorkflow_MissingName(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
-	body := `{"steps":[{"service":"svc","path":"/x"}]}`
+	body := `{"steps":[{"step_id":"some-id"}]}`
 	r := httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewBufferString(body))
 	r.Header.Set("Authorization", "Bearer tok")
 	w := httptest.NewRecorder()
@@ -494,9 +452,9 @@ func TestHandleCreateWorkflow_MissingName(t *testing.T) {
 	}
 }
 
-func TestHandleCreateWorkflow_InvalidStep(t *testing.T) {
+func TestHandleCreateWorkflow_StepWithoutID(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
-	body := `{"name":"my-wf","steps":[{"path":"/x"}]}`
+	body := `{"name":"my-wf","steps":[{}]}`
 	r := httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewBufferString(body))
 	r.Header.Set("Authorization", "Bearer tok")
 	w := httptest.NewRecorder()

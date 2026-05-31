@@ -1,9 +1,6 @@
 package main
 
-import (
-	"encoding/json"
-	"time"
-)
+import "time"
 
 const (
 	StatusPending   = "pending"
@@ -21,33 +18,90 @@ const (
 	maxSteps        = 50
 )
 
-// WorkflowStep is a single step in a workflow definition. It describes a generic
-// HTTP request to a named, registered service. The Bearer token from the
-// triggering user is forwarded automatically.
-//
-// Path, Body, and Header values support ${KEY} substitution from run-level Inputs.
-type WorkflowStep struct {
-	Name           string            `json:"name"`
-	Service        string            `json:"service"`                   // registered service name, e.g. "forge"
-	Method         string            `json:"method"`                    // HTTP method; defaults to "POST"
-	Path           string            `json:"path"`                      // path on the target service, e.g. "/executions"
-	Body           json.RawMessage   `json:"body,omitempty"`            // optional JSON body
-	Headers        map[string]string `json:"headers,omitempty"`         // extra request headers
-	ExpectedStatus int               `json:"expected_status,omitempty"` // 0 = any 2xx response
-	TimeoutSecs    int64             `json:"timeout_secs"`
+// ActionHTTP is the escape hatch for raw HTTP calls to any registered service.
+const ActionHTTP = "http"
+
+// AsyncConfig describes how to poll an async job to terminal state.
+type AsyncConfig struct {
+	IDField          string   `json:"id_field"`
+	PollPath         string   `json:"poll_path"`
+	PollIntervalSecs int      `json:"poll_interval_secs"`
+	StatusField      string   `json:"status_field"`
+	SuccessStates    []string `json:"success_states"`
+	FailureStates    []string `json:"failure_states"`
+	CancelStates     []string `json:"cancel_states"`
+	OutputField      string   `json:"output_field"`
+	ErrorFields      []string `json:"error_fields"`
 }
 
-// Workflow is a named, ordered sequence of steps.
-type Workflow struct {
-	WorkflowID  string         `json:"workflow_id"  gorm:"column:workflow_id;primaryKey"`
+// BodyTransform rewrites a With key before the payload is sent to the service.
+// If Wrap is non-empty the string value is appended to form a string slice.
+type BodyTransform struct {
+	FromKey string   `json:"from_key"`
+	ToKey   string   `json:"to_key"`
+	Wrap    []string `json:"wrap,omitempty"`
+}
+
+// ActionDef is a callable workflow action loaded from the registry action catalog.
+type ActionDef struct {
+	Name           string          `json:"name"`
+	ServiceName    string          `json:"service_name"`
+	ServiceURL     string          `json:"service_url"`
+	Method         string          `json:"method"`
+	Path           string          `json:"path"`
+	BodyTransforms []BodyTransform `json:"body_transforms,omitempty"`
+	Async          *AsyncConfig    `json:"async,omitempty"`
+}
+
+// Step is a reusable, named action definition that can be composed into workflows.
+// Action determines what the step does; With holds action-specific configuration.
+// String values inside With support ${KEY} substitution from run-level Inputs.
+type Step struct {
+	StepID      string         `json:"step_id"      gorm:"column:step_id;primaryKey"`
 	Name        string         `json:"name"         gorm:"column:name"`
 	Description string         `json:"description"  gorm:"column:description;default:''"`
+	Action      string         `json:"action"       gorm:"column:action"`
+	With        map[string]any `json:"with"         gorm:"column:config;serializer:json"`
+	Timeout     int64          `json:"timeout"      gorm:"column:timeout_secs;default:30"`
 	CreatedBy   string         `json:"created_by"   gorm:"column:created_by"`
 	OrgID       string         `json:"org_id"       gorm:"column:org_id;default:''"`
-	Steps       []WorkflowStep `json:"steps"        gorm:"column:steps;serializer:json"`
+	Active      bool           `json:"active"       gorm:"column:active;default:true"`
 	CreatedAt   time.Time      `json:"created_at"   gorm:"column:created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"   gorm:"column:updated_at"`
-	Active      bool           `json:"active"       gorm:"column:active;default:true"`
+}
+
+func (Step) TableName() string { return "steps" }
+
+// WorkflowStepRef records how a step is used within a specific workflow:
+// which step and, optionally, which parallel execution group it belongs to.
+// Steps sharing the same non-nil ParallelGroup execute concurrently; the run
+// waits for all steps in a group before advancing.
+type WorkflowStepRef struct {
+	StepID        string `json:"step_id"`
+	ParallelGroup *int   `json:"parallel_group,omitempty"`
+}
+
+// WorkflowStep enriches a WorkflowStepRef with the full Step definition.
+// It is assembled at request/execution time and never stored in the DB.
+type WorkflowStep struct {
+	Step
+	ParallelGroup *int `json:"parallel_group,omitempty"`
+}
+
+// Workflow is a named, ordered pipeline of step references.
+// StepRefs is the authoritative DB column (JSON array of WorkflowStepRef).
+// Steps is populated at query time by joining against the steps table.
+type Workflow struct {
+	WorkflowID  string            `json:"workflow_id"  gorm:"column:workflow_id;primaryKey"`
+	Name        string            `json:"name"         gorm:"column:name"`
+	Description string            `json:"description"  gorm:"column:description;default:''"`
+	CreatedBy   string            `json:"created_by"   gorm:"column:created_by"`
+	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
+	Active      bool              `json:"active"       gorm:"column:active;default:true"`
+	CreatedAt   time.Time         `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"   gorm:"column:updated_at"`
+	StepRefs    []WorkflowStepRef `json:"-"            gorm:"column:steps;serializer:json"`
+	Steps       []WorkflowStep    `json:"steps"        gorm:"-"`
 }
 
 func (Workflow) TableName() string { return "workflows" }
@@ -74,15 +128,14 @@ func (WorkflowRun) TableName() string { return "workflow_runs" }
 
 // WorkflowStepRun is the execution record for one step within a WorkflowRun.
 type WorkflowStepRun struct {
-	StepRunID      string     `json:"step_run_id"               gorm:"column:step_run_id;primaryKey"`
-	RunID          string     `json:"run_id"                    gorm:"column:run_id"`
-	StepIndex      int        `json:"step_index"                gorm:"column:step_index"`
-	StepName       string     `json:"step_name"                 gorm:"column:step_name"`
-	Status         string     `json:"status"                    gorm:"column:status;default:'pending'"`
-	ResponseStatus *int       `json:"response_status,omitempty" gorm:"column:response_status"`
-	ResponseBody   *string    `json:"response_body,omitempty"   gorm:"column:response_body"`
-	StartedAt      *time.Time `json:"started_at,omitempty"      gorm:"column:started_at"`
-	EndedAt        *time.Time `json:"ended_at,omitempty"        gorm:"column:ended_at"`
+	StepRunID    string     `json:"step_run_id"            gorm:"column:step_run_id;primaryKey"`
+	RunID        string     `json:"run_id"                 gorm:"column:run_id"`
+	StepIndex    int        `json:"step_index"             gorm:"column:step_index"`
+	StepName     string     `json:"step_name"              gorm:"column:step_name"`
+	Status       string     `json:"status"                 gorm:"column:status;default:'pending'"`
+	Output       *string    `json:"output,omitempty"       gorm:"column:response_body"`
+	StartedAt    *time.Time `json:"started_at,omitempty"   gorm:"column:started_at"`
+	EndedAt      *time.Time `json:"ended_at,omitempty"     gorm:"column:ended_at"`
 }
 
 func (WorkflowStepRun) TableName() string { return "workflow_step_runs" }

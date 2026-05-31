@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -54,6 +53,15 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
 	}
+	if len(wf.StepRefs) == 0 {
+		http.Error(w, "pipeline has no steps", http.StatusBadRequest)
+		return
+	}
+	// wf.Steps is enriched by getWorkflow; any ref whose step was deleted will be absent.
+	if len(wf.Steps) < len(wf.StepRefs) {
+		http.Error(w, "one or more referenced steps no longer exist", http.StatusBadRequest)
+		return
+	}
 
 	var req triggerRunRequest
 	if r.ContentLength != 0 {
@@ -63,8 +71,6 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		req.Inputs = map[string]string{}
 	}
 
-	token := bearerToken(r)
-
 	run := WorkflowRun{
 		RunID:       uuid.New().String(),
 		WorkflowID:  wf.WorkflowID,
@@ -72,12 +78,12 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		OrgID:       orgID,
 		Status:      StatusPending,
 		Inputs:      req.Inputs,
-		Token:       token,
+		Token:       bearerToken(r),
 		StepRuns:    []WorkflowStepRun{},
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	if err := db.WithContext(ctx).Create(&run).Error; err != nil {
+	if err := run.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("trigger run: db error", "workflow_id", workflowID, "user_id", userID, "error", err)
@@ -104,25 +110,13 @@ func handleListRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := r.URL.Query()
-	workflowID := q.Get("workflow_id")
-
-	query := db.WithContext(ctx).
-		Where("triggered_by=? OR (org_id != '' AND org_id = ?)", userID, orgID)
-	if workflowID != "" {
-		query = query.Where("workflow_id=?", workflowID)
-	}
-
-	var runs []WorkflowRun
-	if err := query.Order("created_at DESC").Limit(100).Find(&runs).Error; err != nil {
+	runs, err := listRuns(ctx, userID, orgID, r.URL.Query().Get("workflow_id"))
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		slog.Error("list runs: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list runs", http.StatusInternalServerError)
 		return
-	}
-	if runs == nil {
-		runs = []WorkflowRun{}
 	}
 	for i := range runs {
 		runs[i].StepRuns = []WorkflowStepRun{}
@@ -159,20 +153,13 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var stepRuns []WorkflowStepRun
-	if err := db.WithContext(ctx).Raw(
-		`SELECT step_run_id, run_id, step_index, step_name, status,
-		        response_status, response_body, started_at, ended_at
-		 FROM workflow_step_runs WHERE run_id=? ORDER BY step_index`, id,
-	).Scan(&stepRuns).Error; err != nil {
+	stepRuns, err := getStepRuns(ctx, id)
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query step runs failed")
 		slog.Error("get run: step runs query", "run_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get run steps", http.StatusInternalServerError)
 		return
-	}
-	if stepRuns == nil {
-		stepRuns = []WorkflowStepRun{}
 	}
 	run.StepRuns = stepRuns
 
@@ -210,15 +197,13 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		result := db.WithContext(ctx).Exec(
-			"UPDATE workflow_runs SET status='cancelled', ended_at=now(), token=NULL WHERE run_id=? AND status IN ('pending','running')", id,
-		)
-		if result.Error != nil {
-			slog.Error("cancel run: db update", "run_id", id, "user_id", userID, "error", result.Error)
+		affected, err := cancelRun(ctx, id)
+		if err != nil {
+			slog.Error("cancel run: db update", "run_id", id, "user_id", userID, "error", err)
 			http.Error(w, "failed to cancel run", http.StatusInternalServerError)
 			return
 		}
-		if result.RowsAffected == 0 {
+		if affected == 0 {
 			http.Error(w, "run is not in a cancellable state", http.StatusConflict)
 			return
 		}
@@ -231,10 +216,4 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 		slog.Info("workflow run cancelled", "run_id", id, "user_id", userID)
 		w.WriteHeader(http.StatusNoContent)
 	}
-}
-
-func getRun(ctx context.Context, id string) (WorkflowRun, error) {
-	var run WorkflowRun
-	result := db.WithContext(ctx).Where("run_id=?", id).First(&run)
-	return run, result.Error
 }
