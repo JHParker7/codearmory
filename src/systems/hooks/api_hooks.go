@@ -41,6 +41,105 @@ func signTrigger(workflowID, triggeredBy string) (token, timestamp string) {
 	return hex.EncodeToString(mac.Sum(nil)), ts
 }
 
+// triggerResult holds the outcome of a single rule match and dispatch attempt.
+type triggerResult struct {
+	Trigger  HookTrigger
+	RuleName string
+	Success  bool
+}
+
+// matchAndDispatch queries matching rules for the given payload and dispatches
+// a workflow run for each match. sigHeader is the X-Hub-Signature-256 header
+// value from the caller; pass "" to skip per-rule HMAC checks (e.g. when the
+// GitHub App handler has already verified the App-level signature).
+// Returns the trigger results and (successCount, failCount).
+func matchAndDispatch(ctx context.Context, eventID string, payload webhookPayload, payloadMap map[string]string, rawBody []byte, sigHeader string) ([]triggerResult, int, int) {
+	matchedRules, err := getMatchedRules(ctx, payload.Repo, payload.Event)
+	if err != nil {
+		slog.Error("matchAndDispatch: query rules", "error", err)
+		return nil, 0, 0
+	}
+
+	var results []triggerResult
+	successCount := 0
+	failCount := 0
+
+	for _, rws := range matchedRules {
+		// Apply ref_filter.
+		if !matchesRefFilter(rws.RefFilter, payload.Ref) {
+			continue
+		}
+
+		// HMAC verification: if the rule has a secret, the caller must supply
+		// X-Hub-Signature-256: sha256=<hex(HMAC-SHA256(secret, body))>.
+		// When sigHeader is "" (GitHub App handler), rules with a secret are skipped.
+		if rws.Secret != nil && *rws.Secret != "" {
+			expected := "sha256=" + computeHMAC(*rws.Secret, rawBody)
+			if !hmac.Equal([]byte(sigHeader), []byte(expected)) {
+				slog.Warn("matchAndDispatch: HMAC mismatch, skipping rule",
+					"rule_id", rws.RuleID, "event_id", eventID)
+				continue
+			}
+		}
+
+		meterRulesMatched.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("repo", payload.Repo),
+			attribute.String("workflow.id", rws.WorkflowID),
+		))
+
+		// Build workflow inputs: system defaults + input_mapping overrides.
+		inputs := map[string]string{
+			"HOOK_REPO":   payload.Repo,
+			"HOOK_EVENT":  payload.Event,
+			"HOOK_REF":    payload.Ref,
+			"HOOK_COMMIT": payload.Commit,
+		}
+		for wfKey, payloadField := range rws.InputMapping {
+			if v, found := payloadMap[payloadField]; found {
+				inputs[wfKey] = v
+			}
+		}
+
+		triggerID := uuid.New().String()
+		trig := HookTrigger{
+			TriggerID:  triggerID,
+			EventID:    eventID,
+			RuleID:     rws.RuleID,
+			WorkflowID: rws.WorkflowID,
+			CreatedAt:  time.Now().UTC(),
+		}
+
+		runID, trigErr := dispatchWorkflow(ctx, rws.WorkflowID, rws.CreatedBy, rws.OrgID, inputs)
+		success := false
+		if trigErr != nil {
+			slog.Error("matchAndDispatch: dispatch workflow failed",
+				"rule_id", rws.RuleID, "workflow_id", rws.WorkflowID, "error", trigErr)
+			errStr := trigErr.Error()
+			trig.Status = "failed"
+			trig.Error = &errStr
+			failCount++
+		} else {
+			trig.Status = "triggered"
+			trig.RunID = runID
+			success = true
+			successCount++
+			meterRunsTriggered.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("workflow.id", rws.WorkflowID),
+			))
+		}
+		results = append(results, triggerResult{Trigger: trig, RuleName: rws.Name, Success: success})
+
+		// Persist the trigger record (fire-and-forget after response is sent).
+		go func(t HookTrigger) {
+			if err := t.Add(context.Background()); err != nil {
+				slog.Error("matchAndDispatch: insert trigger", "trigger_id", t.TriggerID, "error", err)
+			}
+		}(trig)
+	}
+
+	return results, successCount, failCount
+}
+
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("hooks").Start(r.Context(), "handleWebhook")
 	defer span.End()
@@ -97,103 +196,20 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		Status:    "received",
 		CreatedAt: time.Now().UTC(),
 	}
-	if result := db.WithContext(ctx).Create(&newEvent); result.Error != nil {
-		span.RecordError(result.Error)
+	if err := newEvent.Add(ctx); err != nil {
+		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert event failed")
-		slog.Error("webhook: insert event", "error", result.Error)
+		slog.Error("webhook: insert event", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	// Query matching active rules for this repo + event type.
-	// Use raw SQL because ANY(events) is postgres-specific.
-	var matchedRules []PipelineRule
-	if result := db.WithContext(ctx).Raw(
-		`SELECT rule_id, name, repo, events, ref_filter, workflow_id, secret, input_mapping, created_by, org_id
-		 FROM pipeline_rules
-		 WHERE repo = ? AND active = true AND events::jsonb @> jsonb_build_array(?::text)`,
-		payload.Repo, payload.Event,
-	).Scan(&matchedRules); result.Error != nil {
-		span.RecordError(result.Error)
-		span.SetStatus(codes.Error, "db query rules failed")
-		slog.Error("webhook: query rules", "error", result.Error)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
+	trigResults, successCount, failCount := matchAndDispatch(ctx, eventID, payload, payloadMap, rawBody, r.Header.Get("X-Hub-Signature-256"))
 
-	var triggers []HookTrigger
-	successCount := 0
-	failCount := 0
-
-	for _, rws := range matchedRules {
-		// Apply ref_filter.
-		if !matchesRefFilter(rws.RefFilter, payload.Ref) {
-			continue
-		}
-
-		// HMAC verification: if the rule has a secret, the caller must supply
-		// X-Hub-Signature-256: sha256=<hex(HMAC-SHA256(secret, body))>.
-		if rws.Secret != nil && *rws.Secret != "" {
-			sigHeader := r.Header.Get("X-Hub-Signature-256")
-			expected := "sha256=" + computeHMAC(*rws.Secret, rawBody)
-			if !hmac.Equal([]byte(sigHeader), []byte(expected)) {
-				slog.Warn("webhook: HMAC mismatch, skipping rule",
-					"rule_id", rws.RuleID, "event_id", eventID)
-				continue
-			}
-		}
-
-		meterRulesMatched.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("repo", payload.Repo),
-			attribute.String("workflow.id", rws.WorkflowID),
-		))
-
-		// Build workflow inputs: system defaults + input_mapping overrides.
-		inputs := map[string]string{
-			"HOOK_REPO":   payload.Repo,
-			"HOOK_EVENT":  payload.Event,
-			"HOOK_REF":    payload.Ref,
-			"HOOK_COMMIT": payload.Commit,
-		}
-		for wfKey, payloadField := range rws.InputMapping {
-			if v, found := payloadMap[payloadField]; found {
-				inputs[wfKey] = v
-			}
-		}
-
-		triggerID := uuid.New().String()
-		trig := HookTrigger{
-			TriggerID:  triggerID,
-			EventID:    eventID,
-			RuleID:     rws.RuleID,
-			WorkflowID: rws.WorkflowID,
-			CreatedAt:  time.Now().UTC(),
-		}
-
-		runID, trigErr := dispatchWorkflow(ctx, rws.WorkflowID, rws.CreatedBy, rws.OrgID, inputs)
-		if trigErr != nil {
-			slog.Error("webhook: dispatch workflow failed",
-				"rule_id", rws.RuleID, "workflow_id", rws.WorkflowID, "error", trigErr)
-			errStr := trigErr.Error()
-			trig.Status = "failed"
-			trig.Error = &errStr
-			failCount++
-		} else {
-			trig.Status = "triggered"
-			trig.RunID = runID
-			successCount++
-			meterRunsTriggered.Add(ctx, 1, metric.WithAttributes(
-				attribute.String("workflow.id", rws.WorkflowID),
-			))
-		}
-		triggers = append(triggers, trig)
-
-		// Persist the trigger record (fire-and-forget after response is sent).
-		go func(t HookTrigger) {
-			if result := db.Create(&t); result.Error != nil {
-				slog.Error("webhook: insert trigger", "trigger_id", t.TriggerID, "error", result.Error)
-			}
-		}(trig)
+	// Collect triggers for response.
+	triggers := make([]HookTrigger, 0, len(trigResults))
+	for _, tr := range trigResults {
+		triggers = append(triggers, tr.Trigger)
 	}
 
 	// Derive overall event status.
@@ -212,12 +228,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Update the hook_events row (fire-and-forget).
 	go func() {
-		if result := db.Exec(
-			`UPDATE hook_events SET rules_matched=?, status=? WHERE event_id=?`,
-			total, eventStatus, eventID,
-		); result.Error != nil {
-			slog.Error("webhook: update event status", "event_id", eventID, "error", result.Error)
-		}
+		updateEventStatus(eventID, total, eventStatus)
 	}()
 
 	event := HookEvent{

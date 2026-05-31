@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,13 +19,9 @@ import (
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 var (
-	db               *gorm.DB
 	gatekeeperClient *gk.Client
 	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	workflowsURL     = envOrDefault("WORKFLOWS_URL", "http://localhost:8085")
@@ -146,22 +143,17 @@ func main() {
 	initMetrics()
 	httpClient = initHTTPClient()
 
-	dsn := secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/hooks")
-	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
-	if err != nil {
-		slog.Error("failed to connect to database", "error", err)
-		os.Exit(1)
-	}
-
 	// Safely migrate existing TEXT[] events column to JSONB.
 	func() {
 		defer func() { recover() }() //nolint:errcheck
-		db.Exec("ALTER TABLE pipeline_rules ALTER COLUMN events TYPE jsonb USING to_jsonb(events) WHERE pg_typeof(events)::text = 'text[]'")
+		connect().Exec("ALTER TABLE pipeline_rules ALTER COLUMN events TYPE jsonb USING to_jsonb(events) WHERE pg_typeof(events)::text = 'text[]'")
 	}()
 
-	if err := db.AutoMigrate(&PipelineRule{}, &HookEvent{}, &HookTrigger{}); err != nil {
+	// Backfill any legacy rules that were created before the mandatory-secret
+	// requirement was introduced. NULL secrets would bypass HMAC verification.
+	connect().Exec("UPDATE pipeline_rules SET secret = '' WHERE secret IS NULL")
+
+	if err := connect().AutoMigrate(&PipelineRule{}, &HookEvent{}, &HookTrigger{}); err != nil {
 		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
 	}
@@ -170,6 +162,27 @@ func main() {
 	gatekeeperClient = newGatekeeperClient()
 	registry.StartKeyRotation(ctx, gatekeeperURL, "hooks",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
+
+	var ghApp *githubApp
+	if rawID := secret("GITHUB_APP_ID"); rawID != "" {
+		appID, err := strconv.ParseInt(rawID, 10, 64)
+		if err != nil {
+			slog.Error("GITHUB_APP_ID is not a valid integer", "error", err)
+			os.Exit(1)
+		}
+		webhookSecret := secret("GITHUB_APP_WEBHOOK_SECRET")
+		if webhookSecret == "" {
+			slog.Error("GITHUB_APP_WEBHOOK_SECRET must be set when GITHUB_APP_ID is configured")
+			os.Exit(1)
+		}
+		app, err := newGithubApp(appID, secret("GITHUB_APP_PRIVATE_KEY"), webhookSecret)
+		if err != nil {
+			slog.Error("failed to initialise GitHub App", "error", err)
+			os.Exit(1)
+		}
+		ghApp = app
+		slog.Info("GitHub App configured", "app_id", appID)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -181,6 +194,9 @@ func main() {
 	mux.HandleFunc("DELETE /rules/{id}", handleDeleteRule)
 
 	mux.HandleFunc("POST /hooks", handleWebhook)
+	if ghApp != nil {
+		mux.HandleFunc("POST /hooks/github", handleGitHubWebhook(ghApp))
+	}
 
 	mux.HandleFunc("GET /events", handleListEvents)
 	mux.HandleFunc("GET /events/{id}", handleGetEvent)
