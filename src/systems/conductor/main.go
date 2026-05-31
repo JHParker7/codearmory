@@ -311,8 +311,6 @@ var (
 	blockedIPs  = map[string]time.Time{}
 )
 
-func suspectKey(ip, userID string) string { return ip + "::" + userID }
-
 // sourceIP returns the immediate peer IP from r.RemoteAddr, stripping the port.
 func sourceIP(r *http.Request) string {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -322,56 +320,50 @@ func sourceIP(r *http.Request) string {
 	return ip
 }
 
-// isBlocked reports whether the (ip, userID) pair is on the block list and has
-// not yet expired.
-func isBlocked(ip, userID string) bool {
-	key := suspectKey(ip, userID)
+// isBlocked reports whether the IP is on the block list and has not yet expired.
+func isBlocked(ip string) bool {
 	suspectMu.Lock()
 	defer suspectMu.Unlock()
-	until, ok := blockedIPs[key]
+	until, ok := blockedIPs[ip]
 	if !ok {
 		return false
 	}
 	if time.Now().After(until) {
-		delete(blockedIPs, key)
-		delete(suspectHits, key)
+		delete(blockedIPs, ip)
+		delete(suspectHits, ip)
 		return false
 	}
 	return true
 }
 
-// resetSuspect clears the failure counter for (ip, userID) on a successful
-// authentication, so legitimate users who recover from a mistake are not penalised.
-func resetSuspect(ip, userID string) {
+// resetSuspect clears the failure counter for the IP on successful authentication.
+func resetSuspect(ip string) {
 	suspectMu.Lock()
 	defer suspectMu.Unlock()
-	delete(suspectHits, suspectKey(ip, userID))
+	delete(suspectHits, ip)
 }
 
-// recordSuspect logs an auth failure for a real credential and blocks the
-// (ip, userID) pair after suspectThreshold failures. Only called when a
-// well-formed JWT was presented so missing/malformed tokens don't count.
+// recordSuspect logs an auth failure and blocks the IP after suspectThreshold
+// failures. Keyed on IP alone so a forged JWT sub claim cannot target a specific
+// victim's block state.
 func recordSuspect(ip, userID, method, path string) {
-	key := suspectKey(ip, userID)
 	suspectMu.Lock()
 	defer suspectMu.Unlock()
-	if _, already := blockedIPs[key]; already {
+	if _, already := blockedIPs[ip]; already {
 		return
 	}
-	suspectHits[key]++
-	n := suspectHits[key]
+	suspectHits[ip]++
+	n := suspectHits[ip]
 	slog.Warn("user passed conductor auth but failed service validation",
 		"source_ip", ip, "user_id", userID,
 		"method", method, "path", path, "failure_count", n)
 	if n >= suspectThreshold {
 		until := time.Now().Add(blockDuration)
-		blockedIPs[key] = until
-		slog.Warn("(IP, userID) pair added to block list",
-			"source_ip", ip, "user_id", userID, "blocked_until", until)
+		blockedIPs[ip] = until
+		slog.Warn("IP added to block list",
+			"source_ip", ip, "blocked_until", until)
 		meterBlocked.Add(context.Background(), 1,
-			metric.WithAttributes(
-				attribute.String("source_ip", ip),
-				attribute.String("user_id", userID)))
+			metric.WithAttributes(attribute.String("source_ip", ip)))
 	}
 }
 
@@ -653,7 +645,7 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		default:
-			resetSuspect(sourceIP(r), userID)
+			resetSuspect(sourceIP(r))
 		}
 	}
 
@@ -706,18 +698,10 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 //     Returns 404 if no match is found.
 func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	ip := sourceIP(r)
-	// Decode (but don't verify) the JWT to enable the per-(IP, userID) block
-	// check before paying routing / auth cost. Missing or malformed tokens skip
-	// the check — they'll be rejected by checkUserAuth anyway.
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		if uid, ok := getUserID(strings.TrimPrefix(auth, "Bearer ")); ok {
-			if isBlocked(ip, uid) {
-				slog.Warn("request rejected: (IP, userID) pair is blocked",
-					"source_ip", ip, "user_id", uid, "path", r.URL.Path)
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-		}
+	if isBlocked(ip) {
+		slog.Warn("request rejected: IP is blocked", "source_ip", ip, "path", r.URL.Path)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
 	}
 
 	path := r.URL.Path

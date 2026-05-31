@@ -671,7 +671,12 @@ func main() {
 	}
 	initCache()
 
-	db, err = pgxpool.New(ctx, secretOrDefault("DATABASE_URL", "postgresql://postgres:test@127.0.0.1:5432/blueprints"))
+	dbURL := secret("DATABASE_URL")
+	if dbURL == "" {
+		slog.Error("DATABASE_URL is required")
+		os.Exit(1)
+	}
+	db, err = pgxpool.New(ctx, dbURL)
 	if err != nil {
 		slog.Error("failed to create database pool", "error", err)
 		os.Exit(1)
