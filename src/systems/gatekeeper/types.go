@@ -17,10 +17,12 @@ type Org struct {
 }
 
 // Role defines a named permission set scoped to an Org.
+// Name is empty for user-facing roles and "workflow:<id>" for workflow service roles.
 type Role struct {
 	RoleID         string    `json:"role_id"          gorm:"column:role_id;primaryKey"`
 	CreatedAt      time.Time `json:"created_at"       gorm:"column:created_at"`
 	UpdatedAt      time.Time `json:"updated_at"       gorm:"column:updated_at"`
+	Name           string    `json:"name,omitempty"   gorm:"column:name;default:''"`
 	PermissionsIDs []string  `json:"permissions_ids"  gorm:"column:permissions_ids;serializer:json"`
 	OrgID          *string   `json:"org_id"           gorm:"column:org_id"`
 	OwnerID        string    `json:"owner_id"         gorm:"column:owner_id"`
@@ -60,14 +62,18 @@ type User struct {
 // The JWT itself is never stored — authMiddleware re-validates the signature on
 // each request using the stored PubKey, so retaining the token would be redundant
 // and would expose all active sessions on a database breach.
+// ScopedRoleID, when set, restricts permission checks to only the permissions in
+// that role — regardless of the user's own role or team membership. Used by
+// run-scoped tokens to enforce the workflow's minimal permission set.
 type Session struct {
-	SessionID string    `gorm:"column:session_id;primaryKey"`
-	CreatedAt time.Time `gorm:"column:created_at"`
-	UpdatedAt time.Time `gorm:"column:updated_at"`
-	UserID    string    `gorm:"column:user_id"`
-	ExpiresAt time.Time `gorm:"column:expires_at"`
-	PubKey    string    `gorm:"column:pub_key"`
-	Active    bool      `gorm:"column:active;default:true"`
+	SessionID    string    `gorm:"column:session_id;primaryKey"`
+	CreatedAt    time.Time `gorm:"column:created_at"`
+	UpdatedAt    time.Time `gorm:"column:updated_at"`
+	UserID       string    `gorm:"column:user_id"`
+	ExpiresAt    time.Time `gorm:"column:expires_at"`
+	PubKey       string    `gorm:"column:pub_key"`
+	Active       bool      `gorm:"column:active;default:true"`
+	ScopedRoleID *string   `gorm:"column:scoped_role_id"`
 }
 
 // Invite represents a pending or resolved invitation for a user to join an Org or Team.
