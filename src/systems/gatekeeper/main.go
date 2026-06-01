@@ -254,6 +254,16 @@ func main() {
 	// Key rotation: service-key authenticated; generates a new key server-side and returns it.
 	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)
 
+	// Run tokens: short-lived session JWTs issued to the workflows service so that
+	// workflow runs never store the triggering user's own session token in the DB.
+	mux.HandleFunc("POST /internal/run-tokens", handleCreateRunToken)
+	mux.HandleFunc("DELETE /internal/run-tokens/{session_id}", handleRevokeRunToken)
+
+	// Workflow service roles: minimal-permission roles provisioned at workflow
+	// creation time; each permission is verified against the owner's access first.
+	mux.HandleFunc("POST /internal/workflow-roles", handleCreateWorkflowRole)
+	mux.HandleFunc("DELETE /internal/workflow-roles/{role_id}", handleDeleteWorkflowRole)
+
 	// Service permission requests: POST is service-key authenticated; the rest require user JWT.
 	mux.HandleFunc("POST /service-permission-requests", handleCreateServicePermissionRequest)
 	mux.Handle("GET /service-permission-requests", mw(handleListServicePermissionRequests))
@@ -284,6 +294,7 @@ func main() {
 	initCache()
 	initPermittedServices()
 	initTrustedProxies()
+	initAuditPermissionChecks()
 
 	wrappedMux := otelhttp.NewHandler(NewLogger(limitBody(mux)), "gatekeeper",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
