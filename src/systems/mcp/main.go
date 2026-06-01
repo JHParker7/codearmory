@@ -22,6 +22,7 @@ func main() {
 - Tickets: task tracker with comments (list_tickets, create_ticket, get_ticket, update_ticket, add_ticket_comment)
 - Forge: sandboxed code execution (run_forge, list_executions, get_execution)
 - Hooks: webhook-triggered pipeline rules (list_rules, create_rule, list_events)
+- Containers: container image registry (list_repositories, list_tags, get_manifest, delete_manifest)
 
 All tools require authentication. Set CODEARMORY_TOKEN or run ` + "`armory auth login`" + ` first.
 Set CODEARMORY_URL to override the conductor base URL (default: http://localhost:8082).`),
@@ -32,6 +33,7 @@ Set CODEARMORY_URL to override the conductor base URL (default: http://localhost
 	registerTicketTools(s, c)
 	registerForgeTools(s, c)
 	registerHookTools(s, c)
+	registerContainerTools(s, c)
 
 	if err := server.ServeStdio(s); err != nil {
 		slog.Error("server error", "error", err)
