@@ -69,6 +69,7 @@ API_URL=http://localhost:8080 pytest tests/gatekeeper/ -v
 | `GATEKEEPER_SECRETS_KEY` | No | 64 hex chars (32 bytes) AES-256-GCM key for encrypting secrets at rest. Secrets endpoints return 503 if unset. |
 | `REGISTRY_URL` | No | Registry service base URL. Required to load default permission grants (org/team owner permissions). |
 | `REGISTRY_SERVICE_KEY` | No | Service key for authenticating with the registry to fetch default grants. |
+| `AUDIT_PERMISSION_CHECKS` | No | Set to `true` to persist every `checkPermissions` evaluation to the `permissions_checks` table (who checked what, when, and which org). Off by default. |
 
 ## API
 
@@ -121,6 +122,10 @@ Quick reference:
 | `POST` | `/service-permission-requests/{id}/approve` | ✓ | Approve a pending service permission request |
 | `POST` | `/service-permission-requests/{id}/decline` | ✓ | Decline a pending service permission request |
 | `POST` | `/internal/secrets/resolve` | Service key | Resolve (decrypt) named secrets for an org — called by the workflow worker |
+| `POST` | `/internal/run-tokens` | Service key (`workflows` only) | Mint a short-lived session JWT for a user on behalf of the workflows service |
+| `DELETE` | `/internal/run-tokens/{session_id}` | Service key (`workflows` only) | Revoke a run token |
+| `POST` | `/internal/workflow-roles` | Service key (`workflows` only) | Create a minimal-permission scoped role for a workflow |
+| `DELETE` | `/internal/workflow-roles/{role_id}` | Service key (`workflows` only) | Delete a workflow scoped role |
 
 All protected endpoints require `Authorization: Bearer <token>` and enforce RBAC permission checks. On signup, every user automatically receives:
 
@@ -150,7 +155,7 @@ Organisations can delegate secret storage to an external provider by configuring
 |----------|---------------|-------|
 | `builtin` | — | Secrets stored encrypted in the `secrets` table. Default if no provider is configured. |
 | `doppler` | `service_token`, `project`, `config` | Fetches each secret from the Doppler API per-request. |
-| `vault` | `address`, `token`, `namespace` (optional), `mount` (default: `secret`) | Uses HashiCorp Vault KV v2. |
+| `vault` | `address`, `token`, `namespace` (optional), `mount` (default: `secret`) | Uses HashiCorp Vault KV v2. The vault client re-validates resolved IP addresses on every connection to prevent DNS rebinding SSRF. |
 | `aws_sm` | `region` (optional) | Uses AWS Secrets Manager. Omit `region` to use the IAM role's default region. |
 
 Provider config is stored encrypted in the `org_secret_providers` table. The `GET /orgs/{id}/secret-provider` response returns only the provider name and timestamps — never the config.
@@ -209,7 +214,7 @@ ingress:
 | `roles`               | `role_id`              | `org_id` → `orgs`                                            | |
 | `teams`               | `team_id`              | `role_id` → `roles`                                          | |
 | `users`               | `user_id`              | `org_id` → `orgs`, `role_id` → `roles`, `team_id` → `teams` | |
-| `sessions`            | `session_id`           | `user_id` → `users`                                          | |
+| `sessions`            | `session_id`           | `user_id` → `users`                                          | `scoped_role_id` (nullable) restricts permission checks to a single role — used by workflow run tokens |
 | `permissions`         | `permissions_id`       | —                                                             | |
 | `invites`             | `invite_id`            | `inviter_id` → `users`                                       | |
 | `permissions_checks`  | `permissions_check_id` | `user_id` → `users`, `org_id` → `orgs`, `team_id` → `teams` | |

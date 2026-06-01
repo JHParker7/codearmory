@@ -64,6 +64,8 @@ docker run -p 8081:8081 \
 
 ## API
 
+### Terraform state backend
+
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/state/{username}/{workspace}` | Fetch state (204 if none exists) |
@@ -71,6 +73,26 @@ docker run -p 8081:8081 \
 | `DELETE` | `/state/{username}/{workspace}` | Delete state |
 | `LOCK` | `/state/{username}/{workspace}` | Acquire workspace lock |
 | `UNLOCK` | `/state/{username}/{workspace}` | Release workspace lock |
+
+### Backend credentials (mTLS)
+
+Short-lived credentials that bind an mTLS client certificate fingerprint to a workspace, allowing OpenTofu/Terraform backends to authenticate using client certificates instead of bearer tokens. Intended for CI/CD pipelines running inside a forge container.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/backend-credentials` | Bearer | Issue a credential for a workspace; returns a token and the workspace URL |
+| `DELETE` | `/backend-credentials/{id}` | Bearer | Revoke a credential before it expires |
+
+**Create a credential:**
+
+```bash
+curl -X POST http://blueprints:8081/backend-credentials \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace": "alice/dev", "cert_fingerprint": "<SHA-256 hex of client cert>"}'
+```
+
+Response includes a `token` and the full backend `address` to pass to OpenTofu. Credentials expire after a fixed TTL and are stored hashed in the `backend_credentials` table.
 
 ## Terraform configuration
 

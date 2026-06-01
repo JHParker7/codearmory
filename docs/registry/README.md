@@ -202,7 +202,7 @@ curl http://registry:8084/actions \
   -H "X-Service-Key: workflows:$READ_KEY"
 ```
 
-Response is an array of action objects: `action_id`, `service_id`, `service_name`, `service_url`, `name`, `method`, `path`, `body_transforms`, `async`, `active`.
+Response is an array of action objects: `action_id`, `service_id`, `service_name`, `service_url`, `name`, `method`, `path`, `body_transforms`, `async`, `active`, plus `gk_service`, `gk_action`, `gk_resource` when a matching `service_endpoint` record exists. These three fields carry the Gatekeeper permission triple required to call the action, used by the Workflows service to build scoped roles for workflow runs.
 
 ### List default grants
 

@@ -85,6 +85,7 @@ PERMITTED_SERVICES=gatekeeper,blueprints,forge,workflows,tickets,hooks,my-servic
 - A `Permissions` record with `org_id = A` cannot be added to a role by a caller whose `org_id` is `B`.
 - A caller with no `org_id` cannot use org-scoped permissions at all — only nil-org (personal/system) permissions are accepted.
 - A role's `org_id` can only be set to a value that matches the caller's own `org_id`; it cannot be cleared or reassigned to a foreign org.
+- A caller may only delete a `Permissions` record whose `org_id` matches their own; attempts to delete another org's permission records return `403 Forbidden`.
 
 ## Owner Permissions
 
@@ -119,6 +120,30 @@ UPDATE users SET role_id = '<role_id>' WHERE email = 'admin@example.com';
 ```
 
 The integration test suite does exactly this for the `admin_token` fixture in `tests/gatekeeper/conftest.py`.
+
+## Scoped Roles (Run Tokens)
+
+Workflow run tokens carry a `scoped_role_id` in their session record. When present, `checkPermissions` evaluates only the permissions in that role — the user's direct role and team role are bypassed entirely. This enforces a minimal permission set for workflow executions without granting the triggering user's full access to the workflow worker.
+
+Scoped roles are created and deleted automatically by the Workflows service via the internal `POST /internal/workflow-roles` and `DELETE /internal/workflow-roles/{role_id}` endpoints. Only the `workflows` service account may call these endpoints.
+
+## Permission Check Audit
+
+Every call to `checkPermissions` — whether from an internal `requirePermission` guard or from a service calling `POST /check_permissions` — can optionally be recorded in the `permissions_checks` table. Each row captures:
+
+| Column | Description |
+|--------|-------------|
+| `permissions_check_id` | Row ID |
+| `service` | Service the permission was checked against |
+| `action` | Action that was evaluated |
+| `resource` | Resource path that was evaluated |
+| `user_id` | Caller's user ID |
+| `org_id` | Caller's org ID at the time of the check |
+| `team_id` | Caller's team ID at the time of the check |
+| `granted` | Whether access was granted |
+| `created_at` | Timestamp of the evaluation |
+
+Set `AUDIT_PERMISSION_CHECKS=true` to enable recording. When unset or set to any other value, no rows are written and there is no runtime overhead. The table is append-only; rows are never updated or deleted.
 
 ## Examples
 

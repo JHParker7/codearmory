@@ -50,6 +50,7 @@ All variables support a `_FILE` suffix variant (e.g. `DATABASE_URL_FILE`) that r
 |---|---|---|
 | `CONTAINER_MEMORY_LIMIT` | `256m` | Memory limit per container |
 | `CONTAINER_CPU_QUOTA` | `50000` | CPU quota (100000 = one full core) |
+| `FORGE_NETWORK_MODE` | `none` | Docker network mode for containers. Defaults to `none` (no network access). Set to `bridge` to allow outbound internet access (e.g. for package installs in local dev). Use `none` in production. |
 
 ### Kubernetes runtime variables
 
@@ -151,7 +152,7 @@ curl -X POST http://conductor:8082/executions \
 ### Container sandbox (Docker runtime)
 
 Every container runs with:
-- `NetworkMode: none` — no network access
+- `NetworkMode` — controlled by `FORGE_NETWORK_MODE` (default `none`, no network access)
 - `ReadonlyRootfs: true` — read-only root filesystem
 - `/tmp` — writable tmpfs (64 MB)
 - `CapDrop: ALL` — all Linux capabilities dropped

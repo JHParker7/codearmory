@@ -29,15 +29,18 @@ Caller → POST /workflows/{id}/runs
          ▼
    Worker pool (5 goroutines, FOR UPDATE SKIP LOCKED)
          │  1. Pick pending run
-         │  2. Fetch workflow definition; enrich step refs from steps table
-         │  3. Group steps by parallel_group; execute each group:
+         │  2. Mint a run token via POST {GATEKEEPER_URL}/internal/run-tokens
+         │     (short-lived JWT scoped to a minimal workflow role — the user's
+         │      own session token is never stored in the workflows database)
+         │  3. Fetch workflow definition; enrich step refs from steps table
+         │  4. Group steps by parallel_group; execute each group:
          │     - Steps with same non-nil parallel_group run concurrently
          │     - Steps with nil parallel_group run sequentially
          │     - For each step:
          │       a. Resolve action: "http" → raw HTTP; other → action catalog
          │       b. Substitute ${KEY} from run inputs into all With string values
-         │       c. Execute action; store output in WorkflowStepRun.output
-         │  4. Write step results; clear stored token on terminal state
+         │       c. Execute action using the run token; store output in WorkflowStepRun.output
+         │  5. Write step results; revoke run token on terminal state
 ```
 
 Access is org-scoped: users can access steps, workflows, and runs they created, or those owned by members of their org.
@@ -335,10 +338,15 @@ Returns an array of action definitions loaded from the registry:
     "service_name": "forge",
     "service_url": "http://forge:8083",
     "method": "POST",
-    "path": "/executions"
+    "path": "/executions",
+    "gk_service": "forge",
+    "gk_action": "createExecution",
+    "gk_resource": "forge/executions"
   }
 ]
 ```
+
+`gk_service`, `gk_action`, and `gk_resource` are present when the registry has a matching `service_endpoint` record for the action's path. They represent the Gatekeeper permission triple required to call the action and are used to build the workflow's scoped role.
 
 The catalog refreshes every 5 minutes. Requires `REGISTRY_URL` and `REGISTRY_SERVICE_KEY` to be set.
 
