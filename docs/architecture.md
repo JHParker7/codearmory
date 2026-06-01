@@ -4,14 +4,18 @@
 
 | Service | Port | Role |
 |---------|------|------|
-| [Gatekeeper](gatekeeper/architecture.md) | 8080 | Authentication, session management, RBAC |
-| [Blueprints](blueprints/architecture.md) | 8081 | Self-hosted Terraform HTTP backend |
-| [Conductor](conductor/architecture.md)   | 8082 | API gateway — identity check, RBAC, reverse proxy |
-| [Forge](forge/architecture.md)           | 8083 | Sandboxed container execution |
-| [Registry](registry/architecture.md)    | 8084 | Service catalogue polled by Conductor |
-| [Workflows](workflows/architecture.md)  | 8085 | CI/CD pipeline orchestrator |
-| [Tickets](tickets/architecture.md)      | 8086 | Org-scoped task tracker |
-| [Hooks](hooks/architecture.md)          | 8087 | Webhook receiver and pipeline trigger |
+| [Gatekeeper](gatekeeper/architecture.md)             | 8081 | Authentication, session management, RBAC, OIDC provider |
+| [Blueprints](blueprints/architecture.md)             | 8084 | Self-hosted Terraform HTTP backend |
+| [Conductor](conductor/architecture.md)               | 8080 | API gateway — identity check, RBAC, reverse proxy |
+| [Forge](forge/architecture.md)                       | 8083 | Sandboxed container execution |
+| [Registry](registry/architecture.md)                 | 8082 | Service catalogue polled by Conductor |
+| [Workflows](workflows/architecture.md)               | 8085 | CI/CD pipeline orchestrator |
+| [Tickets](tickets/architecture.md)                   | 8086 | Org-scoped task tracker |
+| [Hooks](hooks/architecture.md)                       | 8087 | Webhook receiver and pipeline trigger |
+| [Gitea Integration](gitea_integration/README.md)     | 8088 | Forgejo/Gitea repository and PR management |
+| [Containers](containers/README.md)                   | 8089 | OCI registry management proxy |
+| [Egress Proxy](egress-proxy/README.md)               | 3128 | Allowlist-enforcing HTTP CONNECT proxy for Forge |
+| MCP Server                                           | stdio | Local MCP server wrapping the full platform API |
 
 ## Service topology
 
@@ -177,6 +181,8 @@ Each service owns an isolated PostgreSQL database. Cross-service references (e.g
 | Workflows | `workflows` | GORM AutoMigrate |
 | Tickets | `tickets` | GORM AutoMigrate |
 | Hooks | `hooks` | GORM AutoMigrate |
+| Gitea Integration | `gitea_integration` | GORM AutoMigrate |
+| Containers | — | Stateless — no local database |
 
 ## Observability
 
