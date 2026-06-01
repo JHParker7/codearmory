@@ -107,6 +107,7 @@ services:
       ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25
       # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: forge-local-secret
+      FORGE_NETWORK_MODE: bridge
       # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
       # K8S_RUNTIME_CLASS: gvisor     # optional: use gVisor for stronger isolation
     volumes:
@@ -146,8 +147,6 @@ services:
   workflows:
     build:
       context: ../../src/systems/workflows
-      additional_contexts:
-        sdk: ../../../codearmory_sdk
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/workflows
       GATEKEEPER_URL: http://gatekeeper:8081
@@ -172,8 +171,6 @@ services:
   tickets:
     build:
       context: ../../src/systems/tickets
-      additional_contexts:
-        sdk: ../../../codearmory_sdk
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/tickets
       GATEKEEPER_URL: http://gatekeeper:8081
@@ -273,8 +270,6 @@ services:
   hooks:
     build:
       context: ../../src/systems/hooks
-      additional_contexts:
-        sdk: ../../../codearmory_sdk
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/hooks
       GATEKEEPER_URL: http://gatekeeper:8081

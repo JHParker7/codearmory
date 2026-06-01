@@ -84,6 +84,42 @@ jobs:
       - name: Run registry unit tests
         run: cd src/systems/registry; go test .
 
+  workflows-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run workflows unit tests
+        run: cd src/systems/workflows; go test .
+
+  hooks-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run hooks unit tests
+        run: cd src/systems/hooks; go test .
+
+  tickets-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run tickets unit tests
+        run: cd src/systems/tickets; go test .
+
   integration-tests:
     runs-on: ubuntu-latest
     needs:
@@ -93,6 +129,9 @@ jobs:
       - cli-unit-test
       - forge-unit-test
       - registry-unit-test
+      - workflows-unit-test
+      - hooks-unit-test
+      - tickets-unit-test
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -148,6 +187,18 @@ jobs:
 
       - name: Run registry integration tests
         run: docker compose run --no-deps --rm registry-integration-tests
+        working-directory: infra/local
+
+      - name: Run workflows integration tests
+        run: docker compose run --no-deps --rm workflows-integration-tests
+        working-directory: infra/local
+
+      - name: Run tickets integration tests
+        run: docker compose run --no-deps --rm tickets-integration-tests
+        working-directory: infra/local
+
+      - name: Run hooks integration tests
+        run: docker compose run --no-deps --rm hooks-integration-tests
         working-directory: infra/local
 
       - name: Show compose logs on failure
@@ -287,6 +338,60 @@ jobs:
           tags: |
             ghcr.io/code-armory-app/registry-tests:alpha-${{ needs.release.outputs.new_release_version }}
             ghcr.io/code-armory-app/registry-tests:alpha-latest
+      - name: Build and push workflows
+        uses: docker/build-push-action@v6
+        with:
+          context: src/systems/workflows
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/workflows:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/workflows:alpha-latest
+      - name: Build and push tickets
+        uses: docker/build-push-action@v6
+        with:
+          context: src/systems/tickets
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/tickets:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/tickets:alpha-latest
+      - name: Build and push hooks
+        uses: docker/build-push-action@v6
+        with:
+          context: src/systems/hooks
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/hooks:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/hooks:alpha-latest
+      - name: Build and push workflows integration tests
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/workflows
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/workflows-tests:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/workflows-tests:alpha-latest
+      - name: Build and push tickets integration tests
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/tickets
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/tickets-tests:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/tickets-tests:alpha-latest
+      - name: Build and push hooks integration tests
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/hooks
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/hooks-tests:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/hooks-tests:alpha-latest
 
   build-cli:
     needs: release

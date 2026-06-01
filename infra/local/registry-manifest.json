@@ -74,13 +74,21 @@
       { "method": "POST",   "path": "/state/{username}/{workspace}", "action": "updateState", "resource": "states/{username}/{workspace}" },
       { "method": "DELETE", "path": "/state/{username}/{workspace}", "action": "deleteState", "resource": "states/{username}/{workspace}" },
       { "method": "LOCK",   "path": "/state/{username}/{workspace}", "action": "lockState",   "resource": "states/{username}/{workspace}" },
-      { "method": "UNLOCK", "path": "/state/{username}/{workspace}", "action": "unlockState", "resource": "states/{username}/{workspace}" }
+      { "method": "UNLOCK", "path": "/state/{username}/{workspace}", "action": "unlockState", "resource": "states/{username}/{workspace}" },
+      { "method": "POST",   "path": "/backend",                      "action": "createBackend", "resource": "states"                      }
+    ],
+    "actions": [
+      {
+        "name": "blueprints/backend",
+        "method": "POST",
+        "path": "/backend"
+      }
     ],
     "default_grants": [
       {
         "grant_on": "user",
-        "actions": ["getState", "updateState", "deleteState", "lockState", "unlockState"],
-        "resources": ["states/{username}/*"]
+        "actions": ["getState", "updateState", "deleteState", "lockState", "unlockState", "createBackend"],
+        "resources": ["states/{username}/*", "states"]
       }
     ]
   },
