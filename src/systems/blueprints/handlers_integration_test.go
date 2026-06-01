@@ -75,7 +75,7 @@ func authorized(t *testing.T, method, body string) *http.Request {
 
 func TestHandleGetState_NotFound_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "GET", "")
@@ -88,7 +88,7 @@ func TestHandleGetState_NotFound_DB(t *testing.T) {
 
 func TestHandleGetState_Found_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	stateData := []byte(`{"version":4,"resources":[]}`)
 	db.Exec(context.Background(),
@@ -110,7 +110,7 @@ func TestHandleGetState_Found_DB(t *testing.T) {
 
 func TestHandleUpdateState_Creates_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	stateData := `{"version":4,"resources":[]}`
 	w := httptest.NewRecorder()
@@ -130,7 +130,7 @@ func TestHandleUpdateState_Creates_DB(t *testing.T) {
 
 func TestHandleUpdateState_LockedNoID_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	lockBody := `{"ID":"lock-abc"}`
 	db.Exec(context.Background(),
@@ -148,7 +148,7 @@ func TestHandleUpdateState_LockedNoID_DB(t *testing.T) {
 
 func TestHandleUpdateState_LockedMatchingID_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	lockBody := `{"ID":"lock-xyz"}`
 	db.Exec(context.Background(),
@@ -170,7 +170,7 @@ func TestHandleUpdateState_LockedMatchingID_DB(t *testing.T) {
 
 func TestHandleDeleteState_Success_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	db.Exec(context.Background(),
 		`INSERT INTO states (workspace, data) VALUES ($1, $2)`, ws, []byte(`{}`))
@@ -194,7 +194,7 @@ func TestHandleDeleteState_Success_DB(t *testing.T) {
 
 func TestHandleLockState_Success_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "LOCK", `{"ID":"lock-1","Operation":"OperationPlanWithDestroy"}`)
@@ -213,7 +213,7 @@ func TestHandleLockState_Success_DB(t *testing.T) {
 
 func TestHandleLockState_Conflict_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	// Pre-insert an existing lock.
 	db.Exec(context.Background(),
@@ -232,7 +232,7 @@ func TestHandleLockState_Conflict_DB(t *testing.T) {
 
 func TestHandleUnlockState_Success_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	db.Exec(context.Background(),
 		`INSERT INTO locks (workspace, lock_data) VALUES ($1, $2)`, ws, `{"ID":"lock-to-release"}`)
@@ -254,7 +254,7 @@ func TestHandleUnlockState_Success_DB(t *testing.T) {
 
 func TestHandleUnlockState_WrongID_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	db.Exec(context.Background(),
 		`INSERT INTO locks (workspace, lock_data) VALUES ($1, $2)`, ws, `{"ID":"correct-id"}`)
@@ -270,7 +270,7 @@ func TestHandleUnlockState_WrongID_DB(t *testing.T) {
 
 func TestHandleUnlockState_NoLock_DB(t *testing.T) {
 	requireBlueprintsDB(t)
-	ws, res := wsKey(t)
+	ws, _ := wsKey(t)
 
 	// Unlock when no lock exists is idempotent → 200.
 	w := httptest.NewRecorder()
