@@ -1,0 +1,669 @@
+package main
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"html/template"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
+)
+
+// ── Signing key ───────────────────────────────────────────────────────────────
+
+var (
+	oidcSigningKey *ecdsa.PrivateKey
+	oidcKeyID      string // stable fingerprint used as JWKS kid
+	oidcIssuer     string
+)
+
+func initOIDC() {
+	oidcIssuer = secret("OIDC_ISSUER")
+	if oidcIssuer == "" {
+		oidcIssuer = "http://localhost:8081"
+		slog.Warn("OIDC_ISSUER not set — defaulting to localhost; set for production deployments")
+	}
+
+	var key *ecdsa.PrivateKey
+	if keyPEM := secret("OIDC_SIGNING_KEY"); keyPEM != "" {
+		block, _ := pem.Decode([]byte(keyPEM))
+		if block == nil {
+			slog.Error("OIDC_SIGNING_KEY: failed to decode PEM block")
+			return
+		}
+		var err error
+		key, err = x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			slog.Error("OIDC_SIGNING_KEY: failed to parse EC private key", "error", err)
+			return
+		}
+	} else {
+		slog.Warn("OIDC_SIGNING_KEY not set — generating ephemeral key (not stable across restarts; set for production)")
+		var err error
+		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			slog.Error("OIDC: ephemeral key generation failed", "error", err)
+			return
+		}
+	}
+
+	pubBytes, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		slog.Error("OIDC: marshal public key failed", "error", err)
+		return
+	}
+	h := sha256.Sum256(pubBytes)
+	oidcKeyID = fmt.Sprintf("%x", h[:8])
+	oidcSigningKey = key
+	slog.Info("OIDC signing key loaded", "kid", oidcKeyID, "issuer", oidcIssuer)
+}
+
+// ── ID token claims ───────────────────────────────────────────────────────────
+
+type oidcClaims struct {
+	jwt.RegisteredClaims
+	Email             string   `json:"email"`
+	EmailVerified     bool     `json:"email_verified"`
+	Name              string   `json:"name"`
+	PreferredUsername string   `json:"preferred_username"`
+	Groups            []string `json:"groups,omitempty"`
+}
+
+// ── Discovery and JWKS ────────────────────────────────────────────────────────
+
+func handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"issuer":                                oidcIssuer,
+		"authorization_endpoint":                oidcIssuer + "/oauth/authorize",
+		"token_endpoint":                        oidcIssuer + "/oauth/token",
+		"userinfo_endpoint":                     oidcIssuer + "/oauth/userinfo",
+		"jwks_uri":                              oidcIssuer + "/oauth/jwks",
+		"response_types_supported":              []string{"code"},
+		"subject_types_supported":               []string{"public"},
+		"id_token_signing_alg_values_supported": []string{"ES256"},
+		"scopes_supported":                      []string{"openid", "email", "profile", "groups"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_post", "client_secret_basic"},
+		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "email", "name", "preferred_username", "groups"},
+	})
+}
+
+func handleJWKS(w http.ResponseWriter, r *http.Request) {
+	if oidcSigningKey == nil {
+		http.Error(w, "OIDC not configured", http.StatusServiceUnavailable)
+		return
+	}
+	pub := &oidcSigningKey.PublicKey
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"keys": []any{map[string]any{
+			"kty": "EC",
+			"use": "sig",
+			"crv": "P-256",
+			"kid": oidcKeyID,
+			"alg": "ES256",
+			"x":   base64.RawURLEncoding.EncodeToString(zeroPad(pub.X.Bytes(), 32)),
+			"y":   base64.RawURLEncoding.EncodeToString(zeroPad(pub.Y.Bytes(), 32)),
+		}},
+	})
+}
+
+func zeroPad(b []byte, size int) []byte {
+	if len(b) >= size {
+		return b
+	}
+	out := make([]byte, size)
+	copy(out[size-len(b):], b)
+	return out
+}
+
+// ── Authorization endpoint ────────────────────────────────────────────────────
+
+var loginFormTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sign in — Codearmory</title>
+  <style>
+    body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f5}
+    .card{background:#fff;padding:2rem;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.12);width:100%;max-width:360px}
+    h2{margin:0 0 1.5rem;font-size:1.25rem}
+    label{display:block;margin-bottom:1rem;font-size:.9rem}
+    input{display:block;width:100%;margin-top:.25rem;padding:.5rem;border:1px solid #ccc;border-radius:4px;font-size:1rem;box-sizing:border-box}
+    button{width:100%;padding:.65rem;background:#0066cc;color:#fff;border:none;border-radius:4px;font-size:1rem;cursor:pointer;margin-top:.5rem}
+    button:hover{background:#0052a3}
+    .app-name{color:#555;font-size:.85rem;margin-bottom:1.5rem}
+    .error{color:#c00;font-size:.85rem;margin-bottom:1rem}
+  </style>
+</head>
+<body>
+<div class="card">
+  <h2>Sign in to Codearmory</h2>
+  {{if .AppName}}<p class="app-name">Authorizing <strong>{{.AppName}}</strong></p>{{end}}
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+  <form method="POST" action="/oauth/authorize">
+    <input type="hidden" name="client_id"     value="{{.ClientID}}">
+    <input type="hidden" name="redirect_uri"  value="{{.RedirectURI}}">
+    <input type="hidden" name="state"         value="{{.State}}">
+    <input type="hidden" name="scope"         value="{{.Scope}}">
+    <input type="hidden" name="response_type" value="{{.ResponseType}}">
+    <label>Email<input type="email" name="email" required autocomplete="username"></label>
+    <label>Password<input type="password" name="password" required autocomplete="current-password"></label>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+</body>
+</html>`))
+
+type loginFormData struct {
+	ClientID     string
+	RedirectURI  string
+	State        string
+	Scope        string
+	ResponseType string
+	AppName      string
+	Error        string
+}
+
+// oauthParams holds validated OAuth2 request parameters.
+type oauthParams struct {
+	client       OAuthClient
+	redirectURI  string
+	state        string
+	scope        string
+	responseType string
+}
+
+// parseOAuthParams extracts and validates OAuth2 parameters from the request.
+// Errors before redirect_uri is validated are returned as plain HTTP errors;
+// errors after that redirect with an error parameter per RFC 6749.
+func parseOAuthParams(w http.ResponseWriter, r *http.Request, fromForm bool) (oauthParams, bool) {
+	get := r.URL.Query().Get
+	if fromForm {
+		get = r.FormValue
+	}
+
+	clientID := get("client_id")
+	if clientID == "" {
+		http.Error(w, "client_id is required", http.StatusBadRequest)
+		return oauthParams{}, false
+	}
+
+	var client OAuthClient
+	if err := connect().WithContext(r.Context()).Where("client_id = ? AND active = ?", clientID, true).First(&client).Error; err != nil {
+		http.Error(w, "unknown client_id", http.StatusBadRequest)
+		return oauthParams{}, false
+	}
+
+	redirectURI := get("redirect_uri")
+	if redirectURI == "" {
+		if len(client.RedirectURIs) == 1 {
+			redirectURI = client.RedirectURIs[0]
+		} else {
+			http.Error(w, "redirect_uri is required", http.StatusBadRequest)
+			return oauthParams{}, false
+		}
+	}
+	if !slices.Contains(client.RedirectURIs, redirectURI) {
+		http.Error(w, "redirect_uri not registered for this client", http.StatusBadRequest)
+		return oauthParams{}, false
+	}
+
+	state := get("state")
+	responseType := get("response_type")
+	if responseType != "code" {
+		oauthRedirectError(w, r, redirectURI, state, "unsupported_response_type", "only 'code' is supported")
+		return oauthParams{}, false
+	}
+
+	return oauthParams{
+		client:       client,
+		redirectURI:  redirectURI,
+		state:        state,
+		scope:        get("scope"),
+		responseType: responseType,
+	}, true
+}
+
+// handleAuthorize displays the login form for the OAuth2 authorization_code flow.
+func handleAuthorize(w http.ResponseWriter, r *http.Request) {
+	if oidcSigningKey == nil {
+		http.Error(w, "OIDC not configured", http.StatusServiceUnavailable)
+		return
+	}
+	params, ok := parseOAuthParams(w, r, false)
+	if !ok {
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	loginFormTmpl.Execute(w, loginFormData{ //nolint:errcheck
+		ClientID:     params.client.ClientID,
+		RedirectURI:  params.redirectURI,
+		State:        params.state,
+		Scope:        params.scope,
+		ResponseType: params.responseType,
+		AppName:      params.client.Name,
+	})
+}
+
+// handleAuthorizeSubmit processes the login form, authenticates the user, and
+// redirects back to the client with an authorization code.
+func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
+	if oidcSigningKey == nil {
+		http.Error(w, "OIDC not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form data", http.StatusBadRequest)
+		return
+	}
+	params, ok := parseOAuthParams(w, r, true)
+	if !ok {
+		return
+	}
+
+	renderError := func(msg string) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		loginFormTmpl.Execute(w, loginFormData{ //nolint:errcheck
+			ClientID:     params.client.ClientID,
+			RedirectURI:  params.redirectURI,
+			State:        params.state,
+			Scope:        params.scope,
+			ResponseType: params.responseType,
+			AppName:      params.client.Name,
+			Error:        msg,
+		})
+	}
+
+	email := r.FormValue("email")
+	password := r.FormValue("password")
+
+	// Constant-time dummy hash prevents user-enumeration via timing differences.
+	const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+	var user User
+	if err := connect().WithContext(r.Context()).Where("email = ? AND active = ?", email, true).First(&user).Error; err != nil {
+		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password)) //nolint:errcheck
+		slog.Warn("oauth authorize: user not found", "email", email)
+		renderError("Invalid email or password.")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(password)); err != nil {
+		slog.Warn("oauth authorize: bad password", "user_id", user.UserID)
+		renderError("Invalid email or password.")
+		return
+	}
+
+	code := OAuthCode{
+		Code:        uuid.New().String(),
+		ClientID:    params.client.ClientID,
+		UserID:      user.UserID,
+		RedirectURI: params.redirectURI,
+		Scopes:      strings.Fields(params.scope),
+		ExpiresAt:   time.Now().Add(10 * time.Minute).UTC(),
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := connect().WithContext(r.Context()).Create(&code).Error; err != nil {
+		slog.Error("oauth authorize: persist code failed", "error", err)
+		oauthRedirectError(w, r, params.redirectURI, params.state, "server_error", "failed to create authorization code")
+		return
+	}
+
+	slog.Info("oauth: authorization code issued", "client_id", params.client.ClientID, "user_id", user.UserID)
+	oauthRedirectCode(w, r, params.redirectURI, code.Code, params.state)
+}
+
+// ── Token endpoint ────────────────────────────────────────────────────────────
+
+func handleToken(w http.ResponseWriter, r *http.Request) {
+	if oidcSigningKey == nil {
+		tokenError(w, "server_error", "OIDC not configured")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		tokenError(w, "invalid_request", "cannot parse request body")
+		return
+	}
+	if r.FormValue("grant_type") != "authorization_code" {
+		tokenError(w, "unsupported_grant_type", "only authorization_code is supported")
+		return
+	}
+
+	clientID, clientSecret, ok := extractClientCredentials(r)
+	if !ok {
+		tokenError(w, "invalid_client", "client credentials missing")
+		return
+	}
+
+	var client OAuthClient
+	if err := connect().WithContext(r.Context()).Where("client_id = ? AND active = ?", clientID, true).First(&client).Error; err != nil {
+		tokenError(w, "invalid_client", "client not found")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(client.SecretHash), []byte(clientSecret)); err != nil {
+		tokenError(w, "invalid_client", "invalid client secret")
+		return
+	}
+
+	var authCode OAuthCode
+	if err := connect().WithContext(r.Context()).
+		Where("code = ? AND client_id = ? AND used = ?", r.FormValue("code"), clientID, false).
+		First(&authCode).Error; err != nil {
+		tokenError(w, "invalid_grant", "authorization code not found or already used")
+		return
+	}
+	if time.Now().After(authCode.ExpiresAt) {
+		tokenError(w, "invalid_grant", "authorization code expired")
+		return
+	}
+	if authCode.RedirectURI != r.FormValue("redirect_uri") {
+		tokenError(w, "invalid_grant", "redirect_uri mismatch")
+		return
+	}
+
+	// Mark code as used before issuing tokens.
+	connect().WithContext(r.Context()).Model(&authCode).Update("used", true) //nolint:errcheck
+
+	userRow, err := (User{UserID: authCode.UserID}).Get(r.Context())
+	if err != nil {
+		tokenError(w, "server_error", "user not found")
+		return
+	}
+	user := userRow.(User)
+
+	accessToken, sessionID, expiresAt, err := createOAuthSession(r.Context(), user.UserID)
+	if err != nil {
+		slog.Error("oauth token: session creation failed", "user_id", user.UserID, "error", err)
+		tokenError(w, "server_error", "failed to create session")
+		return
+	}
+
+	idToken, err := mintIDToken(user, sessionID, client.ClientID, expiresAt, buildGroups(r.Context(), user))
+	if err != nil {
+		slog.Error("oauth token: id_token signing failed", "user_id", user.UserID, "error", err)
+		tokenError(w, "server_error", "failed to sign id_token")
+		return
+	}
+
+	slog.Info("oauth: tokens issued", "client_id", clientID, "user_id", user.UserID, "session_id", sessionID)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"access_token": accessToken,
+		"token_type":   "Bearer",
+		"expires_in":   int(time.Until(expiresAt).Seconds()),
+		"id_token":     idToken,
+		"scope":        strings.Join(authCode.Scopes, " "),
+	})
+}
+
+// ── Userinfo endpoint ─────────────────────────────────────────────────────────
+
+// handleUserinfo returns standard OIDC claims for the authenticated user.
+// The access_token is a standard gatekeeper JWT verified by authMiddleware.
+func handleUserinfo(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID, _ := ctx.Value(userIDKey).(string)
+
+	userRow, err := (User{UserID: userID}).Get(ctx)
+	if err != nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	user := userRow.(User)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"sub":                user.UserID,
+		"email":              user.Email,
+		"email_verified":     true,
+		"name":               strings.TrimSpace(user.Firstname + " " + user.Lastname),
+		"preferred_username": user.Username,
+		"groups":             buildGroups(ctx, user),
+	})
+}
+
+// ── OAuth client management (internal, service-auth) ─────────────────────────
+
+func handleCreateOAuthClient(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireServiceAuth(w, r); !ok {
+		return
+	}
+
+	var req struct {
+		Name         string   `json:"name"`
+		RedirectURIs []string `json:"redirect_uris"`
+		OrgID        string   `json:"org_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || len(req.RedirectURIs) == 0 {
+		http.Error(w, "name and redirect_uris are required", http.StatusBadRequest)
+		return
+	}
+
+	rawSecret := make([]byte, 32)
+	if _, err := rand.Read(rawSecret); err != nil {
+		slog.Error("oauth client: secret generation failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	clientSecret := base64.RawURLEncoding.EncodeToString(rawSecret)
+	secretHash, err := bcrypt.GenerateFromPassword([]byte(clientSecret), 12)
+	if err != nil {
+		slog.Error("oauth client: bcrypt failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	client := OAuthClient{
+		ClientID:     uuid.New().String(),
+		Name:         req.Name,
+		SecretHash:   string(secretHash),
+		RedirectURIs: req.RedirectURIs,
+		OrgID:        req.OrgID,
+		Active:       true,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := connect().WithContext(r.Context()).Create(&client).Error; err != nil {
+		slog.Error("oauth client: create failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("oauth client registered", "client_id", client.ClientID, "name", client.Name)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"client_id":     client.ClientID,
+		"client_secret": clientSecret, // returned once only
+		"name":          client.Name,
+		"redirect_uris": client.RedirectURIs,
+		"org_id":        client.OrgID,
+	})
+}
+
+func handleListOAuthClients(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireServiceAuth(w, r); !ok {
+		return
+	}
+	var clients []OAuthClient
+	if err := connect().WithContext(r.Context()).Where("active = ?", true).Find(&clients).Error; err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(clients) //nolint:errcheck
+}
+
+func handleDeleteOAuthClient(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireServiceAuth(w, r); !ok {
+		return
+	}
+	id := r.PathValue("id")
+	result := connect().WithContext(r.Context()).Model(&OAuthClient{}).Where("client_id = ?", id).Update("active", false)
+	if result.Error != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if result.RowsAffected == 0 {
+		http.Error(w, "client not found", http.StatusNotFound)
+		return
+	}
+	slog.Info("oauth client deleted", "client_id", id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+// createOAuthSession creates a gatekeeper session and returns its JWT as the
+// OAuth access_token. The token is a standard gatekeeper JWT, so it works
+// transparently with authMiddleware and all downstream services.
+func createOAuthSession(ctx context.Context, userID string) (token, sessionID string, expiresAt time.Time, err error) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	sessionID = uuid.New().String()
+	expiresAt = time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+
+	tokenString, err := jwt.NewWithClaims(jwt.SigningMethodES256, authClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "gatekeeper",
+			Subject:   userID,
+			ID:        sessionID,
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}).SignedString(privKey)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+
+	pubBytes, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	session := Session{
+		SessionID: sessionID,
+		UserID:    userID,
+		ExpiresAt: expiresAt,
+		PubKey:    string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes})),
+		Active:    true,
+	}
+	if err := session.Add(ctx); err != nil {
+		return "", "", time.Time{}, err
+	}
+	return tokenString, sessionID, expiresAt, nil
+}
+
+// mintIDToken signs an OIDC ID token using the stable oidcSigningKey.
+func mintIDToken(user User, sessionID, audience string, expiresAt time.Time, groups []string) (string, error) {
+	t := jwt.NewWithClaims(jwt.SigningMethodES256, oidcClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    oidcIssuer,
+			Subject:   user.UserID,
+			Audience:  jwt.ClaimStrings{audience},
+			ID:        sessionID,
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+		Email:             user.Email,
+		EmailVerified:     true,
+		Name:              strings.TrimSpace(user.Firstname + " " + user.Lastname),
+		PreferredUsername: user.Username,
+		Groups:            groups,
+	})
+	t.Header["kid"] = oidcKeyID
+	return t.SignedString(oidcSigningKey)
+}
+
+// buildGroups returns OIDC group claims in "org-name" and "org-name/team-name"
+// format. Forgejo maps these to org/team membership via its OIDC team sync.
+func buildGroups(ctx context.Context, user User) []string {
+	if user.OrgID == nil {
+		return []string{}
+	}
+	orgRow, err := (Org{OrgID: *user.OrgID}).Get(ctx)
+	if err != nil {
+		return []string{}
+	}
+	org := orgRow.(Org)
+	groups := []string{org.OrgName}
+	if user.TeamID != nil {
+		if teamRow, err := (Team{TeamID: *user.TeamID}).Get(ctx); err == nil {
+			groups = append(groups, org.OrgName+"/"+teamRow.(Team).TeamName)
+		}
+	}
+	return groups
+}
+
+// extractClientCredentials reads the client_id and client_secret from either
+// HTTP Basic auth (client_secret_basic) or form fields (client_secret_post).
+func extractClientCredentials(r *http.Request) (clientID, secret string, ok bool) {
+	if id, sec, hasBasic := r.BasicAuth(); hasBasic {
+		return id, sec, true
+	}
+	id, sec := r.FormValue("client_id"), r.FormValue("client_secret")
+	if id != "" && sec != "" {
+		return id, sec, true
+	}
+	return "", "", false
+}
+
+func oauthRedirectError(w http.ResponseWriter, r *http.Request, redirectURI, state, errCode, description string) {
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+		return
+	}
+	q := u.Query()
+	q.Set("error", errCode)
+	if description != "" {
+		q.Set("error_description", description)
+	}
+	if state != "" {
+		q.Set("state", state)
+	}
+	u.RawQuery = q.Encode()
+	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
+func oauthRedirectCode(w http.ResponseWriter, r *http.Request, redirectURI, code, state string) {
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+		return
+	}
+	q := u.Query()
+	q.Set("code", code)
+	if state != "" {
+		q.Set("state", state)
+	}
+	u.RawQuery = q.Encode()
+	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
+func tokenError(w http.ResponseWriter, errCode, description string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+		"error":             errCode,
+		"error_description": description,
+	})
+}

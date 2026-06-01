@@ -181,9 +181,10 @@ func main() {
 	initSecretsEncryption()
 
 	db := connect()
-	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{})
+	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{})
 	applyForeignKeys(db)
 	seedServiceAccounts(db)
+	initOIDC()
 
 	if registryURL := os.Getenv("REGISTRY_URL"); registryURL != "" {
 		serviceKey := "gatekeeper:" + secret("REGISTRY_SERVICE_KEY")
@@ -197,6 +198,17 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, envInt("SIGNUP_RATE_LIMIT", 10), envDuration("SIGNUP_RATE_WINDOW", 10*time.Minute), handleSignup))
 	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleLogin))
+
+	// OIDC provider — used by Forgejo/Gitea and any other OAuth2 client.
+	mux.HandleFunc("GET /.well-known/openid-configuration", handleOIDCDiscovery)
+	mux.HandleFunc("GET /oauth/jwks", handleJWKS)
+	mux.HandleFunc("GET /oauth/authorize", handleAuthorize)
+	mux.HandleFunc("POST /oauth/authorize", handleAuthorizeSubmit)
+	mux.HandleFunc("POST /oauth/token", handleToken)
+	mux.Handle("GET /oauth/userinfo", authMiddleware(http.HandlerFunc(handleUserinfo)))
+	mux.HandleFunc("POST /internal/oauth/clients", handleCreateOAuthClient)
+	mux.HandleFunc("GET /internal/oauth/clients", handleListOAuthClients)
+	mux.HandleFunc("DELETE /internal/oauth/clients/{id}", handleDeleteOAuthClient)
 	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
 
 	mw := func(h http.HandlerFunc) http.Handler { return authMiddleware(http.HandlerFunc(h)) }

@@ -206,3 +206,33 @@ type OrgSecretProvider struct {
 }
 
 func (OrgSecretProvider) TableName() string { return "org_secret_providers" }
+
+// OAuthClient is a registered OAuth 2.0 / OIDC client (e.g. a Forgejo instance).
+// The client secret is stored only as a bcrypt hash; the plaintext is returned
+// once at creation time and never again.
+type OAuthClient struct {
+	ClientID     string    `json:"client_id"     gorm:"column:client_id;primaryKey"`
+	Name         string    `json:"name"          gorm:"column:name"`
+	SecretHash   string    `json:"-"             gorm:"column:secret_hash"`
+	RedirectURIs []string  `json:"redirect_uris" gorm:"column:redirect_uris;serializer:json"`
+	OrgID        string    `json:"org_id"        gorm:"column:org_id;default:''"`
+	Active       bool      `json:"active"        gorm:"column:active;default:true"`
+	CreatedAt    time.Time `json:"created_at"    gorm:"column:created_at"`
+}
+
+func (OAuthClient) TableName() string { return "oauth_clients" }
+
+// OAuthCode is a short-lived single-use authorization code issued during the
+// OAuth2 authorization_code flow. Codes expire after 10 minutes.
+type OAuthCode struct {
+	Code        string    `gorm:"column:code;primaryKey"`
+	ClientID    string    `gorm:"column:client_id"`
+	UserID      string    `gorm:"column:user_id"`
+	RedirectURI string    `gorm:"column:redirect_uri"`
+	Scopes      []string  `gorm:"column:scopes;serializer:json"`
+	Used        bool      `gorm:"column:used;default:false"`
+	ExpiresAt   time.Time `gorm:"column:expires_at"`
+	CreatedAt   time.Time `gorm:"column:created_at"`
+}
+
+func (OAuthCode) TableName() string { return "oauth_codes" }
