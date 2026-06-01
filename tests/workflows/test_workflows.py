@@ -1,4 +1,6 @@
 """Integration tests for workflow definition CRUD endpoints."""
+import uuid
+
 import pytest
 import requests
 
@@ -38,9 +40,9 @@ def test_delete_unauthorized():
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
-def test_create_missing_name(bearer):
+def test_create_missing_name(bearer, healthz_step_id):
     res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "steps": [HEALTHZ_STEP],
+        "steps": [{"step_id": healthz_step_id}],
     })
     assert res.status_code == 400
 
@@ -52,34 +54,18 @@ def test_create_empty_steps(bearer):
     assert res.status_code == 400
 
 
-def test_create_step_missing_service(bearer):
+def test_create_step_missing_step_id(bearer):
     res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
         "name": "bad-step",
-        "steps": [{"path": "/foo", "method": "GET"}],
+        "steps": [{}],
     })
     assert res.status_code == 400
 
 
-def test_create_step_missing_path(bearer):
+def test_create_step_nonexistent_step_id(bearer):
     res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "bad-step",
-        "steps": [{"service": "forge", "method": "GET"}],
-    })
-    assert res.status_code == 400
-
-
-def test_create_step_path_not_slash_prefixed(bearer):
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "bad-path",
-        "steps": [{"service": "forge", "path": "executions", "method": "GET"}],
-    })
-    assert res.status_code == 400
-
-
-def test_create_step_invalid_method(bearer):
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "bad-method",
-        "steps": [{"service": "forge", "path": "/executions", "method": "TRACE"}],
+        "name": "bad-ref",
+        "steps": [{"step_id": "00000000-0000-0000-0000-000000000000"}],
     })
     assert res.status_code == 400
 
@@ -92,26 +78,18 @@ def test_create_invalid_json(bearer):
 # ── CRUD lifecycle ────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
-def created_workflow(bearer):
+def created_workflow(bearer, healthz_step_id, second_step_id):
     res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
         "name": "test-pipeline",
         "description": "integration test workflow",
         "steps": [
-            HEALTHZ_STEP,
-            {
-                "name": "second-check",
-                "service": "gatekeeper",
-                "method": "GET",
-                "path": "/healthz",
-                "expected_status": 200,
-                "timeout_secs": 10,
-            },
+            {"step_id": healthz_step_id},
+            {"step_id": second_step_id},
         ],
     })
     assert res.status_code == 201, f"create failed: {res.text}"
     wf = res.json()
     yield wf
-    # Cleanup
     requests.delete(f"{WORKFLOWS_URL}/workflows/{wf['workflow_id']}", headers=bearer)
 
 
@@ -124,28 +102,10 @@ def test_create_returns_workflow(created_workflow):
     assert wf["active"] is True
 
 
-def test_create_normalises_defaults(bearer):
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "defaults-wf",
-        "steps": [{"service": "gatekeeper", "path": "/healthz"}],
-    })
-    assert res.status_code == 201
-    wf = res.json()
-    step = wf["steps"][0]
-    assert step["method"] == "POST"         # default method
-    assert step["timeout_secs"] == 30       # default timeout
-    assert step["name"] == "step-0"         # auto-named
-    requests.delete(f"{WORKFLOWS_URL}/workflows/{wf['workflow_id']}", headers=bearer)
-
-
-def test_create_method_uppercased(bearer):
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "method-case-wf",
-        "steps": [{"service": "gatekeeper", "path": "/healthz", "method": "get"}],
-    })
-    assert res.status_code == 201
-    assert res.json()["steps"][0]["method"] == "GET"
-    requests.delete(f"{WORKFLOWS_URL}/workflows/{res.json()['workflow_id']}", headers=bearer)
+def test_create_returns_step_details(created_workflow):
+    step = created_workflow["steps"][0]
+    assert step["step_id"] != ""
+    assert step["action"] == "http"
 
 
 def test_get_workflow(bearer, created_workflow):
@@ -174,12 +134,12 @@ def test_list_returns_array(bearer):
     assert isinstance(res.json(), list)
 
 
-def test_update_workflow(bearer, created_workflow):
+def test_update_workflow(bearer, created_workflow, healthz_step_id):
     wf_id = created_workflow["workflow_id"]
     res = requests.put(f"{WORKFLOWS_URL}/workflows/{wf_id}", headers=bearer, json={
         "name": "updated-pipeline",
         "description": "updated description",
-        "steps": [HEALTHZ_STEP],
+        "steps": [{"step_id": healthz_step_id}],
     })
     assert res.status_code == 200
     updated = res.json()
@@ -188,17 +148,18 @@ def test_update_workflow(bearer, created_workflow):
     assert len(updated["steps"]) == 1
 
 
-def test_update_not_found(bearer):
+def test_update_not_found(bearer, healthz_step_id):
     res = requests.put(f"{WORKFLOWS_URL}/workflows/00000000-0000-0000-0000-000000000000",
                        headers=bearer, json={
-                           "name": "x", "steps": [HEALTHZ_STEP],
+                           "name": "x", "steps": [{"step_id": healthz_step_id}],
                        })
     assert res.status_code == 404
 
 
-def test_delete_workflow(bearer):
+def test_delete_workflow(bearer, healthz_step_id):
     res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "to-delete", "steps": [HEALTHZ_STEP],
+        "name": f"to-delete-{uuid.uuid4().hex[:6]}",
+        "steps": [{"step_id": healthz_step_id}],
     })
     assert res.status_code == 201
     wf_id = res.json()["workflow_id"]
@@ -206,7 +167,6 @@ def test_delete_workflow(bearer):
     res = requests.delete(f"{WORKFLOWS_URL}/workflows/{wf_id}", headers=bearer)
     assert res.status_code == 204
 
-    # GET should return 404 after deletion
     res = requests.get(f"{WORKFLOWS_URL}/workflows/{wf_id}", headers=bearer)
     assert res.status_code == 404
 
@@ -217,13 +177,13 @@ def test_delete_not_found(bearer):
     assert res.status_code == 404
 
 
-def test_delete_idempotent_second_call(bearer):
+def test_delete_idempotent_second_call(bearer, healthz_step_id):
     res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "idempotent-delete", "steps": [HEALTHZ_STEP],
+        "name": f"idempotent-delete-{uuid.uuid4().hex[:6]}",
+        "steps": [{"step_id": healthz_step_id}],
     })
     wf_id = res.json()["workflow_id"]
     requests.delete(f"{WORKFLOWS_URL}/workflows/{wf_id}", headers=bearer)
 
-    # Second delete on an already-inactive workflow returns 404
     res = requests.delete(f"{WORKFLOWS_URL}/workflows/{wf_id}", headers=bearer)
     assert res.status_code == 404

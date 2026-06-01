@@ -285,8 +285,18 @@ func main() {
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_runs_queue ON workflow_runs (status, created_at) WHERE status IN ('pending', 'running')`).Error; err != nil {
 		slog.Warn("failed to create workflow_runs index", "error", err)
 	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_runs_org ON workflow_runs (org_id, created_at DESC)`).Error; err != nil {
+		slog.Warn("failed to create workflow_runs org index", "error", err)
+	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs (workflow_id, status)`).Error; err != nil {
+		slog.Warn("failed to create workflow_runs workflow index", "error", err)
+	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_step_runs_run ON workflow_step_runs (run_id, step_index)`).Error; err != nil {
+		slog.Warn("failed to create workflow_step_runs index", "error", err)
+	}
 	slog.Info("database initialized")
 
+	initTokenEncryption()
 	recoverStuckRuns()
 
 	initServices()

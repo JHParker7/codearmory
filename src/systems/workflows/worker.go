@@ -19,6 +19,10 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
+// maxParallelSteps caps concurrent step goroutines within a single parallel group
+// to avoid goroutine explosion on large workflows.
+const maxParallelSteps = 10
+
 // tokenStore holds the current run token and session ID, safe for concurrent
 // reads by parallel step goroutines and writes by the rotation goroutine.
 type tokenStore struct {
@@ -109,22 +113,34 @@ func (p *WorkerPool) Cancel(runID string) bool {
 }
 
 func (p *WorkerPool) loop(ctx context.Context) {
-	ticker := time.NewTicker(time.Second)
+	interval := time.Second
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.tryOne(ctx)
+			found := p.tryOne(ctx)
+			// Slow down when the queue is empty (up to 5 s); reset immediately on work found.
+			var next time.Duration
+			if found {
+				next = time.Second
+			} else {
+				next = min(interval*2, 5*time.Second)
+			}
+			if next != interval {
+				interval = next
+				ticker.Reset(interval)
+			}
 		}
 	}
 }
 
-func (p *WorkerPool) tryOne(ctx context.Context) {
+func (p *WorkerPool) tryOne(ctx context.Context) bool {
 	tx := connect().WithContext(ctx).Begin()
 	if tx.Error != nil {
-		return
+		return false
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -146,21 +162,35 @@ func (p *WorkerPool) tryOne(ctx context.Context) {
 		FOR UPDATE SKIP LOCKED
 	`).Scan(&pickup)
 	if result.Error != nil || result.RowsAffected == 0 {
-		return
+		return false
 	}
 
 	var inputs map[string]string
 	if err := json.Unmarshal(pickup.Inputs, &inputs); err != nil {
 		slog.Error("worker: unmarshal inputs", "run_id", pickup.RunID, "error", err)
-		return
+		return false
 	}
 
-	tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", pickup.RunID)
+	if pickup.Token != "" {
+		plainToken, err := decryptToken(pickup.Token)
+		if err != nil {
+			slog.Error("worker: decrypt run token", "run_id", pickup.RunID, "error", err)
+			return false
+		}
+		pickup.Token = plainToken
+	}
+
+	if result := tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", pickup.RunID); result.RowsAffected == 0 {
+		slog.Warn("worker: status update matched no rows, skipping", "run_id", pickup.RunID)
+		return false
+	}
 	if err := tx.Commit().Error; err != nil {
-		return
+		slog.Error("worker: commit failed", "run_id", pickup.RunID, "error", err)
+		return false
 	}
 
 	p.executeRun(ctx, pickup.RunID, pickup.WorkflowID, pickup.Token, pickup.RunSessionID, pickup.TriggeredBy, inputs)
+	return true
 }
 
 func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, sessionID, triggeredBy string, inputs map[string]string) {
@@ -197,9 +227,15 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 				slog.Warn("worker: token rotation failed", "run_id", runID, "error", err)
 				continue
 			}
-			if dbErr := connect().WithContext(context.Background()).Exec(
+			encNewToken, err := encryptToken(newToken)
+			if err != nil {
+				slog.Warn("worker: token rotation encryption failed, discarding new token", "run_id", runID, "error", err)
+				revokeRunToken(context.Background(), newSID)
+				continue
+			}
+			if dbErr := connect().WithContext(runCtx).Exec(
 				"UPDATE workflow_runs SET token=?, run_session_id=? WHERE run_id=?",
-				newToken, newSID, runID,
+				encNewToken, newSID, runID,
 			).Error; dbErr != nil {
 				slog.Warn("worker: token rotation DB update failed, discarding new token", "run_id", runID, "error", dbErr)
 				revokeRunToken(context.Background(), newSID)
@@ -209,7 +245,9 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			slog.Info("worker: run token rotated", "run_id", runID)
 			go func(sid string) {
 				time.Sleep(60 * time.Second)
-				revokeRunToken(context.Background(), sid)
+				rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer rcancel()
+				revokeRunToken(rctx, sid)
 			}(oldSID)
 		}
 	}()
@@ -221,7 +259,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			break
 		}
 
-		connect().WithContext(context.Background()).Exec( //nolint:errcheck
+		connect().WithContext(runCtx).Exec( //nolint:errcheck
 			"UPDATE workflow_runs SET current_step=? WHERE run_id=?", group.indices[0], runID)
 
 		if len(group.steps) == 1 {
@@ -277,8 +315,16 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		}
 
 		results := make(chan parallelResult, len(group.steps))
+		sem := make(chan struct{}, maxParallelSteps)
 		for j, ws := range group.steps {
 			go func(j int, ws WorkflowStep) {
+				select {
+				case sem <- struct{}{}:
+				case <-runCtx.Done():
+					results <- parallelResult{stepRunIDs[j], ws.Action, group.indices[j], "", context.Canceled}
+					return
+				}
+				defer func() { <-sem }()
 				out, err := p.executeStep(runCtx, ts, ws.Step, inputs)
 				results <- parallelResult{stepRunIDs[j], ws.Action, group.indices[j], out, err}
 			}(j, ws)

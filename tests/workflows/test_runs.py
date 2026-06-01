@@ -1,10 +1,11 @@
 """Integration tests for workflow run endpoints."""
 import time
+import uuid
 
 import pytest
 import requests
 
-from conftest import WORKFLOWS_URL, HEALTHZ_STEP
+from conftest import WORKFLOWS_URL, GATEKEEPER_URL, HEALTHZ_STEP
 
 
 def poll_until_done(bearer, run_id, timeout=30):
@@ -21,11 +22,11 @@ def poll_until_done(bearer, run_id, timeout=30):
 
 
 @pytest.fixture(scope="module")
-def workflow(bearer):
-    """Create a reusable workflow for run tests."""
+def workflow(bearer, healthz_step_id):
+    """Create a reusable single-step workflow for run tests."""
     res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "run-test-pipeline",
-        "steps": [HEALTHZ_STEP],
+        "name": f"run-test-pipeline-{uuid.uuid4().hex[:6]}",
+        "steps": [{"step_id": healthz_step_id}],
     })
     assert res.status_code == 201, f"setup failed: {res.text}"
     wf = res.json()
@@ -34,20 +35,13 @@ def workflow(bearer):
 
 
 @pytest.fixture(scope="module")
-def multi_step_workflow(bearer):
+def multi_step_workflow(bearer, healthz_step_id, second_step_id):
     """Create a two-step workflow for sequential-execution tests."""
     res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "multi-step-pipeline",
+        "name": f"multi-step-pipeline-{uuid.uuid4().hex[:6]}",
         "steps": [
-            HEALTHZ_STEP,
-            {
-                "name": "second-step",
-                "service": "gatekeeper",
-                "method": "GET",
-                "path": "/healthz",
-                "expected_status": 200,
-                "timeout_secs": 10,
-            },
+            {"step_id": healthz_step_id},
+            {"step_id": second_step_id},
         ],
     })
     assert res.status_code == 201, f"setup failed: {res.text}"
@@ -190,8 +184,6 @@ def test_completed_run_has_step_runs(bearer, workflow):
     assert len(result["step_runs"]) == 1
     step = result["step_runs"][0]
     assert step["status"] == "completed"
-    assert step["response_status"] == 200
-    assert step["step_name"] == "check-gatekeeper"
     assert step["step_index"] == 0
 
 
@@ -208,21 +200,28 @@ def test_multi_step_run_completes(bearer, multi_step_workflow):
     assert len(result["step_runs"]) == 2
     for step in result["step_runs"]:
         assert step["status"] == "completed"
-        assert step["response_status"] == 200
 
 
-def test_run_fails_on_bad_expected_status(bearer):
-    """A step with expected_status=999 should never match, causing the run to fail."""
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "failing-pipeline",
-        "steps": [{
-            "name": "will-fail",
+def test_run_fails_on_bad_expected_status(bearer, healthz_step_id):
+    """A step expecting status 999 should never match, causing the run to fail."""
+    # Create a step that will always fail.
+    bad_step_res = requests.post(f"{WORKFLOWS_URL}/steps", headers=bearer, json={
+        "name": f"will-fail-{uuid.uuid4().hex[:6]}",
+        "action": "http",
+        "with": {
             "service": "gatekeeper",
             "method": "GET",
             "path": "/healthz",
             "expected_status": 999,
-            "timeout_secs": 10,
-        }],
+        },
+        "timeout": 10,
+    })
+    assert bad_step_res.status_code == 201
+    bad_step_id = bad_step_res.json()["step_id"]
+
+    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
+        "name": f"failing-pipeline-{uuid.uuid4().hex[:6]}",
+        "steps": [{"step_id": bad_step_id}],
     })
     assert res.status_code == 201
     wf_id = res.json()["workflow_id"]
@@ -236,20 +235,28 @@ def test_run_fails_on_bad_expected_status(bearer):
     assert result["step_runs"][0]["status"] == "failed"
 
     requests.delete(f"{WORKFLOWS_URL}/workflows/{wf_id}", headers=bearer)
+    requests.delete(f"{WORKFLOWS_URL}/steps/{bad_step_id}", headers=bearer)
 
 
 def test_input_substitution_in_path(bearer):
-    """${ENV} in a step path should be substituted from run inputs."""
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": "substitution-pipeline",
-        "steps": [{
-            "name": "parameterised",
+    """${ENDPOINT} in a step path should be substituted from run inputs."""
+    param_step_res = requests.post(f"{WORKFLOWS_URL}/steps", headers=bearer, json={
+        "name": f"parameterised-{uuid.uuid4().hex[:6]}",
+        "action": "http",
+        "with": {
             "service": "gatekeeper",
             "method": "GET",
             "path": "/${ENDPOINT}",
             "expected_status": 200,
-            "timeout_secs": 10,
-        }],
+        },
+        "timeout": 10,
+    })
+    assert param_step_res.status_code == 201
+    param_step_id = param_step_res.json()["step_id"]
+
+    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
+        "name": f"substitution-pipeline-{uuid.uuid4().hex[:6]}",
+        "steps": [{"step_id": param_step_id}],
     })
     assert res.status_code == 201
     wf_id = res.json()["workflow_id"]
@@ -266,6 +273,7 @@ def test_input_substitution_in_path(bearer):
     assert result["status"] == "completed", f"step_runs: {result['step_runs']}"
 
     requests.delete(f"{WORKFLOWS_URL}/workflows/{wf_id}", headers=bearer)
+    requests.delete(f"{WORKFLOWS_URL}/steps/{param_step_id}", headers=bearer)
 
 
 # ── Cancel ─────────────────────────────────────────────────────────────────────
@@ -298,8 +306,6 @@ def test_cancel_pending_run(bearer, workflow):
     assert res.status_code == 202
     run_id = res.json()["run_id"]
 
-    # Cancel immediately — may race with worker pickup, but must end in a
-    # terminal state.
     res = requests.delete(f"{WORKFLOWS_URL}/runs/{run_id}", headers=bearer)
     assert res.status_code == 204
 

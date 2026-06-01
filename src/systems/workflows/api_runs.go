@@ -151,6 +151,15 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
 		return
 	}
+	encToken, err := encryptToken(runToken)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "run token encryption failed")
+		slog.Error("trigger run: failed to encrypt run token", "workflow_id", workflowID, "user_id", userID, "error", err)
+		revokeRunToken(context.Background(), sessionID)
+		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
+		return
+	}
 
 	run := WorkflowRun{
 		RunID:        uuid.New().String(),
@@ -159,7 +168,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		OrgID:        orgID,
 		Status:       StatusPending,
 		Inputs:       req.Inputs,
-		Token:        runToken,
+		Token:        encToken,
 		RunSessionID: sessionID,
 		StepRuns:     []WorkflowStepRun{},
 		CreatedAt:    time.Now().UTC(),

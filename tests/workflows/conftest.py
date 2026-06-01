@@ -49,13 +49,46 @@ def other_bearer(other_token):
     return {"Authorization": f"Bearer {other_token}"}
 
 
-# A minimal valid workflow step that calls gatekeeper's /healthz (no auth
-# required on that endpoint, so it completes regardless of user permissions).
-HEALTHZ_STEP = {
-    "name": "check-gatekeeper",
-    "service": "gatekeeper",
-    "method": "GET",
-    "path": "/healthz",
-    "expected_status": 200,
-    "timeout_secs": 10,
-}
+# Placeholder step reference used in auth-only tests where the body is
+# irrelevant (the request is rejected before step validation).
+HEALTHZ_STEP = {"step_id": "00000000-0000-0000-0000-000000000001"}
+
+
+@pytest.fixture(scope="session")
+def healthz_step_id(bearer):
+    """Create a reusable healthz step in the library and return its step_id."""
+    res = requests.post(f"{WORKFLOWS_URL}/steps", headers=bearer, json={
+        "name": f"check-gatekeeper-{uuid.uuid4().hex[:6]}",
+        "action": "http",
+        "with": {
+            "service": "gatekeeper",
+            "method": "GET",
+            "path": "/healthz",
+            "expected_status": 200,
+        },
+        "timeout": 10,
+    })
+    assert res.status_code == 201, f"step creation failed: {res.text}"
+    step_id = res.json()["step_id"]
+    yield step_id
+    requests.delete(f"{WORKFLOWS_URL}/steps/{step_id}", headers=bearer)
+
+
+@pytest.fixture(scope="session")
+def second_step_id(bearer):
+    """Create a second healthz step for multi-step workflow tests."""
+    res = requests.post(f"{WORKFLOWS_URL}/steps", headers=bearer, json={
+        "name": f"second-check-{uuid.uuid4().hex[:6]}",
+        "action": "http",
+        "with": {
+            "service": "gatekeeper",
+            "method": "GET",
+            "path": "/healthz",
+            "expected_status": 200,
+        },
+        "timeout": 10,
+    })
+    assert res.status_code == 201, f"second step creation failed: {res.text}"
+    step_id = res.json()["step_id"]
+    yield step_id
+    requests.delete(f"{WORKFLOWS_URL}/steps/{step_id}", headers=bearer)

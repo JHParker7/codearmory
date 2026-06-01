@@ -3,11 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeGatekeeper spins up a test server that always returns the given status
@@ -531,6 +536,461 @@ func TestSecret_FromFile(t *testing.T) {
 	}
 }
 
+// ── canAccessStep ─────────────────────────────────────────────────────────────
+
+func TestCanAccessStep_Owner(t *testing.T) {
+	s := Step{CreatedBy: "user-1", OrgID: ""}
+	if !canAccessStep(s, "user-1", "") {
+		t.Fatal("owner should have access")
+	}
+}
+
+func TestCanAccessStep_SameOrg(t *testing.T) {
+	s := Step{CreatedBy: "user-1", OrgID: "org-x"}
+	if !canAccessStep(s, "user-2", "org-x") {
+		t.Fatal("same-org user should have access")
+	}
+}
+
+func TestCanAccessStep_DifferentOrg(t *testing.T) {
+	s := Step{CreatedBy: "user-1", OrgID: "org-x"}
+	if canAccessStep(s, "user-2", "org-y") {
+		t.Fatal("different-org user should not have access")
+	}
+}
+
+func TestCanAccessStep_NoOrg(t *testing.T) {
+	s := Step{CreatedBy: "user-1", OrgID: ""}
+	if canAccessStep(s, "user-2", "") {
+		t.Fatal("unrelated user with no org should not have access")
+	}
+}
+
+// ── validateStepRequest (additional cases) ────────────────────────────────────
+
+func TestValidateStepRequest_TimeoutTooLarge(t *testing.T) {
+	msg := validateStepRequest(createStepRequest{Name: "t", Action: "forge/run", Timeout: maxTimeout + 1})
+	if msg == "" {
+		t.Fatal("expected error for timeout exceeding max")
+	}
+}
+
+func TestValidateStepRequest_NegativeTimeout(t *testing.T) {
+	msg := validateStepRequest(createStepRequest{Name: "t", Action: "forge/run", Timeout: -1})
+	if msg == "" {
+		t.Fatal("expected error for negative timeout")
+	}
+}
+
+func TestValidateStepRequest_ZeroTimeoutAllowed(t *testing.T) {
+	msg := validateStepRequest(createStepRequest{Name: "t", Action: "forge/run", Timeout: 0})
+	if msg != "" {
+		t.Fatalf("zero timeout should be allowed (means use default), got %q", msg)
+	}
+}
+
+// ── groupSteps ────────────────────────────────────────────────────────────────
+
+func TestGroupSteps_AllSequential(t *testing.T) {
+	steps := []WorkflowStep{
+		{Step: Step{StepID: "a"}},
+		{Step: Step{StepID: "b"}},
+	}
+	groups := groupSteps(steps)
+	if len(groups) != 2 {
+		t.Fatalf("want 2 groups, got %d", len(groups))
+	}
+	for _, g := range groups {
+		if len(g.steps) != 1 {
+			t.Fatalf("each group should have 1 step, got %d", len(g.steps))
+		}
+	}
+}
+
+func TestGroupSteps_AllParallel(t *testing.T) {
+	pg := 1
+	steps := []WorkflowStep{
+		{Step: Step{StepID: "a"}, ParallelGroup: &pg},
+		{Step: Step{StepID: "b"}, ParallelGroup: &pg},
+		{Step: Step{StepID: "c"}, ParallelGroup: &pg},
+	}
+	groups := groupSteps(steps)
+	if len(groups) != 1 {
+		t.Fatalf("want 1 group, got %d", len(groups))
+	}
+	if len(groups[0].steps) != 3 {
+		t.Fatalf("want 3 steps in group, got %d", len(groups[0].steps))
+	}
+}
+
+func TestGroupSteps_Mixed(t *testing.T) {
+	pg := 1
+	steps := []WorkflowStep{
+		{Step: Step{StepID: "seq1"}},
+		{Step: Step{StepID: "p1"}, ParallelGroup: &pg},
+		{Step: Step{StepID: "p2"}, ParallelGroup: &pg},
+		{Step: Step{StepID: "seq2"}},
+	}
+	groups := groupSteps(steps)
+	if len(groups) != 3 {
+		t.Fatalf("want 3 groups (seq, parallel, seq), got %d", len(groups))
+	}
+	if len(groups[1].steps) != 2 {
+		t.Fatalf("parallel group should have 2 steps, got %d", len(groups[1].steps))
+	}
+}
+
+// ── substituteWith ────────────────────────────────────────────────────────────
+
+func TestSubstituteWith_StringValue(t *testing.T) {
+	with := map[string]any{"tag": "${IMAGE_TAG}"}
+	result := substituteWith(with, map[string]string{"IMAGE_TAG": "v1.2.3"})
+	if result["tag"] != "v1.2.3" {
+		t.Fatalf("got %q, want v1.2.3", result["tag"])
+	}
+}
+
+func TestSubstituteWith_NestedMap(t *testing.T) {
+	with := map[string]any{"inner": map[string]any{"key": "${VAL}"}}
+	result := substituteWith(with, map[string]string{"VAL": "hello"})
+	inner, _ := result["inner"].(map[string]any)
+	if inner["key"] != "hello" {
+		t.Fatalf("nested substitution failed: got %v", inner["key"])
+	}
+}
+
+func TestSubstituteWith_SliceValues(t *testing.T) {
+	with := map[string]any{"items": []any{"${A}", "${B}"}}
+	result := substituteWith(with, map[string]string{"A": "x", "B": "y"})
+	items, _ := result["items"].([]any)
+	if len(items) != 2 || items[0] != "x" || items[1] != "y" {
+		t.Fatalf("slice substitution failed: %v", items)
+	}
+}
+
+func TestSubstituteWith_NoInputs(t *testing.T) {
+	with := map[string]any{"k": "${V}"}
+	result := substituteWith(with, nil)
+	// No inputs → with map returned as-is (unmodified).
+	if result["k"] != "${V}" {
+		t.Fatalf("got %q, want ${V}", result["k"])
+	}
+}
+
+// ── verifyHooksTrigger ────────────────────────────────────────────────────────
+
+func TestVerifyHooksTrigger_NoKey(t *testing.T) {
+	orig := hooksTriggerKey
+	hooksTriggerKey = ""
+	defer func() { hooksTriggerKey = orig }()
+	if verifyHooksTrigger("wf", "user", "tok", "123") {
+		t.Fatal("expected false when key is empty")
+	}
+}
+
+func TestVerifyHooksTrigger_InvalidTimestamp(t *testing.T) {
+	orig := hooksTriggerKey
+	hooksTriggerKey = "secret"
+	defer func() { hooksTriggerKey = orig }()
+	if verifyHooksTrigger("wf", "user", "tok", "not-a-number") {
+		t.Fatal("expected false for non-numeric timestamp")
+	}
+}
+
+func TestVerifyHooksTrigger_ExpiredTimestamp(t *testing.T) {
+	orig := hooksTriggerKey
+	hooksTriggerKey = "secret"
+	defer func() { hooksTriggerKey = orig }()
+	oldTS := fmt.Sprintf("%d", time.Now().Unix()-60)
+	if verifyHooksTrigger("wf", "user", "tok", oldTS) {
+		t.Fatal("expected false for timestamp older than 30 s")
+	}
+}
+
+func TestVerifyHooksTrigger_WrongSignature(t *testing.T) {
+	orig := hooksTriggerKey
+	hooksTriggerKey = "secret"
+	defer func() { hooksTriggerKey = orig }()
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	if verifyHooksTrigger("wf", "user", "deadbeef", ts) {
+		t.Fatal("expected false for wrong signature")
+	}
+}
+
+func TestVerifyHooksTrigger_ValidSignature(t *testing.T) {
+	orig := hooksTriggerKey
+	hooksTriggerKey = "test-key-123"
+	defer func() { hooksTriggerKey = orig }()
+
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	mac := hmac.New(sha256.New, []byte(hooksTriggerKey))
+	fmt.Fprintf(mac, "hooks:%s:%s:%s", "wf-id", "user-id", ts)
+	token := hex.EncodeToString(mac.Sum(nil))
+
+	if !verifyHooksTrigger("wf-id", "user-id", token, ts) {
+		t.Fatal("expected true for valid signature")
+	}
+}
+
+// ── step handler auth (no-DB) ─────────────────────────────────────────────────
+
+func TestHandleCreateStep_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/steps", nil)
+	w := httptest.NewRecorder()
+	handleCreateStep(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleCreateStep_InvalidBody(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
+	r := httptest.NewRequest(http.MethodPost, "/steps", bytes.NewBufferString("not-json"))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateStep(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleCreateStep_MissingName(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
+	body := `{"action":"forge/run"}`
+	r := httptest.NewRequest(http.MethodPost, "/steps", bytes.NewBufferString(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateStep(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "name") {
+		t.Errorf("expected 'name' in error, got %q", w.Body.String())
+	}
+}
+
+func TestHandleCreateStep_MissingAction(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
+	body := `{"name":"build"}`
+	r := httptest.NewRequest(http.MethodPost, "/steps", bytes.NewBufferString(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateStep(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "action") {
+		t.Errorf("expected 'action' in error, got %q", w.Body.String())
+	}
+}
+
+func TestHandleCreateStep_HTTPMissingService(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
+	body := `{"name":"call","action":"http","with":{"path":"/foo"}}`
+	r := httptest.NewRequest(http.MethodPost, "/steps", bytes.NewBufferString(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateStep(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleCreateStep_HTTPMissingPath(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
+	body := `{"name":"call","action":"http","with":{"service":"forge"}}`
+	r := httptest.NewRequest(http.MethodPost, "/steps", bytes.NewBufferString(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateStep(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleListSteps_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/steps", nil)
+	w := httptest.NewRecorder()
+	handleListSteps(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleGetStep_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/steps/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleGetStep(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleUpdateStep_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "/steps/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleUpdateStep(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleDeleteStep_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodDelete, "/steps/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleDeleteStep(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+// ── workflow handler auth (no-DB) ─────────────────────────────────────────────
+
+func TestHandleGetWorkflow_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/workflows/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleGetWorkflow(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleUpdateWorkflow_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "/workflows/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleUpdateWorkflow(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleDeleteWorkflow_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodDelete, "/workflows/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleDeleteWorkflow(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+// ── run handler auth (no-DB) ──────────────────────────────────────────────────
+
+func TestHandleListRuns_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/runs", nil)
+	w := httptest.NewRecorder()
+	handleListRuns(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleCancelRun_Unauthorized(t *testing.T) {
+	pool := newWorkerPool()
+	handler := handleCancelRun(pool)
+	r := httptest.NewRequest(http.MethodDelete, "/runs/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handler(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+// ── internal endpoint auth (no-DB) ───────────────────────────────────────────
+
+func TestHandleInternalTriggerRun_InvalidBody(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/internal/workflows/wf-1/runs", bytes.NewBufferString("bad"))
+	r.SetPathValue("id", "wf-1")
+	w := httptest.NewRecorder()
+	handleInternalTriggerRun(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleInternalTriggerRun_NoKey(t *testing.T) {
+	orig := hooksTriggerKey
+	hooksTriggerKey = ""
+	defer func() { hooksTriggerKey = orig }()
+
+	body := `{"triggered_by":"user-1","org_id":"org-1"}`
+	r := httptest.NewRequest(http.MethodPost, "/internal/workflows/wf-1/runs", bytes.NewBufferString(body))
+	r.SetPathValue("id", "wf-1")
+	w := httptest.NewRecorder()
+	handleInternalTriggerRun(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleInternalTriggerRun_WrongSignature(t *testing.T) {
+	orig := hooksTriggerKey
+	hooksTriggerKey = "test-key"
+	defer func() { hooksTriggerKey = orig }()
+
+	body := `{"triggered_by":"user-1","org_id":"org-1"}`
+	r := httptest.NewRequest(http.MethodPost, "/internal/workflows/wf-1/runs", bytes.NewBufferString(body))
+	r.SetPathValue("id", "wf-1")
+	r.Header.Set("X-Hooks-Token", "wrongtoken")
+	r.Header.Set("X-Hooks-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+	w := httptest.NewRecorder()
+	handleInternalTriggerRun(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleInternalGetWorkflow_NoKey(t *testing.T) {
+	orig := hooksTriggerKey
+	hooksTriggerKey = ""
+	defer func() { hooksTriggerKey = orig }()
+
+	r := httptest.NewRequest(http.MethodGet, "/internal/workflows/wf-1", nil)
+	r.SetPathValue("id", "wf-1")
+	w := httptest.NewRecorder()
+	handleInternalGetWorkflow(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleInternalGetRun_NoKey(t *testing.T) {
+	orig := hooksTriggerKey
+	hooksTriggerKey = ""
+	defer func() { hooksTriggerKey = orig }()
+
+	r := httptest.NewRequest(http.MethodGet, "/internal/runs/run-1", nil)
+	r.SetPathValue("id", "run-1")
+	w := httptest.NewRecorder()
+	handleInternalGetRun(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+// ── handleListActions (no-DB, returns empty catalog) ─────────────────────────
+
+func TestHandleListActions_EmptyCatalog(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
+	r := httptest.NewRequest(http.MethodGet, "/actions", nil)
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleListActions(w, r)
+	// No DB required: the catalog is an in-memory map seeded at startup.
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
 // ── statusResponseWriter ─────────────────────────────────────────────────────
 
 func TestStatusResponseWriter_WriteHeader(t *testing.T) {
@@ -542,6 +1002,52 @@ func TestStatusResponseWriter_WriteHeader(t *testing.T) {
 	}
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("underlying recorder: got %d, want 404", w.Code)
+	}
+}
+
+// ── tokenStore ────────────────────────────────────────────────────────────────
+
+func TestTokenStore_GetToken(t *testing.T) {
+	ts := newTokenStore("tok1", "sid1")
+	if got := ts.getToken(); got != "tok1" {
+		t.Fatalf("got %q, want tok1", got)
+	}
+}
+
+func TestTokenStore_GetSessionID(t *testing.T) {
+	ts := newTokenStore("tok1", "sid1")
+	if got := ts.getSessionID(); got != "sid1" {
+		t.Fatalf("got %q, want sid1", got)
+	}
+}
+
+func TestTokenStore_Swap_ReturnsOldSessionID(t *testing.T) {
+	ts := newTokenStore("tok1", "sid1")
+	oldSID := ts.swap("tok2", "sid2")
+	if oldSID != "sid1" {
+		t.Fatalf("swap returned old session ID %q, want sid1", oldSID)
+	}
+}
+
+func TestTokenStore_Swap_UpdatesValues(t *testing.T) {
+	ts := newTokenStore("tok1", "sid1")
+	ts.swap("tok2", "sid2")
+	if got := ts.getToken(); got != "tok2" {
+		t.Fatalf("after swap token = %q, want tok2", got)
+	}
+	if got := ts.getSessionID(); got != "sid2" {
+		t.Fatalf("after swap session ID = %q, want sid2", got)
+	}
+}
+
+// ── rotationInterval ─────────────────────────────────────────────────────────
+
+func TestRotationInterval_InBounds(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		d := rotationInterval()
+		if d < 30*time.Minute || d >= 60*time.Minute {
+			t.Fatalf("rotationInterval() = %v, want in [30m, 60m)", d)
+		}
 	}
 }
 

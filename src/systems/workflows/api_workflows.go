@@ -182,6 +182,10 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
+	if len(req.Steps) == 0 {
+		http.Error(w, "at least one step is required", http.StatusBadRequest)
+		return
+	}
 	if len(req.Steps) > maxSteps {
 		http.Error(w, fmt.Sprintf("maximum %d steps allowed", maxSteps), http.StatusBadRequest)
 		return
@@ -341,6 +345,10 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" {
 		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if len(req.Steps) == 0 {
+		http.Error(w, "at least one step is required", http.StatusBadRequest)
 		return
 	}
 	if len(req.Steps) > maxSteps {
