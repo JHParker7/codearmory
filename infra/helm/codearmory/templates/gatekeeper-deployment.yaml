@@ -72,6 +72,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-gatekeeper
                   key: registry-service-key
+            {{- if .Values.gatekeeper.env.oidcIssuer }}
+            - name: OIDC_ISSUER
+              value: {{ .Values.gatekeeper.env.oidcIssuer | quote }}
+            {{- end }}
+            {{- if .Values.gatekeeper.secret.oidcSigningKey }}
+            - name: OIDC_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-gatekeeper
+                  key: oidc-signing-key
+            {{- end }}
           livenessProbe:
             tcpSocket:
               port: http

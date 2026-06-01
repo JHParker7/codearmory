@@ -6,6 +6,12 @@
     "forward_auth": true,
     "service_key": "gatekeeper-registry-local-secret",
     "endpoints": [
+      { "method": "GET",    "path": "/.well-known/openid-configuration",    "action": "oidcDiscovery",     "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "GET",    "path": "/oauth/jwks",                           "action": "oidcJWKS",          "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "GET",    "path": "/oauth/authorize",                      "action": "oidcAuthorize",     "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "POST",   "path": "/oauth/authorize",                      "action": "oidcAuthorize",     "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "POST",   "path": "/oauth/token",                          "action": "oidcToken",         "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "GET",    "path": "/oauth/userinfo",                       "action": "oidcUserinfo",      "resource": "gatekeeper/oidc",             "public": true  },
       { "method": "POST",   "path": "/signup",                               "action": "signup",            "resource": "gatekeeper/users",            "public": true  },
       { "method": "POST",   "path": "/login",                                "action": "login",             "resource": "gatekeeper/users",            "public": true  },
       { "method": "GET",    "path": "/users",                                "action": "listUser",          "resource": "gatekeeper/users"             },

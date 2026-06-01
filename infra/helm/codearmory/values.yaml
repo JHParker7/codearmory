@@ -28,6 +28,10 @@ gatekeeper:
     trustedProxyCIDRs: ""
     # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
     otelEndpoint: ""
+    # Publicly reachable base URL for OIDC discovery and token endpoints.
+    # Must match the URL Forgejo/Gitea clients use to reach this instance.
+    # e.g. https://codearmory.example.com
+    oidcIssuer: ""
   secret:
     # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
@@ -41,6 +45,12 @@ gatekeeper:
     # Read key gatekeeper uses to fetch default grants from the registry.
     # Must match an entry in registry.secret.serviceAccounts.
     registryServiceKey: ""
+    # PEM-encoded ECDSA P-256 private key used to sign OIDC ID tokens.
+    # Must be stable across pod restarts — rotating this key invalidates existing
+    # ID tokens and forces all connected clients to re-authenticate.
+    # Generate with: openssl ecparam -name prime256v1 -genkey -noout | openssl ec -out -
+    # If unset, an ephemeral key is generated on startup (not suitable for production).
+    oidcSigningKey: ""
   redis:
     enabled: true
     image:
