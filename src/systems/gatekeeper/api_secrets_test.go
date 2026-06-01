@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
@@ -91,6 +92,48 @@ func createAuthorizedOrgUser(t *testing.T, action, resource string) (Org, User) 
 	connect().WithContext(context.Background()).Model(&User{}).
 		Where("user_id = ?", u.UserID).Update("role_id", role.RoleID) //nolint:errcheck
 	return org, u
+}
+
+// createWorkflowsServiceAccount creates a ServiceAccount with ServiceName "workflows".
+func createWorkflowsServiceAccount(t *testing.T) (ServiceAccount, string) {
+	t.Helper()
+	key := uuid.New().String()
+	hashed, err := bcrypt.GenerateFromPassword([]byte(key), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("createWorkflowsServiceAccount bcrypt: %v", err)
+	}
+	svc := ServiceAccount{
+		ServiceAccountID: uuid.New().String(),
+		ServiceName:      "workflows",
+		HashedKey:        string(hashed),
+		Active:           true,
+	}
+	if err := svc.Add(context.Background()); err != nil {
+		t.Fatalf("createWorkflowsServiceAccount add: %v", err)
+	}
+	// Hard-delete so the unique service_name index doesn't block subsequent tests.
+	t.Cleanup(func() {
+		connect().WithContext(context.Background()).
+			Unscoped().Delete(&ServiceAccount{}, "service_account_id = ?", svc.ServiceAccountID) //nolint:errcheck
+	})
+	return svc, key
+}
+
+// createSessionForUser inserts an active session for userID and registers cleanup.
+func createSessionForUser(t *testing.T, userID string) Session {
+	t.Helper()
+	sess := Session{
+		SessionID: uuid.New().String(),
+		UserID:    userID,
+		ExpiresAt: time.Now().Add(24 * time.Hour).UTC(),
+		PubKey:    "test-pub-key",
+		Active:    true,
+	}
+	if err := sess.Add(context.Background()); err != nil {
+		t.Fatalf("createSessionForUser add: %v", err)
+	}
+	t.Cleanup(func() { sess.Remove(context.Background()) })
+	return sess
 }
 
 // createServiceAccount creates a ServiceAccount with a known plaintext key.
@@ -401,22 +444,22 @@ func TestSetSecretProvider_InvalidProvider(t *testing.T) {
 // ── Internal resolve (builtin) ────────────────────────────────────────────────
 
 func TestResolveSecrets_Builtin(t *testing.T) {
-	org := Org{OrgID: uuid.New().String(), OrgName: "resolve-org-" + uuid.New().String()}
-	org.Add(context.Background()) //nolint:errcheck
-	t.Cleanup(func() { org.Remove(context.Background()) })
+	org, u := createOrgWithUser(t)
 
 	ct, _ := encryptSecret("s3cr3t-val")
-	s := Secret{SecretID: uuid.New().String(), OrgID: org.OrgID, Name: "MY_KEY", Ciphertext: ct, CreatedBy: "test"}
+	s := Secret{SecretID: uuid.New().String(), OrgID: org.OrgID, Name: "MY_KEY", Ciphertext: ct, CreatedBy: u.UserID}
 	connect().WithContext(context.Background()).Create(&s) //nolint:errcheck
 	t.Cleanup(func() {
 		connect().WithContext(context.Background()).
 			Model(&Secret{}).Where("secret_id = ?", s.SecretID).Update("active", false) //nolint:errcheck
 	})
 
-	svc, key := createServiceAccount(t)
-	body, _ := json.Marshal(resolveRequest{OrgID: org.OrgID, Names: []string{"MY_KEY"}})
+	svc, svcKey := createWorkflowsServiceAccount(t)
+	sess := createSessionForUser(t, u.UserID)
+
+	body, _ := json.Marshal(resolveRequest{OrgID: org.OrgID, SessionID: sess.SessionID, Names: []string{"MY_KEY"}})
 	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/resolve", bytes.NewReader(body))
-	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, key))
+	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, svcKey))
 	w := httptest.NewRecorder()
 	handleResolveSecrets(w, r)
 
@@ -431,14 +474,14 @@ func TestResolveSecrets_Builtin(t *testing.T) {
 }
 
 func TestResolveSecrets_MissingSecret(t *testing.T) {
-	org := Org{OrgID: uuid.New().String(), OrgName: "resolve-miss-" + uuid.New().String()}
-	org.Add(context.Background()) //nolint:errcheck
-	t.Cleanup(func() { org.Remove(context.Background()) })
+	org, u := createOrgWithUser(t)
 
-	svc, key := createServiceAccount(t)
-	body, _ := json.Marshal(resolveRequest{OrgID: org.OrgID, Names: []string{"MISSING"}})
+	svc, svcKey := createWorkflowsServiceAccount(t)
+	sess := createSessionForUser(t, u.UserID)
+
+	body, _ := json.Marshal(resolveRequest{OrgID: org.OrgID, SessionID: sess.SessionID, Names: []string{"MISSING"}})
 	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/resolve", bytes.NewReader(body))
-	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, key))
+	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, svcKey))
 	w := httptest.NewRecorder()
 	handleResolveSecrets(w, r)
 
@@ -528,6 +571,10 @@ func TestResolveVault_Success(t *testing.T) {
 	old := adapterClient
 	adapterClient = mock.Client()
 	defer func() { adapterClient = old }()
+
+	oldVault := resolveVaultClient
+	resolveVaultClient = mock.Client()
+	defer func() { resolveVaultClient = oldVault }()
 
 	result, err := resolveVault(context.Background(), ct, []string{"DB_PASS"})
 	if err != nil {

@@ -376,8 +376,14 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		"user_id":  userID,
 		"username": req.Username,
 	}
+	userGrants := defaultGrantsFor("user")
+	if len(userGrants) == 0 {
+		slog.Error("signup: no default grants for 'user' — new user will have no permissions; check that the registry is reachable and has default_grants seeded", "user_id", userID)
+		http.Error(w, "service configuration error: permissions not available", http.StatusServiceUnavailable)
+		return
+	}
 	var createdPerms []Permissions
-	for _, grant := range defaultGrantsFor("user") {
+	for _, grant := range userGrants {
 		perm := Permissions{
 			Name:          fmt.Sprintf("%s default permissions for %s", grant.ServiceName, req.Username),
 			PermissionsID: uuid.New().String(),

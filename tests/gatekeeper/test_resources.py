@@ -114,6 +114,27 @@ class TestUnauthenticated:
     def test_delete_session(self, base_url):
         self._check(base_url, "delete", f"/sessions/{rand_id()}")
 
+    def test_post_secrets(self, base_url):
+        self._check(base_url, "post", "/secrets")
+
+    def test_get_secrets(self, base_url):
+        self._check(base_url, "get", "/secrets")
+
+    def test_put_secret(self, base_url):
+        self._check(base_url, "put", f"/secrets/{rand_id()}")
+
+    def test_delete_secret(self, base_url):
+        self._check(base_url, "delete", f"/secrets/{rand_id()}")
+
+    def test_get_org_secret_provider(self, base_url):
+        self._check(base_url, "get", f"/orgs/{rand_id()}/secret-provider")
+
+    def test_put_org_secret_provider(self, base_url):
+        self._check(base_url, "put", f"/orgs/{rand_id()}/secret-provider")
+
+    def test_delete_org_secret_provider(self, base_url):
+        self._check(base_url, "delete", f"/orgs/{rand_id()}/secret-provider")
+
 
 # ---------------------------------------------------------------------------
 # 403 — authenticated but no matching permission
@@ -199,6 +220,27 @@ class TestForbidden:
 
     def test_delete_session(self, base_url, token):
         self._check(base_url, token, "delete", f"/sessions/{rand_id()}")
+
+    def test_post_secrets(self, base_url, token):
+        self._check(base_url, token, "post", "/secrets", {"name": "X", "value": "y"})
+
+    def test_get_secrets(self, base_url, token):
+        self._check(base_url, token, "get", "/secrets")
+
+    def test_put_secret(self, base_url, token):
+        self._check(base_url, token, "put", f"/secrets/{rand_id()}", {"value": "x"})
+
+    def test_delete_secret(self, base_url, token):
+        self._check(base_url, token, "delete", f"/secrets/{rand_id()}")
+
+    def test_get_org_secret_provider(self, base_url, token):
+        self._check(base_url, token, "get", f"/orgs/{rand_id()}/secret-provider")
+
+    def test_put_org_secret_provider(self, base_url, token):
+        self._check(base_url, token, "put", f"/orgs/{rand_id()}/secret-provider", {"provider": "builtin"})
+
+    def test_delete_org_secret_provider(self, base_url, token):
+        self._check(base_url, token, "delete", f"/orgs/{rand_id()}/secret-provider")
 
 
 # ---------------------------------------------------------------------------

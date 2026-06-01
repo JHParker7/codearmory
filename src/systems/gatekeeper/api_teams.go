@@ -205,7 +205,13 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		"username": owner.Username,
 	}
 	db := connect().WithContext(ctx)
-	for _, grant := range defaultGrantsFor("team") {
+	teamGrants := defaultGrantsFor("team")
+	if len(teamGrants) == 0 {
+		slog.Error("create team: no default grants for 'team' — owner will have no permissions; check that the registry is reachable and has default_grants seeded", "team_id", team.TeamID, "caller_id", callerID)
+		http.Error(w, "service configuration error: permissions not available", http.StatusServiceUnavailable)
+		return
+	}
+	for _, grant := range teamGrants {
 		permName := fmt.Sprintf("%s-%s %s permissions", owner.Username, team.TeamName, grant.ServiceName)
 		resources := applyGrantTemplates(grant.Resources, templateVars)
 		for _, resource := range resources {

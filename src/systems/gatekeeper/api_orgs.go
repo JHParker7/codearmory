@@ -45,8 +45,23 @@ func handleListOrgs(w http.ResponseWriter, r *http.Request) {
 			filter.OrgID = *oid
 		}
 	}
+	// A caller with no org has nothing to list — return empty rather than leaking all orgs.
+	// (GORM's Where(struct) ignores zero-value fields, so an empty OrgID would match all.)
+	if filter.OrgID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]Org{}) //nolint:errcheck
+		span.SetStatus(codes.Ok, "")
+		return
+	}
 
 	q := r.URL.Query()
+	if v := q.Get("org_id"); v != "" && v != filter.OrgID {
+		// Caller requested a specific org_id that doesn't match their own — nothing to return.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]Org{}) //nolint:errcheck
+		span.SetStatus(codes.Ok, "")
+		return
+	}
 	if v := q.Get("org_name"); v != "" {
 		filter.OrgName = v
 	}
@@ -142,7 +157,13 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		"username": owner.Username,
 	}
 	db := connect().WithContext(ctx)
-	for _, grant := range defaultGrantsFor("org") {
+	orgGrants := defaultGrantsFor("org")
+	if len(orgGrants) == 0 {
+		slog.Error("create org: no default grants for 'org' — owner will have no permissions; check that the registry is reachable and has default_grants seeded", "org_id", org.OrgID, "user_id", userID)
+		http.Error(w, "service configuration error: permissions not available", http.StatusServiceUnavailable)
+		return
+	}
+	for _, grant := range orgGrants {
 		permName := fmt.Sprintf("%s-%s %s permissions", owner.Username, org.OrgName, grant.ServiceName)
 		resources := applyGrantTemplates(grant.Resources, templateVars)
 		for _, resource := range resources {

@@ -19,6 +19,10 @@ import (
 
 var adapterClient = &http.Client{Timeout: 10 * time.Second}
 
+// resolveVaultClient is the HTTP client used by resolveVault. Tests can
+// substitute a stub to bypass the SSRF-protected vaultClient.
+var resolveVaultClient *http.Client
+
 // vaultClient uses a custom DialContext that re-validates the resolved IP at
 // every connection attempt, preventing DNS rebinding SSRF. If a hostname that
 // passed validateVaultAddress later rebinds to a private IP, the dial fails.
@@ -602,51 +606,51 @@ func resolveDoppler(ctx context.Context, encConfig []byte, names []string) (map[
 		return nil, fmt.Errorf("doppler config: %w", err)
 	}
 
-	result := make(map[string]string, len(names))
-	for _, name := range names {
-		reqURL := "https://api.doppler.com/v3/configs/config/secret?name=" + url.QueryEscape(name)
-		if cfg.Project != "" {
-			reqURL += "&project=" + url.QueryEscape(cfg.Project)
-		}
+	// Fetch all secrets in a single request instead of one per name.
+	reqURL := "https://api.doppler.com/v3/configs/config/secrets"
+	if cfg.Project != "" {
+		reqURL += "?project=" + url.QueryEscape(cfg.Project)
 		if cfg.Config != "" {
 			reqURL += "&config=" + url.QueryEscape(cfg.Config)
 		}
+	} else if cfg.Config != "" {
+		reqURL += "?config=" + url.QueryEscape(cfg.Config)
+	}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-		if err != nil {
-			return nil, fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+cfg.ServiceToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.ServiceToken)
 
-		resp, err := adapterClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("doppler request: %w", err)
+	resp, err := adapterClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("doppler request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("doppler HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	// Response: {"secrets": {"KEY": {"raw": "value", "computed": "value"}, ...}}
+	var payload struct {
+		Secrets map[string]struct {
+			Raw      string `json:"raw"`
+			Computed string `json:"computed"`
+		} `json:"secrets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode doppler response: %w", err)
+	}
+
+	result := make(map[string]string, len(names))
+	for _, name := range names {
+		s, ok := payload.Secrets[name]
+		if !ok {
+			return nil, fmt.Errorf("secret %q not found in Doppler", name)
 		}
-		val, err := func() (string, error) {
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusNotFound {
-				return "", fmt.Errorf("secret %q not found in Doppler", name)
-			}
-			if resp.StatusCode != http.StatusOK {
-				body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-				return "", fmt.Errorf("doppler HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-			}
-			var payload struct {
-				Secret struct {
-					Raw struct {
-						Raw string `json:"raw"`
-					} `json:"raw"`
-				} `json:"secret"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-				return "", fmt.Errorf("decode doppler response: %w", err)
-			}
-			return payload.Secret.Raw.Raw, nil
-		}()
-		if err != nil {
-			return nil, err
-		}
-		result[name] = val
+		result[name] = s.Raw
 	}
 	return result, nil
 }
@@ -695,7 +699,11 @@ func resolveVault(ctx context.Context, encConfig []byte, names []string) (map[st
 			req.Header.Set("X-Vault-Namespace", cfg.Namespace)
 		}
 
-		resp, err := vaultClient.Do(req)
+		client := resolveVaultClient
+		if client == nil {
+			client = vaultClient
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("vault request: %w", err)
 		}

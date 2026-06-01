@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -14,9 +15,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// permittedServices is the allowlist of service names that can be used in
-// Permissions records. Populated once at startup from PERMITTED_SERVICES
-// (comma-separated) or defaulting to the known built-in services.
+// permittedServices is a startup-seeded set of known service names, populated
+// from PERMITTED_SERVICES (comma-separated). It is a fast path only — any
+// service not listed here is checked live against the ServiceAccount table, so
+// services deployed after Gatekeeper starts are automatically permitted once
+// they register via key rotation.
 var permittedServices map[string]bool
 
 func initPermittedServices() {
@@ -31,6 +34,16 @@ func initPermittedServices() {
 			permittedServices[s] = true
 		}
 	}
+}
+
+// isServicePermitted returns true if name is in the startup-seeded set or has
+// an active ServiceAccount record (registered via SDK key rotation).
+func isServicePermitted(ctx context.Context, name string) bool {
+	if permittedServices[name] {
+		return true
+	}
+	_, err := (ServiceAccount{ServiceName: name}).Get(ctx)
+	return err == nil
 }
 
 type permissionsRequest struct {
@@ -69,9 +82,9 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service is required", http.StatusBadRequest)
 		return
 	}
-	if !permittedServices[req.Service] {
+	if !isServicePermitted(ctx, req.Service) {
 		span.SetStatus(codes.Error, "unknown service")
-		slog.Warn("create permissions: service not in allowlist", "caller_id", callerID, "service", req.Service)
+		slog.Warn("create permissions: service not permitted", "caller_id", callerID, "service", req.Service)
 		http.Error(w, "service not permitted", http.StatusBadRequest)
 		return
 	}
@@ -196,9 +209,9 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service is required", http.StatusBadRequest)
 		return
 	}
-	if !permittedServices[req.Service] {
+	if !isServicePermitted(ctx, req.Service) {
 		span.SetStatus(codes.Error, "unknown service")
-		slog.Warn("update permissions: service not in allowlist", "caller_id", callerID, "permissions_id", id, "service", req.Service)
+		slog.Warn("update permissions: service not permitted", "caller_id", callerID, "permissions_id", id, "service", req.Service)
 		http.Error(w, "service not permitted", http.StatusBadRequest)
 		return
 	}

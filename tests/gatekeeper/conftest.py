@@ -97,6 +97,8 @@ def pytest_sessionfinish(session, exitstatus):
             conn.execute(sa.text("DELETE FROM teams WHERE team_id = ANY(:tids)"), {"tids": team_ids})
         if org_ids:
             conn.execute(sa.text("UPDATE roles SET org_id = NULL WHERE org_id = ANY(:oids)"), {"oids": org_ids})
+            conn.execute(sa.text("UPDATE secrets SET active = false WHERE org_id = ANY(:oids)"), {"oids": org_ids})
+            conn.execute(sa.text("DELETE FROM org_secret_providers WHERE org_id = ANY(:oids)"), {"oids": org_ids})
             conn.execute(sa.text("DELETE FROM orgs WHERE org_id = ANY(:oids)"), {"oids": org_ids})
 
         conn.execute(

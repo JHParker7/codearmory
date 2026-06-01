@@ -377,8 +377,16 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mark code as used before issuing tokens.
-	connect().WithContext(r.Context()).Model(&authCode).Update("used", true) //nolint:errcheck
+	// Atomically mark the code as used. RowsAffected == 0 means a concurrent
+	// request already redeemed it, preventing double-issuance of sessions.
+	result := connect().WithContext(r.Context()).
+		Model(&OAuthCode{}).
+		Where("code = ? AND used = ?", authCode.Code, false).
+		Update("used", true)
+	if result.Error != nil || result.RowsAffected == 0 {
+		tokenError(w, "invalid_grant", "authorization code already used")
+		return
+	}
 
 	userRow, err := (User{UserID: authCode.UserID}).Get(r.Context())
 	if err != nil {
