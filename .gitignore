@@ -5,6 +5,9 @@ src/systems/conductor/conductor
 src/systems/workflows/workflows
 src/systems/tickets/tickets
 src/systems/hooks/hooks
+src/systems/forge/forge
+src/systems/mcp/codearmory-mcp
+src/systems/registry/registry
 src/cli/armory
 
 # SQLite databases
