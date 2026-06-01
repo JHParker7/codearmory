@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
+	"net/url"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -68,19 +68,19 @@ func handleListTickets(c *client) server.ToolHandlerFunc {
 		if err := c.cfg.validate(); err != nil {
 			return noAuth(), nil
 		}
-		var params []string
+		params := url.Values{}
 		if v := argStr(req, "status"); v != "" {
-			params = append(params, "status="+v)
+			params.Set("status", v)
 		}
 		if v := argStr(req, "priority"); v != "" {
-			params = append(params, "priority="+v)
+			params.Set("priority", v)
 		}
 		if v := argStr(req, "assignee_id"); v != "" {
-			params = append(params, "assignee_id="+v)
+			params.Set("assignee_id", v)
 		}
 		path := "/tickets"
 		if len(params) > 0 {
-			path += "?" + strings.Join(params, "&")
+			path += "?" + params.Encode()
 		}
 		data, status, err := c.get(ctx, path)
 		if err != nil {

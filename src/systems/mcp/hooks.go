@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -203,7 +204,7 @@ func handleListEvents(c *client) server.ToolHandlerFunc {
 		}
 		path := "/events"
 		if repo := argStr(req, "repo"); repo != "" {
-			path += "?repo=" + repo
+			path += "?repo=" + url.QueryEscape(repo)
 		}
 		data, status, err := c.get(ctx, path)
 		if err != nil {
