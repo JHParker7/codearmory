@@ -364,13 +364,54 @@ func (t HookTrigger) Add(ctx context.Context) error {
 	return nil
 }
 
-func (t HookTrigger) Update(ctx context.Context) error { return nil }
-func (t HookTrigger) Remove(ctx context.Context) error { return nil }
-func (t HookTrigger) Get(ctx context.Context) (db, error) {
-	return nil, fmt.Errorf("not implemented")
+func (t HookTrigger) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("hooks").Start(ctx, "db.hook_trigger.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("trigger.id", t.TriggerID))
+	if err := connect().WithContext(ctx).Save(&t).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
 }
+
+func (t HookTrigger) Remove(ctx context.Context) error { return nil }
+
+func (t HookTrigger) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("hooks").Start(ctx, "db.hook_trigger.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("trigger.id", t.TriggerID))
+	var result HookTrigger
+	if err := connectRead().WithContext(ctx).Where("trigger_id=?", t.TriggerID).First(&result).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return result, nil
+}
+
 func (t HookTrigger) List(ctx context.Context, limit, offset int) ([]db, error) {
-	return nil, fmt.Errorf("not implemented")
+	ctx, span := otel.Tracer("hooks").Start(ctx, "db.hook_trigger.list")
+	defer span.End()
+	var triggers []HookTrigger
+	q := connectRead().WithContext(ctx).Where(t).Order("created_at DESC")
+	if limit > 0 {
+		q = q.Limit(limit).Offset(offset)
+	}
+	if err := q.Find(&triggers).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	result := make([]db, len(triggers))
+	for i, tr := range triggers {
+		result[i] = tr
+	}
+	return result, nil
 }
 
 // updateEventStatus updates a hook event's rules_matched count and status.

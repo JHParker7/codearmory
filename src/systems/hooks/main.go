@@ -149,10 +149,6 @@ func main() {
 		connect().Exec("ALTER TABLE pipeline_rules ALTER COLUMN events TYPE jsonb USING to_jsonb(events) WHERE pg_typeof(events)::text = 'text[]'")
 	}()
 
-	// Backfill any legacy rules that were created before the mandatory-secret
-	// requirement was introduced. NULL secrets would bypass HMAC verification.
-	connect().Exec("UPDATE pipeline_rules SET secret = '' WHERE secret IS NULL")
-
 	if err := connect().AutoMigrate(&PipelineRule{}, &HookEvent{}, &HookTrigger{}); err != nil {
 		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
