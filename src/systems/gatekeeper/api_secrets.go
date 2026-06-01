@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -17,7 +19,58 @@ import (
 
 var adapterClient = &http.Client{Timeout: 10 * time.Second}
 
+// vaultClient uses a custom DialContext that re-validates the resolved IP at
+// every connection attempt, preventing DNS rebinding SSRF. If a hostname that
+// passed validateVaultAddress later rebinds to a private IP, the dial fails.
+var vaultClient = func() *http.Client {
+	d := &net.Dialer{}
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				if ip := net.ParseIP(host); ip != nil {
+					if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
+						return nil, fmt.Errorf("vault: address %s is a private or reserved IP", ip)
+					}
+					return d.DialContext(ctx, network, net.JoinHostPort(host, port))
+				}
+				addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+				if err != nil {
+					return nil, fmt.Errorf("vault: cannot resolve %q: %w", host, err)
+				}
+				for _, a := range addrs {
+					ip := net.ParseIP(a)
+					if ip == nil {
+						continue
+					}
+					if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
+						return nil, fmt.Errorf("vault: hostname %q resolves to blocked address %s", host, ip)
+					}
+					conn, err := d.DialContext(ctx, network, net.JoinHostPort(a, port))
+					if err == nil {
+						return conn, nil
+					}
+				}
+				return nil, fmt.Errorf("vault: failed to connect to %q", host)
+			},
+		},
+	}
+}()
+
 // ── Secrets CRUD ──────────────────────────────────────────────────────────────
+
+func validateSecretName(name string) error {
+	for _, ch := range name {
+		if !((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.') {
+			return fmt.Errorf("secret name may only contain letters, digits, underscores, hyphens, and dots")
+		}
+	}
+	return nil
+}
 
 type secretRequest struct {
 	Name  string `json:"name"`
@@ -84,6 +137,10 @@ func handleCreateSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" || req.Value == "" {
 		http.Error(w, "name and value are required", http.StatusBadRequest)
+		return
+	}
+	if err := validateSecretName(req.Name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -196,6 +253,12 @@ func handleUpdateSecret(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "value is required", http.StatusBadRequest)
 		return
 	}
+	if req.Name != "" {
+		if err := validateSecretName(req.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 
 	ct, err := encryptSecret(req.Value)
 	if err != nil {
@@ -251,6 +314,50 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	slog.Info("secret deleted", "secret_id", id, "caller_id", callerID)
 	writeAudit(r.Context(), callerID, "user", "secret.delete", id, s.Name)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── SSRF guard ────────────────────────────────────────────────────────────────
+
+// resolveVaultHost is a package-level var so tests can substitute a stub.
+var resolveVaultHost = net.LookupHost
+
+// validateVaultAddress rejects URLs that target loopback, link-local, or any
+// private/reserved address to prevent SSRF via user-supplied Vault endpoints.
+func validateVaultAddress(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("URL scheme must be http or https")
+	}
+	host := u.Hostname()
+
+	checkIP := func(ip net.IP) error {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
+			return fmt.Errorf("URL must not target a private or reserved address")
+		}
+		return nil
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		return checkIP(ip)
+	}
+
+	addrs, err := resolveVaultHost(host)
+	if err != nil {
+		return fmt.Errorf("hostname %q could not be resolved: %w", host, err)
+	}
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			continue
+		}
+		if err := checkIP(ip); err != nil {
+			return fmt.Errorf("hostname %q resolves to blocked address %s: %w", host, addr, err)
+		}
+	}
+	return nil
 }
 
 // ── Provider configuration ────────────────────────────────────────────────────
@@ -311,6 +418,18 @@ func handleSetSecretProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Provider == "vault" {
+		var vc vaultConfig
+		if err := json.Unmarshal(req.Config, &vc); err != nil || vc.Address == "" {
+			http.Error(w, "vault config requires a valid address", http.StatusBadRequest)
+			return
+		}
+		if err := validateVaultAddress(vc.Address); err != nil {
+			http.Error(w, "vault address: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
 	var configCT []byte
 	if len(req.Config) > 0 && string(req.Config) != "null" {
 		ct, err := encryptSecret(string(req.Config))
@@ -356,8 +475,9 @@ func handleDeleteSecretProvider(w http.ResponseWriter, r *http.Request) {
 // ── Internal resolve endpoint ─────────────────────────────────────────────────
 
 type resolveRequest struct {
-	OrgID string   `json:"org_id"`
-	Names []string `json:"names"`
+	OrgID     string   `json:"org_id"`
+	SessionID string   `json:"session_id"`
+	Names     []string `json:"names"`
 }
 
 // handleResolveSecrets is called by the workflow worker to decrypt secrets for a run.
@@ -370,18 +490,45 @@ func handleResolveSecrets(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if svc.ServiceName != "workflows" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 
 	var req resolveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.OrgID == "" || len(req.Names) == 0 {
-		http.Error(w, "org_id and names are required", http.StatusBadRequest)
+	if req.OrgID == "" || req.SessionID == "" || len(req.Names) == 0 {
+		http.Error(w, "org_id, session_id, and names are required", http.StatusBadRequest)
 		return
 	}
 
-	values, err := resolveSecrets(r.Context(), req.OrgID, req.Names)
+	// Verify the run session belongs to a user in the requested org, preventing
+	// a buggy or compromised caller from exfiltrating another org's secrets.
+	ctx := r.Context()
+	sessionRow, err := (Session{SessionID: req.SessionID}).Get(ctx)
+	if err != nil {
+		slog.Warn("resolve secrets: session not found", "session_id", req.SessionID, "service", svc.ServiceName)
+		http.Error(w, "invalid session_id", http.StatusForbidden)
+		return
+	}
+	session := sessionRow.(Session)
+	userRow, err := (User{UserID: session.UserID}).Get(ctx)
+	if err != nil {
+		slog.Warn("resolve secrets: user not found", "user_id", session.UserID, "service", svc.ServiceName)
+		http.Error(w, "invalid session_id", http.StatusForbidden)
+		return
+	}
+	user := userRow.(User)
+	if user.OrgID == nil || *user.OrgID != req.OrgID {
+		slog.Warn("resolve secrets: org mismatch", "session_id", req.SessionID, "user_id", session.UserID, "req_org", req.OrgID, "service", svc.ServiceName)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	values, err := resolveSecrets(ctx, req.OrgID, req.Names)
 	if err != nil {
 		slog.Warn("resolve secrets: failed", "org_id", req.OrgID, "service", svc.ServiceName, "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -457,15 +604,15 @@ func resolveDoppler(ctx context.Context, encConfig []byte, names []string) (map[
 
 	result := make(map[string]string, len(names))
 	for _, name := range names {
-		url := fmt.Sprintf("https://api.doppler.com/v3/configs/config/secret?name=%s", name)
+		reqURL := "https://api.doppler.com/v3/configs/config/secret?name=" + url.QueryEscape(name)
 		if cfg.Project != "" {
-			url += "&project=" + cfg.Project
+			reqURL += "&project=" + url.QueryEscape(cfg.Project)
 		}
 		if cfg.Config != "" {
-			url += "&config=" + cfg.Config
+			reqURL += "&config=" + url.QueryEscape(cfg.Config)
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
 			return nil, fmt.Errorf("build request: %w", err)
 		}
@@ -548,7 +695,7 @@ func resolveVault(ctx context.Context, encConfig []byte, names []string) (map[st
 			req.Header.Set("X-Vault-Namespace", cfg.Namespace)
 		}
 
-		resp, err := adapterClient.Do(req)
+		resp, err := vaultClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("vault request: %w", err)
 		}
