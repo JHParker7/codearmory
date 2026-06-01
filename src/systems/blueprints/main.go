@@ -84,6 +84,18 @@ CREATE TABLE IF NOT EXISTS locks (
     created_at TIMESTAMPTZ  DEFAULT now(),
     updated_at TIMESTAMPTZ  DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS backend_credentials (
+    credential_id TEXT        PRIMARY KEY,
+    workspace     TEXT        NOT NULL,
+    cert_fp       TEXT        NOT NULL UNIQUE,
+    token_hash    TEXT        NOT NULL UNIQUE,
+    created_by    TEXT        NOT NULL,
+    expires_at    TIMESTAMPTZ NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_backend_creds_cert_fp     ON backend_credentials (cert_fp);
+CREATE INDEX IF NOT EXISTS idx_backend_creds_token_hash  ON backend_credentials (token_hash);
+CREATE INDEX IF NOT EXISTS idx_backend_creds_expires     ON backend_credentials (expires_at);
 `
 
 // ── Logger middleware ─────────────────────────────────────────────────────────
@@ -161,11 +173,11 @@ func loginToGatekeeper(ctx context.Context, email, password string) (string, boo
 
 func extractToken(ctx context.Context, r *http.Request) (string, bool) {
 	h := r.Header.Get("Authorization")
-	if strings.HasPrefix(h, "Bearer ") {
-		return strings.TrimPrefix(h, "Bearer "), true
+	if tok, ok := strings.CutPrefix(h, "Bearer "); ok {
+		return tok, true
 	}
-	if strings.HasPrefix(h, "Basic ") {
-		decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(h, "Basic "))
+	if encoded, ok := strings.CutPrefix(h, "Basic "); ok {
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil {
 			return "", false
 		}
@@ -249,29 +261,29 @@ func requireAuth(ctx context.Context, w http.ResponseWriter, r *http.Request) (s
 
 // ── State handlers ────────────────────────────────────────────────────────────
 
-func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey, resource string) {
+func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey string) {
 	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "getState")
 	defer span.End()
 	span.SetAttributes(attribute.String("workspace", workspaceKey))
 
-	token, ok := requireAuth(ctx, w, r)
-	if !ok {
+	if !requireWorkspaceAuth(ctx, w, r, workspaceKey, "getState") {
 		span.SetStatus(codes.Error, "unauthorized")
-		return
-	}
-	if !checkPermissions(ctx, token, resource, "getState") {
-		span.SetStatus(codes.Error, "forbidden")
-		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
 	if cached, ok := stateCacheGet(ctx, workspaceKey); ok {
 		slog.Info("state cache hit", "workspace", workspaceKey)
-		span.SetStatus(codes.Ok, "")
-		meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "found")))
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(cached)
-		return
+		// The cache stores ciphertext so Redis never holds plaintext state.
+		if plaintext, err := decrypt(cached); err == nil {
+			span.SetStatus(codes.Ok, "")
+			meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "found")))
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(plaintext)
+			return
+		}
+		// Decrypt failure means a stale or corrupt cache entry; evict and re-read.
+		stateCacheDel(ctx, workspaceKey)
+		slog.Warn("state cache: decrypt failed, evicting", "workspace", workspaceKey)
 	}
 
 	var data []byte
@@ -300,7 +312,7 @@ func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey, resour
 		return
 	}
 
-	stateCacheSet(ctx, workspaceKey, plaintext)
+	stateCacheSet(ctx, workspaceKey, data)
 	slog.Info("state retrieved", "workspace", workspaceKey)
 	span.SetStatus(codes.Ok, "")
 	meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "found")))
@@ -308,19 +320,13 @@ func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey, resour
 	w.Write(plaintext)
 }
 
-func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey, resource string) {
+func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey string) {
 	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "updateState")
 	defer span.End()
 	span.SetAttributes(attribute.String("workspace", workspaceKey))
 
-	token, ok := requireAuth(ctx, w, r)
-	if !ok {
+	if !requireWorkspaceAuth(ctx, w, r, workspaceKey, "updateState") {
 		span.SetStatus(codes.Error, "unauthorized")
-		return
-	}
-	if !checkPermissions(ctx, token, resource, "updateState") {
-		span.SetStatus(codes.Error, "forbidden")
-		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -416,19 +422,13 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 	w.WriteHeader(http.StatusOK)
 }
 
-func handleDeleteState(w http.ResponseWriter, r *http.Request, workspaceKey, resource string) {
+func handleDeleteState(w http.ResponseWriter, r *http.Request, workspaceKey string) {
 	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "deleteState")
 	defer span.End()
 	span.SetAttributes(attribute.String("workspace", workspaceKey))
 
-	token, ok := requireAuth(ctx, w, r)
-	if !ok {
+	if !requireWorkspaceAuth(ctx, w, r, workspaceKey, "deleteState") {
 		span.SetStatus(codes.Error, "unauthorized")
-		return
-	}
-	if !checkPermissions(ctx, token, resource, "deleteState") {
-		span.SetStatus(codes.Error, "forbidden")
-		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -447,19 +447,13 @@ func handleDeleteState(w http.ResponseWriter, r *http.Request, workspaceKey, res
 	w.WriteHeader(http.StatusOK)
 }
 
-func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey, resource string) {
+func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey string) {
 	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "lockState")
 	defer span.End()
 	span.SetAttributes(attribute.String("workspace", workspaceKey))
 
-	token, ok := requireAuth(ctx, w, r)
-	if !ok {
+	if !requireWorkspaceAuth(ctx, w, r, workspaceKey, "lockState") {
 		span.SetStatus(codes.Error, "unauthorized")
-		return
-	}
-	if !checkPermissions(ctx, token, resource, "lockState") {
-		span.SetStatus(codes.Error, "forbidden")
-		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -527,19 +521,13 @@ func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey, resou
 	w.WriteHeader(http.StatusOK)
 }
 
-func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey, resource string) {
+func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey string) {
 	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "unlockState")
 	defer span.End()
 	span.SetAttributes(attribute.String("workspace", workspaceKey))
 
-	token, ok := requireAuth(ctx, w, r)
-	if !ok {
+	if !requireWorkspaceAuth(ctx, w, r, workspaceKey, "unlockState") {
 		span.SetStatus(codes.Error, "unauthorized")
-		return
-	}
-	if !checkPermissions(ctx, token, resource, "unlockState") {
-		span.SetStatus(codes.Error, "forbidden")
-		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -631,12 +619,12 @@ func userKey(r *http.Request) (string, string) {
 // pattern and dispatched manually here.
 func lockUnlock(keyFn func(*http.Request) (string, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		k, res := keyFn(r)
+		k, _ := keyFn(r)
 		switch r.Method {
 		case "LOCK":
-			handleLockState(w, r, k, res)
+			handleLockState(w, r, k)
 		case "UNLOCK":
-			handleUnlockState(w, r, k, res)
+			handleUnlockState(w, r, k)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -669,6 +657,10 @@ func main() {
 		slog.Error("encryption init failed", "error", err)
 		os.Exit(1)
 	}
+	if err := initClientCA(); err != nil {
+		slog.Error("client CA init failed", "error", err)
+		os.Exit(1)
+	}
 	initCache()
 
 	dbURL := secret("DATABASE_URL")
@@ -697,19 +689,20 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("POST /backend", handleCreateBackend)
 
 	// User-scoped: /state/{username}/{workspace}
 	mux.HandleFunc("GET /state/{username}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
-		k, res := userKey(r)
-		handleGetState(w, r, k, res)
+		k, _ := userKey(r)
+		handleGetState(w, r, k)
 	})
 	mux.HandleFunc("POST /state/{username}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
-		k, res := userKey(r)
-		handleUpdateState(w, r, k, res)
+		k, _ := userKey(r)
+		handleUpdateState(w, r, k)
 	})
 	mux.HandleFunc("DELETE /state/{username}/{workspace}", func(w http.ResponseWriter, r *http.Request) {
-		k, res := userKey(r)
-		handleDeleteState(w, r, k, res)
+		k, _ := userKey(r)
+		handleDeleteState(w, r, k)
 	})
 	mux.HandleFunc("/state/{username}/{workspace}", lockUnlock(userKey))
 

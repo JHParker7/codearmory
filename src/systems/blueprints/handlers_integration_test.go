@@ -79,7 +79,7 @@ func TestHandleGetState_NotFound_DB(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "GET", "")
-	handleGetState(w, r, ws, res)
+	handleGetState(w, r, ws)
 
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("got %d, want 204", w.Code)
@@ -96,7 +96,7 @@ func TestHandleGetState_Found_DB(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "GET", "")
-	handleGetState(w, r, ws, res)
+	handleGetState(w, r, ws)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200", w.Code)
@@ -115,7 +115,7 @@ func TestHandleUpdateState_Creates_DB(t *testing.T) {
 	stateData := `{"version":4,"resources":[]}`
 	w := httptest.NewRecorder()
 	r := authorized(t, "POST", stateData)
-	handleUpdateState(w, r, ws, res)
+	handleUpdateState(w, r, ws)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200", w.Code)
@@ -139,7 +139,7 @@ func TestHandleUpdateState_LockedNoID_DB(t *testing.T) {
 	// POST without ?ID= query parameter → 409 conflict with lock body.
 	w := httptest.NewRecorder()
 	r := authorized(t, "POST", `{"version":4}`)
-	handleUpdateState(w, r, ws, res)
+	handleUpdateState(w, r, ws)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got %d, want 409", w.Code)
@@ -159,7 +159,7 @@ func TestHandleUpdateState_LockedMatchingID_DB(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true}`)
 	r := httptest.NewRequest("POST", "/?ID=lock-xyz", bytes.NewBufferString(stateData))
 	r.Header.Set("Authorization", "Bearer testtoken")
-	handleUpdateState(w, r, ws, res)
+	handleUpdateState(w, r, ws)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200", w.Code)
@@ -177,7 +177,7 @@ func TestHandleDeleteState_Success_DB(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "DELETE", "")
-	handleDeleteState(w, r, ws, res)
+	handleDeleteState(w, r, ws)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200", w.Code)
@@ -198,7 +198,7 @@ func TestHandleLockState_Success_DB(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "LOCK", `{"ID":"lock-1","Operation":"OperationPlanWithDestroy"}`)
-	handleLockState(w, r, ws, res)
+	handleLockState(w, r, ws)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200", w.Code)
@@ -221,7 +221,7 @@ func TestHandleLockState_Conflict_DB(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "LOCK", `{"ID":"new-lock"}`)
-	handleLockState(w, r, ws, res)
+	handleLockState(w, r, ws)
 
 	if w.Code != http.StatusLocked {
 		t.Fatalf("got %d, want 423", w.Code)
@@ -239,7 +239,7 @@ func TestHandleUnlockState_Success_DB(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "UNLOCK", `{"ID":"lock-to-release"}`)
-	handleUnlockState(w, r, ws, res)
+	handleUnlockState(w, r, ws)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200", w.Code)
@@ -261,7 +261,7 @@ func TestHandleUnlockState_WrongID_DB(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "UNLOCK", `{"ID":"wrong-id"}`)
-	handleUnlockState(w, r, ws, res)
+	handleUnlockState(w, r, ws)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got %d, want 409", w.Code)
@@ -275,7 +275,7 @@ func TestHandleUnlockState_NoLock_DB(t *testing.T) {
 	// Unlock when no lock exists is idempotent → 200.
 	w := httptest.NewRecorder()
 	r := authorized(t, "UNLOCK", `{"ID":"any"}`)
-	handleUnlockState(w, r, ws, res)
+	handleUnlockState(w, r, ws)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200 (unlock is idempotent)", w.Code)
