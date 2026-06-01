@@ -16,6 +16,12 @@ import (
 // testDBReady is set to true in TestMain when the registry DB is accessible.
 var testDBReady bool
 
+// Test-only service account credentials seeded into registry_service_accounts.
+const (
+	testReadKey  = "test-reader:testreadkey"
+	testAdminKey = "test-admin:testadminkey"
+)
+
 func TestMain(m *testing.M) {
 	// Stub DNS so tests don't need real hostname resolution.
 	// Returns a public IP that passes SSRF validation.
@@ -32,12 +38,16 @@ func TestMain(m *testing.M) {
 		if _, err := p.Exec(ctx, createTables); err == nil {
 			pool = p
 			testDBReady = true
+			seedServiceAccounts(ctx, "test-reader=testreadkey", "read")
+			seedServiceAccounts(ctx, "test-admin=testadminkey", "admin")
 		} else {
 			p.Close()
 		}
 	}
 	code := m.Run()
 	if pool != nil {
+		ctx := context.Background()
+		pool.Exec(ctx, `DELETE FROM registry_service_accounts WHERE name IN ('test-reader','test-admin')`) //nolint:errcheck
 		pool.Close()
 	}
 	os.Exit(code)
@@ -73,11 +83,9 @@ func insertTestService(t *testing.T, name string) string {
 
 func TestHandleListServices_Success(t *testing.T) {
 	requireDB(t)
-	t.Setenv("READ_KEY", "rk")
-	t.Setenv("ADMIN_KEY", "ak")
 
 	r := httptest.NewRequest(http.MethodGet, "/services", nil)
-	r.Header.Set("Authorization", "Bearer rk")
+	r.Header.Set("X-Service-Key", testReadKey)
 	w := httptest.NewRecorder()
 	handleListServices(w, r)
 
@@ -94,7 +102,6 @@ func TestHandleListServices_Success(t *testing.T) {
 
 func TestHandleCreateService_Success(t *testing.T) {
 	requireDB(t)
-	t.Setenv("ADMIN_KEY", "ak")
 
 	name := uuid.New().String()
 	t.Cleanup(func() {
@@ -103,7 +110,7 @@ func TestHandleCreateService_Success(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"name":"` + name + `","url":"http://newsvc:9000","description":"test svc"}`)
 	r := httptest.NewRequest(http.MethodPost, "/services", body)
-	r.Header.Set("Authorization", "Bearer ak")
+	r.Header.Set("X-Service-Key", testAdminKey)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handleCreateService(w, r)
@@ -125,14 +132,13 @@ func TestHandleCreateService_Success(t *testing.T) {
 
 func TestHandleCreateService_Duplicate(t *testing.T) {
 	requireDB(t)
-	t.Setenv("ADMIN_KEY", "ak")
 
 	name := uuid.New().String()
 	insertTestService(t, name)
 
 	body := bytes.NewBufferString(`{"name":"` + name + `","url":"http://dup:9000"}`)
 	r := httptest.NewRequest(http.MethodPost, "/services", body)
-	r.Header.Set("Authorization", "Bearer ak")
+	r.Header.Set("X-Service-Key", testAdminKey)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handleCreateService(w, r)
@@ -144,11 +150,10 @@ func TestHandleCreateService_Duplicate(t *testing.T) {
 
 func TestHandleCreateService_MissingURL(t *testing.T) {
 	requireDB(t)
-	t.Setenv("ADMIN_KEY", "ak")
 
 	body := bytes.NewBufferString(`{"name":"somesvc"}`)
 	r := httptest.NewRequest(http.MethodPost, "/services", body)
-	r.Header.Set("Authorization", "Bearer ak")
+	r.Header.Set("X-Service-Key", testAdminKey)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handleCreateService(w, r)
@@ -160,11 +165,10 @@ func TestHandleCreateService_MissingURL(t *testing.T) {
 
 func TestHandleCreateService_SSRFLoopback(t *testing.T) {
 	requireDB(t)
-	t.Setenv("ADMIN_KEY", "ak")
 
 	body := bytes.NewBufferString(`{"name":"loopback-svc","url":"http://127.0.0.1:9999"}`)
 	r := httptest.NewRequest(http.MethodPost, "/services", body)
-	r.Header.Set("Authorization", "Bearer ak")
+	r.Header.Set("X-Service-Key", testAdminKey)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handleCreateService(w, r)
@@ -178,14 +182,13 @@ func TestHandleCreateService_SSRFLoopback(t *testing.T) {
 
 func TestHandleDeleteService_Success(t *testing.T) {
 	requireDB(t)
-	t.Setenv("ADMIN_KEY", "ak")
 
 	name := uuid.New().String()
 	id := insertTestService(t, name)
 
 	r := httptest.NewRequest(http.MethodDelete, "/services/"+id, nil)
 	r.SetPathValue("id", id)
-	r.Header.Set("Authorization", "Bearer ak")
+	r.Header.Set("X-Service-Key", testAdminKey)
 	w := httptest.NewRecorder()
 	handleDeleteService(w, r)
 
@@ -196,11 +199,10 @@ func TestHandleDeleteService_Success(t *testing.T) {
 
 func TestHandleDeleteService_NotFound(t *testing.T) {
 	requireDB(t)
-	t.Setenv("ADMIN_KEY", "ak")
 
 	r := httptest.NewRequest(http.MethodDelete, "/services/no-such-id", nil)
 	r.SetPathValue("id", "no-such-id")
-	r.Header.Set("Authorization", "Bearer ak")
+	r.Header.Set("X-Service-Key", testAdminKey)
 	w := httptest.NewRecorder()
 	handleDeleteService(w, r)
 

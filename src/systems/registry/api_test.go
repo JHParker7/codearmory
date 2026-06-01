@@ -80,6 +80,47 @@ func TestHandleDeleteService_NoServiceKey(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Handlers that use requireReadAuth — missing X-Service-Key → 401
+// ---------------------------------------------------------------------------
+
+func TestHandleListActions_NoServiceKey(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/actions", nil)
+	w := httptest.NewRecorder()
+	handleListActions(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestHandleListDefaultGrants_NoServiceKey(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/default-grants", nil)
+	w := httptest.NewRecorder()
+	handleListDefaultGrants(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestHandleSystemHealth_NoServiceKey(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/system_health", nil)
+	w := httptest.NewRecorder()
+	handleSystemHealth(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestHandleUpdateServiceEndpoints_NoServiceKey(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "/services/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleUpdateServiceEndpoints(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // statusResponseWriter
 // ---------------------------------------------------------------------------
 

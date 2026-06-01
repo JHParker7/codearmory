@@ -18,6 +18,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Service is a registered backend service known to the registry.
+// ForwardAuth, when true, signals that conductor should forward the user's
+// Authorization header when proxying requests to this service.
 type Service struct {
 	ServiceID   string    `json:"service_id"`
 	Name        string    `json:"name"`
@@ -29,6 +32,8 @@ type Service struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// ServiceRole is a named role defined by a service and published in the registry.
+// Gatekeeper resolves these names when evaluating permission requests.
 type ServiceRole struct {
 	RoleID      string    `json:"role_id"`
 	ServiceID   string    `json:"service_id"`
@@ -37,6 +42,8 @@ type ServiceRole struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// ServiceEndpoint maps an HTTP method + path on a service to a gatekeeper
+// action/resource pair. Public endpoints bypass permission checks entirely.
 type ServiceEndpoint struct {
 	EndpointID string    `json:"endpoint_id"`
 	ServiceID  string    `json:"service_id"`
@@ -305,41 +312,57 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Collect service IDs for batch sub-queries — avoids N+1 round-trips.
+	svcIndex := make(map[string]int, len(svcs))
+	svcIDs := make([]string, len(svcs))
 	result := make([]serviceWithEndpoints, len(svcs))
 	for i, s := range svcs {
 		result[i] = serviceWithEndpoints{Service: s, Roles: []ServiceRole{}, Endpoints: []ServiceEndpoint{}}
+		svcIDs[i] = s.ServiceID
+		svcIndex[s.ServiceID] = i
+	}
 
+	if len(svcIDs) > 0 {
 		roleRows, err := pool.Query(r.Context(),
 			`SELECT role_id, service_id, name, description, created_at
-			 FROM service_roles WHERE service_id = $1 ORDER BY name`, s.ServiceID)
-		if err == nil {
+			 FROM service_roles WHERE service_id = ANY($1) ORDER BY service_id, name`,
+			svcIDs)
+		if err != nil {
+			slog.Error("list services: query roles", "error", err)
+		} else {
 			for roleRows.Next() {
 				var sr ServiceRole
 				if err := roleRows.Scan(&sr.RoleID, &sr.ServiceID, &sr.Name, &sr.Description, &sr.CreatedAt); err != nil {
 					slog.Error("list services: scan role", "error", err)
 					continue
 				}
-				result[i].Roles = append(result[i].Roles, sr)
+				if i, ok := svcIndex[sr.ServiceID]; ok {
+					result[i].Roles = append(result[i].Roles, sr)
+				}
 			}
 			roleRows.Close()
 		}
 
 		epRows, err := pool.Query(r.Context(),
 			`SELECT endpoint_id, service_id, method, path, action, resource, public, active, created_at, updated_at
-			 FROM service_endpoints WHERE service_id = $1 AND active = true`, s.ServiceID)
+			 FROM service_endpoints WHERE service_id = ANY($1) AND active = true ORDER BY service_id`,
+			svcIDs)
 		if err != nil {
-			continue
-		}
-		for epRows.Next() {
-			var ep ServiceEndpoint
-			if err := epRows.Scan(&ep.EndpointID, &ep.ServiceID, &ep.Method, &ep.Path,
-				&ep.Action, &ep.Resource, &ep.Public, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
-				slog.Error("list services: scan endpoint", "error", err)
-				continue
+			slog.Error("list services: query endpoints", "error", err)
+		} else {
+			for epRows.Next() {
+				var ep ServiceEndpoint
+				if err := epRows.Scan(&ep.EndpointID, &ep.ServiceID, &ep.Method, &ep.Path,
+					&ep.Action, &ep.Resource, &ep.Public, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
+					slog.Error("list services: scan endpoint", "error", err)
+					continue
+				}
+				if i, ok := svcIndex[ep.ServiceID]; ok {
+					result[i].Endpoints = append(result[i].Endpoints, ep)
+				}
 			}
-			result[i].Endpoints = append(result[i].Endpoints, ep)
+			epRows.Close()
 		}
-		epRows.Close()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
