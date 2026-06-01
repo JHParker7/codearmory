@@ -2,6 +2,13 @@ package main
 
 import "time"
 
+// PermissionSpec is a single gatekeeper permission triple required by a step action.
+type PermissionSpec struct {
+	Service  string `json:"service"`
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+}
+
 const (
 	StatusPending   = "pending"
 	StatusRunning   = "running"
@@ -44,13 +51,14 @@ type BodyTransform struct {
 
 // ActionDef is a callable workflow action loaded from the registry action catalog.
 type ActionDef struct {
-	Name           string          `json:"name"`
-	ServiceName    string          `json:"service_name"`
-	ServiceURL     string          `json:"service_url"`
-	Method         string          `json:"method"`
-	Path           string          `json:"path"`
-	BodyTransforms []BodyTransform `json:"body_transforms,omitempty"`
-	Async          *AsyncConfig    `json:"async,omitempty"`
+	Name               string          `json:"name"`
+	ServiceName        string          `json:"service_name"`
+	ServiceURL         string          `json:"service_url"`
+	Method             string          `json:"method"`
+	Path               string          `json:"path"`
+	BodyTransforms     []BodyTransform `json:"body_transforms,omitempty"`
+	Async              *AsyncConfig    `json:"async,omitempty"`
+	RequiredPermission *PermissionSpec `json:"required_permission,omitempty"`
 }
 
 // Step is a reusable, named action definition that can be composed into workflows.
@@ -91,12 +99,15 @@ type WorkflowStep struct {
 // Workflow is a named, ordered pipeline of step references.
 // StepRefs is the authoritative DB column (JSON array of WorkflowStepRef).
 // Steps is populated at query time by joining against the steps table.
+// RoleID is the gatekeeper role provisioned at creation time; it scopes run
+// tokens to only the permissions the workflow's steps actually require.
 type Workflow struct {
 	WorkflowID  string            `json:"workflow_id"  gorm:"column:workflow_id;primaryKey"`
 	Name        string            `json:"name"         gorm:"column:name"`
 	Description string            `json:"description"  gorm:"column:description;default:''"`
 	CreatedBy   string            `json:"created_by"   gorm:"column:created_by"`
 	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
+	RoleID      string            `json:"role_id,omitempty" gorm:"column:role_id;default:''"`
 	Active      bool              `json:"active"       gorm:"column:active;default:true"`
 	CreatedAt   time.Time         `json:"created_at"   gorm:"column:created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"   gorm:"column:updated_at"`
@@ -107,8 +118,9 @@ type Workflow struct {
 func (Workflow) TableName() string { return "workflows" }
 
 // WorkflowRun is a single triggered execution of a Workflow.
-// Token holds the caller's Bearer JWT, forwarded to each step's target service.
-// It is cleared once the run reaches a terminal state.
+// Token holds a short-lived run-scoped JWT minted by gatekeeper at trigger time;
+// it is never the triggering user's own session token. RunSessionID tracks the
+// underlying gatekeeper session so it can be revoked on terminal state.
 type WorkflowRun struct {
 	RunID       string            `json:"run_id"       gorm:"column:run_id;primaryKey"`
 	WorkflowID  string            `json:"workflow_id"  gorm:"column:workflow_id"`
@@ -117,7 +129,8 @@ type WorkflowRun struct {
 	Status      string            `json:"status"       gorm:"column:status;default:'pending'"`
 	CurrentStep int               `json:"current_step" gorm:"column:current_step;default:0"`
 	Inputs      map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
-	Token       string            `json:"-"            gorm:"column:token"`
+	Token          string            `json:"-"            gorm:"column:token"`
+	RunSessionID   string            `json:"-"            gorm:"column:run_session_id"`
 	StepRuns    []WorkflowStepRun `json:"step_runs"    gorm:"-"`
 	CreatedAt   time.Time         `json:"created_at"   gorm:"column:created_at"`
 	StartedAt   *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`

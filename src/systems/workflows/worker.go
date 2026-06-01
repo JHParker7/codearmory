@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,6 +18,46 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
+
+// tokenStore holds the current run token and session ID, safe for concurrent
+// reads by parallel step goroutines and writes by the rotation goroutine.
+type tokenStore struct {
+	mu        sync.RWMutex
+	token     string
+	sessionID string
+}
+
+func newTokenStore(token, sessionID string) *tokenStore {
+	return &tokenStore{token: token, sessionID: sessionID}
+}
+
+func (ts *tokenStore) getToken() string {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return ts.token
+}
+
+func (ts *tokenStore) getSessionID() string {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return ts.sessionID
+}
+
+// swap atomically replaces the token+sessionID and returns the old sessionID
+// so the caller can revoke it after a grace period.
+func (ts *tokenStore) swap(token, sessionID string) (oldSessionID string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	old := ts.sessionID
+	ts.token = token
+	ts.sessionID = sessionID
+	return old
+}
+
+// rotationInterval returns a random duration in [30 min, 60 min).
+func rotationInterval() time.Duration {
+	return 30*time.Minute + time.Duration(rand.Int63n(int64(30*time.Minute)))
+}
 
 // stepGroup is a set of steps that execute together (sequential = 1 step, parallel = N steps).
 type stepGroup struct {
@@ -88,14 +129,16 @@ func (p *WorkerPool) tryOne(ctx context.Context) {
 	defer tx.Rollback() //nolint:errcheck
 
 	type runPickup struct {
-		RunID      string
-		WorkflowID string
-		Inputs     []byte
-		Token      string
+		RunID        string
+		WorkflowID   string
+		Inputs       []byte
+		Token        string
+		RunSessionID string
+		TriggeredBy  string
 	}
 	var pickup runPickup
 	result := tx.Raw(`
-		SELECT run_id, workflow_id, inputs, token
+		SELECT run_id, workflow_id, inputs, token, run_session_id, triggered_by
 		FROM workflow_runs
 		WHERE status = 'pending'
 		ORDER BY created_at
@@ -117,10 +160,10 @@ func (p *WorkerPool) tryOne(ctx context.Context) {
 		return
 	}
 
-	p.executeRun(ctx, pickup.RunID, pickup.WorkflowID, pickup.Token, inputs)
+	p.executeRun(ctx, pickup.RunID, pickup.WorkflowID, pickup.Token, pickup.RunSessionID, pickup.TriggeredBy, inputs)
 }
 
-func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token string, inputs map[string]string) {
+func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, sessionID, triggeredBy string, inputs map[string]string) {
 	runCtx, cancel := context.WithCancel(ctx)
 	p.cancels.Store(runID, cancel)
 	defer func() {
@@ -133,9 +176,43 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token st
 	wf, err := getWorkflow(runCtx, workflowID)
 	if err != nil {
 		slog.Error("worker: fetch workflow", "run_id", runID, "workflow_id", workflowID, "error", err)
-		p.failRun(runID)
+		p.failRun(runID, sessionID)
 		return
 	}
+
+	ts := newTokenStore(token, sessionID)
+
+	// Rotate the run token every 30–60 minutes so no single credential stays
+	// live for the full run duration. The old session is revoked after a 60 s
+	// grace period to avoid invalidating any in-flight step requests.
+	go func() {
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-time.After(rotationInterval()):
+			}
+			newToken, newSID, err := createRunToken(runCtx, triggeredBy, wf.RoleID)
+			if err != nil {
+				slog.Warn("worker: token rotation failed", "run_id", runID, "error", err)
+				continue
+			}
+			if dbErr := connect().WithContext(context.Background()).Exec(
+				"UPDATE workflow_runs SET token=?, run_session_id=? WHERE run_id=?",
+				newToken, newSID, runID,
+			).Error; dbErr != nil {
+				slog.Warn("worker: token rotation DB update failed, discarding new token", "run_id", runID, "error", dbErr)
+				revokeRunToken(context.Background(), newSID)
+				continue
+			}
+			oldSID := ts.swap(newToken, newSID)
+			slog.Info("worker: run token rotated", "run_id", runID)
+			go func(sid string) {
+				time.Sleep(60 * time.Second)
+				revokeRunToken(context.Background(), sid)
+			}(oldSID)
+		}
+	}()
 
 	finalStatus := StatusCompleted
 	for _, group := range groupSteps(wf.Steps) {
@@ -156,7 +233,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token st
 				finalStatus = StatusFailed
 				break
 			}
-			output, stepErr := p.executeStep(runCtx, token, ws.Step, inputs)
+			output, stepErr := p.executeStep(runCtx, ts, ws.Step, inputs)
 			if stepErr != nil {
 				if errors.Is(stepErr, context.Canceled) {
 					p.finishStepRun(stepRunID, StatusCancelled, strPtr(stepErr.Error()))
@@ -202,7 +279,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token st
 		results := make(chan parallelResult, len(group.steps))
 		for j, ws := range group.steps {
 			go func(j int, ws WorkflowStep) {
-				out, err := p.executeStep(runCtx, token, ws.Step, inputs)
+				out, err := p.executeStep(runCtx, ts, ws.Step, inputs)
 				results <- parallelResult{stepRunIDs[j], ws.Action, group.indices[j], out, err}
 			}(j, ws)
 		}
@@ -243,16 +320,17 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token st
 		attribute.String("status", finalStatus),
 	))
 	connect().WithContext(context.Background()).Exec( //nolint:errcheck
-		"UPDATE workflow_runs SET status=?, ended_at=now(), token=NULL WHERE run_id=? AND status='running'",
+		"UPDATE workflow_runs SET status=?, ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
 		finalStatus, runID,
 	)
+	revokeRunToken(context.Background(), ts.getSessionID())
 	slog.Info("worker: run finished", "run_id", runID, "status", finalStatus)
 }
 
 // executeStep dispatches a step to either the http escape-hatch or the registry
 // action catalog. Returns the step output and a non-nil error on failure.
 // context.Canceled means the run was cancelled.
-func (p *WorkerPool) executeStep(ctx context.Context, token string, step Step, inputs map[string]string) (string, error) {
+func (p *WorkerPool) executeStep(ctx context.Context, ts *tokenStore, step Step, inputs map[string]string) (string, error) {
 	with := substituteWith(step.With, inputs)
 	timeout := step.Timeout
 	if timeout <= 0 {
@@ -264,7 +342,7 @@ func (p *WorkerPool) executeStep(ctx context.Context, token string, step Step, i
 	defer cancel()
 
 	if step.Action == ActionHTTP {
-		return p.executeHTTP(stepCtx, token, with)
+		return p.executeHTTP(stepCtx, ts, with)
 	}
 
 	actionCatalogMu.RLock()
@@ -273,12 +351,12 @@ func (p *WorkerPool) executeStep(ctx context.Context, token string, step Step, i
 	if !ok {
 		return "", fmt.Errorf("unknown action %q — register it in the service catalog or use the http escape hatch", step.Action)
 	}
-	return p.executeAction(stepCtx, token, def, with)
+	return p.executeAction(stepCtx, ts, def, with)
 }
 
 // executeAction dispatches a catalog action: applies body transforms, sends the
 // HTTP request, then polls if the action is async.
-func (p *WorkerPool) executeAction(ctx context.Context, token string, def ActionDef, with map[string]any) (string, error) {
+func (p *WorkerPool) executeAction(ctx context.Context, ts *tokenStore, def ActionDef, with map[string]any) (string, error) {
 	body := make(map[string]any, len(with))
 	for k, v := range with {
 		body[k] = v
@@ -316,8 +394,8 @@ func (p *WorkerPool) executeAction(ctx context.Context, token string, def Action
 		return "", fmt.Errorf("build %s request: %w", def.Name, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if tok := ts.getToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 
 	resp, err := httpClient.Do(req)
@@ -350,12 +428,12 @@ func (p *WorkerPool) executeAction(ctx context.Context, token string, def Action
 	if !ok || jobID == "" {
 		return "", fmt.Errorf("%s: async ID field %q is not a string", def.Name, def.Async.IDField)
 	}
-	return p.pollAction(ctx, token, def, jobID)
+	return p.pollAction(ctx, ts, def, jobID)
 }
 
 // pollAction polls the job status URL until a terminal state is reached or the
 // context is cancelled.
-func (p *WorkerPool) pollAction(ctx context.Context, token string, def ActionDef, jobID string) (string, error) {
+func (p *WorkerPool) pollAction(ctx context.Context, ts *tokenStore, def ActionDef, jobID string) (string, error) {
 	interval := time.Duration(def.Async.PollIntervalSecs) * time.Second
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -375,8 +453,8 @@ func (p *WorkerPool) pollAction(ctx context.Context, token string, def ActionDef
 		if err != nil {
 			return "", fmt.Errorf("build poll request: %w", err)
 		}
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
+		if tok := ts.getToken(); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
 		}
 		resp, err := httpClient.Do(req)
 		if err != nil {
@@ -434,7 +512,7 @@ func (p *WorkerPool) pollAction(ctx context.Context, token string, def ActionDef
 
 // executeHTTP performs a raw HTTP call. All HTTP parameters come from With:
 // service, method, path, body (any), headers (map), expected_status (int).
-func (p *WorkerPool) executeHTTP(ctx context.Context, token string, with map[string]any) (string, error) {
+func (p *WorkerPool) executeHTTP(ctx context.Context, ts *tokenStore, with map[string]any) (string, error) {
 	service := withString(with, "service")
 	serviceURLsMu.RLock()
 	baseURL, ok := serviceURLs[service]
@@ -448,6 +526,9 @@ func (p *WorkerPool) executeHTTP(ctx context.Context, token string, with map[str
 		method = http.MethodPost
 	}
 	path := withString(with, "path")
+	if strings.Contains(path, "..") {
+		return "", fmt.Errorf("invalid path: traversal sequences are not allowed")
+	}
 	url := strings.TrimRight(baseURL, "/") + path
 
 	var bodyReader io.Reader
@@ -465,8 +546,8 @@ func (p *WorkerPool) executeHTTP(ctx context.Context, token string, with map[str
 	if bodyReader != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if tok := ts.getToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	reservedHeaders := map[string]bool{
 		"authorization": true,
@@ -524,10 +605,11 @@ func (p *WorkerPool) finishStepRun(stepRunID, status string, output *string) {
 	)
 }
 
-func (p *WorkerPool) failRun(runID string) {
+func (p *WorkerPool) failRun(runID, sessionID string) {
 	connect().WithContext(context.Background()).Exec( //nolint:errcheck
-		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL WHERE run_id=?", runID,
+		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=?", runID,
 	)
+	revokeRunToken(context.Background(), sessionID)
 	slog.Warn("worker: run failed before first step", "run_id", runID)
 }
 

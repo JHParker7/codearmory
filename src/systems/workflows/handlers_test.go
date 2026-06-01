@@ -203,7 +203,7 @@ func TestExecuteHTTP_2xxSuccess(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/ok", "method": "GET"}}
-	_, err := pool.executeStep(context.Background(), "", step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
@@ -215,7 +215,7 @@ func TestExecuteHTTP_4xxFails(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 	})
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/bad", "method": "GET"}}
-	_, err := pool.executeStep(context.Background(), "", step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
 	if err == nil {
 		t.Fatal("expected error for 4xx response")
 	}
@@ -229,7 +229,7 @@ func TestExecuteHTTP_ExactMatchSuccess(t *testing.T) {
 	step := Step{Action: ActionHTTP, With: map[string]any{
 		"service": "svc", "path": "/create", "method": "POST", "expected_status": float64(201),
 	}}
-	_, err := pool.executeStep(context.Background(), "", step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
 	if err != nil {
 		t.Fatalf("expected success for exact match 201, got %v", err)
 	}
@@ -243,7 +243,7 @@ func TestExecuteHTTP_ExactMatchFail(t *testing.T) {
 	step := Step{Action: ActionHTTP, With: map[string]any{
 		"service": "svc", "path": "/create", "method": "POST", "expected_status": float64(201),
 	}}
-	_, err := pool.executeStep(context.Background(), "", step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
 	if err == nil {
 		t.Fatal("expected error when status 200 != expected 201")
 	}
@@ -316,7 +316,7 @@ func TestWorkerPool_Cancel_Found(t *testing.T) {
 func TestExecuteStep_UnknownAction(t *testing.T) {
 	pool := &WorkerPool{}
 	step := Step{Action: "unknown/action"}
-	_, err := pool.executeStep(context.Background(), "tok", step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown action") {
 		t.Fatalf("expected unknown action error, got %v", err)
 	}
@@ -325,7 +325,7 @@ func TestExecuteStep_UnknownAction(t *testing.T) {
 func TestExecuteStep_HTTPUnknownService(t *testing.T) {
 	pool := &WorkerPool{}
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "no-such-svc", "path": "/foo"}}
-	_, err := pool.executeStep(context.Background(), "tok", step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown service") {
 		t.Fatalf("expected unknown service error, got %v", err)
 	}
@@ -339,7 +339,7 @@ func TestExecuteStep_HTTPSuccess(t *testing.T) {
 	})
 
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "mysvc", "path": "/health", "method": "GET"}}
-	body, err := pool.executeStep(context.Background(), "tok", step, nil)
+	body, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestExecuteStep_HTTPSubstitutesInputsInPath(t *testing.T) {
 	})
 
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/items/${ITEM_ID}", "method": "GET"}}
-	pool.executeStep(context.Background(), "tok", step, map[string]string{"ITEM_ID": "abc-123"}) //nolint:errcheck
+	pool.executeStep(context.Background(), newTokenStore("", ""), step, map[string]string{"ITEM_ID": "abc-123"}) //nolint:errcheck
 	if capturedPath != "/items/abc-123" {
 		t.Errorf("path = %q, want /items/abc-123", capturedPath)
 	}
@@ -372,7 +372,7 @@ func TestExecuteStep_HTTPForwardsAuthHeader(t *testing.T) {
 	})
 
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/endpoint", "method": "GET"}}
-	pool.executeStep(context.Background(), "my-token", step, nil) //nolint:errcheck
+	pool.executeStep(context.Background(), newTokenStore("my-token", ""), step, nil) //nolint:errcheck
 	if capturedAuth != "Bearer my-token" {
 		t.Errorf("Authorization = %q, want \"Bearer my-token\"", capturedAuth)
 	}
@@ -391,7 +391,7 @@ func TestExecuteStep_HTTPSendsBody(t *testing.T) {
 		"body": map[string]any{"image": "alpine:3.19"},
 		"expected_status": float64(201),
 	}}
-	_, err := pool.executeStep(context.Background(), "tok", step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestExecuteStep_HTTPSubstitutesInputsInBody(t *testing.T) {
 		"service": "svc", "path": "/deploy", "method": "POST",
 		"body": map[string]any{"tag": "${IMAGE_TAG}"},
 	}}
-	pool.executeStep(context.Background(), "tok", step, map[string]string{"IMAGE_TAG": "v1.2.3"}) //nolint:errcheck
+	pool.executeStep(context.Background(), newTokenStore("", ""), step, map[string]string{"IMAGE_TAG": "v1.2.3"}) //nolint:errcheck
 	if !strings.Contains(string(capturedBodyBytes), "v1.2.3") {
 		t.Errorf("body %q missing substituted value", string(capturedBodyBytes))
 	}

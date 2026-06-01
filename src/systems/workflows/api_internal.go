@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -91,28 +92,39 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.OrgID != "" && wf.OrgID != req.OrgID {
+	if wf.OrgID != req.OrgID {
 		span.SetStatus(codes.Error, "cross-org trigger denied")
 		slog.Warn("internal trigger: org mismatch", "workflow_id", workflowID, "workflow_org", wf.OrgID, "req_org", req.OrgID)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
+	runToken, sessionID, err := createRunToken(ctx, req.TriggeredBy, wf.RoleID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "run token creation failed")
+		slog.Error("internal trigger: failed to create run token", "workflow_id", workflowID, "error", err)
+		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
+		return
+	}
+
 	run := WorkflowRun{
-		RunID:       uuid.New().String(),
-		WorkflowID:  wf.WorkflowID,
-		TriggeredBy: req.TriggeredBy,
-		OrgID:       req.OrgID,
-		Status:      StatusPending,
-		Inputs:      req.Inputs,
-		Token:       "",
-		CreatedAt:   time.Now().UTC(),
+		RunID:        uuid.New().String(),
+		WorkflowID:   wf.WorkflowID,
+		TriggeredBy:  req.TriggeredBy,
+		OrgID:        wf.OrgID,
+		Status:       StatusPending,
+		Inputs:       req.Inputs,
+		Token:        runToken,
+		RunSessionID: sessionID,
+		CreatedAt:    time.Now().UTC(),
 	}
 
 	if err := run.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("internal trigger: db error", "workflow_id", workflowID, "error", err)
+		revokeRunToken(context.Background(), sessionID)
 		http.Error(w, "failed to trigger run", http.StatusInternalServerError)
 		return
 	}

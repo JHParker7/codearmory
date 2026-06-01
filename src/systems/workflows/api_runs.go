@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +19,73 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"gorm.io/gorm"
 )
+
+// createRunToken asks gatekeeper to mint a short-lived session JWT for userID.
+// When roleID is non-empty the token is scoped to only the permissions in that
+// role (the workflow's minimal service role).
+func createRunToken(ctx context.Context, userID, roleID string) (token, sessionID string, err error) {
+	key := gatekeeperKey()
+	if key == "" {
+		return "", "", fmt.Errorf("gatekeeper service key not available")
+	}
+	payload := map[string]any{"user_id": userID}
+	if roleID != "" {
+		payload["role_id"] = roleID
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		gatekeeperURL+"/internal/run-tokens", bytes.NewReader(body))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Service-Key", "workflows:"+key)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return "", "", fmt.Errorf("gatekeeper returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var result struct {
+		Token     string `json:"token"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", err
+	}
+	return result.Token, result.SessionID, nil
+}
+
+// revokeRunToken revokes the gatekeeper session associated with a run. Failures
+// are logged but never propagate — a missing revocation is better than a failed run.
+func revokeRunToken(ctx context.Context, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	key := gatekeeperKey()
+	if key == "" {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		gatekeeperURL+"/internal/run-tokens/"+sessionID, nil)
+	if err != nil {
+		slog.Warn("revokeRunToken: build request failed", "session_id", sessionID, "error", err)
+		return
+	}
+	req.Header.Set("X-Service-Key", "workflows:"+key)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		slog.Warn("revokeRunToken: request failed", "session_id", sessionID, "error", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		slog.Warn("revokeRunToken: unexpected status", "session_id", sessionID, "status", resp.StatusCode)
+	}
+}
 
 type triggerRunRequest struct {
 	// Inputs are extra env vars injected into every step. Step-level env takes precedence.
@@ -71,22 +143,33 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		req.Inputs = map[string]string{}
 	}
 
+	runToken, sessionID, err := createRunToken(ctx, userID, wf.RoleID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "run token creation failed")
+		slog.Error("trigger run: failed to create run token", "workflow_id", workflowID, "user_id", userID, "error", err)
+		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
+		return
+	}
+
 	run := WorkflowRun{
-		RunID:       uuid.New().String(),
-		WorkflowID:  wf.WorkflowID,
-		TriggeredBy: userID,
-		OrgID:       orgID,
-		Status:      StatusPending,
-		Inputs:      req.Inputs,
-		Token:       bearerToken(r),
-		StepRuns:    []WorkflowStepRun{},
-		CreatedAt:   time.Now().UTC(),
+		RunID:        uuid.New().String(),
+		WorkflowID:   wf.WorkflowID,
+		TriggeredBy:  userID,
+		OrgID:        orgID,
+		Status:       StatusPending,
+		Inputs:       req.Inputs,
+		Token:        runToken,
+		RunSessionID: sessionID,
+		StepRuns:     []WorkflowStepRun{},
+		CreatedAt:    time.Now().UTC(),
 	}
 
 	if err := run.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("trigger run: db error", "workflow_id", workflowID, "user_id", userID, "error", err)
+		revokeRunToken(context.Background(), sessionID)
 		http.Error(w, "failed to trigger run", http.StatusInternalServerError)
 		return
 	}

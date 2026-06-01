@@ -25,6 +25,7 @@ import (
 var (
 	gatekeeperClient *gk.Client
 	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	gatekeeperKey    func() string // current workflows service key, updated by key rotation
 	hooksTriggerKey  = os.Getenv("HOOKS_TRIGGER_KEY")
 
 	// serviceURLs maps registered service names to their base URLs.
@@ -163,15 +164,31 @@ func refreshCatalog(ctx context.Context) {
 		return
 	}
 
-	var actions []ActionDef
-	if err := json.NewDecoder(resp.Body).Decode(&actions); err != nil {
+	// The registry embeds the gatekeeper permission triple as flat fields
+	// (gk_service, gk_action, gk_resource). Map them into RequiredPermission.
+	type registryAction struct {
+		ActionDef
+		GkService  string `json:"gk_service"`
+		GkAction   string `json:"gk_action"`
+		GkResource string `json:"gk_resource"`
+	}
+	var raw []registryAction
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		slog.Warn("catalog refresh: decode failed", "error", err)
 		return
 	}
 
-	newCatalog := make(map[string]ActionDef, len(actions))
-	for _, a := range actions {
-		newCatalog[a.Name] = a
+	newCatalog := make(map[string]ActionDef, len(raw))
+	for _, ra := range raw {
+		def := ra.ActionDef
+		if ra.GkService != "" && ra.GkAction != "" && ra.GkResource != "" {
+			def.RequiredPermission = &PermissionSpec{
+				Service:  ra.GkService,
+				Action:   ra.GkAction,
+				Resource: ra.GkResource,
+			}
+		}
+		newCatalog[def.Name] = def
 	}
 
 	actionCatalogMu.Lock()
@@ -180,14 +197,14 @@ func refreshCatalog(ctx context.Context) {
 
 	// Also update serviceURLs with any new service URLs from the catalog.
 	serviceURLsMu.Lock()
-	for _, a := range actions {
-		if a.ServiceName != "" && a.ServiceURL != "" {
-			serviceURLs[a.ServiceName] = a.ServiceURL
+	for _, ra := range raw {
+		if ra.ServiceName != "" && ra.ServiceURL != "" {
+			serviceURLs[ra.ServiceName] = ra.ServiceURL
 		}
 	}
 	serviceURLsMu.Unlock()
 
-	slog.Info("catalog refreshed", "actions", len(actions))
+	slog.Info("catalog refreshed", "actions", len(raw))
 }
 
 type statusResponseWriter struct {
@@ -253,7 +270,7 @@ func main() {
 
 	initServices()
 	gatekeeperClient = newGatekeeperClient()
-	registry.StartKeyRotation(ctx, gatekeeperURL, "workflows",
+	gatekeeperKey = registry.StartKeyRotation(ctx, gatekeeperURL, "workflows",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	startCatalogPoller(ctx)

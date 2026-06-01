@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -16,6 +19,112 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"gorm.io/gorm"
 )
+
+// collectWorkflowPermissions returns the deduplicated set of gatekeeper
+// permissions declared by the workflow's step actions in the current catalog.
+func collectWorkflowPermissions(steps []WorkflowStep) []PermissionSpec {
+	seen := map[string]struct{}{}
+	var out []PermissionSpec
+	actionCatalogMu.RLock()
+	defer actionCatalogMu.RUnlock()
+	for _, ws := range steps {
+		if ws.Action == ActionHTTP {
+			continue // ActionHTTP permissions are runtime-dynamic; can't enumerate statically
+		}
+		def, ok := actionCatalog[ws.Action]
+		if !ok || def.RequiredPermission == nil {
+			continue
+		}
+		p := def.RequiredPermission
+		key := p.Service + ":" + p.Action + ":" + p.Resource
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, PermissionSpec{
+			Service:  p.Service,
+			Action:   p.Action,
+			Resource: p.Resource,
+		})
+	}
+	return out
+}
+
+// provisionWorkflowRole asks gatekeeper to create a minimal-permission role for
+// workflowID. Returns the new role_id, or "" when the key is unconfigured or the
+// permission list is empty (runs will use the user's full session permissions).
+func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string, steps []WorkflowStep) string {
+	perms := collectWorkflowPermissions(steps)
+	if len(perms) == 0 {
+		return ""
+	}
+	key := gatekeeperKey()
+	if key == "" {
+		return ""
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"workflow_id":  workflowID,
+		"user_id":      userID,
+		"org_id":       orgID,
+		"permissions":  perms,
+	})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		gatekeeperURL+"/internal/workflow-roles", bytes.NewReader(payload))
+	if err != nil {
+		slog.Warn("provisionWorkflowRole: build request", "workflow_id", workflowID, "error", err)
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Service-Key", "workflows:"+key)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		slog.Warn("provisionWorkflowRole: request failed", "workflow_id", workflowID, "error", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		slog.Warn("provisionWorkflowRole: unexpected status", "workflow_id", workflowID,
+			"status", resp.StatusCode, "body", strings.TrimSpace(string(raw)))
+		return ""
+	}
+	var result struct {
+		RoleID string `json:"role_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		slog.Warn("provisionWorkflowRole: decode response", "workflow_id", workflowID, "error", err)
+		return ""
+	}
+	return result.RoleID
+}
+
+// deleteWorkflowRole removes the role that was provisioned at workflow creation.
+// Failures are logged but never propagated — a missing cleanup is not fatal.
+func deleteWorkflowRole(ctx context.Context, roleID string) {
+	if roleID == "" {
+		return
+	}
+	key := gatekeeperKey()
+	if key == "" {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		gatekeeperURL+"/internal/workflow-roles/"+roleID, nil)
+	if err != nil {
+		slog.Warn("deleteWorkflowRole: build request", "role_id", roleID, "error", err)
+		return
+	}
+	req.Header.Set("X-Service-Key", "workflows:"+key)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		slog.Warn("deleteWorkflowRole: request failed", "role_id", roleID, "error", err)
+		return
+	}
+	resp.Body.Close()
+}
 
 var validMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE"}
 
@@ -109,15 +218,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:   time.Now().UTC(),
 	}
 
-	if err := wf.Add(ctx); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create workflow: db error", "error", err)
-		http.Error(w, "failed to create workflow", http.StatusInternalServerError)
-		return
-	}
-
-	steps, err := enrichStepRefs(ctx, wf.StepRefs)
+	steps, err := enrichStepRefs(ctx, refs)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "enrich steps failed")
@@ -126,6 +227,18 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wf.Steps = steps
+
+	// Provision a scoped service role before persisting so the role_id is stored atomically.
+	wf.RoleID = provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps)
+
+	if err := wf.Add(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db insert failed")
+		slog.Error("create workflow: db error", "error", err)
+		deleteWorkflowRole(ctx, wf.RoleID)
+		http.Error(w, "failed to create workflow", http.StatusInternalServerError)
+		return
+	}
 
 	span.SetAttributes(attribute.String("workflow.id", wf.WorkflowID))
 	span.SetStatus(codes.Ok, "")
@@ -252,29 +365,40 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if refs == nil {
 		refs = []WorkflowStepRef{}
 	}
+	newSteps, err := enrichStepRefs(ctx, refs)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "enrich steps failed")
+		slog.Error("update workflow: enrich steps", "workflow_id", id, "error", err)
+		http.Error(w, "failed to update workflow", http.StatusInternalServerError)
+		return
+	}
+
+	oldRoleID := existing.RoleID
 	existing.Name = req.Name
 	existing.Description = req.Description
 	existing.StepRefs = refs
+	existing.Steps = newSteps
+	existing.UpdatedAt = time.Now().UTC()
+
+	// Re-provision the role with the updated step set.
+	existing.RoleID = provisionWorkflowRole(ctx, id, userID, orgID, newSteps)
 
 	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
 		slog.Error("update workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
+		deleteWorkflowRole(ctx, existing.RoleID)
 		http.Error(w, "failed to update workflow", http.StatusInternalServerError)
 		return
 	}
+	// Old role is now superseded; clean it up after the DB write succeeds.
+	deleteWorkflowRole(ctx, oldRoleID)
 
-	wf, err := getWorkflow(ctx, id)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "db fetch after update failed")
-		http.Error(w, "failed to get updated workflow", http.StatusInternalServerError)
-		return
-	}
 	span.SetStatus(codes.Ok, "")
 	slog.Info("workflow updated", "workflow_id", id, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(wf) //nolint:errcheck
+	json.NewEncoder(w).Encode(existing) //nolint:errcheck
 }
 
 func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -305,6 +429,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	roleID := wf.RoleID
 	if err := wf.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
@@ -312,6 +437,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to delete workflow", http.StatusInternalServerError)
 		return
 	}
+	deleteWorkflowRole(ctx, roleID)
 
 	span.SetStatus(codes.Ok, "")
 	slog.Info("workflow deleted", "workflow_id", id, "user_id", userID)
