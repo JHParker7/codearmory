@@ -299,7 +299,19 @@ func handleDeletePermissions(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("permissions.id", id)))
 
-	if err := row.(Permissions).Remove(ctx); err != nil {
+	p := row.(Permissions)
+	var callerOrgID *string
+	if callerRow, err := (User{UserID: callerID}).Get(ctx); err == nil {
+		callerOrgID = callerRow.(User).OrgID
+	}
+	if p.OrgID != nil && (callerOrgID == nil || *p.OrgID != *callerOrgID) {
+		span.SetStatus(codes.Error, "forbidden: cross-org delete")
+		slog.Warn("delete permissions: cross-org attempt", "caller_id", callerID, "permissions_id", id)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	if err := p.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
 		slog.Error("delete permissions: db error", "caller_id", callerID, "permissions_id", id, "error", err)
