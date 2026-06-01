@@ -331,6 +331,21 @@ func TestValidStatusesAndPriorities(t *testing.T) {
 	}
 }
 
+// ── handleDeleteComment auth ──────────────────────────────────────────────────
+
+func TestHandleDeleteComment_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodDelete, "/tickets/t-1/comments/c-1", nil)
+	r.SetPathValue("id", "t-1")
+	r.SetPathValue("comment_id", "c-1")
+	w := httptest.NewRecorder()
+	handleDeleteComment(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+
+
 // ── statusResponseWriter ─────────────────────────────────────────────────────
 
 func TestStatusResponseWriter(t *testing.T) {
