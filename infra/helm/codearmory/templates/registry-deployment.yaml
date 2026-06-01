@@ -8,6 +8,12 @@
 {{- if .Values.forge.enabled -}}
 {{- $svcs = append $svcs (printf "forge=http://%s-forge:%d" $fullname (.Values.forge.port | int)) -}}
 {{- end -}}
+{{- if .Values.containers.enabled -}}
+{{- $svcs = append $svcs (printf "containers=http://%s-containers:%d" $fullname (.Values.containers.port | int)) -}}
+{{- end -}}
+{{- if .Values.giteaIntegration.enabled -}}
+{{- $svcs = append $svcs (printf "gitea=http://%s-gitea-integration:%d" $fullname (.Values.giteaIntegration.port | int)) -}}
+{{- end -}}
 {{- $services = join "," $svcs -}}
 {{- end }}
 apiVersion: apps/v1

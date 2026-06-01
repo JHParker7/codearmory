@@ -66,6 +66,11 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-workflows
                   key: hooks-trigger-key
+            - name: WORKFLOWS_TOKEN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-workflows
+                  key: token-key
             {{- include "codearmory.tls.envs" .Values.workflows.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.workflows.tls) }}
           volumeMounts:

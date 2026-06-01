@@ -277,6 +277,9 @@ workflows:
     # Shared HMAC secret with the hooks service for authenticating internal trigger requests.
     # Must match hooks.secret.hooksTriggerKey. Generate with: openssl rand -hex 32
     hooksTriggerKey: ""
+    # AES-256 key for encrypting run tokens at rest in the database.
+    # Generate with: openssl rand -hex 32
+    tokenKey: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -340,6 +343,96 @@ hooks:
     # Shared HMAC secret with the workflows service for signing internal trigger requests.
     # Must match workflows.secret.hooksTriggerKey. Generate with: openssl rand -hex 32
     hooksTriggerKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Containers ────────────────────────────────────────────────────────────────
+containers:
+  enabled: true
+  image:
+    repository: codearmory/containers
+    tag: ""
+  replicaCount: 1
+  port: 8089
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # Base URL of your OCI/Docker registry, e.g. https://registry.example.com
+    # Required — containers will refuse to start without this.
+    registryUrl: ""
+    # Registry credentials (optional — omit for anonymous/token-based access).
+    registryUsername: ""
+    registryPassword: ""
+    # Must match the containers entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Egress Proxy ──────────────────────────────────────────────────────────────
+egressProxy:
+  enabled: true
+  image:
+    repository: codearmory/egress-proxy
+    tag: ""
+  replicaCount: 1
+  port: 3128
+  resources:
+    requests:
+      cpu: 25m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  env:
+    # Comma-separated list of domains forge execution containers may reach.
+    # Exact hostnames or wildcard prefixes (*.github.com).
+    allowedDomains: "registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com"
+
+# ── Gitea integration ─────────────────────────────────────────────────────────
+giteaIntegration:
+  enabled: false
+  image:
+    repository: codearmory/gitea
+    tag: ""
+  replicaCount: 1
+  port: 8088
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Base URL of your Forgejo/Gitea instance, e.g. https://git.example.com
+    # Required when gitea.enabled is true.
+    giteaUrl: ""
+    # Admin API token for the Forgejo/Gitea instance.
+    # Required when gitea.enabled is true.
+    giteaAdminToken: ""
+    # Must match the gitea entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -426,3 +519,4 @@ postgresql:
           CREATE DATABASE workflows;
           CREATE DATABASE tickets;
           CREATE DATABASE hooks;
+          CREATE DATABASE gitea_integration;

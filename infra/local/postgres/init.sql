@@ -5,3 +5,4 @@ CREATE DATABASE registry;
 CREATE DATABASE workflows;
 CREATE DATABASE tickets;
 CREATE DATABASE hooks;
+CREATE DATABASE gitea_integration;

@@ -69,6 +69,10 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.forge.env.otelEndpoint | quote }}
             {{- end }}
+            {{- if and (eq .Values.forge.env.runtime "docker") .Values.egressProxy.enabled }}
+            - name: FORGE_EGRESS_PROXY
+              value: "http://{{ include "codearmory.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            {{- end }}
             {{- include "codearmory.postgresql.env" (list . "forge" "forge" (include "codearmory.fullname" .)) | nindent 12 }}
             - name: CONDUCTOR_FORWARD_KEY
               valueFrom:
