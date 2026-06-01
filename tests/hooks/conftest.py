@@ -49,18 +49,26 @@ def other_bearer(other_token):
 @pytest.fixture(scope="session")
 def workflow(bearer):
     """A minimal single-step workflow used by hook trigger tests."""
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
-        "name": f"hooks-test-wf-{uuid.uuid4().hex[:6]}",
-        "steps": [{
-            "name": "healthz",
+    step_res = requests.post(f"{WORKFLOWS_URL}/steps", headers=bearer, json={
+        "name": f"hooks-healthz-{uuid.uuid4().hex[:6]}",
+        "action": "http",
+        "with": {
             "service": "gatekeeper",
             "method": "GET",
             "path": "/healthz",
             "expected_status": 200,
-            "timeout_secs": 10,
-        }],
+        },
+        "timeout": 10,
+    })
+    assert step_res.status_code == 201, f"step creation failed: {step_res.text}"
+    step_id = step_res.json()["step_id"]
+
+    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
+        "name": f"hooks-test-wf-{uuid.uuid4().hex[:6]}",
+        "steps": [{"step_id": step_id}],
     })
     assert res.status_code == 201, f"workflow creation failed: {res.text}"
     wf = res.json()
     yield wf
     requests.delete(f"{WORKFLOWS_URL}/workflows/{wf['workflow_id']}", headers=bearer)
+    requests.delete(f"{WORKFLOWS_URL}/steps/{step_id}", headers=bearer)

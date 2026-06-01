@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +12,7 @@ import (
 	"strings"
 	"testing"
 )
+
 
 // fakeGatekeeper spins up a test server that always returns the given status
 // and body, overriding gatekeeperClient.URL for the test duration.
@@ -254,6 +258,185 @@ func TestHandleWebhook_MissingEvent(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "event") {
 		t.Fatalf("expected 'event' in error body, got %q", w.Body.String())
+	}
+}
+
+// ── handleCreateRule validation ───────────────────────────────────────────────
+
+func TestHandleCreateRule_MissingName(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
+	body := `{"repo":"owner/repo","events":["push"],"workflow_id":"wf-1","secret":"s3cr3t"}`
+	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateRule(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleCreateRule_MissingRepo(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
+	body := `{"name":"ci","events":["push"],"workflow_id":"wf-1","secret":"s3cr3t"}`
+	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateRule(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleCreateRule_EmptyEvents(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
+	body := `{"name":"ci","repo":"owner/repo","events":[],"workflow_id":"wf-1","secret":"s3cr3t"}`
+	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateRule(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleCreateRule_MissingWorkflowID(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
+	body := `{"name":"ci","repo":"owner/repo","events":["push"],"secret":"s3cr3t"}`
+	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateRule(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleCreateRule_MissingSecret(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
+	body := `{"name":"ci","repo":"owner/repo","events":["push"],"workflow_id":"wf-1"}`
+	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateRule(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleCreateRule_EmptySecret(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
+	empty := ""
+	body, _ := json.Marshal(createRuleRequest{
+		Name: "ci", Repo: "owner/repo", Events: []string{"push"}, WorkflowID: "wf-1", Secret: &empty,
+	})
+	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewReader(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateRule(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleCreateRule_InvalidBody(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
+	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString("not-json"))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateRule(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+// ── handleUpdateRule auth and validation ──────────────────────────────────────
+
+func TestHandleUpdateRule_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "/rules/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleUpdateRule(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+// ── handleDeleteRule auth ─────────────────────────────────────────────────────
+
+func TestHandleDeleteRule_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodDelete, "/rules/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleDeleteRule(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+// ── handleListEvents / handleGetEvent auth ────────────────────────────────────
+
+func TestHandleListEvents_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/events", nil)
+	w := httptest.NewRecorder()
+	handleListEvents(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleGetEvent_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/events/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleGetEvent(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+
+// ── computeHMAC ───────────────────────────────────────────────────────────────
+
+func TestComputeHMAC_Deterministic(t *testing.T) {
+	body := []byte("test payload")
+	got1 := computeHMAC("secret", body)
+	got2 := computeHMAC("secret", body)
+	if got1 != got2 {
+		t.Fatal("computeHMAC is not deterministic")
+	}
+	if len(got1) != 64 {
+		t.Fatalf("expected 64-char hex HMAC-SHA256, got %d chars", len(got1))
+	}
+}
+
+func TestComputeHMAC_DifferentSecrets(t *testing.T) {
+	body := []byte("test payload")
+	h1 := computeHMAC("secret1", body)
+	h2 := computeHMAC("secret2", body)
+	if h1 == h2 {
+		t.Fatal("different secrets should produce different HMACs")
+	}
+}
+
+func TestComputeHMAC_DifferentBodies(t *testing.T) {
+	h1 := computeHMAC("secret", []byte("body1"))
+	h2 := computeHMAC("secret", []byte("body2"))
+	if h1 == h2 {
+		t.Fatal("different bodies should produce different HMACs")
+	}
+}
+
+func TestComputeHMAC_MatchesWebhookFormat(t *testing.T) {
+	// Verify computeHMAC produces the value expected by the "sha256=" check in matchAndDispatch.
+	body := []byte(`{"repo":"org/repo","event":"push"}`)
+	secret := "webhook-secret"
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body) //nolint:errcheck
+	want := hex.EncodeToString(mac.Sum(nil))
+
+	if got := computeHMAC(secret, body); got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

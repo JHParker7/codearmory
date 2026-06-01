@@ -55,10 +55,11 @@ type triggerResult struct {
 
 // matchAndDispatch queries matching rules for the given payload and dispatches
 // a workflow run for each match. sigHeader is the X-Hub-Signature-256 header
-// value from the caller; pass "" to skip per-rule HMAC checks (e.g. when the
-// GitHub App handler has already verified the App-level signature).
+// value from the caller. When skipHMAC is true the per-rule HMAC check is
+// bypassed entirely (use only when the caller has already performed an
+// equivalent authentication step, e.g. the GitHub App handler).
 // Returns the trigger results and (successCount, failCount).
-func matchAndDispatch(ctx context.Context, eventID string, payload webhookPayload, payloadMap map[string]string, rawBody []byte, sigHeader string) ([]triggerResult, int, int) {
+func matchAndDispatch(ctx context.Context, eventID string, payload webhookPayload, payloadMap map[string]string, rawBody []byte, sigHeader string, skipHMAC bool) ([]triggerResult, int, int) {
 	matchedRules, err := getMatchedRules(ctx, payload.Repo, payload.Event)
 	if err != nil {
 		slog.Error("matchAndDispatch: query rules", "error", err)
@@ -75,10 +76,9 @@ func matchAndDispatch(ctx context.Context, eventID string, payload webhookPayloa
 			continue
 		}
 
-		// HMAC verification: if the rule has a secret, the caller must supply
-		// X-Hub-Signature-256: sha256=<hex(HMAC-SHA256(secret, body))>.
-		// When sigHeader is "" (GitHub App handler), rules with a secret are skipped.
-		if rws.Secret != nil && *rws.Secret != "" {
+		// HMAC verification: if the rule has a secret and skipHMAC is false,
+		// the caller must supply X-Hub-Signature-256: sha256=<hex(HMAC-SHA256(secret, body))>.
+		if !skipHMAC && rws.Secret != nil && *rws.Secret != "" {
 			expected := "sha256=" + computeHMAC(*rws.Secret, rawBody)
 			if !hmac.Equal([]byte(sigHeader), []byte(expected)) {
 				slog.Warn("matchAndDispatch: HMAC mismatch, skipping rule",
@@ -120,8 +120,13 @@ func matchAndDispatch(ctx context.Context, eventID string, payload webhookPayloa
 			slog.Error("matchAndDispatch: dispatch workflow failed",
 				"rule_id", rws.RuleID, "workflow_id", rws.WorkflowID, "error", trigErr)
 			errStr := trigErr.Error()
-			trig.Status = "failed"
 			trig.Error = &errStr
+			if errors.Is(trigErr, errWorkflowNotFound) {
+				trig.Status = "failed"
+			} else {
+				// Transient failure — mark for retry so the run is not silently lost.
+				trig.Status = "pending_retry"
+			}
 			failCount++
 		} else {
 			trig.Status = "triggered"
@@ -143,11 +148,17 @@ func matchAndDispatch(ctx context.Context, eventID string, payload webhookPayloa
 			}(rws.RuleID)
 		}
 
-		results = append(results, triggerResult{Trigger: trig, RuleName: rws.Name, Success: success})
-
 		if err := trig.Add(ctx); err != nil {
 			slog.Error("matchAndDispatch: insert trigger", "trigger_id", trig.TriggerID, "error", err)
 		}
+		// Enqueue retry for transient failures so the dispatch is not lost.
+		if trig.Status == "pending_retry" {
+			if retryErr := addRetry(ctx, trig.TriggerID, rws.WorkflowID, rws.CreatedBy, rws.OrgID, inputs, *trig.Error); retryErr != nil {
+				slog.Error("matchAndDispatch: enqueue retry failed", "trigger_id", trig.TriggerID, "error", retryErr)
+			}
+		}
+
+		results = append(results, triggerResult{Trigger: trig, RuleName: rws.Name, Success: success})
 	}
 
 	return results, successCount, failCount
@@ -217,7 +228,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	trigResults, successCount, failCount := matchAndDispatch(ctx, eventID, payload, payloadMap, rawBody, r.Header.Get("X-Hub-Signature-256"))
+	trigResults, successCount, failCount := matchAndDispatch(ctx, eventID, payload, payloadMap, rawBody, r.Header.Get("X-Hub-Signature-256"), false)
 
 	// Collect triggers for response.
 	triggers := make([]HookTrigger, 0, len(trigResults))

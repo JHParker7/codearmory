@@ -45,6 +45,9 @@ def test_webhook_no_rules_returns_200():
 
 # ── Webhook with matching rule ─────────────────────────────────────────────────
 
+_PUSH_SECRET = "push-test-secret"
+
+
 @pytest.fixture(scope="module")
 def push_rule(bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
@@ -54,6 +57,7 @@ def push_rule(bearer, workflow):
         "ref_filter": "refs/heads/main",
         "workflow_id": workflow["workflow_id"],
         "input_mapping": {"COMMIT_SHA": "commit", "PUSHED_BY": "pusher"},
+        "secret": _PUSH_SECRET,
     })
     assert res.status_code == 201, res.text
     r = res.json()
@@ -62,13 +66,14 @@ def push_rule(bearer, workflow):
 
 
 def test_webhook_matches_rule_and_triggers(push_rule):
-    res = requests.post(f"{HOOKS_URL}/hooks", json={
-        "repo": "ci/myapp",
-        "event": "push",
-        "ref": "refs/heads/main",
-        "commit": "abc123",
-        "pusher": "alice",
-    })
+    import json as _json
+    payload = {"repo": "ci/myapp", "event": "push", "ref": "refs/heads/main",
+               "commit": "abc123", "pusher": "alice"}
+    body = _json.dumps(payload).encode()
+    sig = _sign(_PUSH_SECRET, body)
+    res = requests.post(f"{HOOKS_URL}/hooks", data=body,
+                        headers={"Content-Type": "application/json",
+                                 "X-Hub-Signature-256": sig})
     assert res.status_code == 200, res.text
     data = res.json()
     assert data["rules_matched"] >= 1
@@ -108,10 +113,15 @@ def test_webhook_event_type_mismatch_no_trigger(push_rule):
 
 def test_x_hook_event_header_overrides_body(push_rule):
     """X-Hook-Event header should override the event field in the body."""
-    res = requests.post(f"{HOOKS_URL}/hooks",
-                        json={"repo": "ci/myapp", "event": "merge",
-                              "ref": "refs/heads/main", "commit": "xyz"},
-                        headers={"X-Hook-Event": "push"})
+    import json as _json
+    payload = {"repo": "ci/myapp", "event": "merge",
+               "ref": "refs/heads/main", "commit": "xyz"}
+    body = _json.dumps(payload).encode()
+    sig = _sign(_PUSH_SECRET, body)
+    res = requests.post(f"{HOOKS_URL}/hooks", data=body,
+                        headers={"Content-Type": "application/json",
+                                 "X-Hook-Event": "push",
+                                 "X-Hub-Signature-256": sig})
     assert res.status_code == 200
     data = res.json()
     assert data["event_type"] == "push"

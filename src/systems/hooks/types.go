@@ -2,7 +2,10 @@ package main
 
 import "time"
 
-const maxBodyBytes = 64 * 1024
+const (
+	maxBodyBytes     = 64 * 1024
+	maxRetryAttempts = 5
+)
 
 // PipelineRule describes a rule that maps incoming webhook events for a
 // repository to a workflow run. The Secret field is stored in the database
@@ -54,3 +57,20 @@ type HookTrigger struct {
 }
 
 func (HookTrigger) TableName() string { return "hook_triggers" }
+
+// HookTriggerRetry is a dead-letter record for a dispatch that failed transiently.
+// The retry loop picks these up and re-dispatches them with exponential backoff.
+type HookTriggerRetry struct {
+	RetryID     string            `gorm:"column:retry_id;primaryKey"`
+	TriggerID   string            `gorm:"column:trigger_id"`
+	WorkflowID  string            `gorm:"column:workflow_id"`
+	TriggeredBy string            `gorm:"column:triggered_by"`
+	OrgID       string            `gorm:"column:org_id;default:''"`
+	Inputs      map[string]string `gorm:"column:inputs;serializer:json"`
+	Attempt     int               `gorm:"column:attempt;default:1"`
+	LastError   string            `gorm:"column:last_error"`
+	NextRetryAt time.Time         `gorm:"column:next_retry_at"`
+	CreatedAt   time.Time         `gorm:"column:created_at"`
+}
+
+func (HookTriggerRetry) TableName() string { return "hook_trigger_retries" }

@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -415,13 +417,45 @@ func (t HookTrigger) List(ctx context.Context, limit, offset int) ([]db, error) 
 }
 
 // updateEventStatus updates a hook event's rules_matched count and status.
-// Called fire-and-forget from webhook handling.
 func updateEventStatus(eventID string, rulesMatched int, status string) {
 	if err := connect().Exec(
 		`UPDATE hook_events SET rules_matched=?, status=? WHERE event_id=?`,
 		rulesMatched, status, eventID,
 	).Error; err != nil {
-		// logged by caller via goroutine
-		_ = err
+		slog.Error("updateEventStatus: db update failed", "event_id", eventID, "error", err)
 	}
+}
+
+// addRetry inserts a dead-letter retry record for a failed dispatch.
+func addRetry(ctx context.Context, triggerID, workflowID, triggeredBy, orgID string, inputs map[string]string, lastError string) error {
+	retry := HookTriggerRetry{
+		RetryID:     uuid.New().String(),
+		TriggerID:   triggerID,
+		WorkflowID:  workflowID,
+		TriggeredBy: triggeredBy,
+		OrgID:       orgID,
+		Inputs:      inputs,
+		Attempt:     1,
+		LastError:   lastError,
+		NextRetryAt: time.Now().UTC().Add(60 * time.Second),
+		CreatedAt:   time.Now().UTC(),
+	}
+	return connect().WithContext(ctx).Create(&retry).Error
+}
+
+// claimDueRetries returns up to n retry records whose next_retry_at has passed.
+func claimDueRetries(ctx context.Context, n int) ([]HookTriggerRetry, error) {
+	var retries []HookTriggerRetry
+	err := connect().WithContext(ctx).
+		Where("next_retry_at <= now()").
+		Order("next_retry_at").
+		Limit(n).
+		Find(&retries).Error
+	return retries, err
+}
+
+// retryBackoff returns the delay before the nth attempt (1-indexed).
+// Sequence: 60s, 120s, 240s, 480s, capped at 900s.
+func retryBackoff(attempt int) time.Duration {
+	return time.Duration(min(60*(1<<(attempt-1)), 900)) * time.Second
 }

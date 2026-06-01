@@ -492,8 +492,8 @@ func handleGitHubWebhook(app *githubApp) http.HandlerFunc {
 			return
 		}
 
-		// Pass "" as sigHeader — App HMAC already verified; per-rule secrets skipped.
-		trigResults, successCount, failCount := matchAndDispatch(ctx, eventID, payload, payloadMap, rawBody, "")
+		// App-level HMAC already verified above; skip per-rule HMAC checks.
+		trigResults, successCount, failCount := matchAndDispatch(ctx, eventID, payload, payloadMap, rawBody, "", true)
 
 		// For successful dispatches with a run ID, create a GitHub check run and watch it.
 		if installationID != 0 {

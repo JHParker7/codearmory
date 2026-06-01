@@ -18,6 +18,8 @@ import (
 	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -122,6 +124,70 @@ func limitBody(next http.Handler) http.Handler {
 	})
 }
 
+// startRetryLoop runs a background goroutine that periodically re-dispatches
+// failed hook triggers, providing at-least-once delivery when the workflows
+// service is temporarily unavailable.
+func startRetryLoop(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				processRetries(ctx)
+			}
+		}
+	}()
+}
+
+func processRetries(ctx context.Context) {
+	retries, err := claimDueRetries(ctx, 10)
+	if err != nil {
+		slog.Error("retry loop: query retries", "error", err)
+		return
+	}
+	for _, r := range retries {
+		runID, dispatchErr := dispatchWorkflow(ctx, r.WorkflowID, r.TriggeredBy, r.OrgID, r.Inputs)
+		if dispatchErr == nil {
+			if updateErr := connect().WithContext(ctx).Model(&HookTrigger{}).
+				Where("trigger_id = ?", r.TriggerID).
+				Updates(map[string]any{"status": "triggered", "run_id": runID}).Error; updateErr != nil {
+				slog.Error("retry loop: update trigger", "trigger_id", r.TriggerID, "error", updateErr)
+			}
+			connect().WithContext(ctx).Delete(&HookTriggerRetry{RetryID: r.RetryID}) //nolint:errcheck
+			meterRunsTriggered.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("workflow.id", r.WorkflowID),
+			))
+			slog.Info("retry: dispatch succeeded", "trigger_id", r.TriggerID, "attempt", r.Attempt)
+			continue
+		}
+		nextAttempt := r.Attempt + 1
+		if nextAttempt > maxRetryAttempts || errors.Is(dispatchErr, errWorkflowNotFound) {
+			if updateErr := connect().WithContext(ctx).Model(&HookTrigger{}).
+				Where("trigger_id = ?", r.TriggerID).
+				Updates(map[string]any{"status": "failed", "error": dispatchErr.Error()}).Error; updateErr != nil {
+				slog.Error("retry loop: mark trigger failed", "trigger_id", r.TriggerID, "error", updateErr)
+			}
+			connect().WithContext(ctx).Delete(&HookTriggerRetry{RetryID: r.RetryID}) //nolint:errcheck
+			slog.Warn("retry: permanently failed", "trigger_id", r.TriggerID, "attempts", r.Attempt, "error", dispatchErr)
+		} else {
+			backoff := retryBackoff(nextAttempt)
+			if updateErr := connect().WithContext(ctx).Model(&HookTriggerRetry{}).
+				Where("retry_id = ?", r.RetryID).
+				Updates(map[string]any{
+					"attempt":      nextAttempt,
+					"last_error":   dispatchErr.Error(),
+					"next_retry_at": time.Now().UTC().Add(backoff),
+				}).Error; updateErr != nil {
+				slog.Error("retry loop: update retry record", "retry_id", r.RetryID, "error", updateErr)
+			}
+			slog.Warn("retry: will retry", "trigger_id", r.TriggerID, "attempt", nextAttempt, "backoff", backoff, "error", dispatchErr)
+		}
+	}
+}
+
 func main() {
 	logLevel := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
@@ -149,9 +215,15 @@ func main() {
 		connect().Exec("ALTER TABLE pipeline_rules ALTER COLUMN events TYPE jsonb USING to_jsonb(events) WHERE pg_typeof(events)::text = 'text[]'")
 	}()
 
-	if err := connect().AutoMigrate(&PipelineRule{}, &HookEvent{}, &HookTrigger{}); err != nil {
+	if err := connect().AutoMigrate(&PipelineRule{}, &HookEvent{}, &HookTrigger{}, &HookTriggerRetry{}); err != nil {
 		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
+	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_pipeline_rules_repo_active ON pipeline_rules (repo, active) WHERE active = true`).Error; err != nil {
+		slog.Warn("failed to create pipeline_rules index", "error", err)
+	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_hook_trigger_retries_next ON hook_trigger_retries (next_retry_at) WHERE next_retry_at IS NOT NULL`).Error; err != nil {
+		slog.Warn("failed to create hook_trigger_retries index", "error", err)
 	}
 	slog.Info("database initialized")
 
@@ -162,6 +234,7 @@ func main() {
 	gatekeeperClient = newGatekeeperClient()
 	registry.StartKeyRotation(ctx, gatekeeperURL, "hooks",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
+	startRetryLoop(ctx)
 
 	var ghApp *githubApp
 	if rawID := secret("GITHUB_APP_ID"); rawID != "" {

@@ -69,6 +69,7 @@ def rule(bearer, workflow):
         "ref_filter": "refs/heads/main",
         "workflow_id": workflow["workflow_id"],
         "input_mapping": {"COMMIT": "commit", "BRANCH": "ref"},
+        "secret": "rule-test-secret",
     })
     assert res.status_code == 201, res.text
     r = res.json()
@@ -148,6 +149,7 @@ def test_delete_rule(bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
         "name": "to-delete", "repo": "x/y",
         "events": ["push"], "workflow_id": workflow["workflow_id"],
+        "secret": "delete-test-secret",
     })
     rid = res.json()["rule_id"]
 
@@ -161,6 +163,7 @@ def test_delete_other_user_rule_not_found(bearer, other_bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
         "name": "protected-rule", "repo": "x/y",
         "events": ["push"], "workflow_id": workflow["workflow_id"],
+        "secret": "protected-test-secret",
     })
     rid = res.json()["rule_id"]
 
