@@ -15,5 +15,5 @@ WORKDIR /home/svc/
 COPY --from=builder /src/gatekeeper .
 RUN chown svc:svc ./gatekeeper
 USER svc
-EXPOSE 8080
+EXPOSE 8081
 CMD ["./gatekeeper"]

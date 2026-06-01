@@ -1,5 +1,4 @@
 {{- if .Values.tests.gatekeeper.enabled }}
-{{- $dbUrl := coalesce .Values.tests.gatekeeper.databaseUrl (ternary (include "codearmory.postgresql.dsn" (list . "gatekeeper")) "" .Values.postgresql.enabled) }}
 apiVersion: v1
 kind: Pod
 metadata:
@@ -24,6 +23,10 @@ spec:
       env:
         - name: API_URL
           value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+        {{- if .Values.tests.gatekeeper.databaseUrl }}
         - name: DATABASE_URL
-          value: {{ $dbUrl | quote }}
+          value: {{ .Values.tests.gatekeeper.databaseUrl | quote }}
+        {{- else }}
+        {{- include "codearmory.postgresql.env" (list . "gatekeeper" "gatekeeper" (include "codearmory.fullname" .)) | nindent 8 }}
+        {{- end }}
 {{- end }}

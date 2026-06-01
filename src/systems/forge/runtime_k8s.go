@@ -18,6 +18,10 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// KubernetesRuntime runs executions as single-container Kubernetes Jobs.
+// Jobs are created in K8S_NAMESPACE (default: forge) and deleted immediately
+// after the result is collected. An optional RuntimeClass (K8S_RUNTIME_CLASS)
+// enables gVisor or other sandboxed runtimes.
 type KubernetesRuntime struct {
 	client       kubernetes.Interface
 	namespace    string
@@ -58,6 +62,9 @@ func newKubernetesRuntime() (*KubernetesRuntime, error) {
 	}, nil
 }
 
+// Run creates a Kubernetes Job for the execution, polls until it reaches a
+// terminal state, collects logs, then deletes the job. The job is always
+// deleted on return, even if Run returns an error.
 func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult, error) {
 	jobName := "forge-" + exec.ExecutionID
 
@@ -240,6 +247,8 @@ func (r *KubernetesRuntime) podExitCode(executionID string) (int, bool) {
 	return 0, false
 }
 
+// Cancel deletes the Kubernetes Job for the execution, which terminates the
+// running pod. The context passed to Run will also be cancelled by the worker.
 func (r *KubernetesRuntime) Cancel(_ context.Context, executionID string) error {
 	r.deleteJob(context.Background(), "forge-"+executionID)
 	return nil

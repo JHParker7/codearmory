@@ -1,0 +1,20 @@
+{{- if .Values.egressProxy.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "codearmory.fullname" . }}-egress-proxy
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress-proxy
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.egressProxy.port }}
+      targetPort: proxy
+      protocol: TCP
+      name: proxy
+  selector:
+    app.kubernetes.io/name: {{ include "codearmory.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: egress-proxy
+{{- end }}

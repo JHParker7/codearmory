@@ -1,0 +1,95 @@
+{{- if .Values.workflows.enabled }}
+{{- $fullname := include "codearmory.fullname" . }}
+{{- $services := .Values.workflows.env.services | default (printf "forge=http://%s-forge:%d,blueprints=http://%s-blueprints:%d" $fullname (.Values.forge.port | int) $fullname (.Values.blueprints.port | int)) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-workflows
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workflows
+spec:
+  replicas: {{ .Values.workflows.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "codearmory.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: workflows
+  template:
+    metadata:
+      labels:
+        {{- include "codearmory.labels" . | nindent 8 }}
+        app.kubernetes.io/component: workflows
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: workflows
+          image: "{{ .Values.workflows.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.workflows) }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.workflows.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.workflows.port | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.workflows.env.logLevel | quote }}
+            - name: GATEKEEPER_URL
+              value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+            - name: SERVICES
+              value: {{ $services | quote }}
+            {{- if .Values.workflows.env.otelEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.workflows.env.otelEndpoint | quote }}
+            {{- end }}
+            {{- include "codearmory.postgresql.env" (list . "workflows" "workflows" $fullname) | nindent 12 }}
+            - name: GATEKEEPER_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-workflows
+                  key: gatekeeper-service-key
+            - name: HOOKS_TRIGGER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-workflows
+                  key: hooks-trigger-key
+            - name: WORKFLOWS_TOKEN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-workflows
+                  key: token-key
+            {{- include "codearmory.tls.envs" .Values.workflows.tls | nindent 12 }}
+          {{- with (include "codearmory.tls.volumeMounts" .Values.workflows.tls) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.workflows.resources | nindent 12 }}
+      {{- with (include "codearmory.tls.volumes" .Values.workflows.tls) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
+{{- end }}

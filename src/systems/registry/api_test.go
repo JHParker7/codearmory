@@ -7,171 +7,53 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// checkKey
+// requireAuthWithRole — header-only checks (no DB required)
 // ---------------------------------------------------------------------------
 
-func TestCheckKey_EmptyExpected(t *testing.T) {
+func TestRequireAuthWithRole_MissingHeader(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer sometoken")
-	if checkKey(r, "") {
-		t.Fatal("expected false when expected key is empty")
-	}
-}
-
-func TestCheckKey_NoBearer(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "sometoken") // no "Bearer " prefix
-	if checkKey(r, "sometoken") {
-		t.Fatal("expected false when Authorization header lacks 'Bearer ' prefix")
-	}
-}
-
-func TestCheckKey_WrongToken(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer wrongtoken")
-	if checkKey(r, "correcttoken") {
-		t.Fatal("expected false when token does not match expected")
-	}
-}
-
-func TestCheckKey_CorrectToken(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer secretkey")
-	if !checkKey(r, "secretkey") {
-		t.Fatal("expected true when token matches expected")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// requireAdminKey
-// ---------------------------------------------------------------------------
-
-func TestRequireAdminKey_NoKeySet(t *testing.T) {
-	// ADMIN_KEY not set → empty string → checkKey returns false → 401
-	t.Setenv("ADMIN_KEY", "")
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer anything")
 	w := httptest.NewRecorder()
-	if requireAdminKey(w, r) {
-		t.Fatal("expected false (unauthorized) when ADMIN_KEY is not set")
+	if requireAuthWithRole(w, r, "") {
+		t.Fatal("expected false when X-Service-Key header is absent")
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
 }
 
-func TestRequireAdminKey_WrongKey(t *testing.T) {
-	t.Setenv("ADMIN_KEY", "correctadminkey")
+func TestRequireAuthWithRole_MalformedHeader_NoColon(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer wrongkey")
+	r.Header.Set("X-Service-Key", "nameonly") // no colon
 	w := httptest.NewRecorder()
-	if requireAdminKey(w, r) {
-		t.Fatal("expected false (unauthorized) when key does not match")
+	if requireAuthWithRole(w, r, "") {
+		t.Fatal("expected false for malformed header")
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
 }
 
-func TestRequireAdminKey_CorrectKey(t *testing.T) {
-	t.Setenv("ADMIN_KEY", "correctadminkey")
+func TestRequireAuthWithRole_MalformedHeader_EmptyName(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer correctadminkey")
+	r.Header.Set("X-Service-Key", ":somekey") // name part is empty
 	w := httptest.NewRecorder()
-	if !requireAdminKey(w, r) {
-		t.Fatal("expected true when ADMIN_KEY matches")
-	}
-	// No response body should have been written (status stays 200 default, body empty)
-	if body := w.Body.String(); body != "" {
-		t.Fatalf("expected no body on success, got %q", body)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// requireReadKey
-// ---------------------------------------------------------------------------
-
-func TestRequireReadKey_NeitherKeySet(t *testing.T) {
-	t.Setenv("READ_KEY", "")
-	t.Setenv("ADMIN_KEY", "")
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer anything")
-	w := httptest.NewRecorder()
-	if requireReadKey(w, r) {
-		t.Fatal("expected false when neither READ_KEY nor ADMIN_KEY is set")
+	if requireAuthWithRole(w, r, "") {
+		t.Fatal("expected false for empty service name")
 	}
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
 }
 
-func TestRequireReadKey_WithReadKey(t *testing.T) {
-	t.Setenv("READ_KEY", "myreadkey")
-	t.Setenv("ADMIN_KEY", "")
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer myreadkey")
-	w := httptest.NewRecorder()
-	if !requireReadKey(w, r) {
-		t.Fatal("expected true when READ_KEY matches")
-	}
-}
-
-func TestRequireReadKey_WithAdminKey(t *testing.T) {
-	t.Setenv("READ_KEY", "")
-	t.Setenv("ADMIN_KEY", "myadminkey")
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer myadminkey")
-	w := httptest.NewRecorder()
-	if !requireReadKey(w, r) {
-		t.Fatal("expected true when ADMIN_KEY matches (admin can read)")
-	}
-}
-
-func TestRequireReadKey_BothSet_ReadMatches(t *testing.T) {
-	t.Setenv("READ_KEY", "myreadkey")
-	t.Setenv("ADMIN_KEY", "myadminkey")
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer myreadkey")
-	w := httptest.NewRecorder()
-	if !requireReadKey(w, r) {
-		t.Fatal("expected true when READ_KEY matches (both keys set)")
-	}
-}
-
-func TestRequireReadKey_BothSet_AdminMatches(t *testing.T) {
-	t.Setenv("READ_KEY", "myreadkey")
-	t.Setenv("ADMIN_KEY", "myadminkey")
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer myadminkey")
-	w := httptest.NewRecorder()
-	if !requireReadKey(w, r) {
-		t.Fatal("expected true when ADMIN_KEY matches (both keys set)")
-	}
-}
-
-func TestRequireReadKey_BothSet_NeitherMatches(t *testing.T) {
-	t.Setenv("READ_KEY", "myreadkey")
-	t.Setenv("ADMIN_KEY", "myadminkey")
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("Authorization", "Bearer wrongkey")
-	w := httptest.NewRecorder()
-	if requireReadKey(w, r) {
-		t.Fatal("expected false when neither key matches")
-	}
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", w.Code)
-	}
-}
+// DB-dependent auth success/failure is covered by the integration test suite.
 
 // ---------------------------------------------------------------------------
-// Pre-auth handler paths — pool is nil, only test auth rejection (no valid key)
+// Pre-auth handler paths — pool is nil; only the auth rejection path runs
 // ---------------------------------------------------------------------------
 
-func TestHandleListServices_Unauthorized(t *testing.T) {
-	t.Setenv("READ_KEY", "readkey")
-	t.Setenv("ADMIN_KEY", "adminkey")
+func TestHandleListServices_NoServiceKey(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/services", nil)
-	// No Authorization header → 401
+	// No X-Service-Key header → 401
 	w := httptest.NewRecorder()
 	handleListServices(w, r)
 	if w.Code != http.StatusUnauthorized {
@@ -179,10 +61,8 @@ func TestHandleListServices_Unauthorized(t *testing.T) {
 	}
 }
 
-func TestHandleCreateService_Unauthorized(t *testing.T) {
-	t.Setenv("ADMIN_KEY", "adminkey")
+func TestHandleCreateService_NoServiceKey(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/services", nil)
-	// No Authorization header → 401
 	w := httptest.NewRecorder()
 	handleCreateService(w, r)
 	if w.Code != http.StatusUnauthorized {
@@ -190,12 +70,51 @@ func TestHandleCreateService_Unauthorized(t *testing.T) {
 	}
 }
 
-func TestHandleDeleteService_Unauthorized(t *testing.T) {
-	t.Setenv("ADMIN_KEY", "adminkey")
+func TestHandleDeleteService_NoServiceKey(t *testing.T) {
 	r := httptest.NewRequest(http.MethodDelete, "/services/some-id", nil)
-	// No Authorization header → 401
 	w := httptest.NewRecorder()
 	handleDeleteService(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Handlers that use requireReadAuth — missing X-Service-Key → 401
+// ---------------------------------------------------------------------------
+
+func TestHandleListActions_NoServiceKey(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/actions", nil)
+	w := httptest.NewRecorder()
+	handleListActions(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestHandleListDefaultGrants_NoServiceKey(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/default-grants", nil)
+	w := httptest.NewRecorder()
+	handleListDefaultGrants(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestHandleSystemHealth_NoServiceKey(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/system_health", nil)
+	w := httptest.NewRecorder()
+	handleSystemHealth(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestHandleUpdateServiceEndpoints_NoServiceKey(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "/services/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleUpdateServiceEndpoints(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
@@ -224,7 +143,7 @@ func TestStatusResponseWriter_DelegatesWrite(t *testing.T) {
 	rw := &statusResponseWriter{ResponseWriter: rec, status: http.StatusOK}
 
 	rw.WriteHeader(http.StatusNotFound)
-	rw.Write([]byte("not found"))
+	rw.Write([]byte("not found")) //nolint:errcheck
 
 	if rw.status != http.StatusNotFound {
 		t.Fatalf("expected captured status 404, got %d", rw.status)

@@ -8,6 +8,12 @@
 {{- if .Values.forge.enabled -}}
 {{- $svcs = append $svcs (printf "forge=http://%s-forge:%d" $fullname (.Values.forge.port | int)) -}}
 {{- end -}}
+{{- if .Values.containers.enabled -}}
+{{- $svcs = append $svcs (printf "containers=http://%s-containers:%d" $fullname (.Values.containers.port | int)) -}}
+{{- end -}}
+{{- if .Values.giteaIntegration.enabled -}}
+{{- $svcs = append $svcs (printf "gitea=http://%s-gitea-integration:%d" $fullname (.Values.giteaIntegration.port | int)) -}}
+{{- end -}}
 {{- $services = join "," $svcs -}}
 {{- end }}
 apiVersion: apps/v1
@@ -56,27 +62,35 @@ spec:
               value: {{ .Values.registry.port | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.registry.env.logLevel | quote }}
+            - name: GATEKEEPER_URL
+              value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
             - name: SERVICES
               value: {{ $services | quote }}
             {{- if .Values.registry.env.otelEndpoint }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.registry.env.otelEndpoint | quote }}
             {{- end }}
-            - name: DATABASE_URL
+            {{- include "codearmory.postgresql.env" (list . "registry" "registry" (include "codearmory.fullname" .)) | nindent 12 }}
+            - name: GATEKEEPER_SERVICE_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-registry
-                  key: database-url
-            - name: ADMIN_KEY
+                  key: gatekeeper-service-key
+            - name: REGISTRY_SERVICE_ACCOUNTS
               valueFrom:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-registry
-                  key: admin-key
-            - name: READ_KEY
+                  key: service-accounts
+            - name: REGISTRY_ADMIN_ACCOUNTS
               valueFrom:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-registry
-                  key: read-key
+                  key: admin-accounts
+            {{- include "codearmory.tls.envs" .Values.registry.tls | nindent 12 }}
+          {{- with (include "codearmory.tls.volumeMounts" .Values.registry.tls) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             tcpSocket:
               port: http
@@ -89,3 +103,7 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.registry.resources | nindent 12 }}
+      {{- with (include "codearmory.tls.volumes" .Values.registry.tls) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}

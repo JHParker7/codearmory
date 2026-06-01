@@ -1,7 +1,7 @@
 package main
 
 import (
-	"crypto/subtle"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,8 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +18,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Service is a registered backend service known to the registry.
+// ForwardAuth, when true, signals that conductor should forward the user's
+// Authorization header when proxying requests to this service.
 type Service struct {
 	ServiceID   string    `json:"service_id"`
 	Name        string    `json:"name"`
@@ -29,6 +32,8 @@ type Service struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// ServiceRole is a named role defined by a service and published in the registry.
+// Gatekeeper resolves these names when evaluating permission requests.
 type ServiceRole struct {
 	RoleID      string    `json:"role_id"`
 	ServiceID   string    `json:"service_id"`
@@ -37,6 +42,8 @@ type ServiceRole struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// ServiceEndpoint maps an HTTP method + path on a service to a gatekeeper
+// action/resource pair. Public endpoints bypass permission checks entirely.
 type ServiceEndpoint struct {
 	EndpointID string    `json:"endpoint_id"`
 	ServiceID  string    `json:"service_id"`
@@ -52,12 +59,59 @@ type ServiceEndpoint struct {
 
 type serviceWithEndpoints struct {
 	Service
-	Roles     []ServiceRole     `json:"roles"`
-	Endpoints []ServiceEndpoint `json:"endpoints"`
+	Roles         []ServiceRole        `json:"roles"`
+	Endpoints     []ServiceEndpoint    `json:"endpoints"`
+	DefaultGrants []ServiceDefaultGrant `json:"default_grants,omitempty"`
+}
+
+// ServiceDefaultGrant is a permission template a service declares for new
+// users, orgs, or teams. Gatekeeper reads these at startup and applies them
+// when creating new principals.
+type ServiceDefaultGrant struct {
+	GrantID     string    `json:"grant_id"`
+	ServiceID   string    `json:"service_id"`
+	ServiceName string    `json:"service_name"`
+	GrantOn     string    `json:"grant_on"` // "user", "org", or "team"
+	Actions     []string  `json:"actions"`
+	Resources   []string  `json:"resources"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// ServiceAction is a callable workflow action registered by a service.
+// BodyTransforms and AsyncConfig are stored as raw JSONB and passed through.
+// GkService/GkAction/GkResource are the gatekeeper permission triple required
+// to call this action, derived from the matching service_endpoint record. Empty
+// when the endpoint has no registered service_endpoint entry.
+type ServiceAction struct {
+	ActionID       string          `json:"action_id"`
+	ServiceID      string          `json:"service_id"`
+	ServiceName    string          `json:"service_name"`
+	ServiceURL     string          `json:"service_url"`
+	Name           string          `json:"name"`
+	Method         string          `json:"method"`
+	Path           string          `json:"path"`
+	BodyTransforms json.RawMessage `json:"body_transforms,omitempty"`
+	AsyncConfig    json.RawMessage `json:"async,omitempty"`
+	Active         bool            `json:"active"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	GkService      string          `json:"gk_service,omitempty"`
+	GkAction       string          `json:"gk_action,omitempty"`
+	GkResource     string          `json:"gk_resource,omitempty"`
 }
 
 // resolveHost is the DNS lookup used by validateServiceURL. Tests can replace it.
 var resolveHost = net.LookupHost
+
+// jsonbOrNil returns nil when raw is empty or the JSON null literal,
+// so that pgx inserts a SQL NULL into a JSONB column instead of the string "null".
+func jsonbOrNil(raw json.RawMessage) interface{} {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	return []byte(raw)
+}
 
 // hashServiceKey bcrypt-hashes a plaintext service key for storage.
 // Returns an empty string and no error when key is empty (no key configured).
@@ -72,38 +126,48 @@ func hashServiceKey(key string) (string, error) {
 	return string(h), nil
 }
 
-// checkKey does a constant-time comparison against a configured API key so the
-// check is not vulnerable to timing-based enumeration.
-func checkKey(r *http.Request, expected string) bool {
-	if expected == "" {
-		return false
-	}
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
+// requireReadAuth verifies X-Service-Key against registry_service_accounts.
+// Any valid service account (any role) is accepted.
+func requireReadAuth(w http.ResponseWriter, r *http.Request) bool {
+	return requireAuthWithRole(w, r, "")
 }
 
-func requireAdminKey(w http.ResponseWriter, r *http.Request) bool {
-	if checkKey(r, os.Getenv("ADMIN_KEY")) {
-		return true
-	}
-	http.Error(w, "unauthorized", http.StatusUnauthorized)
-	return false
+// requireAdminAuth verifies X-Service-Key and requires role=admin.
+func requireAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+	return requireAuthWithRole(w, r, "admin")
 }
 
-// requireReadKey accepts either the read key or the admin key.
-// Both comparisons are always evaluated to prevent the short-circuit from
-// leaking which key was checked first via response timing.
-func requireReadKey(w http.ResponseWriter, r *http.Request) bool {
-	readOK := checkKey(r, os.Getenv("READ_KEY"))
-	adminOK := checkKey(r, os.Getenv("ADMIN_KEY"))
-	if readOK || adminOK {
-		return true
+func requireAuthWithRole(w http.ResponseWriter, r *http.Request, requiredRole string) bool {
+	header := r.Header.Get("X-Service-Key")
+	if header == "" {
+		http.Error(w, "missing X-Service-Key header", http.StatusUnauthorized)
+		return false
 	}
-	http.Error(w, "unauthorized", http.StatusUnauthorized)
-	return false
+	idx := strings.Index(header, ":")
+	if idx < 1 {
+		http.Error(w, "invalid X-Service-Key format, expected name:key", http.StatusUnauthorized)
+		return false
+	}
+	name, key := header[:idx], header[idx+1:]
+
+	var hashedKey, role string
+	err := pool.QueryRow(r.Context(),
+		`SELECT hashed_key, role FROM registry_service_accounts WHERE name = $1`,
+		name,
+	).Scan(&hashedKey, &role)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hashedKey), []byte(key)) != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	if requiredRole != "" && role != requiredRole {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // validateServiceURL rejects URLs that target loopback, link-local, or any
@@ -154,9 +218,72 @@ func validateServiceURL(rawURL string) error {
 	return nil
 }
 
+// handleListActions returns all active workflow actions joined with their service URLs.
+func handleListActions(w http.ResponseWriter, r *http.Request) {
+	if !requireReadAuth(w, r) {
+		return
+	}
+
+	rows, err := pool.Query(r.Context(), `
+		SELECT sa.action_id, sa.service_id, s.name, s.url,
+		       sa.name, sa.method, sa.path,
+		       sa.body_transforms, sa.async_config,
+		       sa.active, sa.created_at, sa.updated_at,
+		       COALESCE(se.action, ''), COALESCE(se.resource, '')
+		FROM service_actions sa
+		JOIN services s ON sa.service_id = s.service_id
+		LEFT JOIN service_endpoints se
+		       ON se.service_id = sa.service_id
+		      AND se.method     = sa.method
+		      AND se.path       = sa.path
+		      AND se.active     = true
+		WHERE sa.active = true AND s.active = true
+		ORDER BY sa.name
+	`)
+	if err != nil {
+		slog.Error("list actions: query", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var actions []ServiceAction
+	for rows.Next() {
+		var a ServiceAction
+		var bodyTransforms, asyncConfig []byte
+		if err := rows.Scan(
+			&a.ActionID, &a.ServiceID, &a.ServiceName, &a.ServiceURL,
+			&a.Name, &a.Method, &a.Path,
+			&bodyTransforms, &asyncConfig,
+			&a.Active, &a.CreatedAt, &a.UpdatedAt,
+			&a.GkAction, &a.GkResource,
+		); err != nil {
+			slog.Error("list actions: scan", "error", err)
+			continue
+		}
+		a.BodyTransforms = json.RawMessage(bodyTransforms)
+		a.AsyncConfig = json.RawMessage(asyncConfig)
+		if a.GkAction != "" {
+			a.GkService = a.ServiceName
+		}
+		actions = append(actions, a)
+	}
+	if rows.Err() != nil {
+		slog.Error("list actions: rows", "error", rows.Err())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if actions == nil {
+		actions = []ServiceAction{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(actions) //nolint:errcheck
+}
+
 // handleListServices returns all active services with their endpoint manifests.
 func handleListServices(w http.ResponseWriter, r *http.Request) {
-	if !requireReadKey(w, r) {
+	if !requireReadAuth(w, r) {
 		return
 	}
 
@@ -185,41 +312,57 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Collect service IDs for batch sub-queries — avoids N+1 round-trips.
+	svcIndex := make(map[string]int, len(svcs))
+	svcIDs := make([]string, len(svcs))
 	result := make([]serviceWithEndpoints, len(svcs))
 	for i, s := range svcs {
 		result[i] = serviceWithEndpoints{Service: s, Roles: []ServiceRole{}, Endpoints: []ServiceEndpoint{}}
+		svcIDs[i] = s.ServiceID
+		svcIndex[s.ServiceID] = i
+	}
 
+	if len(svcIDs) > 0 {
 		roleRows, err := pool.Query(r.Context(),
 			`SELECT role_id, service_id, name, description, created_at
-			 FROM service_roles WHERE service_id = $1 ORDER BY name`, s.ServiceID)
-		if err == nil {
+			 FROM service_roles WHERE service_id = ANY($1) ORDER BY service_id, name`,
+			svcIDs)
+		if err != nil {
+			slog.Error("list services: query roles", "error", err)
+		} else {
 			for roleRows.Next() {
 				var sr ServiceRole
 				if err := roleRows.Scan(&sr.RoleID, &sr.ServiceID, &sr.Name, &sr.Description, &sr.CreatedAt); err != nil {
 					slog.Error("list services: scan role", "error", err)
 					continue
 				}
-				result[i].Roles = append(result[i].Roles, sr)
+				if i, ok := svcIndex[sr.ServiceID]; ok {
+					result[i].Roles = append(result[i].Roles, sr)
+				}
 			}
 			roleRows.Close()
 		}
 
 		epRows, err := pool.Query(r.Context(),
 			`SELECT endpoint_id, service_id, method, path, action, resource, public, active, created_at, updated_at
-			 FROM service_endpoints WHERE service_id = $1 AND active = true`, s.ServiceID)
+			 FROM service_endpoints WHERE service_id = ANY($1) AND active = true ORDER BY service_id`,
+			svcIDs)
 		if err != nil {
-			continue
-		}
-		for epRows.Next() {
-			var ep ServiceEndpoint
-			if err := epRows.Scan(&ep.EndpointID, &ep.ServiceID, &ep.Method, &ep.Path,
-				&ep.Action, &ep.Resource, &ep.Public, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
-				slog.Error("list services: scan endpoint", "error", err)
-				continue
+			slog.Error("list services: query endpoints", "error", err)
+		} else {
+			for epRows.Next() {
+				var ep ServiceEndpoint
+				if err := epRows.Scan(&ep.EndpointID, &ep.ServiceID, &ep.Method, &ep.Path,
+					&ep.Action, &ep.Resource, &ep.Public, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
+					slog.Error("list services: scan endpoint", "error", err)
+					continue
+				}
+				if i, ok := svcIndex[ep.ServiceID]; ok {
+					result[i].Endpoints = append(result[i].Endpoints, ep)
+				}
 			}
-			result[i].Endpoints = append(result[i].Endpoints, ep)
+			epRows.Close()
 		}
-		epRows.Close()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -228,7 +371,7 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateService registers a new service entry (admin key required).
 func handleCreateService(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminKey(w, r) {
+	if !requireAdminAuth(w, r) {
 		return
 	}
 	var req struct {
@@ -287,7 +430,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteService soft-deletes a service by ID (admin key required).
 func handleDeleteService(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminKey(w, r) {
+	if !requireAdminAuth(w, r) {
 		return
 	}
 	id := r.PathValue("id")
@@ -308,7 +451,7 @@ func handleDeleteService(w http.ResponseWriter, r *http.Request) {
 // handleUpdateServiceEndpoints replaces the full endpoint manifest for a service
 // (admin key required). Used to seed endpoint definitions without self-registration.
 func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminKey(w, r) {
+	if !requireAdminAuth(w, r) {
 		return
 	}
 	id := r.PathValue("id")
@@ -327,6 +470,18 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 			Resource string `json:"resource"`
 			Public   bool   `json:"public"`
 		} `json:"endpoints"`
+		Actions []struct {
+			Name           string          `json:"name"`
+			Method         string          `json:"method"`
+			Path           string          `json:"path"`
+			BodyTransforms json.RawMessage `json:"body_transforms,omitempty"`
+			Async          json.RawMessage `json:"async,omitempty"`
+		} `json:"actions"`
+		DefaultGrants []struct {
+			GrantOn   string   `json:"grant_on"`
+			Actions   []string `json:"actions"`
+			Resources []string `json:"resources"`
+		} `json:"default_grants"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -403,6 +558,47 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if _, err := tx.Exec(ctx, `DELETE FROM service_actions WHERE service_id = $1`, id); err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	for _, a := range req.Actions {
+		if a.Name == "" || a.Method == "" || a.Path == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO service_actions (action_id, service_id, name, method, path, body_transforms, async_config)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			uuid.New().String(), id, a.Name, a.Method, a.Path,
+			jsonbOrNil(a.BodyTransforms), jsonbOrNil(a.Async)); err != nil {
+			slog.Error("update endpoints: insert action", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if len(req.DefaultGrants) > 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM service_default_grants WHERE service_id = $1`, id); err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		for _, g := range req.DefaultGrants {
+			if g.GrantOn == "" || len(g.Actions) == 0 || len(g.Resources) == 0 {
+				continue
+			}
+			actionsJSON, _ := json.Marshal(g.Actions)
+			resourcesJSON, _ := json.Marshal(g.Resources)
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO service_default_grants (grant_id, service_id, grant_on, actions, resources)
+				 VALUES ($1, $2, $3, $4, $5)`,
+				uuid.New().String(), id, g.GrantOn, actionsJSON, resourcesJSON); err != nil {
+				slog.Error("update endpoints: insert default grant", "error", err)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		slog.Error("update endpoints: commit", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -411,3 +607,156 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleListDefaultGrants returns all active default grants across all services,
+// enriched with the service name so callers don't need a second lookup.
+// Requires a valid read service key.
+func handleListDefaultGrants(w http.ResponseWriter, r *http.Request) {
+	if !requireReadAuth(w, r) {
+		return
+	}
+	rows, err := pool.Query(r.Context(),
+		`SELECT g.grant_id, g.service_id, s.name, g.grant_on, g.actions, g.resources, g.created_at, g.updated_at
+		 FROM service_default_grants g
+		 JOIN services s ON s.service_id = g.service_id AND s.active = true
+		 ORDER BY s.name, g.grant_on`,
+	)
+	if err != nil {
+		slog.Error("list default grants: db", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var grants []ServiceDefaultGrant
+	for rows.Next() {
+		var g ServiceDefaultGrant
+		var actionsRaw, resourcesRaw []byte
+		if err := rows.Scan(&g.GrantID, &g.ServiceID, &g.ServiceName, &g.GrantOn,
+			&actionsRaw, &resourcesRaw, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			slog.Error("list default grants: scan", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		json.Unmarshal(actionsRaw, &g.Actions)     //nolint:errcheck
+		json.Unmarshal(resourcesRaw, &g.Resources) //nolint:errcheck
+		grants = append(grants, g)
+	}
+	if grants == nil {
+		grants = []ServiceDefaultGrant{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(grants) //nolint:errcheck
+}
+
+// ── System health ─────────────────────────────────────────────────────────────
+
+var registryHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
+var (
+	healthMu    sync.RWMutex
+	healthCache map[string]serviceHealth
+)
+
+type serviceHealth struct {
+	Status    string    `json:"status"`
+	Error     string    `json:"error,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
+}
+
+// startHealthCollector queries active services from the DB every 30 seconds,
+// calls /healthz on each concurrently, and caches the results for handleSystemHealth.
+func startHealthCollector(ctx context.Context) {
+	collect := func() {
+		rows, err := pool.Query(ctx, `SELECT name, url FROM services WHERE active = true`)
+		if err != nil {
+			slog.Warn("health collector: db query failed", "error", err)
+			return
+		}
+		type svc struct{ name, url string }
+		var svcs []svc
+		for rows.Next() {
+			var s svc
+			if err := rows.Scan(&s.name, &s.url); err == nil {
+				svcs = append(svcs, s)
+			}
+		}
+		rows.Close()
+
+		results := make(map[string]serviceHealth, len(svcs))
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for _, s := range svcs {
+			wg.Add(1)
+			go func(name, svcURL string) {
+				defer wg.Done()
+				hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				now := time.Now().UTC()
+				req, err := http.NewRequestWithContext(hctx, http.MethodGet, svcURL+"/healthz", nil)
+				if err != nil {
+					mu.Lock()
+					results[name] = serviceHealth{Status: "unhealthy", Error: err.Error(), CheckedAt: now}
+					mu.Unlock()
+					return
+				}
+				resp, err := registryHTTPClient.Do(req)
+				if err != nil {
+					mu.Lock()
+					results[name] = serviceHealth{Status: "unhealthy", Error: err.Error(), CheckedAt: now}
+					mu.Unlock()
+					return
+				}
+				resp.Body.Close()
+				mu.Lock()
+				if resp.StatusCode == http.StatusOK {
+					results[name] = serviceHealth{Status: "healthy", CheckedAt: now}
+				} else {
+					results[name] = serviceHealth{Status: "unhealthy", Error: fmt.Sprintf("status %d", resp.StatusCode), CheckedAt: now}
+				}
+				mu.Unlock()
+			}(s.name, s.url)
+		}
+		wg.Wait()
+
+		healthMu.Lock()
+		healthCache = results
+		healthMu.Unlock()
+	}
+
+	go func() {
+		collect()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				collect()
+			}
+		}
+	}()
+}
+
+func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
+	if !requireReadAuth(w, r) {
+		return
+	}
+	healthMu.RLock()
+	cache := healthCache
+	healthMu.RUnlock()
+
+	overall := "healthy"
+	for _, h := range cache {
+		if h.Status != "healthy" {
+			overall = "degraded"
+			break
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(struct { //nolint:errcheck
+		Status   string                   `json:"status"`
+		Services map[string]serviceHealth `json:"services"`
+	}{Status: overall, Services: cache})
+}

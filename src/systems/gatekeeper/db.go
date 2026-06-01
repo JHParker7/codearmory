@@ -887,7 +887,7 @@ func (req ServicePermissionRequest) List(ctx context.Context, limit, offset int)
 	defer span.End()
 	var rows []ServicePermissionRequest
 	req.Active = true
-	q := connectRead().WithContext(ctx).Where(req)
+	q := connectRead().WithContext(ctx).Where(req).Order("created_at DESC")
 	if limit > 0 {
 		q = q.Limit(limit).Offset(offset)
 	}

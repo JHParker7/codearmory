@@ -23,7 +23,7 @@ class TestAuth:
         assert resp.status_code == 401
 
     def test_get_wrong_key_returns_401(self, registry_url):
-        headers = {"Authorization": "Bearer definitely-wrong-key"}
+        headers = {"X-Service-Key": "conductor:definitely-wrong-key"}
         resp = requests.get(f"{registry_url}/services", headers=headers)
         assert resp.status_code == 401
 
@@ -32,7 +32,7 @@ class TestAuth:
         assert resp.status_code == 401
 
     def test_post_wrong_key_returns_401(self, registry_url):
-        headers = {"Authorization": "Bearer definitely-wrong-key"}
+        headers = {"X-Service-Key": "registry-admin:definitely-wrong-key"}
         resp = requests.post(
             f"{registry_url}/services",
             json={"name": "x", "url": "http://x"},
@@ -40,21 +40,21 @@ class TestAuth:
         )
         assert resp.status_code == 401
 
-    def test_post_read_key_returns_401(self, registry_url, read_headers):
+    def test_post_read_key_returns_403(self, registry_url, read_headers):
         # Read key is not sufficient for write operations.
         resp = requests.post(
             f"{registry_url}/services",
             json={"name": "x", "url": "http://x"},
             headers=read_headers,
         )
-        assert resp.status_code == 401
+        assert resp.status_code == 403
 
     def test_delete_no_key_returns_401(self, registry_url):
         resp = requests.delete(f"{registry_url}/services/some-nonexistent-id")
         assert resp.status_code == 401
 
     def test_delete_wrong_key_returns_401(self, registry_url):
-        headers = {"Authorization": "Bearer definitely-wrong-key"}
+        headers = {"X-Service-Key": "registry-admin:definitely-wrong-key"}
         resp = requests.delete(
             f"{registry_url}/services/some-nonexistent-id",
             headers=headers,

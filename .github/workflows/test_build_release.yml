@@ -84,8 +84,43 @@ jobs:
       - name: Run registry unit tests
         run: cd src/systems/registry; go test .
 
-  integration-tests:
+  workflows-unit-test:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run workflows unit tests
+        run: cd src/systems/workflows; go test .
+
+  hooks-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run hooks unit tests
+        run: cd src/systems/hooks; go test .
+
+  tickets-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run tickets unit tests
+        run: cd src/systems/tickets; go test .
+
+  release:
     needs:
       - gatekeeper-unit-test
       - blueprints-unit-test
@@ -93,70 +128,9 @@ jobs:
       - cli-unit-test
       - forge-unit-test
       - registry-unit-test
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: "1.25"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install CLI test dependencies
-        run: pip install -r tests/cli/requirements.txt
-
-      - name: Build CLI binary
-        run: go build -o "${{ runner.temp }}/armory" .
-        working-directory: src/cli
-
-      - name: Export docker socket GID for forge
-        run: echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" >> $GITHUB_ENV
-
-      - name: Deploy compose stack
-        run: docker compose --profile test build && docker compose up -d --build --wait
-        working-directory: infra/local
-
-      - name: Wait for conductor
-        run: timeout 120 bash -c "until curl -s -o /dev/null --max-time 2 http://localhost:8082/; do sleep 1; done"
-
-      - name: Run gatekeeper integration tests
-        run: docker compose run --no-deps --rm gatekeeper-integration-tests
-        working-directory: infra/local
-
-      - name: Run blueprints integration tests
-        run: docker compose run --no-deps --rm blueprints-integration-tests
-        working-directory: infra/local
-
-      - name: Run conductor integration tests
-        run: docker compose run --no-deps --rm conductor-integration-tests
-        working-directory: infra/local
-
-      - name: Run CLI integration tests
-        env:
-          CONDUCTOR_URL: http://localhost:8082
-          ARMORY_BIN: ${{ runner.temp }}/armory
-        run: pytest tests/cli -v
-
-      - name: Run forge integration tests
-        run: docker compose run --no-deps --rm forge-integration-tests
-        working-directory: infra/local
-
-      - name: Run registry integration tests
-        run: docker compose run --no-deps --rm registry-integration-tests
-        working-directory: infra/local
-
-      - name: Show compose logs on failure
-        if: failure()
-        run: docker compose logs
-        working-directory: infra/local
-
-  release:
-    needs: integration-tests
+      - workflows-unit-test
+      - hooks-unit-test
+      - tickets-unit-test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -287,6 +261,60 @@ jobs:
           tags: |
             ghcr.io/code-armory-app/registry-tests:alpha-${{ needs.release.outputs.new_release_version }}
             ghcr.io/code-armory-app/registry-tests:alpha-latest
+      - name: Build and push workflows
+        uses: docker/build-push-action@v6
+        with:
+          context: src/systems/workflows
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/workflows:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/workflows:alpha-latest
+      - name: Build and push tickets
+        uses: docker/build-push-action@v6
+        with:
+          context: src/systems/tickets
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/tickets:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/tickets:alpha-latest
+      - name: Build and push hooks
+        uses: docker/build-push-action@v6
+        with:
+          context: src/systems/hooks
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/hooks:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/hooks:alpha-latest
+      - name: Build and push workflows integration tests
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/workflows
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/workflows-tests:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/workflows-tests:alpha-latest
+      - name: Build and push tickets integration tests
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/tickets
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/tickets-tests:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/tickets-tests:alpha-latest
+      - name: Build and push hooks integration tests
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/hooks
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/code-armory-app/hooks-tests:alpha-${{ needs.release.outputs.new_release_version }}
+            ghcr.io/code-armory-app/hooks-tests:alpha-latest
 
   build-cli:
     needs: release

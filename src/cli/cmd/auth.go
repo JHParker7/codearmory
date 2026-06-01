@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zalando/go-keyring"
+	"golang.org/x/term"
 )
 
 var authCmd = &cobra.Command{
@@ -19,8 +20,13 @@ var loginCmd = &cobra.Command{
 	Short: "Authenticate and save token to config",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		email, _ := cmd.Flags().GetString("email")
-		password, _ := cmd.Flags().GetString("password")
-		body, _ := json.Marshal(map[string]string{"email": email, "password": password})
+		fmt.Fprint(os.Stderr, "Password: ")
+		raw, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return fmt.Errorf("reading password: %w", err)
+		}
+		body, _ := json.Marshal(map[string]string{"email": email, "password": string(raw)})
 		data, err := doRequest("POST", "/login", body)
 		if err != nil {
 			return err
@@ -46,11 +52,16 @@ var signupCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		email, _ := cmd.Flags().GetString("email")
 		username, _ := cmd.Flags().GetString("username")
-		password, _ := cmd.Flags().GetString("password")
+		fmt.Fprint(os.Stderr, "Password: ")
+		raw, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return fmt.Errorf("reading password: %w", err)
+		}
 		body, _ := json.Marshal(map[string]string{
 			"email":    email,
 			"username": username,
-			"password": password,
+			"password": string(raw),
 		})
 		return apiCall("POST", "/signup", body)
 	},
@@ -93,16 +104,12 @@ var authStatusCmd = &cobra.Command{
 
 func init() {
 	loginCmd.Flags().String("email", "", "email address")
-	loginCmd.Flags().String("password", "", "password")
-	loginCmd.MarkFlagRequired("email")   //nolint:errcheck
-	loginCmd.MarkFlagRequired("password") //nolint:errcheck
+	loginCmd.MarkFlagRequired("email") //nolint:errcheck
 
 	signupCmd.Flags().String("email", "", "email address")
 	signupCmd.Flags().String("username", "", "username (alphanumeric, hyphens, underscores; 1–64 chars)")
-	signupCmd.Flags().String("password", "", "password (min 8 chars)")
 	signupCmd.MarkFlagRequired("email")    //nolint:errcheck
 	signupCmd.MarkFlagRequired("username") //nolint:errcheck
-	signupCmd.MarkFlagRequired("password") //nolint:errcheck
 
 	authCmd.AddCommand(loginCmd, signupCmd, logoutCmd, authStatusCmd)
 	rootCmd.AddCommand(authCmd)

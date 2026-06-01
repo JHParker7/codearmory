@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"crypto/tls"
+	"crypto/x509"
 	"os"
 	"os/signal"
 	"regexp"
@@ -25,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -37,9 +40,11 @@ import (
 var (
 	gatekeeperURL       = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8084")
-	registryKey         = os.Getenv("REGISTRY_READ_KEY")
 	conductorForwardKey = os.Getenv("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
 	httpClient          = &http.Client{Timeout: 10 * time.Second}
+	// getRegistryKey returns the current rotating service key used to authenticate
+	// conductor's requests to the registry. Set in main() via StartKeyRotation.
+	getRegistryKey func() string
 )
 
 const maxRequestBodyBytes = 64 * 1024
@@ -306,8 +311,6 @@ var (
 	blockedIPs  = map[string]time.Time{}
 )
 
-func suspectKey(ip, userID string) string { return ip + "::" + userID }
-
 // sourceIP returns the immediate peer IP from r.RemoteAddr, stripping the port.
 func sourceIP(r *http.Request) string {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -317,56 +320,50 @@ func sourceIP(r *http.Request) string {
 	return ip
 }
 
-// isBlocked reports whether the (ip, userID) pair is on the block list and has
-// not yet expired.
-func isBlocked(ip, userID string) bool {
-	key := suspectKey(ip, userID)
+// isBlocked reports whether the IP is on the block list and has not yet expired.
+func isBlocked(ip string) bool {
 	suspectMu.Lock()
 	defer suspectMu.Unlock()
-	until, ok := blockedIPs[key]
+	until, ok := blockedIPs[ip]
 	if !ok {
 		return false
 	}
 	if time.Now().After(until) {
-		delete(blockedIPs, key)
-		delete(suspectHits, key)
+		delete(blockedIPs, ip)
+		delete(suspectHits, ip)
 		return false
 	}
 	return true
 }
 
-// resetSuspect clears the failure counter for (ip, userID) on a successful
-// authentication, so legitimate users who recover from a mistake are not penalised.
-func resetSuspect(ip, userID string) {
+// resetSuspect clears the failure counter for the IP on successful authentication.
+func resetSuspect(ip string) {
 	suspectMu.Lock()
 	defer suspectMu.Unlock()
-	delete(suspectHits, suspectKey(ip, userID))
+	delete(suspectHits, ip)
 }
 
-// recordSuspect logs an auth failure for a real credential and blocks the
-// (ip, userID) pair after suspectThreshold failures. Only called when a
-// well-formed JWT was presented so missing/malformed tokens don't count.
+// recordSuspect logs an auth failure and blocks the IP after suspectThreshold
+// failures. Keyed on IP alone so a forged JWT sub claim cannot target a specific
+// victim's block state.
 func recordSuspect(ip, userID, method, path string) {
-	key := suspectKey(ip, userID)
 	suspectMu.Lock()
 	defer suspectMu.Unlock()
-	if _, already := blockedIPs[key]; already {
+	if _, already := blockedIPs[ip]; already {
 		return
 	}
-	suspectHits[key]++
-	n := suspectHits[key]
+	suspectHits[ip]++
+	n := suspectHits[ip]
 	slog.Warn("user passed conductor auth but failed service validation",
 		"source_ip", ip, "user_id", userID,
 		"method", method, "path", path, "failure_count", n)
 	if n >= suspectThreshold {
 		until := time.Now().Add(blockDuration)
-		blockedIPs[key] = until
-		slog.Warn("(IP, userID) pair added to block list",
-			"source_ip", ip, "user_id", userID, "blocked_until", until)
+		blockedIPs[ip] = until
+		slog.Warn("IP added to block list",
+			"source_ip", ip, "blocked_until", until)
 		meterBlocked.Add(context.Background(), 1,
-			metric.WithAttributes(
-				attribute.String("source_ip", ip),
-				attribute.String("user_id", userID)))
+			metric.WithAttributes(attribute.String("source_ip", ip)))
 	}
 }
 
@@ -379,7 +376,7 @@ func refreshServiceCache(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+registryKey)
+	req.Header.Set("X-Service-Key", "conductor:"+getRegistryKey())
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -648,7 +645,7 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		default:
-			resetSuspect(sourceIP(r), userID)
+			resetSuspect(sourceIP(r))
 		}
 	}
 
@@ -701,18 +698,10 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 //     Returns 404 if no match is found.
 func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	ip := sourceIP(r)
-	// Decode (but don't verify) the JWT to enable the per-(IP, userID) block
-	// check before paying routing / auth cost. Missing or malformed tokens skip
-	// the check — they'll be rejected by checkUserAuth anyway.
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		if uid, ok := getUserID(strings.TrimPrefix(auth, "Bearer ")); ok {
-			if isBlocked(ip, uid) {
-				slog.Warn("request rejected: (IP, userID) pair is blocked",
-					"source_ip", ip, "user_id", uid, "path", r.URL.Path)
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-		}
+	if isBlocked(ip) {
+		slog.Warn("request rejected: IP is blocked", "source_ip", ip, "path", r.URL.Path)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
 	}
 
 	path := r.URL.Path
@@ -749,9 +738,22 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+func secret(name string) string {
+	if path := os.Getenv(name + "_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Error("cannot read secret file", "var", name+"_FILE", "path", path, "error", err)
+			os.Exit(1)
+		}
+		return strings.TrimRight(string(data), "\n")
+	}
+	return os.Getenv(name)
+}
+
 func main() {
-	if registryKey == "" {
-		slog.Error("REGISTRY_READ_KEY is not set; refusing to start")
+	initialRegistryKey := secret("REGISTRY_SERVICE_KEY")
+	if initialRegistryKey == "" {
+		slog.Error("REGISTRY_SERVICE_KEY is not set; refusing to start")
 		os.Exit(1)
 	}
 
@@ -773,6 +775,10 @@ func main() {
 		defer shutdown(context.Background())
 	}
 	initMetrics()
+
+	// Rotate conductor's registry service key every 25 minutes so the credential
+	// is always short-lived. The key is used in X-Service-Key on every GET /services call.
+	getRegistryKey = registry.StartKeyRotation(ctx, registryURL, "conductor", initialRegistryKey, 25*time.Minute)
 
 	// Warm the service cache, retrying until the registry is reachable.
 	for {
@@ -806,9 +812,10 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.Handle("/{path...}", http.HandlerFunc(handleServiceProxy))
 
-	port := envOrDefault("PORT", "8082")
+	port := envOrDefault("PORT", "8080")
 
 	wrappedMux := otelhttp.NewHandler(newLogger(mux), "conductor",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
@@ -824,10 +831,37 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	if certFile != "" && keyFile != "" {
+		tlsCfg := &tls.Config{}
+		switch os.Getenv("TLS_CLIENT_AUTH") {
+		case "require":
+			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+			if caFile == "" {
+				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+				os.Exit(1)
+			}
+			caCert, err := os.ReadFile(caFile)
+			if err != nil {
+				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
+				os.Exit(1)
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caCert) {
+				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
+				os.Exit(1)
+			}
+			tlsCfg.ClientCAs = caPool
+			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+		case "request":
+			tlsCfg.ClientAuth = tls.RequestClientCert
+		}
+		srv.TLSConfig = tlsCfg
+	}
+
 	go func() {
 		var err error
 		if certFile != "" && keyFile != "" {
-			slog.Info("listening with TLS", "port", port)
+			slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
 			err = srv.ListenAndServeTLS(certFile, keyFile)
 		} else {
 			slog.Info("listening", "port", port)

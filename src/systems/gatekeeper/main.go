@@ -178,16 +178,37 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
+	initSecretsEncryption()
+
 	db := connect()
-	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{})
+	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{})
 	applyForeignKeys(db)
 	seedServiceAccounts(db)
+	initOIDC()
+
+	if registryURL := os.Getenv("REGISTRY_URL"); registryURL != "" {
+		serviceKey := "gatekeeper:" + secret("REGISTRY_SERVICE_KEY")
+		startDefaultGrantPoller(ctx, registryURL, serviceKey)
+	} else {
+		slog.Warn("REGISTRY_URL not set — default grants will not be loaded from registry; signup permissions will be minimal")
+	}
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, envInt("SIGNUP_RATE_LIMIT", 10), envDuration("SIGNUP_RATE_WINDOW", 10*time.Minute), handleSignup))
 	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleLogin))
+
+	// OIDC provider — used by Forgejo/Gitea and any other OAuth2 client.
+	mux.HandleFunc("GET /.well-known/openid-configuration", handleOIDCDiscovery)
+	mux.HandleFunc("GET /oauth/jwks", handleJWKS)
+	mux.HandleFunc("GET /oauth/authorize", handleAuthorize)
+	mux.HandleFunc("POST /oauth/authorize", handleAuthorizeSubmit)
+	mux.HandleFunc("POST /oauth/token", handleToken)
+	mux.Handle("GET /oauth/userinfo", authMiddleware(http.HandlerFunc(handleUserinfo)))
+	mux.HandleFunc("POST /internal/oauth/clients", handleCreateOAuthClient)
+	mux.HandleFunc("GET /internal/oauth/clients", handleListOAuthClients)
+	mux.HandleFunc("DELETE /internal/oauth/clients/{id}", handleDeleteOAuthClient)
 	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
 
 	mw := func(h http.HandlerFunc) http.Handler { return authMiddleware(http.HandlerFunc(h)) }
@@ -232,8 +253,28 @@ func main() {
 
 	mux.Handle("GET /audit-logs", mw(handleListAuditLogs))
 
+	// Secrets: user-authenticated CRUD (values write-only) + internal resolve for the workflow worker.
+	mux.Handle("POST /secrets", mw(handleCreateSecret))
+	mux.Handle("GET /secrets", mw(handleListSecrets))
+	mux.Handle("PUT /secrets/{id}", mw(handleUpdateSecret))
+	mux.Handle("DELETE /secrets/{id}", mw(handleDeleteSecret))
+	mux.Handle("GET /orgs/{id}/secret-provider", mw(handleGetSecretProvider))
+	mux.Handle("PUT /orgs/{id}/secret-provider", mw(handleSetSecretProvider))
+	mux.Handle("DELETE /orgs/{id}/secret-provider", mw(handleDeleteSecretProvider))
+	mux.HandleFunc("POST /internal/secrets/resolve", handleResolveSecrets)
+
 	// Key rotation: service-key authenticated; generates a new key server-side and returns it.
 	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)
+
+	// Run tokens: short-lived session JWTs issued to the workflows service so that
+	// workflow runs never store the triggering user's own session token in the DB.
+	mux.HandleFunc("POST /internal/run-tokens", handleCreateRunToken)
+	mux.HandleFunc("DELETE /internal/run-tokens/{session_id}", handleRevokeRunToken)
+
+	// Workflow service roles: minimal-permission roles provisioned at workflow
+	// creation time; each permission is verified against the owner's access first.
+	mux.HandleFunc("POST /internal/workflow-roles", handleCreateWorkflowRole)
+	mux.HandleFunc("DELETE /internal/workflow-roles/{role_id}", handleDeleteWorkflowRole)
 
 	// Service permission requests: POST is service-key authenticated; the rest require user JWT.
 	mux.HandleFunc("POST /service-permission-requests", handleCreateServicePermissionRequest)
@@ -244,7 +285,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "8081"
 	}
 
 	logLevel := slog.LevelInfo
@@ -265,6 +306,7 @@ func main() {
 	initCache()
 	initPermittedServices()
 	initTrustedProxies()
+	initAuditPermissionChecks()
 
 	wrappedMux := otelhttp.NewHandler(NewLogger(limitBody(mux)), "gatekeeper",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),

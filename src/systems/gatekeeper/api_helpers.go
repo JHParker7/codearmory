@@ -36,6 +36,7 @@ import (
 type contextKey string
 
 const userIDKey contextKey = "user_id"
+const scopedRoleKey contextKey = "scoped_role_id"
 
 // authClaims is the JWT claims type used for all session tokens. Subject holds
 // the user ID; ID (jti) holds the session ID used to look up the stored public key.
@@ -194,8 +195,58 @@ func authMiddleware(next http.Handler) http.Handler {
 		span.SetStatus(codes.Ok, "")
 		meterAuthMiddleware.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "accepted")))
 		slog.Debug("auth accepted", "user_id", claims.Subject, "session_id", session.SessionID, "method", r.Method, "path", r.URL.Path)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, userIDKey, claims.Subject)))
+		authCtx := context.WithValue(ctx, userIDKey, claims.Subject)
+		if session.ScopedRoleID != nil && *session.ScopedRoleID != "" {
+			authCtx = context.WithValue(authCtx, scopedRoleKey, *session.ScopedRoleID)
+		}
+		next.ServeHTTP(w, r.WithContext(authCtx))
 	})
+}
+
+// matchPermission reports whether perm grants (service, action, resource).
+// Resource matching supports exact strings, wildcard "*", prefix "foo/*", and
+// per-segment wildcards like "foo/*/bar".
+func matchPermission(perm Permissions, service, action, resource string) bool {
+	if perm.Service != service {
+		return false
+	}
+	allowedAction := slices.Contains(perm.Actions, "*") || slices.Contains(perm.Actions, action)
+	if !allowedAction {
+		for _, a := range perm.Actions {
+			if len(a) > 0 && a[len(a)-1] == '*' && strings.HasPrefix(action, a[:len(a)-1]) {
+				allowedAction = true
+				break
+			}
+		}
+	}
+	if !allowedAction {
+		return false
+	}
+	if slices.Contains(perm.Resources, resource) || slices.Contains(perm.Resources, "*") {
+		return true
+	}
+	for _, r := range perm.Resources {
+		if strings.HasSuffix(r, "/*") {
+			if strings.HasPrefix(resource, r[:len(r)-2]+"/") {
+				return true
+			}
+		}
+		ra := strings.Split(resource, "/")
+		rb := strings.Split(r, "/")
+		if len(ra) == len(rb) {
+			match := true
+			for i := range ra {
+				if ra[i] != rb[i] && rb[i] != "*" {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkPermissions resolves the caller's effective permissions by walking both
@@ -206,6 +257,7 @@ func authMiddleware(next http.Handler) http.Handler {
 func checkPermissions(ctx context.Context, userID string, service string, action string, resource string) (bool, error) {
 	permissionCheck := PermissionsCheck{
 		PermissionsCheckID: uuid.New().String(),
+		Service:            service,
 		Action:             action,
 		Resource:           resource,
 		UserID:             userID,
@@ -227,16 +279,51 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 		span.SetStatus(codes.Error, err.Error())
 		dbLog(err, "checkPermissions: failed to load user", "user_id", userID, "error", err)
 		permissionCheck.Granted = false
-		perErr := permissionCheck.Add(ctx)
-		if perErr != nil {
-			slog.Debug("permissions check row failed to save", "error", perErr.Error())
-		}
-
+		savePermissionsCheck(ctx, permissionCheck)
 		return false, err
 	}
 	user := row.(User)
 	permissionCheck.TeamID = user.TeamID
 	permissionCheck.OrgID = user.OrgID
+
+	// When the session carries a scoped role (workflow run token), evaluate only
+	// the permissions in that role — the user's own role and team are bypassed.
+	if scopedRoleID, _ := ctx.Value(scopedRoleKey).(string); scopedRoleID != "" {
+		span.AddEvent("permission.scoped", trace.WithAttributes(attribute.String("scoped_role.id", scopedRoleID)))
+		scopedRow, err := (Role{RoleID: scopedRoleID}).Get(ctx)
+		if err != nil {
+			span.SetStatus(codes.Ok, "scoped role not found — deny")
+			permissionCheck.Granted = false
+			savePermissionsCheck(ctx, permissionCheck)
+			return false, nil
+		}
+		scopedRole := scopedRow.(Role)
+		var scopedPerms []Permissions
+		if len(scopedRole.PermissionsIDs) > 0 {
+			if err := connectRead().WithContext(ctx).
+				Where("permissions_id IN ? AND active = true", scopedRole.PermissionsIDs).
+				Find(&scopedPerms).Error; err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Ok, "scoped perms load failed — deny")
+				permissionCheck.Granted = false
+				savePermissionsCheck(ctx, permissionCheck)
+				return false, nil
+			}
+		}
+		for _, perm := range scopedPerms {
+			if !matchPermission(perm, service, action, resource) {
+				continue
+			}
+			span.SetStatus(codes.Ok, "")
+			permissionCheck.Granted = true
+			savePermissionsCheck(ctx, permissionCheck)
+			return true, nil
+		}
+		span.SetStatus(codes.Ok, "scoped role denied")
+		permissionCheck.Granted = false
+		savePermissionsCheck(ctx, permissionCheck)
+		return false, nil
+	}
 	span.AddEvent("user.loaded", trace.WithAttributes(
 		attribute.Bool("user.has_role", user.RoleID != nil),
 		attribute.Bool("user.has_team", user.TeamID != nil),
@@ -253,10 +340,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 			span.SetStatus(codes.Error, err.Error())
 			dbLog(err, "checkPermissions: failed to load user role", "user_id", userID, "role_id", *user.RoleID, "error", err)
 			permissionCheck.Granted = false
-			perErr := permissionCheck.Add(ctx)
-			if perErr != nil {
-				slog.Debug("permissions check row failed to save", "error", perErr.Error())
-			}
+			savePermissionsCheck(ctx, permissionCheck)
 			return false, err
 		}
 		role := roleRow.(Role)
@@ -272,10 +356,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 				span.SetStatus(codes.Error, err.Error())
 				dbLog(err, "checkPermissions: failed to load permission", "user_id", userID, "permissions_id", pid, "error", err)
 				permissionCheck.Granted = false
-				perErr := permissionCheck.Add(ctx)
-				if perErr != nil {
-					slog.Debug("permissions check row failed to save", "error", perErr.Error())
-				}
+				savePermissionsCheck(ctx, permissionCheck)
 				return false, err
 			}
 			permissions = append(permissions, pRow.(Permissions))
@@ -314,10 +395,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 				span.SetStatus(codes.Error, err.Error())
 				dbLog(err, "checkPermissions: failed to load team role", "user_id", userID, "team_id", team.TeamID, "role_id", *team.RoleID, "error", err)
 				permissionCheck.Granted = false
-				perErr := permissionCheck.Add(ctx)
-				if perErr != nil {
-					slog.Debug("permissions check row failed to save", "error", perErr.Error())
-				}
+				savePermissionsCheck(ctx, permissionCheck)
 				return false, err
 			}
 			role := row.(Role)
@@ -333,10 +411,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 					span.SetStatus(codes.Error, err.Error())
 					dbLog(err, "checkPermissions: failed to load team permission", "user_id", userID, "team_id", team.TeamID, "permissions_id", pid, "error", err)
 					permissionCheck.Granted = false
-					perErr := permissionCheck.Add(ctx)
-					if perErr != nil {
-						slog.Debug("permissions check row failed to save", "error", perErr.Error())
-					}
+					savePermissionsCheck(ctx, permissionCheck)
 					return false, err
 				}
 				permissions = append(permissions, pRow.(Permissions))
@@ -353,54 +428,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 	))
 
 	for _, permission := range permissions {
-		resourceMatch := false
-
-		// Three matching strategies, tried in order:
-		//  1. Exact match or global wildcard ("*")
-		//  2. Trailing-star prefix: "blueprints/states/*" matches any path under that prefix.
-		//     The "*" MUST be preceded by "/" — patterns like "blueprints/states*" are not
-		//     treated as wildcards to prevent overmatch against adjacent path names.
-		//  3. Per-segment wildcard: "blueprints/states/*/locks" matches a specific depth with a wildcard segment
-		if slices.Contains(permission.Resources, resource) || slices.Contains(permission.Resources, "*") {
-			resourceMatch = true
-		} else {
-			for _, allowedResource := range permission.Resources {
-				if strings.HasSuffix(allowedResource, "/*") {
-					prefix := allowedResource[:len(allowedResource)-2] // strip "/*"
-					if strings.HasPrefix(resource, prefix+"/") {
-						resourceMatch = true
-					}
-				}
-				split_resource_a := strings.Split(resource, "/")
-				split_resource_b := strings.Split(allowedResource, "/")
-				if len(split_resource_a) == len(split_resource_b) {
-					nonMatch := false
-					for i := range split_resource_a {
-						if split_resource_a[i] != split_resource_b[i] && split_resource_b[i] != "*" {
-							nonMatch = true
-						}
-					}
-					if !nonMatch {
-						resourceMatch = true
-					}
-				}
-			}
-		}
-
-		allowedAction := false
-		if slices.Contains(permission.Actions, "*") || slices.Contains(permission.Actions, action) {
-			allowedAction = true
-		}
-		for _, per_action := range permission.Actions {
-			if len(per_action) > 0 && per_action[len(per_action)-1] == '*' {
-				prefix := per_action[:len(per_action)-1]
-				if strings.HasPrefix(action, prefix) {
-					allowedAction = true
-				}
-			}
-		}
-
-		if permission.Service == service && allowedAction && resourceMatch {
+		if matchPermission(permission, service, action, resource) {
 			span.SetAttributes(attribute.Bool("permission.granted", true))
 			span.AddEvent("permission.granted", trace.WithAttributes(
 				attribute.String("matched.permissions_id", permission.PermissionsID),
@@ -409,10 +437,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 			span.SetStatus(codes.Ok, "")
 			slog.Debug("permission granted", "user_id", userID, "service", service, "action", action, "resource", resource, "matched_permission_id", permission.PermissionsID)
 			permissionCheck.Granted = true
-			perErr := permissionCheck.Add(ctx)
-			if perErr != nil {
-				slog.Debug("permissions check row failed to save", "error", perErr.Error())
-			}
+			savePermissionsCheck(ctx, permissionCheck)
 			return true, nil
 		}
 	}
@@ -424,10 +449,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 	span.SetStatus(codes.Ok, "")
 	slog.Debug("permission denied", "user_id", userID, "service", service, "action", action, "resource", resource, "permissions_checked", len(permissions))
 	permissionCheck.Granted = false
-	perErr := permissionCheck.Add(ctx)
-	if perErr != nil {
-		slog.Debug("permissions check row failed to save", "error", perErr.Error())
-	}
+	savePermissionsCheck(ctx, permissionCheck)
 	return false, nil
 }
 
@@ -476,7 +498,12 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	span.SetStatus(codes.Ok, "")
 	meterPermissionChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", isAllowed)))
 	slog.Info("check_permissions result", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
-	json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": userID})
+
+	var orgID *string
+	if userRow, err := (User{UserID: userID}).Get(r.Context()); err == nil {
+		orgID = userRow.(User).OrgID
+	}
+	json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": userID, "org_id": orgID})
 }
 
 // parseECPublicKey decodes a PEM-encoded PKIX public key and asserts it is ECDSA.
@@ -562,9 +589,14 @@ func validatePermissionIDs(ctx context.Context, ids []string, callerOrgID *strin
 			return fmt.Errorf("permission %s not found", id)
 		}
 		p := row.(Permissions)
+		// Nil-OrgID permissions are global/system-scoped. An org-scoped caller
+		// (callerOrgID != nil) must not be able to attach them to their own role,
+		// as that would grant system-wide access to an org member.
+		if p.OrgID == nil && callerOrgID != nil {
+			return fmt.Errorf("permission %s is a system permission and cannot be attached to an org-scoped role", id)
+		}
 		// Fail-closed: org-scoped permissions are rejected when the caller has no org
-		// or belongs to a different org. Nil p.OrgID (personal/system permissions)
-		// are always allowed.
+		// or belongs to a different org.
 		if p.OrgID != nil && (callerOrgID == nil || *p.OrgID != *callerOrgID) {
 			return fmt.Errorf("permission %s belongs to a different org", id)
 		}
@@ -586,6 +618,23 @@ func writeAudit(ctx context.Context, actorID, actorType, action, resourceID, det
 	}
 	if err := entry.Add(ctx); err != nil {
 		slog.Warn("audit log write failed", "action", action, "resource_id", resourceID, "error", err)
+	}
+}
+
+// auditPermissionChecks controls whether every call to checkPermissions
+// persists a PermissionsCheck row. Enabled by setting AUDIT_PERMISSION_CHECKS=true.
+var auditPermissionChecks bool
+
+func initAuditPermissionChecks() {
+	auditPermissionChecks = os.Getenv("AUDIT_PERMISSION_CHECKS") == "true"
+}
+
+func savePermissionsCheck(ctx context.Context, pc PermissionsCheck) {
+	if !auditPermissionChecks {
+		return
+	}
+	if err := pc.Add(ctx); err != nil {
+		slog.Debug("permissions check row failed to save", "error", err.Error())
 	}
 }
 

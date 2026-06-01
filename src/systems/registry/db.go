@@ -46,6 +46,39 @@ CREATE TABLE IF NOT EXISTS service_endpoints (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS service_actions (
+    action_id       TEXT        PRIMARY KEY,
+    service_id      TEXT        NOT NULL REFERENCES services(service_id),
+    name            TEXT        NOT NULL,
+    method          TEXT        NOT NULL,
+    path            TEXT        NOT NULL,
+    body_transforms JSONB,
+    async_config    JSONB,
+    active          BOOLEAN     NOT NULL DEFAULT true,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (service_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS registry_service_accounts (
+    account_id  TEXT        PRIMARY KEY,
+    name        TEXT        NOT NULL UNIQUE,
+    hashed_key  TEXT        NOT NULL,
+    role        TEXT        NOT NULL DEFAULT 'read',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS service_default_grants (
+    grant_id    TEXT        PRIMARY KEY,
+    service_id  TEXT        NOT NULL REFERENCES services(service_id),
+    grant_on    TEXT        NOT NULL,
+    actions     JSONB       NOT NULL DEFAULT '[]',
+    resources   JSONB       NOT NULL DEFAULT '[]',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `
 
 func connectDB(ctx context.Context) {

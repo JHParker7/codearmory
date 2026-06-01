@@ -12,7 +12,7 @@ gatekeeper:
     repository: codearmory/gatekeeper
     tag: ""
   replicaCount: 1
-  port: 8080
+  port: 8081
   resources:
     requests:
       cpu: 100m
@@ -23,11 +23,15 @@ gatekeeper:
   env:
     logLevel: info
     # Comma-separated list of service names permitted to register.
-    permittedServices: "gatekeeper,blueprints,forge"
+    permittedServices: "gatekeeper,blueprints,forge,workflows,tickets,hooks"
     # Comma-separated CIDRs of trusted reverse proxies (optional).
     trustedProxyCIDRs: ""
     # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
     otelEndpoint: ""
+    # Publicly reachable base URL for OIDC discovery and token endpoints.
+    # Must match the URL Forgejo/Gitea clients use to reach this instance.
+    # e.g. https://codearmory.example.com
+    oidcIssuer: ""
   secret:
     # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
@@ -35,9 +39,18 @@ gatekeeper:
     # Override to use an external Redis instance.
     redisUrl: ""
     # Comma-separated "name=key" pairs for service-to-service authentication,
-    # e.g. "blueprints=<key>,forge=<key>". Keys must match the gatekeeperServiceKey
-    # values set in blueprints.secret and forge.secret.
+    # e.g. "blueprints=<key>,forge=<key>,workflows=<key>,tickets=<key>,hooks=<key>".
+    # Keys must match the gatekeeperServiceKey values set in each service's secret.
     gatekeeperServices: ""
+    # Read key gatekeeper uses to fetch default grants from the registry.
+    # Must match an entry in registry.secret.serviceAccounts.
+    registryServiceKey: ""
+    # PEM-encoded ECDSA P-256 private key used to sign OIDC ID tokens.
+    # Must be stable across pod restarts — rotating this key invalidates existing
+    # ID tokens and forces all connected clients to re-authenticate.
+    # Generate with: openssl ecparam -name prime256v1 -genkey -noout | openssl ec -out -
+    # If unset, an ephemeral key is generated on startup (not suitable for production).
+    oidcSigningKey: ""
   redis:
     enabled: true
     image:
@@ -59,7 +72,7 @@ registry:
     repository: codearmory/registry
     tag: ""
   replicaCount: 1
-  port: 8084
+  port: 8082
   resources:
     requests:
       cpu: 50m
@@ -69,17 +82,28 @@ registry:
       memory: 128Mi
   env:
     logLevel: info
-    # Auto-populated as "blueprints=http://<fullname>-blueprints:8081,forge=http://<fullname>-forge:8083"
-    # when left empty. Override to use custom service URLs.
+    # Auto-populated as "blueprints=http://<fullname>-blueprints:8084,forge=http://<fullname>-forge:8083,
+    # workflows=http://<fullname>-workflows:8085,tickets=http://<fullname>-tickets:8086,
+    # hooks=http://<fullname>-hooks:8087" when left empty. Override to use custom service URLs.
     services: ""
     otelEndpoint: ""
   secret:
     # PostgreSQL DSN. Auto-constructed when left empty.
     databaseUrl: ""
-    # Bearer token for write (admin) operations — required.
-    adminKey: ""
-    # Bearer token for read operations — must match conductor.secret.registryReadKey.
-    readKey: ""
+    # Must match the registry entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+    # Comma-separated "name=key" pairs for read-only service accounts (e.g. Conductor, Gatekeeper).
+    # Must match conductor.secret.registryServiceKey and gatekeeper.secret.registryServiceKey.
+    # Generate with: openssl rand -hex 32
+    serviceAccounts: ""
+    # Comma-separated "name=key" pairs for admin service accounts (e.g. CI pipelines).
+    adminAccounts: ""
+  tls:
+    certSecret: ""     # Kubernetes TLS secret (tls.crt + tls.key) for server TLS
+    clientAuth: ""     # "require" or "request" — enables mTLS on incoming connections
+    caSecret: ""       # Secret containing ca.crt used to verify client certificates
+    clientCertSecret: "" # TLS secret (tls.crt + tls.key) presented on outbound calls
+    caBundle: ""       # Secret containing ca.crt used to verify outbound server certs
 
 # ── Blueprints ────────────────────────────────────────────────────────────────
 blueprints:
@@ -88,7 +112,7 @@ blueprints:
     repository: codearmory/blueprints
     tag: ""
   replicaCount: 1
-  port: 8081
+  port: 8084
   resources:
     requests:
       cpu: 100m
@@ -132,7 +156,7 @@ conductor:
     repository: codearmory/conductor
     tag: ""
   replicaCount: 1
-  port: 8082
+  port: 8080
   resources:
     requests:
       cpu: 50m
@@ -144,11 +168,19 @@ conductor:
     logLevel: info
     otelEndpoint: ""
   secret:
-    # Must match registry.secret.readKey.
-    registryReadKey: ""
+    # Initial service key for conductor's account in the registry.
+    # Must match the conductor entry in registry.secret.serviceAccounts.
+    # Rotated automatically every 25 minutes via POST /service-accounts/rotate-key on registry.
+    registryServiceKey: ""
     # Shared HMAC signing key for X-Conductor-Token headers.
     # Must match forge.secret.conductorForwardKey.
     conductorForwardKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
   service:
     type: ClusterIP
     # Set to LoadBalancer to expose conductor directly without an ingress.
@@ -184,7 +216,7 @@ forge:
     # When set to "docker", mount the Docker socket via forge.dockerSocket.
     runtime: kubernetes
     # Comma-separated list of container images forge is permitted to run.
-    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim"
+    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25"
     # Kubernetes namespace in which forge creates sandbox Jobs.
     k8sNamespace: forge
     # Optional RuntimeClass for stronger isolation (e.g. "gvisor").
@@ -200,6 +232,12 @@ forge:
     conductorForwardKey: ""
     # Must match the forge entry in gatekeeper.secret.gatekeeperServices.
     gatekeeperServiceKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
   serviceAccount:
     create: true
     name: ""
@@ -208,6 +246,199 @@ forge:
   dockerSocket:
     enabled: false
     path: /var/run/docker.sock
+
+# ── Workflows ─────────────────────────────────────────────────────────────────
+workflows:
+  enabled: true
+  image:
+    repository: codearmory/workflows
+    tag: ""
+  replicaCount: 1
+  port: 8085
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    logLevel: info
+    # Comma-separated "name=url" pairs of services that workflow steps may call.
+    # Auto-populated as "forge=http://<fullname>-forge:8083,blueprints=http://<fullname>-blueprints:8084"
+    # when left empty. Override to add custom services or change URLs.
+    services: ""
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Must match the workflows entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+    # Shared HMAC secret with the hooks service for authenticating internal trigger requests.
+    # Must match hooks.secret.hooksTriggerKey. Generate with: openssl rand -hex 32
+    hooksTriggerKey: ""
+    # AES-256 key for encrypting run tokens at rest in the database.
+    # Generate with: openssl rand -hex 32
+    tokenKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Tickets ───────────────────────────────────────────────────────────────────
+tickets:
+  enabled: true
+  image:
+    repository: codearmory/tickets
+    tag: ""
+  replicaCount: 1
+  port: 8086
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Must match the tickets entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Hooks ─────────────────────────────────────────────────────────────────────
+hooks:
+  enabled: true
+  image:
+    repository: codearmory/hooks
+    tag: ""
+  replicaCount: 1
+  port: 8087
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Must match the hooks entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+    # Shared HMAC secret with the workflows service for signing internal trigger requests.
+    # Must match workflows.secret.hooksTriggerKey. Generate with: openssl rand -hex 32
+    hooksTriggerKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Containers ────────────────────────────────────────────────────────────────
+containers:
+  enabled: true
+  image:
+    repository: codearmory/containers
+    tag: ""
+  replicaCount: 1
+  port: 8089
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # Base URL of your OCI/Docker registry, e.g. https://registry.example.com
+    # Required — containers will refuse to start without this.
+    registryUrl: ""
+    # Registry credentials (optional — omit for anonymous/token-based access).
+    registryUsername: ""
+    registryPassword: ""
+    # Must match the containers entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Egress Proxy ──────────────────────────────────────────────────────────────
+egressProxy:
+  enabled: true
+  image:
+    repository: codearmory/egress-proxy
+    tag: ""
+  replicaCount: 1
+  port: 3128
+  resources:
+    requests:
+      cpu: 25m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  env:
+    # Comma-separated list of domains forge execution containers may reach.
+    # Exact hostnames or wildcard prefixes (*.github.com).
+    allowedDomains: "registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com"
+
+# ── Gitea integration ─────────────────────────────────────────────────────────
+giteaIntegration:
+  enabled: false
+  image:
+    repository: codearmory/gitea
+    tag: ""
+  replicaCount: 1
+  port: 8088
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Base URL of your Forgejo/Gitea instance, e.g. https://git.example.com
+    # Required when gitea.enabled is true.
+    giteaUrl: ""
+    # Admin API token for the Forgejo/Gitea instance.
+    # Required when gitea.enabled is true.
+    giteaAdminToken: ""
+    # Must match the gitea entry in gatekeeper.secret.gatekeeperServices.
+    gatekeeperServiceKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
 
 # ── Integration tests (helm test) ────────────────────────────────────────────
 # Run with: helm test <release>
@@ -246,14 +477,34 @@ tests:
     image:
       repository: codearmory/test-registry
       tag: ""
+  workflows:
+    # Also requires workflows.enabled to be true.
+    enabled: true
+    image:
+      repository: codearmory/test-workflows
+      tag: ""
+  tickets:
+    # Also requires tickets.enabled to be true.
+    enabled: true
+    image:
+      repository: codearmory/test-tickets
+      tag: ""
+  hooks:
+    # Also requires hooks.enabled and workflows.enabled to be true.
+    enabled: true
+    image:
+      repository: codearmory/test-hooks
+      tag: ""
 
 # ── PostgreSQL (Bitnami subchart) ─────────────────────────────────────────────
 postgresql:
   enabled: true
   auth:
-    # Superuser password used for all service database connections by default.
-    # For production, create per-service users and set explicit databaseUrl values.
-    postgresPassword: "changeme"
+    # Superuser password. Leave empty to let the subchart auto-generate a random
+    # password on first install (stored only in the cluster Secret, never in git).
+    # Set explicitly only if you need a specific password or are migrating an
+    # existing cluster. For production, create per-service users with explicit databaseUrl.
+    postgresPassword: ""
     # Leave username/password empty to use the postgres superuser.
     username: ""
     password: ""
@@ -265,3 +516,7 @@ postgresql:
           CREATE DATABASE blueprints;
           CREATE DATABASE forge;
           CREATE DATABASE registry;
+          CREATE DATABASE workflows;
+          CREATE DATABASE tickets;
+          CREATE DATABASE hooks;
+          CREATE DATABASE gitea_integration;

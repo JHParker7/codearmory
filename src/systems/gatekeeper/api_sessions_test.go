@@ -15,12 +15,36 @@ func makeExpiry() time.Time {
 	return time.Now().Add(24 * time.Hour)
 }
 
-func TestGetSession_Success(t *testing.T) {
+// createOwnerWithSession creates a test user, a session owned by that user,
+// and grants the user the given action on their own session.
+func createOwnerWithSession(t *testing.T, action string) (User, Session) {
+	t.Helper()
 	u := createTestUser(t)
 	_, session := makeSession(t, u.UserID, makeExpiry())
-	actor := createAuthorizedUser(t, "getSession", "gatekeeper/sessions/"+session.SessionID)
+	perm := Permissions{
+		PermissionsID: uuid.New().String(),
+		Service:       "gatekeeper",
+		Actions:       []string{action},
+		Resources:     []string{"gatekeeper/sessions/" + session.SessionID},
+	}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatalf("createOwnerWithSession perm: %v", err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+	role := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{perm.PermissionsID}}
+	if err := role.Add(context.Background()); err != nil {
+		t.Fatalf("createOwnerWithSession role: %v", err)
+	}
+	t.Cleanup(func() { role.Remove(context.Background()) })
+	connect().WithContext(context.Background()).Model(&User{}).
+		Where("user_id = ?", u.UserID).Update("role_id", role.RoleID) //nolint:errcheck
+	return u, session
+}
 
-	r := withUserID(httptest.NewRequest(http.MethodGet, "/sessions/"+session.SessionID, nil), actor.UserID)
+func TestGetSession_Success(t *testing.T) {
+	u, session := createOwnerWithSession(t, "getSession")
+
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/sessions/"+session.SessionID, nil), u.UserID)
 	r.SetPathValue("id", session.SessionID)
 	w := httptest.NewRecorder()
 	handleGetSession(w, r)
@@ -65,11 +89,9 @@ func TestGetSession_Forbidden(t *testing.T) {
 }
 
 func TestDeleteSession_Success(t *testing.T) {
-	u := createTestUser(t)
-	_, session := makeSession(t, u.UserID, makeExpiry())
-	actor := createAuthorizedUser(t, "deleteSession", "gatekeeper/sessions/"+session.SessionID)
+	u, session := createOwnerWithSession(t, "deleteSession")
 
-	r := withUserID(httptest.NewRequest(http.MethodDelete, "/sessions/"+session.SessionID, nil), actor.UserID)
+	r := withUserID(httptest.NewRequest(http.MethodDelete, "/sessions/"+session.SessionID, nil), u.UserID)
 	r.SetPathValue("id", session.SessionID)
 	w := httptest.NewRecorder()
 	handleDeleteSession(w, r)
@@ -114,11 +136,9 @@ func TestDeleteSession_Forbidden(t *testing.T) {
 // --- toSessionResponse ---
 
 func TestGetSession_ResponseOmitsJWTAndPubKey(t *testing.T) {
-	u := createTestUser(t)
-	_, session := makeSession(t, u.UserID, makeExpiry())
-	actor := createAuthorizedUser(t, "getSession", "gatekeeper/sessions/"+session.SessionID)
+	u, session := createOwnerWithSession(t, "getSession")
 
-	r := withUserID(httptest.NewRequest(http.MethodGet, "/sessions/"+session.SessionID, nil), actor.UserID)
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/sessions/"+session.SessionID, nil), u.UserID)
 	r.SetPathValue("id", session.SessionID)
 	w := httptest.NewRecorder()
 	handleGetSession(w, r)

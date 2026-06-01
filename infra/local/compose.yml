@@ -6,7 +6,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - postgres_data:/var/lib/postgresql/data
@@ -37,9 +37,13 @@ services:
     build:
       context: ../../src/systems/gatekeeper
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret
+      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,hooks=hooks-local-secret,gitea=gitea-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
+      OIDC_ISSUER: http://localhost:8080
+      GATEKEEPER_SECRETS_KEY: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
       SIGNUP_RATE_LIMIT: "1000"
       SIGNUP_RATE_WINDOW: 1h
       LOGIN_RATE_LIMIT: "1000"
@@ -49,8 +53,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      registry:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/healthz"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -60,24 +66,29 @@ services:
     build:
       context: ../../src/systems/registry
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/registry
-      ADMIN_KEY: registry-admin-local-secret
-      READ_KEY: registry-read-local-secret
-      SERVICES: blueprints=http://blueprints:8081,forge=http://forge:8083,gatekeeper=http://gatekeeper:8080
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/registry
+      REGISTRY_SERVICE_ACCOUNTS: conductor=registry-read-local-secret,workflows=workflows-registry-local-secret,gatekeeper=gatekeeper-registry-read-local-secret,registry-test-reader=registry-test-reader-local-secret
+      REGISTRY_ADMIN_ACCOUNTS: registry-admin=registry-admin-local-secret
+      SERVICES: blueprints=http://blueprints:8084,forge=http://forge:8083,gatekeeper=http://gatekeeper:8081
       MANIFEST_FILE: /etc/registry/manifest.json
     volumes:
       - ./registry-manifest.json:/etc/registry/manifest.json:ro
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: on-failure
 
   blueprints:
     build:
       context: ../../src/systems/blueprints
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/blueprints
-      GATEKEEPER_URL: http://gatekeeper:8080
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/blueprints
+      GATEKEEPER_URL: http://gatekeeper:8081
       REDIS_URL: redis://redis:6379/1
       # Must match the blueprints entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: blueprints-local-secret
@@ -93,16 +104,43 @@ services:
         condition: service_started
     restart: on-failure
 
+  # ── Egress proxy ─────────────────────────────────────────────────────────────
+  # Sits on both the default network (internet access) and the internal
+  # forge-exec network. Execution containers on forge-exec can only reach the
+  # internet through this proxy; direct outbound traffic is blocked by the
+  # internal network flag. Configure FORGE_PROXY_ALLOWED_DOMAINS to restrict
+  # which external hosts containers may contact.
+
+  egress-proxy:
+    build:
+      context: ../../src/systems/egress-proxy
+    environment:
+      PROXY_ALLOWED_DOMAINS: ${FORGE_PROXY_ALLOWED_DOMAINS:-registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com}
+    networks:
+      - default
+      - forge-exec
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3128/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   forge:
     build:
       context: ../../src/systems/forge
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/forge
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/forge
       RUNTIME: docker
-      GATEKEEPER_URL: http://gatekeeper:8080
-      ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim
+      GATEKEEPER_URL: http://gatekeeper:8081
+      ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25
       # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: forge-local-secret
+      # Execution containers join the internal forge-exec network and route all
+      # outbound traffic through the egress proxy's allowlist. Direct internet
+      # access is blocked by the internal: true flag on that network.
+      FORGE_NETWORK_MODE: forge-exec
+      FORGE_EGRESS_PROXY: http://egress-proxy:3128
       # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
       # K8S_RUNTIME_CLASS: gvisor     # optional: use gVisor for stronger isolation
     volumes:
@@ -120,18 +158,20 @@ services:
         condition: service_healthy
       registry:
         condition: service_started
+      egress-proxy:
+        condition: service_healthy
     restart: on-failure
 
   conductor:
     build:
       context: ../../src/systems/conductor
     environment:
-      GATEKEEPER_URL: http://gatekeeper:8080
+      GATEKEEPER_URL: http://gatekeeper:8081
       REGISTRY_URL: http://registry:8084
-      REGISTRY_READ_KEY: registry-read-local-secret
+      REGISTRY_SERVICE_KEY: registry-read-local-secret
       CONDUCTOR_FORWARD_KEY: forge-conductor-shared-local-secret
     ports:
-      - "8082:8082"
+      - "8080:8080"
     depends_on:
       gatekeeper:
         condition: service_healthy
@@ -139,12 +179,146 @@ services:
         condition: service_started
     restart: on-failure
 
+  workflows:
+    build:
+      context: ../../src/systems/workflows
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/workflows
+      GATEKEEPER_URL: http://gatekeeper:8081
+      SERVICES: blueprints=http://blueprints:8084,registry=http://registry:8084,conductor=http://conductor:8080,hooks=http://hooks:8087
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_SERVICE_KEY: workflows-registry-local-secret
+      GATEKEEPER_SERVICE_KEY: workflows-local-secret
+      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
+      WORKFLOWS_TOKEN_KEY: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    ports:
+      - "8085:8085"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+      registry:
+        condition: service_started
+      forge:
+        condition: service_started
+    restart: on-failure
+
+  tickets:
+    build:
+      context: ../../src/systems/tickets
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/tickets
+      GATEKEEPER_URL: http://gatekeeper:8081
+      GATEKEEPER_SERVICE_KEY: tickets-local-secret
+    ports:
+      - "8086:8086"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+    restart: on-failure
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:10
+    environment:
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__security__SECRET_KEY: forgejo-compose-local-secret-key-dev
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__ROOT_URL: http://forgejo:3000
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__log__LEVEL: warn
+      GITEA_ADMIN_USER: forgejo-admin
+      GITEA_ADMIN_PASSWORD: forgejo-local-admin-pass
+      GITEA_ADMIN_EMAIL: admin@forgejo.local
+    volumes:
+      - forgejo_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/v1/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: on-failure
+
+  forgejo-setup:
+    image: alpine:3.23.3
+    depends_on:
+      forgejo:
+        condition: service_healthy
+    volumes:
+      - forgejo_token:/token
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache curl >/dev/null 2>&1
+        if [ -f /token/token.txt ] && [ -s /token/token.txt ]; then
+          echo 'Forgejo token already exists'; exit 0
+        fi
+        # Forgejo 10 does not auto-create the admin from env vars — create via API if needed.
+        curl -sf -X POST http://forgejo:3000/api/v1/admin/users \
+          -H 'Content-Type: application/json' \
+          -H 'Authorization: basic Zm9yZ2Vqby1hZG1pbjpmb3JnZWpvLWxvY2FsLWFkbWluLXBhc3M=' \
+          -d '{"username":"forgejo-admin","password":"forgejo-local-admin-pass","email":"admin@forgejo.local","login_name":"forgejo-admin","source_id":0,"must_change_password":false}' \
+          >/dev/null 2>&1 || true
+        TOKEN=$(curl -sf \
+          -u forgejo-admin:forgejo-local-admin-pass \
+          -X POST http://forgejo:3000/api/v1/users/forgejo-admin/tokens \
+          -H 'Content-Type: application/json' \
+          -d '{"name":"compose-local","scopes":["write:admin","write:organization","write:issue","write:repository","write:user","read:user","read:repository","read:organization"]}' | \
+          grep -o '"sha1":"[^"]*"' | cut -d'"' -f4)
+        [ -z "$TOKEN" ] && echo 'Failed to create Forgejo token' && exit 1
+        printf '%s' "$TOKEN" > /token/token.txt
+        chmod 644 /token/token.txt
+        echo 'Forgejo token created'
+    restart: "no"
+
+  gitea-integration:
+    build:
+      context: ../../src/systems/gitea
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "export GITEA_ADMIN_TOKEN=$(cat /token/token.txt) && exec ./gitea"
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gitea_integration
+      GATEKEEPER_URL: http://gatekeeper:8081
+      GATEKEEPER_SERVICE_KEY: gitea-local-secret
+      GITEA_URL: http://forgejo:3000
+    ports:
+      - "8088:8088"
+    volumes:
+      - forgejo_token:/token
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+      forgejo-setup:
+        condition: service_completed_successfully
+    restart: on-failure
+
+  containers:
+    build:
+      context: ../../src/systems/containers
+    environment:
+      GATEKEEPER_URL: http://gatekeeper:8081
+      GATEKEEPER_SERVICE_KEY: containers-local-secret
+      REGISTRY_URL: ${CONTAINER_REGISTRY_URL:?CONTAINER_REGISTRY_URL must be set to your OCI/Docker registry base URL}
+      REGISTRY_USERNAME: ${CONTAINER_REGISTRY_USERNAME:-}
+      REGISTRY_PASSWORD: ${CONTAINER_REGISTRY_PASSWORD:-}
+    ports:
+      - "8089:8089"
+    depends_on:
+      gatekeeper:
+        condition: service_healthy
+    restart: on-failure
+
   gatekeeper-integration-tests:
     build:
       context: ../../tests/gatekeeper
     environment:
-      API_URL: http://gatekeeper:8080
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gatekeeper
+      API_URL: http://gatekeeper:8081
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
     depends_on:
       gatekeeper:
         condition: service_healthy
@@ -157,8 +331,8 @@ services:
     build:
       context: ../../tests/blueprints
     environment:
-      BLUEPRINTS_URL: http://blueprints:8081
-      GATEKEEPER_URL: http://gatekeeper:8080
+      BLUEPRINTS_URL: http://blueprints:8084
+      GATEKEEPER_URL: http://gatekeeper:8081
     depends_on:
       blueprints:
         condition: service_started
@@ -172,8 +346,8 @@ services:
       context: ../../tests/registry
     environment:
       REGISTRY_URL: http://registry:8084
-      REGISTRY_ADMIN_KEY: registry-admin-local-secret
-      REGISTRY_READ_KEY: registry-read-local-secret
+      REGISTRY_ADMIN_KEY: registry-admin:registry-admin-local-secret
+      REGISTRY_READ_KEY: registry-test-reader:registry-test-reader-local-secret
     depends_on:
       registry:
         condition: service_started
@@ -184,8 +358,8 @@ services:
     build:
       context: ../../tests/conductor
     environment:
-      CONDUCTOR_URL: http://conductor:8082
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gatekeeper
+      CONDUCTOR_URL: http://conductor:8080
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
     depends_on:
       conductor:
         condition: service_started
@@ -199,7 +373,7 @@ services:
       context: ../../tests/forge
     environment:
       FORGE_URL: http://forge:8083
-      GATEKEEPER_URL: http://gatekeeper:8080
+      GATEKEEPER_URL: http://gatekeeper:8081
     depends_on:
       forge:
         condition: service_started
@@ -208,5 +382,101 @@ services:
     profiles: [test]
     restart: no
 
+  workflows-integration-tests:
+    build:
+      context: ../../tests/workflows
+    environment:
+      WORKFLOWS_URL: http://workflows:8085
+      GATEKEEPER_URL: http://gatekeeper:8081
+    depends_on:
+      workflows:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  hooks:
+    build:
+      context: ../../src/systems/hooks
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/hooks
+      GATEKEEPER_URL: http://gatekeeper:8081
+      WORKFLOWS_URL: http://workflows:8085
+      GATEKEEPER_SERVICE_KEY: hooks-local-secret
+      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
+      # GitHub App integration (optional — configure to enable check runs)
+      # GITHUB_APP_ID: ""
+      # GITHUB_APP_PRIVATE_KEY: ""       # PEM content or use GITHUB_APP_PRIVATE_KEY_FILE
+      # GITHUB_APP_WEBHOOK_SECRET: ""
+    ports:
+      - "8087:8087"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+      workflows:
+        condition: service_started
+    restart: on-failure
+
+  tickets-integration-tests:
+    build:
+      context: ../../tests/tickets
+    environment:
+      TICKETS_URL: http://tickets:8086
+      GATEKEEPER_URL: http://gatekeeper:8081
+    depends_on:
+      tickets:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  hooks-integration-tests:
+    build:
+      context: ../../tests/hooks
+    environment:
+      HOOKS_URL: http://hooks:8087
+      WORKFLOWS_URL: http://workflows:8085
+      GATEKEEPER_URL: http://gatekeeper:8081
+    depends_on:
+      hooks:
+        condition: service_started
+      workflows:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  mcp:
+    build:
+      context: ../../src/systems/mcp
+    environment:
+      CODEARMORY_URL: http://conductor:8080
+      # CODEARMORY_TOKEN: set this to a valid bearer token before use
+    stdin_open: true
+    tty: true
+    depends_on:
+      conductor:
+        condition: service_started
+    profiles: [mcp]
+    restart: "no"
+
 volumes:
   postgres_data:
+  forgejo_data:
+  forgejo_token:
+
+networks:
+  # forge-exec is an isolated bridge network for execution containers.
+  # internal: true blocks all direct egress to the internet; the only outbound
+  # path is through the egress-proxy service which enforces a domain allowlist.
+  # The fixed name is required so the forge runtime can reference it by name
+  # when creating containers (FORGE_NETWORK_MODE=forge-exec).
+  forge-exec:
+    name: forge-exec
+    driver: bridge
+    internal: true

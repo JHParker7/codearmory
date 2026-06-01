@@ -14,5 +14,5 @@ WORKDIR /home/svc/
 COPY --from=builder /src/blueprints/blueprints .
 RUN chown svc:svc ./blueprints
 USER svc
-EXPOSE 8081
+EXPOSE 8084
 CMD ["./blueprints"]

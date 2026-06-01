@@ -18,6 +18,8 @@ const (
 	maxTimeout     = int64(3600)
 )
 
+// Execution is the persistent record for a single container run submitted to forge.
+// Status progresses: pending → running → completed | failed | timed_out | cancelled.
 type Execution struct {
 	ExecutionID string            `json:"execution_id"`
 	UserID      string            `json:"user_id"`

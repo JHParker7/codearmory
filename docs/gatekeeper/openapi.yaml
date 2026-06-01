@@ -423,6 +423,102 @@ components:
           type: string
           format: date-time
 
+    SecretRequest:
+      type: object
+      required: [name, value]
+      properties:
+        name:
+          type: string
+          example: MY_KEY
+        value:
+          type: string
+          format: password
+          example: s3cr3t
+
+    SecretUpdateRequest:
+      type: object
+      required: [value]
+      properties:
+        name:
+          type: string
+          example: NEW_NAME
+        value:
+          type: string
+          format: password
+          example: new_value
+
+    ProviderRequest:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [builtin, doppler, vault, aws_sm]
+          example: doppler
+        config:
+          type: object
+          description: |
+            Provider-specific configuration object, stored encrypted.
+            - **builtin**: no config required
+            - **doppler**: `{"service_token": "...", "project": "...", "config": "..."}`
+            - **vault**: `{"address": "https://vault:8200", "token": "...", "namespace": "...", "mount": "secret"}`
+            - **aws_sm**: `{"region": "us-east-1"}` (optional; uses IAM role if omitted)
+          additionalProperties: true
+
+    ResolveSecretsRequest:
+      type: object
+      required: [org_id, names]
+      properties:
+        org_id:
+          type: string
+          example: org-uuid-here
+        names:
+          type: array
+          items:
+            type: string
+          example: [DB_PASSWORD, API_KEY]
+
+    Secret:
+      type: object
+      description: Secret metadata. The value is never returned by any API endpoint.
+      properties:
+        secret_id:
+          type: string
+          example: secret-uuid-here
+        org_id:
+          type: string
+          example: org-uuid-here
+        name:
+          type: string
+          example: MY_KEY
+        created_by:
+          type: string
+          example: user-uuid-here
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SecretProvider:
+      type: object
+      description: Org secret provider configuration. The config blob is never returned.
+      properties:
+        org_id:
+          type: string
+          example: org-uuid-here
+        provider:
+          type: string
+          enum: [builtin, doppler, vault, aws_sm]
+          example: doppler
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
   responses:
     Unauthorized:
       description: Missing or invalid bearer token.
@@ -1105,6 +1201,10 @@ paths:
         Returns session metadata. The JWT and public key are never included in
         the response. Use `POST /login` to obtain a token.
 
+        **Owner-only:** only the user who owns the session may retrieve it.
+        Cross-user access returns 403 even when the caller holds the required
+        permission.
+
         **Required permission:** `getSession` on `gatekeeper/sessions/{id}`
       tags: [Sessions]
       security:
@@ -1128,6 +1228,10 @@ paths:
       description: |
         Soft-deletes the session, causing the associated JWT to be rejected on
         all subsequent requests.
+
+        **Owner-only:** only the user who owns the session may delete it.
+        Cross-user access returns 403 even when the caller holds the required
+        permission.
 
         **Required permission:** `deleteSession` on `gatekeeper/sessions/{id}`
       tags: [Sessions]
@@ -1344,6 +1448,294 @@ paths:
         "500":
           description: Internal server error.
 
+  # ── Secrets ───────────────────────────────────────────────────────────────
+
+  /secrets:
+    post:
+      summary: Create a secret
+      description: |
+        Creates an encrypted secret scoped to the caller's org. The value is
+        write-only and never returned by the API.
+
+        **Required permission:** `createSecret` on `gatekeeper/secrets`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretRequest"
+      responses:
+        "201":
+          description: Secret created. Value is omitted from the response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Secret"
+        "400":
+          description: Missing name/value, invalid JSON, or caller has no org.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A secret with that name already exists in the org.
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+    get:
+      summary: List secrets
+      description: |
+        Returns all active secrets for the caller's org. Values are never
+        included in the response.
+
+        **Required permission:** `listSecret` on `gatekeeper/secrets`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: List of secret metadata for the caller's org.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Secret"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+  /secrets/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Secret UUID
+
+    put:
+      summary: Update a secret
+      description: |
+        Replaces the encrypted value (and optionally the name) of an existing
+        secret. The caller must belong to the same org as the secret.
+
+        **Required permission:** `updateSecret` on `gatekeeper/secrets/{id}`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretUpdateRequest"
+      responses:
+        "200":
+          description: Updated secret metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Secret"
+        "400":
+          description: Missing value or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+    delete:
+      summary: Delete a secret
+      description: |
+        Soft-deletes the secret (sets `active = false`). The caller must belong
+        to the same org as the secret.
+
+        **Required permission:** `deleteSecret` on `gatekeeper/secrets/{id}`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Secret deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+  # ── Org secret provider ───────────────────────────────────────────────────
+
+  /orgs/{id}/secret-provider:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Org UUID
+
+    get:
+      summary: Get the org's secret provider configuration
+      description: |
+        Returns the configured secret provider for the org. The provider config
+        blob is never returned — only the provider name and timestamps.
+
+        **Required permission:** `getSecretProvider` on `gatekeeper/orgs/{id}`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Secret provider configuration (config blob omitted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecretProvider"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No secret provider configured for this org.
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+    put:
+      summary: Configure the org's secret provider
+      description: |
+        Sets or replaces the org's secret provider. The config object is
+        provider-specific and stored encrypted. Supported providers:
+
+        - **builtin** — no config required; secrets stored in the `secrets` table
+        - **doppler** — `{"service_token": "...", "project": "...", "config": "..."}`
+        - **vault** — `{"address": "...", "token": "...", "namespace": "...", "mount": "secret"}`
+        - **aws_sm** — `{"region": "us-east-1"}` (optional; uses IAM role if omitted)
+
+        **Required permission:** `updateSecretProvider` on `gatekeeper/orgs/{id}`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderRequest"
+      responses:
+        "200":
+          description: Updated secret provider record (config blob omitted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecretProvider"
+        "400":
+          description: Invalid provider value or request body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Internal server error.
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+    delete:
+      summary: Remove the org's secret provider configuration
+      description: |
+        Deletes the org's secret provider record. Subsequent secret resolves
+        will fall back to the builtin provider.
+
+        **Required permission:** `deleteSecretProvider` on `gatekeeper/orgs/{id}`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Provider configuration removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+  # ── Internal ──────────────────────────────────────────────────────────────
+
+  /internal/secrets/resolve:
+    post:
+      summary: Resolve (decrypt) named secrets for an org
+      description: |
+        Internal endpoint called by the workflow worker to retrieve plaintext
+        secret values for a pipeline run. Uses the org's configured secret
+        provider (or builtin if none is set).
+
+        Authentication is via `X-Service-Key: name:key` service auth, not a
+        user JWT. The calling service must be registered in `PERMITTED_SERVICES`.
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Internal]
+      security: []
+      parameters:
+        - name: X-Service-Key
+          in: header
+          required: true
+          schema:
+            type: string
+          description: "Service authentication header in the form `name:key`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveSecretsRequest"
+      responses:
+        "200":
+          description: Map of secret name to plaintext value.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+                example:
+                  DB_PASSWORD: s3cr3t
+                  API_KEY: abc123
+        "400":
+          description: Missing org_id/names, invalid JSON, or a requested secret was not found.
+        "401":
+          description: Missing or invalid X-Service-Key.
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
 tags:
   - name: Auth
     description: Signup, login, and permission checks.
@@ -1361,3 +1753,7 @@ tags:
     description: Session lifecycle management.
   - name: Invites
     description: Org and team invitations.
+  - name: Secrets
+    description: Secrets management — create, list, update, delete encrypted secrets and configure per-org secret providers.
+  - name: Internal
+    description: Internal service-to-service endpoints. Not exposed through Conductor.

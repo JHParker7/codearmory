@@ -1,0 +1,28 @@
+{{- if and .Values.workflows.enabled .Values.tests.workflows.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "codearmory.fullname" . }}-test-workflows
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test-workflows
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "20"
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: test
+      image: "{{ .Values.tests.workflows.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.tests.workflows) }}"
+      imagePullPolicy: {{ .Values.imagePullPolicy }}
+      env:
+        - name: WORKFLOWS_URL
+          value: "http://{{ include "codearmory.fullname" . }}-workflows:{{ .Values.workflows.port }}"
+        - name: GATEKEEPER_URL
+          value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+{{- end }}

@@ -66,6 +66,10 @@ API_URL=http://localhost:8080 pytest tests/gatekeeper/ -v
 | `OTEL_SERVICE_NAME` | No | Service name reported in traces and metrics (default: `gatekeeper`) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | OTel Collector HTTP endpoint. Omit to disable telemetry. |
 | `LOG_LEVEL` | No | Set to `debug` for verbose output. |
+| `GATEKEEPER_SECRETS_KEY` | No | 64 hex chars (32 bytes) AES-256-GCM key for encrypting secrets at rest. Secrets endpoints return 503 if unset. |
+| `REGISTRY_URL` | No | Registry service base URL. Required to load default permission grants (org/team owner permissions). |
+| `REGISTRY_SERVICE_KEY` | No | Service key for authenticating with the registry to fetch default grants. |
+| `AUDIT_PERMISSION_CHECKS` | No | Set to `true` to persist every `checkPermissions` evaluation to the `permissions_checks` table (who checked what, when, and which org). Off by default. |
 
 ## API
 
@@ -86,12 +90,13 @@ Quick reference:
 |--------|------|------|-------------|
 | `POST` | `/signup` | — | Create account |
 | `POST` | `/login` | — | Authenticate, get JWT |
-| `GET` | `/check_permissions` | ✓ | Check caller's permission |
-| `GET` | `/users` | ✓ | List users |
+| `POST` | `/check_permissions` | ✓ (service-to-service) | Check caller's permission — called directly by backends (e.g. Blueprints, Forge); not routed through Conductor |
+| `GET` | `/users` | ✓ | List users (scoped to caller's org) |
 | `GET` `PUT` `DELETE` | `/users/{id}` | ✓ | User management |
 | `POST` | `/orgs` | ✓ | Create org |
-| `GET` | `/orgs` | ✓ | List orgs |
+| `GET` | `/orgs` | ✓ | List orgs (scoped to caller's org) |
 | `GET` `PUT` `DELETE` | `/orgs/{id}` | ✓ | Org management |
+| `GET` `PUT` `DELETE` | `/orgs/{id}/secret-provider` | ✓ | Get, configure, or remove the org's secret provider |
 | `POST` | `/teams` | ✓ | Create team |
 | `GET` | `/teams` | ✓ | List teams |
 | `GET` `PUT` `DELETE` | `/teams/{id}` | ✓ | Team management |
@@ -99,7 +104,10 @@ Quick reference:
 | `GET` `PUT` `DELETE` | `/roles/{id}` | ✓ | Role management |
 | `POST` | `/permissions` | ✓ | Create permissions record |
 | `GET` `PUT` `DELETE` | `/permissions/{id}` | ✓ | Permissions management |
-| `GET` `DELETE` | `/sessions/{id}` | ✓ | Session management |
+| `GET` `DELETE` | `/sessions/{id}` | ✓ | Session management (session owner only) |
+| `POST` | `/secrets` | ✓ | Create a secret for the caller's org |
+| `GET` | `/secrets` | ✓ | List secrets for the caller's org (values never returned) |
+| `PUT` `DELETE` | `/secrets/{id}` | ✓ | Update or soft-delete a secret |
 | `POST` | `/orgs/{id}/invites` | ✓ | Invite a user to an org |
 | `POST` | `/teams/{id}/invites` | ✓ | Invite a user to a team |
 | `GET` | `/invites` | ✓ | List invites (own invites only) |
@@ -113,16 +121,48 @@ Quick reference:
 | `GET` | `/service-permission-requests/{id}` | ✓ | Get a single service permission request |
 | `POST` | `/service-permission-requests/{id}/approve` | ✓ | Approve a pending service permission request |
 | `POST` | `/service-permission-requests/{id}/decline` | ✓ | Decline a pending service permission request |
+| `POST` | `/internal/secrets/resolve` | Service key | Resolve (decrypt) named secrets for an org — called by the workflow worker |
+| `POST` | `/internal/run-tokens` | Service key (`workflows` only) | Mint a short-lived session JWT for a user on behalf of the workflows service |
+| `DELETE` | `/internal/run-tokens/{session_id}` | Service key (`workflows` only) | Revoke a run token |
+| `POST` | `/internal/workflow-roles` | Service key (`workflows` only) | Create a minimal-permission scoped role for a workflow |
+| `DELETE` | `/internal/workflow-roles/{role_id}` | Service key (`workflows` only) | Delete a workflow scoped role |
 
 All protected endpoints require `Authorization: Bearer <token>` and enforce RBAC permission checks. On signup, every user automatically receives:
 
 - `getUser`, `updateUser`, `deleteUser` on their own user resource
 - `createOrg` on `gatekeeper/orgs`, `createTeam` on `gatekeeper/teams`
-- `getState`, `updateState`, `deleteState`, `lockState`, `unlockState` on `blueprints/states/{username}/*`
+- `getState`, `updateState`, `deleteState`, `lockState`, `unlockState` on `states/{username}/*`
 
-All other permissions must be explicitly granted. When a user creates an org, they additionally receive full state access on `blueprints/{org}/states/*`.
+All other permissions must be explicitly granted.
 
 Invite endpoints are accessible only to the inviter and the invitee. Accepting an org invite sets `org_id` on the invitee's user record; accepting a team invite sets `team_id`.
+
+`GET /sessions/{id}` and `DELETE /sessions/{id}` enforce session ownership: only the user whose session it is may retrieve or invalidate it. Cross-user access returns 403 even when the caller holds the required permission.
+
+## Secrets
+
+Gatekeeper provides a secrets management layer used by the workflow worker to inject credentials into pipeline runs. All secret values are encrypted at rest using AES-256-GCM. The feature requires `GATEKEEPER_SECRETS_KEY` to be set; all secrets endpoints return `503 Service Unavailable` if it is not.
+
+### Builtin storage (default)
+
+By default, secret values are stored in the `secrets` table, encrypted with the `GATEKEEPER_SECRETS_KEY`. The plaintext value is never returned by any API endpoint — responses include only `secret_id`, `org_id`, `name`, `created_by`, `created_at`, and `updated_at`.
+
+### Provider adapters
+
+Organisations can delegate secret storage to an external provider by configuring one via `PUT /orgs/{id}/secret-provider`. When a provider is configured, `POST /internal/secrets/resolve` fetches secrets from that provider instead of the `secrets` table.
+
+| Provider | Config fields | Notes |
+|----------|---------------|-------|
+| `builtin` | — | Secrets stored encrypted in the `secrets` table. Default if no provider is configured. |
+| `doppler` | `service_token`, `project`, `config` | Fetches each secret from the Doppler API per-request. |
+| `vault` | `address`, `token`, `namespace` (optional), `mount` (default: `secret`) | Uses HashiCorp Vault KV v2. The vault client re-validates resolved IP addresses on every connection to prevent DNS rebinding SSRF. |
+| `aws_sm` | `region` (optional) | Uses AWS Secrets Manager. Omit `region` to use the IAM role's default region. |
+
+Provider config is stored encrypted in the `org_secret_providers` table. The `GET /orgs/{id}/secret-provider` response returns only the provider name and timestamps — never the config.
+
+### Default permission grants
+
+When `REGISTRY_URL` and `REGISTRY_SERVICE_KEY` are set, gatekeeper polls the registry's `GET /default-grants` endpoint every 5 minutes. These grants are applied automatically when orgs and teams are created, so users receive owner-level permissions without manual bootstrapping.
 
 ## Deployment
 
@@ -168,15 +208,17 @@ ingress:
 
 ## Schema
 
-| Table                 | Primary Key            | Foreign Keys                                                  |
-|-----------------------|------------------------|---------------------------------------------------------------|
-| `orgs`                | `org_id`               | —                                                             |
-| `roles`               | `role_id`              | `org_id` → `orgs`                                            |
-| `teams`               | `team_id`              | `role_id` → `roles`                                          |
-| `users`               | `user_id`              | `org_id` → `orgs`, `role_id` → `roles`, `team_id` → `teams` |
-| `sessions`            | `session_id`           | `user_id` → `users`                                          |
-| `permissions`         | `permissions_id`       | —                                                             |
-| `invites`             | `invite_id`            | `inviter_id` → `users`                                       |
-| `permissions_checks`  | `permissions_check_id` | `user_id` → `users`, `org_id` → `orgs`, `team_id` → `teams` |
+| Table                 | Primary Key            | Foreign Keys                                                  | Description |
+|-----------------------|------------------------|---------------------------------------------------------------|-------------|
+| `orgs`                | `org_id`               | —                                                             | |
+| `roles`               | `role_id`              | `org_id` → `orgs`                                            | |
+| `teams`               | `team_id`              | `role_id` → `roles`                                          | |
+| `users`               | `user_id`              | `org_id` → `orgs`, `role_id` → `roles`, `team_id` → `teams` | |
+| `sessions`            | `session_id`           | `user_id` → `users`                                          | `scoped_role_id` (nullable) restricts permission checks to a single role — used by workflow run tokens |
+| `permissions`         | `permissions_id`       | —                                                             | |
+| `invites`             | `invite_id`            | `inviter_id` → `users`                                       | |
+| `permissions_checks`  | `permissions_check_id` | `user_id` → `users`, `org_id` → `orgs`, `team_id` → `teams` | |
+| `secrets`             | `secret_id`            | `org_id` → `orgs`                                            | AES-256-GCM encrypted org secrets. Value never returned by API. |
+| `org_secret_providers`| `org_id`               | `org_id` → `orgs`                                            | Per-org secret provider config (builtin/doppler/vault/aws_sm). Config stored encrypted. |
 
 `users.email` and `users.username` have unique indexes. All tables use a soft-delete `active` column. Schema is defined in Go via GORM struct tags in `src/systems/gatekeeper/types.go`.

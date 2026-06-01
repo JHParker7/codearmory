@@ -52,16 +52,21 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.conductor.env.otelEndpoint | quote }}
             {{- end }}
-            - name: REGISTRY_READ_KEY
+            - name: REGISTRY_SERVICE_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-conductor
-                  key: registry-read-key
+                  key: registry-service-key
             - name: CONDUCTOR_FORWARD_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-conductor
                   key: conductor-forward-key
+            {{- include "codearmory.tls.envs" .Values.conductor.tls | nindent 12 }}
+          {{- with (include "codearmory.tls.volumeMounts" .Values.conductor.tls) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             tcpSocket:
               port: http
@@ -74,3 +79,7 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.conductor.resources | nindent 12 }}
+      {{- with (include "codearmory.tls.volumes" .Values.conductor.tls) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}

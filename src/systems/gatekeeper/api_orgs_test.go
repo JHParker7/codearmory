@@ -346,49 +346,25 @@ func TestDeleteOrg_Forbidden(t *testing.T) {
 }
 
 func TestListOrgs_Success(t *testing.T) {
-	ownerID := uuid.New().String()
-	o1 := Org{OrgID: uuid.New().String(), OrgName: "list-org-1", OwnerID: ownerID}
-	o2 := Org{OrgID: uuid.New().String(), OrgName: "list-org-2", OwnerID: ownerID}
-	if err := o1.Add(context.Background()); err != nil {
+	o := Org{OrgID: uuid.New().String(), OrgName: "list-org-1"}
+	if err := o.Add(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { o1.Remove(context.Background()) })
-	if err := o2.Add(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { o2.Remove(context.Background()) })
+	t.Cleanup(func() { o.Remove(context.Background()) })
 
+	// Actor must be a member of the org — listOrgs is scoped to the caller's own org.
 	actor := createAuthorizedUser(t, "listOrg", "gatekeeper/orgs")
-	r := withUserID(httptest.NewRequest(http.MethodGet, "/orgs?owner_id="+ownerID, nil), actor.UserID)
-	w := httptest.NewRecorder()
-	handleListOrgs(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	var resp []Org
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	if len(resp) != 2 {
-		t.Fatalf("expected 2 orgs, got %d", len(resp))
-	}
-}
-
-func TestListOrgs_ExcludesDeleted(t *testing.T) {
-	ownerID := uuid.New().String()
-	o1 := Org{OrgID: uuid.New().String(), OrgName: "list-del-org-1", OwnerID: ownerID}
-	o2 := Org{OrgID: uuid.New().String(), OrgName: "list-del-org-2", OwnerID: ownerID}
-	if err := o1.Add(context.Background()); err != nil {
+	fetched, err := (User{UserID: actor.UserID}).Get(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { o1.Remove(context.Background()) })
-	if err := o2.Add(context.Background()); err != nil {
+	full := fetched.(User)
+	full.OrgID = &o.OrgID
+	if err := full.Update(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { o2.Remove(context.Background()) })
-	o1.Remove(context.Background())
 
-	actor := createAuthorizedUser(t, "listOrg", "gatekeeper/orgs")
-	r := withUserID(httptest.NewRequest(http.MethodGet, "/orgs?owner_id="+ownerID, nil), actor.UserID)
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/orgs", nil), actor.UserID)
 	w := httptest.NewRecorder()
 	handleListOrgs(w, r)
 
@@ -398,10 +374,45 @@ func TestListOrgs_ExcludesDeleted(t *testing.T) {
 	var resp []Org
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	if len(resp) != 1 {
-		t.Fatalf("expected 1 org after delete, got %d", len(resp))
+		t.Fatalf("expected 1 org, got %d", len(resp))
 	}
-	if resp[0].OrgID != o2.OrgID {
-		t.Fatalf("expected org %s, got %s", o2.OrgID, resp[0].OrgID)
+	if resp[0].OrgID != o.OrgID {
+		t.Fatalf("expected org %s, got %s", o.OrgID, resp[0].OrgID)
+	}
+}
+
+func TestListOrgs_ExcludesDeleted(t *testing.T) {
+	o := Org{OrgID: uuid.New().String(), OrgName: "list-del-org"}
+	if err := o.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { o.Remove(context.Background()) })
+
+	actor := createAuthorizedUser(t, "listOrg", "gatekeeper/orgs")
+	fetched, err := (User{UserID: actor.UserID}).Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := fetched.(User)
+	full.OrgID = &o.OrgID
+	if err := full.Update(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Soft-delete the actor's org.
+	o.Remove(context.Background())
+
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/orgs", nil), actor.UserID)
+	w := httptest.NewRecorder()
+	handleListOrgs(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp []Org
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if len(resp) != 0 {
+		t.Fatalf("expected 0 orgs after delete, got %d", len(resp))
 	}
 }
 
@@ -413,6 +424,17 @@ func TestListOrgs_FilterByOrgID(t *testing.T) {
 	t.Cleanup(func() { o.Remove(context.Background()) })
 
 	actor := createAuthorizedUser(t, "listOrg", "gatekeeper/orgs")
+	fetched, err := (User{UserID: actor.UserID}).Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := fetched.(User)
+	full.OrgID = &o.OrgID
+	if err := full.Update(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Filtering by the actor's own org_id works.
 	r := withUserID(httptest.NewRequest(http.MethodGet, "/orgs?org_id="+o.OrgID, nil), actor.UserID)
 	w := httptest.NewRecorder()
 	handleListOrgs(w, r)

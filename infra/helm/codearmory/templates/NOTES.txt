@@ -18,12 +18,19 @@ Conductor is the public-facing API gateway.
 {{- end }}
 
 Before production use, make sure you have set:
-  - gatekeeper.secret.gatekeeperServices   (service auth keys)
-  - registry.secret.adminKey / readKey
-  - blueprints.secret.encryptionKey        (openssl rand -hex 32)
+  - gatekeeper.secret.gatekeeperServices        (service auth keys for all services)
+  - registry.secret.gatekeeperServiceKey
+  - registry.secret.serviceAccounts            (e.g. "conductor=<key>")
+  - registry.secret.adminAccounts              (e.g. "admin=<key>")
+  - conductor.secret.registryServiceKey        (must match registry.secret.serviceAccounts entry)
+  - blueprints.secret.encryptionKey             (openssl rand -hex 32)
   - blueprints.secret.gatekeeperServiceKey
-  - conductor.secret.registryReadKey
   - conductor.secret.conductorForwardKey
   - forge.secret.conductorForwardKey
   - forge.secret.gatekeeperServiceKey
-  - postgresql.auth.postgresPassword       (change from default)
+  - workflows.secret.gatekeeperServiceKey
+  - workflows.secret.hooksTriggerKey            (openssl rand -hex 32, must match hooks)
+  - tickets.secret.gatekeeperServiceKey
+  - hooks.secret.gatekeeperServiceKey
+  - hooks.secret.hooksTriggerKey                (must match workflows.secret.hooksTriggerKey)
+  - postgresql.auth.postgresPassword            (optional — auto-generated when empty)

@@ -12,22 +12,22 @@ def registry_url():
 
 @pytest.fixture(scope="session")
 def admin_key():
-    return os.getenv("REGISTRY_ADMIN_KEY", "registry-admin-local-secret")
+    return os.getenv("REGISTRY_ADMIN_KEY", "registry-admin:registry-admin-local-secret")
 
 
 @pytest.fixture(scope="session")
 def read_key():
-    return os.getenv("REGISTRY_READ_KEY", "registry-read-local-secret")
+    return os.getenv("REGISTRY_READ_KEY", "conductor:registry-read-local-secret")
 
 
 @pytest.fixture
 def admin_headers(admin_key):
-    return {"Authorization": f"Bearer {admin_key}"}
+    return {"X-Service-Key": admin_key}
 
 
 @pytest.fixture
 def read_headers(read_key):
-    return {"Authorization": f"Bearer {read_key}"}
+    return {"X-Service-Key": read_key}
 
 
 @pytest.fixture

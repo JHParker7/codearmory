@@ -17,10 +17,12 @@ type Org struct {
 }
 
 // Role defines a named permission set scoped to an Org.
+// Name is empty for user-facing roles and "workflow:<id>" for workflow service roles.
 type Role struct {
 	RoleID         string    `json:"role_id"          gorm:"column:role_id;primaryKey"`
 	CreatedAt      time.Time `json:"created_at"       gorm:"column:created_at"`
 	UpdatedAt      time.Time `json:"updated_at"       gorm:"column:updated_at"`
+	Name           string    `json:"name,omitempty"   gorm:"column:name;default:''"`
 	PermissionsIDs []string  `json:"permissions_ids"  gorm:"column:permissions_ids;serializer:json"`
 	OrgID          *string   `json:"org_id"           gorm:"column:org_id"`
 	OwnerID        string    `json:"owner_id"         gorm:"column:owner_id"`
@@ -60,14 +62,18 @@ type User struct {
 // The JWT itself is never stored — authMiddleware re-validates the signature on
 // each request using the stored PubKey, so retaining the token would be redundant
 // and would expose all active sessions on a database breach.
+// ScopedRoleID, when set, restricts permission checks to only the permissions in
+// that role — regardless of the user's own role or team membership. Used by
+// run-scoped tokens to enforce the workflow's minimal permission set.
 type Session struct {
-	SessionID string    `gorm:"column:session_id;primaryKey"`
-	CreatedAt time.Time `gorm:"column:created_at"`
-	UpdatedAt time.Time `gorm:"column:updated_at"`
-	UserID    string    `gorm:"column:user_id"`
-	ExpiresAt time.Time `gorm:"column:expires_at"`
-	PubKey    string    `gorm:"column:pub_key"`
-	Active    bool      `gorm:"column:active;default:true"`
+	SessionID    string    `gorm:"column:session_id;primaryKey"`
+	CreatedAt    time.Time `gorm:"column:created_at"`
+	UpdatedAt    time.Time `gorm:"column:updated_at"`
+	UserID       string    `gorm:"column:user_id"`
+	ExpiresAt    time.Time `gorm:"column:expires_at"`
+	PubKey       string    `gorm:"column:pub_key"`
+	Active       bool      `gorm:"column:active;default:true"`
+	ScopedRoleID *string   `gorm:"column:scoped_role_id"`
 }
 
 // Invite represents a pending or resolved invitation for a user to join an Org or Team.
@@ -172,3 +178,61 @@ type PermissionsCheck struct {
 	Granted            bool      `json:"granted"              gorm:"column:granted"`
 	Active             bool      `json:"active"               gorm:"column:active;default:true"`
 }
+
+// Secret holds an AES-256-GCM encrypted value scoped to an org.
+// The plaintext value is never returned by the API (write-only).
+type Secret struct {
+	SecretID   string    `json:"secret_id"  gorm:"column:secret_id;primaryKey"`
+	OrgID      string    `json:"org_id"     gorm:"column:org_id;not null"`
+	Name       string    `json:"name"       gorm:"column:name;not null"`
+	Ciphertext []byte    `json:"-"          gorm:"column:ciphertext;not null"`
+	CreatedBy  string    `json:"created_by" gorm:"column:created_by"`
+	Active     bool      `json:"active"     gorm:"column:active;default:true"`
+	CreatedAt  time.Time `json:"created_at" gorm:"column:created_at"`
+	UpdatedAt  time.Time `json:"updated_at" gorm:"column:updated_at"`
+}
+
+func (Secret) TableName() string { return "secrets" }
+
+// OrgSecretProvider records which secrets backend an org uses.
+// Provider is one of: builtin, doppler, vault, aws_sm.
+// Config holds encrypted JSON with provider-specific credentials.
+type OrgSecretProvider struct {
+	OrgID     string    `json:"org_id"    gorm:"column:org_id;primaryKey"`
+	Provider  string    `json:"provider"  gorm:"column:provider;not null"`
+	Config    []byte    `json:"-"         gorm:"column:config"`
+	CreatedAt time.Time `json:"created_at" gorm:"column:created_at"`
+	UpdatedAt time.Time `json:"updated_at" gorm:"column:updated_at"`
+}
+
+func (OrgSecretProvider) TableName() string { return "org_secret_providers" }
+
+// OAuthClient is a registered OAuth 2.0 / OIDC client (e.g. a Forgejo instance).
+// The client secret is stored only as a bcrypt hash; the plaintext is returned
+// once at creation time and never again.
+type OAuthClient struct {
+	ClientID     string    `json:"client_id"     gorm:"column:client_id;primaryKey"`
+	Name         string    `json:"name"          gorm:"column:name"`
+	SecretHash   string    `json:"-"             gorm:"column:secret_hash"`
+	RedirectURIs []string  `json:"redirect_uris" gorm:"column:redirect_uris;serializer:json"`
+	OrgID        string    `json:"org_id"        gorm:"column:org_id;default:''"`
+	Active       bool      `json:"active"        gorm:"column:active;default:true"`
+	CreatedAt    time.Time `json:"created_at"    gorm:"column:created_at"`
+}
+
+func (OAuthClient) TableName() string { return "oauth_clients" }
+
+// OAuthCode is a short-lived single-use authorization code issued during the
+// OAuth2 authorization_code flow. Codes expire after 10 minutes.
+type OAuthCode struct {
+	Code        string    `gorm:"column:code;primaryKey"`
+	ClientID    string    `gorm:"column:client_id"`
+	UserID      string    `gorm:"column:user_id"`
+	RedirectURI string    `gorm:"column:redirect_uri"`
+	Scopes      []string  `gorm:"column:scopes;serializer:json"`
+	Used        bool      `gorm:"column:used;default:false"`
+	ExpiresAt   time.Time `gorm:"column:expires_at"`
+	CreatedAt   time.Time `gorm:"column:created_at"`
+}
+
+func (OAuthCode) TableName() string { return "oauth_codes" }

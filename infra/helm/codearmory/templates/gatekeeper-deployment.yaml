@@ -54,11 +54,7 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.gatekeeper.env.otelEndpoint | quote }}
             {{- end }}
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "codearmory.fullname" . }}-gatekeeper
-                  key: database-url
+            {{- include "codearmory.postgresql.env" (list . "gatekeeper" "gatekeeper" (include "codearmory.fullname" .)) | nindent 12 }}
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
@@ -69,6 +65,24 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-gatekeeper
                   key: gatekeeper-services
+            - name: REGISTRY_URL
+              value: "http://{{ include "codearmory.fullname" . }}-registry:{{ .Values.registry.port }}"
+            - name: REGISTRY_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-gatekeeper
+                  key: registry-service-key
+            {{- if .Values.gatekeeper.env.oidcIssuer }}
+            - name: OIDC_ISSUER
+              value: {{ .Values.gatekeeper.env.oidcIssuer | quote }}
+            {{- end }}
+            {{- if .Values.gatekeeper.secret.oidcSigningKey }}
+            - name: OIDC_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-gatekeeper
+                  key: oidc-signing-key
+            {{- end }}
           livenessProbe:
             tcpSocket:
               port: http

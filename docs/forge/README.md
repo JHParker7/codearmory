@@ -50,6 +50,35 @@ All variables support a `_FILE` suffix variant (e.g. `DATABASE_URL_FILE`) that r
 |---|---|---|
 | `CONTAINER_MEMORY_LIMIT` | `256m` | Memory limit per container |
 | `CONTAINER_CPU_QUOTA` | `50000` | CPU quota (100000 = one full core) |
+| `FORGE_NETWORK_MODE` | `none` | Docker network mode for execution containers. Defaults to `none` (no network access). Set to the name of a Docker network to enable controlled outbound access. See **Egress proxy** below. |
+| `FORGE_EGRESS_PROXY` | — | HTTP proxy URL injected as `HTTP_PROXY`/`HTTPS_PROXY` into every execution container. When set, forge injects the proxy vars automatically so tools like `tofu`, `npm`, and `curl` route through it without per-execution configuration. |
+
+### Egress proxy (controlled outbound access)
+
+By default, execution containers have no network access (`FORGE_NETWORK_MODE=none`). For CI/CD workloads that need to download modules or packages, use the `egress-proxy` sidecar from `src/systems/egress-proxy` instead of opening broad internet access.
+
+The recommended setup:
+
+1. Create a Docker bridge network with `internal: true` (no direct internet routing):
+   ```bash
+   docker network create --internal forge-exec
+   ```
+2. Run `egress-proxy` on both `forge-exec` and a network that has internet access. Configure `PROXY_ALLOWED_DOMAINS` with a comma-separated list of permitted hostnames. Wildcards (`*.github.com`) are supported.
+3. Set `FORGE_NETWORK_MODE=forge-exec` and `FORGE_EGRESS_PROXY=http://<proxy-host>:3128` on forge.
+
+Execution containers are then isolated to the `forge-exec` network (no direct internet) but can reach the allowlisted domains through the proxy. The compose file at `infra/local/compose.yml` ships a ready-to-use configuration.
+
+**Default allowed domains** (overridable via `FORGE_PROXY_ALLOWED_DOMAINS` in compose):
+
+| Domain | Purpose |
+|--------|---------|
+| `registry.terraform.io` | OpenTofu/Terraform module registry |
+| `releases.hashicorp.com` | Provider binary downloads |
+| `github.com`, `*.github.com` | GitHub |
+| `raw.githubusercontent.com`, `objects.githubusercontent.com` | GitHub raw content |
+| `registry.npmjs.org` | npm packages |
+| `pypi.org`, `files.pythonhosted.org` | Python packages |
+| `proxy.golang.org`, `sum.golang.org`, `storage.googleapis.com` | Go modules |
 
 ### Kubernetes runtime variables
 
@@ -151,7 +180,7 @@ curl -X POST http://conductor:8082/executions \
 ### Container sandbox (Docker runtime)
 
 Every container runs with:
-- `NetworkMode: none` — no network access
+- `NetworkMode` — controlled by `FORGE_NETWORK_MODE` (default `none`, no network access)
 - `ReadonlyRootfs: true` — read-only root filesystem
 - `/tmp` — writable tmpfs (64 MB)
 - `CapDrop: ALL` — all Linux capabilities dropped

@@ -10,8 +10,8 @@ Client
   ▼
 Conductor :8082
   │
-  ├── block list check
-  │     Source IP blocked after 10 conductor-level 401s? → 403 Forbidden
+  ├── block list check (skipped when token is missing or malformed)
+  │     (source IP, user ID) blocked after 10 post-auth 401s? → 403 Forbidden
   │
   ▼
   lookupEndpoint(method, path)
@@ -110,7 +110,7 @@ Each registered endpoint declares:
 - **Permission enforcement** — Backend services that need per-resource access control must call Gatekeeper's `POST /check_permissions` themselves, using the forwarded `Authorization` header (set `forward_auth=true` in the registry so Conductor passes it through).
 - **Auth header stripping** — For `forward_auth=false` services, `Authorization` is removed before forwarding so backends cannot replay it against other services. `X-Service-Key`, `X-User-ID`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Real-IP` are always stripped from incoming requests.
 - **Forward signing** — When `CONDUCTOR_FORWARD_KEY` is set, every forwarded request carries `X-Conductor-Token` (HMAC-SHA256 of `conductor:{user_id}:{timestamp}`) and `X-Conductor-Timestamp`. Backend services with `forward_auth=false` can verify these to confirm `X-User-ID` was injected by Conductor and not spoofed. The token window is 30 seconds.
-- **Source IP block list** — If Conductor rejects requests from a source IP with 401 ten times, the IP is blocked for one hour. The counter resets whenever a request from that IP authenticates successfully, so a legitimate user who recovers from a mistake is not penalised. Once an IP is blocked, a subsequent successful request does not unblock it — the full hour must elapse. Only conductor-level rejections count; backend permission failures (403 from the service) do not.
+- **(IP, user ID) block list** — If Conductor returns 401 for the same (source IP, user ID) pair ten times with a well-formed JWT, that pair is blocked for one hour. The failure counter resets on a successful authentication, so a legitimate user who recovers from a mistake is not penalised. Blocked pairs remain blocked for the full hour — a subsequent success does not unblock early. Only well-formed JWT rejections count; missing or malformed tokens do not increment the counter. Backend permission failures (403 from the service) do not count either.
 
 ## Metrics
 
@@ -118,4 +118,4 @@ Each registered endpoint declares:
 |---|---|
 | `conductor.requests.allowed.total` | Requests that passed the user-existence check |
 | `conductor.requests.rejected.total` | Requests rejected by the user-existence check, labelled by `reason`: `no_token`, `malformed_token`, `unauthorized`, `user_not_found`, `gatekeeper_error` |
-| `conductor.ips.blocked.total` | Source IPs added to the block list, labelled by `source_ip` |
+| `conductor.ips.blocked.total` | (IP, user ID) pairs added to the block list, labelled by `source_ip` and `user_id` |

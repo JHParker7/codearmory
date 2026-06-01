@@ -14,8 +14,8 @@ import pytest
 import requests
 
 
-_SERVICE_NAME = "blueprints"
-_SERVICE_PLAIN_KEY = "blueprints-local-secret"
+_SERVICE_NAME = "test-service"
+_SERVICE_PLAIN_KEY = "test-service-local-secret"
 _SERVICE_KEY_HEADER = f"{_SERVICE_NAME}:{_SERVICE_PLAIN_KEY}"
 
 

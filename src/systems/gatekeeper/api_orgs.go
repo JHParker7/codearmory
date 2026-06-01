@@ -38,16 +38,32 @@ func handleListOrgs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := r.URL.Query()
+	// Always scope results to the caller's own org.
 	var filter Org
-	if v := q.Get("org_id"); v != "" {
-		filter.OrgID = v
+	if callerRow, err := (User{UserID: callerID}).Get(ctx); err == nil {
+		if oid := callerRow.(User).OrgID; oid != nil {
+			filter.OrgID = *oid
+		}
+	}
+	// A caller with no org has nothing to list — return empty rather than leaking all orgs.
+	// (GORM's Where(struct) ignores zero-value fields, so an empty OrgID would match all.)
+	if filter.OrgID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]Org{}) //nolint:errcheck
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+
+	q := r.URL.Query()
+	if v := q.Get("org_id"); v != "" && v != filter.OrgID {
+		// Caller requested a specific org_id that doesn't match their own — nothing to return.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]Org{}) //nolint:errcheck
+		span.SetStatus(codes.Ok, "")
+		return
 	}
 	if v := q.Get("org_name"); v != "" {
 		filter.OrgName = v
-	}
-	if v := q.Get("owner_id"); v != "" {
-		filter.OwnerID = v
 	}
 
 	rows, err := filter.List(ctx, limit, offset)
@@ -135,15 +151,30 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		attribute.String("user.id", userID),
 	))
 
-	permName := fmt.Sprintf("%s-%s-owners-permissions", owner.Username, org.OrgName)
-	if err := grantPermissions(ctx, connect().WithContext(ctx), userID, permName,
-		[]string{"getOrg", "updateOrg", "deleteOrg", "inviteUser"},
-		fmt.Sprintf("gatekeeper/orgs/%s", org.OrgID)); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to grant owner permissions")
-		slog.Error("create org: failed to grant owner permissions", "caller_id", callerID, "org_id", org.OrgID, "error", err)
-		http.Error(w, "failed to give owner permissions", http.StatusInternalServerError)
+	templateVars := map[string]string{
+		"org_id":   org.OrgID,
+		"user_id":  userID,
+		"username": owner.Username,
+	}
+	db := connect().WithContext(ctx)
+	orgGrants := defaultGrantsFor("org")
+	if len(orgGrants) == 0 {
+		slog.Error("create org: no default grants for 'org' — owner will have no permissions; check that the registry is reachable and has default_grants seeded", "org_id", org.OrgID, "user_id", userID)
+		http.Error(w, "service configuration error: permissions not available", http.StatusServiceUnavailable)
 		return
+	}
+	for _, grant := range orgGrants {
+		permName := fmt.Sprintf("%s-%s %s permissions", owner.Username, org.OrgName, grant.ServiceName)
+		resources := applyGrantTemplates(grant.Resources, templateVars)
+		for _, resource := range resources {
+			if err := grantServicePermissions(ctx, db, grant.ServiceName, userID, permName, grant.Actions, resource); err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "failed to grant owner permissions")
+				slog.Error("create org: failed to grant owner permissions", "caller_id", callerID, "org_id", org.OrgID, "service", grant.ServiceName, "error", err)
+				http.Error(w, "failed to give owner permissions", http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	span.SetAttributes(attribute.String("org.id", org.OrgID))

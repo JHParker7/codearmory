@@ -163,3 +163,88 @@ Manages Terraform state at `/state/{username}/{workspace}`.
 | `state unlock <username> <workspace> [--data <json\|@file>]` | Release workspace lock |
 
 The `--data` flag on `lock` and `unlock` accepts a JSON string or a `@filename` to read from a file. The lock ID in the data must match the ID of the current lock when unlocking.
+
+### `ci`
+
+Manage CI/CD steps, pipelines, and runs. Steps are reusable building blocks; pipelines compose steps using a DSL (`step1->step2->[parallel_a,parallel_b]->step3`); runs are triggered executions of a pipeline.
+
+**Steps**
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `ci create step <name>` | `--action`, `--with <json>`, `--image`, `--run`, `--env KEY=VAL` (repeatable), `--timeout`, `--description`, `-f <file>` | Create a reusable step |
+| `ci list steps` | | List all steps |
+| `ci get step <id>` | | Get a step |
+| `ci update step <id>` | `--action`, `--with <json>`, `--image`, `--run`, `--env KEY=VAL` (repeatable), `--timeout`, `--description`, `-f <file>` | Update a step |
+| `ci delete step <id>` | | Delete a step |
+
+**Pipelines**
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `ci create pipeline <repo> <branch> [dsl]` | `-f <file>` | Create a pipeline from a DSL string or JSON file |
+| `ci list pipelines` | | List all pipelines |
+| `ci get pipeline <id>` | | Get a pipeline with full step definitions |
+| `ci update pipeline <id> [dsl]` | `--name`, `--description`, `-f <file>` | Replace a pipeline's step list |
+| `ci delete pipeline <id>` | | Delete a pipeline |
+
+**Runs**
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `ci run pipeline <id>` | `--input KEY=VAL` (repeatable, `-i`) | Trigger a pipeline run |
+| `ci list runs` | `--pipeline <id>` | List runs, optionally filtered by pipeline |
+| `ci get run <id>` | | Get a run with step details |
+| `ci cancel run <id>` | | Cancel a pending or running run |
+
+**Actions**
+
+| Command | Description |
+|---------|-------------|
+| `ci list actions` | List available workflow actions from the service catalog |
+
+For `forge/run` steps, `--image` and `--run` are convenience flags that build the required `with` JSON automatically. For all other actions, `--with <json>` is required.
+
+### `hooks`
+
+Manage webhook pipeline rules and event history.
+
+**Rules**
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `hooks rules create` | `--name`, `--repo`, `--events` (repeatable), `--ref-filter`, `--workflow <id>`, `--secret`, `--input KEY=VAL` (repeatable, `-i`) | Create a webhook pipeline rule |
+| `hooks rules list` | | List rules |
+| `hooks rules get <id>` | | Get a rule |
+| `hooks rules update <id>` | `--name`, `--repo`, `--events` (repeatable), `--ref-filter`, `--workflow <id>`, `--secret`, `--clear-secret`, `--input KEY=VAL` (repeatable, `-i`) | Update a rule (all fields replaced) |
+| `hooks rules delete <id>` | | Delete a rule |
+
+On `rules update`, omit `--secret` to leave the existing secret unchanged, pass `--clear-secret` to remove it, or pass `--secret <value>` to replace it.
+
+**Events**
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `hooks events list` | `--repo` | List received webhook events, optionally filtered by repo |
+| `hooks events get <id>` | | Get an event with its trigger details |
+
+### `tickets`
+
+Manage tickets and comments.
+
+**Tickets**
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `tickets create` | `--title` (required), `--description`, `--priority` (low/medium/high/critical), `--assignee <user-id>`, `--workflow <id>`, `--run <id>`, `--forge-execution <id>` | Create a ticket |
+| `tickets list` | `--status` (open/in_progress/resolved/closed), `--priority`, `--assignee <user-id>` | List tickets |
+| `tickets get <id>` | | Get a ticket with its comments |
+| `tickets update <id>` | `--title`, `--description`, `--status`, `--priority`, `--assignee <user-id>`, `--workflow <id>`, `--run <id>`, `--forge-execution <id>` | Update a ticket (title fetched automatically if omitted) |
+| `tickets delete <id>` | | Delete a ticket |
+
+**Comments**
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `tickets comment add <ticket-id>` | `--body` (required) | Add a comment to a ticket |
+| `tickets comment delete <ticket-id> <comment-id>` | | Delete a comment |
