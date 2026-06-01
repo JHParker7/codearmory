@@ -73,6 +73,9 @@ type ServiceDefaultGrant struct {
 
 // ServiceAction is a callable workflow action registered by a service.
 // BodyTransforms and AsyncConfig are stored as raw JSONB and passed through.
+// GkService/GkAction/GkResource are the gatekeeper permission triple required
+// to call this action, derived from the matching service_endpoint record. Empty
+// when the endpoint has no registered service_endpoint entry.
 type ServiceAction struct {
 	ActionID       string          `json:"action_id"`
 	ServiceID      string          `json:"service_id"`
@@ -86,6 +89,9 @@ type ServiceAction struct {
 	Active         bool            `json:"active"`
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
+	GkService      string          `json:"gk_service,omitempty"`
+	GkAction       string          `json:"gk_action,omitempty"`
+	GkResource     string          `json:"gk_resource,omitempty"`
 }
 
 // resolveHost is the DNS lookup used by validateServiceURL. Tests can replace it.
@@ -215,9 +221,15 @@ func handleListActions(w http.ResponseWriter, r *http.Request) {
 		SELECT sa.action_id, sa.service_id, s.name, s.url,
 		       sa.name, sa.method, sa.path,
 		       sa.body_transforms, sa.async_config,
-		       sa.active, sa.created_at, sa.updated_at
+		       sa.active, sa.created_at, sa.updated_at,
+		       COALESCE(se.action, ''), COALESCE(se.resource, '')
 		FROM service_actions sa
 		JOIN services s ON sa.service_id = s.service_id
+		LEFT JOIN service_endpoints se
+		       ON se.service_id = sa.service_id
+		      AND se.method     = sa.method
+		      AND se.path       = sa.path
+		      AND se.active     = true
 		WHERE sa.active = true AND s.active = true
 		ORDER BY sa.name
 	`)
@@ -237,12 +249,16 @@ func handleListActions(w http.ResponseWriter, r *http.Request) {
 			&a.Name, &a.Method, &a.Path,
 			&bodyTransforms, &asyncConfig,
 			&a.Active, &a.CreatedAt, &a.UpdatedAt,
+			&a.GkAction, &a.GkResource,
 		); err != nil {
 			slog.Error("list actions: scan", "error", err)
 			continue
 		}
 		a.BodyTransforms = json.RawMessage(bodyTransforms)
 		a.AsyncConfig = json.RawMessage(asyncConfig)
+		if a.GkAction != "" {
+			a.GkService = a.ServiceName
+		}
 		actions = append(actions, a)
 	}
 	if rows.Err() != nil {
@@ -700,6 +716,9 @@ func startHealthCollector(ctx context.Context) {
 }
 
 func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
+	if !requireReadAuth(w, r) {
+		return
+	}
 	healthMu.RLock()
 	cache := healthCache
 	healthMu.RUnlock()
