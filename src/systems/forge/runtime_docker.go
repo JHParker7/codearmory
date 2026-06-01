@@ -28,10 +28,11 @@ func newDockerRuntime() (*DockerRuntime, error) {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
 	return &DockerRuntime{
-		client:    c,
-		memLimit:  256 * 1024 * 1024, // 256 MB
-		cpuQuota:  50000,              // 50% of one core (100000 = full core)
-		pidsLimit: 64,
+		client:     c,
+		memLimit:   256 * 1024 * 1024, // 256 MB
+		cpuQuota:   50000,              // 50% of one core (100000 = full core)
+		pidsLimit:  64,
+		allowedNet: envOrDefault("FORGE_NETWORK_MODE", "none"),
 	}, nil
 }
 
@@ -62,9 +63,7 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 			AttachStderr: true,
 		},
 		&container.HostConfig{
-			// NetworkMode=none drops all network interfaces so the container cannot
-			// reach the internet, the host, or other containers.
-			NetworkMode: "none",
+			NetworkMode: container.NetworkMode(r.allowedNet),
 			// ReadonlyRootfs prevents writes to the image layers. /tmp is a writable
 			// tmpfs mount so programs that need a scratch directory still work.
 			ReadonlyRootfs: true,
