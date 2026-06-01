@@ -14,32 +14,61 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 )
 
+// DockerRuntime runs executions as short-lived Docker containers on the local daemon.
+// Each container gets a read-only root filesystem, a 64 MB /tmp tmpfs, capped memory
+// and CPU, and is placed on the network specified by FORGE_NETWORK_MODE (default: none).
 type DockerRuntime struct {
-	client     *client.Client
-	memLimit   int64
-	cpuQuota   int64
-	pidsLimit  int64
-	allowedNet string
+	client      *client.Client
+	memLimit    int64
+	cpuQuota    int64
+	pidsLimit   int64
+	allowedNet  string
+	egressProxy string // HTTP proxy URL injected into containers, e.g. "http://egress-proxy:3128"
 }
+
+// dangerousNetModes are Docker network modes that grant containers access to the
+// host network stack or the default Docker bridge, defeating sandbox isolation.
+var dangerousNetModes = map[string]bool{"host": true, "bridge": true}
 
 func newDockerRuntime() (*DockerRuntime, error) {
 	c, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
+	net := envOrDefault("FORGE_NETWORK_MODE", "none")
+	if dangerousNetModes[net] {
+		return nil, fmt.Errorf("FORGE_NETWORK_MODE=%q is not permitted; use \"none\" or a custom bridge network name", net)
+	}
 	return &DockerRuntime{
-		client:     c,
-		memLimit:   256 * 1024 * 1024, // 256 MB
-		cpuQuota:   50000,              // 50% of one core (100000 = full core)
-		pidsLimit:  64,
-		allowedNet: envOrDefault("FORGE_NETWORK_MODE", "none"),
+		client:      c,
+		memLimit:    256 * 1024 * 1024, // 256 MB
+		cpuQuota:    50000,              // 50% of one core (100000 = full core)
+		pidsLimit:   64,
+		allowedNet:  net,
+		egressProxy: envOrDefault("FORGE_EGRESS_PROXY", ""),
 	}, nil
 }
 
+// Run pulls the image if not present, creates a sandboxed container, and blocks
+// until completion or timeout. The container is always removed on return.
 func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, error) {
 	envList := make([]string, 0, len(exec.Env))
 	for k, v := range exec.Env {
 		envList = append(envList, k+"="+v)
+	}
+	if r.egressProxy != "" {
+		for _, pair := range [][2]string{
+			{"HTTP_PROXY", r.egressProxy},
+			{"HTTPS_PROXY", r.egressProxy},
+			{"NO_PROXY", "localhost,127.0.0.1"},
+			{"http_proxy", r.egressProxy},
+			{"https_proxy", r.egressProxy},
+			{"no_proxy", "localhost,127.0.0.1"},
+		} {
+			if _, exists := exec.Env[pair[0]]; !exists {
+				envList = append(envList, pair[0]+"="+pair[1])
+			}
+		}
 	}
 
 	if _, err := r.client.ImageInspect(ctx, exec.Image); err != nil {
@@ -150,6 +179,8 @@ func (r *DockerRuntime) collectLogs(containerID string) (stdout, stderr string, 
 	return stdout, stderr, err
 }
 
+// Cancel is a no-op for the Docker runtime: cancellation is driven by context
+// cancellation inside Run, which stops the container via ContainerStop.
 func (r *DockerRuntime) Cancel(_ context.Context, executionID string) error {
 	// Cancellation is handled by context cancellation in Run().
 	// The worker cancels the context, which unblocks ContainerWait and stops the container.

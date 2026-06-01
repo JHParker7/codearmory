@@ -53,46 +53,23 @@ var allowedImages map[string]bool
 func initAllowedImages(raw string) {
 	if raw == "" {
 		allowedImages = nil // deny-all when not configured
+		slog.Warn("ALLOWED_IMAGES is not set — all image submissions will be rejected; set ALLOWED_IMAGES to a comma-separated list of permitted images")
 		return
 	}
 	allowedImages = make(map[string]bool)
 	for _, img := range splitTrim(raw) {
-		if img != "" {
-			allowedImages[img] = true
-		}
+		allowedImages[img] = true
 	}
 }
 
 func splitTrim(s string) []string {
 	parts := make([]string, 0)
-	for _, p := range splitComma(s) {
-		if t := trimSpace(p); t != "" {
+	for _, p := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(p); t != "" {
 			parts = append(parts, t)
 		}
 	}
 	return parts
-}
-
-func splitComma(s string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == ',' {
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-	return append(out, s[start:])
-}
-
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
-		s = s[:len(s)-1]
-	}
-	return s
 }
 
 // checkGatekeeper calls gatekeeper's /check_permissions endpoint with the Bearer
