@@ -506,7 +506,23 @@ func (p *WorkerPool) pollAction(ctx context.Context, ts *tokenStore, def ActionD
 				return "", context.Canceled
 			}
 		}
-		// pending/running — keep polling
+		// Status is not in any known terminal or cancel set — keep polling.
+		// Log a warning if the status is non-empty and unrecognised so operators
+		// can detect misconfigured action definitions before the step times out.
+		if status != "" {
+			allKnown := append(append(def.Async.SuccessStates, def.Async.FailureStates...), def.Async.CancelStates...)
+			known := false
+			for _, s := range allKnown {
+				if status == s {
+					known = true
+					break
+				}
+			}
+			if !known {
+				slog.Warn("poll: unrecognised status value, continuing to poll — check action definition",
+					"action", def.Name, "job_id", jobID, "status", status)
+			}
+		}
 	}
 }
 

@@ -131,11 +131,11 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 	}
 	if wfOrgID, err := fetchWorkflowOrgID(ctx, req.WorkflowID); err != nil {
 		slog.Warn("create rule: workflow not found or unreachable", "workflow_id", req.WorkflowID, "error", err)
-		http.Error(w, "workflow_id not found", http.StatusBadRequest)
+		http.Error(w, "workflow_id not found", http.StatusUnprocessableEntity)
 		return
 	} else if wfOrgID != orgID {
 		slog.Warn("create rule: cross-org workflow reference", "user_id", userID, "workflow_id", req.WorkflowID, "workflow_org", wfOrgID, "caller_org", orgID)
-		http.Error(w, "workflow_id not found", http.StatusBadRequest)
+		http.Error(w, "workflow_id not found", http.StatusUnprocessableEntity)
 		return
 	}
 	if req.InputMapping == nil {
@@ -284,11 +284,11 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	}
 	if wfOrgID, err := fetchWorkflowOrgID(ctx, req.WorkflowID); err != nil {
 		slog.Warn("update rule: workflow not found or unreachable", "rule_id", id, "workflow_id", req.WorkflowID, "error", err)
-		http.Error(w, "workflow_id not found", http.StatusBadRequest)
+		http.Error(w, "workflow_id not found", http.StatusUnprocessableEntity)
 		return
 	} else if wfOrgID != orgID {
 		slog.Warn("update rule: cross-org workflow reference", "user_id", userID, "rule_id", id, "workflow_id", req.WorkflowID, "workflow_org", wfOrgID, "caller_org", orgID)
-		http.Error(w, "workflow_id not found", http.StatusBadRequest)
+		http.Error(w, "workflow_id not found", http.StatusUnprocessableEntity)
 		return
 	}
 	if req.InputMapping == nil {

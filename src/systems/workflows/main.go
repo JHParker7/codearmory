@@ -241,6 +241,22 @@ func limitBody(next http.Handler) http.Handler {
 	})
 }
 
+// recoverStuckRuns marks any runs left in 'running' state (from a previous pod
+// crash) as 'failed' so they do not block the worker queue indefinitely.
+// Sessions are nulled out; their JWTs expire naturally within the 1-hour TTL.
+func recoverStuckRuns() {
+	result := connect().Exec(
+		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE status='running'",
+	)
+	if result.Error != nil {
+		slog.Error("startup: failed to recover stuck runs", "error", result.Error)
+		return
+	}
+	if result.RowsAffected > 0 {
+		slog.Warn("startup: recovered stuck runs from previous pod", "count", result.RowsAffected)
+	}
+}
+
 func main() {
 	logLevel := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
@@ -266,7 +282,12 @@ func main() {
 		slog.Error("failed to run AutoMigrate", "error", err)
 		os.Exit(1)
 	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_runs_queue ON workflow_runs (status, created_at) WHERE status IN ('pending', 'running')`).Error; err != nil {
+		slog.Warn("failed to create workflow_runs index", "error", err)
+	}
 	slog.Info("database initialized")
+
+	recoverStuckRuns()
 
 	initServices()
 	gatekeeperClient = newGatekeeperClient()
@@ -274,6 +295,13 @@ func main() {
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	startCatalogPoller(ctx)
+
+	actionCatalogMu.RLock()
+	catalogSize := len(actionCatalog)
+	actionCatalogMu.RUnlock()
+	if catalogSize == 0 {
+		slog.Warn("action catalog empty after startup — registry may be unavailable; catalog actions will fail until it responds")
+	}
 
 	workers := newWorkerPool()
 	workers.Start(ctx, 5)

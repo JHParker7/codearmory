@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,6 +22,10 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 )
+
+// errWorkflowNotFound is returned by dispatchWorkflow when the target workflow
+// does not exist. Used to deactivate stale rules that reference deleted workflows.
+var errWorkflowNotFound = errors.New("workflow not found")
 
 // webhookPayload is the JSON body expected on POST /hooks.
 type webhookPayload struct {
@@ -127,14 +132,22 @@ func matchAndDispatch(ctx context.Context, eventID string, payload webhookPayloa
 				attribute.String("workflow.id", rws.WorkflowID),
 			))
 		}
+		// Deactivate rules that reference a deleted workflow so they stop firing.
+		if errors.Is(trigErr, errWorkflowNotFound) {
+			slog.Warn("matchAndDispatch: workflow not found — deactivating rule",
+				"rule_id", rws.RuleID, "workflow_id", rws.WorkflowID)
+			go func(ruleID string) {
+				if err := (PipelineRule{RuleID: ruleID}).Remove(context.Background()); err != nil {
+					slog.Error("matchAndDispatch: deactivate zombie rule", "rule_id", ruleID, "error", err)
+				}
+			}(rws.RuleID)
+		}
+
 		results = append(results, triggerResult{Trigger: trig, RuleName: rws.Name, Success: success})
 
-		// Persist the trigger record (fire-and-forget after response is sent).
-		go func(t HookTrigger) {
-			if err := t.Add(context.Background()); err != nil {
-				slog.Error("matchAndDispatch: insert trigger", "trigger_id", t.TriggerID, "error", err)
-			}
-		}(trig)
+		if err := trig.Add(ctx); err != nil {
+			slog.Error("matchAndDispatch: insert trigger", "trigger_id", trig.TriggerID, "error", err)
+		}
 	}
 
 	return results, successCount, failCount
@@ -226,10 +239,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		eventStatus = "partial"
 	}
 
-	// Update the hook_events row (fire-and-forget).
-	go func() {
-		updateEventStatus(eventID, total, eventStatus)
-	}()
+	updateEventStatus(eventID, total, eventStatus)
 
 	event := HookEvent{
 		EventID:      eventID,
@@ -293,6 +303,9 @@ func dispatchWorkflow(ctx context.Context, workflowID, triggeredBy, orgID string
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errWorkflowNotFound
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("workflows returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}

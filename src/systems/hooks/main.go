@@ -155,6 +155,10 @@ func main() {
 	}
 	slog.Info("database initialized")
 
+	if hooksTriggerKey == "" {
+		slog.Warn("HOOKS_TRIGGER_KEY not set — internal trigger endpoint will reject all hook-to-workflow dispatch requests")
+	}
+
 	gatekeeperClient = newGatekeeperClient()
 	registry.StartKeyRotation(ctx, gatekeeperURL, "hooks",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
