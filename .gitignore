@@ -8,6 +8,8 @@ src/systems/hooks/hooks
 src/systems/forge/forge
 src/systems/mcp/codearmory-mcp
 src/systems/registry/registry
+src/systems/gitea/gitea
+src/systems/containers/containers
 src/cli/armory
 
 # SQLite databases
@@ -30,6 +32,9 @@ load-tests/package-lock.json
 .env
 .vscode/
 .continue/
+
+# Claude Code session data — never commit
+.claude/
 
 # Local security notes — never commit
 SECURITY_FINDINGS.md
