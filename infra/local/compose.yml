@@ -39,7 +39,7 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,hooks=hooks-local-secret,gitea=gitea-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
+      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,hooks=hooks-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
       OIDC_ISSUER: http://localhost:8080
@@ -275,14 +275,14 @@ services:
 
   gitea-integration:
     build:
-      context: ../../src/systems/gitea
+      context: ../../src/systems/gitea_integration
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - "export GITEA_ADMIN_TOKEN=$(cat /token/token.txt) && exec ./gitea"
+      - "export GITEA_ADMIN_TOKEN=$(cat /token/token.txt) && exec ./gitea_integration"
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gitea_integration
       GATEKEEPER_URL: http://gatekeeper:8081
-      GATEKEEPER_SERVICE_KEY: gitea-local-secret
+      GATEKEEPER_SERVICE_KEY: gitea-integration-local-secret
       GITEA_URL: http://forgejo:3000
     ports:
       - "8088:8088"

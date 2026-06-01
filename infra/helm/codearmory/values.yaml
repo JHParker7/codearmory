@@ -408,7 +408,7 @@ egressProxy:
 giteaIntegration:
   enabled: false
   image:
-    repository: codearmory/gitea
+    repository: codearmory/gitea_integration
     tag: ""
   replicaCount: 1
   port: 8088
@@ -426,12 +426,12 @@ giteaIntegration:
     # PostgreSQL DSN. Auto-constructed when left empty.
     databaseUrl: ""
     # Base URL of your Forgejo/Gitea instance, e.g. https://git.example.com
-    # Required when gitea.enabled is true.
+    # Required when giteaIntegration.enabled is true.
     giteaUrl: ""
     # Admin API token for the Forgejo/Gitea instance.
-    # Required when gitea.enabled is true.
+    # Required when giteaIntegration.enabled is true.
     giteaAdminToken: ""
-    # Must match the gitea entry in gatekeeper.secret.gatekeeperServices.
+    # Must match the gitea_integration entry in gatekeeper.secret.gatekeeperServices.
     gatekeeperServiceKey: ""
   tls:
     certSecret: ""
