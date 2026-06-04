@@ -360,6 +360,8 @@ func totpValidateForUser(ctx context.Context, userID, code string) (bool, int, s
 }
 
 // totpValidate decrypts cred's secret and validates code against it.
+// It also enforces per-step replay protection: the same 6-digit code is rejected
+// if it was already accepted within the current 30-second time step.
 func totpValidate(ctx context.Context, userID, code string, cred *TOTPCredential) (bool, int, string) {
 	secret, err := decryptSecret(cred.EncSecret)
 	if err != nil {
@@ -368,6 +370,16 @@ func totpValidate(ctx context.Context, userID, code string, cred *TOTPCredential
 	}
 	if !totp.Validate(code, secret) {
 		return false, http.StatusUnauthorized, "invalid TOTP code"
+	}
+	// Reject replay: same code already accepted in this 30-second step.
+	if cred.LastUsedCode == code && time.Now().Unix()/30 == cred.LastUsedAt.Unix()/30 {
+		return false, http.StatusUnauthorized, "invalid TOTP code"
+	}
+	// Record the accepted code to block replay within this time step.
+	cred.LastUsedCode = code
+	cred.LastUsedAt = time.Now().UTC()
+	if err := cred.Update(ctx); err != nil {
+		slog.Error("totp validate: failed to record used code", "user_id", userID, "error", err)
 	}
 	return true, http.StatusOK, ""
 }

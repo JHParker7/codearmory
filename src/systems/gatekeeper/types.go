@@ -246,6 +246,10 @@ type TOTPCredential struct {
 	EncSecret    []byte    `gorm:"column:enc_secret"`
 	Confirmed    bool      `gorm:"column:confirmed;default:false"`
 	Active       bool      `gorm:"column:active;default:true"`
+	// LastUsedCode and LastUsedAt track the most recently accepted TOTP code so
+	// the same code cannot be replayed within the same 30-second time step.
+	LastUsedCode string    `gorm:"column:last_used_code"`
+	LastUsedAt   time.Time `gorm:"column:last_used_at"`
 	CreatedAt    time.Time `gorm:"column:created_at"`
 	UpdatedAt    time.Time `gorm:"column:updated_at"`
 }

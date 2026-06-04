@@ -4,17 +4,17 @@ fullnameOverride: ""
 # Registry prefix prepended to all codearmory service images.
 # Set to your registry host, e.g. "ghcr.io/myorg" or "registry.example.com/codearmory".
 # Leave empty to use the repository value as-is.
-imageRegistry: "ghcr.io"
+imageRegistry: "ghcr.io/code-armory-app"
 
 # Default image tag applied to all services when the per-service tag is empty.
-imageTag: latest
+imageTag: alpha-1.2.0
 imagePullPolicy: IfNotPresent
 imagePullSecrets: []
 
 # ── Gatekeeper ────────────────────────────────────────────────────────────────
 gatekeeper:
   image:
-    repository: codearmory/gatekeeper
+    repository: gatekeeper
     tag: ""
   replicaCount: 1
   port: 8081
@@ -74,7 +74,7 @@ gatekeeper:
 # ── Registry ──────────────────────────────────────────────────────────────────
 registry:
   image:
-    repository: codearmory/registry
+    repository: registry
     tag: ""
   replicaCount: 1
   port: 8082
@@ -114,7 +114,7 @@ registry:
 blueprints:
   enabled: true
   image:
-    repository: codearmory/blueprints
+    repository: blueprints
     tag: ""
   replicaCount: 1
   port: 8084
@@ -158,7 +158,7 @@ blueprints:
 # ── Conductor ─────────────────────────────────────────────────────────────────
 conductor:
   image:
-    repository: codearmory/conductor
+    repository: conductor
     tag: ""
   replicaCount: 1
   port: 8080
@@ -204,7 +204,7 @@ conductor:
 forge:
   enabled: true
   image:
-    repository: codearmory/forge
+    repository: forge
     tag: ""
   replicaCount: 1
   port: 8083
@@ -256,7 +256,7 @@ forge:
 workflows:
   enabled: true
   image:
-    repository: codearmory/workflows
+    repository: workflows
     tag: ""
   replicaCount: 1
   port: 8085
@@ -296,7 +296,7 @@ workflows:
 tickets:
   enabled: true
   image:
-    repository: codearmory/tickets
+    repository: tickets
     tag: ""
   replicaCount: 1
   port: 8086
@@ -326,7 +326,7 @@ tickets:
 hooks:
   enabled: true
   image:
-    repository: codearmory/hooks
+    repository: hooks
     tag: ""
   replicaCount: 1
   port: 8087
@@ -359,7 +359,7 @@ hooks:
 containers:
   enabled: true
   image:
-    repository: codearmory/containers
+    repository: containers
     tag: ""
   replicaCount: 1
   port: 8089
@@ -393,7 +393,7 @@ containers:
 egressProxy:
   enabled: true
   image:
-    repository: codearmory/egress-proxy
+    repository: egress-proxy
     tag: ""
   replicaCount: 1
   port: 3128
@@ -413,7 +413,7 @@ egressProxy:
 giteaIntegration:
   enabled: false
   image:
-    repository: codearmory/gitea_integration
+    repository: gitea_integration
     tag: ""
   replicaCount: 1
   port: 8088
@@ -453,7 +453,7 @@ tests:
   gatekeeper:
     enabled: true
     image:
-      repository: codearmory/test-gatekeeper
+      repository: test-gatekeeper
       tag: ""
     # DATABASE_URL for post-test cleanup. Auto-constructed from postgresql when empty.
     databaseUrl: ""
@@ -461,12 +461,12 @@ tests:
     # Also requires blueprints.enabled to be true.
     enabled: true
     image:
-      repository: codearmory/test-blueprints
+      repository: test-blueprints
       tag: ""
   conductor:
     enabled: true
     image:
-      repository: codearmory/test-conductor
+      repository: test-conductor
       tag: ""
     # DATABASE_URL for post-test cleanup (targets the gatekeeper db).
     # Auto-constructed from postgresql when empty.
@@ -475,30 +475,30 @@ tests:
     # Also requires forge.enabled to be true.
     enabled: true
     image:
-      repository: codearmory/test-forge
+      repository: test-forge
       tag: ""
   registry:
     enabled: true
     image:
-      repository: codearmory/test-registry
+      repository: test-registry
       tag: ""
   workflows:
     # Also requires workflows.enabled to be true.
     enabled: true
     image:
-      repository: codearmory/test-workflows
+      repository: test-workflows
       tag: ""
   tickets:
     # Also requires tickets.enabled to be true.
     enabled: true
     image:
-      repository: codearmory/test-tickets
+      repository: test-tickets
       tag: ""
   hooks:
     # Also requires hooks.enabled and workflows.enabled to be true.
     enabled: true
     image:
-      repository: codearmory/test-hooks
+      repository: test-hooks
       tag: ""
 
 # ── PostgreSQL (Bitnami subchart) ─────────────────────────────────────────────
