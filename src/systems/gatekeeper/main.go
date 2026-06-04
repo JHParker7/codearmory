@@ -181,7 +181,7 @@ func main() {
 	initSecretsEncryption()
 
 	db := connect()
-	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{})
+	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{})
 	applyForeignKeys(db)
 	seedServiceAccounts(db)
 	initOIDC()
@@ -198,12 +198,15 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, envInt("SIGNUP_RATE_LIMIT", 10), envDuration("SIGNUP_RATE_WINDOW", 10*time.Minute), handleSignup))
 	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleLogin))
+	mux.HandleFunc("POST /mfa/verify", rateLimitMiddleware("mfa-verify", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleMFAVerify))
 
 	// OIDC provider — used by Forgejo/Gitea and any other OAuth2 client.
 	mux.HandleFunc("GET /.well-known/openid-configuration", handleOIDCDiscovery)
 	mux.HandleFunc("GET /oauth/jwks", handleJWKS)
 	mux.HandleFunc("GET /oauth/authorize", handleAuthorize)
 	mux.HandleFunc("POST /oauth/authorize", handleAuthorizeSubmit)
+	mux.HandleFunc("GET /oauth/mfa", handleOAuthMFAGet)
+	mux.HandleFunc("POST /oauth/mfa", rateLimitMiddleware("oauth-mfa", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleOAuthMFAPost))
 	mux.HandleFunc("POST /oauth/token", handleToken)
 	mux.Handle("GET /oauth/userinfo", authMiddleware(http.HandlerFunc(handleUserinfo)))
 	mux.HandleFunc("POST /internal/oauth/clients", handleCreateOAuthClient)
@@ -212,6 +215,11 @@ func main() {
 	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
 
 	mw := func(h http.HandlerFunc) http.Handler { return authMiddleware(http.HandlerFunc(h)) }
+
+	mux.Handle("POST /mfa/totp/enroll", mw(handleTOTPEnroll))
+	mux.Handle("POST /mfa/totp/confirm", mw(handleTOTPConfirm))
+	mux.Handle("GET /mfa/totp/status", mw(handleTOTPStatus))
+	mux.Handle("DELETE /mfa/totp", mw(handleTOTPDisable))
 
 	mux.Handle("GET /users/{id}", mw(handleGetUser))
 	mux.Handle("GET /users", mw(handleListUsers))

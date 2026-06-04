@@ -904,6 +904,87 @@ func (req ServicePermissionRequest) List(ctx context.Context, limit, offset int)
 	return result, nil
 }
 
+// Add inserts the TOTP credential.
+func (c TOTPCredential) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.totp_credential.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("credential.id", c.CredentialID))
+	if err := connect().WithContext(ctx).Create(&c).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// Update saves all TOTP credential fields.
+func (c TOTPCredential) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.totp_credential.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("credential.id", c.CredentialID))
+	c.UpdatedAt = time.Now()
+	if err := connect().WithContext(ctx).Save(&c).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// Remove soft-deletes the TOTP credential.
+func (c TOTPCredential) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.totp_credential.remove")
+	defer span.End()
+	span.SetAttributes(attribute.String("credential.id", c.CredentialID))
+	if err := connect().WithContext(ctx).Model(&TOTPCredential{}).Where("credential_id = ?", c.CredentialID).Update("active", false).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// Get retrieves the active TOTP credential by CredentialID.
+func (c TOTPCredential) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.totp_credential.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("credential.id", c.CredentialID))
+	var result TOTPCredential
+	if err := connectRead().WithContext(ctx).First(&result, "credential_id = ? AND active = ?", c.CredentialID, true).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return result, nil
+}
+
+// List retrieves active TOTP credentials matching the non-zero fields of the receiver.
+func (c TOTPCredential) List(ctx context.Context, limit, offset int) ([]db, error) {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.totp_credential.list")
+	defer span.End()
+	var rows []TOTPCredential
+	c.Active = true
+	q := connectRead().WithContext(ctx).Where(c)
+	if limit > 0 {
+		q = q.Limit(limit).Offset(offset)
+	}
+	if err := q.Find(&rows).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	result := make([]db, len(rows))
+	for i, r := range rows {
+		result[i] = r
+	}
+	return result, nil
+}
+
 // Add inserts the audit log entry.
 func (a AuditLog) Add(ctx context.Context) error {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.audit_log.add")
