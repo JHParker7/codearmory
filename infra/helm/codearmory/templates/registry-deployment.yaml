@@ -46,7 +46,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: registry
-          image: "{{ .Values.registry.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.registry) }}"
+          image: "{{ include "codearmory.image" (list . .Values.registry) }}"
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

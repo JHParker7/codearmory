@@ -18,7 +18,7 @@ spec:
   {{- end }}
   containers:
     - name: test
-      image: "{{ .Values.tests.blueprints.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.tests.blueprints) }}"
+      image: "{{ include "codearmory.image" (list . .Values.tests.blueprints) }}"
       imagePullPolicy: {{ .Values.imagePullPolicy }}
       env:
         - name: BLUEPRINTS_URL

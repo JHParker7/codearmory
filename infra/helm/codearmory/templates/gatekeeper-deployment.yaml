@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gatekeeper
-          image: "{{ .Values.gatekeeper.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.gatekeeper) }}"
+          image: "{{ include "codearmory.image" (list . .Values.gatekeeper) }}"
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

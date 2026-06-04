@@ -18,7 +18,7 @@ spec:
   {{- end }}
   containers:
     - name: test
-      image: "{{ .Values.tests.tickets.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.tests.tickets) }}"
+      image: "{{ include "codearmory.image" (list . .Values.tests.tickets) }}"
       imagePullPolicy: {{ .Values.imagePullPolicy }}
       env:
         - name: TICKETS_URL

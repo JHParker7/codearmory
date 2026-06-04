@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: tickets
-          image: "{{ .Values.tickets.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.tickets) }}"
+          image: "{{ include "codearmory.image" (list . .Values.tickets) }}"
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

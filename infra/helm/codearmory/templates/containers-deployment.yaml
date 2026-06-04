@@ -30,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: containers
-          image: "{{ .Values.containers.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.containers) }}"
+          image: "{{ include "codearmory.image" (list . .Values.containers) }}"
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

@@ -1,6 +1,11 @@
 nameOverride: ""
 fullnameOverride: ""
 
+# Registry prefix prepended to all codearmory service images.
+# Set to your registry host, e.g. "ghcr.io/myorg" or "registry.example.com/codearmory".
+# Leave empty to use the repository value as-is.
+imageRegistry: "ghcr.io"
+
 # Default image tag applied to all services when the per-service tag is empty.
 imageTag: latest
 imagePullPolicy: IfNotPresent

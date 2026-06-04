@@ -30,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gitea-integration
-          image: "{{ .Values.giteaIntegration.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.giteaIntegration) }}"
+          image: "{{ include "codearmory.image" (list . .Values.giteaIntegration) }}"
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
