@@ -1,4 +1,4 @@
-module gitea
+module gitea_integration
 
 go 1.25.6
 

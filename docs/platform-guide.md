@@ -15,9 +15,12 @@ This guide explains what each CodeArmory service does, how they fit together, an
 7. [Pipeline Orchestration — Workflows](#pipeline-orchestration--workflows)
 8. [Git Webhooks — Hooks](#git-webhooks--hooks)
 9. [Task Tracking — Tickets](#task-tracking--tickets)
-10. [CLI — Armory](#cli--armory)
-11. [Observability](#observability)
-12. [Running the stack](#running-the-stack)
+10. [Forgejo/Gitea Integration — Gitea Integration](#forgejoitea-integration--gitea-integration)
+11. [Container Registry Management — Containers](#container-registry-management--containers)
+12. [Egress Proxy](#egress-proxy)
+13. [CLI — Armory](#cli--armory)
+14. [Observability](#observability)
+15. [Running the stack](#running-the-stack)
 
 ---
 
@@ -33,11 +36,13 @@ Browser / CLI / Terraform
         │
         ├── POST /signup, POST /login ──► Gatekeeper :8081  (public)
         │
-        ├── /state/...       ──────────► Blueprints  :8084  (Terraform state)
-        ├── /executions/...  ──────────► Forge       :8083  (sandboxed runners)
-        ├── /workflows/...   ──────────► Workflows   :8085  (pipelines)
-        ├── /tickets/...     ──────────► Tickets     :8086  (task tracker)
-        └── /hooks/...       ──────────► Hooks       :8087  (webhook receiver)
+        ├── /state/...            ──────► Blueprints        :8084  (Terraform state)
+        ├── /executions/...       ──────► Forge             :8083  (sandboxed runners)
+        ├── /workflows/...        ──────► Workflows         :8085  (pipelines)
+        ├── /tickets/...          ──────► Tickets           :8086  (task tracker)
+        ├── /hooks/...            ──────► Hooks             :8087  (webhook receiver)
+        ├── /gitea_integration/...──────► Gitea Integration :8088  (repo / PR management)
+        └── /containers/...       ──────► Containers        :8089  (OCI registry proxy)
 
    Registry :8082  ← Conductor polls this to build its routing table
 ```
@@ -390,6 +395,85 @@ The `workflow_id`, `run_id`, and `forge_execution_id` fields are plain-text refe
 
 ---
 
+## Forgejo/Gitea Integration — Gitea Integration
+
+**Port:** 8088
+
+The Gitea Integration service connects CodeArmory to a Forgejo (or Gitea) instance. Users link their CodeArmory account to their Forgejo identity with a one-time token verification, then use the platform API to manage repositories and pull requests without leaving the platform.
+
+### Account linking
+
+Before using any repository or PR endpoint, a user links their Forgejo account:
+
+```bash
+curl -X PUT http://localhost:8080/gitea_integration/account \
+  -H "Authorization: Bearer <token>" \
+  -d '{"gitea_username": "alice", "gitea_token": "<forgejo-pat>"}'
+```
+
+The `gitea_token` is a personal access token from Forgejo. It is used once to verify that the user controls the claimed Forgejo account and is never stored. Subsequent operations use the admin token with per-user `Sudo`.
+
+### Repositories and pull requests
+
+```bash
+# Create a repository
+curl -X POST http://localhost:8080/gitea_integration/repos \
+  -H "Authorization: Bearer <token>" \
+  -d '{"name": "my-app", "auto_init": true}'
+
+# List open pull requests
+curl http://localhost:8080/gitea_integration/repos/alice/my-app/pulls \
+  -H "Authorization: Bearer <token>"
+
+# Merge a pull request
+curl -X POST http://localhost:8080/gitea_integration/repos/alice/my-app/pulls/1/merge \
+  -H "Authorization: Bearer <token>" \
+  -d '{"Do": "merge"}'
+```
+
+### Git smart protocol
+
+The service also proxies the Git HTTP smart protocol, so `git clone`, `git push`, and `git pull` routed through the platform work transparently. Git clients authenticate with their Forgejo credentials directly.
+
+---
+
+## Container Registry Management — Containers
+
+**Port:** 8089
+
+The Containers service provides authenticated management access to an external OCI registry (Docker Hub, GHCR, ECR, or any distribution-spec registry). It adds RBAC-enforced visibility and deletion on top of the registry's native API, and proxies the OCI distribution protocol so `docker push`/`pull` can be routed through the platform.
+
+```bash
+# List repositories
+curl http://localhost:8080/containers/repositories \
+  -H "Authorization: Bearer <token>"
+
+# List tags for an image
+curl http://localhost:8080/containers/repositories/myorg/myapp/tags \
+  -H "Authorization: Bearer <token>"
+
+# Delete a manifest by digest
+curl -X DELETE \
+  http://localhost:8080/containers/repositories/myorg/myapp/manifests/sha256:abc123 \
+  -H "Authorization: Bearer <token>"
+```
+
+The management API (`/repositories`, `/tags`, `/manifests`) is gated by Gatekeeper RBAC. The `/v2/...` OCI distribution proxy passes requests to the upstream registry without RBAC interception — Docker clients authenticate directly with their registry credentials.
+
+---
+
+## Egress Proxy
+
+**Port:** 3128
+
+The Egress Proxy is an allowlist-enforcing HTTP CONNECT proxy used by Forge execution containers. It provides controlled outbound internet access for CI/CD workloads (package downloads, module fetches) without opening broad internet access.
+
+It is not a user-facing service — it sits on an internal Docker/Kubernetes network and is configured via Forge's `FORGE_EGRESS_PROXY` environment variable. Containers route outbound HTTP and HTTPS traffic through it automatically when `HTTP_PROXY`/`HTTPS_PROXY` are set.
+
+Connections to hosts not in `PROXY_ALLOWED_DOMAINS` are refused before any data is exchanged. See the [Egress Proxy README](egress-proxy/README.md) and [Forge README](forge/README.md) for setup details.
+
+---
+
 ## CLI — Armory
 
 The Armory CLI is a command-line client for the full platform. It covers the complete API surface of all services, with consistent auth handling (reads a stored token or prompts for credentials), output formatting, and `--help` documentation for every command.
@@ -481,6 +565,9 @@ You can run a subset of services depending on your use case:
 |----------|------------------|
 | Terraform state only | Gatekeeper, Conductor, Registry, Blueprints |
 | CI/CD pipelines only | Gatekeeper, Conductor, Registry, Forge, Workflows, Hooks |
+| Forge with egress control | Add Egress Proxy; set `FORGE_NETWORK_MODE` and `FORGE_EGRESS_PROXY` on Forge |
+| Forgejo/Gitea integration | Add Gitea Integration; requires a running Forgejo instance |
+| OCI registry management | Add Containers; requires an upstream OCI registry |
 | Full platform | All services |
 
 Gatekeeper, Conductor, and Registry are required by any configuration. The remaining services are independently deployable.

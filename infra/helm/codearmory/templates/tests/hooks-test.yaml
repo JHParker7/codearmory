@@ -18,7 +18,7 @@ spec:
   {{- end }}
   containers:
     - name: test
-      image: "{{ .Values.tests.hooks.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.tests.hooks) }}"
+      image: "{{ include "codearmory.image" (list . .Values.tests.hooks) }}"
       imagePullPolicy: {{ .Values.imagePullPolicy }}
       env:
         - name: HOOKS_URL

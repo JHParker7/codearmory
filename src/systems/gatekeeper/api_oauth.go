@@ -24,6 +24,44 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+var totpFormTmpl = template.Must(template.New("totp").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Two-factor authentication — Codearmory</title>
+  <style>
+    body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f5}
+    .card{background:#fff;padding:2rem;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.12);width:100%;max-width:360px}
+    h2{margin:0 0 1.5rem;font-size:1.25rem}
+    label{display:block;margin-bottom:1rem;font-size:.9rem}
+    input{display:block;width:100%;margin-top:.25rem;padding:.5rem;border:1px solid #ccc;border-radius:4px;font-size:1rem;box-sizing:border-box}
+    button{width:100%;padding:.65rem;background:#0066cc;color:#fff;border:none;border-radius:4px;font-size:1rem;cursor:pointer;margin-top:.5rem}
+    button:hover{background:#0052a3}
+    .app-name{color:#555;font-size:.85rem;margin-bottom:1.5rem}
+    .error{color:#c00;font-size:.85rem;margin-bottom:1rem}
+  </style>
+</head>
+<body>
+<div class="card">
+  <h2>Two-factor authentication</h2>
+  {{if .AppName}}<p class="app-name">Authorizing <strong>{{.AppName}}</strong></p>{{end}}
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+  <form method="POST" action="/oauth/mfa">
+    <input type="hidden" name="token" value="{{.Token}}">
+    <label>Authentication code<input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required autofocus></label>
+    <button type="submit">Verify</button>
+  </form>
+</div>
+</body>
+</html>`))
+
+type totpFormData struct {
+	Token   string
+	AppName string
+	Error   string
+}
+
 // ── Signing key ───────────────────────────────────────────────────────────────
 
 var (
@@ -310,6 +348,19 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if userHasTOTP(r.Context(), user.UserID) {
+		pending, err := newMFAPending(r.Context(), user.UserID,
+			params.client.ClientID, params.redirectURI, params.state, params.scope)
+		if err != nil {
+			slog.Error("oauth authorize: failed to create MFA pending", "user_id", user.UserID, "error", err)
+			renderError("Internal server error.")
+			return
+		}
+		slog.Info("oauth authorize: MFA required", "user_id", user.UserID)
+		http.Redirect(w, r, "/oauth/mfa?token="+url.QueryEscape(pending.Token), http.StatusFound)
+		return
+	}
+
 	code := OAuthCode{
 		Code:        uuid.New().String(),
 		ClientID:    params.client.ClientID,
@@ -534,6 +585,110 @@ func handleDeleteOAuthClient(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("oauth client deleted", "client_id", id)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── OAuth MFA handlers ────────────────────────────────────────────────────────
+
+// handleOAuthMFAGet renders the TOTP input form during an OAuth authorization flow.
+func handleOAuthMFAGet(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		http.Error(w, "token is required", http.StatusBadRequest)
+		return
+	}
+
+	var pending MFAPending
+	if err := connectRead().WithContext(r.Context()).
+		Where("token = ? AND used = ?", token, false).
+		First(&pending).Error; err != nil || time.Now().After(pending.ExpiresAt) {
+		http.Error(w, "invalid or expired MFA token", http.StatusUnauthorized)
+		return
+	}
+
+	var appName string
+	if pending.OAuthClientID != "" {
+		var client OAuthClient
+		if err := connectRead().WithContext(r.Context()).
+			Where("client_id = ?", pending.OAuthClientID).First(&client).Error; err == nil {
+			appName = client.Name
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	totpFormTmpl.Execute(w, totpFormData{Token: token, AppName: appName}) //nolint:errcheck
+}
+
+// handleOAuthMFAPost verifies the TOTP code submitted via the OAuth MFA form and,
+// on success, issues an authorization code and redirects back to the client.
+func handleOAuthMFAPost(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form data", http.StatusBadRequest)
+		return
+	}
+
+	token := r.FormValue("token")
+	code := r.FormValue("code")
+	if token == "" || code == "" {
+		http.Error(w, "token and code are required", http.StatusBadRequest)
+		return
+	}
+
+	pending, ok := consumeMFAPending(ctx, w, token)
+	if !ok {
+		return
+	}
+	if pending.OAuthClientID == "" {
+		http.Error(w, "use POST /mfa/verify for direct login", http.StatusBadRequest)
+		return
+	}
+
+	var client OAuthClient
+	connectRead().WithContext(ctx).Where("client_id = ?", pending.OAuthClientID).First(&client) //nolint:errcheck
+
+	renderTOTPError := func(msg string) {
+		// Re-issue a fresh pending token so the user can retry without starting over.
+		newPending, err := newMFAPending(ctx, pending.UserID,
+			pending.OAuthClientID, pending.OAuthRedirectURI, pending.OAuthState, pending.OAuthScope)
+		if err != nil {
+			slog.Error("oauth mfa: re-issue pending failed", "user_id", pending.UserID, "error", err)
+			oauthRedirectError(w, r, pending.OAuthRedirectURI, pending.OAuthState, "server_error", "internal error")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		totpFormTmpl.Execute(w, totpFormData{ //nolint:errcheck
+			Token:   newPending.Token,
+			AppName: client.Name,
+			Error:   msg,
+		})
+	}
+
+	valid, _, msg := totpValidateForUser(ctx, pending.UserID, code)
+	if !valid {
+		slog.Warn("oauth mfa: invalid code", "user_id", pending.UserID)
+		renderTOTPError(msg)
+		return
+	}
+
+	authCode := OAuthCode{
+		Code:        uuid.New().String(),
+		ClientID:    pending.OAuthClientID,
+		UserID:      pending.UserID,
+		RedirectURI: pending.OAuthRedirectURI,
+		Scopes:      mfaPendingOAuthScopes(pending.OAuthScope),
+		ExpiresAt:   time.Now().Add(10 * time.Minute).UTC(),
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := connect().WithContext(ctx).Create(&authCode).Error; err != nil {
+		slog.Error("oauth mfa: persist auth code failed", "error", err)
+		oauthRedirectError(w, r, pending.OAuthRedirectURI, pending.OAuthState, "server_error", "failed to create authorization code")
+		return
+	}
+
+	slog.Info("oauth mfa: authorization code issued", "client_id", pending.OAuthClientID, "user_id", pending.UserID)
+	oauthRedirectCode(w, r, pending.OAuthRedirectURI, authCode.Code, pending.OAuthState)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

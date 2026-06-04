@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: blueprints
-          image: "{{ .Values.blueprints.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.blueprints) }}"
+          image: "{{ include "codearmory.image" (list . .Values.blueprints) }}"
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

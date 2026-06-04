@@ -7,7 +7,7 @@ use (
 	./egress-proxy
 	./forge
 	./gatekeeper
-	./gitea
+	./gitea_integration
 	./hooks
 	./mcp
 	./registry

@@ -49,13 +49,25 @@
       { "method": "GET",    "path": "/service-permission-requests",          "action": "listSPR",           "resource": "gatekeeper/service-permission-requests" },
       { "method": "GET",    "path": "/service-permission-requests/{id}",     "action": "getSPR",            "resource": "gatekeeper/service-permission-requests/{id}" },
       { "method": "POST",   "path": "/service-permission-requests/{id}/approve", "action": "approveSPR",   "resource": "gatekeeper/service-permission-requests/{id}" },
-      { "method": "POST",   "path": "/service-permission-requests/{id}/decline", "action": "declineSPR",   "resource": "gatekeeper/service-permission-requests/{id}" }
+      { "method": "POST",   "path": "/service-permission-requests/{id}/decline", "action": "declineSPR",   "resource": "gatekeeper/service-permission-requests/{id}" },
+      { "method": "POST",   "path": "/mfa/verify",       "action": "mfaVerify",    "resource": "gatekeeper/mfa", "public": true },
+      { "method": "GET",    "path": "/oauth/mfa",         "action": "oauthMFA",     "resource": "gatekeeper/mfa", "public": true },
+      { "method": "POST",   "path": "/oauth/mfa",         "action": "oauthMFA",     "resource": "gatekeeper/mfa", "public": true },
+      { "method": "POST",   "path": "/mfa/totp/enroll",  "action": "enrollTOTP",   "resource": "gatekeeper/mfa" },
+      { "method": "POST",   "path": "/mfa/totp/confirm", "action": "confirmTOTP",  "resource": "gatekeeper/mfa" },
+      { "method": "GET",    "path": "/mfa/totp/status",  "action": "getMFAStatus", "resource": "gatekeeper/mfa" },
+      { "method": "DELETE", "path": "/mfa/totp",         "action": "disableTOTP",  "resource": "gatekeeper/mfa" }
     ],
     "default_grants": [
       {
         "grant_on": "user",
         "actions": ["getUser", "updateUser", "deleteUser", "createOrg", "createTeam"],
         "resources": ["gatekeeper/users/{user_id}", "gatekeeper/orgs", "gatekeeper/teams"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["enrollTOTP", "confirmTOTP", "getMFAStatus", "disableTOTP"],
+        "resources": ["gatekeeper/mfa"]
       },
       {
         "grant_on": "org",
@@ -226,33 +238,38 @@
     ]
   },
   {
-    "name": "gitea",
+    "name": "gitea_integration",
     "url": "http://gitea-integration:8088",
     "description": "Forgejo/Gitea git repository management",
     "forward_auth": true,
     "service_key": "gitea-registry-local-secret",
     "endpoints": [
-      { "method": "GET",    "path": "/account",                                    "action": "getAccount",    "resource": "gitea/account"                              },
-      { "method": "PUT",    "path": "/account",                                    "action": "linkAccount",   "resource": "gitea/account"                              },
-      { "method": "DELETE", "path": "/account",                                    "action": "unlinkAccount", "resource": "gitea/account"                              },
-      { "method": "GET",    "path": "/repos",                                      "action": "listRepo",      "resource": "gitea/repos"                                },
-      { "method": "POST",   "path": "/repos",                                      "action": "createRepo",    "resource": "gitea/repos"                                },
-      { "method": "GET",    "path": "/repos/{owner}/{name}",                       "action": "getRepo",       "resource": "gitea/repos/{owner}/{name}"                 },
-      { "method": "DELETE", "path": "/repos/{owner}/{name}",                       "action": "deleteRepo",    "resource": "gitea/repos/{owner}/{name}"                 },
-      { "method": "GET",    "path": "/repos/{owner}/{name}/branches",              "action": "listBranch",    "resource": "gitea/repos/{owner}/{name}"                 },
-      { "method": "GET",    "path": "/repos/{owner}/{name}/tags",                  "action": "listTag",       "resource": "gitea/repos/{owner}/{name}"                 },
-      { "method": "GET",    "path": "/repos/{owner}/{name}/releases",              "action": "listRelease",   "resource": "gitea/repos/{owner}/{name}"                 },
-      { "method": "GET",    "path": "/repos/{owner}/{name}/commits",               "action": "listCommit",    "resource": "gitea/repos/{owner}/{name}"                 },
-      { "method": "GET",    "path": "/repos/{owner}/{name}/pulls",                 "action": "listPull",      "resource": "gitea/repos/{owner}/{name}/pulls"           },
-      { "method": "POST",   "path": "/repos/{owner}/{name}/pulls",                 "action": "createPull",    "resource": "gitea/repos/{owner}/{name}/pulls"           },
-      { "method": "GET",    "path": "/repos/{owner}/{name}/pulls/{index}",         "action": "getPull",       "resource": "gitea/repos/{owner}/{name}/pulls/{index}"   },
-      { "method": "POST",   "path": "/repos/{owner}/{name}/pulls/{index}/merge",   "action": "mergePull",     "resource": "gitea/repos/{owner}/{name}/pulls/{index}"   }
+      { "method": "GET",    "path": "/account",                                    "action": "getAccount",    "resource": "gitea_integration/account"                              },
+      { "method": "PUT",    "path": "/account",                                    "action": "linkAccount",   "resource": "gitea_integration/account"                              },
+      { "method": "DELETE", "path": "/account",                                    "action": "unlinkAccount", "resource": "gitea_integration/account"                              },
+      { "method": "GET",    "path": "/repos",                                      "action": "listRepo",      "resource": "gitea_integration/repos"                                },
+      { "method": "POST",   "path": "/repos",                                      "action": "createRepo",    "resource": "gitea_integration/repos"                                },
+      { "method": "GET",    "path": "/repos/{owner}/{name}",                       "action": "getRepo",       "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "DELETE", "path": "/repos/{owner}/{name}",                       "action": "deleteRepo",    "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/branches",              "action": "listBranch",    "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/tags",                  "action": "listTag",       "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/releases",              "action": "listRelease",   "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/commits",               "action": "listCommit",    "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/pulls",                 "action": "listPull",      "resource": "gitea_integration/repos/{owner}/{name}/pulls"           },
+      { "method": "POST",   "path": "/repos/{owner}/{name}/pulls",                 "action": "createPull",    "resource": "gitea_integration/repos/{owner}/{name}/pulls"           },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/pulls/{index}",         "action": "getPull",       "resource": "gitea_integration/repos/{owner}/{name}/pulls/{index}"   },
+      { "method": "POST",   "path": "/repos/{owner}/{name}/pulls/{index}/merge",   "action": "mergePull",     "resource": "gitea_integration/repos/{owner}/{name}/pulls/{index}"   }
     ],
     "default_grants": [
       {
         "grant_on": "user",
         "actions": ["getAccount", "linkAccount", "unlinkAccount", "listRepo", "createRepo"],
-        "resources": ["gitea/account", "gitea/repos"]
+        "resources": ["gitea_integration/account", "gitea_integration/repos"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["getRepo", "deleteRepo", "listBranch", "listTag", "listRelease", "listCommit", "listPull", "createPull", "getPull", "mergePull"],
+        "resources": ["gitea_integration/repos/*"]
       }
     ]
   },

@@ -18,7 +18,7 @@ spec:
   {{- end }}
   containers:
     - name: test
-      image: "{{ .Values.tests.gatekeeper.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.tests.gatekeeper) }}"
+      image: "{{ include "codearmory.image" (list . .Values.tests.gatekeeper) }}"
       imagePullPolicy: {{ .Values.imagePullPolicy }}
       env:
         - name: API_URL

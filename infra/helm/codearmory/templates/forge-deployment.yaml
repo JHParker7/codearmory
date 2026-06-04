@@ -31,7 +31,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: forge
-          image: "{{ .Values.forge.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.forge) }}"
+          image: "{{ include "codearmory.image" (list . .Values.forge) }}"
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

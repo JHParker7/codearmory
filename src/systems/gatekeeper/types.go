@@ -236,3 +236,32 @@ type OAuthCode struct {
 }
 
 func (OAuthCode) TableName() string { return "oauth_codes" }
+
+// TOTPCredential stores an AES-256-GCM encrypted TOTP secret for a user.
+// Confirmed is false until the user verifies the first code after enrollment.
+// Only one active confirmed credential per user is permitted.
+type TOTPCredential struct {
+	CredentialID string    `gorm:"column:credential_id;primaryKey"`
+	UserID       string    `gorm:"column:user_id"`
+	EncSecret    []byte    `gorm:"column:enc_secret"`
+	Confirmed    bool      `gorm:"column:confirmed;default:false"`
+	Active       bool      `gorm:"column:active;default:true"`
+	CreatedAt    time.Time `gorm:"column:created_at"`
+	UpdatedAt    time.Time `gorm:"column:updated_at"`
+}
+
+// MFAPending is a short-lived token issued after password verification succeeds
+// but the user has TOTP enabled. It expires after 2 minutes and is single-use.
+// For OAuth flows the originating OAuth parameters are stored here so the TOTP
+// completion step can reconstruct the flow.
+type MFAPending struct {
+	Token            string    `gorm:"column:token;primaryKey"`
+	UserID           string    `gorm:"column:user_id"`
+	ExpiresAt        time.Time `gorm:"column:expires_at"`
+	Used             bool      `gorm:"column:used;default:false"`
+	CreatedAt        time.Time `gorm:"column:created_at"`
+	OAuthClientID    string    `gorm:"column:oauth_client_id"`
+	OAuthRedirectURI string    `gorm:"column:oauth_redirect_uri"`
+	OAuthState       string    `gorm:"column:oauth_state"`
+	OAuthScope       string    `gorm:"column:oauth_scope"`
+}

@@ -541,6 +541,25 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("credentials.verified")
 
+	if userHasTOTP(ctx, user.UserID) {
+		pending, err := newMFAPending(ctx, user.UserID, "", "", "", "")
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "mfa pending creation failed")
+			slog.Error("login: failed to create MFA pending", "user_id", user.UserID, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		span.SetStatus(codes.Ok, "")
+		slog.Info("login: MFA required", "user_id", user.UserID)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"mfa_required": true,
+			"mfa_token":    pending.Token,
+		})
+		return
+	}
+
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		span.RecordError(err)

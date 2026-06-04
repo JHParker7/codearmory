@@ -18,7 +18,7 @@ spec:
   {{- end }}
   containers:
     - name: test
-      image: "{{ .Values.tests.workflows.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.tests.workflows) }}"
+      image: "{{ include "codearmory.image" (list . .Values.tests.workflows) }}"
       imagePullPolicy: {{ .Values.imagePullPolicy }}
       env:
         - name: WORKFLOWS_URL

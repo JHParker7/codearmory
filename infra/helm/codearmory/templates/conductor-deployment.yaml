@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: conductor
-          image: "{{ .Values.conductor.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.conductor) }}"
+          image: "{{ include "codearmory.image" (list . .Values.conductor) }}"
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

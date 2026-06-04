@@ -31,7 +31,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: workflows
-          image: "{{ .Values.workflows.image.repository }}:{{ include "codearmory.imageTag" (list . .Values.workflows) }}"
+          image: "{{ include "codearmory.image" (list . .Values.workflows) }}"
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

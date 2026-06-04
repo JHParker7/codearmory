@@ -2,10 +2,10 @@
 
 [![CI](https://github.com/code-armory-app/codearmory/actions/workflows/test_build_release.yml/badge.svg)](https://github.com/code-armory-app/codearmory/actions/workflows/unit_tests.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.22-00ADD8)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8)](https://go.dev)
 [![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange)](../../releases)
 
-**A self-hosted developer platform — remote Terraform state, extensible CI pipelines, and a CLI that keeps you in your terminal.**
+**A self-hosted developer platform — remote Terraform state, extensible CI pipelines, Forgejo/Gitea integration, container registry management, and a CLI that keeps you in your terminal.**
 
 ---
 
@@ -13,11 +13,14 @@
 
 - **Remote Terraform/OpenTofu state** — drop-in HTTP backend with workspace locking, backed by your own Postgres. Point any existing `tofu` or `terraform` config at it with two lines of config.
 - **Extensible pipelines** — register any HTTP service and use it as a pipeline step. Your internal tools, build systems, and deployment scripts become first-class pipeline targets without any code changes.
-- **CLI-first** — every platform operation is available from `armory`. Create workflows, trigger runs, manage tickets, inspect logs — without opening a browser.
-- **Sandboxed runners** — run commands in isolated containers with dropped capabilities, no network, and resource limits (Forge).
-- **Git webhook triggers** — receive pushes and PRs from GitHub, GitLab, or Gitea and map them to pipeline runs (Hooks).
-- **Auth + RBAC** — ES256 JWT sessions, orgs, teams, and roles covering every service in the platform (Gatekeeper).
+- **Sandboxed runners** — run commands in isolated containers with dropped capabilities, resource limits, and optional egress control via an allowlist proxy (Forge + Egress Proxy).
+- **Git webhook triggers** — receive pushes and PRs from GitHub, GitLab, or Gitea and map them to pipeline runs with at-least-once delivery (Hooks).
+- **Auth + RBAC + SSO** — ES256 JWT sessions, orgs, teams, and roles covering every service. Gatekeeper also acts as an OIDC provider so Forgejo can use CodeArmory as its SSO identity source.
+- **Forgejo/Gitea integration** — link CodeArmory user accounts to Forgejo identities and manage repos, branches, commits, and pull requests through the platform API (Gitea Integration).
+- **Container registry management** — authenticated RBAC-enforced visibility and deletion on top of any OCI registry, plus transparent `docker push`/`pull` proxying (Containers).
 - **Task tracker** — tickets linked directly to pipeline runs and forge executions, so deployment tasks and their outcomes live together (Tickets).
+- **CLI-first** — every platform operation is available from `armory`. Create workflows, trigger runs, manage tickets, inspect logs — without opening a browser.
+- **MCP server** — expose the full platform API as MCP tools so AI assistants can trigger pipelines, inspect runs, and manage tickets directly.
 
 ---
 
@@ -25,9 +28,9 @@
 
 The DevOps toolchain is fragmented. GitHub Actions handles CI but has no state management. Terraform Cloud manages state but is separate from your pipelines. Atlantis brings state into CI but doesn't run arbitrary jobs. You end up stitching together multiple tools, multiple auth systems, and multiple places to look when something breaks.
 
-CodeArmory runs state, pipelines, sandboxed runners, webhook triggers, and task tracking in one place, with one auth layer covering everything. Your Terraform runs, CI jobs, and deployment tickets all live under the same RBAC model, accessed through the same API.
+CodeArmory runs state, pipelines, sandboxed runners, webhook triggers, Forgejo integration, container registry management, and task tracking in one place, with one auth layer covering everything. Your Terraform runs, CI jobs, and deployment tickets all live under the same RBAC model, accessed through the same API and the same SSO session.
 
-It's also built to grow with you. Every service in the platform is registered through a common interface — so integrating a new tool means registering an HTTP endpoint, not forking the platform. Have a unique deployment process, an internal approval system, or a tool the platform doesn't support yet? Write a small service using the [CodeArmory SDK](https://github.com/code-armory-app/codearmory_sdk), register it, and it immediately becomes a first-class pipeline step — with auth, routing, and RBAC handled for you.
+It's also built to grow with you. Every service in the platform is registered through a common interface — so integrating a new tool means registering an HTTP endpoint, not forking the platform. Write a small service using the [CodeArmory SDK](https://github.com/code-armory-app/codearmory_sdk), register it, and it immediately becomes a first-class pipeline step with auth, routing, and RBAC handled for you.
 
 ---
 
@@ -36,7 +39,7 @@ It's also built to grow with you. Every service in the platform is registered th
 Every request enters through Conductor. Backend services delegate auth to Gatekeeper — permission logic stays in one place across the whole platform.
 
 ```
- Browser / CLI / Terraform
+ Browser / CLI / Terraform / Git client
           │
           ▼
     ┌─────────────┐
@@ -50,17 +53,24 @@ Every request enters through Conductor. Backend services delegate auth to Gateke
 
     Routes traffic to:
 
-    ┌─────────────┐   ┌─────────────┐   ┌──────────┐
-    │ Gatekeeper  │   │  Blueprints │   │  Forge   │
-    │   :8081     │   │   :8084     │   │  :8083   │
-    │ auth + RBAC │   │ Tofu state  │   │ runners  │
-    └─────────────┘   └─────────────┘   └──────────┘
+    ┌─────────────┐   ┌─────────────┐   ┌──────────────┐
+    │ Gatekeeper  │   │  Blueprints │   │    Forge     │
+    │   :8081     │   │   :8084     │   │    :8083     │
+    │ auth + RBAC │   │ Tofu state  │   │   runners    │
+    │ OIDC/SSO    │   └─────────────┘   └──────┬───────┘
+    └─────────────┘                            │ egress
+                                               ▼
+    ┌─────────────┐   ┌─────────────┐   ┌──────────────┐
+    │  Workflows  │   │    Hooks    │   │ Egress Proxy │
+    │   :8085     │   │   :8087     │   │    :3128     │
+    │  pipelines  │   │  webhooks   │   │  allowlist   │
+    └─────────────┘   └─────────────┘   └──────────────┘
 
-    ┌─────────────┐   ┌─────────────┐   ┌──────────┐
-    │  Workflows  │   │    Hooks    │   │ Tickets  │
-    │   :8085     │   │   :8087     │   │  :8086   │
-    │  pipelines  │   │  webhooks   │   │  tasks   │
-    └─────────────┘   └─────────────┘   └──────────┘
+    ┌─────────────┐   ┌─────────────────┐   ┌────────────┐
+    │   Tickets   │   │Gitea Integration│   │ Containers │
+    │   :8086     │   │     :8088       │   │   :8089    │
+    │   tasks     │   │ repos + PRs     │   │ OCI proxy  │
+    └─────────────┘   └─────────────────┘   └────────────┘
 ```
 
 ---
@@ -71,10 +81,11 @@ Every request enters through Conductor. Backend services delegate auth to Gateke
 git clone https://github.com/code-armory-app/codearmory
 cd codearmory/infra/local
 export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+export CONTAINER_REGISTRY_URL=https://ghcr.io   # required for Containers service
 docker compose up --build
 ```
 
-Starts PostgreSQL, Redis, and all eight services. API gateway at `http://localhost:8080`.
+Starts PostgreSQL, Redis, and all services. API gateway at `http://localhost:8080`.
 
 ```bash
 # Sign up and get a token
@@ -91,7 +102,7 @@ armory workflows run <workflow-id> --input ENV=staging --input VERSION=v1.2
 **Helm (production):**
 
 ```bash
-helm install codearmory ./infra/helm \
+helm install codearmory ./infra/helm/codearmory \
   --set global.domain=armory.example.com \
   --set global.postgresUrl=postgresql://...
 ```
@@ -129,8 +140,7 @@ armory services register \
   --url http://my-deployer:9000 \
   --prefix /deploy
 
-# Use it as a pipeline step
-# in deploy.yaml:
+# Use it as a pipeline step (in deploy.yaml):
 steps:
   - name: run-deployer
     service: deployer
@@ -140,7 +150,7 @@ steps:
       version: ${VERSION}
 ```
 
-No code changes to your existing service. Conductor handles auth and routing; your service just receives authenticated HTTP requests. Workflow steps can target any combination of built-in services (Forge, Blueprints) and your own registered services in the same pipeline.
+No code changes to your existing service. Conductor handles auth and routing; your service just receives authenticated HTTP requests.
 
 ---
 
@@ -156,6 +166,8 @@ armory runs get <id>                                # inspect results
 armory executions run --image node:20 --cmd "npm test"
 armory tickets create --title "Deploy v2" --priority high
 armory tickets update <id> --status in_progress
+armory hooks rules create --repo myorg/myapp --event push --workflow <id>
+armory containers repos list
 armory services register --name my-tool --url http://...
 armory orgs invite --email colleague@example.com
 ```
@@ -169,13 +181,16 @@ Binaries for Linux, macOS, and Windows are attached to each [GitHub release](../
 | Service | Port | Docs |
 |---------|------|------|
 | Conductor | 8080 | [API gateway](docs/conductor/README.md) |
-| Gatekeeper | 8081 | [Auth + RBAC](docs/gatekeeper/README.md) |
-| Blueprints | 8084 | [Terraform state](docs/blueprints/README.md) |
+| Gatekeeper | 8081 | [Auth + RBAC + OIDC](docs/gatekeeper/README.md) |
 | Registry | 8082 | [Service discovery](docs/registry/README.md) |
 | Forge | 8083 | [Sandboxed execution](docs/forge/README.md) |
+| Blueprints | 8084 | [Terraform state](docs/blueprints/README.md) |
 | Workflows | 8085 | [Pipeline orchestration](docs/workflows/README.md) |
-| Hooks | 8087 | [Webhook receiver](docs/hooks/README.md) |
 | Tickets | 8086 | [Task tracker](docs/tickets/README.md) |
+| Hooks | 8087 | [Webhook receiver](docs/hooks/README.md) |
+| Gitea Integration | 8088 | [Forgejo/Gitea repos + PRs](docs/gitea_integration/README.md) |
+| Containers | 8089 | [OCI registry management](docs/containers/README.md) |
+| Egress Proxy | 3128 | [Allowlist proxy for Forge](docs/egress-proxy/README.md) |
 | Armory CLI | — | [Command reference](docs/cli/README.md) |
 
 Full platform guide with worked examples: [docs/platform-guide.md](docs/platform-guide.md)
@@ -195,6 +210,9 @@ ghcr.io/code-armory-app/forge:alpha-latest
 ghcr.io/code-armory-app/workflows:alpha-latest
 ghcr.io/code-armory-app/hooks:alpha-latest
 ghcr.io/code-armory-app/tickets:alpha-latest
+ghcr.io/code-armory-app/gitea-integration:alpha-latest
+ghcr.io/code-armory-app/containers:alpha-latest
+ghcr.io/code-armory-app/egress-proxy:alpha-latest
 ```
 
 ---
@@ -228,9 +246,9 @@ pip install pre-commit && pre-commit install --hook-type commit-msg
 ```bash
 cd infra/local
 export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+export CONTAINER_REGISTRY_URL=https://ghcr.io
 docker compose up --build -d
 
-# Run one service's integration tests
 docker compose --profile test run --rm gatekeeper-integration-tests
 docker compose --profile test run --rm blueprints-integration-tests
 docker compose --profile test run --rm registry-integration-tests
@@ -240,6 +258,8 @@ docker compose --profile test run --rm workflows-integration-tests
 docker compose --profile test run --rm tickets-integration-tests
 docker compose --profile test run --rm hooks-integration-tests
 ```
+
+Gitea integration tests require a live Forgejo instance and run directly with pytest — see [tests/gitea_integration/](tests/gitea_integration/).
 
 ---
 

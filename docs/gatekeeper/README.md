@@ -139,6 +139,66 @@ Invite endpoints are accessible only to the inviter and the invitee. Accepting a
 
 `GET /sessions/{id}` and `DELETE /sessions/{id}` enforce session ownership: only the user whose session it is may retrieve or invalidate it. Cross-user access returns 403 even when the caller holds the required permission.
 
+## OIDC Provider
+
+Gatekeeper acts as an OpenID Connect provider so external services (primarily the Forgejo/Gitea Integration) can use CodeArmory as their SSO identity source.
+
+### Configuration
+
+| Variable | Description |
+|----------|-------------|
+| `OIDC_ISSUER` | Issuer URL, e.g. `https://gatekeeper.example.com`. Used in `.well-known/openid-configuration` and as the `iss` claim in issued tokens. Defaults to `http://localhost:8081`. |
+| `OIDC_SIGNING_KEY` | PEM-encoded EC P-256 private key for signing ID tokens. If unset, an ephemeral key is generated on startup (not stable across restarts — set this in production). |
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/.well-known/openid-configuration` | OIDC discovery document (served via Conductor) |
+| `GET` | `/oauth/jwks` | JSON Web Key Set — public keys for ID token verification |
+| `GET` | `/oauth/authorize` | Authorization endpoint — renders the login form |
+| `POST` | `/oauth/authorize` | Authorization form submission |
+| `POST` | `/oauth/token` | Token endpoint — exchanges an authorization code for tokens |
+| `GET` | `/oauth/userinfo` | UserInfo endpoint (requires Bearer ID token) |
+
+### Client management (internal)
+
+OAuth clients are managed via internal endpoints authenticated with a service key:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/internal/oauth/clients` | Register a new OAuth client |
+| `GET` | `/internal/oauth/clients` | List registered clients |
+| `DELETE` | `/internal/oauth/clients/{id}` | Delete a client |
+
+### Flow
+
+Gatekeeper implements the OAuth 2.0 authorization code flow (RFC 6749). The flow is:
+
+1. Forgejo redirects the user's browser to `GET /oauth/authorize?client_id=...&redirect_uri=...&response_type=code&scope=openid`.
+2. Gatekeeper renders a login form. The user enters their CodeArmory credentials.
+3. On success, Gatekeeper issues a one-time authorization code and redirects to `redirect_uri?code=...&state=...`.
+4. Forgejo exchanges the code for tokens at `POST /oauth/token` using `client_id` + `client_secret`.
+5. Gatekeeper validates the code atomically (preventing double-use), issues an ID token (ES256-signed JWT) and access token.
+
+The `redirect_uri` must match a value registered on the OAuth client record. Authorization codes expire after 10 minutes.
+
+### Setting up Forgejo SSO
+
+1. Register a client:
+   ```bash
+   curl -X POST http://gatekeeper:8081/internal/oauth/clients \
+     -H "X-Service-Key: gatekeeper:your-service-key" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "client_name": "forgejo",
+       "redirect_uris": ["https://git.example.com/user/oauth2/CodeArmory/callback"]
+     }'
+   # → {"client_id": "...", "client_secret": "..."}
+   ```
+
+2. In Forgejo admin panel, add an OAuth2 authentication source pointing at the CodeArmory gatekeeper with the `client_id` and `client_secret` from step 1. Set the autodiscover URL to `https://gatekeeper.example.com/.well-known/openid-configuration`.
+
 ## Secrets
 
 Gatekeeper provides a secrets management layer used by the workflow worker to inject credentials into pipeline runs. All secret values are encrypted at rest using AES-256-GCM. The feature requires `GATEKEEPER_SECRETS_KEY` to be set; all secrets endpoints return `503 Service Unavailable` if it is not.

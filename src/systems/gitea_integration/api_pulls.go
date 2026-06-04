@@ -20,7 +20,7 @@ func handleListPulls(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	name := r.PathValue("name")
 
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listPull", "gitea/repos/"+owner+"/"+name+"/pulls")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listPull", "gitea_integration/repos/"+owner+"/"+name+"/pulls")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -69,7 +69,7 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	name := r.PathValue("name")
 
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createPull", "gitea/repos/"+owner+"/"+name+"/pulls")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createPull", "gitea_integration/repos/"+owner+"/"+name+"/pulls")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -126,7 +126,7 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 	index := r.PathValue("index")
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getPull",
-		"gitea/repos/"+owner+"/"+name+"/pulls/"+index)
+		"gitea_integration/repos/"+owner+"/"+name+"/pulls/"+index)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -168,7 +168,7 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 	index := r.PathValue("index")
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "mergePull",
-		"gitea/repos/"+owner+"/"+name+"/pulls/"+index)
+		"gitea_integration/repos/"+owner+"/"+name+"/pulls/"+index)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return

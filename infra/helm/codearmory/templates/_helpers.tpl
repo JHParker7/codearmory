@@ -52,6 +52,23 @@ Usage: {{ include "codearmory.imageTag" (list . .Values.gatekeeper) }}
 {{- end }}
 
 {{/*
+Build a fully-qualified image reference for a codearmory service.
+Prepends imageRegistry when set: "<registry>/<repo>:<tag>" or "<repo>:<tag>".
+Usage: {{ include "codearmory.image" (list . .Values.gatekeeper) }}
+*/}}
+{{- define "codearmory.image" -}}
+{{- $root := index . 0 -}}
+{{- $svc := index . 1 -}}
+{{- $repo := $svc.image.repository -}}
+{{- $tag := include "codearmory.imageTag" (list $root $svc) -}}
+{{- if $root.Values.imageRegistry -}}
+{{- printf "%s/%s:%s" $root.Values.imageRegistry $repo $tag -}}
+{{- else -}}
+{{- printf "%s:%s" $repo $tag -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Construct a PostgreSQL DSN for a named database. Used only by test pods that need
 a render-time URL; prefer codearmory.postgresql.env for service deployments.
 Usage: {{ include "codearmory.postgresql.dsn" (list . "gatekeeper") }}
