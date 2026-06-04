@@ -54,7 +54,7 @@ func initHTTPClient() *http.Client {
 }
 
 func newGatekeeperClient() *gk.Client {
-	return &gk.Client{URL: gatekeeperURL, Service: "gitea", HTTPClient: httpClient}
+	return &gk.Client{URL: gatekeeperURL, Service: "gitea_integration", HTTPClient: httpClient}
 }
 
 func envOrDefault(key, def string) string {

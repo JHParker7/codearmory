@@ -15,7 +15,7 @@ func handleListRepos(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gitea").Start(r.Context(), "handleListRepos")
 	defer span.End()
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRepo", "gitea/repos")
+	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRepo", "gitea_integration/repos")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -53,7 +53,7 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gitea").Start(r.Context(), "handleCreateRepo")
 	defer span.End()
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createRepo", "gitea/repos")
+	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createRepo", "gitea_integration/repos")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -98,7 +98,7 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	name := r.PathValue("name")
 
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRepo", "gitea/repos/"+owner+"/"+name)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRepo", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -138,7 +138,7 @@ func handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	name := r.PathValue("name")
 
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteRepo", "gitea/repos/"+owner+"/"+name)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteRepo", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -177,7 +177,7 @@ func handleListBranches(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	name := r.PathValue("name")
 
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listBranch", "gitea/repos/"+owner+"/"+name)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listBranch", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -217,7 +217,7 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	name := r.PathValue("name")
 
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTag", "gitea/repos/"+owner+"/"+name)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTag", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -257,7 +257,7 @@ func handleListReleases(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	name := r.PathValue("name")
 
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRelease", "gitea/repos/"+owner+"/"+name)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRelease", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -297,7 +297,7 @@ func handleListCommits(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	name := r.PathValue("name")
 
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listCommit", "gitea/repos/"+owner+"/"+name)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listCommit", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return

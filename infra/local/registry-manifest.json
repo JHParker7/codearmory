@@ -49,13 +49,25 @@
       { "method": "GET",    "path": "/service-permission-requests",          "action": "listSPR",           "resource": "gatekeeper/service-permission-requests" },
       { "method": "GET",    "path": "/service-permission-requests/{id}",     "action": "getSPR",            "resource": "gatekeeper/service-permission-requests/{id}" },
       { "method": "POST",   "path": "/service-permission-requests/{id}/approve", "action": "approveSPR",   "resource": "gatekeeper/service-permission-requests/{id}" },
-      { "method": "POST",   "path": "/service-permission-requests/{id}/decline", "action": "declineSPR",   "resource": "gatekeeper/service-permission-requests/{id}" }
+      { "method": "POST",   "path": "/service-permission-requests/{id}/decline", "action": "declineSPR",   "resource": "gatekeeper/service-permission-requests/{id}" },
+      { "method": "POST",   "path": "/mfa/verify",       "action": "mfaVerify",    "resource": "gatekeeper/mfa", "public": true },
+      { "method": "GET",    "path": "/oauth/mfa",         "action": "oauthMFA",     "resource": "gatekeeper/mfa", "public": true },
+      { "method": "POST",   "path": "/oauth/mfa",         "action": "oauthMFA",     "resource": "gatekeeper/mfa", "public": true },
+      { "method": "POST",   "path": "/mfa/totp/enroll",  "action": "enrollTOTP",   "resource": "gatekeeper/mfa" },
+      { "method": "POST",   "path": "/mfa/totp/confirm", "action": "confirmTOTP",  "resource": "gatekeeper/mfa" },
+      { "method": "GET",    "path": "/mfa/totp/status",  "action": "getMFAStatus", "resource": "gatekeeper/mfa" },
+      { "method": "DELETE", "path": "/mfa/totp",         "action": "disableTOTP",  "resource": "gatekeeper/mfa" }
     ],
     "default_grants": [
       {
         "grant_on": "user",
         "actions": ["getUser", "updateUser", "deleteUser", "createOrg", "createTeam"],
         "resources": ["gatekeeper/users/{user_id}", "gatekeeper/orgs", "gatekeeper/teams"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["enrollTOTP", "confirmTOTP", "getMFAStatus", "disableTOTP"],
+        "resources": ["gatekeeper/mfa"]
       },
       {
         "grant_on": "org",
@@ -253,6 +265,11 @@
         "grant_on": "user",
         "actions": ["getAccount", "linkAccount", "unlinkAccount", "listRepo", "createRepo"],
         "resources": ["gitea_integration/account", "gitea_integration/repos"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["getRepo", "deleteRepo", "listBranch", "listTag", "listRelease", "listCommit", "listPull", "createPull", "getPull", "mergePull"],
+        "resources": ["gitea_integration/repos/*"]
       }
     ]
   },

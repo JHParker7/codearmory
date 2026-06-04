@@ -451,6 +451,28 @@ services:
     profiles: [test]
     restart: no
 
+  gitea-integration-integration-tests:
+    build:
+      context: ../../tests/gitea_integration
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "export GITEA_ADMIN_TOKEN=$(cat /token/token.txt) && exec pytest -v --tb=short"
+    environment:
+      GITEA_INTEGRATION_URL: http://gitea-integration:8088
+      GATEKEEPER_URL: http://gatekeeper:8081
+      GITEA_URL: http://forgejo:3000
+    volumes:
+      - forgejo_token:/token
+    depends_on:
+      gitea-integration:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+      forgejo-setup:
+        condition: service_completed_successfully
+    profiles: [test]
+    restart: no
+
   mcp:
     build:
       context: ../../src/systems/mcp

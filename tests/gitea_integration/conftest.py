@@ -53,8 +53,8 @@ def _create_forgejo_user():
     assert res.status_code == 201, f"Forgejo user create failed: {res.text}"
     pat = requests.post(
         f"{GITEA_URL}/api/v1/users/{username}/tokens",
-        headers={"Authorization": f"token {GITEA_ADMIN_TOKEN}", "Sudo": username},
-        json={"name": "itest-token"},
+        auth=(username, "FgTest_123!"),
+        json={"name": "itest-token", "scopes": ["write:repository", "write:user", "write:issue", "read:organization"]},
     )
     assert pat.status_code == 201, f"Forgejo PAT create failed: {pat.text}"
     return {"username": username, "token": pat.json()["sha1"]}
@@ -75,7 +75,7 @@ def _fg_headers(token):
 def _create_forgejo_repo(fg_user, name, auto_init=True):
     res = requests.post(
         f"{GITEA_URL}/api/v1/user/repos",
-        headers={"Authorization": f"token {fg_user['token']}", "Sudo": fg_user["username"]},
+        headers={"Authorization": f"token {fg_user['token']}"},
         json={"name": name, "auto_init": auto_init, "default_branch": "main", "private": False},
     )
     assert res.status_code == 201, f"Forgejo repo create failed: {res.text}"
