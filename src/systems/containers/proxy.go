@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -22,10 +23,12 @@ func initOCIProxy() {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
-			// Swap codearmory token for registry service account credentials
-			// so the upstream registry accepts the request.
+			// Swap codearmory token for registry credentials. Per-org credentials
+			// (set via context by handleV2) take precedence over the global fallback.
 			req.Header.Del("Authorization")
-			if registry.username != "" {
+			if creds, ok := req.Context().Value(ctxCredsKey{}).(registryCreds); ok && creds.username != "" {
+				req.SetBasicAuth(creds.username, creds.password)
+			} else if registry.username != "" {
 				req.SetBasicAuth(registry.username, registry.password)
 			}
 		},
@@ -115,9 +118,17 @@ func handleV2(w http.ResponseWriter, r *http.Request) {
 	action, resource := v2ActionResource(r.Method, r.URL.Path)
 
 	r.Header.Set("Authorization", "Bearer "+token)
-	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, action, resource); !ok {
+	_, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, action, resource)
+	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
+	}
+
+	// Inject per-org registry credentials when REGISTRY_ORG_SECRET_NAME is set.
+	// Falls back silently to global REGISTRY_USERNAME/REGISTRY_PASSWORD on any error
+	// (secret not found, org not set, feature disabled).
+	if creds, err := resolveOrgCreds(ctx, orgID); err == nil {
+		r = r.WithContext(context.WithValue(ctx, ctxCredsKey{}, creds))
 	}
 
 	// Discovery ping — respond directly rather than round-tripping upstream.

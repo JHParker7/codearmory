@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -19,9 +20,45 @@ func fakeGatekeeper(t *testing.T, status int, body string) {
 		w.Write([]byte(body)) //nolint:errcheck
 	}))
 	orig := gatekeeperClient.URL
+	origURL := gatekeeperURL
 	gatekeeperClient.URL = srv.URL
+	gatekeeperURL = srv.URL
 	t.Cleanup(func() {
 		gatekeeperClient.URL = orig
+		gatekeeperURL = origURL
+		srv.Close()
+	})
+}
+
+// fakeGatekeeperMulti sets up a fake that dispatches to different handlers
+// based on request path: checkPermissions for /check_permissions,
+// secretValue (or 404 if empty) for /internal/secrets/lookup.
+func fakeGatekeeperMulti(t *testing.T, permBody string, secretValue string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/check_permissions" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(permBody)) //nolint:errcheck
+			return
+		}
+		if r.URL.Path == "/internal/secrets/lookup" {
+			if secretValue == "" {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"value": secretValue}) //nolint:errcheck
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	orig := gatekeeperClient.URL
+	origURL := gatekeeperURL
+	gatekeeperClient.URL = srv.URL
+	gatekeeperURL = srv.URL
+	t.Cleanup(func() {
+		gatekeeperClient.URL = orig
+		gatekeeperURL = origURL
 		srv.Close()
 	})
 }
@@ -32,6 +69,7 @@ func TestMain(m *testing.M) {
 	gatekeeperClient = &gk.Client{URL: gatekeeperURL, Service: "containers", HTTPClient: httpClient}
 	registry = &registryClient{baseURL: "http://127.0.0.1:1", http: httpClient}
 	ociProxy = &httputil.ReverseProxy{Director: func(r *http.Request) {}}
+	getServiceKey = func() string { return "test-service-key" }
 	os.Exit(m.Run())
 }
 
@@ -298,5 +336,203 @@ func TestStatusResponseWriter_WriteHeader(t *testing.T) {
 	}
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("underlying recorder: got %d, want 404", w.Code)
+	}
+}
+
+// ── resolveOrgCreds ───────────────────────────────────────────────────────────
+
+func TestResolveOrgCreds_Success(t *testing.T) {
+	orgID := "org-" + t.Name()
+	t.Cleanup(func() { orgCredsCache.Delete(orgID) })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"value": "forgejo-bot:tok-abc123"}) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+
+	origURL := gatekeeperURL
+	gatekeeperURL = srv.URL
+	t.Cleanup(func() { gatekeeperURL = origURL })
+
+	origName := orgSecretName
+	orgSecretName = "registry-token"
+	t.Cleanup(func() { orgSecretName = origName })
+
+	creds, err := resolveOrgCreds(t.Context(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if creds.username != "forgejo-bot" || creds.password != "tok-abc123" {
+		t.Fatalf("got (%q, %q), want (forgejo-bot, tok-abc123)", creds.username, creds.password)
+	}
+}
+
+func TestResolveOrgCreds_Cached(t *testing.T) {
+	orgID := "org-" + t.Name()
+	t.Cleanup(func() { orgCredsCache.Delete(orgID) })
+
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"value": "user:token"}) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+
+	origURL := gatekeeperURL
+	gatekeeperURL = srv.URL
+	t.Cleanup(func() { gatekeeperURL = origURL })
+
+	origName := orgSecretName
+	orgSecretName = "registry-token"
+	t.Cleanup(func() { orgSecretName = origName })
+
+	for i := range 3 {
+		if _, err := resolveOrgCreds(t.Context(), orgID); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 Gatekeeper call (cache hit on subsequent), got %d", calls)
+	}
+}
+
+func TestResolveOrgCreds_NotFound(t *testing.T) {
+	orgID := "org-" + t.Name()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	origURL := gatekeeperURL
+	gatekeeperURL = srv.URL
+	t.Cleanup(func() { gatekeeperURL = origURL })
+
+	origName := orgSecretName
+	orgSecretName = "registry-token"
+	t.Cleanup(func() { orgSecretName = origName })
+
+	if _, err := resolveOrgCreds(t.Context(), orgID); err == nil {
+		t.Fatal("expected error for 404 response")
+	}
+}
+
+func TestResolveOrgCreds_InvalidFormat(t *testing.T) {
+	orgID := "org-" + t.Name()
+	t.Cleanup(func() { orgCredsCache.Delete(orgID) })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"value": "no-colon-here"}) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+
+	origURL := gatekeeperURL
+	gatekeeperURL = srv.URL
+	t.Cleanup(func() { gatekeeperURL = origURL })
+
+	origName := orgSecretName
+	orgSecretName = "registry-token"
+	t.Cleanup(func() { orgSecretName = origName })
+
+	if _, err := resolveOrgCreds(t.Context(), orgID); err == nil {
+		t.Fatal("expected error for secret missing colon separator")
+	}
+}
+
+func TestResolveOrgCreds_Disabled(t *testing.T) {
+	origName := orgSecretName
+	orgSecretName = ""
+	t.Cleanup(func() { orgSecretName = origName })
+
+	if _, err := resolveOrgCreds(t.Context(), "some-org"); err == nil {
+		t.Fatal("expected error when orgSecretName is empty")
+	}
+}
+
+func TestResolveOrgCreds_EmptyOrg(t *testing.T) {
+	origName := orgSecretName
+	orgSecretName = "registry-token"
+	t.Cleanup(func() { orgSecretName = origName })
+
+	if _, err := resolveOrgCreds(t.Context(), ""); err == nil {
+		t.Fatal("expected error when orgID is empty")
+	}
+}
+
+// ── handleV2 per-org credential injection ────────────────────────────────────
+
+func TestHandleV2_InjectsOrgCreds(t *testing.T) {
+	// Verify that per-org creds resolved from Gatekeeper are cached after handleV2.
+	// The discovery ping path /v2 returns before proxying, so we check the cache directly.
+	orgID := "org-perorg"
+	t.Cleanup(func() { orgCredsCache.Delete(orgID) })
+
+	fakeGatekeeperMulti(t,
+		`{"authorized":true,"user_id":"u1","org_id":"org-perorg"}`,
+		"forgejo-bot:tok-xyz",
+	)
+
+	origName := orgSecretName
+	orgSecretName = "registry-token"
+	t.Cleanup(func() { orgSecretName = origName })
+
+	r := httptest.NewRequest(http.MethodGet, "/v2", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	handleV2(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+
+	v, ok := orgCredsCache.Load(orgID)
+	if !ok {
+		t.Fatal("expected org creds to be cached after handleV2")
+	}
+	if v.(cachedCreds).creds.username != "forgejo-bot" {
+		t.Fatalf("cached username = %q, want forgejo-bot", v.(cachedCreds).creds.username)
+	}
+}
+
+func TestHandleV2_FallsBackWhenSecretMissing(t *testing.T) {
+	// When the org secret doesn't exist, handleV2 should fall back silently and still return 200.
+	fakeGatekeeperMulti(t,
+		`{"authorized":true,"user_id":"u1","org_id":"org-nosecret"}`,
+		"", // empty → lookup server returns 404
+	)
+	t.Cleanup(func() { orgCredsCache.Delete("org-nosecret") })
+
+	origName := orgSecretName
+	orgSecretName = "registry-token"
+	t.Cleanup(func() { orgSecretName = origName })
+
+	r := httptest.NewRequest(http.MethodGet, "/v2", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	handleV2(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 (should fall back gracefully)", w.Code)
+	}
+}
+
+func TestHandleV2_FallsBackWhenFeatureDisabled(t *testing.T) {
+	// When REGISTRY_ORG_SECRET_NAME is not set, handleV2 should work normally with global creds.
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-abc"}`)
+
+	origName := orgSecretName
+	orgSecretName = ""
+	t.Cleanup(func() { orgSecretName = origName })
+
+	r := httptest.NewRequest(http.MethodGet, "/v2", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	handleV2(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 (feature disabled should not break auth)", w.Code)
 	}
 }
