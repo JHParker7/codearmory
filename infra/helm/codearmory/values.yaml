@@ -45,10 +45,11 @@ gatekeeper:
     redisUrl: ""
     # Comma-separated "name=key" pairs for service-to-service authentication,
     # e.g. "blueprints=<key>,forge=<key>,workflows=<key>,tickets=<key>,hooks=<key>".
-    # Keys must match the gatekeeperServiceKey values set in each service's secret.
+    # Auto-assembled from each service's secret on upgrade. Leave empty for auto-generation.
+    # Set explicitly only if you need to pin specific keys or add services outside this chart.
     gatekeeperServices: ""
     # Read key gatekeeper uses to fetch default grants from the registry.
-    # Must match an entry in registry.secret.serviceAccounts.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     registryServiceKey: ""
     # PEM-encoded ECDSA P-256 private key used to sign OIDC ID tokens.
     # Must be stable across pod restarts — rotating this key invalidates existing
@@ -96,10 +97,11 @@ registry:
     # PostgreSQL DSN. Auto-constructed when left empty.
     databaseUrl: ""
     # Must match the registry entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
     # Comma-separated "name=key" pairs for read-only service accounts (e.g. Conductor, Gatekeeper).
-    # Must match conductor.secret.registryServiceKey and gatekeeper.secret.registryServiceKey.
-    # Generate with: openssl rand -hex 32
+    # Auto-assembled from conductor and gatekeeper secrets on upgrade. Leave empty for auto-generation.
+    # Set explicitly only if you need additional service accounts beyond conductor and gatekeeper.
     serviceAccounts: ""
     # Comma-separated "name=key" pairs for admin service accounts (e.g. CI pipelines).
     adminAccounts: ""
@@ -135,8 +137,7 @@ blueprints:
     # Override to use an external Redis instance.
     redisUrl: ""
     # 64-character hex string for AES-256-GCM encryption of Terraform state.
-    # Generate with: openssl rand -hex 32
-    # Required — blueprints will refuse to start without this.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     encryptionKey: ""
     # Must match the blueprints entry in gatekeeper.secret.gatekeeperServices.
     gatekeeperServiceKey: ""
@@ -174,11 +175,11 @@ conductor:
     otelEndpoint: ""
   secret:
     # Initial service key for conductor's account in the registry.
-    # Must match the conductor entry in registry.secret.serviceAccounts.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     # Rotated automatically every 25 minutes via POST /service-accounts/rotate-key on registry.
     registryServiceKey: ""
     # Shared HMAC signing key for X-Conductor-Token headers.
-    # Must match forge.secret.conductorForwardKey.
+    # Auto-generated and synced to forge.secret.conductorForwardKey on upgrades. Leave empty for auto-generation.
     conductorForwardKey: ""
   tls:
     certSecret: ""
@@ -236,6 +237,7 @@ forge:
     # Must match conductor.secret.conductorForwardKey.
     conductorForwardKey: ""
     # Must match the forge entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
   tls:
     certSecret: ""
@@ -278,12 +280,13 @@ workflows:
     # PostgreSQL DSN. Auto-constructed when left empty.
     databaseUrl: ""
     # Must match the workflows entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
     # Shared HMAC secret with the hooks service for authenticating internal trigger requests.
-    # Must match hooks.secret.hooksTriggerKey. Generate with: openssl rand -hex 32
+    # Auto-synced from hooks.secret.hooksTriggerKey on upgrades. Leave empty for auto-generation.
     hooksTriggerKey: ""
     # AES-256 key for encrypting run tokens at rest in the database.
-    # Generate with: openssl rand -hex 32
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     tokenKey: ""
   tls:
     certSecret: ""
@@ -314,6 +317,7 @@ tickets:
     # PostgreSQL DSN. Auto-constructed when left empty.
     databaseUrl: ""
     # Must match the tickets entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
   tls:
     certSecret: ""
@@ -344,9 +348,10 @@ hooks:
     # PostgreSQL DSN. Auto-constructed when left empty.
     databaseUrl: ""
     # Must match the hooks entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
     # Shared HMAC secret with the workflows service for signing internal trigger requests.
-    # Must match workflows.secret.hooksTriggerKey. Generate with: openssl rand -hex 32
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     hooksTriggerKey: ""
   tls:
     certSecret: ""
@@ -381,6 +386,7 @@ containers:
     registryUsername: ""
     registryPassword: ""
     # Must match the containers entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
   tls:
     certSecret: ""
@@ -437,6 +443,7 @@ giteaIntegration:
     # Required when giteaIntegration.enabled is true.
     giteaAdminToken: ""
     # Must match the gitea_integration entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
   tls:
     certSecret: ""

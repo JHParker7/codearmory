@@ -17,20 +17,23 @@ Conductor is the public-facing API gateway.
     kubectl port-forward svc/{{ include "codearmory.fullname" . }}-conductor {{ .Values.conductor.port }}:{{ .Values.conductor.port }} -n {{ .Release.Namespace }}
 {{- end }}
 
+Service keys (gatekeeperServiceKey, conductorForwardKey, hooksTriggerKey, etc.) are
+auto-generated on first install and preserved across upgrades. No manual key generation
+is required for a default installation.
+
+IMPORTANT — fresh install only:
+  Cross-service shared keys (gatekeeper-services, conductor-forward-key, hooks-trigger-key,
+  registry service-accounts) are assembled by reading sibling secrets at render time. On a
+  brand-new install those secrets do not yet exist, so the first install produces mismatched
+  keys and services will fail to authenticate with each other. Fix this with a second apply:
+
+    helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }}
+
+  This is a one-time step. Subsequent upgrades sync correctly without it.
+
 Before production use, make sure you have set:
-  - gatekeeper.secret.gatekeeperServices        (service auth keys for all services)
-  - registry.secret.gatekeeperServiceKey
-  - registry.secret.serviceAccounts            (e.g. "conductor=<key>")
-  - registry.secret.adminAccounts              (e.g. "admin=<key>")
-  - conductor.secret.registryServiceKey        (must match registry.secret.serviceAccounts entry)
-  - blueprints.secret.encryptionKey             (openssl rand -hex 32)
-  - blueprints.secret.gatekeeperServiceKey
-  - conductor.secret.conductorForwardKey
-  - forge.secret.conductorForwardKey
-  - forge.secret.gatekeeperServiceKey
-  - workflows.secret.gatekeeperServiceKey
-  - workflows.secret.hooksTriggerKey            (openssl rand -hex 32, must match hooks)
-  - tickets.secret.gatekeeperServiceKey
-  - hooks.secret.gatekeeperServiceKey
-  - hooks.secret.hooksTriggerKey                (must match workflows.secret.hooksTriggerKey)
-  - postgresql.auth.postgresPassword            (optional — auto-generated when empty)
+  - gatekeeper.secret.oidcSigningKey              (stable ECDSA key; ephemeral if unset)
+  - containers.secret.registryUrl                 (required for containers service)
+  - giteaIntegration.secret.giteaUrl              (required when giteaIntegration.enabled)
+  - giteaIntegration.secret.giteaAdminToken       (required when giteaIntegration.enabled)
+  - postgresql.auth.postgresPassword              (optional — auto-generated when empty)
