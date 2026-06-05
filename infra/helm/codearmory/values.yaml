@@ -1,3 +1,9 @@
+global:
+  # When true, all Secret resources are managed externally (e.g. via ESO+Vault).
+  # The helm chart will not create any Secret objects. Set to true when using
+  # Vault + External Secrets Operator.
+  externalSecrets: false
+
 nameOverride: ""
 fullnameOverride: ""
 
