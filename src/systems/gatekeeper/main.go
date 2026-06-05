@@ -266,6 +266,7 @@ func main() {
 	mux.Handle("PUT /orgs/{id}/secret-provider", mw(handleSetSecretProvider))
 	mux.Handle("DELETE /orgs/{id}/secret-provider", mw(handleDeleteSecretProvider))
 	mux.HandleFunc("POST /internal/secrets/resolve", handleResolveSecrets)
+	mux.HandleFunc("POST /internal/secrets/lookup", handleLookupSecret)
 
 	// Key rotation: service-key authenticated; generates a new key server-side and returns it.
 	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)

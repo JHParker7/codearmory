@@ -544,6 +544,49 @@ func handleResolveSecrets(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(values) //nolint:errcheck
 }
 
+// handleLookupSecret resolves a single named secret for an org on behalf of an
+// authenticated service. Any registered service may call this endpoint. The org
+// binding is established by the caller — the containers service, for example,
+// derives the orgID from a prior CheckPermissions call that validated the user's JWT.
+func handleLookupSecret(w http.ResponseWriter, r *http.Request) {
+	if !secretsEnabledOrError(w) {
+		return
+	}
+	svc, ok := requireServiceAuth(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		OrgID string `json:"org_id"`
+		Name  string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.OrgID == "" || req.Name == "" {
+		http.Error(w, "org_id and name are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	values, err := resolveSecrets(ctx, req.OrgID, []string{req.Name})
+	if err != nil {
+		slog.Debug("lookup secret: not found", "org_id", req.OrgID, "name", req.Name, "service", svc.ServiceName)
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	value, exists := values[req.Name]
+	if !exists || value == "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"value": value}) //nolint:errcheck
+}
+
 // resolveSecrets dispatches to the org's configured provider (or builtin if none set).
 func resolveSecrets(ctx context.Context, orgID string, names []string) (map[string]string, error) {
 	var p OrgSecretProvider
