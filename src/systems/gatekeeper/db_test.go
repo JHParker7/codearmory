@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/google/uuid"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -852,5 +854,55 @@ func TestInviteList(t *testing.T) {
 	}
 	if rows[0].(Invite).InviteID != inv2.InviteID {
 		t.Fatalf("expected invite %s, got %s", inv2.InviteID, rows[0].(Invite).InviteID)
+	}
+}
+
+func TestSeedServiceAccounts_CreatesNew(t *testing.T) {
+	name := "seed-test-" + t.Name()
+	t.Cleanup(func() {
+		gormDB.Unscoped().Where("service_name = ?", name).Delete(&ServiceAccount{}) //nolint:errcheck
+	})
+
+	t.Setenv("GATEKEEPER_SERVICES", name+"=bootstrapkey")
+	seedServiceAccounts(gormDB)
+
+	var svc ServiceAccount
+	if err := gormDB.Where("service_name = ?", name).First(&svc).Error; err != nil {
+		t.Fatalf("expected service account to be created: %v", err)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(svc.HashedKey), []byte("bootstrapkey")) != nil {
+		t.Fatal("stored hash does not match bootstrap key")
+	}
+}
+
+func TestSeedServiceAccounts_PreservesRotatedKey(t *testing.T) {
+	name := "seed-rotate-" + t.Name()
+	t.Cleanup(func() {
+		gormDB.Unscoped().Where("service_name = ?", name).Delete(&ServiceAccount{}) //nolint:errcheck
+	})
+
+	// First seed: create the account with the bootstrap key.
+	t.Setenv("GATEKEEPER_SERVICES", name+"=bootstrapkey")
+	seedServiceAccounts(gormDB)
+
+	// Simulate runtime key rotation: overwrite the hash with a rotated key's hash.
+	rotatedHash, err := bcrypt.GenerateFromPassword([]byte("rotatedkey"), 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gormDB.Model(&ServiceAccount{}).Where("service_name = ?", name).
+		Update("hashed_key", string(rotatedHash)).Error; err != nil {
+		t.Fatalf("failed to simulate rotation: %v", err)
+	}
+
+	// Second seed: simulates Gatekeeper restarting. Must not overwrite the rotated key.
+	seedServiceAccounts(gormDB)
+
+	var svc ServiceAccount
+	if err := gormDB.Where("service_name = ?", name).First(&svc).Error; err != nil {
+		t.Fatalf("expected service account to exist: %v", err)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(svc.HashedKey), []byte("rotatedkey")) != nil {
+		t.Fatal("rotated key was overwritten by seedServiceAccounts on restart")
 	}
 }

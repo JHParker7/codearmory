@@ -83,8 +83,10 @@ func envDuration(key string, def time.Duration) time.Duration {
 }
 
 // seedServiceAccounts reads GATEKEEPER_SERVICES (format "name=key,name=key") and
-// upserts a ServiceAccount row for each entry with a fresh bcrypt hash. This sets
-// the initial key; services rotate their keys at runtime via POST /service-accounts/rotate-key.
+// creates a ServiceAccount row for each entry that does not already exist. Existing
+// accounts are left untouched so that keys rotated at runtime are not reset when
+// Gatekeeper restarts. To force a key reset, delete the row from the database and
+// restart Gatekeeper.
 func seedServiceAccounts(db *gorm.DB) {
 	raw := secret("GATEKEEPER_SERVICES")
 	if raw == "" {
@@ -98,33 +100,27 @@ func seedServiceAccounts(db *gorm.DB) {
 			continue
 		}
 		name, key := entry[:idx], entry[idx+1:]
+		var existing ServiceAccount
+		err := db.Where("service_name = ?", name).First(&existing).Error
+		if err == nil {
+			slog.Debug("seedServiceAccounts: account exists, preserving rotated key", "name", name)
+			continue
+		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(key), 12)
 		if err != nil {
 			slog.Error("seedServiceAccounts: bcrypt failed", "name", name, "error", err)
 			continue
 		}
-		var existing ServiceAccount
-		err = db.Where("service_name = ?", name).First(&existing).Error
-		if err != nil {
-			svc := ServiceAccount{
-				ServiceAccountID: uuid.New().String(),
-				ServiceName:      name,
-				HashedKey:        string(hash),
-				Active:           true,
-			}
-			if err := db.Create(&svc).Error; err != nil {
-				slog.Error("seedServiceAccounts: create failed", "name", name, "error", err)
-			} else {
-				slog.Info("seedServiceAccounts: created", "name", name)
-			}
+		svc := ServiceAccount{
+			ServiceAccountID: uuid.New().String(),
+			ServiceName:      name,
+			HashedKey:        string(hash),
+			Active:           true,
+		}
+		if err := db.Create(&svc).Error; err != nil {
+			slog.Error("seedServiceAccounts: create failed", "name", name, "error", err)
 		} else {
-			existing.HashedKey = string(hash)
-			existing.UpdatedAt = time.Now()
-			if err := db.Save(&existing).Error; err != nil {
-				slog.Error("seedServiceAccounts: update failed", "name", name, "error", err)
-			} else {
-				slog.Info("seedServiceAccounts: updated key", "name", name)
-			}
+			slog.Info("seedServiceAccounts: created", "name", name)
 		}
 	}
 }
