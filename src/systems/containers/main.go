@@ -25,6 +25,14 @@ var (
 	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
 	registry         *registryClient
 	httpClient       *http.Client
+
+	// orgSecretName is the Gatekeeper secret name that holds per-org registry
+	// credentials in "username:token" format. Set via REGISTRY_ORG_SECRET_NAME.
+	// When empty the global REGISTRY_USERNAME/REGISTRY_PASSWORD are used instead.
+	orgSecretName string
+	// getServiceKey returns the current rotated service key for authenticating
+	// internal calls to Gatekeeper.
+	getServiceKey func() string
 )
 
 func initHTTPClient() *http.Client {
@@ -152,8 +160,10 @@ func main() {
 	}
 	initOCIProxy()
 
+	orgSecretName = os.Getenv("REGISTRY_ORG_SECRET_NAME")
+
 	gatekeeperClient = newGatekeeperClient()
-	sdkregistry.StartKeyRotation(ctx, gatekeeperURL, "containers",
+	getServiceKey = sdkregistry.StartKeyRotation(ctx, gatekeeperURL, "containers",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	mux := http.NewServeMux()

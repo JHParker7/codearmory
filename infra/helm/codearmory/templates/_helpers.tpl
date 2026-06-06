@@ -69,6 +69,25 @@ Usage: {{ include "codearmory.image" (list . .Values.gatekeeper) }}
 {{- end }}
 
 {{/*
+Derive a deterministic bootstrap service key from the release name, namespace,
+and service name. Both gatekeeper-secret and the service's own secret use this
+helper as their fallback when no existing Secret is found in the cluster (i.e.
+on first install). Because the same inputs produce the same sha256sum output,
+both sides always agree — eliminating the first-install key mismatch that
+occurs when each template calls randAlphaNum independently.
+
+The key is only valid until the first rotation (~25 minutes post-boot), after
+which the service replaces it with a cryptographically random rotated key.
+
+Usage: {{ include "codearmory.bootstrapServiceKey" (list . "containers") }}
+*/}}
+{{- define "codearmory.bootstrapServiceKey" -}}
+{{- $root := index . 0 -}}
+{{- $svcName := index . 1 -}}
+{{- printf "%s|%s|%s|codearmory-bootstrap-key" $root.Release.Name $root.Release.Namespace $svcName | sha256sum -}}
+{{- end -}}
+
+{{/*
 Construct a PostgreSQL DSN for a named database. Used only by test pods that need
 a render-time URL; prefer codearmory.postgresql.env for service deployments.
 Usage: {{ include "codearmory.postgresql.dsn" (list . "gatekeeper") }}

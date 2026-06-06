@@ -83,8 +83,12 @@ func envDuration(key string, def time.Duration) time.Duration {
 }
 
 // seedServiceAccounts reads GATEKEEPER_SERVICES (format "name=key,name=key") and
-// upserts a ServiceAccount row for each entry with a fresh bcrypt hash. This sets
-// the initial key; services rotate their keys at runtime via POST /service-accounts/rotate-key.
+// upserts ServiceAccount rows. For new accounts, both HashedKey and
+// HashedBootstrapKey are set to the provided key's hash. For existing accounts,
+// only HashedBootstrapKey is refreshed — HashedKey is left intact so that keys
+// rotated at runtime survive Gatekeeper restarts. The bootstrap key fallback in
+// requireServiceAuth lets a service pod re-authenticate after a restart with its
+// original GATEKEEPER_SERVICE_KEY even when HashedKey holds a rotated value.
 func seedServiceAccounts(db *gorm.DB) {
 	raw := secret("GATEKEEPER_SERVICES")
 	if raw == "" {
@@ -105,26 +109,28 @@ func seedServiceAccounts(db *gorm.DB) {
 		}
 		var existing ServiceAccount
 		err = db.Where("service_name = ?", name).First(&existing).Error
-		if err != nil {
-			svc := ServiceAccount{
-				ServiceAccountID: uuid.New().String(),
-				ServiceName:      name,
-				HashedKey:        string(hash),
-				Active:           true,
-			}
-			if err := db.Create(&svc).Error; err != nil {
-				slog.Error("seedServiceAccounts: create failed", "name", name, "error", err)
+		if err == nil {
+			// Preserve rotated HashedKey; refresh HashedBootstrapKey so pod restarts
+			// after rotation can re-authenticate via the bootstrap key fallback.
+			if err2 := db.Model(&ServiceAccount{}).Where("service_name = ?", name).
+				Update("hashed_bootstrap_key", string(hash)).Error; err2 != nil {
+				slog.Error("seedServiceAccounts: update bootstrap key failed", "name", name, "error", err2)
 			} else {
-				slog.Info("seedServiceAccounts: created", "name", name)
+				slog.Debug("seedServiceAccounts: account exists, bootstrap key refreshed", "name", name)
 			}
+			continue
+		}
+		svc := ServiceAccount{
+			ServiceAccountID:   uuid.New().String(),
+			ServiceName:        name,
+			HashedKey:          string(hash),
+			HashedBootstrapKey: string(hash),
+			Active:             true,
+		}
+		if err := db.Create(&svc).Error; err != nil {
+			slog.Error("seedServiceAccounts: create failed", "name", name, "error", err)
 		} else {
-			existing.HashedKey = string(hash)
-			existing.UpdatedAt = time.Now()
-			if err := db.Save(&existing).Error; err != nil {
-				slog.Error("seedServiceAccounts: update failed", "name", name, "error", err)
-			} else {
-				slog.Info("seedServiceAccounts: updated key", "name", name)
-			}
+			slog.Info("seedServiceAccounts: created", "name", name)
 		}
 	}
 }
@@ -270,6 +276,7 @@ func main() {
 	mux.Handle("PUT /orgs/{id}/secret-provider", mw(handleSetSecretProvider))
 	mux.Handle("DELETE /orgs/{id}/secret-provider", mw(handleDeleteSecretProvider))
 	mux.HandleFunc("POST /internal/secrets/resolve", handleResolveSecrets)
+	mux.HandleFunc("POST /internal/secrets/lookup", handleLookupSecret)
 
 	// Key rotation: service-key authenticated; generates a new key server-side and returns it.
 	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)

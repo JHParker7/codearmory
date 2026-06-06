@@ -108,6 +108,13 @@ type Permissions struct {
 // ServiceAccount represents a non-user service identity with a hashed key and
 // an associated role. Permissions are added to the role via ServicePermissionRequest.
 //
+// Key fields:
+//   - HashedKey: bcrypt hash of the current key. Updated on each rotation.
+//   - HashedBootstrapKey: bcrypt hash of the bootstrap key from GATEKEEPER_SERVICES.
+//     Never changes after the account is seeded. Used as a fallback in
+//     requireServiceAuth so that a service pod can re-authenticate after a restart
+//     even if its rotated key was only stored in memory.
+//
 // Network binding fields (both optional; nil / empty slice means "no restriction"):
 //
 //   - AllowedCIDRs: if non-empty, the source IP of every authenticated request
@@ -119,15 +126,16 @@ type Permissions struct {
 // MAC-address binding is not supported at the HTTP layer: MAC addresses do not
 // cross IP routers and are not visible to the server in normal deployments.
 type ServiceAccount struct {
-	ServiceAccountID       string   `json:"service_account_id"        gorm:"column:service_account_id;primaryKey"`
-	CreatedAt              time.Time `json:"created_at"               gorm:"column:created_at"`
-	UpdatedAt              time.Time `json:"updated_at"               gorm:"column:updated_at"`
-	ServiceName            string   `json:"service_name"              gorm:"column:service_name;uniqueIndex"`
-	HashedKey              string   `json:"-"                         gorm:"column:hashed_key"`
-	RoleID                 *string  `json:"role_id"                   gorm:"column:role_id"`
-	AllowedCIDRs           []string `json:"allowed_cidrs,omitempty"   gorm:"column:allowed_cidrs;serializer:json"`
-	ClientCertFingerprints []string `json:"client_cert_fingerprints,omitempty" gorm:"column:client_cert_fingerprints;serializer:json"`
-	Active                 bool     `json:"active"                    gorm:"column:active;default:true"`
+	ServiceAccountID       string    `json:"service_account_id"                    gorm:"column:service_account_id;primaryKey"`
+	CreatedAt              time.Time `json:"created_at"                            gorm:"column:created_at"`
+	UpdatedAt              time.Time `json:"updated_at"                            gorm:"column:updated_at"`
+	ServiceName            string    `json:"service_name"                          gorm:"column:service_name;uniqueIndex"`
+	HashedKey              string    `json:"-"                                     gorm:"column:hashed_key"`
+	HashedBootstrapKey     string    `json:"-"                                     gorm:"column:hashed_bootstrap_key;default:''"`
+	RoleID                 *string   `json:"role_id"                               gorm:"column:role_id"`
+	AllowedCIDRs           []string  `json:"allowed_cidrs,omitempty"               gorm:"column:allowed_cidrs;serializer:json"`
+	ClientCertFingerprints []string  `json:"client_cert_fingerprints,omitempty"    gorm:"column:client_cert_fingerprints;serializer:json"`
+	Active                 bool      `json:"active"                                gorm:"column:active;default:true"`
 }
 
 // ServicePermissionRequest is a pending request from a service to add a permission

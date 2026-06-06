@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -64,6 +65,16 @@ var vaultClient = func() *http.Client {
 		},
 	}
 }()
+
+// ── Secret error types ────────────────────────────────────────────────────────
+
+// errSecretNotFound is returned by resolveSecrets adapters when a named secret
+// does not exist in the provider. handleLookupSecret uses this to distinguish a
+// genuine 404 from an infrastructure failure (DB error, decryption failure,
+// provider network error) which should be a 500.
+type errSecretNotFound struct{ name string }
+
+func (e *errSecretNotFound) Error() string { return fmt.Sprintf("secret %q not found", e.name) }
 
 // ── Secrets CRUD ──────────────────────────────────────────────────────────────
 
@@ -544,6 +555,78 @@ func handleResolveSecrets(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(values) //nolint:errcheck
 }
 
+// handleLookupSecret resolves a single named secret for an org on behalf of an
+// authenticated service. Only services listed in SECRETS_LOOKUP_ALLOWED_CALLERS
+// may use this endpoint. The org binding is established by the caller — the
+// containers service, for example, derives orgID from a prior CheckPermissions
+// call that validated the user's JWT.
+func handleLookupSecret(w http.ResponseWriter, r *http.Request) {
+	if !secretsEnabledOrError(w) {
+		return
+	}
+	svc, ok := requireServiceAuth(w, r)
+	if !ok {
+		return
+	}
+
+	// Only explicitly allow-listed services may look up org secrets. If
+	// SECRETS_LOOKUP_ALLOWED_CALLERS is unset the endpoint is closed to all
+	// callers (deny-by-default prevents a compromised service from reading
+	// another org's secrets without an explicit operator grant).
+	allowed := secret("SECRETS_LOOKUP_ALLOWED_CALLERS")
+	if allowed == "" {
+		slog.Warn("lookup secret: SECRETS_LOOKUP_ALLOWED_CALLERS not configured; denying", "service", svc.ServiceName)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	permitted := false
+	for c := range strings.SplitSeq(allowed, ",") {
+		if strings.TrimSpace(c) == svc.ServiceName {
+			permitted = true
+			break
+		}
+	}
+	if !permitted {
+		slog.Warn("lookup secret: caller not in allowed list", "service", svc.ServiceName)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var req struct {
+		OrgID string `json:"org_id"`
+		Name  string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.OrgID == "" || req.Name == "" {
+		http.Error(w, "org_id and name are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	values, err := resolveSecrets(ctx, req.OrgID, []string{req.Name})
+	if err != nil {
+		var nfe *errSecretNotFound
+		if errors.As(err, &nfe) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("lookup secret: resolve failed", "org_id", req.OrgID, "name", req.Name, "service", svc.ServiceName, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	value, exists := values[req.Name]
+	if !exists || value == "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"value": value}) //nolint:errcheck
+}
+
 // resolveSecrets dispatches to the org's configured provider (or builtin if none set).
 func resolveSecrets(ctx context.Context, orgID string, names []string) (map[string]string, error) {
 	var p OrgSecretProvider
@@ -586,7 +669,7 @@ func resolveBuiltin(ctx context.Context, orgID string, names []string) (map[stri
 
 	for _, name := range names {
 		if _, ok := found[name]; !ok {
-			return nil, fmt.Errorf("secret %q not found", name)
+			return nil, &errSecretNotFound{name: name}
 		}
 	}
 	return found, nil
@@ -648,7 +731,7 @@ func resolveDoppler(ctx context.Context, encConfig []byte, names []string) (map[
 	for _, name := range names {
 		s, ok := payload.Secrets[name]
 		if !ok {
-			return nil, fmt.Errorf("secret %q not found in Doppler", name)
+			return nil, &errSecretNotFound{name: name}
 		}
 		result[name] = s.Raw
 	}
@@ -710,7 +793,7 @@ func resolveVault(ctx context.Context, encConfig []byte, names []string) (map[st
 		val, err := func() (string, error) {
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusNotFound {
-				return "", fmt.Errorf("secret %q not found in Vault", name)
+				return "", &errSecretNotFound{name: name}
 			}
 			if resp.StatusCode != http.StatusOK {
 				body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

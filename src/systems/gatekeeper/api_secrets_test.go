@@ -504,6 +504,109 @@ func TestResolveSecrets_Unauthorized(t *testing.T) {
 	}
 }
 
+// ── Internal lookup ───────────────────────────────────────────────────────────
+
+func TestLookupSecret_OK(t *testing.T) {
+	org, u := createOrgWithUser(t)
+
+	ct, _ := encryptSecret("forgejo-user:forgejo-token-abc")
+	s := Secret{SecretID: uuid.New().String(), OrgID: org.OrgID, Name: "registry-token", Ciphertext: ct, CreatedBy: u.UserID}
+	connect().WithContext(context.Background()).Create(&s) //nolint:errcheck
+	t.Cleanup(func() {
+		connect().WithContext(context.Background()).
+			Model(&Secret{}).Where("secret_id = ?", s.SecretID).Update("active", false) //nolint:errcheck
+	})
+
+	svc, svcKey := createServiceAccount(t)
+	t.Setenv("SECRETS_LOOKUP_ALLOWED_CALLERS", svc.ServiceName)
+	body, _ := json.Marshal(map[string]string{"org_id": org.OrgID, "name": "registry-token"})
+	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
+	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, svcKey))
+	w := httptest.NewRecorder()
+	handleLookupSecret(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result map[string]string
+	json.Unmarshal(w.Body.Bytes(), &result) //nolint:errcheck
+	if result["value"] != "forgejo-user:forgejo-token-abc" {
+		t.Fatalf("value = %q, want forgejo-user:forgejo-token-abc", result["value"])
+	}
+}
+
+func TestLookupSecret_NotFound(t *testing.T) {
+	org, _ := createOrgWithUser(t)
+	svc, svcKey := createServiceAccount(t)
+	t.Setenv("SECRETS_LOOKUP_ALLOWED_CALLERS", svc.ServiceName)
+
+	body, _ := json.Marshal(map[string]string{"org_id": org.OrgID, "name": "does-not-exist"})
+	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
+	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, svcKey))
+	w := httptest.NewRecorder()
+	handleLookupSecret(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestLookupSecret_MissingFields(t *testing.T) {
+	svc, svcKey := createServiceAccount(t)
+	t.Setenv("SECRETS_LOOKUP_ALLOWED_CALLERS", svc.ServiceName)
+
+	body, _ := json.Marshal(map[string]string{"org_id": "x"}) // name missing
+	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
+	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, svcKey))
+	w := httptest.NewRecorder()
+	handleLookupSecret(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestLookupSecret_Unauthorized(t *testing.T) {
+	body, _ := json.Marshal(map[string]string{"org_id": "x", "name": "k"})
+	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	handleLookupSecret(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestLookupSecret_ForbiddenWhenNotAllowed(t *testing.T) {
+	svc, svcKey := createServiceAccount(t)
+	t.Setenv("SECRETS_LOOKUP_ALLOWED_CALLERS", "other-service") // svc.ServiceName not listed
+
+	body, _ := json.Marshal(map[string]string{"org_id": "x", "name": "k"})
+	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
+	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, svcKey))
+	w := httptest.NewRecorder()
+	handleLookupSecret(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestLookupSecret_ForbiddenWhenEnvUnset(t *testing.T) {
+	svc, svcKey := createServiceAccount(t)
+	t.Setenv("SECRETS_LOOKUP_ALLOWED_CALLERS", "")
+
+	body, _ := json.Marshal(map[string]string{"org_id": "x", "name": "k"})
+	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
+	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, svcKey))
+	w := httptest.NewRecorder()
+	handleLookupSecret(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
+
 // ── Doppler adapter ───────────────────────────────────────────────────────────
 
 func TestResolveDoppler_Success(t *testing.T) {
