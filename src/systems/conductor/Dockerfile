@@ -9,10 +9,10 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o conductor .
 
 FROM public.ecr.aws/docker/library/alpine:3.23.3
-RUN apk --no-cache add ca-certificates && addgroup -S svc && adduser -S svc -G svc
+RUN apk --no-cache add ca-certificates && addgroup -S -g 101 svc && adduser -S -u 100 -G svc svc
 WORKDIR /home/svc/
 COPY --from=builder /src/conductor/conductor .
 RUN chown svc:svc ./conductor
-USER svc
+USER 100:101
 EXPOSE 8080
 CMD ["./conductor"]
