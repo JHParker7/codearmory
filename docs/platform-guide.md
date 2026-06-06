@@ -521,17 +521,38 @@ armory services register \
 
 All services emit OpenTelemetry traces and metrics. Set `OTEL_EXPORTER_OTLP_ENDPOINT` on any service to export to your collector. Omit the variable to disable telemetry with no other changes required.
 
+**The value must include a scheme and a non-empty host**, e.g. `http://otel-collector:4318`. A scheme-only value such as `http://` (empty host) will be accepted by the env-var guard but will produce runtime errors of the form `Post "http:///v1/logs": http: no Host in request URL` as the exporter tries to flush. If you see this in the logs, check that `otelEndpoint` in your Helm values (or `OTEL_EXPORTER_OTLP_ENDPOINT` in your env) contains a full URL.
+
 ### Key metrics
 
 | Service | Metric | Labels |
 |---------|--------|--------|
+| Blueprints | `blueprints.state.get.total` | `result` (found/not_found) |
+| Blueprints | `blueprints.state.update.total` | — |
+| Blueprints | `blueprints.state.delete.total` | — |
+| Blueprints | `blueprints.state.lock.total` | `result` (ok/conflict) |
+| Blueprints | `blueprints.state.unlock.total` | — |
+| Blueprints | `blueprints.permission_checks.total` | `authorized` (true/false) |
+| Conductor | `conductor.requests.allowed.total` | — |
+| Conductor | `conductor.requests.rejected.total` | `reason` (no_token/malformed_token/unauthorized/gatekeeper_error/user_not_found) |
+| Conductor | `conductor.ips.blocked.total` | `source_ip` |
+| Containers | `containers.manifests.deleted.total` | `repo.namespace` |
+| Forge | `forge.executions.submitted.total` | `image` |
+| Forge | `forge.executions.completed.total` | `status` |
+| Forge | `forge.executions.cancelled.total` | — |
 | Gatekeeper | `gatekeeper.logins.total` | — |
 | Gatekeeper | `gatekeeper.permission_checks.total` | `result` (allowed/denied) |
+| Gitea Integration | `gitea.repos.created.total` | — |
+| Gitea Integration | `gitea.pulls.created.total` | — |
+| Gitea Integration | `gitea.pulls.merged.total` | — |
+| Hooks | `hooks.received.total` | `repo` |
+| Hooks | `hooks.rules.matched.total` | `repo`, `workflow.id` |
+| Hooks | `hooks.runs.triggered.total` | `workflow.id` |
+| Tickets | `tickets.created.total` | `priority` |
+| Tickets | `tickets.resolved.total` | `status` |
 | Workflows | `workflows.runs.triggered.total` | `workflow.id` |
 | Workflows | `workflows.runs.completed.total` | `workflow.id`, `status` |
 | Workflows | `workflows.steps.completed.total` | `workflow.id`, `status` |
-| Tickets | `tickets.created.total` | `priority` |
-| Tickets | `tickets.resolved.total` | `status` |
 
 Each service exposes a `GET /healthz` endpoint that returns `200 OK` when the service and its database connection are healthy. Use this for liveness and readiness probes.
 
@@ -578,5 +599,5 @@ All services share these conventions:
 
 - Every secret variable supports a `_FILE` suffix that reads the value from a file path (Docker secrets / Kubernetes secret mounts).
 - `LOG_LEVEL=debug` enables verbose structured logging on any service.
-- `OTEL_EXPORTER_OTLP_ENDPOINT` enables telemetry export; omitting it disables telemetry entirely.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` enables telemetry export; omitting it disables telemetry entirely. Must be a full URL with host (e.g. `http://otel-collector:4318`) — a scheme-only value like `http://` causes silent exporter errors.
 - `PORT` overrides the default listen port on every service.
