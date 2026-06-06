@@ -75,7 +75,7 @@ func resolveOrgCreds(ctx context.Context, orgID string) (registryCreds, error) {
 	}
 
 	username, token, ok := strings.Cut(result.Value, ":")
-	if !ok || token == "" {
+	if !ok || username == "" || token == "" {
 		return registryCreds{}, errors.New("org registry secret must be in username:token format")
 	}
 

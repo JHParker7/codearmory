@@ -83,10 +83,12 @@ func envDuration(key string, def time.Duration) time.Duration {
 }
 
 // seedServiceAccounts reads GATEKEEPER_SERVICES (format "name=key,name=key") and
-// creates a ServiceAccount row for each entry that does not already exist. Existing
-// accounts are left untouched so that keys rotated at runtime are not reset when
-// Gatekeeper restarts. To force a key reset, delete the row from the database and
-// restart Gatekeeper.
+// upserts ServiceAccount rows. For new accounts, both HashedKey and
+// HashedBootstrapKey are set to the provided key's hash. For existing accounts,
+// only HashedBootstrapKey is refreshed — HashedKey is left intact so that keys
+// rotated at runtime survive Gatekeeper restarts. The bootstrap key fallback in
+// requireServiceAuth lets a service pod re-authenticate after a restart with its
+// original GATEKEEPER_SERVICE_KEY even when HashedKey holds a rotated value.
 func seedServiceAccounts(db *gorm.DB) {
 	raw := secret("GATEKEEPER_SERVICES")
 	if raw == "" {
@@ -100,22 +102,30 @@ func seedServiceAccounts(db *gorm.DB) {
 			continue
 		}
 		name, key := entry[:idx], entry[idx+1:]
-		var existing ServiceAccount
-		err := db.Where("service_name = ?", name).First(&existing).Error
-		if err == nil {
-			slog.Debug("seedServiceAccounts: account exists, preserving rotated key", "name", name)
-			continue
-		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(key), 12)
 		if err != nil {
 			slog.Error("seedServiceAccounts: bcrypt failed", "name", name, "error", err)
 			continue
 		}
+		var existing ServiceAccount
+		err = db.Where("service_name = ?", name).First(&existing).Error
+		if err == nil {
+			// Preserve rotated HashedKey; refresh HashedBootstrapKey so pod restarts
+			// after rotation can re-authenticate via the bootstrap key fallback.
+			if err2 := db.Model(&ServiceAccount{}).Where("service_name = ?", name).
+				Update("hashed_bootstrap_key", string(hash)).Error; err2 != nil {
+				slog.Error("seedServiceAccounts: update bootstrap key failed", "name", name, "error", err2)
+			} else {
+				slog.Debug("seedServiceAccounts: account exists, bootstrap key refreshed", "name", name)
+			}
+			continue
+		}
 		svc := ServiceAccount{
-			ServiceAccountID: uuid.New().String(),
-			ServiceName:      name,
-			HashedKey:        string(hash),
-			Active:           true,
+			ServiceAccountID:   uuid.New().String(),
+			ServiceName:        name,
+			HashedKey:          string(hash),
+			HashedBootstrapKey: string(hash),
+			Active:             true,
 		}
 		if err := db.Create(&svc).Error; err != nil {
 			slog.Error("seedServiceAccounts: create failed", "name", name, "error", err)

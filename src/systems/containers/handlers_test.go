@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"os"
+	"strings"
 	"testing"
 
 	gk "github.com/code-armory-app/codearmory_sdk/gatekeeper"
@@ -464,16 +465,104 @@ func TestResolveOrgCreds_EmptyOrg(t *testing.T) {
 
 // ── handleV2 per-org credential injection ────────────────────────────────────
 
-func TestHandleV2_InjectsOrgCreds(t *testing.T) {
-	// Verify that per-org creds resolved from Gatekeeper are cached after handleV2.
-	// The discovery ping path /v2 returns before proxying, so we check the cache directly.
-	orgID := "org-perorg"
+// TestHandleV2_InjectsOrgCredsToProxy verifies that per-org credentials fetched
+// from Gatekeeper are forwarded as Basic auth to the upstream OCI registry on
+// proxied requests (not discovery pings). This exercises the Director code path.
+func TestHandleV2_InjectsOrgCredsToProxy(t *testing.T) {
+	orgID := "org-director-test"
 	t.Cleanup(func() { orgCredsCache.Delete(orgID) })
 
+	// Fake upstream registry records the Authorization header it receives.
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	// Wire ociProxy to the fake upstream.
+	origProxy := ociProxy
+	initOCIProxy()
+	t.Cleanup(func() { ociProxy = origProxy })
+
+	// Point registry baseURL at the fake upstream so initOCIProxy routes there.
+	origReg := registry
+	registry = &registryClient{baseURL: upstream.URL, http: httpClient}
+	t.Cleanup(func() { registry = origReg })
+	initOCIProxy()
+
 	fakeGatekeeperMulti(t,
-		`{"authorized":true,"user_id":"u1","org_id":"org-perorg"}`,
+		`{"authorized":true,"user_id":"u1","org_id":"org-director-test"}`,
 		"forgejo-bot:tok-xyz",
 	)
+
+	origName := orgSecretName
+	orgSecretName = "registry-token"
+	t.Cleanup(func() { orgSecretName = origName })
+
+	// Send a manifest pull request — goes through ociProxy, not the early-return path.
+	r := httptest.NewRequest(http.MethodGet, "/v2/myorg/myimage/manifests/latest", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	handleV2(w, r)
+
+	if gotAuth == "" {
+		t.Fatal("upstream received no Authorization header")
+	}
+	// SetBasicAuth encodes as "Basic base64(user:pass)".
+	user, pass, ok := parseBasicAuth(gotAuth)
+	if !ok {
+		t.Fatalf("Authorization header is not Basic auth: %q", gotAuth)
+	}
+	if user != "forgejo-bot" || pass != "tok-xyz" {
+		t.Fatalf("upstream received user=%q pass=%q, want forgejo-bot:tok-xyz", user, pass)
+	}
+}
+
+// parseBasicAuth decodes an "Authorization: Basic ..." header value.
+func parseBasicAuth(auth string) (user, pass string, ok bool) {
+	const prefix = "Basic "
+	if len(auth) < len(prefix) || auth[:len(prefix)] != prefix {
+		return "", "", false
+	}
+	encoded := auth[len(prefix):]
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", "", false
+	}
+	u, p, found := strings.Cut(string(decoded), ":")
+	if !found {
+		return "", "", false
+	}
+	return u, p, true
+}
+
+func TestHandleV2_DiscoveryPingSkipsCredsLookup(t *testing.T) {
+	// GET /v2 (discovery ping) must return 200 without contacting the secrets
+	// endpoint — resolveOrgCreds is called only for proxied requests.
+	lookupCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/check_permissions" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"authorized":true,"user_id":"u1","org_id":"org-ping"}`)) //nolint:errcheck
+			return
+		}
+		if r.URL.Path == "/internal/secrets/lookup" {
+			lookupCalls++
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	origURL := gatekeeperURL
+	origClient := gatekeeperClient
+	gatekeeperURL = srv.URL
+	gatekeeperClient = &gk.Client{URL: srv.URL, Service: "containers", HTTPClient: httpClient}
+	t.Cleanup(func() {
+		gatekeeperURL = origURL
+		gatekeeperClient = origClient
+	})
 
 	origName := orgSecretName
 	orgSecretName = "registry-token"
@@ -487,35 +576,46 @@ func TestHandleV2_InjectsOrgCreds(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200", w.Code)
 	}
-
-	v, ok := orgCredsCache.Load(orgID)
-	if !ok {
-		t.Fatal("expected org creds to be cached after handleV2")
-	}
-	if v.(cachedCreds).creds.username != "forgejo-bot" {
-		t.Fatalf("cached username = %q, want forgejo-bot", v.(cachedCreds).creds.username)
+	if lookupCalls != 0 {
+		t.Fatalf("secrets lookup called %d times for /v2 ping, want 0", lookupCalls)
 	}
 }
 
 func TestHandleV2_FallsBackWhenSecretMissing(t *testing.T) {
-	// When the org secret doesn't exist, handleV2 should fall back silently and still return 200.
+	// When the org secret doesn't exist, proxied requests must still succeed using
+	// global credentials.
+	orgID := "org-nosecret"
+	t.Cleanup(func() { orgCredsCache.Delete(orgID) })
+
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	origReg := registry
+	registry = &registryClient{baseURL: upstream.URL, http: httpClient, username: "global-user", password: "global-pass"}
+	t.Cleanup(func() { registry = origReg })
+	initOCIProxy()
+
 	fakeGatekeeperMulti(t,
 		`{"authorized":true,"user_id":"u1","org_id":"org-nosecret"}`,
-		"", // empty → lookup server returns 404
+		"", // 404 from secrets endpoint
 	)
-	t.Cleanup(func() { orgCredsCache.Delete("org-nosecret") })
 
 	origName := orgSecretName
 	orgSecretName = "registry-token"
 	t.Cleanup(func() { orgSecretName = origName })
 
-	r := httptest.NewRequest(http.MethodGet, "/v2", nil)
+	r := httptest.NewRequest(http.MethodGet, "/v2/org/img/manifests/latest", nil)
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
 	handleV2(w, r)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("got %d, want 200 (should fall back gracefully)", w.Code)
+	user, pass, ok := parseBasicAuth(gotAuth)
+	if !ok || user != "global-user" || pass != "global-pass" {
+		t.Fatalf("expected global creds fallback; got auth %q (user=%q, pass=%q, ok=%v)", gotAuth, user, pass, ok)
 	}
 }
 

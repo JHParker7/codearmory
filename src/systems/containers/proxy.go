@@ -124,20 +124,22 @@ func handleV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Inject per-org registry credentials when REGISTRY_ORG_SECRET_NAME is set.
-	// Falls back silently to global REGISTRY_USERNAME/REGISTRY_PASSWORD on any error
-	// (secret not found, org not set, feature disabled).
-	if creds, err := resolveOrgCreds(ctx, orgID); err == nil {
-		r = r.WithContext(context.WithValue(ctx, ctxCredsKey{}, creds))
-	}
-
 	// Discovery ping — respond directly rather than round-tripping upstream.
+	// Must be before resolveOrgCreds to avoid a Gatekeeper round-trip on every
+	// docker login probe when the fetched credentials would be discarded anyway.
 	if r.URL.Path == "/v2" || r.URL.Path == "/v2/" {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 		w.WriteHeader(http.StatusOK)
 		span.SetStatus(codes.Ok, "")
 		return
+	}
+
+	// Inject per-org registry credentials when REGISTRY_ORG_SECRET_NAME is set.
+	// Falls back silently to global REGISTRY_USERNAME/REGISTRY_PASSWORD on any error
+	// (secret not found, org not set, feature disabled).
+	if creds, err := resolveOrgCreds(ctx, orgID); err == nil {
+		r = r.WithContext(context.WithValue(ctx, ctxCredsKey{}, creds))
 	}
 
 	span.SetStatus(codes.Ok, "")

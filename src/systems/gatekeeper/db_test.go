@@ -871,7 +871,10 @@ func TestSeedServiceAccounts_CreatesNew(t *testing.T) {
 		t.Fatalf("expected service account to be created: %v", err)
 	}
 	if bcrypt.CompareHashAndPassword([]byte(svc.HashedKey), []byte("bootstrapkey")) != nil {
-		t.Fatal("stored hash does not match bootstrap key")
+		t.Fatal("HashedKey does not match bootstrap key")
+	}
+	if bcrypt.CompareHashAndPassword([]byte(svc.HashedBootstrapKey), []byte("bootstrapkey")) != nil {
+		t.Fatal("HashedBootstrapKey does not match bootstrap key")
 	}
 }
 
@@ -885,7 +888,7 @@ func TestSeedServiceAccounts_PreservesRotatedKey(t *testing.T) {
 	t.Setenv("GATEKEEPER_SERVICES", name+"=bootstrapkey")
 	seedServiceAccounts(gormDB)
 
-	// Simulate runtime key rotation: overwrite the hash with a rotated key's hash.
+	// Simulate runtime key rotation: overwrite HashedKey with the rotated key's hash.
 	rotatedHash, err := bcrypt.GenerateFromPassword([]byte("rotatedkey"), 12)
 	if err != nil {
 		t.Fatal(err)
@@ -895,7 +898,8 @@ func TestSeedServiceAccounts_PreservesRotatedKey(t *testing.T) {
 		t.Fatalf("failed to simulate rotation: %v", err)
 	}
 
-	// Second seed: simulates Gatekeeper restarting. Must not overwrite the rotated key.
+	// Second seed: simulates Gatekeeper restarting. HashedKey must be preserved;
+	// HashedBootstrapKey must be refreshed to the current bootstrap key.
 	seedServiceAccounts(gormDB)
 
 	var svc ServiceAccount
@@ -904,5 +908,8 @@ func TestSeedServiceAccounts_PreservesRotatedKey(t *testing.T) {
 	}
 	if bcrypt.CompareHashAndPassword([]byte(svc.HashedKey), []byte("rotatedkey")) != nil {
 		t.Fatal("rotated key was overwritten by seedServiceAccounts on restart")
+	}
+	if bcrypt.CompareHashAndPassword([]byte(svc.HashedBootstrapKey), []byte("bootstrapkey")) != nil {
+		t.Fatal("HashedBootstrapKey was not refreshed to bootstrap key on restart")
 	}
 }

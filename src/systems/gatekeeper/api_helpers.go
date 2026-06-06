@@ -713,8 +713,21 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 	}
 	svc := row.(ServiceAccount)
 	if err := bcrypt.CompareHashAndPassword([]byte(svc.HashedKey), []byte(key)); err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return ServiceAccount{}, false
+		// Fall back to the bootstrap key. This lets a service pod re-authenticate
+		// after a restart when the rotated key was only stored in memory. On
+		// success, HashedKey is reset to the bootstrap hash so the service can
+		// immediately call /service-accounts/rotate-key to re-establish rotation.
+		if svc.HashedBootstrapKey == "" || bcrypt.CompareHashAndPassword([]byte(svc.HashedBootstrapKey), []byte(key)) != nil {
+			slog.Warn("service auth rejected: key mismatch", "service", name)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return ServiceAccount{}, false
+		}
+		slog.Warn("service auth: bootstrap key fallback used; service will re-rotate", "service", name)
+		if err2 := connect().WithContext(r.Context()).Model(&ServiceAccount{}).
+			Where("service_name = ?", name).
+			Update("hashed_key", svc.HashedBootstrapKey).Error; err2 != nil {
+			slog.Error("service auth: failed to sync hashed_key from bootstrap", "service", name, "error", err2)
+		}
 	}
 
 	// IP allowlist: if the service account has allowed CIDRs configured, the

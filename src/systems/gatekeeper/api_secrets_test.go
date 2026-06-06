@@ -518,6 +518,7 @@ func TestLookupSecret_OK(t *testing.T) {
 	})
 
 	svc, svcKey := createServiceAccount(t)
+	t.Setenv("SECRETS_LOOKUP_ALLOWED_CALLERS", svc.ServiceName)
 	body, _ := json.Marshal(map[string]string{"org_id": org.OrgID, "name": "registry-token"})
 	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
 	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, svcKey))
@@ -537,6 +538,7 @@ func TestLookupSecret_OK(t *testing.T) {
 func TestLookupSecret_NotFound(t *testing.T) {
 	org, _ := createOrgWithUser(t)
 	svc, svcKey := createServiceAccount(t)
+	t.Setenv("SECRETS_LOOKUP_ALLOWED_CALLERS", svc.ServiceName)
 
 	body, _ := json.Marshal(map[string]string{"org_id": org.OrgID, "name": "does-not-exist"})
 	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
@@ -551,6 +553,7 @@ func TestLookupSecret_NotFound(t *testing.T) {
 
 func TestLookupSecret_MissingFields(t *testing.T) {
 	svc, svcKey := createServiceAccount(t)
+	t.Setenv("SECRETS_LOOKUP_ALLOWED_CALLERS", svc.ServiceName)
 
 	body, _ := json.Marshal(map[string]string{"org_id": "x"}) // name missing
 	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
@@ -571,6 +574,36 @@ func TestLookupSecret_Unauthorized(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestLookupSecret_ForbiddenWhenNotAllowed(t *testing.T) {
+	svc, svcKey := createServiceAccount(t)
+	t.Setenv("SECRETS_LOOKUP_ALLOWED_CALLERS", "other-service") // svc.ServiceName not listed
+
+	body, _ := json.Marshal(map[string]string{"org_id": "x", "name": "k"})
+	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
+	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, svcKey))
+	w := httptest.NewRecorder()
+	handleLookupSecret(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestLookupSecret_ForbiddenWhenEnvUnset(t *testing.T) {
+	svc, svcKey := createServiceAccount(t)
+	t.Setenv("SECRETS_LOOKUP_ALLOWED_CALLERS", "")
+
+	body, _ := json.Marshal(map[string]string{"org_id": "x", "name": "k"})
+	r := httptest.NewRequest(http.MethodPost, "/internal/secrets/lookup", bytes.NewReader(body))
+	r.Header.Set("X-Service-Key", fmt.Sprintf("%s:%s", svc.ServiceName, svcKey))
+	w := httptest.NewRecorder()
+	handleLookupSecret(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
 	}
 }
 
