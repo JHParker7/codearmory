@@ -215,6 +215,29 @@ Usage: {{ include "codearmory.tls.volumes" .Values.someservice.tls }}
 {{- end }}
 
 {{/*
+initContainer that polls gatekeeper's /healthz until it returns HTTP 200.
+Inject into every service that calls StartKeyRotation so it never races gatekeeper on startup.
+Usage: {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
+*/}}
+{{- define "codearmory.initContainer.waitForGatekeeper" -}}
+- name: wait-for-gatekeeper
+  image: {{ .Values.waitContainerImage | default "busybox:1.36" }}
+  command:
+    - sh
+    - -c
+    - >-
+      until wget -qO- http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}/healthz
+      2>/dev/null; do echo "waiting for gatekeeper"; sleep 2; done
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    capabilities:
+      drop: ["ALL"]
+{{- end }}
+
+{{/*
 Forge service account name.
 */}}
 {{- define "codearmory.forge.serviceAccountName" -}}

@@ -84,20 +84,22 @@ func signForwardedUserID(userID string) (token, timestamp string) {
 // endpointEntry is a compiled representation of one endpoint declared by a
 // backend service. pattern matches the full request path as registered.
 type endpointEntry struct {
-	method      string
-	pattern     *regexp.Regexp
-	paramNames  []string // ordered param names captured by pattern (e.g. "id" for {id})
-	action      string
-	resource    string   // may contain {param} placeholders resolved at request time
-	public      bool     // skip user auth and permission check
-	serviceName string   // which service owns this endpoint
+	method       string
+	pattern      *regexp.Regexp
+	paramNames   []string // ordered param names captured by pattern (e.g. "id" for {id})
+	action       string
+	resource     string // may contain {param} placeholders resolved at request time
+	public       bool   // skip user auth and permission check
+	serviceName  string // which service owns this endpoint
+	originalPath string // path template as declared in the registry (e.g. /users/{id})
 }
 
 // serviceState holds the proxy and per-service routing config for one service.
 type serviceState struct {
 	url         string
 	proxy       *httputil.ReverseProxy
-	forwardAuth bool // whether to forward the caller's Authorization header
+	forwardAuth bool   // whether to forward the caller's Authorization header
+	description string // human-readable description from the registry manifest
 }
 
 // routingMu protects both servicesMap and endpointsList under a single lock so
@@ -394,6 +396,7 @@ func refreshServiceCache(ctx context.Context) {
 	var svcs []struct {
 		Name        string `json:"name"`
 		URL         string `json:"url"`
+		Description string `json:"description"`
 		ForwardAuth bool   `json:"forward_auth"`
 		Endpoints   []struct {
 			Method   string `json:"method"`
@@ -435,17 +438,19 @@ func refreshServiceCache(ctx context.Context) {
 			url:         s.URL,
 			proxy:       proxy,
 			forwardAuth: s.ForwardAuth,
+			description: s.Description,
 		}
 
 		for _, ep := range s.Endpoints {
 			newEndpoints = append(newEndpoints, endpointEntry{
-				method:      ep.Method,
-				pattern:     compilePathPattern(ep.Path),
-				paramNames:  parseParamNames(ep.Path),
-				action:      ep.Action,
-				resource:    ep.Resource,
-				public:      ep.Public,
-				serviceName: s.Name,
+				method:       ep.Method,
+				pattern:      compilePathPattern(ep.Path),
+				paramNames:   parseParamNames(ep.Path),
+				action:       ep.Action,
+				resource:     ep.Resource,
+				public:       ep.Public,
+				serviceName:  s.Name,
+				originalPath: ep.Path,
 			})
 		}
 	}
@@ -813,6 +818,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /openapi.json", handleOpenAPISpec)
+	mux.HandleFunc("GET /docs", handleDocs)
 	mux.Handle("/{path...}", http.HandlerFunc(handleServiceProxy))
 
 	port := envOrDefault("PORT", "8080")

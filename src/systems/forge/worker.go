@@ -72,14 +72,14 @@ func (p *WorkerPool) tryOne(ctx context.Context) {
 	// locks exactly one pending row and skips any already locked by a sibling,
 	// so workers never block each other on the same row.
 	row := tx.QueryRow(ctx, `
-		SELECT execution_id, user_id, image, command, env, timeout_secs
+		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class
 		FROM executions
 		WHERE status = 'pending'
 		ORDER BY created_at
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED
 	`)
-	err = row.Scan(&exec.ExecutionID, &exec.UserID, &exec.Image, &cmdJSON, &envJSON, &exec.TimeoutSecs)
+	err = row.Scan(&exec.ExecutionID, &exec.UserID, &exec.Image, &cmdJSON, &envJSON, &exec.TimeoutSecs, &exec.RunnerClass)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return
 	}

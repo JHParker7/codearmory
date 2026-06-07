@@ -30,6 +30,8 @@ spec:
         runAsGroup: 101
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
       containers:
         - name: hooks
           image: "{{ include "codearmory.image" (list . .Values.hooks) }}"

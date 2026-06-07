@@ -27,6 +27,7 @@ type Execution struct {
 	Command     []string          `json:"command"`
 	Env         map[string]string `json:"env"`
 	TimeoutSecs int64             `json:"timeout"`
+	RunnerClass string            `json:"runner_class"`
 	Status      string            `json:"status"`
 	ExitCode    *int              `json:"exit_code,omitempty"`
 	Stdout      *string           `json:"stdout,omitempty"`
@@ -37,10 +38,11 @@ type Execution struct {
 }
 
 type submitRequest struct {
-	Image   string            `json:"image"`
-	Command []string          `json:"command"`
-	Env     map[string]string `json:"env"`
-	Timeout int64             `json:"timeout"`
+	Image       string            `json:"image"`
+	Command     []string          `json:"command"`
+	Env         map[string]string `json:"env"`
+	Timeout     int64             `json:"timeout"`
+	RunnerClass string            `json:"runner_class"`
 }
 
 // RunResult holds the output of a completed container run.

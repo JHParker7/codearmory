@@ -65,12 +65,11 @@ func TestHandleSubmit_Success_DB(t *testing.T) {
 	t.Cleanup(func() { initAllowedImages("") })
 
 	userID := "user-" + uuid.New().String()
-	pool := &WorkerPool{}
 	body := bytes.NewBufferString(`{"image":"alpine:3.19","command":["echo","hi"]}`)
 	r := httptest.NewRequest(http.MethodPost, "/executions", body)
 	r.Header.Set("X-User-ID", userID)
 	w := httptest.NewRecorder()
-	handleSubmit(pool)(w, r)
+	handleSubmit(w, r)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got %d, want 202: %s", w.Code, w.Body.String())

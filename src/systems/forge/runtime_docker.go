@@ -15,13 +15,11 @@ import (
 )
 
 // DockerRuntime runs executions as short-lived Docker containers on the local daemon.
-// Each container gets a read-only root filesystem, a 64 MB /tmp tmpfs, capped memory
-// and CPU, and is placed on the network specified by FORGE_NETWORK_MODE (default: none).
+// Each container gets a read-only root filesystem, a tmpfs /tmp, and resource limits
+// determined by the execution's runner class. Network mode is set by FORGE_NETWORK_MODE
+// (default: none).
 type DockerRuntime struct {
 	client      *client.Client
-	memLimit    int64
-	cpuQuota    int64
-	pidsLimit   int64
 	allowedNet  string
 	egressProxy string // HTTP proxy URL injected into containers, e.g. "http://egress-proxy:3128"
 }
@@ -41,9 +39,6 @@ func newDockerRuntime() (*DockerRuntime, error) {
 	}
 	return &DockerRuntime{
 		client:      c,
-		memLimit:    256 * 1024 * 1024, // 256 MB
-		cpuQuota:    50000,              // 50% of one core (100000 = full core)
-		pidsLimit:   64,
 		allowedNet:  net,
 		egressProxy: envOrDefault("FORGE_EGRESS_PROXY", ""),
 	}, nil
@@ -52,6 +47,15 @@ func newDockerRuntime() (*DockerRuntime, error) {
 // Run pulls the image if not present, creates a sandboxed container, and blocks
 // until completion or timeout. The container is always removed on return.
 func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, error) {
+	spec, err := runnerClassSpec(ctx, exec.RunnerClass)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("runner class: %w", err)
+	}
+	memLimit := spec.MemoryMB * 1024 * 1024
+	cpuQuota := spec.CPUMillicores * 100 // 1000m → 100000 (one full core)
+	pidsLimit := spec.PidsLimit
+	tmpfsOpt := fmt.Sprintf("size=%dm", spec.TmpfsMB)
+
 	envList := make([]string, 0, len(exec.Env))
 	for k, v := range exec.Env {
 		envList = append(envList, k+"="+v)
@@ -96,11 +100,11 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 			// ReadonlyRootfs prevents writes to the image layers. /tmp is a writable
 			// tmpfs mount so programs that need a scratch directory still work.
 			ReadonlyRootfs: true,
-			Tmpfs:          map[string]string{"/tmp": "size=64m"},
+			Tmpfs:          map[string]string{"/tmp": tmpfsOpt},
 			Resources: container.Resources{
-				Memory:    r.memLimit,
-				CPUQuota:  r.cpuQuota,
-				PidsLimit: &r.pidsLimit,
+				Memory:    memLimit,
+				CPUQuota:  cpuQuota,
+				PidsLimit: &pidsLimit,
 			},
 			CapDrop:    []string{"ALL"},
 			SecurityOpt: []string{"no-new-privileges"},

@@ -21,13 +21,12 @@ import (
 // KubernetesRuntime runs executions as single-container Kubernetes Jobs.
 // Jobs are created in K8S_NAMESPACE (default: forge) and deleted immediately
 // after the result is collected. An optional RuntimeClass (K8S_RUNTIME_CLASS)
-// enables gVisor or other sandboxed runtimes.
+// enables gVisor or other sandboxed runtimes. Resource limits are determined
+// per-execution by the runner class stored in the database.
 type KubernetesRuntime struct {
 	client       kubernetes.Interface
 	namespace    string
 	runtimeClass *string
-	memLimit     resource.Quantity
-	cpuLimit     resource.Quantity
 }
 
 func newKubernetesRuntime() (*KubernetesRuntime, error) {
@@ -57,8 +56,6 @@ func newKubernetesRuntime() (*KubernetesRuntime, error) {
 		client:       client,
 		namespace:    envOrDefault("K8S_NAMESPACE", "forge"),
 		runtimeClass: rc,
-		memLimit:     resource.MustParse(envOrDefault("CONTAINER_MEMORY_LIMIT", "256Mi")),
-		cpuLimit:     resource.MustParse(envOrDefault("CONTAINER_CPU_LIMIT", "500m")),
 	}, nil
 }
 
@@ -66,6 +63,14 @@ func newKubernetesRuntime() (*KubernetesRuntime, error) {
 // terminal state, collects logs, then deletes the job. The job is always
 // deleted on return, even if Run returns an error.
 func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult, error) {
+	spec, err := runnerClassSpec(ctx, exec.RunnerClass)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("runner class: %w", err)
+	}
+	memLimit := resource.MustParse(fmt.Sprintf("%dMi", spec.MemoryMB))
+	cpuLimit := resource.MustParse(fmt.Sprintf("%dm", spec.CPUMillicores))
+	tmpSize := resource.MustParse(fmt.Sprintf("%dMi", spec.TmpfsMB))
+
 	jobName := "forge-" + exec.ExecutionID
 
 	envVars := make([]corev1.EnvVar, 0, len(exec.Env))
@@ -73,7 +78,6 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 	}
 
-	tmpSize := resource.MustParse("64Mi")
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -110,12 +114,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 						Env:     envVars,
 						Resources: corev1.ResourceRequirements{
 							Limits: corev1.ResourceList{
-								corev1.ResourceMemory: r.memLimit,
-								corev1.ResourceCPU:    r.cpuLimit,
+								corev1.ResourceMemory: memLimit,
+								corev1.ResourceCPU:    cpuLimit,
 							},
 							Requests: corev1.ResourceList{
-								corev1.ResourceMemory: r.memLimit,
-								corev1.ResourceCPU:    r.cpuLimit,
+								corev1.ResourceMemory: memLimit,
+								corev1.ResourceCPU:    cpuLimit,
 							},
 						},
 						SecurityContext: &corev1.SecurityContext{
