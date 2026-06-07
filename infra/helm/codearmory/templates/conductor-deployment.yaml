@@ -30,6 +30,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
+        {{- include "codearmory.initContainer.waitForRegistry" . | nindent 8 }}
       containers:
         - name: conductor
           image: "{{ include "codearmory.image" (list . .Values.conductor) }}"
