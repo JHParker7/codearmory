@@ -13,7 +13,7 @@
 
 - **Remote Terraform/OpenTofu state** — drop-in HTTP backend with workspace locking, backed by your own Postgres. Point any existing `tofu` or `terraform` config at it with two lines of config.
 - **Extensible pipelines** — register any HTTP service and use it as a pipeline step. Your internal tools, build systems, and deployment scripts become first-class pipeline targets without any code changes.
-- **Sandboxed runners** — run commands in isolated containers with dropped capabilities, resource limits, and optional egress control via an allowlist proxy (Forge + Egress Proxy).
+- **Sandboxed runners** — run commands in isolated containers with dropped capabilities, configurable resource tiers (runner classes), and optional egress control via an allowlist proxy (Forge + Egress Proxy).
 - **Git webhook triggers** — receive pushes and PRs from GitHub, GitLab, or Gitea and map them to pipeline runs with at-least-once delivery (Hooks).
 - **Auth + RBAC + SSO** — ES256 JWT sessions, orgs, teams, and roles covering every service. Gatekeeper also acts as an OIDC provider so Forgejo can use CodeArmory as its SSO identity source.
 - **Forgejo/Gitea integration** — link CodeArmory user accounts to Forgejo identities and manage repos, branches, commits, and pull requests through the platform API (Gitea Integration).
@@ -210,9 +210,10 @@ ghcr.io/code-armory-app/forge:alpha-latest
 ghcr.io/code-armory-app/workflows:alpha-latest
 ghcr.io/code-armory-app/hooks:alpha-latest
 ghcr.io/code-armory-app/tickets:alpha-latest
-ghcr.io/code-armory-app/gitea-integration:alpha-latest
+ghcr.io/code-armory-app/gitea_integration:alpha-latest
 ghcr.io/code-armory-app/containers:alpha-latest
 ghcr.io/code-armory-app/egress-proxy:alpha-latest
+ghcr.io/code-armory-app/mcp:alpha-latest
 ```
 
 ---

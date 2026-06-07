@@ -165,6 +165,138 @@ paths:
               schema:
                 type: string
 
+  /runner-classes:
+    get:
+      summary: List runner classes
+      operationId: listRunnerClasses
+      description: |
+        Returns all runner classes ordered by name.
+
+        Permission: `listRunnerClass` on `forge/runner-classes`.
+      responses:
+        '200':
+          description: List of runner classes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RunnerClass'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      summary: Create runner class
+      operationId: createRunnerClass
+      description: |
+        Creates a new runner class. Returns `409` if a class with the same name
+        already exists.
+
+        Permission: `createRunnerClass` on `forge/runner-classes`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunnerClassBody'
+      responses:
+        '201':
+          description: Runner class created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunnerClass'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Runner class already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /runner-classes/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Runner class name
+
+    get:
+      summary: Get runner class
+      operationId: getRunnerClass
+      description: |
+        Permission: `getRunnerClass` on `forge/runner-classes/{name}`.
+      responses:
+        '200':
+          description: Runner class
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunnerClass'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      summary: Update runner class
+      operationId: updateRunnerClass
+      description: |
+        Replaces all mutable fields of the named runner class. Changes take effect
+        immediately for new submissions — no restart required.
+
+        Permission: `updateRunnerClass` on `forge/runner-classes/{name}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunnerClassBody'
+      responses:
+        '200':
+          description: Updated runner class
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunnerClass'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete runner class
+      operationId: deleteRunnerClass
+      description: |
+        Deletes the named runner class. In-flight executions using this class are
+        unaffected; only new submissions are rejected.
+
+        Permission: `deleteRunnerClass` on `forge/runner-classes/{name}`.
+      responses:
+        '204':
+          description: Runner class deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -214,6 +346,14 @@ components:
           default: 30
           minimum: 1
           maximum: 3600
+        runner_class:
+          type: string
+          description: |
+            Resource tier for the execution. Defaults to `standard`. Must be an
+            enabled runner class. Returns `400` if the class does not exist or is
+            disabled.
+          default: standard
+          example: standard
 
     Execution:
       type: object
@@ -240,6 +380,10 @@ components:
         timeout:
           type: integer
           description: Configured timeout in seconds
+        runner_class:
+          type: string
+          description: Runner class used for this execution.
+          example: standard
         status:
           type: string
           enum: [pending, running, completed, failed, timed_out, cancelled]
@@ -273,6 +417,73 @@ components:
           format: date-time
           nullable: true
           readOnly: true
+
+    RunnerClass:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Unique identifier for the runner class.
+          example: standard
+        memory_mb:
+          type: integer
+          description: Memory limit in megabytes.
+          example: 256
+        cpu_millicores:
+          type: integer
+          description: CPU limit in millicores (1000 = one full core).
+          example: 500
+        pids_limit:
+          type: integer
+          description: Maximum number of processes the container may create.
+          example: 64
+        tmpfs_mb:
+          type: integer
+          description: Size of the writable /tmp tmpfs in megabytes.
+          example: 64
+        enabled:
+          type: boolean
+          description: Whether this class can be selected for new submissions.
+          example: true
+
+    RunnerClassBody:
+      type: object
+      required:
+        - name
+        - memory_mb
+        - cpu_millicores
+        - pids_limit
+        - tmpfs_mb
+        - enabled
+      properties:
+        name:
+          type: string
+          description: Unique name for the runner class. Ignored on PUT (name comes from path).
+          example: gpu-small
+        memory_mb:
+          type: integer
+          description: Memory limit in megabytes. Minimum 64.
+          minimum: 64
+          example: 512
+        cpu_millicores:
+          type: integer
+          description: CPU limit in millicores. Minimum 100.
+          minimum: 100
+          example: 1000
+        pids_limit:
+          type: integer
+          description: Maximum process count. Minimum 8.
+          minimum: 8
+          example: 64
+        tmpfs_mb:
+          type: integer
+          description: /tmp size in megabytes. Minimum 16.
+          minimum: 16
+          example: 64
+        enabled:
+          type: boolean
+          description: Whether the class can be selected for new submissions.
+          example: true
 
   responses:
     BadRequest:
