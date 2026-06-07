@@ -169,6 +169,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
+	mux.HandleFunc("POST /internal/registry-token", handleInternalRegistryToken)
+
 	mux.HandleFunc("GET /account", handleGetAccount)
 	mux.HandleFunc("PUT /account", handleLinkAccount)
 	mux.HandleFunc("DELETE /account", handleUnlinkAccount)

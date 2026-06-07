@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 type giteaClient struct {
@@ -235,4 +237,62 @@ func (c *giteaClient) listCommits(ctx context.Context, owner, name, sudo string,
 		commits = []Commit{}
 	}
 	return commits, nil
+}
+
+// ── Registry token management ─────────────────────────────────────────────────
+
+type giteaUserToken struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+// listUserTokens returns all personal access tokens for the given Gitea user.
+// Uses the admin token with Sudo to act on behalf of the user.
+func (c *giteaClient) listUserTokens(ctx context.Context, username string) ([]giteaUserToken, error) {
+	var tokens []giteaUserToken
+	if err := c.get(ctx, "/users/"+url.PathEscape(username)+"/tokens", username, &tokens); err != nil {
+		return nil, err
+	}
+	if tokens == nil {
+		tokens = []giteaUserToken{}
+	}
+	return tokens, nil
+}
+
+// createRegistryToken creates a Gitea API token scoped to package read/write
+// for the given user via admin Sudo. Returns the raw token value (only available
+// at creation time — Gitea does not expose it again after this call).
+func (c *giteaClient) createRegistryToken(ctx context.Context, username, name string) (string, error) {
+	var result struct {
+		SHA1 string `json:"sha1"`
+	}
+	if err := c.post(ctx, "/users/"+url.PathEscape(username)+"/tokens", username, map[string]any{
+		"name":   name,
+		"scopes": []string{"read:package", "write:package"},
+	}, &result); err != nil {
+		return "", err
+	}
+	if result.SHA1 == "" {
+		return "", fmt.Errorf("gitea returned empty token value")
+	}
+	return result.SHA1, nil
+}
+
+// cleanRegistryTokens deletes all tokens matching the "codearmory-reg-" prefix
+// for the given user. Deletion failures are logged but do not abort the loop.
+func (c *giteaClient) cleanRegistryTokens(ctx context.Context, username string) error {
+	tokens, err := c.listUserTokens(ctx, username)
+	if err != nil {
+		return fmt.Errorf("list tokens: %w", err)
+	}
+	for _, t := range tokens {
+		if !strings.HasPrefix(t.Name, "codearmory-reg-") {
+			continue
+		}
+		path := fmt.Sprintf("/users/%s/tokens/%d", url.PathEscape(username), t.ID)
+		if err := c.delete(ctx, path, username); err != nil {
+			slog.Warn("clean registry tokens: delete failed", "username", username, "token_id", t.ID, "error", err)
+		}
+	}
+	return nil
 }

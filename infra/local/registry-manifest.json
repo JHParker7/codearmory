@@ -280,6 +280,11 @@
         "grant_on": "user",
         "actions": ["getRepo", "deleteRepo", "listBranch", "listTag", "listRelease", "listCommit", "listPull", "createPull", "getPull", "mergePull"],
         "resources": ["gitea_integration/repos/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["getRegistryToken"],
+        "resources": ["gitea_integration/registry-token"]
       }
     ]
   },
