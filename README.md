@@ -274,4 +274,3 @@ CodeArmory is in **alpha**. APIs and data models may change between releases.
 
 To report a vulnerability, use [GitHub's private security advisory form](https://github.com/code-armory-app/codearmory/security/advisories/new) — do not open a public issue. We'll respond within 72 hours.
 
-
