@@ -17,6 +17,10 @@ imageTag: alpha-1.2.0
 imagePullPolicy: IfNotPresent
 imagePullSecrets: []
 
+# Image used by initContainers that poll dependency readiness (e.g. wait-for-gatekeeper).
+# Override to use a private mirror: e.g. "registry.example.com/busybox:1.36"
+waitContainerImage: "busybox:1.36"
+
 # ── Gatekeeper ────────────────────────────────────────────────────────────────
 gatekeeper:
   image:

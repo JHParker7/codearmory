@@ -46,6 +46,8 @@ spec:
         runAsGroup: 101
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
       containers:
         - name: registry
           image: "{{ include "codearmory.image" (list . .Values.registry) }}"
@@ -88,6 +90,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-registry
                   key: admin-accounts
+                  optional: true
             {{- include "codearmory.tls.envs" .Values.registry.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.registry.tls) }}
           volumeMounts:

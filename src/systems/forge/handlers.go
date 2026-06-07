@@ -131,76 +131,81 @@ func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request
 
 // ── Submit ────────────────────────────────────────────────────────────────────
 
-func handleSubmit(pool *WorkerPool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, span := otel.Tracer("forge").Start(r.Context(), "handleSubmit")
-		defer span.End()
+func handleSubmit(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("forge").Start(r.Context(), "handleSubmit")
+	defer span.End()
 
-		userID, ok := checkGatekeeper(ctx, w, r, "createExecution", "forge/executions")
-		if !ok {
-			return
-		}
-
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
-		if err != nil || !json.Valid(body) {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		var req submitRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		if req.Image == "" || len(req.Command) == 0 {
-			http.Error(w, "image and command are required", http.StatusBadRequest)
-			return
-		}
-		// allowedImages == nil means ALLOWED_IMAGES was not configured: deny all.
-		if allowedImages == nil || !allowedImages[req.Image] {
-			http.Error(w, "image not allowed", http.StatusBadRequest)
-			return
-		}
-		if req.Timeout <= 0 {
-			req.Timeout = defaultTimeout
-		}
-		if req.Timeout > maxTimeout {
-			req.Timeout = maxTimeout
-		}
-		if req.Env == nil {
-			req.Env = map[string]string{}
-		}
-		if err := validateEnvKeys(req.Env); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		cmdJSON, _ := json.Marshal(req.Command)
-		envJSON, _ := json.Marshal(req.Env)
-		executionID := uuid.New().String()
-
-		_, err = db.Exec(ctx,
-			`INSERT INTO executions (execution_id, user_id, image, command, env, timeout_secs)
-			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			executionID, userID, req.Image, cmdJSON, envJSON, req.Timeout,
-		)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			slog.Error("submit: insert execution", "error", err)
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-
-		meterSubmit.Add(ctx, 1, metric.WithAttributes(attribute.String("image", req.Image)))
-		span.SetStatus(codes.Ok, "")
-		slog.Info("execution submitted", "execution_id", executionID, "user_id", userID, "image", req.Image)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]string{"execution_id": executionID})
+	userID, ok := checkGatekeeper(ctx, w, r, "createExecution", "forge/executions")
+	if !ok {
+		return
 	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	if err != nil || !json.Valid(body) {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	var req submitRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Image == "" || len(req.Command) == 0 {
+		http.Error(w, "image and command are required", http.StatusBadRequest)
+		return
+	}
+	// allowedImages == nil means ALLOWED_IMAGES was not configured: deny all.
+	if allowedImages == nil || !allowedImages[req.Image] {
+		http.Error(w, "image not allowed", http.StatusBadRequest)
+		return
+	}
+	if req.Timeout <= 0 {
+		req.Timeout = defaultTimeout
+	}
+	if req.Timeout > maxTimeout {
+		req.Timeout = maxTimeout
+	}
+	if req.Env == nil {
+		req.Env = map[string]string{}
+	}
+	if err := validateEnvKeys(req.Env); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.RunnerClass == "" {
+		req.RunnerClass = "standard"
+	}
+	if _, err := runnerClassSpec(ctx, req.RunnerClass); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	cmdJSON, _ := json.Marshal(req.Command)
+	envJSON, _ := json.Marshal(req.Env)
+	executionID := uuid.New().String()
+
+	_, err = db.Exec(ctx,
+		`INSERT INTO executions (execution_id, user_id, image, command, env, timeout_secs, runner_class)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		executionID, userID, req.Image, cmdJSON, envJSON, req.Timeout, req.RunnerClass,
+	)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("submit: insert execution", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	meterSubmit.Add(ctx, 1, metric.WithAttributes(attribute.String("image", req.Image)))
+	span.SetStatus(codes.Ok, "")
+	slog.Info("execution submitted", "execution_id", executionID, "user_id", userID, "image", req.Image, "runner_class", req.RunnerClass)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"execution_id": executionID})
 }
 
 // ── Get ───────────────────────────────────────────────────────────────────────
@@ -243,7 +248,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(ctx,
-		`SELECT execution_id, user_id, image, status, exit_code, created_at, started_at, ended_at
+		`SELECT execution_id, user_id, image, status, exit_code, created_at, started_at, ended_at, runner_class
 		 FROM executions
 		 WHERE user_id = $1
 		 ORDER BY created_at DESC
@@ -261,7 +266,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	executions := []Execution{}
 	for rows.Next() {
 		var e Execution
-		if err := rows.Scan(&e.ExecutionID, &e.UserID, &e.Image, &e.Status, &e.ExitCode, &e.CreatedAt, &e.StartedAt, &e.EndedAt); err != nil {
+		if err := rows.Scan(&e.ExecutionID, &e.UserID, &e.Image, &e.Status, &e.ExitCode, &e.CreatedAt, &e.StartedAt, &e.EndedAt, &e.RunnerClass); err != nil {
 			continue
 		}
 		executions = append(executions, e)
@@ -325,11 +330,11 @@ func getExecution(ctx context.Context, executionID, userID string) (Execution, e
 	var e Execution
 	err := db.QueryRow(ctx,
 		`SELECT execution_id, user_id, image, status, exit_code, stdout, stderr,
-		        created_at, started_at, ended_at
+		        created_at, started_at, ended_at, runner_class
 		 FROM executions
 		 WHERE execution_id = $1 AND user_id = $2`,
 		executionID, userID,
 	).Scan(&e.ExecutionID, &e.UserID, &e.Image, &e.Status, &e.ExitCode,
-		&e.Stdout, &e.Stderr, &e.CreatedAt, &e.StartedAt, &e.EndedAt)
+		&e.Stdout, &e.Stderr, &e.CreatedAt, &e.StartedAt, &e.EndedAt, &e.RunnerClass)
 	return e, err
 }

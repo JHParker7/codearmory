@@ -115,11 +115,10 @@ func TestInitAllowedImages_Multiple(t *testing.T) {
 func TestHandleSubmit_Unauthorized(t *testing.T) {
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
-	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19","command":["echo","hi"]}`))
 	w := httptest.NewRecorder()
-	handleSubmit(pool)(w, r)
+	handleSubmit(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
@@ -129,11 +128,10 @@ func TestHandleSubmit_InvalidJSON(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
-	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions", bytes.NewBufferString("not json"))
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
-	handleSubmit(pool)(w, r)
+	handleSubmit(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
@@ -143,12 +141,11 @@ func TestHandleSubmit_MissingImage(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
-	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"command":["echo","hi"]}`))
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
-	handleSubmit(pool)(w, r)
+	handleSubmit(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
@@ -158,12 +155,11 @@ func TestHandleSubmit_MissingCommand(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
-	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19"}`))
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
-	handleSubmit(pool)(w, r)
+	handleSubmit(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
@@ -173,12 +169,11 @@ func TestHandleSubmit_DisallowedImage(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("ubuntu:22.04")
 	t.Cleanup(func() { initAllowedImages("") })
-	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19","command":["echo","hi"]}`))
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
-	handleSubmit(pool)(w, r)
+	handleSubmit(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
@@ -266,12 +261,11 @@ func TestHandleSubmit_EmptyCommandSlice(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
-	pool := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodPost, "/executions",
 		bytes.NewBufferString(`{"image":"alpine:3.19","command":[]}`))
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
-	handleSubmit(pool)(w, r)
+	handleSubmit(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
@@ -281,12 +275,11 @@ func TestHandleSubmit_BodyTooLarge(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
 	initAllowedImages("alpine:3.19")
 	t.Cleanup(func() { initAllowedImages("") })
-	pool := &WorkerPool{}
 	bigBody := bytes.Repeat([]byte("a"), maxBodyBytes+1)
 	r := httptest.NewRequest(http.MethodPost, "/executions", bytes.NewReader(bigBody))
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
-	handleSubmit(pool)(w, r)
+	handleSubmit(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}

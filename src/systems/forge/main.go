@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS executions (
     command       JSONB       NOT NULL,
     env           JSONB       NOT NULL DEFAULT '{}',
     timeout_secs  BIGINT      NOT NULL DEFAULT 30,
+    runner_class  TEXT        NOT NULL DEFAULT 'standard',
     status        TEXT        NOT NULL DEFAULT 'pending',
     exit_code     INT,
     stdout        TEXT,
@@ -164,6 +165,10 @@ func main() {
 		slog.Error("failed to create tables", "error", err)
 		os.Exit(1)
 	}
+	if err := migrateAndSeedRunnerClasses(); err != nil {
+		slog.Error("failed to migrate runner classes", "error", err)
+		os.Exit(1)
+	}
 	slog.Info("database pool initialized")
 
 	rt, err := newRuntime()
@@ -186,10 +191,15 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("POST /executions", handleSubmit(workers))
+	mux.HandleFunc("POST /executions", handleSubmit)
 	mux.HandleFunc("GET /executions", handleList)
 	mux.HandleFunc("GET /executions/{id}", handleGet)
 	mux.HandleFunc("DELETE /executions/{id}", handleCancel(workers))
+	mux.HandleFunc("GET /runner-classes", handleListRunnerClasses)
+	mux.HandleFunc("POST /runner-classes", handleCreateRunnerClass)
+	mux.HandleFunc("GET /runner-classes/{name}", handleGetRunnerClass)
+	mux.HandleFunc("PUT /runner-classes/{name}", handleUpdateRunnerClass)
+	mux.HandleFunc("DELETE /runner-classes/{name}", handleDeleteRunnerClass)
 
 	port := envOrDefault("PORT", "8083")
 	wrapped := otelhttp.NewHandler(&logger{mux}, "forge",

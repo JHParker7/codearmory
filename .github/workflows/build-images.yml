@@ -15,6 +15,51 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: gatekeeper
+            context: src/systems/gatekeeper
+          - name: blueprints
+            context: src/systems/blueprints
+          - name: conductor
+            context: src/systems/conductor
+          - name: forge
+            context: src/systems/forge
+          - name: registry
+            context: src/systems/registry
+          - name: workflows
+            context: src/systems/workflows
+          - name: tickets
+            context: src/systems/tickets
+          - name: hooks
+            context: src/systems/hooks
+          - name: egress-proxy
+            context: src/systems/egress-proxy
+          - name: containers
+            context: src/systems/containers
+          - name: gitea_integration
+            context: src/systems/gitea_integration
+          - name: mcp
+            context: src/systems/mcp
+          - name: gatekeeper-tests
+            context: tests/gatekeeper
+          - name: blueprints-tests
+            context: tests/blueprints
+          - name: conductor-tests
+            context: tests/conductor
+          - name: forge-tests
+            context: tests/forge
+          - name: registry-tests
+            context: tests/registry
+          - name: workflows-tests
+            context: tests/workflows
+          - name: tickets-tests
+            context: tests/tickets
+          - name: hooks-tests
+            context: tests/hooks
+          - name: gitea_integration-tests
+            context: tests/gitea_integration
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -28,192 +73,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push gatekeeper
+      - name: Build and push ${{ matrix.name }}
         uses: docker/build-push-action@v6
         with:
-          context: src/systems/gatekeeper
+          context: ${{ matrix.context }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/code-armory-app/gatekeeper:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/gatekeeper:alpha-latest
-      - name: Build and push blueprints
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/blueprints
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/blueprints:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/blueprints:alpha-latest
-      - name: Build and push conductor
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/conductor
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/conductor:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/conductor:alpha-latest
-      - name: Build and push forge
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/forge
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/forge:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/forge:alpha-latest
-      - name: Build and push registry
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/registry
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/registry:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/registry:alpha-latest
-      - name: Build and push workflows
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/workflows
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/workflows:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/workflows:alpha-latest
-      - name: Build and push tickets
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/tickets
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/tickets:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/tickets:alpha-latest
-      - name: Build and push hooks
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/hooks
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/hooks:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/hooks:alpha-latest
-      - name: Build and push egress-proxy
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/egress-proxy
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/egress-proxy:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/egress-proxy:alpha-latest
-      - name: Build and push containers
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/containers
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/containers:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/containers:alpha-latest
-      - name: Build and push gitea_integration
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/gitea_integration
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/gitea_integration:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/gitea_integration:alpha-latest
-      - name: Build and push mcp
-        uses: docker/build-push-action@v6
-        with:
-          context: src/systems/mcp
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/mcp:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/mcp:alpha-latest
-      - name: Build and push gatekeeper integration tests
-        uses: docker/build-push-action@v6
-        with:
-          context: tests/gatekeeper
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/gatekeeper-tests:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/gatekeeper-tests:alpha-latest
-      - name: Build and push blueprints integration tests
-        uses: docker/build-push-action@v6
-        with:
-          context: tests/blueprints
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/blueprints-tests:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/blueprints-tests:alpha-latest
-      - name: Build and push conductor integration tests
-        uses: docker/build-push-action@v6
-        with:
-          context: tests/conductor
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/conductor-tests:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/conductor-tests:alpha-latest
-      - name: Build and push forge integration tests
-        uses: docker/build-push-action@v6
-        with:
-          context: tests/forge
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/forge-tests:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/forge-tests:alpha-latest
-      - name: Build and push registry integration tests
-        uses: docker/build-push-action@v6
-        with:
-          context: tests/registry
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/registry-tests:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/registry-tests:alpha-latest
-      - name: Build and push workflows integration tests
-        uses: docker/build-push-action@v6
-        with:
-          context: tests/workflows
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/workflows-tests:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/workflows-tests:alpha-latest
-      - name: Build and push tickets integration tests
-        uses: docker/build-push-action@v6
-        with:
-          context: tests/tickets
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/tickets-tests:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/tickets-tests:alpha-latest
-      - name: Build and push hooks integration tests
-        uses: docker/build-push-action@v6
-        with:
-          context: tests/hooks
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/hooks-tests:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/hooks-tests:alpha-latest
-      - name: Build and push gitea_integration integration tests
-        uses: docker/build-push-action@v6
-        with:
-          context: tests/gitea_integration
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/code-armory-app/gitea_integration-tests:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/gitea_integration-tests:alpha-latest
+            ghcr.io/code-armory-app/${{ matrix.name }}:alpha-${{ inputs.version }}
+            ghcr.io/code-armory-app/${{ matrix.name }}:alpha-latest

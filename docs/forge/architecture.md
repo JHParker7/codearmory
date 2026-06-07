@@ -16,7 +16,9 @@ POST /executions
   |
   +-- Validate env keys (POSIX names + blocked-key denylist)
   |
-  +-- INSERT INTO executions (status=pending)
+  +-- Resolve runner class from database (resource limits)
+  |
+  +-- INSERT INTO executions (status=pending, runner_class=...)
   |
   v
 WorkerPool (goroutines)
@@ -39,7 +41,7 @@ Forge verifies permissions against `POST /check_permissions` on Gatekeeper using
 
 ### Image allowlist
 
-The operator configures `ALLOWED_IMAGES` (comma-separated). Any submission referencing an unlisted image is rejected `400 Bad Request`. When `ALLOWED_IMAGES` is unset, all submissions are rejected — deny-all is the default.
+The operator configures `ALLOWED_IMAGES` (comma-separated). Any submission referencing an unlisted image is rejected `400 Bad Request`. When `ALLOWED_IMAGES` is unset, all submissions are rejected — deny-all is the default. Images are pulled automatically from the registry when not already present on the Docker host.
 
 ### Environment variable denylist
 
@@ -57,6 +59,18 @@ DYLD_INSERT_LIBRARIES, DYLD_LIBRARY_PATH
 
 These names can redirect interpreter or dynamic linker behaviour in user containers, enabling sandbox escapes.
 
+## Runner classes
+
+Runner classes define the resource limits for an execution tier. They are stored in a `runner_classes` table (GORM AutoMigrate), seeded with three defaults on startup, and managed at runtime via the `/runner-classes` API.
+
+| Name | Memory | CPU | Pids | Tmpfs |
+|------|--------|-----|------|-------|
+| `standard` | 256 MB | 500m | 64 | 64 MB |
+| `large` | 2048 MB | 2000m | 256 | 512 MB |
+| `xlarge` | 8192 MB | 4000m | 512 | 2048 MB |
+
+When a submission arrives, `runnerClassSpec()` fetches the named class from the database and passes the limits to the container runtime. Disabled classes are rejected at submission time with `400 Bad Request`. Changes to runner classes take effect immediately for new submissions — no restart required.
+
 ## Execution lifecycle
 
 ```
@@ -71,7 +85,9 @@ cancelled -- cancelled by the user
 
 ## Data model
 
-Single table, created with raw SQL on startup:
+### executions table
+
+Created with raw SQL (`pgxpool`) on startup:
 
 ```
 executions
@@ -81,6 +97,7 @@ executions
   command       JSONB  ([]string)
   env           JSONB  (map[string]string)
   timeout_secs  INT    DEFAULT 30
+  runner_class  TEXT   DEFAULT 'standard'
   status        TEXT   DEFAULT 'pending'
   exit_code     INT    (nullable)
   stdout        TEXT   (nullable, capped at 1 MB)
@@ -92,13 +109,42 @@ executions
 
 `stdout` and `stderr` are populated only on `GET /executions/{id}` — the list endpoint omits them to keep payloads small.
 
+### runner_classes table
+
+Managed by GORM AutoMigrate, seeded on startup:
+
+```
+runner_classes
+  name            TEXT   PRIMARY KEY
+  memory_mb       INT    NOT NULL
+  cpu_millicores  INT    NOT NULL
+  pids_limit      INT    NOT NULL  DEFAULT 64
+  tmpfs_mb        INT    NOT NULL  DEFAULT 64
+  enabled         BOOL   NOT NULL  DEFAULT true
+```
+
 ## Worker pool
 
 The pool is a fixed set of goroutines sharing a work queue. Each goroutine calls the configured runtime to start the container, blocks until it exits, then writes the result to the DB. When `DELETE /executions/{id}` is called for a running execution, `pool.Cancel(id)` sends a cancellation signal via a stored `context.CancelFunc`.
 
+## Docker runtime
+
+With `RUNTIME=docker`, Forge runs each execution as a short-lived container on the local Docker daemon. Container configuration:
+- Network mode from `FORGE_NETWORK_MODE` (default `none`); `host` and `bridge` are rejected at startup
+- Read-only root filesystem with a writable tmpfs at `/tmp` (size from runner class)
+- Memory, CPU quota, and PID limit from the runner class
+- All capabilities dropped, `no-new-privileges` secopt
+- Egress proxy vars injected when `FORGE_EGRESS_PROXY` is set
+- Image pulled automatically when not present on the host
+
 ## Kubernetes runtime
 
-With `RUNTIME=kubernetes`, Forge creates a Kubernetes `Job` per execution in `K8S_NAMESPACE`. An optional `RuntimeClass` (e.g. `gvisor`) can be set for stronger isolation. Resource limits `CONTAINER_MEMORY_LIMIT` and `CONTAINER_CPU_LIMIT` are applied to every sandbox container.
+With `RUNTIME=kubernetes`, Forge creates a Kubernetes `Job` per execution in `K8S_NAMESPACE`. Configuration:
+- Resource limits (memory, CPU) and `/tmp` EmptyDir size from the runner class
+- Optional `RuntimeClass` (e.g. `gvisor`) for stronger isolation
+- `AutomountServiceAccountToken: false`, `RunAsNonRoot: true`, all capabilities dropped, seccomp `RuntimeDefault`
+- `BackoffLimit: 0` — failures are not retried
+- Jobs are deleted immediately after logs are collected
 
 The Forge service account requires `create`, `get`, `delete` on `Jobs` and `Pods` in the forge namespace — see `infra/helm/codearmory/templates/forge-rbac.yaml`.
 

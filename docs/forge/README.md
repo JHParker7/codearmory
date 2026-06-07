@@ -5,13 +5,14 @@ Sandboxed code execution service. Accepts execution requests from authenticated 
 ## How it works
 
 ```
-Conductor :8082
+Client (Bearer JWT)
   │
   └── POST /executions ─────────────────────────► Forge :8083
-        │  1. Verify X-Conductor-Token HMAC (when CONDUCTOR_FORWARD_KEY is set)
+        │  1. Verify token via Gatekeeper /check_permissions
         │  2. Validate image against ALLOWED_IMAGES allowlist
         │  3. Reject any blocked env keys (LD_PRELOAD, PYTHONPATH, etc.)
-        │  4. Enqueue execution record in PostgreSQL
+        │  4. Resolve runner class (resource limits) from database
+        │  5. Enqueue execution record in PostgreSQL
         │
         ▼
       Worker pool (10 goroutines)
@@ -21,7 +22,7 @@ Conductor :8082
         │  4. Write result back to PostgreSQL
 ```
 
-Forge never verifies JWTs directly. The authenticated user identity arrives via the `X-User-ID` header, signed by Conductor with HMAC-SHA256 when `CONDUCTOR_FORWARD_KEY` is configured.
+Forge calls Gatekeeper directly to verify the Bearer token on every request. It does not trust the `X-User-ID` header injected by Conductor, which prevents privilege escalation via a compromised gateway.
 
 ## Requirements
 
@@ -36,7 +37,8 @@ Forge never verifies JWTs directly. The authenticated user identity arrives via 
 | `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/forge` | PostgreSQL connection string |
 | `RUNTIME` | `kubernetes` | Container runtime. Set to `docker` or `kubernetes`. |
 | `ALLOWED_IMAGES` | — | **Required.** Comma-separated list of permitted container images. Forge denies all submissions when unset. |
-| `CONDUCTOR_FORWARD_KEY` | — | Shared secret used to verify `X-Conductor-Token` HMAC on incoming requests. Should match the value configured on Conductor. Set this in all production deployments. |
+| `GATEKEEPER_URL` | `http://localhost:8080` | URL of the Gatekeeper service used for permission checks and service key rotation. |
+| `GATEKEEPER_SERVICE_KEY` | — | Shared service key registered with Gatekeeper. Required for service-to-service authentication in production. |
 | `PORT` | `8083` | Port the server listens on |
 | `OTEL_SERVICE_NAME` | `forge` | Service name reported in traces and metrics |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTel Collector HTTP endpoint. Omit to disable telemetry. |
@@ -44,14 +46,26 @@ Forge never verifies JWTs directly. The authenticated user identity arrives via 
 
 All variables support a `_FILE` suffix variant (e.g. `DATABASE_URL_FILE`) that reads the value from a file path — useful for Docker secrets and Kubernetes secret mounts.
 
+### TLS variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `TLS_CERT_FILE` | — | Path to TLS certificate for the server. When set alongside `TLS_KEY_FILE`, the server listens with TLS. |
+| `TLS_KEY_FILE` | — | Path to TLS private key for the server. |
+| `TLS_CLIENT_AUTH` | — | Set to `require` to enforce mutual TLS on incoming connections, or `request` to request but not require a client certificate. `TLS_CLIENT_CA_FILE` must be set when using `require`. |
+| `TLS_CLIENT_CA_FILE` | — | CA certificate used to verify client certificates when `TLS_CLIENT_AUTH=require`. |
+| `TLS_CLIENT_CERT_FILE` | — | Client certificate presented on outbound TLS connections (e.g. to Gatekeeper). |
+| `TLS_CLIENT_KEY_FILE` | — | Private key for the outbound client certificate. |
+| `TLS_CA_FILE` | — | CA bundle used to verify outbound TLS connections. |
+
 ### Docker runtime variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `CONTAINER_MEMORY_LIMIT` | `256m` | Memory limit per container |
-| `CONTAINER_CPU_QUOTA` | `50000` | CPU quota (100000 = one full core) |
-| `FORGE_NETWORK_MODE` | `none` | Docker network mode for execution containers. Defaults to `none` (no network access). Set to the name of a Docker network to enable controlled outbound access. See **Egress proxy** below. |
+| `FORGE_NETWORK_MODE` | `none` | Docker network mode for execution containers. Defaults to `none` (no network access). Set to the name of a custom bridge network to enable controlled outbound access. `host` and `bridge` are explicitly rejected. |
 | `FORGE_EGRESS_PROXY` | — | HTTP proxy URL injected as `HTTP_PROXY`/`HTTPS_PROXY` into every execution container. When set, forge injects the proxy vars automatically so tools like `tofu`, `npm`, and `curl` route through it without per-execution configuration. |
+
+Resource limits (memory, CPU, pids, tmpfs) are controlled per execution by runner classes — see [Runner classes](#runner-classes).
 
 ### Egress proxy (controlled outbound access)
 
@@ -86,9 +100,39 @@ Execution containers are then isolated to the `forge-exec` network (no direct in
 |---|---|---|
 | `K8S_NAMESPACE` | `forge` | Namespace to create Jobs in |
 | `K8S_RUNTIME_CLASS` | — | RuntimeClass name (e.g. `gvisor` for stronger isolation) |
-| `CONTAINER_MEMORY_LIMIT` | `256Mi` | Memory limit per container |
-| `CONTAINER_CPU_LIMIT` | `500m` | CPU limit per container |
 | `KUBECONFIG` | `~/.kube/config` | Kubeconfig path (falls back to in-cluster credentials) |
+
+Resource limits are controlled per execution by runner classes — see [Runner classes](#runner-classes).
+
+## Runner classes
+
+Runner classes define the resource limits applied to execution containers. They are stored in PostgreSQL and can be updated at runtime via the API without restarting Forge.
+
+### Default runner classes
+
+| Name | Memory | CPU | Pids | Tmpfs |
+|------|--------|-----|------|-------|
+| `standard` | 256 MB | 500m (0.5 core) | 64 | 64 MB |
+| `large` | 2048 MB | 2000m (2 cores) | 256 | 512 MB |
+| `xlarge` | 8192 MB | 4000m (4 cores) | 512 | 2048 MB |
+
+These three classes are seeded automatically on startup if absent. Operators can edit them or add custom classes via the API. Changes take effect immediately for new submissions — no restart required.
+
+### Selecting a runner class
+
+Set `runner_class` in the submit request body. Defaults to `standard` when omitted. Submitting with a disabled or nonexistent class returns `400 Bad Request`.
+
+### Managing runner classes
+
+| Method | Path | Permission | Description |
+|--------|------|------------|-------------|
+| `GET` | `/runner-classes` | `listRunnerClass` on `forge/runner-classes` | List all runner classes |
+| `POST` | `/runner-classes` | `createRunnerClass` on `forge/runner-classes` | Create a new runner class |
+| `GET` | `/runner-classes/{name}` | `getRunnerClass` on `forge/runner-classes/{name}` | Get a single runner class |
+| `PUT` | `/runner-classes/{name}` | `updateRunnerClass` on `forge/runner-classes/{name}` | Update a runner class |
+| `DELETE` | `/runner-classes/{name}` | `deleteRunnerClass` on `forge/runner-classes/{name}` | Delete a runner class |
+
+By default, all authenticated users can list and get runner classes. Creating, updating, and deleting requires an operator-granted permission.
 
 ## Running locally
 
@@ -97,6 +141,7 @@ cd src/systems/forge
 DATABASE_URL=postgresql://postgres:pass@localhost:5432/forge \
   RUNTIME=docker \
   ALLOWED_IMAGES=alpine:3.19,ubuntu:22.04,python:3.12-slim \
+  GATEKEEPER_URL=http://localhost:8081 \
   go run .
 ```
 
@@ -113,20 +158,23 @@ docker run -p 8083:8083 \
   -e DATABASE_URL=postgresql://postgres:pass@db:5432/forge \
   -e RUNTIME=docker \
   -e ALLOWED_IMAGES=alpine:3.19,ubuntu:22.04,python:3.12-slim \
-  -e CONDUCTOR_FORWARD_KEY=your-shared-secret \
+  -e GATEKEEPER_URL=http://gatekeeper:8081 \
+  -e GATEKEEPER_SERVICE_KEY=your-service-key \
   forge:latest
 ```
 
 ## API
 
-All endpoints require authentication via `X-User-ID` (injected by Conductor). The routes are registered in Conductor's service registry and require the `forge` service permissions.
+All endpoints require a Gatekeeper-issued Bearer token (`Authorization: Bearer <token>`). Forge verifies permissions directly with Gatekeeper on every request.
+
+### Executions
 
 | Method | Path | Permission | Description |
 |--------|------|------------|-------------|
-| `POST` | `/executions` | `createExecution` on `executions` | Submit a new execution |
-| `GET` | `/executions` | `listExecution` on `executions` | List the caller's executions |
-| `GET` | `/executions/{id}` | `getExecution` on `executions` | Get a single execution |
-| `DELETE` | `/executions/{id}` | `deleteExecution` on `executions` | Cancel a pending or running execution |
+| `POST` | `/executions` | `createExecution` on `forge/executions` | Submit a new execution |
+| `GET` | `/executions` | `listExecution` on `forge/executions` | List the caller's executions |
+| `GET` | `/executions/{id}` | `getExecution` on `forge/executions/{id}` | Get a single execution |
+| `DELETE` | `/executions/{id}` | `deleteExecution` on `forge/executions/{id}` | Cancel a pending or running execution |
 
 ### Submit an execution
 
@@ -138,7 +186,8 @@ curl -X POST http://conductor:8082/executions \
     "image": "python:3.12-slim",
     "command": ["python", "-c", "print(\"hello\")"],
     "env": {"MY_VAR": "value"},
-    "timeout": 30
+    "timeout": 30,
+    "runner_class": "standard"
   }'
 # → {"execution_id": "uuid"}
 ```
@@ -151,6 +200,7 @@ curl -X POST http://conductor:8082/executions \
 | `command` | `[]string` | Yes | Command and arguments passed directly to the container (not a shell). |
 | `env` | `map[string]string` | No | Additional environment variables. Keys must be valid POSIX names. Dangerous interpreter keys (`LD_PRELOAD`, `PYTHONPATH`, `NODE_OPTIONS`, etc.) are rejected. |
 | `timeout` | int | No | Execution timeout in seconds. Defaults to 30, capped at 3600. |
+| `runner_class` | string | No | Resource tier to use. Defaults to `standard`. Must be an enabled runner class. |
 
 ### Execution object
 
@@ -159,6 +209,7 @@ curl -X POST http://conductor:8082/executions \
   "execution_id": "uuid",
   "user_id": "uuid",
   "image": "python:3.12-slim",
+  "runner_class": "standard",
   "status": "completed",
   "exit_code": 0,
   "stdout": "hello\n",
@@ -180,14 +231,12 @@ curl -X POST http://conductor:8082/executions \
 ### Container sandbox (Docker runtime)
 
 Every container runs with:
-- `NetworkMode` — controlled by `FORGE_NETWORK_MODE` (default `none`, no network access)
+- `NetworkMode` — controlled by `FORGE_NETWORK_MODE` (default `none`, no network access); `host` and `bridge` are rejected at startup
 - `ReadonlyRootfs: true` — read-only root filesystem
-- `/tmp` — writable tmpfs (64 MB)
+- `/tmp` — writable tmpfs (size from runner class)
 - `CapDrop: ALL` — all Linux capabilities dropped
 - `no-new-privileges` security option
-- Memory limit: 256 MB
-- CPU quota: 50% of one core
-- PID limit: 64
+- Memory, CPU, and PID limits from the selected runner class
 
 ### Container sandbox (Kubernetes runtime)
 
@@ -198,12 +247,13 @@ Every Job runs with:
 - `ReadOnlyRootFilesystem: true`
 - All capabilities dropped
 - Seccomp profile: `RuntimeDefault`
-- `/tmp` EmptyDir (64 Mi)
+- `/tmp` EmptyDir (size from runner class)
 - `BackoffLimit: 0` — failures are not retried
+- Memory and CPU limits from the selected runner class
 
 ### Image allowlist
 
-Forge denies all submissions when `ALLOWED_IMAGES` is not configured. In production, set this to a minimal list of vetted images.
+Forge denies all submissions when `ALLOWED_IMAGES` is not configured. In production, set this to a minimal list of vetted images. Images are pulled automatically if not already present on the host.
 
 ### Environment variable denylist
 
@@ -213,7 +263,7 @@ The following env keys are always rejected regardless of case:
 
 ### Request authentication
 
-Forge trusts the `X-User-ID` header injected by Conductor. When `CONDUCTOR_FORWARD_KEY` is set, Forge verifies the accompanying `X-Conductor-Token` HMAC-SHA256 signature and rejects requests where the token is missing, expired (> 30 seconds), or invalid. Configure this key in all production deployments to prevent identity spoofing from any other service on the internal network.
+Forge calls `POST /check_permissions` on Gatekeeper with the caller's Bearer token to verify authorization on every request. This happens even when the request arrives through Conductor, so a compromised Conductor cannot escalate privileges by forging the `X-User-ID` header.
 
 ## Metrics
 
