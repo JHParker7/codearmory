@@ -80,6 +80,13 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-workflows
                   key: registry-notify-key
+            - name: REGISTRY_URL
+              value: "http://{{ $fullname }}-registry:{{ .Values.registry.port }}"
+            - name: REGISTRY_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-workflows
+                  key: registry-service-key
             {{- include "codearmory.tls.envs" .Values.workflows.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.workflows.tls) }}
           volumeMounts:
