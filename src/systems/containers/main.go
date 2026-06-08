@@ -174,7 +174,7 @@ func main() {
 	getServiceKey = sdkregistry.StartKeyRotation(ctx, gatekeeperURL, "containers",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
-	mux := http.NewServeMux()
+	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	mux.HandleFunc("GET /repositories", handleListRepositories)

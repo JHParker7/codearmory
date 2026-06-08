@@ -166,7 +166,7 @@ func main() {
 	registry.StartKeyRotation(ctx, gatekeeperURL, "gitea",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
-	mux := http.NewServeMux()
+	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	mux.HandleFunc("POST /internal/registry-token", handleInternalRegistryToken)

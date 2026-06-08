@@ -612,6 +612,7 @@ func validateSignupBody(body []byte) error {
 // auth/RBAC, and forwards to the backend. strippedPath is the path to forward
 // (may differ from r.URL.Path when a service-name prefix was stripped).
 func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, paramValues []string, strippedPath string) {
+	trace.SpanFromContext(r.Context()).SetName(entry.serviceName + " " + entry.method + " " + entry.originalPath)
 	routingMu.RLock()
 	svc, ok := servicesMap[entry.serviceName]
 	routingMu.RUnlock()
@@ -839,7 +840,7 @@ func main() {
 		}
 	}()
 
-	mux := http.NewServeMux()
+	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /internal/refresh", handleInternalRefresh)
 	mux.HandleFunc("GET /openapi.json", handleOpenAPISpec)

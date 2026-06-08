@@ -329,7 +329,7 @@ func main() {
 	workers.Start(ctx, 5)
 	slog.Info("worker pool started", "workers", 5)
 
-	mux := http.NewServeMux()
+	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /actions", handleListActions)
 

@@ -420,7 +420,7 @@ func main() {
 
 	startHealthCollector(ctx)
 
-	mux := http.NewServeMux()
+	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /system_health", handleSystemHealth)
 	mux.HandleFunc("GET /services", handleListServices)
