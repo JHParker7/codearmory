@@ -21,6 +21,12 @@ def base_url():
     return os.getenv("API_URL", "http://localhost:8080")
 
 
+@pytest.fixture(scope="session")
+def service_key():
+    """X-Service-Key header value for calling internal endpoints directly."""
+    return os.getenv("GATEKEEPER_SERVICE_KEY", "test-service:test-service-local-secret")
+
+
 def pytest_sessionfinish(session, exitstatus):
     conn = None
     try:

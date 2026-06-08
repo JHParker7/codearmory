@@ -447,7 +447,7 @@ class TestOAuthMFAFlow:
         # The internal endpoint requires service auth; skip if stack is not running.
         return resp
 
-    def test_authorize_redirects_to_mfa_form_when_totp_enabled(self, base_url, admin_token):
+    def test_authorize_redirects_to_mfa_form_when_totp_enabled(self, base_url, service_key, admin_token):
         password = "oauthpass123"
         user = signup_and_login(base_url, password=password)
         enroll_and_confirm_totp(base_url, user["token"])
@@ -458,14 +458,9 @@ class TestOAuthMFAFlow:
                 "name": f"mfatest-{uuid.uuid4().hex[:6]}",
                 "redirect_uris": ["https://example.com/callback"],
             },
-            headers={
-                "X-Service-Name": "gatekeeper",
-                "X-Conductor-Token": admin_token["token"],
-            },
+            headers={"X-Service-Key": service_key},
         )
-        if client_resp.status_code != 201:
-            import pytest
-            pytest.skip("internal oauth client endpoint not accessible — stack may not be running")
+        assert client_resp.status_code == 201, f"failed to create oauth client: {client_resp.text}"
 
         client = client_resp.json()
 
@@ -487,7 +482,7 @@ class TestOAuthMFAFlow:
         assert "/oauth/mfa" in location
         assert "token=" in location
 
-    def test_mfa_get_renders_html_form(self, base_url, admin_token):
+    def test_mfa_get_renders_html_form(self, base_url, service_key, admin_token):
         password = "oauthpass123"
         user = signup_and_login(base_url, password=password)
         enroll_and_confirm_totp(base_url, user["token"])
@@ -498,14 +493,9 @@ class TestOAuthMFAFlow:
                 "name": f"mfatest-{uuid.uuid4().hex[:6]}",
                 "redirect_uris": ["https://example.com/callback"],
             },
-            headers={
-                "X-Service-Name": "gatekeeper",
-                "X-Conductor-Token": admin_token["token"],
-            },
+            headers={"X-Service-Key": service_key},
         )
-        if client_resp.status_code != 201:
-            import pytest
-            pytest.skip("internal oauth client endpoint not accessible")
+        assert client_resp.status_code == 201, f"failed to create oauth client: {client_resp.text}"
 
         client = client_resp.json()
 
@@ -532,7 +522,7 @@ class TestOAuthMFAFlow:
         assert "text/html" in form_resp.headers.get("Content-Type", "")
         assert "Authentication code" in form_resp.text or "code" in form_resp.text.lower()
 
-    def test_mfa_post_redirects_with_code_on_valid_totp(self, base_url, admin_token):
+    def test_mfa_post_redirects_with_code_on_valid_totp(self, base_url, service_key, admin_token):
         from urllib.parse import urlparse, parse_qs
 
         password = "oauthpass123"
@@ -545,14 +535,9 @@ class TestOAuthMFAFlow:
                 "name": f"mfatest-{uuid.uuid4().hex[:6]}",
                 "redirect_uris": ["https://example.com/callback"],
             },
-            headers={
-                "X-Service-Name": "gatekeeper",
-                "X-Conductor-Token": admin_token["token"],
-            },
+            headers={"X-Service-Key": service_key},
         )
-        if client_resp.status_code != 201:
-            import pytest
-            pytest.skip("internal oauth client endpoint not accessible")
+        assert client_resp.status_code == 201, f"failed to create oauth client: {client_resp.text}"
 
         client = client_resp.json()
 
