@@ -7,4 +7,14 @@ metadata:
     app.kubernetes.io/component: registry
 data:
   manifest.json: |
-{{ .Files.Get "files/registry-manifest.json" | indent 4 }}
+{{- $fullname := include "codearmory.fullname" . -}}
+{{- $manifest := .Files.Get "files/registry-manifest.json" -}}
+{{- $manifest = replace "http://gatekeeper:"        (printf "http://%s-gatekeeper:" $fullname)        $manifest -}}
+{{- $manifest = replace "http://blueprints:"        (printf "http://%s-blueprints:" $fullname)        $manifest -}}
+{{- $manifest = replace "http://forge:"             (printf "http://%s-forge:" $fullname)             $manifest -}}
+{{- $manifest = replace "http://workflows:"         (printf "http://%s-workflows:" $fullname)         $manifest -}}
+{{- $manifest = replace "http://tickets:"           (printf "http://%s-tickets:" $fullname)           $manifest -}}
+{{- $manifest = replace "http://hooks:"             (printf "http://%s-hooks:" $fullname)             $manifest -}}
+{{- $manifest = replace "http://gitea-integration:" (printf "http://%s-gitea-integration:" $fullname) $manifest -}}
+{{- $manifest = replace "http://containers:"        (printf "http://%s-containers:" $fullname)        $manifest -}}
+{{ $manifest | indent 4 }}
