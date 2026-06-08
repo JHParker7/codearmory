@@ -75,6 +75,11 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-workflows
                   key: token-key
+            - name: WORKFLOWS_NOTIFY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-workflows
+                  key: registry-notify-key
             {{- include "codearmory.tls.envs" .Values.workflows.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.workflows.tls) }}
           volumeMounts:

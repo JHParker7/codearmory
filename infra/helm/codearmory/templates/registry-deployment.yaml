@@ -100,6 +100,15 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-conductor
                   key: conductor-notify-key
+            {{- if .Values.workflows.enabled }}
+            - name: WORKFLOWS_URL
+              value: "http://{{ include "codearmory.fullname" . }}-workflows:{{ .Values.workflows.port }}"
+            - name: WORKFLOWS_NOTIFY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-workflows
+                  key: registry-notify-key
+            {{- end }}
             {{- include "codearmory.tls.envs" .Values.registry.tls | nindent 12 }}
           volumeMounts:
             - name: registry-manifest

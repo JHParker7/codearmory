@@ -305,27 +305,53 @@ func loadManifest(ctx context.Context, path string) {
 	}
 }
 
-func notifyConductor(ctx context.Context) {
-	conductorURL := os.Getenv("CONDUCTOR_URL")
-	notifyKey := os.Getenv("CONDUCTOR_NOTIFY_KEY")
-	if conductorURL == "" || notifyKey == "" {
+func notifyService(ctx context.Context, name, target, key string) {
+	if target == "" || key == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, conductorURL+"/internal/refresh", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, nil)
 	if err != nil {
-		slog.Warn("conductor notify: failed to create request", "error", err)
+		slog.Warn(name+" notify: failed to create request", "error", err)
 		return
 	}
-	req.Header.Set("X-Service-Key", "registry:"+notifyKey)
+	req.Header.Set("X-Service-Key", "registry:"+key)
 	resp, err := registryHTTPClient.Do(req)
 	if err != nil {
-		slog.Warn("conductor notify: request failed", "error", err)
+		slog.Warn(name+" notify: request failed", "error", err)
 		return
 	}
 	resp.Body.Close()
-	slog.Info("conductor notified of manifest update", "status", resp.StatusCode)
+	slog.Info(name+" notified", "status", resp.StatusCode)
+}
+
+func notifyConductor(ctx context.Context) {
+	notifyService(ctx, "conductor",
+		os.Getenv("CONDUCTOR_URL")+"/internal/refresh",
+		os.Getenv("CONDUCTOR_NOTIFY_KEY"))
+}
+
+func notifyWorkflows(ctx context.Context) {
+	notifyService(ctx, "workflows",
+		os.Getenv("WORKFLOWS_URL")+"/internal/catalog/refresh",
+		os.Getenv("WORKFLOWS_NOTIFY_KEY"))
+}
+
+func startNotificationTicker(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				notifyConductor(ctx)
+				notifyWorkflows(ctx)
+			}
+		}
+	}()
 }
 
 func main() {
@@ -383,7 +409,10 @@ func main() {
 	if manifestPath := os.Getenv("MANIFEST_FILE"); manifestPath != "" {
 		loadManifest(ctx, manifestPath)
 		notifyConductor(ctx)
+		notifyWorkflows(ctx)
 	}
+
+	startNotificationTicker(ctx)
 
 	// Register Registry itself as a Gatekeeper service account so its identity rotates.
 	registry.StartKeyRotation(ctx, gatekeeperURL, "registry",
