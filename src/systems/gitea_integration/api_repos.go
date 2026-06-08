@@ -15,11 +15,15 @@ func handleListRepos(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gitea").Start(r.Context(), "handleListRepos")
 	defer span.End()
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRepo", "gitea_integration/repos")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRepo", "gitea_integration/repos")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {
@@ -53,11 +57,15 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gitea").Start(r.Context(), "handleCreateRepo")
 	defer span.End()
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createRepo", "gitea_integration/repos")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createRepo", "gitea_integration/repos")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {
@@ -103,6 +111,11 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {
@@ -143,6 +156,11 @@ func handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {
@@ -182,6 +200,11 @@ func handleListBranches(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {
@@ -222,6 +245,11 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {
@@ -262,6 +290,11 @@ func handleListReleases(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {
@@ -302,6 +335,11 @@ func handleListCommits(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {

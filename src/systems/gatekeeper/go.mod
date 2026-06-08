@@ -5,7 +5,7 @@ go 1.25.6
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.20
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.9
-	github.com/code-armory-app/codearmory_sdk v0.1.0
+	github.com/code-armory-app/codearmory_sdk v0.2.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/pquerna/otp v1.5.0

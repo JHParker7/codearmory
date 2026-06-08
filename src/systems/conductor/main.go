@@ -658,6 +658,10 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		}
 	}
 
+	if userID != "" {
+		trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("user.id", userID))
+	}
+
 	r2 := r.Clone(r.Context())
 	// Strip headers that could be used to spoof identity or routing metadata.
 	// X-Conductor-Token and X-Conductor-Timestamp are stripped here and only

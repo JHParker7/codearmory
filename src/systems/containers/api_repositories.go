@@ -16,11 +16,12 @@ func handleListRepositories(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("containers").Start(r.Context(), "handleListRepositories")
 	defer span.End()
 
-	_, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRepository", "containers/repositories")
+	_, userID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRepository", "containers/repositories")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(attribute.String("user.id", userID))
 
 	repos, err := registry.listRepositories(ctx)
 	if err != nil {
@@ -49,12 +50,16 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 	image := r.PathValue("image")
 	name := namespace + "/" + image
 
-	_, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTag",
+	_, userID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTag",
 		"containers/repositories/"+namespace+"/"+image)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("repo.name", name),
+	)
 
 	tl, err := registry.listTags(ctx, name)
 	if err != nil {
@@ -64,12 +69,11 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "registry error")
-		slog.Error("list tags: registry error", "name", name, "error", err)
+		slog.Error("list tags: registry error", "name", name, "user_id", userID, "error", err)
 		http.Error(w, "failed to list tags", http.StatusBadGateway)
 		return
 	}
 
-	span.SetAttributes(attribute.String("repo.name", name))
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(tl) //nolint:errcheck
@@ -84,12 +88,17 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 	reference := r.PathValue("reference")
 	name := namespace + "/" + image
 
-	_, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getManifest",
+	_, userID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getManifest",
 		"containers/repositories/"+namespace+"/"+image)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("repo.name", name),
+		attribute.String("manifest.reference", reference),
+	)
 
 	manifest, err := registry.getManifest(ctx, name, reference)
 	if err != nil {
@@ -104,10 +113,7 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	span.SetAttributes(
-		attribute.String("repo.name", name),
-		attribute.String("manifest.digest", manifest.Digest),
-	)
+	span.SetAttributes(attribute.String("manifest.digest", manifest.Digest))
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(manifest) //nolint:errcheck
@@ -134,6 +140,11 @@ func handleDeleteManifest(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("repo.name", name),
+		attribute.String("manifest.digest", digest),
+	)
 
 	if err := registry.deleteManifest(ctx, name, digest); err != nil {
 		if isRegistryNotFound(err) {
@@ -149,10 +160,6 @@ func handleDeleteManifest(w http.ResponseWriter, r *http.Request) {
 
 	meterManifestsDeleted.Add(ctx, 1,
 		metric.WithAttributes(attribute.String("repo.namespace", namespace)))
-	span.SetAttributes(
-		attribute.String("repo.name", name),
-		attribute.String("manifest.digest", digest),
-	)
 	span.SetStatus(codes.Ok, "")
 	slog.Info("manifest deleted", "user_id", userID, "name", name, "digest", digest)
 	w.WriteHeader(http.StatusNoContent)

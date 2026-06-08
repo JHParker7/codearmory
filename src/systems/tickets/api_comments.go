@@ -28,6 +28,10 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	t, err := getTicket(ctx, id)
 	if err != nil {
@@ -96,6 +100,10 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	t, err := getTicket(ctx, ticketID)
 	if err != nil {

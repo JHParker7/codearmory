@@ -3,10 +3,11 @@ module registry
 go 1.25.6
 
 require (
-	github.com/code-armory-app/codearmory_sdk v0.1.0
+	github.com/code-armory-app/codearmory_sdk v0.2.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
+	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
 	golang.org/x/crypto v0.50.0
 )
@@ -23,7 +24,6 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/bridges/otelslog v0.18.0 // indirect
-	go.opentelemetry.io/otel v1.43.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.19.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.43.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0 // indirect

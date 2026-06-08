@@ -139,6 +139,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	span.SetAttributes(attribute.String("user.id", userID))
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil || !json.Valid(body) {
@@ -185,6 +186,11 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	cmdJSON, _ := json.Marshal(req.Command)
 	envJSON, _ := json.Marshal(req.Env)
 	executionID := uuid.New().String()
+	span.SetAttributes(
+		attribute.String("execution.id", executionID),
+		attribute.String("image", req.Image),
+		attribute.String("runner_class", req.RunnerClass),
+	)
 
 	_, err = db.Exec(ctx,
 		`INSERT INTO executions (execution_id, user_id, image, command, env, timeout_secs, runner_class)
@@ -219,6 +225,10 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("execution.id", executionID),
+	)
 
 	exec, err := getExecution(ctx, executionID, userID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -232,6 +242,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(exec)
 }
@@ -246,6 +257,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	span.SetAttributes(attribute.String("user.id", userID))
 
 	rows, err := db.Query(ctx,
 		`SELECT execution_id, user_id, image, status, exit_code, created_at, started_at, ended_at, runner_class
@@ -272,6 +284,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 		executions = append(executions, e)
 	}
 
+	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(executions)
 }
@@ -288,6 +301,10 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		span.SetAttributes(
+			attribute.String("user.id", userID),
+			attribute.String("execution.id", executionID),
+		)
 
 		exec, err := getExecution(ctx, executionID, userID)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -319,6 +336,7 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		}
 
 		meterCancel.Add(ctx, 1)
+		span.SetStatus(codes.Ok, "")
 		slog.Info("execution cancelled", "execution_id", executionID, "user_id", userID)
 		w.WriteHeader(http.StatusNoContent)
 	}

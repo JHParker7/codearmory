@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
 
@@ -24,11 +25,15 @@ func handleInternalRegistryToken(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gitea").Start(r.Context(), "handleInternalRegistryToken")
 	defer span.End()
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRegistryToken", "gitea_integration/registry-token")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRegistryToken", "gitea_integration/registry-token")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	account, err := getAccount(ctx, userID)
 	if err != nil {

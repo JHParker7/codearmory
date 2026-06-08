@@ -171,6 +171,10 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	var req createWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -261,6 +265,10 @@ func handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	wfs, err := listWorkflows(ctx, userID, orgID)
 	if err != nil {
@@ -289,6 +297,10 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	wf, err := getWorkflow(ctx, id)
 	if err != nil {
@@ -322,6 +334,10 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	existing, err := getWorkflow(ctx, id)
 	if err != nil {
@@ -419,6 +435,10 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	wf, err := getWorkflow(ctx, id)
 	if err != nil {

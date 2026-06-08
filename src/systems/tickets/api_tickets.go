@@ -51,6 +51,10 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	var req createTicketRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -114,6 +118,10 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	q := r.URL.Query()
 	statusFilter := q.Get("status")
@@ -153,6 +161,10 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	t, err := getTicket(ctx, id)
 	if err != nil {
@@ -196,6 +208,10 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	existing, err := getTicket(ctx, id)
 	if err != nil {
@@ -295,6 +311,10 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	t, err := getTicket(ctx, id)
 	if err != nil {
