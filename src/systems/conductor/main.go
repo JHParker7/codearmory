@@ -385,9 +385,11 @@ func refreshServiceCache(ctx context.Context) {
 	if getRegistryKey == nil {
 		return
 	}
+	rctx, span := otel.Tracer("conductor").Start(ctx, "registry.refresh")
+	defer span.End()
 	refreshMu.Lock()
 	defer refreshMu.Unlock()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, registryURL+"/services", nil)
+	req, err := http.NewRequestWithContext(rctx, http.MethodGet, registryURL+"/services", nil)
 	if err != nil {
 		return
 	}

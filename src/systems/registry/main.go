@@ -21,6 +21,7 @@ import (
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -316,9 +317,11 @@ func notifyService(ctx context.Context, name, target, key string) {
 	if target == "" || key == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	nctx, span := otel.Tracer("registry").Start(ctx, "notify."+name)
+	defer span.End()
+	nctx, cancel := context.WithTimeout(nctx, 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, nil)
+	req, err := http.NewRequestWithContext(nctx, http.MethodPost, target, nil)
 	if err != nil {
 		slog.Warn(name+" notify: failed to create request", "error", err)
 		return
