@@ -1,0 +1,311 @@
+[
+  {
+    "name": "gatekeeper",
+    "url": "http://gatekeeper:8081",
+    "description": "Authentication, authorisation and user management",
+    "forward_auth": true,
+    "service_key": "gatekeeper-registry-local-secret",
+    "endpoints": [
+      { "method": "GET",    "path": "/.well-known/openid-configuration",    "action": "oidcDiscovery",     "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "GET",    "path": "/oauth/jwks",                           "action": "oidcJWKS",          "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "GET",    "path": "/oauth/authorize",                      "action": "oidcAuthorize",     "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "POST",   "path": "/oauth/authorize",                      "action": "oidcAuthorize",     "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "POST",   "path": "/oauth/token",                          "action": "oidcToken",         "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "GET",    "path": "/oauth/userinfo",                       "action": "oidcUserinfo",      "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "POST",   "path": "/signup",                               "action": "signup",            "resource": "gatekeeper/users",            "public": true  },
+      { "method": "POST",   "path": "/login",                                "action": "login",             "resource": "gatekeeper/users",            "public": true  },
+      { "method": "GET",    "path": "/users",                                "action": "listUser",          "resource": "gatekeeper/users"             },
+      { "method": "GET",    "path": "/users/{id}",                           "action": "getUser",           "resource": "gatekeeper/users/{id}"        },
+      { "method": "PUT",    "path": "/users/{id}",                           "action": "updateUser",        "resource": "gatekeeper/users/{id}"        },
+      { "method": "DELETE", "path": "/users/{id}",                           "action": "deleteUser",        "resource": "gatekeeper/users/{id}"        },
+      { "method": "GET",    "path": "/orgs",                                 "action": "listOrg",           "resource": "gatekeeper/orgs"              },
+      { "method": "POST",   "path": "/orgs",                                 "action": "createOrg",         "resource": "gatekeeper/orgs"              },
+      { "method": "GET",    "path": "/orgs/{id}",                            "action": "getOrg",            "resource": "gatekeeper/orgs/{id}"         },
+      { "method": "PUT",    "path": "/orgs/{id}",                            "action": "updateOrg",         "resource": "gatekeeper/orgs/{id}"         },
+      { "method": "DELETE", "path": "/orgs/{id}",                            "action": "deleteOrg",         "resource": "gatekeeper/orgs/{id}"         },
+      { "method": "GET",    "path": "/teams",                                "action": "listTeam",          "resource": "gatekeeper/teams"             },
+      { "method": "POST",   "path": "/teams",                                "action": "createTeam",        "resource": "gatekeeper/teams"             },
+      { "method": "GET",    "path": "/teams/{id}",                           "action": "getTeam",           "resource": "gatekeeper/teams/{id}"        },
+      { "method": "PUT",    "path": "/teams/{id}",                           "action": "updateTeam",        "resource": "gatekeeper/teams/{id}"        },
+      { "method": "DELETE", "path": "/teams/{id}",                           "action": "deleteTeam",        "resource": "gatekeeper/teams/{id}"        },
+      { "method": "POST",   "path": "/roles",                                "action": "createRole",        "resource": "gatekeeper/roles"             },
+      { "method": "GET",    "path": "/roles/{id}",                           "action": "getRole",           "resource": "gatekeeper/roles/{id}"        },
+      { "method": "PUT",    "path": "/roles/{id}",                           "action": "updateRole",        "resource": "gatekeeper/roles/{id}"        },
+      { "method": "DELETE", "path": "/roles/{id}",                           "action": "deleteRole",        "resource": "gatekeeper/roles/{id}"        },
+      { "method": "POST",   "path": "/permissions",                          "action": "createPermission",  "resource": "gatekeeper/permissions"       },
+      { "method": "GET",    "path": "/permissions/{id}",                     "action": "getPermission",     "resource": "gatekeeper/permissions/{id}"  },
+      { "method": "PUT",    "path": "/permissions/{id}",                     "action": "updatePermission",  "resource": "gatekeeper/permissions/{id}"  },
+      { "method": "DELETE", "path": "/permissions/{id}",                     "action": "deletePermission",  "resource": "gatekeeper/permissions/{id}"  },
+      { "method": "GET",    "path": "/sessions/{id}",                        "action": "getSession",        "resource": "gatekeeper/sessions/{id}"     },
+      { "method": "DELETE", "path": "/sessions/{id}",                        "action": "deleteSession",     "resource": "gatekeeper/sessions/{id}"     },
+      { "method": "GET",    "path": "/invites",                              "action": "listInvite",        "resource": "gatekeeper/invites"           },
+      { "method": "GET",    "path": "/invites/{id}",                         "action": "getInvite",         "resource": "gatekeeper/invites/{id}"      },
+      { "method": "DELETE", "path": "/invites/{id}",                         "action": "deleteInvite",      "resource": "gatekeeper/invites/{id}"      },
+      { "method": "POST",   "path": "/orgs/{id}/invites",                    "action": "inviteUser",        "resource": "gatekeeper/orgs/{id}"         },
+      { "method": "POST",   "path": "/teams/{id}/invites",                   "action": "inviteUser",        "resource": "gatekeeper/teams/{id}"        },
+      { "method": "POST",   "path": "/invites/{id}/accept",                  "action": "acceptInvite",      "resource": "gatekeeper/invites/{id}"      },
+      { "method": "POST",   "path": "/invites/{id}/decline",                 "action": "declineInvite",     "resource": "gatekeeper/invites/{id}"      },
+      { "method": "GET",    "path": "/audit-logs",                           "action": "listAuditLog",      "resource": "gatekeeper/audit-logs"        },
+      { "method": "GET",    "path": "/service-permission-requests",          "action": "listSPR",           "resource": "gatekeeper/service-permission-requests" },
+      { "method": "GET",    "path": "/service-permission-requests/{id}",     "action": "getSPR",            "resource": "gatekeeper/service-permission-requests/{id}" },
+      { "method": "POST",   "path": "/service-permission-requests/{id}/approve", "action": "approveSPR",   "resource": "gatekeeper/service-permission-requests/{id}" },
+      { "method": "POST",   "path": "/service-permission-requests/{id}/decline", "action": "declineSPR",   "resource": "gatekeeper/service-permission-requests/{id}" },
+      { "method": "POST",   "path": "/mfa/verify",       "action": "mfaVerify",    "resource": "gatekeeper/mfa", "public": true },
+      { "method": "GET",    "path": "/oauth/mfa",         "action": "oauthMFA",     "resource": "gatekeeper/mfa", "public": true },
+      { "method": "POST",   "path": "/oauth/mfa",         "action": "oauthMFA",     "resource": "gatekeeper/mfa", "public": true },
+      { "method": "POST",   "path": "/mfa/totp/enroll",  "action": "enrollTOTP",   "resource": "gatekeeper/mfa" },
+      { "method": "POST",   "path": "/mfa/totp/confirm", "action": "confirmTOTP",  "resource": "gatekeeper/mfa" },
+      { "method": "GET",    "path": "/mfa/totp/status",  "action": "getMFAStatus", "resource": "gatekeeper/mfa" },
+      { "method": "DELETE", "path": "/mfa/totp",         "action": "disableTOTP",  "resource": "gatekeeper/mfa" }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["getUser", "updateUser", "deleteUser", "createOrg", "createTeam"],
+        "resources": ["gatekeeper/users/{user_id}", "gatekeeper/orgs", "gatekeeper/teams"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["enrollTOTP", "confirmTOTP", "getMFAStatus", "disableTOTP"],
+        "resources": ["gatekeeper/mfa"]
+      },
+      {
+        "grant_on": "org",
+        "actions": ["getOrg", "updateOrg", "deleteOrg", "inviteUser"],
+        "resources": ["gatekeeper/orgs/{org_id}"]
+      },
+      {
+        "grant_on": "team",
+        "actions": ["getTeam", "updateTeam", "deleteTeam", "inviteUser"],
+        "resources": ["gatekeeper/teams/{team_id}"]
+      }
+    ]
+  },
+  {
+    "name": "blueprints",
+    "url": "http://blueprints:8084",
+    "description": "OpenTofu/Terraform remote state storage",
+    "forward_auth": true,
+    "service_key": "blueprints-registry-local-secret",
+    "endpoints": [
+      { "method": "GET",    "path": "/state/{username}/{workspace}", "action": "getState",    "resource": "states/{username}/{workspace}" },
+      { "method": "POST",   "path": "/state/{username}/{workspace}", "action": "updateState", "resource": "states/{username}/{workspace}" },
+      { "method": "DELETE", "path": "/state/{username}/{workspace}", "action": "deleteState", "resource": "states/{username}/{workspace}" },
+      { "method": "LOCK",   "path": "/state/{username}/{workspace}", "action": "lockState",   "resource": "states/{username}/{workspace}" },
+      { "method": "UNLOCK", "path": "/state/{username}/{workspace}", "action": "unlockState", "resource": "states/{username}/{workspace}" },
+      { "method": "POST",   "path": "/backend",                      "action": "createBackend", "resource": "states"                      }
+    ],
+    "actions": [
+      {
+        "name": "blueprints/backend",
+        "method": "POST",
+        "path": "/backend"
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["getState", "updateState", "deleteState", "lockState", "unlockState", "createBackend"],
+        "resources": ["states/{username}/*", "states"]
+      }
+    ]
+  },
+  {
+    "name": "forge",
+    "url": "http://forge:8083",
+    "description": "Sandboxed code execution",
+    "forward_auth": true,
+    "service_key": "forge-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/executions",               "action": "createExecution",   "resource": "forge/executions" },
+      { "method": "GET",    "path": "/executions",               "action": "listExecution",     "resource": "forge/executions" },
+      { "method": "GET",    "path": "/executions/{id}",          "action": "getExecution",      "resource": "forge/executions/{id}" },
+      { "method": "DELETE", "path": "/executions/{id}",          "action": "deleteExecution",   "resource": "forge/executions/{id}" },
+      { "method": "GET",    "path": "/runner-classes",           "action": "listRunnerClass",   "resource": "forge/runner-classes" },
+      { "method": "POST",   "path": "/runner-classes",           "action": "createRunnerClass", "resource": "forge/runner-classes" },
+      { "method": "GET",    "path": "/runner-classes/{name}",    "action": "getRunnerClass",    "resource": "forge/runner-classes/{name}" },
+      { "method": "PUT",    "path": "/runner-classes/{name}",    "action": "updateRunnerClass", "resource": "forge/runner-classes/{name}" },
+      { "method": "DELETE", "path": "/runner-classes/{name}",    "action": "deleteRunnerClass", "resource": "forge/runner-classes/{name}" }
+    ],
+    "actions": [
+      {
+        "name": "forge/run",
+        "method": "POST",
+        "path": "/executions",
+        "body_transforms": [
+          { "from_key": "run", "to_key": "command", "wrap": ["bash", "-c"] }
+        ],
+        "async": {
+          "id_field": "execution_id",
+          "poll_path": "/executions/{id}",
+          "poll_interval_secs": 2,
+          "status_field": "status",
+          "success_states": ["completed"],
+          "failure_states": ["failed", "timed_out"],
+          "cancel_states": ["cancelled"],
+          "output_field": "stdout",
+          "error_fields": ["stderr"]
+        }
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createExecution", "listExecution", "getExecution", "deleteExecution"],
+        "resources": ["forge/executions", "forge/executions/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listRunnerClass", "getRunnerClass"],
+        "resources": ["forge/runner-classes", "forge/runner-classes/*"]
+      }
+    ]
+  },
+  {
+    "name": "workflows",
+    "url": "http://workflows:8085",
+    "description": "CI/CD pipeline orchestration",
+    "forward_auth": true,
+    "service_key": "workflows-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/steps",      "action": "createStep", "resource": "workflows/steps" },
+      { "method": "GET",    "path": "/steps",      "action": "listStep",   "resource": "workflows/steps" },
+      { "method": "GET",    "path": "/steps/{id}", "action": "getStep",    "resource": "workflows/steps/{id}" },
+      { "method": "PUT",    "path": "/steps/{id}", "action": "updateStep", "resource": "workflows/steps/{id}" },
+      { "method": "DELETE", "path": "/steps/{id}", "action": "deleteStep", "resource": "workflows/steps/{id}" },
+      { "method": "POST",   "path": "/workflows",           "action": "createWorkflow", "resource": "workflows/workflows" },
+      { "method": "GET",    "path": "/workflows",           "action": "listWorkflow",   "resource": "workflows/workflows" },
+      { "method": "GET",    "path": "/workflows/{id}",      "action": "getWorkflow",    "resource": "workflows/workflows/{id}" },
+      { "method": "PUT",    "path": "/workflows/{id}",      "action": "updateWorkflow", "resource": "workflows/workflows/{id}" },
+      { "method": "DELETE", "path": "/workflows/{id}",      "action": "deleteWorkflow", "resource": "workflows/workflows/{id}" },
+      { "method": "POST",   "path": "/workflows/{id}/runs", "action": "triggerRun",     "resource": "workflows/runs" },
+      { "method": "GET",    "path": "/runs",                "action": "listRun",        "resource": "workflows/runs" },
+      { "method": "GET",    "path": "/runs/{id}",           "action": "getRun",         "resource": "workflows/runs/{id}" },
+      { "method": "DELETE", "path": "/runs/{id}",           "action": "cancelRun",      "resource": "workflows/runs/{id}" },
+      { "method": "GET",    "path": "/actions",             "action": "listAction",     "resource": "workflows/actions" }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createStep", "listStep", "getStep", "updateStep", "deleteStep", "createWorkflow", "listWorkflow", "getWorkflow", "updateWorkflow", "deleteWorkflow", "triggerRun", "listRun", "getRun", "cancelRun"],
+        "resources": ["workflows/steps", "workflows/steps/*", "workflows/workflows", "workflows/workflows/*", "workflows/runs", "workflows/runs/*"]
+      }
+    ]
+  },
+  {
+    "name": "tickets",
+    "url": "http://tickets:8086",
+    "description": "Issue and task tracking",
+    "forward_auth": true,
+    "service_key": "tickets-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/tickets",                            "action": "createTicket",  "resource": "tickets/tickets"                           },
+      { "method": "GET",    "path": "/tickets",                            "action": "listTicket",    "resource": "tickets/tickets"                           },
+      { "method": "GET",    "path": "/tickets/{id}",                       "action": "getTicket",     "resource": "tickets/tickets/{id}"                      },
+      { "method": "PUT",    "path": "/tickets/{id}",                       "action": "updateTicket",  "resource": "tickets/tickets/{id}"                      },
+      { "method": "DELETE", "path": "/tickets/{id}",                       "action": "deleteTicket",  "resource": "tickets/tickets/{id}"                      },
+      { "method": "POST",   "path": "/tickets/{id}/comments",              "action": "createComment", "resource": "tickets/tickets/{id}"                      },
+      { "method": "DELETE", "path": "/tickets/{id}/comments/{comment_id}", "action": "deleteComment", "resource": "tickets/tickets/{id}/comments/{comment_id}" }
+    ],
+    "actions": [
+      {
+        "name": "tickets/create",
+        "method": "POST",
+        "path": "/tickets"
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createTicket", "listTicket", "getTicket", "updateTicket", "deleteTicket", "createComment", "deleteComment"],
+        "resources": ["tickets/tickets", "tickets/tickets/*"]
+      }
+    ]
+  },
+  {
+    "name": "hooks",
+    "url": "http://hooks:8087",
+    "description": "Webhook ingestion and pipeline rule management",
+    "forward_auth": true,
+    "service_key": "hooks-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/hooks",        "action": "receiveHook",       "resource": "hooks/hooks", "public": true },
+      { "method": "POST",   "path": "/hooks/github", "action": "receiveGithubHook", "resource": "hooks/hooks", "public": true },
+      { "method": "POST",   "path": "/rules",       "action": "createRule",  "resource": "hooks/rules"       },
+      { "method": "GET",    "path": "/rules",       "action": "listRule",    "resource": "hooks/rules"       },
+      { "method": "GET",    "path": "/rules/{id}",  "action": "getRule",     "resource": "hooks/rules/{id}"  },
+      { "method": "PUT",    "path": "/rules/{id}",  "action": "updateRule",  "resource": "hooks/rules/{id}"  },
+      { "method": "DELETE", "path": "/rules/{id}",  "action": "deleteRule",  "resource": "hooks/rules/{id}"  },
+      { "method": "GET",    "path": "/events",      "action": "listEvent",   "resource": "hooks/events"      },
+      { "method": "GET",    "path": "/events/{id}", "action": "getEvent",    "resource": "hooks/events/{id}" }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createRule", "listRule", "getRule", "updateRule", "deleteRule", "listEvent", "getEvent"],
+        "resources": ["hooks/rules", "hooks/rules/*", "hooks/events", "hooks/events/*"]
+      }
+    ]
+  },
+  {
+    "name": "gitea_integration",
+    "url": "http://gitea-integration:8088",
+    "description": "Forgejo/Gitea git repository management",
+    "forward_auth": true,
+    "service_key": "gitea-registry-local-secret",
+    "endpoints": [
+      { "method": "GET",    "path": "/account",                                    "action": "getAccount",    "resource": "gitea_integration/account"                              },
+      { "method": "PUT",    "path": "/account",                                    "action": "linkAccount",   "resource": "gitea_integration/account"                              },
+      { "method": "DELETE", "path": "/account",                                    "action": "unlinkAccount", "resource": "gitea_integration/account"                              },
+      { "method": "GET",    "path": "/repos",                                      "action": "listRepo",      "resource": "gitea_integration/repos"                                },
+      { "method": "POST",   "path": "/repos",                                      "action": "createRepo",    "resource": "gitea_integration/repos"                                },
+      { "method": "GET",    "path": "/repos/{owner}/{name}",                       "action": "getRepo",       "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "DELETE", "path": "/repos/{owner}/{name}",                       "action": "deleteRepo",    "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/branches",              "action": "listBranch",    "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/tags",                  "action": "listTag",       "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/releases",              "action": "listRelease",   "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/commits",               "action": "listCommit",    "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/pulls",                 "action": "listPull",      "resource": "gitea_integration/repos/{owner}/{name}/pulls"           },
+      { "method": "POST",   "path": "/repos/{owner}/{name}/pulls",                 "action": "createPull",    "resource": "gitea_integration/repos/{owner}/{name}/pulls"           },
+      { "method": "GET",    "path": "/repos/{owner}/{name}/pulls/{index}",         "action": "getPull",       "resource": "gitea_integration/repos/{owner}/{name}/pulls/{index}"   },
+      { "method": "POST",   "path": "/repos/{owner}/{name}/pulls/{index}/merge",   "action": "mergePull",     "resource": "gitea_integration/repos/{owner}/{name}/pulls/{index}"   }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["getAccount", "linkAccount", "unlinkAccount", "listRepo", "createRepo"],
+        "resources": ["gitea_integration/account", "gitea_integration/repos"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["getRepo", "deleteRepo", "listBranch", "listTag", "listRelease", "listCommit", "listPull", "createPull", "getPull", "mergePull"],
+        "resources": ["gitea_integration/repos/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["getRegistryToken"],
+        "resources": ["gitea_integration/registry-token"]
+      }
+    ]
+  },
+  {
+    "name": "containers",
+    "url": "http://containers:8089",
+    "description": "Container image registry management",
+    "forward_auth": true,
+    "service_key": "containers-registry-local-secret",
+    "endpoints": [
+      { "method": "GET",    "path": "/repositories",                                              "action": "listRepository", "resource": "containers/repositories"                              },
+      { "method": "GET",    "path": "/repositories/{namespace}/{image}/tags",                     "action": "listTag",        "resource": "containers/repositories/{namespace}/{image}"          },
+      { "method": "GET",    "path": "/repositories/{namespace}/{image}/manifests/{reference}",    "action": "getManifest",    "resource": "containers/repositories/{namespace}/{image}"          },
+      { "method": "DELETE", "path": "/repositories/{namespace}/{image}/manifests/{digest}",       "action": "deleteManifest", "resource": "containers/repositories/{namespace}/{image}"          }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["listRepository", "listTag", "getManifest"],
+        "resources": ["containers/repositories", "containers/repositories/*"]
+      }
+    ]
+  }
+]

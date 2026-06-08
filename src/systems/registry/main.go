@@ -251,8 +251,8 @@ func loadManifest(ctx context.Context, path string) {
 			slog.Info("manifest: service created", "name", e.Name)
 		} else {
 			if _, err := pool.Exec(ctx,
-				`UPDATE services SET url = $1, description = $2, forward_auth = $3, service_key = $4, active = true, updated_at = now() WHERE service_id = $5`,
-				e.URL, e.Description, e.ForwardAuth, hashedKey, serviceID); err != nil {
+				`UPDATE services SET description = $1, forward_auth = $2, service_key = $3, active = true, updated_at = now() WHERE service_id = $4`,
+				e.Description, e.ForwardAuth, hashedKey, serviceID); err != nil {
 				slog.Error("manifest: failed to update service", "name", e.Name, "error", err)
 				continue
 			}
