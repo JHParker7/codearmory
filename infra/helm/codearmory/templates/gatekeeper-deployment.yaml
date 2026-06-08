@@ -78,6 +78,12 @@ spec:
             - name: OIDC_ISSUER
               value: {{ .Values.gatekeeper.env.oidcIssuer | quote }}
             {{- end }}
+            - name: GATEKEEPER_SECRETS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-gatekeeper
+                  key: gatekeeper-secrets-key
+                  optional: true
             {{- if .Values.gatekeeper.secret.oidcSigningKey }}
             - name: OIDC_SIGNING_KEY
               valueFrom:
