@@ -41,8 +41,8 @@ import (
 var (
 	gatekeeperURL       = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8084")
-	conductorForwardKey = os.Getenv("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
-	conductorNotifyKey  = os.Getenv("CONDUCTOR_NOTIFY_KEY")  // shared secret allowing registry to push refresh notifications
+	conductorForwardKey = secret("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
+	conductorNotifyKey  = secret("CONDUCTOR_NOTIFY_KEY")  // shared secret allowing registry to push refresh notifications
 	httpClient          = &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport), Timeout: 10 * time.Second}
 	// getRegistryKey returns the current rotating service key used to authenticate
 	// conductor's requests to the registry. Set in main() via StartKeyRotation.
@@ -374,9 +374,16 @@ func recordSuspect(ip, userID, method, path string) {
 
 // ── Service registry ──────────────────────────────────────────────────────────
 
+// refreshMu serialises concurrent calls to refreshServiceCache so a push
+// notification and the periodic ticker cannot race when committing the new
+// routing table.
+var refreshMu sync.Mutex
+
 // refreshServiceCache fetches GET /services from the registry and rebuilds the
 // in-memory proxy map and endpoint list.
 func refreshServiceCache(ctx context.Context) {
+	refreshMu.Lock()
+	defer refreshMu.Unlock()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, registryURL+"/services", nil)
 	if err != nil {
 		return

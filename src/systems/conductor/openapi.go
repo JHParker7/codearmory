@@ -156,13 +156,11 @@ func generateOpenAPISpec() openAPISpec {
 }
 
 func handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
-	refreshServiceCache(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(generateOpenAPISpec())
 }
 
 func handleDocs(w http.ResponseWriter, r *http.Request) {
-	refreshServiceCache(r.Context())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(swaggerUIHTML))
 }

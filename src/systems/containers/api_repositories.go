@@ -16,7 +16,7 @@ func handleListRepositories(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("containers").Start(r.Context(), "handleListRepositories")
 	defer span.End()
 
-	_, userID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRepository", "containers/repositories")
+	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRepository", "containers/repositories")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
@@ -50,7 +50,7 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 	image := r.PathValue("image")
 	name := namespace + "/" + image
 
-	_, userID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTag",
+	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTag",
 		"containers/repositories/"+namespace+"/"+image)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
@@ -88,7 +88,7 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 	reference := r.PathValue("reference")
 	name := namespace + "/" + image
 
-	_, userID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getManifest",
+	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getManifest",
 		"containers/repositories/"+namespace+"/"+image)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")

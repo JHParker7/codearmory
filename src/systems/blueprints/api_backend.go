@@ -142,10 +142,10 @@ func tokenHash(token string) string {
 // checkCertCredential returns true when the TLS connection presents a valid
 // client cert whose fingerprint is registered for workspaceKey.
 func checkCertCredential(ctx context.Context, cs *tls.ConnectionState, workspaceKey string) bool {
-	if cs == nil || len(cs.PeerCertificates) == 0 {
+	if cs == nil || len(cs.VerifiedChains) == 0 || len(cs.VerifiedChains[0]) == 0 {
 		return false
 	}
-	fp := rawFingerprint(cs.PeerCertificates[0].Raw)
+	fp := rawFingerprint(cs.VerifiedChains[0][0].Raw)
 	var expiresAt time.Time
 	err := db.QueryRow(ctx,
 		"SELECT expires_at FROM backend_credentials WHERE cert_fp=$1 AND workspace=$2",
@@ -285,7 +285,6 @@ func backendUsername(cc callerContext) string {
 	} else {
 		parts = append(parts, cc.UserID)
 	}
-	parts = append(parts, uuid.New().String())
 	return strings.Join(parts, "_")
 }
 
