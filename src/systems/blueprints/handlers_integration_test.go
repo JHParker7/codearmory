@@ -2,14 +2,15 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 var (
@@ -19,22 +20,27 @@ var (
 
 // requireBlueprintsDB connects to the blueprints database on first call and
 // skips the test if the database is not reachable.
+// Bypasses connect()'s os.Exit by opening GORM directly.
 func requireBlueprintsDB(t *testing.T) {
 	t.Helper()
 	bpDBOnce.Do(func() {
-		dbURL := os.Getenv("DATABASE_URL")
-		if dbURL == "" {
-			dbURL = "postgresql://postgres:postgres@localhost:5432/blueprints"
+		dsn := os.Getenv("DATABASE_URL")
+		if dsn == "" {
+			dsn = "postgresql://postgres:postgres@localhost:5432/blueprints"
 		}
-		p, err := pgxpool.New(context.Background(), dbURL)
+		conn, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+			Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+		})
 		if err != nil {
 			return
 		}
-		if _, err := p.Exec(context.Background(), createTables); err != nil {
-			p.Close()
+		gormDBMu.Lock()
+		gormDB = conn
+		gormDBMu.Unlock()
+
+		if err := conn.AutoMigrate(&State{}, &StateLock{}, &BackendCredential{}); err != nil {
 			return
 		}
-		db = p
 		bpDBReady = true
 	})
 	if !bpDBReady {
@@ -50,8 +56,8 @@ func wsKey(t *testing.T) (string, string) {
 	ws := "integtest/" + t.Name()
 	res := "blueprints/states/" + ws
 	t.Cleanup(func() {
-		db.Exec(context.Background(), `DELETE FROM states WHERE workspace = $1`, ws)
-		db.Exec(context.Background(), `DELETE FROM locks  WHERE workspace = $1`, ws)
+		connect().Exec(`DELETE FROM states WHERE workspace = ?`, ws) //nolint:errcheck
+		connect().Exec(`DELETE FROM locks  WHERE workspace = ?`, ws) //nolint:errcheck
 	})
 	return ws, res
 }
@@ -91,8 +97,7 @@ func TestHandleGetState_Found_DB(t *testing.T) {
 	ws, _ := wsKey(t)
 
 	stateData := []byte(`{"version":4,"resources":[]}`)
-	db.Exec(context.Background(),
-		`INSERT INTO states (workspace, data) VALUES ($1, $2)`, ws, stateData)
+	connect().Exec(`INSERT INTO states (workspace, data) VALUES (?, ?)`, ws, stateData) //nolint:errcheck
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "GET", "")
@@ -121,10 +126,12 @@ func TestHandleUpdateState_Creates_DB(t *testing.T) {
 		t.Fatalf("got %d, want 200", w.Code)
 	}
 
-	var stored []byte
-	db.QueryRow(context.Background(), `SELECT data FROM states WHERE workspace = $1`, ws).Scan(&stored)
-	if !bytes.Equal(stored, []byte(stateData)) {
-		t.Errorf("stored = %q, want %q", stored, stateData)
+	var result struct {
+		Data []byte `gorm:"column:data"`
+	}
+	connect().Raw(`SELECT data FROM states WHERE workspace = ?`, ws).Scan(&result)
+	if !bytes.Equal(result.Data, []byte(stateData)) {
+		t.Errorf("stored = %q, want %q", result.Data, stateData)
 	}
 }
 
@@ -133,8 +140,7 @@ func TestHandleUpdateState_LockedNoID_DB(t *testing.T) {
 	ws, _ := wsKey(t)
 
 	lockBody := `{"ID":"lock-abc"}`
-	db.Exec(context.Background(),
-		`INSERT INTO locks (workspace, lock_data) VALUES ($1, $2)`, ws, lockBody)
+	connect().Exec(`INSERT INTO locks (workspace, lock_data) VALUES (?, ?)`, ws, lockBody) //nolint:errcheck
 
 	// POST without ?ID= query parameter → 409 conflict with lock body.
 	w := httptest.NewRecorder()
@@ -151,8 +157,7 @@ func TestHandleUpdateState_LockedMatchingID_DB(t *testing.T) {
 	ws, _ := wsKey(t)
 
 	lockBody := `{"ID":"lock-xyz"}`
-	db.Exec(context.Background(),
-		`INSERT INTO locks (workspace, lock_data) VALUES ($1, $2)`, ws, lockBody)
+	connect().Exec(`INSERT INTO locks (workspace, lock_data) VALUES (?, ?)`, ws, lockBody) //nolint:errcheck
 
 	stateData := `{"version":4}`
 	w := httptest.NewRecorder()
@@ -172,8 +177,7 @@ func TestHandleDeleteState_Success_DB(t *testing.T) {
 	requireBlueprintsDB(t)
 	ws, _ := wsKey(t)
 
-	db.Exec(context.Background(),
-		`INSERT INTO states (workspace, data) VALUES ($1, $2)`, ws, []byte(`{}`))
+	connect().Exec(`INSERT INTO states (workspace, data) VALUES (?, ?)`, ws, []byte(`{}`)) //nolint:errcheck
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "DELETE", "")
@@ -183,10 +187,12 @@ func TestHandleDeleteState_Success_DB(t *testing.T) {
 		t.Fatalf("got %d, want 200", w.Code)
 	}
 
-	var count int
-	db.QueryRow(context.Background(), `SELECT count(*) FROM states WHERE workspace = $1`, ws).Scan(&count)
-	if count != 0 {
-		t.Errorf("state row count = %d, want 0 after delete", count)
+	var result struct {
+		Count int `gorm:"column:count"`
+	}
+	connect().Raw(`SELECT count(*) FROM states WHERE workspace = ?`, ws).Scan(&result)
+	if result.Count != 0 {
+		t.Errorf("state row count = %d, want 0 after delete", result.Count)
 	}
 }
 
@@ -204,9 +210,11 @@ func TestHandleLockState_Success_DB(t *testing.T) {
 		t.Fatalf("got %d, want 200", w.Code)
 	}
 
-	var lockData string
-	db.QueryRow(context.Background(), `SELECT lock_data FROM locks WHERE workspace = $1`, ws).Scan(&lockData)
-	if lockData == "" {
+	var result struct {
+		LockData string `gorm:"column:lock_data"`
+	}
+	connect().Raw(`SELECT lock_data FROM locks WHERE workspace = ?`, ws).Scan(&result)
+	if result.LockData == "" {
 		t.Error("expected lock row in DB")
 	}
 }
@@ -216,8 +224,7 @@ func TestHandleLockState_Conflict_DB(t *testing.T) {
 	ws, _ := wsKey(t)
 
 	// Pre-insert an existing lock.
-	db.Exec(context.Background(),
-		`INSERT INTO locks (workspace, lock_data) VALUES ($1, $2)`, ws, `{"ID":"already-locked"}`)
+	connect().Exec(`INSERT INTO locks (workspace, lock_data) VALUES (?, ?)`, ws, `{"ID":"already-locked"}`) //nolint:errcheck
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "LOCK", `{"ID":"new-lock"}`)
@@ -234,8 +241,7 @@ func TestHandleUnlockState_Success_DB(t *testing.T) {
 	requireBlueprintsDB(t)
 	ws, _ := wsKey(t)
 
-	db.Exec(context.Background(),
-		`INSERT INTO locks (workspace, lock_data) VALUES ($1, $2)`, ws, `{"ID":"lock-to-release"}`)
+	connect().Exec(`INSERT INTO locks (workspace, lock_data) VALUES (?, ?)`, ws, `{"ID":"lock-to-release"}`) //nolint:errcheck
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "UNLOCK", `{"ID":"lock-to-release"}`)
@@ -245,10 +251,12 @@ func TestHandleUnlockState_Success_DB(t *testing.T) {
 		t.Fatalf("got %d, want 200", w.Code)
 	}
 
-	var count int
-	db.QueryRow(context.Background(), `SELECT count(*) FROM locks WHERE workspace = $1`, ws).Scan(&count)
-	if count != 0 {
-		t.Errorf("lock row count = %d, want 0 after unlock", count)
+	var result struct {
+		Count int `gorm:"column:count"`
+	}
+	connect().Raw(`SELECT count(*) FROM locks WHERE workspace = ?`, ws).Scan(&result)
+	if result.Count != 0 {
+		t.Errorf("lock row count = %d, want 0 after unlock", result.Count)
 	}
 }
 
@@ -256,8 +264,7 @@ func TestHandleUnlockState_WrongID_DB(t *testing.T) {
 	requireBlueprintsDB(t)
 	ws, _ := wsKey(t)
 
-	db.Exec(context.Background(),
-		`INSERT INTO locks (workspace, lock_data) VALUES ($1, $2)`, ws, `{"ID":"correct-id"}`)
+	connect().Exec(`INSERT INTO locks (workspace, lock_data) VALUES (?, ?)`, ws, `{"ID":"correct-id"}`) //nolint:errcheck
 
 	w := httptest.NewRecorder()
 	r := authorized(t, "UNLOCK", `{"ID":"wrong-id"}`)

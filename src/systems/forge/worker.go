@@ -8,8 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -18,13 +16,12 @@ const pollInterval = 1 * time.Second
 
 // WorkerPool runs executions pulled from the pending queue in PostgreSQL.
 type WorkerPool struct {
-	db      *pgxpool.Pool
 	rt      Runtime
 	cancels sync.Map // executionID -> context.CancelFunc
 }
 
-func newWorkerPool(db *pgxpool.Pool, rt Runtime) *WorkerPool {
-	return &WorkerPool{db: db, rt: rt}
+func newWorkerPool(rt Runtime) *WorkerPool {
+	return &WorkerPool{rt: rt}
 }
 
 // Start launches n worker goroutines. Call with a context that lives for the
@@ -59,53 +56,65 @@ func (p *WorkerPool) loop(ctx context.Context) {
 }
 
 func (p *WorkerPool) tryOne(ctx context.Context) {
-	tx, err := p.db.Begin(ctx)
-	if err != nil {
+	tx := connect().WithContext(ctx).Begin()
+	if tx.Error != nil {
 		return
 	}
-	defer tx.Rollback(ctx)
 
-	var exec Execution
-	var cmdJSON, envJSON []byte
+	// pendingRow holds the raw JSONB bytes for manual unmarshal; using []byte avoids
+	// needing GORM's serializer in a raw-SQL scan path.
+	type pendingRow struct {
+		ExecutionID string `gorm:"column:execution_id"`
+		UserID      string `gorm:"column:user_id"`
+		Image       string `gorm:"column:image"`
+		Command     []byte `gorm:"column:command"`
+		Env         []byte `gorm:"column:env"`
+		TimeoutSecs int64  `gorm:"column:timeout_secs"`
+		RunnerClass string `gorm:"column:runner_class"`
+	}
+	var raw pendingRow
 
 	// FOR UPDATE SKIP LOCKED lets multiple workers run in parallel: each goroutine
 	// locks exactly one pending row and skips any already locked by a sibling,
 	// so workers never block each other on the same row.
-	row := tx.QueryRow(ctx, `
+	result := tx.Raw(`
 		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class
-		FROM executions
-		WHERE status = 'pending'
-		ORDER BY created_at
-		LIMIT 1
-		FOR UPDATE SKIP LOCKED
-	`)
-	err = row.Scan(&exec.ExecutionID, &exec.UserID, &exec.Image, &cmdJSON, &envJSON, &exec.TimeoutSecs, &exec.RunnerClass)
-	if errors.Is(err, pgx.ErrNoRows) {
+		FROM executions WHERE status = 'pending' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
+	`).Scan(&raw)
+	if result.Error != nil {
+		tx.Rollback()
+		slog.Error("worker: query pending row", "error", result.Error)
 		return
 	}
-	if err != nil {
-		slog.Error("worker: scan pending row", "error", err)
+	if result.RowsAffected == 0 {
+		tx.Rollback()
 		return
 	}
 
-	if err := json.Unmarshal(cmdJSON, &exec.Command); err != nil {
+	var exec Execution
+	exec.ExecutionID = raw.ExecutionID
+	exec.UserID = raw.UserID
+	exec.Image = raw.Image
+	exec.TimeoutSecs = raw.TimeoutSecs
+	exec.RunnerClass = raw.RunnerClass
+
+	if err := json.Unmarshal(raw.Command, &exec.Command); err != nil {
+		tx.Rollback()
 		slog.Error("worker: unmarshal command", "execution_id", exec.ExecutionID, "error", err)
 		return
 	}
-	if err := json.Unmarshal(envJSON, &exec.Env); err != nil {
+	if err := json.Unmarshal(raw.Env, &exec.Env); err != nil {
+		tx.Rollback()
 		slog.Error("worker: unmarshal env", "execution_id", exec.ExecutionID, "error", err)
 		return
 	}
 
-	_, err = tx.Exec(ctx,
-		`UPDATE executions SET status = 'running', started_at = now() WHERE execution_id = $1`,
-		exec.ExecutionID,
-	)
-	if err != nil {
+	if err := tx.Exec(`UPDATE executions SET status = 'running', started_at = now() WHERE execution_id = ?`, exec.ExecutionID).Error; err != nil {
+		tx.Rollback()
 		slog.Error("worker: mark running", "execution_id", exec.ExecutionID, "error", err)
 		return
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		return
 	}
 
@@ -142,17 +151,12 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 
 	// context.Background() rather than ctx: the worker ctx may already be cancelled
 	// (shutdown or user cancel), but the result must always be persisted.
-	_, err := p.db.Exec(context.Background(),
-		`UPDATE executions
-		 SET status    = $1,
-		     exit_code = $2,
-		     stdout    = $3,
-		     stderr    = $4,
-		     ended_at  = now()
-		 WHERE execution_id = $5`,
+	if err := connect().WithContext(context.Background()).Exec(`
+		UPDATE executions
+		SET status = ?, exit_code = ?, stdout = ?, stderr = ?, ended_at = now()
+		WHERE execution_id = ?`,
 		status, result.ExitCode, result.Stdout, result.Stderr, exec.ExecutionID,
-	)
-	if err != nil {
+	).Error; err != nil {
 		slog.Error("worker: update execution result", "execution_id", exec.ExecutionID, "error", err)
 	}
 }

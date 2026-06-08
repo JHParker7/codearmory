@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // testDBReady is set to true in TestMain when the registry DB is accessible.
@@ -29,26 +31,39 @@ func TestMain(m *testing.M) {
 		return []string{"93.184.216.34"}, nil
 	}
 
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgresql://postgres:postgres@localhost:5432/registry"
+	// Bypass connect()'s os.Exit by opening GORM directly and only setting the
+	// singleton on success.
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgresql://postgres:postgres@localhost:5432/registry"
 	}
-	if p, err := pgxpool.New(context.Background(), dbURL); err == nil {
+	conn, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	if err == nil {
+		gormDBMu.Lock()
+		gormDB = conn
+		gormDBMu.Unlock()
+
 		ctx := context.Background()
-		if _, err := p.Exec(ctx, createTables); err == nil {
-			pool = p
+		migrateErr := conn.AutoMigrate(
+			&ServiceModel{},
+			&ServiceRoleModel{},
+			&ServiceEndpointModel{},
+			&ServiceActionModel{},
+			&ServiceAccountModel{},
+			&ServiceDefaultGrantModel{},
+		)
+		if migrateErr == nil {
 			testDBReady = true
 			seedServiceAccounts(ctx, "test-reader=testreadkey", "read")
 			seedServiceAccounts(ctx, "test-admin=testadminkey", "admin")
-		} else {
-			p.Close()
 		}
 	}
+
 	code := m.Run()
-	if pool != nil {
-		ctx := context.Background()
-		pool.Exec(ctx, `DELETE FROM registry_service_accounts WHERE name IN ('test-reader','test-admin')`) //nolint:errcheck
-		pool.Close()
+	if testDBReady {
+		connect().Exec(`DELETE FROM registry_service_accounts WHERE name IN ('test-reader','test-admin')`) //nolint:errcheck
 	}
 	os.Exit(code)
 }
@@ -65,16 +80,15 @@ func requireDB(t *testing.T) {
 func insertTestService(t *testing.T, name string) string {
 	t.Helper()
 	id := uuid.New().String()
-	_, err := pool.Exec(context.Background(),
-		`INSERT INTO services (service_id, name, url) VALUES ($1, $2, $3)`,
-		id, name, "http://svc:9000")
-	if err != nil {
+	if err := connect().Exec(
+		`INSERT INTO services (service_id, name, url) VALUES (?, ?, ?)`,
+		id, name, "http://svc:9000").Error; err != nil {
 		t.Fatalf("insertTestService: %v", err)
 	}
 	t.Cleanup(func() {
-		pool.Exec(context.Background(), `DELETE FROM service_roles     WHERE service_id = $1`, id)
-		pool.Exec(context.Background(), `DELETE FROM service_endpoints WHERE service_id = $1`, id)
-		pool.Exec(context.Background(), `DELETE FROM services          WHERE service_id = $1`, id)
+		connect().Exec(`DELETE FROM service_roles     WHERE service_id = ?`, id) //nolint:errcheck
+		connect().Exec(`DELETE FROM service_endpoints WHERE service_id = ?`, id) //nolint:errcheck
+		connect().Exec(`DELETE FROM services          WHERE service_id = ?`, id) //nolint:errcheck
 	})
 	return id
 }
@@ -105,7 +119,7 @@ func TestHandleCreateService_Success(t *testing.T) {
 
 	name := uuid.New().String()
 	t.Cleanup(func() {
-		pool.Exec(context.Background(), `DELETE FROM services WHERE name = $1`, name)
+		connect().Exec(`DELETE FROM services WHERE name = ?`, name) //nolint:errcheck
 	})
 
 	body := bytes.NewBufferString(`{"name":"` + name + `","url":"http://newsvc:9000","description":"test svc"}`)

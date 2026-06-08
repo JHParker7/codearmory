@@ -14,13 +14,11 @@ import (
 
 	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
 )
 
 var (
-	db              *pgxpool.Pool
 	gatekeeperURL   = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	forgeHTTPClient *http.Client
 )
@@ -54,26 +52,6 @@ func initHTTPClient() *http.Client {
 	}
 }
 
-const createTables = `
-CREATE TABLE IF NOT EXISTS executions (
-    execution_id  TEXT        PRIMARY KEY,
-    user_id       TEXT        NOT NULL,
-    image         TEXT        NOT NULL,
-    command       JSONB       NOT NULL,
-    env           JSONB       NOT NULL DEFAULT '{}',
-    timeout_secs  BIGINT      NOT NULL DEFAULT 30,
-    runner_class  TEXT        NOT NULL DEFAULT 'standard',
-    status        TEXT        NOT NULL DEFAULT 'pending',
-    exit_code     INT,
-    stdout        TEXT,
-    stderr        TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    started_at    TIMESTAMPTZ,
-    ended_at      TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS executions_user_created ON executions (user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS executions_pending ON executions (status) WHERE status IN ('pending', 'running');
-`
 
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -154,22 +132,21 @@ func main() {
 	initMetrics()
 	forgeHTTPClient = initHTTPClient()
 
-	db, err = pgxpool.New(ctx, secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/forge"))
-	if err != nil {
-		slog.Error("failed to connect to database", "error", err)
+	if err := connect().AutoMigrate(&Execution{}); err != nil {
+		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
-
-	if _, err := db.Exec(ctx, createTables); err != nil {
-		slog.Error("failed to create tables", "error", err)
-		os.Exit(1)
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS executions_user_created ON executions (user_id, created_at DESC)`).Error; err != nil {
+		slog.Warn("failed to create executions index", "error", err)
+	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS executions_pending ON executions (status) WHERE status IN ('pending', 'running')`).Error; err != nil {
+		slog.Warn("failed to create executions pending index", "error", err)
 	}
 	if err := migrateAndSeedRunnerClasses(); err != nil {
 		slog.Error("failed to migrate runner classes", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("database pool initialized")
+	slog.Info("database initialized")
 
 	rt, err := newRuntime()
 	if err != nil {
@@ -185,7 +162,7 @@ func main() {
 	registry.StartKeyRotation(ctx, gatekeeperURL, "forge",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
-	workers := newWorkerPool(db, rt)
+	workers := newWorkerPool(rt)
 	workers.Start(ctx, 10)
 	slog.Info("worker pool started", "workers", 10)
 

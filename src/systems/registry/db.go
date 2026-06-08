@@ -1,99 +1,119 @@
 package main
 
 import (
-	"context"
-	"log/slog"
+	"fmt"
 	"os"
+	"sync"
+	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
-var pool *pgxpool.Pool
+// ── GORM model structs (table schema definitions) ─────────────────────────────
 
-const createTables = `
-CREATE TABLE IF NOT EXISTS services (
-    service_id   TEXT        PRIMARY KEY,
-    name         TEXT        NOT NULL UNIQUE,
-    url          TEXT        NOT NULL,
-    description  TEXT        NOT NULL DEFAULT '',
-    forward_auth BOOLEAN     NOT NULL DEFAULT false,
-    service_key  TEXT        NOT NULL DEFAULT '',
-    active       BOOLEAN     NOT NULL DEFAULT true,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+type ServiceModel struct {
+	ServiceID   string    `gorm:"column:service_id;primaryKey"`
+	Name        string    `gorm:"column:name;not null;uniqueIndex"`
+	URL         string    `gorm:"column:url;not null"`
+	Description string    `gorm:"column:description;not null;default:''"`
+	ForwardAuth bool      `gorm:"column:forward_auth;not null;default:false"`
+	ServiceKey  string    `gorm:"column:service_key;not null;default:''"`
+	Active      bool      `gorm:"column:active;not null;default:true"`
+	CreatedAt   time.Time `gorm:"column:created_at;not null;default:now()"`
+	UpdatedAt   time.Time `gorm:"column:updated_at;not null;default:now()"`
+}
 
-ALTER TABLE services ADD COLUMN IF NOT EXISTS service_key TEXT NOT NULL DEFAULT '';
+func (ServiceModel) TableName() string { return "services" }
 
-CREATE TABLE IF NOT EXISTS service_roles (
-    role_id     TEXT        PRIMARY KEY,
-    service_id  TEXT        NOT NULL REFERENCES services(service_id),
-    name        TEXT        NOT NULL,
-    description TEXT        NOT NULL DEFAULT '',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (service_id, name)
-);
+type ServiceRoleModel struct {
+	RoleID      string    `gorm:"column:role_id;primaryKey"`
+	ServiceID   string    `gorm:"column:service_id;not null"`
+	Name        string    `gorm:"column:name;not null"`
+	Description string    `gorm:"column:description;not null;default:''"`
+	CreatedAt   time.Time `gorm:"column:created_at;not null;default:now()"`
+}
 
-CREATE TABLE IF NOT EXISTS service_endpoints (
-    endpoint_id TEXT        PRIMARY KEY,
-    service_id  TEXT        NOT NULL REFERENCES services(service_id),
-    method      TEXT        NOT NULL,
-    path        TEXT        NOT NULL,
-    action      TEXT        NOT NULL,
-    resource    TEXT        NOT NULL,
-    public      BOOLEAN     NOT NULL DEFAULT false,
-    active      BOOLEAN     NOT NULL DEFAULT true,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+func (ServiceRoleModel) TableName() string { return "service_roles" }
 
-CREATE TABLE IF NOT EXISTS service_actions (
-    action_id       TEXT        PRIMARY KEY,
-    service_id      TEXT        NOT NULL REFERENCES services(service_id),
-    name            TEXT        NOT NULL,
-    method          TEXT        NOT NULL,
-    path            TEXT        NOT NULL,
-    body_transforms JSONB,
-    async_config    JSONB,
-    active          BOOLEAN     NOT NULL DEFAULT true,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (service_id, name)
-);
+type ServiceEndpointModel struct {
+	EndpointID string    `gorm:"column:endpoint_id;primaryKey"`
+	ServiceID  string    `gorm:"column:service_id;not null"`
+	Method     string    `gorm:"column:method;not null"`
+	Path       string    `gorm:"column:path;not null"`
+	Action     string    `gorm:"column:action;not null"`
+	Resource   string    `gorm:"column:resource;not null"`
+	Public     bool      `gorm:"column:public;not null;default:false"`
+	Active     bool      `gorm:"column:active;not null;default:true"`
+	CreatedAt  time.Time `gorm:"column:created_at;not null;default:now()"`
+	UpdatedAt  time.Time `gorm:"column:updated_at;not null;default:now()"`
+}
 
-CREATE TABLE IF NOT EXISTS registry_service_accounts (
-    account_id  TEXT        PRIMARY KEY,
-    name        TEXT        NOT NULL UNIQUE,
-    hashed_key  TEXT        NOT NULL,
-    role        TEXT        NOT NULL DEFAULT 'read',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+func (ServiceEndpointModel) TableName() string { return "service_endpoints" }
 
-CREATE TABLE IF NOT EXISTS service_default_grants (
-    grant_id    TEXT        PRIMARY KEY,
-    service_id  TEXT        NOT NULL REFERENCES services(service_id),
-    grant_on    TEXT        NOT NULL,
-    actions     JSONB       NOT NULL DEFAULT '[]',
-    resources   JSONB       NOT NULL DEFAULT '[]',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-`
+type ServiceActionModel struct {
+	ActionID       string    `gorm:"column:action_id;primaryKey"`
+	ServiceID      string    `gorm:"column:service_id;not null"`
+	Name           string    `gorm:"column:name;not null"`
+	Method         string    `gorm:"column:method;not null"`
+	Path           string    `gorm:"column:path;not null"`
+	BodyTransforms []byte    `gorm:"column:body_transforms;type:jsonb"`
+	AsyncConfig    []byte    `gorm:"column:async_config;type:jsonb"`
+	Active         bool      `gorm:"column:active;not null;default:true"`
+	CreatedAt      time.Time `gorm:"column:created_at;not null;default:now()"`
+	UpdatedAt      time.Time `gorm:"column:updated_at;not null;default:now()"`
+}
 
-func connectDB(ctx context.Context) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgresql://postgres:postgres@localhost:5432/registry"
+func (ServiceActionModel) TableName() string { return "service_actions" }
+
+type ServiceAccountModel struct {
+	AccountID  string    `gorm:"column:account_id;primaryKey"`
+	Name       string    `gorm:"column:name;not null;uniqueIndex"`
+	HashedKey  string    `gorm:"column:hashed_key;not null"`
+	Role       string    `gorm:"column:role;not null;default:read"`
+	CreatedAt  time.Time `gorm:"column:created_at;not null;default:now()"`
+	UpdatedAt  time.Time `gorm:"column:updated_at;not null;default:now()"`
+}
+
+func (ServiceAccountModel) TableName() string { return "registry_service_accounts" }
+
+type ServiceDefaultGrantModel struct {
+	GrantID   string    `gorm:"column:grant_id;primaryKey"`
+	ServiceID string    `gorm:"column:service_id;not null"`
+	GrantOn   string    `gorm:"column:grant_on;not null"`
+	Actions   []byte    `gorm:"column:actions;type:jsonb;not null;default:'[]'"`
+	Resources []byte    `gorm:"column:resources;type:jsonb;not null;default:'[]'"`
+	CreatedAt time.Time `gorm:"column:created_at;not null;default:now()"`
+	UpdatedAt time.Time `gorm:"column:updated_at;not null;default:now()"`
+}
+
+func (ServiceDefaultGrantModel) TableName() string { return "service_default_grants" }
+
+// ── Connection ────────────────────────────────────────────────────────────────
+
+var (
+	gormDB   *gorm.DB
+	gormDBMu sync.Mutex
+)
+
+func connect() *gorm.DB {
+	gormDBMu.Lock()
+	defer gormDBMu.Unlock()
+	if gormDB != nil {
+		return gormDB
 	}
-	p, err := pgxpool.New(ctx, dbURL)
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgresql://postgres:postgres@localhost:5432/registry"
+	}
+	conn, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
 	if err != nil {
-		slog.Error("failed to connect to database", "error", err)
+		fmt.Fprintf(os.Stderr, "registry: connect to database: %v\n", err)
 		os.Exit(1)
 	}
-	if _, err := p.Exec(ctx, createTables); err != nil {
-		slog.Error("failed to create tables", "error", err)
-		os.Exit(1)
-	}
-	pool = p
+	gormDB = conn
+	return gormDB
 }

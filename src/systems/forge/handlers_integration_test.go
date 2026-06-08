@@ -6,32 +6,36 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 var forgeTestDBReady bool
 
 // setupForgeTestDB is called from TestMain. It tries to connect to the forge
-// database and creates the schema; it is a no-op when the database is not
+// database and runs AutoMigrate; it is a no-op when the database is not
 // reachable so the existing unit tests continue to pass without a database.
+// We bypass connect()'s os.Exit by opening GORM directly and only setting the
+// singleton on success.
 func setupForgeTestDB() {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgresql://postgres:postgres@localhost:5432/forge"
-	}
-	p, err := pgxpool.New(context.Background(), dbURL)
+	dsn := secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/forge")
+	conn, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
 	if err != nil {
 		return
 	}
-	if _, err := p.Exec(context.Background(), createTables); err != nil {
-		p.Close()
+	gormDBMu.Lock()
+	gormDB = conn
+	gormDBMu.Unlock()
+
+	if err := conn.AutoMigrate(&Execution{}, &RunnerClass{}); err != nil {
 		return
 	}
-	db = p
 	forgeTestDBReady = true
 }
 
@@ -45,15 +49,14 @@ func requireForgeDB(t *testing.T) {
 // insertExecution inserts a bare execution row and registers cleanup.
 func insertExecution(t *testing.T, execID, userID, status string) {
 	t.Helper()
-	_, err := db.Exec(context.Background(),
+	if err := connect().Exec(
 		`INSERT INTO executions (execution_id, user_id, image, command, env, timeout_secs, status)
-		 VALUES ($1, $2, 'alpine:3.19', '["echo","test"]'::jsonb, '{}'::jsonb, 30, $3)`,
-		execID, userID, status)
-	if err != nil {
+		 VALUES (?, ?, 'alpine:3.19', '["echo","test"]'::jsonb, '{}'::jsonb, 30, ?)`,
+		execID, userID, status).Error; err != nil {
 		t.Fatalf("insertExecution: %v", err)
 	}
 	t.Cleanup(func() {
-		db.Exec(context.Background(), `DELETE FROM executions WHERE execution_id = $1`, execID)
+		connect().Exec(`DELETE FROM executions WHERE execution_id = ?`, execID) //nolint:errcheck
 	})
 }
 
@@ -75,20 +78,23 @@ func TestHandleSubmit_Success_DB(t *testing.T) {
 		t.Fatalf("got %d, want 202: %s", w.Code, w.Body.String())
 	}
 	var resp map[string]string
-	json.NewDecoder(w.Body).Decode(&resp)
+	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
 	execID := resp["execution_id"]
 	if execID == "" {
 		t.Fatal("expected execution_id in response")
 	}
 	t.Cleanup(func() {
-		db.Exec(context.Background(), `DELETE FROM executions WHERE execution_id = $1`, execID)
+		connect().Exec(`DELETE FROM executions WHERE execution_id = ?`, execID) //nolint:errcheck
 	})
 
 	// Verify the row exists in the DB with status=pending.
-	var status string
-	db.QueryRow(context.Background(), `SELECT status FROM executions WHERE execution_id = $1`, execID).Scan(&status)
-	if status != "pending" {
-		t.Errorf("status = %q, want %q", status, "pending")
+	var result struct {
+		Status string `gorm:"column:status"`
+	}
+	connect().WithContext(context.Background()).Raw(
+		`SELECT status FROM executions WHERE execution_id = ?`, execID).Scan(&result)
+	if result.Status != "pending" {
+		t.Errorf("status = %q, want %q", result.Status, "pending")
 	}
 }
 
@@ -150,7 +156,7 @@ func TestHandleList_Empty_DB(t *testing.T) {
 		t.Fatalf("got %d, want 200", w.Code)
 	}
 	var executions []Execution
-	json.NewDecoder(w.Body).Decode(&executions)
+	json.NewDecoder(w.Body).Decode(&executions) //nolint:errcheck
 	if len(executions) != 0 {
 		t.Errorf("got %d executions, want 0", len(executions))
 	}
@@ -172,7 +178,7 @@ func TestHandleList_Success_DB(t *testing.T) {
 		t.Fatalf("got %d, want 200", w.Code)
 	}
 	var executions []Execution
-	json.NewDecoder(w.Body).Decode(&executions)
+	json.NewDecoder(w.Body).Decode(&executions) //nolint:errcheck
 	if len(executions) != 1 {
 		t.Errorf("got %d executions, want 1", len(executions))
 	}
@@ -216,10 +222,13 @@ func TestHandleCancel_Pending_DB(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("got %d, want 204: %s", w.Code, w.Body.String())
 	}
-	var status string
-	db.QueryRow(context.Background(), `SELECT status FROM executions WHERE execution_id = $1`, execID).Scan(&status)
-	if status != "cancelled" {
-		t.Errorf("status = %q, want %q", status, "cancelled")
+	var result struct {
+		Status string `gorm:"column:status"`
+	}
+	connect().WithContext(context.Background()).Raw(
+		`SELECT status FROM executions WHERE execution_id = ?`, execID).Scan(&result)
+	if result.Status != "cancelled" {
+		t.Errorf("status = %q, want %q", result.Status, "cancelled")
 	}
 }
 
