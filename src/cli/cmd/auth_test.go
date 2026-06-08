@@ -19,7 +19,9 @@ func TestLogin_Success(t *testing.T) {
 	setupCLINoToken(t, srv)
 
 	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
-	loginCmd.Flags().Set("password", "supersecret")   //nolint:errcheck
+	orig := readPassword
+	readPassword = func() (string, error) { return "supersecret", nil }
+	t.Cleanup(func() { readPassword = orig })
 
 	if err := loginCmd.RunE(loginCmd, nil); err != nil {
 		t.Fatalf("login: %v", err)
@@ -53,7 +55,9 @@ func TestLogin_HTTPError(t *testing.T) {
 	setupCLINoToken(t, srv)
 
 	loginCmd.Flags().Set("email", "bad@example.com") //nolint:errcheck
-	loginCmd.Flags().Set("password", "wrong")        //nolint:errcheck
+	orig := readPassword
+	readPassword = func() (string, error) { return "wrong", nil }
+	t.Cleanup(func() { readPassword = orig })
 
 	if err := loginCmd.RunE(loginCmd, nil); err == nil {
 		t.Fatal("expected error for 401, got nil")
@@ -69,7 +73,9 @@ func TestLogin_MissingTokenInResponse(t *testing.T) {
 	setupCLINoToken(t, srv)
 
 	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
-	loginCmd.Flags().Set("password", "secret123")     //nolint:errcheck
+	orig := readPassword
+	readPassword = func() (string, error) { return "secret123", nil }
+	t.Cleanup(func() { readPassword = orig })
 
 	if err := loginCmd.RunE(loginCmd, nil); err == nil {
 		t.Fatal("expected error when token field is absent, got nil")
@@ -85,7 +91,9 @@ func TestSignup_SendsCorrectBody(t *testing.T) {
 
 	signupCmd.Flags().Set("email", "new@example.com") //nolint:errcheck
 	signupCmd.Flags().Set("username", "newuser")      //nolint:errcheck
-	signupCmd.Flags().Set("password", "password123")  //nolint:errcheck
+	orig := readPassword
+	readPassword = func() (string, error) { return "password123", nil }
+	t.Cleanup(func() { readPassword = orig })
 
 	if err := signupCmd.RunE(signupCmd, nil); err != nil {
 		t.Fatalf("signup: %v", err)
@@ -214,7 +222,9 @@ func TestLogin_StoreTokenError(t *testing.T) {
 	setupCLINoToken(t, srv)
 
 	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
-	loginCmd.Flags().Set("password", "supersecret")   //nolint:errcheck
+	orig := readPassword
+	readPassword = func() (string, error) { return "supersecret", nil }
+	t.Cleanup(func() { readPassword = orig })
 
 	if err := loginCmd.RunE(loginCmd, nil); err == nil {
 		t.Fatal("expected error when token cannot be stored, got nil")

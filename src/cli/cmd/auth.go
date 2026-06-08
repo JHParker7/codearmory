@@ -15,18 +15,23 @@ var authCmd = &cobra.Command{
 	Short: "Manage authentication",
 }
 
+var readPassword = func() (string, error) {
+	fmt.Fprint(os.Stderr, "Password: ")
+	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	return string(raw), err
+}
+
 var loginCmd = &cobra.Command{
 	Use:   "login",
 	Short: "Authenticate and save token to config",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		email, _ := cmd.Flags().GetString("email")
-		fmt.Fprint(os.Stderr, "Password: ")
-		raw, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(os.Stderr)
+		password, err := readPassword()
 		if err != nil {
 			return fmt.Errorf("reading password: %w", err)
 		}
-		body, _ := json.Marshal(map[string]string{"email": email, "password": string(raw)})
+		body, _ := json.Marshal(map[string]string{"email": email, "password": password})
 		data, err := doRequest("POST", "/login", body)
 		if err != nil {
 			return err
@@ -52,16 +57,14 @@ var signupCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		email, _ := cmd.Flags().GetString("email")
 		username, _ := cmd.Flags().GetString("username")
-		fmt.Fprint(os.Stderr, "Password: ")
-		raw, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(os.Stderr)
+		password, err := readPassword()
 		if err != nil {
 			return fmt.Errorf("reading password: %w", err)
 		}
 		body, _ := json.Marshal(map[string]string{
 			"email":    email,
 			"username": username,
-			"password": string(raw),
+			"password": password,
 		})
 		return apiCall("POST", "/signup", body)
 	},
