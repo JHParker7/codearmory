@@ -382,6 +382,9 @@ var refreshMu sync.Mutex
 // refreshServiceCache fetches GET /services from the registry and rebuilds the
 // in-memory proxy map and endpoint list.
 func refreshServiceCache(ctx context.Context) {
+	if getRegistryKey == nil {
+		return
+	}
 	refreshMu.Lock()
 	defer refreshMu.Unlock()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, registryURL+"/services", nil)
