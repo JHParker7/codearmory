@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -18,7 +17,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	gormlib "gorm.io/gorm"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -455,7 +453,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		ServiceKey:  hashedKey,
 	}
 	if err := connect().WithContext(ctx).Create(&newSvcModel).Error; err != nil {
-		if errors.Is(err, gormlib.ErrDuplicatedKey) {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			span.SetStatus(codes.Error, "service already registered")
 			http.Error(w, "service already registered", http.StatusConflict)
 			return

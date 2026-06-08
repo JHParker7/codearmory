@@ -15,7 +15,7 @@ import (
 
 type ServiceModel struct {
 	ServiceID   string    `gorm:"column:service_id;primaryKey"`
-	Name        string    `gorm:"column:name;not null;uniqueIndex:services_name_key"`
+	Name        string    `gorm:"column:name;not null;uniqueIndex"`
 	URL         string    `gorm:"column:url;not null"`
 	Description string    `gorm:"column:description;not null;default:''"`
 	ForwardAuth bool      `gorm:"column:forward_auth;not null;default:false"`
@@ -29,8 +29,8 @@ func (ServiceModel) TableName() string { return "services" }
 
 type ServiceRoleModel struct {
 	RoleID      string    `gorm:"column:role_id;primaryKey"`
-	ServiceID   string    `gorm:"column:service_id;not null"`
-	Name        string    `gorm:"column:name;not null"`
+	ServiceID   string    `gorm:"column:service_id;not null;uniqueIndex:service_roles_service_id_name_key"`
+	Name        string    `gorm:"column:name;not null;uniqueIndex:service_roles_service_id_name_key"`
 	Description string    `gorm:"column:description;not null;default:''"`
 	CreatedAt   time.Time `gorm:"column:created_at;not null;default:now()"`
 }
@@ -54,8 +54,8 @@ func (ServiceEndpointModel) TableName() string { return "service_endpoints" }
 
 type ServiceActionModel struct {
 	ActionID       string    `gorm:"column:action_id;primaryKey"`
-	ServiceID      string    `gorm:"column:service_id;not null"`
-	Name           string    `gorm:"column:name;not null"`
+	ServiceID      string    `gorm:"column:service_id;not null;uniqueIndex:service_actions_service_id_name_key"`
+	Name           string    `gorm:"column:name;not null;uniqueIndex:service_actions_service_id_name_key"`
 	Method         string    `gorm:"column:method;not null"`
 	Path           string    `gorm:"column:path;not null"`
 	BodyTransforms []byte    `gorm:"column:body_transforms;type:jsonb"`
@@ -69,7 +69,7 @@ func (ServiceActionModel) TableName() string { return "service_actions" }
 
 type ServiceAccountModel struct {
 	AccountID  string    `gorm:"column:account_id;primaryKey"`
-	Name       string    `gorm:"column:name;not null;uniqueIndex:registry_service_accounts_name_key"`
+	Name       string    `gorm:"column:name;not null;uniqueIndex"`
 	HashedKey  string    `gorm:"column:hashed_key;not null"`
 	Role       string    `gorm:"column:role;not null;default:read"`
 	CreatedAt  time.Time `gorm:"column:created_at;not null;default:now()"`

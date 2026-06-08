@@ -32,8 +32,8 @@ func (StateLock) TableName() string { return "locks" }
 type BackendCredential struct {
 	CredentialID string    `gorm:"column:credential_id;primaryKey"`
 	Workspace    string    `gorm:"column:workspace;not null"`
-	CertFP       string    `gorm:"column:cert_fp;not null;uniqueIndex:backend_credentials_cert_fp_key"`
-	TokenHash    string    `gorm:"column:token_hash;not null;uniqueIndex:backend_credentials_token_hash_key"`
+	CertFP       string    `gorm:"column:cert_fp;not null;uniqueIndex"`
+	TokenHash    string    `gorm:"column:token_hash;not null;uniqueIndex"`
 	CreatedBy    string    `gorm:"column:created_by;not null"`
 	ExpiresAt    time.Time `gorm:"column:expires_at;not null;index:idx_backend_creds_expires"`
 	CreatedAt    time.Time `gorm:"column:created_at;not null;default:now()"`

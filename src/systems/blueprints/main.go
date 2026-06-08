@@ -633,6 +633,16 @@ func main() {
 	}
 	initCache()
 
+	// Rename legacy PostgreSQL auto-named constraints to GORM's convention (one-shot).
+	for _, sql := range []string{
+		`ALTER TABLE backend_credentials RENAME CONSTRAINT backend_credentials_cert_fp_key TO uni_backend_credentials_cert_fp`,
+		`ALTER TABLE backend_credentials RENAME CONSTRAINT backend_credentials_token_hash_key TO uni_backend_credentials_token_hash`,
+	} {
+		if r := connect().Exec(sql); r.Error != nil {
+			slog.Debug("constraint rename skipped", "sql", sql, "error", r.Error)
+		}
+	}
+
 	if err := connect().AutoMigrate(&State{}, &StateLock{}, &BackendCredential{}); err != nil {
 		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)

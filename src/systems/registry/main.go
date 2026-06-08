@@ -380,6 +380,18 @@ func main() {
 		defer shutdown(context.Background())
 	}
 
+	// Rename legacy PostgreSQL auto-named constraints to match GORM's naming
+	// convention. These are one-shot: silently ignored if already renamed or
+	// the table doesn't exist yet (fresh install).
+	for _, sql := range []string{
+		`ALTER TABLE services RENAME CONSTRAINT services_name_key TO uni_services_name`,
+		`ALTER TABLE registry_service_accounts RENAME CONSTRAINT registry_service_accounts_name_key TO uni_registry_service_accounts_name`,
+	} {
+		if r := connect().Exec(sql); r.Error != nil {
+			slog.Debug("constraint rename skipped", "sql", sql, "error", r.Error)
+		}
+	}
+
 	if err := connect().AutoMigrate(
 		&ServiceModel{},
 		&ServiceRoleModel{},
