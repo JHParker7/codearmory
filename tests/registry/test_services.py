@@ -206,3 +206,209 @@ class TestDeleteService:
         assert second.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# TestSystemHealth — GET /system_health
+# ---------------------------------------------------------------------------
+
+
+class TestSystemHealth:
+    def test_no_key_returns_401(self, registry_url):
+        resp = requests.get(f"{registry_url}/system_health")
+        assert resp.status_code == 401
+
+    def test_wrong_key_returns_401(self, registry_url):
+        resp = requests.get(
+            f"{registry_url}/system_health",
+            headers={"X-Service-Key": "conductor:definitely-wrong-key"},
+        )
+        assert resp.status_code == 401
+
+    def test_read_key_returns_200(self, registry_url, read_headers):
+        resp = requests.get(f"{registry_url}/system_health", headers=read_headers)
+        assert resp.status_code == 200
+
+    def test_response_has_status_field(self, registry_url, read_headers):
+        resp = requests.get(f"{registry_url}/system_health", headers=read_headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "status" in body
+        assert body["status"] in ("healthy", "degraded")
+
+    def test_response_has_services_map(self, registry_url, read_headers):
+        resp = requests.get(f"{registry_url}/system_health", headers=read_headers)
+        body = resp.json()
+        assert "services" in body
+        assert isinstance(body["services"], dict)
+
+
+# ---------------------------------------------------------------------------
+# TestListDefaultGrants — GET /default-grants
+# ---------------------------------------------------------------------------
+
+
+class TestListDefaultGrants:
+    def test_no_key_returns_401(self, registry_url):
+        resp = requests.get(f"{registry_url}/default-grants")
+        assert resp.status_code == 401
+
+    def test_wrong_key_returns_401(self, registry_url):
+        resp = requests.get(
+            f"{registry_url}/default-grants",
+            headers={"X-Service-Key": "conductor:definitely-wrong-key"},
+        )
+        assert resp.status_code == 401
+
+    def test_read_key_returns_200(self, registry_url, read_headers):
+        resp = requests.get(f"{registry_url}/default-grants", headers=read_headers)
+        assert resp.status_code == 200
+
+    def test_returns_array(self, registry_url, read_headers):
+        resp = requests.get(f"{registry_url}/default-grants", headers=read_headers)
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+
+# ---------------------------------------------------------------------------
+# TestListActions — GET /actions
+# ---------------------------------------------------------------------------
+
+
+class TestListActions:
+    def test_no_key_returns_401(self, registry_url):
+        resp = requests.get(f"{registry_url}/actions")
+        assert resp.status_code == 401
+
+    def test_wrong_key_returns_401(self, registry_url):
+        resp = requests.get(
+            f"{registry_url}/actions",
+            headers={"X-Service-Key": "conductor:definitely-wrong-key"},
+        )
+        assert resp.status_code == 401
+
+    def test_read_key_returns_200(self, registry_url, read_headers):
+        resp = requests.get(f"{registry_url}/actions", headers=read_headers)
+        assert resp.status_code == 200
+
+    def test_returns_array(self, registry_url, read_headers):
+        resp = requests.get(f"{registry_url}/actions", headers=read_headers)
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+
+# ---------------------------------------------------------------------------
+# TestUpdateServiceEndpoints — PUT /services/{id}/endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateServiceEndpoints:
+    def test_no_key_returns_401(self, registry_url):
+        resp = requests.put(f"{registry_url}/services/{uuid.uuid4().hex}/endpoints", json={})
+        assert resp.status_code == 401
+
+    def test_read_key_returns_403(self, registry_url, read_headers):
+        resp = requests.put(
+            f"{registry_url}/services/{uuid.uuid4().hex}/endpoints",
+            json={},
+            headers=read_headers,
+        )
+        assert resp.status_code == 403
+
+    def test_nonexistent_service_returns_404(self, registry_url, admin_headers):
+        resp = requests.put(
+            f"{registry_url}/services/{uuid.uuid4().hex}/endpoints",
+            json={"endpoints": []},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 404
+
+    def test_returns_204_on_success(self, registry_url, admin_headers, service):
+        resp = requests.put(
+            f"{registry_url}/services/{service['service_id']}/endpoints",
+            json={
+                "endpoints": [
+                    {"method": "GET", "path": "/ping", "action": "read", "resource": "thing", "public": False},
+                ],
+            },
+            headers=admin_headers,
+        )
+        assert resp.status_code == 204
+
+    def test_endpoints_visible_in_service_list(self, registry_url, admin_headers, read_headers):
+        unique = uuid.uuid4().hex[:8]
+        create_resp = requests.post(
+            f"{registry_url}/services",
+            json={"name": f"ep-test-{unique}", "url": "http://203.0.113.1:9000"},
+            headers=admin_headers,
+        )
+        assert create_resp.status_code == 201
+        svc_id = create_resp.json()["service_id"]
+
+        requests.put(
+            f"{registry_url}/services/{svc_id}/endpoints",
+            json={"endpoints": [{"method": "GET", "path": "/pong", "action": "read", "resource": "x", "public": True}]},
+            headers=admin_headers,
+        )
+
+        list_resp = requests.get(f"{registry_url}/services", headers=read_headers)
+        svc = next((s for s in list_resp.json() if s["service_id"] == svc_id), None)
+        assert svc is not None
+        assert len(svc["endpoints"]) == 1
+        assert svc["endpoints"][0]["path"] == "/pong"
+
+        requests.delete(f"{registry_url}/services/{svc_id}", headers=admin_headers)
+
+    def test_replaces_existing_endpoints(self, registry_url, admin_headers, read_headers):
+        unique = uuid.uuid4().hex[:8]
+        create_resp = requests.post(
+            f"{registry_url}/services",
+            json={"name": f"ep-replace-{unique}", "url": "http://203.0.113.1:9000"},
+            headers=admin_headers,
+        )
+        assert create_resp.status_code == 201
+        svc_id = create_resp.json()["service_id"]
+
+        requests.put(
+            f"{registry_url}/services/{svc_id}/endpoints",
+            json={"endpoints": [{"method": "GET", "path": "/old", "action": "read", "resource": "x", "public": False}]},
+            headers=admin_headers,
+        )
+        requests.put(
+            f"{registry_url}/services/{svc_id}/endpoints",
+            json={"endpoints": [{"method": "POST", "path": "/new", "action": "write", "resource": "x", "public": False}]},
+            headers=admin_headers,
+        )
+
+        list_resp = requests.get(f"{registry_url}/services", headers=read_headers)
+        svc = next((s for s in list_resp.json() if s["service_id"] == svc_id), None)
+        assert svc is not None
+        paths = [ep["path"] for ep in svc["endpoints"]]
+        assert "/new" in paths
+        assert "/old" not in paths
+
+        requests.delete(f"{registry_url}/services/{svc_id}", headers=admin_headers)
+
+
+# ---------------------------------------------------------------------------
+# TestRotateServiceKey — POST /service-accounts/rotate-key
+# ---------------------------------------------------------------------------
+
+
+class TestRotateServiceKey:
+    def test_no_key_returns_401(self, registry_url):
+        resp = requests.post(f"{registry_url}/service-accounts/rotate-key")
+        assert resp.status_code == 401
+
+    def test_wrong_key_returns_401(self, registry_url):
+        resp = requests.post(
+            f"{registry_url}/service-accounts/rotate-key",
+            headers={"X-Service-Key": "conductor:definitely-wrong-key"},
+        )
+        assert resp.status_code == 401
+
+    def test_malformed_key_header_returns_401(self, registry_url):
+        resp = requests.post(
+            f"{registry_url}/service-accounts/rotate-key",
+            headers={"X-Service-Key": "no-colon-key"},
+        )
+        assert resp.status_code == 401
+

@@ -123,3 +123,68 @@ class TestBlueprintsRouting:
     def test_state_post_requires_auth(self, base_url):
         resp = requests.post(f"{base_url}/state/alice/dev", json={})
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Conductor-native endpoints — /openapi.json, /docs
+# ---------------------------------------------------------------------------
+
+
+class TestConductorNativeEndpoints:
+    def test_openapi_json_returns_200(self, base_url):
+        """GET /openapi.json is served by conductor itself; no auth required."""
+        resp = requests.get(f"{base_url}/openapi.json")
+        assert resp.status_code == 200
+
+    def test_openapi_json_content_type(self, base_url):
+        resp = requests.get(f"{base_url}/openapi.json")
+        assert "application/json" in resp.headers.get("Content-Type", "")
+
+    def test_openapi_json_has_required_fields(self, base_url):
+        resp = requests.get(f"{base_url}/openapi.json")
+        body = resp.json()
+        assert "openapi" in body
+        assert "info" in body
+        assert "paths" in body
+
+    def test_docs_returns_200(self, base_url):
+        """GET /docs serves the Swagger UI HTML; no auth required."""
+        resp = requests.get(f"{base_url}/docs")
+        assert resp.status_code == 200
+
+    def test_docs_content_type_is_html(self, base_url):
+        resp = requests.get(f"{base_url}/docs")
+        assert "text/html" in resp.headers.get("Content-Type", "")
+
+    def test_docs_references_openapi_spec(self, base_url):
+        """Swagger UI page should reference /openapi.json."""
+        resp = requests.get(f"{base_url}/docs")
+        assert "/openapi.json" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Internal refresh endpoint — POST /internal/refresh
+# ---------------------------------------------------------------------------
+
+
+class TestInternalRefresh:
+    def test_no_key_returns_401(self, base_url):
+        """POST /internal/refresh without X-Service-Key is rejected."""
+        resp = requests.post(f"{base_url}/internal/refresh")
+        assert resp.status_code == 401
+
+    def test_wrong_key_returns_401(self, base_url):
+        """An incorrect notify key is rejected."""
+        resp = requests.post(
+            f"{base_url}/internal/refresh",
+            headers={"X-Service-Key": "registry:definitely-wrong-key"},
+        )
+        assert resp.status_code == 401
+
+    def test_bearer_token_returns_401(self, base_url, token):
+        """A user bearer token cannot call the internal refresh endpoint."""
+        resp = requests.post(
+            f"{base_url}/internal/refresh",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401
