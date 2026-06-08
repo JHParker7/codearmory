@@ -10,7 +10,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
+
+var gkRegistryClient = &http.Client{
+	Transport: otelhttp.NewTransport(http.DefaultTransport),
+	Timeout:   10 * time.Second,
+}
 
 // DefaultGrant is a permission template declared by a service in the registry.
 // Resources may contain template variables: {user_id}, {username}, {org_id}, {team_id}.
@@ -60,7 +67,7 @@ func fetchDefaultGrants(ctx context.Context, registryURL, serviceKey string) ([]
 	}
 	req.Header.Set("X-Service-Key", serviceKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := gkRegistryClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

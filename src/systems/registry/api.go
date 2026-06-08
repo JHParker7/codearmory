@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -650,7 +651,10 @@ func handleListDefaultGrants(w http.ResponseWriter, r *http.Request) {
 
 // ── System health ─────────────────────────────────────────────────────────────
 
-var registryHTTPClient = &http.Client{Timeout: 5 * time.Second}
+var registryHTTPClient = &http.Client{
+	Transport: otelhttp.NewTransport(http.DefaultTransport),
+	Timeout:   5 * time.Second,
+}
 
 var (
 	healthMu    sync.RWMutex
