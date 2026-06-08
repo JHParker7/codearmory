@@ -391,6 +391,14 @@ func main() {
 		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
 	}
+	for _, sql := range []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_services_name ON services(name)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_service_accounts_name ON registry_service_accounts(name)`,
+	} {
+		if err := connect().Exec(sql).Error; err != nil {
+			slog.Warn("failed to create index", "sql", sql, "error", err)
+		}
+	}
 	slog.Info("database initialized")
 
 	// Seed service accounts. Read accounts (e.g. Conductor) from REGISTRY_SERVICE_ACCOUNTS=name=key.
