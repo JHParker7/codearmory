@@ -15,7 +15,7 @@ import (
 
 type ServiceModel struct {
 	ServiceID   string    `gorm:"column:service_id;primaryKey"`
-	Name        string    `gorm:"column:name;not null"`
+	Name        string    `gorm:"column:name;not null;uniqueIndex:services_name_key"`
 	URL         string    `gorm:"column:url;not null"`
 	Description string    `gorm:"column:description;not null;default:''"`
 	ForwardAuth bool      `gorm:"column:forward_auth;not null;default:false"`
@@ -69,7 +69,7 @@ func (ServiceActionModel) TableName() string { return "service_actions" }
 
 type ServiceAccountModel struct {
 	AccountID  string    `gorm:"column:account_id;primaryKey"`
-	Name       string    `gorm:"column:name;not null"`
+	Name       string    `gorm:"column:name;not null;uniqueIndex:registry_service_accounts_name_key"`
 	HashedKey  string    `gorm:"column:hashed_key;not null"`
 	Role       string    `gorm:"column:role;not null;default:read"`
 	CreatedAt  time.Time `gorm:"column:created_at;not null;default:now()"`
