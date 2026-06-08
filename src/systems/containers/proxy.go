@@ -118,15 +118,15 @@ func handleV2(w http.ResponseWriter, r *http.Request) {
 	action, resource := v2ActionResource(r.Method, r.URL.Path)
 
 	r.Header.Set("Authorization", "Bearer "+token)
-	_, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, action, resource)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, action, resource)
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
 
 	// Discovery ping — respond directly rather than round-tripping upstream.
-	// Must be before resolveOrgCreds to avoid a Gatekeeper round-trip on every
-	// docker login probe when the fetched credentials would be discarded anyway.
+	// Must be before credential resolution to avoid a Gatekeeper round-trip on
+	// every docker login probe when the fetched credentials would be discarded.
 	if r.URL.Path == "/v2" || r.URL.Path == "/v2/" {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
@@ -135,10 +135,13 @@ func handleV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Inject per-org registry credentials when REGISTRY_ORG_SECRET_NAME is set.
-	// Falls back silently to global REGISTRY_USERNAME/REGISTRY_PASSWORD on any error
-	// (secret not found, org not set, feature disabled).
-	if creds, err := resolveOrgCreds(ctx, orgID); err == nil {
+	// Credential resolution priority (highest to lowest):
+	//   1. Per-user Gitea token (when GITEA_INTEGRATION_URL is set)
+	//   2. Per-org secret from Gatekeeper (when REGISTRY_ORG_SECRET_NAME is set)
+	//   3. Global REGISTRY_USERNAME/REGISTRY_PASSWORD (proxy Director fallback)
+	if creds, err := resolveGiteaUserCreds(ctx, userID, token); err == nil {
+		r = r.WithContext(context.WithValue(ctx, ctxCredsKey{}, creds))
+	} else if creds, err := resolveOrgCreds(ctx, orgID); err == nil {
 		r = r.WithContext(context.WithValue(ctx, ctxCredsKey{}, creds))
 	}
 

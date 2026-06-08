@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -27,6 +28,7 @@ var (
 	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	gatekeeperKey    func() string // current workflows service key, updated by key rotation
 	hooksTriggerKey  = os.Getenv("HOOKS_TRIGGER_KEY")
+	registryNotifyKey = os.Getenv("WORKFLOWS_NOTIFY_KEY")
 
 	// serviceURLs maps registered service names to their base URLs.
 	// Seeded at startup from SERVICES env var and updated every 5 min from the registry.
@@ -257,6 +259,16 @@ func recoverStuckRuns() {
 	}
 }
 
+func handleCatalogRefresh(w http.ResponseWriter, r *http.Request) {
+	expected := "registry:" + registryNotifyKey
+	if registryNotifyKey == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Service-Key")), []byte(expected)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	go refreshCatalog(context.Background())
+	w.WriteHeader(http.StatusAccepted)
+}
+
 func main() {
 	logLevel := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
@@ -317,7 +329,7 @@ func main() {
 	workers.Start(ctx, 5)
 	slog.Info("worker pool started", "workers", 5)
 
-	mux := http.NewServeMux()
+	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /actions", handleListActions)
 
@@ -334,6 +346,7 @@ func main() {
 	mux.HandleFunc("DELETE /workflows/{id}", handleDeleteWorkflow)
 
 	mux.HandleFunc("POST /workflows/{id}/runs", handleTriggerRun)
+	mux.HandleFunc("POST /internal/catalog/refresh", handleCatalogRefresh)
 	mux.HandleFunc("POST /internal/workflows/{id}/runs", handleInternalTriggerRun)
 	mux.HandleFunc("GET /internal/workflows/{id}", handleInternalGetWorkflow)
 	mux.HandleFunc("GET /internal/runs/{id}", handleInternalGetRun)

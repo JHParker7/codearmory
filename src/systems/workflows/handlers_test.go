@@ -974,6 +974,63 @@ func TestHandleInternalGetRun_NoKey(t *testing.T) {
 	}
 }
 
+// ── handleCatalogRefresh ──────────────────────────────────────────────────────
+
+func TestHandleCatalogRefresh_NoKeyConfigured(t *testing.T) {
+	orig := registryNotifyKey
+	registryNotifyKey = ""
+	defer func() { registryNotifyKey = orig }()
+
+	r := httptest.NewRequest(http.MethodPost, "/internal/catalog/refresh", nil)
+	r.Header.Set("X-Service-Key", "registry:somekey")
+	w := httptest.NewRecorder()
+	handleCatalogRefresh(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401 when WORKFLOWS_NOTIFY_KEY is empty", w.Code)
+	}
+}
+
+func TestHandleCatalogRefresh_WrongKey(t *testing.T) {
+	orig := registryNotifyKey
+	registryNotifyKey = "correct-key"
+	defer func() { registryNotifyKey = orig }()
+
+	r := httptest.NewRequest(http.MethodPost, "/internal/catalog/refresh", nil)
+	r.Header.Set("X-Service-Key", "registry:wrong-key")
+	w := httptest.NewRecorder()
+	handleCatalogRefresh(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401 for wrong key", w.Code)
+	}
+}
+
+func TestHandleCatalogRefresh_MissingHeader(t *testing.T) {
+	orig := registryNotifyKey
+	registryNotifyKey = "correct-key"
+	defer func() { registryNotifyKey = orig }()
+
+	r := httptest.NewRequest(http.MethodPost, "/internal/catalog/refresh", nil)
+	w := httptest.NewRecorder()
+	handleCatalogRefresh(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401 when X-Service-Key header is absent", w.Code)
+	}
+}
+
+func TestHandleCatalogRefresh_ValidKey(t *testing.T) {
+	orig := registryNotifyKey
+	registryNotifyKey = "correct-key"
+	defer func() { registryNotifyKey = orig }()
+
+	r := httptest.NewRequest(http.MethodPost, "/internal/catalog/refresh", nil)
+	r.Header.Set("X-Service-Key", "registry:correct-key")
+	w := httptest.NewRecorder()
+	handleCatalogRefresh(w, r)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got %d, want 202 for valid key", w.Code)
+	}
+}
+
 // ── handleListActions (no-DB, returns empty catalog) ─────────────────────────
 
 func TestHandleListActions_EmptyCatalog(t *testing.T) {

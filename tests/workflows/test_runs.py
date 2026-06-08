@@ -311,3 +311,28 @@ def test_cancel_pending_run(bearer, workflow):
 
     result = poll_until_done(bearer, run_id)
     assert result["status"] in ("cancelled", "completed")
+
+
+# ── Internal catalog refresh ───────────────────────────────────────────────────
+
+
+def test_catalog_refresh_no_key_returns_401():
+    res = requests.post(f"{WORKFLOWS_URL}/internal/catalog/refresh")
+    assert res.status_code == 401
+
+
+def test_catalog_refresh_wrong_key_returns_401():
+    res = requests.post(
+        f"{WORKFLOWS_URL}/internal/catalog/refresh",
+        headers={"X-Service-Key": "registry:definitely-wrong-key"},
+    )
+    assert res.status_code == 401
+
+
+def test_catalog_refresh_bearer_token_returns_401(bearer):
+    """A user bearer token cannot call the internal catalog refresh endpoint."""
+    res = requests.post(
+        f"{WORKFLOWS_URL}/internal/catalog/refresh",
+        headers=bearer,
+    )
+    assert res.status_code == 401

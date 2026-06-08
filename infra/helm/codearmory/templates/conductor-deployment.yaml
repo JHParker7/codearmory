@@ -30,6 +30,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
+        {{- include "codearmory.initContainer.waitForRegistry" . | nindent 8 }}
       containers:
         - name: conductor
           image: "{{ include "codearmory.image" (list . .Values.conductor) }}"
@@ -66,6 +67,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-conductor
                   key: conductor-forward-key
+            - name: CONDUCTOR_NOTIFY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-conductor
+                  key: conductor-notify-key
             {{- include "codearmory.tls.envs" .Values.conductor.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.conductor.tls) }}
           volumeMounts:

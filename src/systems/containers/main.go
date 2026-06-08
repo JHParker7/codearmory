@@ -33,6 +33,10 @@ var (
 	// getServiceKey returns the current rotated service key for authenticating
 	// internal calls to Gatekeeper.
 	getServiceKey func() string
+	// giteaIntegrationURL is the base URL of the gitea_integration service.
+	// When set, per-user Gitea registry credentials are fetched for OCI proxy
+	// requests and take precedence over org/global credentials.
+	giteaIntegrationURL string
 )
 
 func initHTTPClient() *http.Client {
@@ -161,12 +165,16 @@ func main() {
 	initOCIProxy()
 
 	orgSecretName = os.Getenv("REGISTRY_ORG_SECRET_NAME")
+	giteaIntegrationURL = strings.TrimRight(os.Getenv("GITEA_INTEGRATION_URL"), "/")
+	if giteaIntegrationURL != "" {
+		slog.Info("gitea integration mode enabled", "url", giteaIntegrationURL)
+	}
 
 	gatekeeperClient = newGatekeeperClient()
 	getServiceKey = sdkregistry.StartKeyRotation(ctx, gatekeeperURL, "containers",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
-	mux := http.NewServeMux()
+	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	mux.HandleFunc("GET /repositories", handleListRepositories)

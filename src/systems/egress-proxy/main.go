@@ -127,6 +127,7 @@ func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	go func() { io.Copy(target, clientConn); done <- struct{}{} }()    //nolint:errcheck
 	go func() { io.Copy(clientConn, target); done <- struct{}{} }()    //nolint:errcheck
 	<-done
+	<-done
 }
 
 func (p *proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {

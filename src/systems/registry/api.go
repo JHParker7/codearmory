@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -14,7 +13,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -59,8 +61,8 @@ type ServiceEndpoint struct {
 
 type serviceWithEndpoints struct {
 	Service
-	Roles         []ServiceRole        `json:"roles"`
-	Endpoints     []ServiceEndpoint    `json:"endpoints"`
+	Roles         []ServiceRole         `json:"roles"`
+	Endpoints     []ServiceEndpoint     `json:"endpoints"`
 	DefaultGrants []ServiceDefaultGrant `json:"default_grants,omitempty"`
 }
 
@@ -113,6 +115,15 @@ func jsonbOrNil(raw json.RawMessage) interface{} {
 	return []byte(raw)
 }
 
+// jsonbBytes returns nil when raw is empty or the JSON null literal, else the
+// raw bytes. Used where a []byte field is required instead of interface{}.
+func jsonbBytes(raw json.RawMessage) []byte {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	return []byte(raw)
+}
+
 // hashServiceKey bcrypt-hashes a plaintext service key for storage.
 // Returns an empty string and no error when key is empty (no key configured).
 func hashServiceKey(key string) (string, error) {
@@ -128,46 +139,44 @@ func hashServiceKey(key string) (string, error) {
 
 // requireReadAuth verifies X-Service-Key against registry_service_accounts.
 // Any valid service account (any role) is accepted.
-func requireReadAuth(w http.ResponseWriter, r *http.Request) bool {
+// Returns the caller's service name and true on success.
+func requireReadAuth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return requireAuthWithRole(w, r, "")
 }
 
 // requireAdminAuth verifies X-Service-Key and requires role=admin.
-func requireAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+// Returns the caller's service name and true on success.
+func requireAdminAuth(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return requireAuthWithRole(w, r, "admin")
 }
 
-func requireAuthWithRole(w http.ResponseWriter, r *http.Request, requiredRole string) bool {
+func requireAuthWithRole(w http.ResponseWriter, r *http.Request, requiredRole string) (string, bool) {
 	header := r.Header.Get("X-Service-Key")
 	if header == "" {
 		http.Error(w, "missing X-Service-Key header", http.StatusUnauthorized)
-		return false
+		return "", false
 	}
 	idx := strings.Index(header, ":")
 	if idx < 1 {
 		http.Error(w, "invalid X-Service-Key format, expected name:key", http.StatusUnauthorized)
-		return false
+		return "", false
 	}
 	name, key := header[:idx], header[idx+1:]
 
-	var hashedKey, role string
-	err := pool.QueryRow(r.Context(),
-		`SELECT hashed_key, role FROM registry_service_accounts WHERE name = $1`,
-		name,
-	).Scan(&hashedKey, &role)
-	if err != nil {
+	var acct ServiceAccountModel
+	if err := connect().WithContext(r.Context()).Where("name = ?", name).First(&acct).Error; err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
+		return "", false
 	}
-	if bcrypt.CompareHashAndPassword([]byte(hashedKey), []byte(key)) != nil {
+	if bcrypt.CompareHashAndPassword([]byte(acct.HashedKey), []byte(key)) != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
+		return "", false
 	}
-	if requiredRole != "" && role != requiredRole {
+	if requiredRole != "" && acct.Role != requiredRole {
 		http.Error(w, "forbidden", http.StatusForbidden)
-		return false
+		return "", false
 	}
-	return true
+	return name, true
 }
 
 // validateServiceURL rejects URLs that target loopback, link-local, or any
@@ -220,11 +229,17 @@ func validateServiceURL(rawURL string) error {
 
 // handleListActions returns all active workflow actions joined with their service URLs.
 func handleListActions(w http.ResponseWriter, r *http.Request) {
-	if !requireReadAuth(w, r) {
+	ctx, span := otel.Tracer("registry").Start(r.Context(), "handleListActions")
+	defer span.End()
+
+	caller, ok := requireReadAuth(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
 		return
 	}
+	span.SetAttributes(attribute.String("caller.service", caller))
 
-	rows, err := pool.Query(r.Context(), `
+	sqlRows, err := connect().WithContext(ctx).Raw(`
 		SELECT sa.action_id, sa.service_id, s.name, s.url,
 		       sa.name, sa.method, sa.path,
 		       sa.body_transforms, sa.async_config,
@@ -239,19 +254,21 @@ func handleListActions(w http.ResponseWriter, r *http.Request) {
 		      AND se.active     = true
 		WHERE sa.active = true AND s.active = true
 		ORDER BY sa.name
-	`)
+	`).Rows()
 	if err != nil {
 		slog.Error("list actions: query", "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db query failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
+	defer sqlRows.Close()
 
 	var actions []ServiceAction
-	for rows.Next() {
+	for sqlRows.Next() {
 		var a ServiceAction
 		var bodyTransforms, asyncConfig []byte
-		if err := rows.Scan(
+		if err := sqlRows.Scan(
 			&a.ActionID, &a.ServiceID, &a.ServiceName, &a.ServiceURL,
 			&a.Name, &a.Method, &a.Path,
 			&bodyTransforms, &asyncConfig,
@@ -268,8 +285,10 @@ func handleListActions(w http.ResponseWriter, r *http.Request) {
 		}
 		actions = append(actions, a)
 	}
-	if rows.Err() != nil {
-		slog.Error("list actions: rows", "error", rows.Err())
+	if sqlRows.Err() != nil {
+		slog.Error("list actions: rows", "error", sqlRows.Err())
+		span.RecordError(sqlRows.Err())
+		span.SetStatus(codes.Error, "db rows error")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -277,37 +296,49 @@ func handleListActions(w http.ResponseWriter, r *http.Request) {
 		actions = []ServiceAction{}
 	}
 
+	span.SetAttributes(attribute.Int("actions.count", len(actions)))
+	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(actions) //nolint:errcheck
 }
 
 // handleListServices returns all active services with their endpoint manifests.
 func handleListServices(w http.ResponseWriter, r *http.Request) {
-	if !requireReadAuth(w, r) {
+	ctx, span := otel.Tracer("registry").Start(r.Context(), "handleListServices")
+	defer span.End()
+
+	caller, ok := requireReadAuth(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
 		return
 	}
+	span.SetAttributes(attribute.String("caller.service", caller))
 
-	rows, err := pool.Query(r.Context(),
+	svcSQLRows, err := connect().WithContext(ctx).Raw(
 		`SELECT service_id, name, url, description, forward_auth, active, created_at, updated_at
-		 FROM services WHERE active = true ORDER BY name`)
+		 FROM services WHERE active = true ORDER BY name`).Rows()
 	if err != nil {
 		slog.Error("list services: query", "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db query failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
+	defer svcSQLRows.Close()
 
 	var svcs []Service
-	for rows.Next() {
+	for svcSQLRows.Next() {
 		var s Service
-		if err := rows.Scan(&s.ServiceID, &s.Name, &s.URL, &s.Description, &s.ForwardAuth, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := svcSQLRows.Scan(&s.ServiceID, &s.Name, &s.URL, &s.Description, &s.ForwardAuth, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			slog.Error("list services: scan", "error", err)
 			continue
 		}
 		svcs = append(svcs, s)
 	}
-	if rows.Err() != nil {
-		slog.Error("list services: rows", "error", rows.Err())
+	if svcSQLRows.Err() != nil {
+		slog.Error("list services: rows", "error", svcSQLRows.Err())
+		span.RecordError(svcSQLRows.Err())
+		span.SetStatus(codes.Error, "db rows error")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -323,10 +354,10 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(svcIDs) > 0 {
-		roleRows, err := pool.Query(r.Context(),
+		roleRows, err := connect().WithContext(ctx).Raw(
 			`SELECT role_id, service_id, name, description, created_at
-			 FROM service_roles WHERE service_id = ANY($1) ORDER BY service_id, name`,
-			svcIDs)
+			 FROM service_roles WHERE service_id IN (?) ORDER BY service_id, name`,
+			svcIDs).Rows()
 		if err != nil {
 			slog.Error("list services: query roles", "error", err)
 		} else {
@@ -343,10 +374,10 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 			roleRows.Close()
 		}
 
-		epRows, err := pool.Query(r.Context(),
+		epRows, err := connect().WithContext(ctx).Raw(
 			`SELECT endpoint_id, service_id, method, path, action, resource, public, active, created_at, updated_at
-			 FROM service_endpoints WHERE service_id = ANY($1) AND active = true ORDER BY service_id`,
-			svcIDs)
+			 FROM service_endpoints WHERE service_id IN (?) AND active = true ORDER BY service_id`,
+			svcIDs).Rows()
 		if err != nil {
 			slog.Error("list services: query endpoints", "error", err)
 		} else {
@@ -365,15 +396,24 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	span.SetAttributes(attribute.Int("services.count", len(svcs)))
+	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
 
 // handleCreateService registers a new service entry (admin key required).
 func handleCreateService(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminAuth(w, r) {
+	ctx, span := otel.Tracer("registry").Start(r.Context(), "handleCreateService")
+	defer span.End()
+
+	caller, ok := requireAdminAuth(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
 		return
 	}
+	span.SetAttributes(attribute.String("caller.service", caller))
+
 	var req struct {
 		Name        string `json:"name"`
 		URL         string `json:"url"`
@@ -382,10 +422,14 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		ServiceKey  string `json:"service_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.URL == "" {
+		span.SetStatus(codes.Error, "bad request")
 		http.Error(w, "name and url are required", http.StatusBadRequest)
 		return
 	}
+	span.SetAttributes(attribute.String("service.name", req.Name))
+
 	if err := validateServiceURL(req.URL); err != nil {
+		span.SetStatus(codes.Error, "invalid url")
 		http.Error(w, "invalid url: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -393,36 +437,57 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 	hashedKey, err := hashServiceKey(req.ServiceKey)
 	if err != nil {
 		slog.Error("create service: hash key", "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "hash key failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	id := uuid.New().String()
-	_, err = pool.Exec(r.Context(),
-		`INSERT INTO services (service_id, name, url, description, forward_auth, service_key)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		id, req.Name, req.URL, req.Description, req.ForwardAuth, hashedKey)
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	newSvcModel := ServiceModel{
+		ServiceID:   id,
+		Name:        req.Name,
+		URL:         req.URL,
+		Description: req.Description,
+		ForwardAuth: req.ForwardAuth,
+		ServiceKey:  hashedKey,
+	}
+	if err := connect().WithContext(ctx).Create(&newSvcModel).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			span.SetStatus(codes.Error, "service already registered")
 			http.Error(w, "service already registered", http.StatusConflict)
 			return
 		}
-		slog.Error("create service: db", "error", err)
+		slog.Error("create service: db", "error", err, "service_name", req.Name)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db insert failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	span.SetAttributes(attribute.String("service.id", id))
 
 	var svc Service
-	if err := pool.QueryRow(r.Context(),
-		`SELECT service_id, name, url, description, forward_auth, active, created_at, updated_at FROM services WHERE service_id = $1`, id).
-		Scan(&svc.ServiceID, &svc.Name, &svc.URL, &svc.Description, &svc.ForwardAuth, &svc.Active, &svc.CreatedAt, &svc.UpdatedAt); err != nil {
-		slog.Error("create service: fetch after insert", "error", err)
+	var fetchedModel ServiceModel
+	if err := connect().WithContext(ctx).Where("service_id = ?", id).First(&fetchedModel).Error; err != nil {
+		slog.Error("create service: fetch after insert", "error", err, "service_id", id)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "fetch after insert failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
+	}
+	svc = Service{
+		ServiceID:   fetchedModel.ServiceID,
+		Name:        fetchedModel.Name,
+		URL:         fetchedModel.URL,
+		Description: fetchedModel.Description,
+		ForwardAuth: fetchedModel.ForwardAuth,
+		Active:      fetchedModel.Active,
+		CreatedAt:   fetchedModel.CreatedAt,
+		UpdatedAt:   fetchedModel.UpdatedAt,
 	}
 
 	slog.Info("service registered", "name", svc.Name)
+	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(svc)
@@ -430,31 +495,52 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteService soft-deletes a service by ID (admin key required).
 func handleDeleteService(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminAuth(w, r) {
+	ctx, span := otel.Tracer("registry").Start(r.Context(), "handleDeleteService")
+	defer span.End()
+
+	caller, ok := requireAdminAuth(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
 		return
 	}
+	span.SetAttributes(attribute.String("caller.service", caller))
+
 	id := r.PathValue("id")
-	tag, err := pool.Exec(r.Context(),
-		`UPDATE services SET active = false, updated_at = now() WHERE service_id = $1 AND active = true`, id)
-	if err != nil {
-		slog.Error("delete service: db", "error", err)
+	span.SetAttributes(attribute.String("service.id", id))
+
+	delResult := connect().WithContext(ctx).Exec(
+		`UPDATE services SET active = false, updated_at = now() WHERE service_id = ? AND active = true`, id)
+	if delResult.Error != nil {
+		slog.Error("delete service: db", "error", delResult.Error, "service_id", id)
+		span.RecordError(delResult.Error)
+		span.SetStatus(codes.Error, "db update failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if delResult.RowsAffected == 0 {
+		span.SetStatus(codes.Error, "not found")
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	span.SetStatus(codes.Ok, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleUpdateServiceEndpoints replaces the full endpoint manifest for a service
 // (admin key required). Used to seed endpoint definitions without self-registration.
 func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminAuth(w, r) {
+	ctx, span := otel.Tracer("registry").Start(r.Context(), "handleUpdateServiceEndpoints")
+	defer span.End()
+
+	caller, ok := requireAdminAuth(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
 		return
 	}
+	span.SetAttributes(attribute.String("caller.service", caller))
+
 	id := r.PathValue("id")
+	span.SetAttributes(attribute.String("service.id", id))
 
 	var req struct {
 		URL         string `json:"url"`
@@ -484,47 +570,58 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 		} `json:"default_grants"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		span.SetStatus(codes.Error, "bad request")
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if req.URL != "" {
 		if err := validateServiceURL(req.URL); err != nil {
+			span.SetStatus(codes.Error, "invalid url")
 			http.Error(w, "invalid url: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
 
-	ctx := r.Context()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
+	tx := connect().WithContext(ctx).Begin()
+	if tx.Error != nil {
+		span.RecordError(tx.Error)
+		span.SetStatus(codes.Error, "begin tx failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck
+	defer tx.Rollback() //nolint:errcheck
 
 	// Verify service exists.
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT true FROM services WHERE service_id = $1 AND active = true`, id).Scan(&exists); err != nil {
+	existsResult := tx.Raw(`SELECT true FROM services WHERE service_id = ? AND active = true`, id).Scan(&exists)
+	if existsResult.Error != nil || existsResult.RowsAffected == 0 {
+		span.SetStatus(codes.Error, "not found")
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 
 	if req.URL != "" {
-		if _, err := tx.Exec(ctx, `UPDATE services SET url = $1, updated_at = now() WHERE service_id = $2`, req.URL, id); err != nil {
-			slog.Error("update endpoints: set url", "error", err)
+		if err := tx.Exec(`UPDATE services SET url = ?, updated_at = now() WHERE service_id = ?`, req.URL, id).Error; err != nil {
+			slog.Error("update endpoints: set url", "error", err, "service_id", id)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "set url failed")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 	}
 	if req.Description != "" {
-		if _, err := tx.Exec(ctx, `UPDATE services SET description = $1, updated_at = now() WHERE service_id = $2`, req.Description, id); err != nil {
-			slog.Error("update endpoints: set description", "error", err)
+		if err := tx.Exec(`UPDATE services SET description = ?, updated_at = now() WHERE service_id = ?`, req.Description, id).Error; err != nil {
+			slog.Error("update endpoints: set description", "error", err, "service_id", id)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "set description failed")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 	}
 
-	if _, err := tx.Exec(ctx, `DELETE FROM service_roles WHERE service_id = $1`, id); err != nil {
+	if err := tx.Exec(`DELETE FROM service_roles WHERE service_id = ?`, id).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "delete roles failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -532,16 +629,20 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 		if role.Name == "" {
 			continue
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO service_roles (role_id, service_id, name, description) VALUES ($1, $2, $3, $4)`,
-			uuid.New().String(), id, role.Name, role.Description); err != nil {
-			slog.Error("update endpoints: insert role", "error", err)
+		if err := tx.Exec(
+			`INSERT INTO service_roles (role_id, service_id, name, description) VALUES (?, ?, ?, ?)`,
+			uuid.New().String(), id, role.Name, role.Description).Error; err != nil {
+			slog.Error("update endpoints: insert role", "error", err, "service_id", id)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "insert role failed")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 	}
 
-	if _, err := tx.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, id); err != nil {
+	if err := tx.Exec(`DELETE FROM service_endpoints WHERE service_id = ?`, id).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "delete endpoints failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -549,16 +650,20 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 		if ep.Method == "" || ep.Path == "" || ep.Action == "" || ep.Resource == "" {
 			continue
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			uuid.New().String(), id, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public); err != nil {
-			slog.Error("update endpoints: insert endpoint", "error", err)
+		if err := tx.Exec(
+			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			uuid.New().String(), id, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public).Error; err != nil {
+			slog.Error("update endpoints: insert endpoint", "error", err, "service_id", id)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "insert endpoint failed")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 	}
 
-	if _, err := tx.Exec(ctx, `DELETE FROM service_actions WHERE service_id = $1`, id); err != nil {
+	if err := tx.Exec(`DELETE FROM service_actions WHERE service_id = ?`, id).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "delete actions failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -566,19 +671,23 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 		if a.Name == "" || a.Method == "" || a.Path == "" {
 			continue
 		}
-		if _, err := tx.Exec(ctx,
+		if err := tx.Exec(
 			`INSERT INTO service_actions (action_id, service_id, name, method, path, body_transforms, async_config)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			uuid.New().String(), id, a.Name, a.Method, a.Path,
-			jsonbOrNil(a.BodyTransforms), jsonbOrNil(a.Async)); err != nil {
-			slog.Error("update endpoints: insert action", "error", err)
+			jsonbBytes(a.BodyTransforms), jsonbBytes(a.Async)).Error; err != nil {
+			slog.Error("update endpoints: insert action", "error", err, "service_id", id, "action_name", a.Name)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "insert action failed")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 	}
 
 	if len(req.DefaultGrants) > 0 {
-		if _, err := tx.Exec(ctx, `DELETE FROM service_default_grants WHERE service_id = $1`, id); err != nil {
+		if err := tx.Exec(`DELETE FROM service_default_grants WHERE service_id = ?`, id).Error; err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "delete default grants failed")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -588,22 +697,27 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 			}
 			actionsJSON, _ := json.Marshal(g.Actions)
 			resourcesJSON, _ := json.Marshal(g.Resources)
-			if _, err := tx.Exec(ctx,
+			if err := tx.Exec(
 				`INSERT INTO service_default_grants (grant_id, service_id, grant_on, actions, resources)
-				 VALUES ($1, $2, $3, $4, $5)`,
-				uuid.New().String(), id, g.GrantOn, actionsJSON, resourcesJSON); err != nil {
-				slog.Error("update endpoints: insert default grant", "error", err)
+				 VALUES (?, ?, ?, ?, ?)`,
+				uuid.New().String(), id, g.GrantOn, actionsJSON, resourcesJSON).Error; err != nil {
+				slog.Error("update endpoints: insert default grant", "error", err, "service_id", id)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "insert default grant failed")
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		slog.Error("update endpoints: commit", "error", err)
+	if err := tx.Commit().Error; err != nil {
+		slog.Error("update endpoints: commit", "error", err, "service_id", id)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "commit failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	span.SetStatus(codes.Ok, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -611,29 +725,40 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 // enriched with the service name so callers don't need a second lookup.
 // Requires a valid read service key.
 func handleListDefaultGrants(w http.ResponseWriter, r *http.Request) {
-	if !requireReadAuth(w, r) {
+	ctx, span := otel.Tracer("registry").Start(r.Context(), "handleListDefaultGrants")
+	defer span.End()
+
+	caller, ok := requireReadAuth(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
 		return
 	}
-	rows, err := pool.Query(r.Context(),
+	span.SetAttributes(attribute.String("caller.service", caller))
+
+	grantSQLRows, err := connect().WithContext(ctx).Raw(
 		`SELECT g.grant_id, g.service_id, s.name, g.grant_on, g.actions, g.resources, g.created_at, g.updated_at
 		 FROM service_default_grants g
 		 JOIN services s ON s.service_id = g.service_id AND s.active = true
 		 ORDER BY s.name, g.grant_on`,
-	)
+	).Rows()
 	if err != nil {
 		slog.Error("list default grants: db", "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db query failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
+	defer grantSQLRows.Close()
 
 	var grants []ServiceDefaultGrant
-	for rows.Next() {
+	for grantSQLRows.Next() {
 		var g ServiceDefaultGrant
 		var actionsRaw, resourcesRaw []byte
-		if err := rows.Scan(&g.GrantID, &g.ServiceID, &g.ServiceName, &g.GrantOn,
+		if err := grantSQLRows.Scan(&g.GrantID, &g.ServiceID, &g.ServiceName, &g.GrantOn,
 			&actionsRaw, &resourcesRaw, &g.CreatedAt, &g.UpdatedAt); err != nil {
 			slog.Error("list default grants: scan", "error", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "scan failed")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -644,13 +769,17 @@ func handleListDefaultGrants(w http.ResponseWriter, r *http.Request) {
 	if grants == nil {
 		grants = []ServiceDefaultGrant{}
 	}
+	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(grants) //nolint:errcheck
 }
 
 // ── System health ─────────────────────────────────────────────────────────────
 
-var registryHTTPClient = &http.Client{Timeout: 5 * time.Second}
+var registryHTTPClient = &http.Client{
+	Transport: otelhttp.NewTransport(http.DefaultTransport),
+	Timeout:   5 * time.Second,
+}
 
 var (
 	healthMu    sync.RWMutex
@@ -667,20 +796,20 @@ type serviceHealth struct {
 // calls /healthz on each concurrently, and caches the results for handleSystemHealth.
 func startHealthCollector(ctx context.Context) {
 	collect := func() {
-		rows, err := pool.Query(ctx, `SELECT name, url FROM services WHERE active = true`)
+		healthRows, err := connect().WithContext(ctx).Raw(`SELECT name, url FROM services WHERE active = true`).Rows()
 		if err != nil {
 			slog.Warn("health collector: db query failed", "error", err)
 			return
 		}
 		type svc struct{ name, url string }
 		var svcs []svc
-		for rows.Next() {
+		for healthRows.Next() {
 			var s svc
-			if err := rows.Scan(&s.name, &s.url); err == nil {
+			if err := healthRows.Scan(&s.name, &s.url); err == nil {
 				svcs = append(svcs, s)
 			}
 		}
-		rows.Close()
+		healthRows.Close()
 
 		results := make(map[string]serviceHealth, len(svcs))
 		var mu sync.Mutex
@@ -739,9 +868,16 @@ func startHealthCollector(ctx context.Context) {
 }
 
 func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
-	if !requireReadAuth(w, r) {
+	_, span := otel.Tracer("registry").Start(r.Context(), "handleSystemHealth")
+	defer span.End()
+
+	caller, ok := requireReadAuth(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
 		return
 	}
+	span.SetAttributes(attribute.String("caller.service", caller))
+
 	healthMu.RLock()
 	cache := healthCache
 	healthMu.RUnlock()
@@ -754,6 +890,8 @@ func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	span.SetAttributes(attribute.String("health.status", overall))
+	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(struct { //nolint:errcheck
 		Status   string                   `json:"status"`

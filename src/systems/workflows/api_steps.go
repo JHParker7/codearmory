@@ -62,6 +62,10 @@ func handleCreateStep(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	var req createStepRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -131,6 +135,10 @@ func handleListSteps(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	steps, err := listSteps(ctx, userID, orgID, r.URL.Query().Get("name"))
 	if err != nil {
@@ -156,6 +164,10 @@ func handleGetStep(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	s, err := getStep(ctx, id)
 	if err != nil {
@@ -188,6 +200,10 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	existing, err := getStep(ctx, id)
 	if err != nil {
@@ -257,6 +273,10 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	s, err := getStep(ctx, id)
 	if err != nil {

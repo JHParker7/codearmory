@@ -25,6 +25,11 @@ func handleListPulls(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {
@@ -74,6 +79,11 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {
@@ -131,6 +141,12 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+		attribute.String("pull.index", index),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {
@@ -173,6 +189,12 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+		attribute.String("pull.index", index),
+	)
 
 	callerUsername, ok := sudoFor(ctx, w, userID)
 	if !ok {

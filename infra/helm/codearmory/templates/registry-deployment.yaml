@@ -91,11 +91,33 @@ spec:
                   name: {{ include "codearmory.fullname" . }}-registry
                   key: admin-accounts
                   optional: true
+            - name: MANIFEST_FILE
+              value: /etc/registry/manifest.json
+            - name: CONDUCTOR_URL
+              value: "http://{{ include "codearmory.fullname" . }}-conductor:{{ .Values.conductor.port }}"
+            - name: CONDUCTOR_NOTIFY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-conductor
+                  key: conductor-notify-key
+            {{- if .Values.workflows.enabled }}
+            - name: WORKFLOWS_URL
+              value: "http://{{ include "codearmory.fullname" . }}-workflows:{{ .Values.workflows.port }}"
+            - name: WORKFLOWS_NOTIFY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-workflows
+                  key: registry-notify-key
+            {{- end }}
             {{- include "codearmory.tls.envs" .Values.registry.tls | nindent 12 }}
-          {{- with (include "codearmory.tls.volumeMounts" .Values.registry.tls) }}
           volumeMounts:
+            - name: registry-manifest
+              mountPath: /etc/registry/manifest.json
+              subPath: manifest.json
+              readOnly: true
+            {{- with (include "codearmory.tls.volumeMounts" .Values.registry.tls) }}
             {{- . | nindent 12 }}
-          {{- end }}
+            {{- end }}
           livenessProbe:
             tcpSocket:
               port: http
@@ -108,7 +130,10 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.registry.resources | nindent 12 }}
-      {{- with (include "codearmory.tls.volumes" .Values.registry.tls) }}
       volumes:
+        - name: registry-manifest
+          configMap:
+            name: {{ include "codearmory.fullname" . }}-registry-manifest
+        {{- with (include "codearmory.tls.volumes" .Values.registry.tls) }}
         {{- . | nindent 8 }}
-      {{- end }}
+        {{- end }}

@@ -23,6 +23,8 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -95,30 +97,16 @@ func seedServiceAccounts(ctx context.Context, raw, role string) {
 			continue
 		}
 
-		var existing string
-		scanErr := pool.QueryRow(ctx,
-			`SELECT account_id FROM registry_service_accounts WHERE name = $1`, name,
-		).Scan(&existing)
-		if scanErr != nil {
-			if _, err := pool.Exec(ctx,
-				`INSERT INTO registry_service_accounts (account_id, name, hashed_key, role)
-				 VALUES ($1, $2, $3, $4)`,
-				uuid.New().String(), name, string(hash), role,
-			); err != nil {
-				slog.Error("seedServiceAccounts: insert failed", "name", name, "error", err)
-			} else {
-				slog.Info("seedServiceAccounts: created", "name", name, "role", role)
-			}
-		} else {
-			if _, err := pool.Exec(ctx,
-				`UPDATE registry_service_accounts SET hashed_key = $1, role = $2, updated_at = now()
-				 WHERE name = $3`,
-				string(hash), role, name,
-			); err != nil {
-				slog.Error("seedServiceAccounts: update failed", "name", name, "error", err)
-			} else {
-				slog.Info("seedServiceAccounts: updated key", "name", name, "role", role)
-			}
+		acct := ServiceAccountModel{AccountID: uuid.New().String(), Name: name, HashedKey: string(hash), Role: role}
+		result := connect().WithContext(ctx).
+			Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "name"}},
+				DoUpdates: clause.Assignments(map[string]any{"hashed_key": string(hash), "role": role, "updated_at": gorm.Expr("now()")}),
+			}).Create(&acct)
+		if result.Error != nil {
+			slog.Error("seedServiceAccounts: upsert failed", "name", name, "error", result.Error)
+		} else if result.RowsAffected > 0 {
+			slog.Info("seedServiceAccounts: upserted", "name", name, "role", role)
 		}
 	}
 }
@@ -143,14 +131,12 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	}
 	name, key := header[:idx], header[idx+1:]
 
-	var hashedKey string
-	if err := pool.QueryRow(r.Context(),
-		`SELECT hashed_key FROM registry_service_accounts WHERE name = $1`, name,
-	).Scan(&hashedKey); err != nil {
+	var acct ServiceAccountModel
+	if err := connect().WithContext(r.Context()).Where("name = ?", name).First(&acct).Error; err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if bcrypt.CompareHashAndPassword([]byte(hashedKey), []byte(key)) != nil {
+	if bcrypt.CompareHashAndPassword([]byte(acct.HashedKey), []byte(key)) != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -174,10 +160,9 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := pool.Exec(r.Context(),
-		`UPDATE registry_service_accounts SET hashed_key = $1, updated_at = now() WHERE name = $2`,
-		string(newHash), name,
-	); err != nil {
+	if err := connect().WithContext(r.Context()).
+		Exec(`UPDATE registry_service_accounts SET hashed_key = ?, updated_at = now() WHERE name = ?`, string(newHash), name).
+		Error; err != nil {
 		slog.Error("rotate service key: db update failed", "service", name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -237,36 +222,49 @@ func loadManifest(ctx context.Context, path string) {
 			continue
 		}
 
-		var serviceID string
-		err = pool.QueryRow(ctx, `SELECT service_id FROM services WHERE name = $1`, e.Name).Scan(&serviceID)
+		db := connect().WithContext(ctx)
+		var svcModel ServiceModel
+		err = db.Where("name = ?", e.Name).First(&svcModel).Error
 		if err != nil {
-			serviceID = uuid.New().String()
-			if _, err := pool.Exec(ctx,
-				`INSERT INTO services (service_id, name, url, description, forward_auth, service_key)
-				 VALUES ($1, $2, $3, $4, $5, $6)`,
-				serviceID, e.Name, e.URL, e.Description, e.ForwardAuth, hashedKey); err != nil {
+			svcModel = ServiceModel{
+				ServiceID:   uuid.New().String(),
+				Name:        e.Name,
+				URL:         e.URL,
+				Description: e.Description,
+				ForwardAuth: e.ForwardAuth,
+				ServiceKey:  hashedKey,
+			}
+			if err := db.Create(&svcModel).Error; err != nil {
 				slog.Error("manifest: failed to insert service", "name", e.Name, "error", err)
 				continue
 			}
 			slog.Info("manifest: service created", "name", e.Name)
 		} else {
-			if _, err := pool.Exec(ctx,
-				`UPDATE services SET url = $1, description = $2, forward_auth = $3, service_key = $4, active = true, updated_at = now() WHERE service_id = $5`,
-				e.URL, e.Description, e.ForwardAuth, hashedKey, serviceID); err != nil {
+			if err := db.Exec(
+				`UPDATE services SET description = ?, forward_auth = ?, service_key = ?, active = true, updated_at = now() WHERE service_id = ?`,
+				e.Description, e.ForwardAuth, hashedKey, svcModel.ServiceID,
+			).Error; err != nil {
 				slog.Error("manifest: failed to update service", "name", e.Name, "error", err)
 				continue
 			}
 			slog.Info("manifest: service updated", "name", e.Name)
 		}
-		pool.Exec(ctx, `DELETE FROM service_endpoints WHERE service_id = $1`, serviceID)      //nolint:errcheck
-		pool.Exec(ctx, `DELETE FROM service_roles WHERE service_id = $1`, serviceID)         //nolint:errcheck
-		pool.Exec(ctx, `DELETE FROM service_actions WHERE service_id = $1`, serviceID)       //nolint:errcheck
-		pool.Exec(ctx, `DELETE FROM service_default_grants WHERE service_id = $1`, serviceID) //nolint:errcheck
+		serviceID := svcModel.ServiceID
+		db.Exec(`DELETE FROM service_endpoints WHERE service_id = ?`, serviceID)       //nolint:errcheck
+		db.Exec(`DELETE FROM service_roles WHERE service_id = ?`, serviceID)           //nolint:errcheck
+		db.Exec(`DELETE FROM service_actions WHERE service_id = ?`, serviceID)         //nolint:errcheck
+		db.Exec(`DELETE FROM service_default_grants WHERE service_id = ?`, serviceID)  //nolint:errcheck
 		for _, ep := range e.Endpoints {
-			if _, err := pool.Exec(ctx,
-				`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				uuid.New().String(), serviceID, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public); err != nil {
+			m := ServiceEndpointModel{
+				EndpointID: uuid.New().String(),
+				ServiceID:  serviceID,
+				Method:     ep.Method,
+				Path:       ep.Path,
+				Action:     ep.Action,
+				Resource:   ep.Resource,
+				Public:     ep.Public,
+			}
+			if err := db.Create(&m).Error; err != nil {
 				slog.Error("manifest: failed to insert endpoint", "service", e.Name, "path", ep.Path, "error", err)
 			}
 		}
@@ -275,11 +273,16 @@ func loadManifest(ctx context.Context, path string) {
 			if a.Name == "" || a.Method == "" || a.Path == "" {
 				continue
 			}
-			if _, err := pool.Exec(ctx,
-				`INSERT INTO service_actions (action_id, service_id, name, method, path, body_transforms, async_config)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				uuid.New().String(), serviceID, a.Name, a.Method, a.Path,
-				jsonbOrNil(a.BodyTransforms), jsonbOrNil(a.Async)); err != nil {
+			m := ServiceActionModel{
+				ActionID:       uuid.New().String(),
+				ServiceID:      serviceID,
+				Name:           a.Name,
+				Method:         a.Method,
+				Path:           a.Path,
+				BodyTransforms: jsonbBytes(a.BodyTransforms),
+				AsyncConfig:    jsonbBytes(a.Async),
+			}
+			if err := db.Create(&m).Error; err != nil {
 				slog.Error("manifest: failed to insert action", "service", e.Name, "action", a.Name, "error", err)
 			}
 		}
@@ -292,10 +295,14 @@ func loadManifest(ctx context.Context, path string) {
 			}
 			actionsJSON, _ := json.Marshal(g.Actions)
 			resourcesJSON, _ := json.Marshal(g.Resources)
-			if _, err := pool.Exec(ctx,
-				`INSERT INTO service_default_grants (grant_id, service_id, grant_on, actions, resources)
-				 VALUES ($1, $2, $3, $4, $5)`,
-				uuid.New().String(), serviceID, g.GrantOn, actionsJSON, resourcesJSON); err != nil {
+			m := ServiceDefaultGrantModel{
+				GrantID:   uuid.New().String(),
+				ServiceID: serviceID,
+				GrantOn:   g.GrantOn,
+				Actions:   actionsJSON,
+				Resources: resourcesJSON,
+			}
+			if err := db.Create(&m).Error; err != nil {
 				slog.Error("manifest: failed to insert default grant", "service", e.Name, "grant_on", g.GrantOn, "error", err)
 			}
 		}
@@ -303,6 +310,55 @@ func loadManifest(ctx context.Context, path string) {
 			slog.Info("manifest: default grants registered", "name", e.Name, "count", len(e.DefaultGrants))
 		}
 	}
+}
+
+func notifyService(ctx context.Context, name, target, key string) {
+	if target == "" || key == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, nil)
+	if err != nil {
+		slog.Warn(name+" notify: failed to create request", "error", err)
+		return
+	}
+	req.Header.Set("X-Service-Key", "registry:"+key)
+	resp, err := registryHTTPClient.Do(req)
+	if err != nil {
+		slog.Warn(name+" notify: request failed", "error", err)
+		return
+	}
+	resp.Body.Close()
+	slog.Info(name+" notified", "status", resp.StatusCode)
+}
+
+func notifyConductor(ctx context.Context) {
+	notifyService(ctx, "conductor",
+		os.Getenv("CONDUCTOR_URL")+"/internal/refresh",
+		os.Getenv("CONDUCTOR_NOTIFY_KEY"))
+}
+
+func notifyWorkflows(ctx context.Context) {
+	notifyService(ctx, "workflows",
+		os.Getenv("WORKFLOWS_URL")+"/internal/catalog/refresh",
+		os.Getenv("WORKFLOWS_NOTIFY_KEY"))
+}
+
+func startNotificationTicker(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				notifyConductor(ctx)
+				notifyWorkflows(ctx)
+			}
+		}
+	}()
 }
 
 func main() {
@@ -324,8 +380,30 @@ func main() {
 		defer shutdown(context.Background())
 	}
 
-	connectDB(ctx)
-	defer pool.Close()
+	// Rename legacy PostgreSQL auto-named constraints to match GORM's naming
+	// convention. These are one-shot: silently ignored if already renamed or
+	// the table doesn't exist yet (fresh install).
+	for _, sql := range []string{
+		`ALTER TABLE services RENAME CONSTRAINT services_name_key TO uni_services_name`,
+		`ALTER TABLE registry_service_accounts RENAME CONSTRAINT registry_service_accounts_name_key TO uni_registry_service_accounts_name`,
+	} {
+		if r := connect().Exec(sql); r.Error != nil {
+			slog.Debug("constraint rename skipped", "sql", sql, "error", r.Error)
+		}
+	}
+
+	if err := connect().AutoMigrate(
+		&ServiceModel{},
+		&ServiceRoleModel{},
+		&ServiceEndpointModel{},
+		&ServiceActionModel{},
+		&ServiceAccountModel{},
+		&ServiceDefaultGrantModel{},
+	); err != nil {
+		slog.Error("failed to migrate database", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("database initialized")
 
 	// Seed service accounts. Read accounts (e.g. Conductor) from REGISTRY_SERVICE_ACCOUNTS=name=key.
 	// Admin accounts (e.g. CI pipelines) from REGISTRY_ADMIN_ACCOUNTS=name=key.
@@ -340,26 +418,27 @@ func main() {
 				continue
 			}
 			name, svcURL := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-			var existing string
-			err := pool.QueryRow(ctx, `SELECT service_id FROM services WHERE name = $1`, name).Scan(&existing)
-			if err != nil {
-				id := uuid.New().String()
-				pool.Exec(ctx, //nolint:errcheck
-					`INSERT INTO services (service_id, name, url) VALUES ($1, $2, $3)`,
-					id, name, svcURL)
-				slog.Info("service seeded", "name", name)
+			svcModel := ServiceModel{ServiceID: uuid.New().String(), Name: name, URL: svcURL}
+			result := connect().WithContext(ctx).
+				Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "name"}},
+					DoUpdates: clause.Assignments(map[string]any{"url": svcURL, "active": true, "updated_at": gorm.Expr("now()")}),
+				}).Create(&svcModel)
+			if result.Error != nil {
+				slog.Error("service seed failed", "name", name, "error", result.Error)
 			} else {
-				pool.Exec(ctx, //nolint:errcheck
-					`UPDATE services SET url = $1, active = true, updated_at = now() WHERE name = $2`,
-					svcURL, name)
-				slog.Info("service updated from seed", "name", name)
+				slog.Info("service seeded", "name", name)
 			}
 		}
 	}
 
 	if manifestPath := os.Getenv("MANIFEST_FILE"); manifestPath != "" {
 		loadManifest(ctx, manifestPath)
+		notifyConductor(ctx)
+		notifyWorkflows(ctx)
 	}
+
+	startNotificationTicker(ctx)
 
 	// Register Registry itself as a Gatekeeper service account so its identity rotates.
 	registry.StartKeyRotation(ctx, gatekeeperURL, "registry",
@@ -367,7 +446,7 @@ func main() {
 
 	startHealthCollector(ctx)
 
-	mux := http.NewServeMux()
+	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /system_health", handleSystemHealth)
 	mux.HandleFunc("GET /services", handleListServices)

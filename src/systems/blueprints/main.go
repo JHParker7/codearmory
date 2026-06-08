@@ -20,8 +20,6 @@ import (
 
 	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -31,7 +29,6 @@ import (
 )
 
 var (
-	db            *pgxpool.Pool
 	gatekeeperURL = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
 	httpClient    = &http.Client{
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
@@ -71,32 +68,6 @@ func secretOrDefault(name, def string) string {
 }
 
 const maxBodyBytes = 64 * 1024 * 1024 // 64 MB — generous upper bound for Terraform state
-
-const createTables = `
-CREATE TABLE IF NOT EXISTS states (
-    workspace  TEXT PRIMARY KEY,
-    data       BYTEA        NOT NULL,
-    updated_at TIMESTAMPTZ  DEFAULT now()
-);
-CREATE TABLE IF NOT EXISTS locks (
-    workspace  TEXT PRIMARY KEY,
-    lock_data  TEXT         NOT NULL,
-    created_at TIMESTAMPTZ  DEFAULT now(),
-    updated_at TIMESTAMPTZ  DEFAULT now()
-);
-CREATE TABLE IF NOT EXISTS backend_credentials (
-    credential_id TEXT        PRIMARY KEY,
-    workspace     TEXT        NOT NULL,
-    cert_fp       TEXT        NOT NULL UNIQUE,
-    token_hash    TEXT        NOT NULL UNIQUE,
-    created_by    TEXT        NOT NULL,
-    expires_at    TIMESTAMPTZ NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_backend_creds_cert_fp     ON backend_credentials (cert_fp);
-CREATE INDEX IF NOT EXISTS idx_backend_creds_token_hash  ON backend_credentials (token_hash);
-CREATE INDEX IF NOT EXISTS idx_backend_creds_expires     ON backend_credentials (expires_at);
-`
 
 // ── Logger middleware ─────────────────────────────────────────────────────────
 
@@ -286,22 +257,23 @@ func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey string)
 		slog.Warn("state cache: decrypt failed, evicting", "workspace", workspaceKey)
 	}
 
-	var data []byte
-	err := db.QueryRow(ctx, "SELECT data FROM states WHERE workspace = $1", workspaceKey).Scan(&data)
-	if errors.Is(err, pgx.ErrNoRows) {
+	var state State
+	result := connect().WithContext(ctx).Where("workspace = ?", workspaceKey).First(&state)
+	if result.RowsAffected == 0 {
 		slog.Info("state not found", "workspace", workspaceKey)
 		span.SetStatus(codes.Ok, "")
 		meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "not_found")))
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		slog.Error("state read failed", "workspace", workspaceKey, "error", err)
+	if result.Error != nil {
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
+		slog.Error("state read failed", "workspace", workspaceKey, "error", result.Error)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	data := state.Data
 
 	plaintext, err := decrypt(data)
 	if err != nil {
@@ -348,34 +320,34 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 
 	lockID := r.URL.Query().Get("ID")
 
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+	tx := connect().WithContext(ctx).Begin()
+	if tx.Error != nil {
+		span.RecordError(tx.Error)
+		span.SetStatus(codes.Error, tx.Error.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback() //nolint:errcheck
 
 	var existingLock string
 	// FOR UPDATE serializes concurrent requests on the same workspace row, preventing
 	// TOCTOU races between the lock check and the subsequent state write.
-	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
-	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
-		span.RecordError(lockErr)
-		span.SetStatus(codes.Error, lockErr.Error())
+	lockResult := tx.Raw("SELECT lock_data FROM locks WHERE workspace = ? FOR UPDATE", workspaceKey).Scan(&existingLock)
+	if lockResult.Error != nil {
+		span.RecordError(lockResult.Error)
+		span.SetStatus(codes.Error, lockResult.Error.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	if lockErr == nil {
+	if lockResult.RowsAffected > 0 {
 		// Workspace is locked — caller must supply the matching lock ID.
 		if lockID == "" {
 			slog.Warn("state update rejected: workspace is locked", "workspace", workspaceKey)
 			span.SetStatus(codes.Error, "locked")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
-			w.Write([]byte(existingLock))
+			w.Write([]byte(existingLock)) //nolint:errcheck
 			return
 		}
 		var lockObj map[string]any
@@ -390,17 +362,15 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 			span.SetStatus(codes.Error, "lock id mismatch")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
-			w.Write([]byte(existingLock))
+			w.Write([]byte(existingLock)) //nolint:errcheck
 			return
 		}
 	}
 
-	_, err = tx.Exec(ctx,
-		`INSERT INTO states (workspace, data) VALUES ($1, $2)
-		 ON CONFLICT (workspace) DO UPDATE SET data = $2, updated_at = now()`,
-		workspaceKey, body,
-	)
-	if err != nil {
+	if err := tx.Exec(
+		`INSERT INTO states (workspace, data) VALUES (?, ?) ON CONFLICT (workspace) DO UPDATE SET data = ?, updated_at = now()`,
+		workspaceKey, body, body,
+	).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		slog.Error("state update failed", "workspace", workspaceKey, "error", err)
@@ -408,7 +378,7 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 		return
 	}
 
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -432,7 +402,7 @@ func handleDeleteState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 		return
 	}
 
-	if _, err := db.Exec(ctx, "DELETE FROM states WHERE workspace = $1", workspaceKey); err != nil {
+	if err := connect().WithContext(ctx).Exec("DELETE FROM states WHERE workspace = ?", workspaceKey).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		slog.Error("state delete failed", "workspace", workspaceKey, "error", err)
@@ -470,37 +440,37 @@ func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey string
 		return
 	}
 
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+	tx := connect().WithContext(ctx).Begin()
+	if tx.Error != nil {
+		span.RecordError(tx.Error)
+		span.SetStatus(codes.Error, tx.Error.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback() //nolint:errcheck
 
 	var existingLock string
 	// FOR UPDATE serializes concurrent lock acquisitions on the same workspace, so two
 	// callers racing to lock the same workspace can't both see it as unlocked.
-	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
-	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
-		span.RecordError(lockErr)
-		span.SetStatus(codes.Error, lockErr.Error())
+	lockResult := tx.Raw("SELECT lock_data FROM locks WHERE workspace = ? FOR UPDATE", workspaceKey).Scan(&existingLock)
+	if lockResult.Error != nil {
+		span.RecordError(lockResult.Error)
+		span.SetStatus(codes.Error, lockResult.Error.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	if lockErr == nil {
+	if lockResult.RowsAffected > 0 {
 		slog.Warn("lock conflict", "workspace", workspaceKey)
 		span.SetStatus(codes.Error, "lock conflict")
 		meterLockState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "conflict")))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusLocked)
-		w.Write([]byte(existingLock))
+		w.Write([]byte(existingLock)) //nolint:errcheck
 		return
 	}
 
-	if _, err := tx.Exec(ctx, "INSERT INTO locks (workspace, lock_data) VALUES ($1, $2)", workspaceKey, string(body)); err != nil {
+	if err := tx.Exec("INSERT INTO locks (workspace, lock_data) VALUES (?, ?)", workspaceKey, string(body)).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		slog.Error("lock insert failed", "workspace", workspaceKey, "error", err)
@@ -508,7 +478,7 @@ func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey string
 		return
 	}
 
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -539,28 +509,28 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 		return
 	}
 
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+	tx := connect().WithContext(ctx).Begin()
+	if tx.Error != nil {
+		span.RecordError(tx.Error)
+		span.SetStatus(codes.Error, tx.Error.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback() //nolint:errcheck
 
 	var existingLock string
 	// FOR UPDATE serializes concurrent unlock attempts on the same workspace row.
-	// ErrNoRows (workspace already unlocked) falls through to a no-op commit, making
-	// unlock idempotent — Terraform expects a 200 even when the lock is already gone.
-	lockErr := tx.QueryRow(ctx, "SELECT lock_data FROM locks WHERE workspace = $1 FOR UPDATE", workspaceKey).Scan(&existingLock)
-	if lockErr != nil && !errors.Is(lockErr, pgx.ErrNoRows) {
-		span.RecordError(lockErr)
-		span.SetStatus(codes.Error, lockErr.Error())
+	// RowsAffected == 0 (workspace already unlocked) falls through to a no-op commit,
+	// making unlock idempotent — Terraform expects a 200 even when the lock is already gone.
+	lockResult := tx.Raw("SELECT lock_data FROM locks WHERE workspace = ? FOR UPDATE", workspaceKey).Scan(&existingLock)
+	if lockResult.Error != nil {
+		span.RecordError(lockResult.Error)
+		span.SetStatus(codes.Error, lockResult.Error.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	if lockErr == nil {
+	if lockResult.RowsAffected > 0 {
 		// Workspace is locked — caller must supply the matching lock ID.
 		var reqID string
 		if len(body) > 0 {
@@ -584,7 +554,7 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 			return
 		}
 
-		if _, err := tx.Exec(ctx, "DELETE FROM locks WHERE workspace = $1", workspaceKey); err != nil {
+		if err := tx.Exec("DELETE FROM locks WHERE workspace = ?", workspaceKey).Error; err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			slog.Error("lock delete failed", "workspace", workspaceKey, "error", err)
@@ -593,7 +563,7 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -663,23 +633,21 @@ func main() {
 	}
 	initCache()
 
-	dbURL := secret("DATABASE_URL")
-	if dbURL == "" {
-		slog.Error("DATABASE_URL is required")
-		os.Exit(1)
+	// Rename legacy PostgreSQL auto-named constraints to GORM's convention (one-shot).
+	for _, sql := range []string{
+		`ALTER TABLE backend_credentials RENAME CONSTRAINT backend_credentials_cert_fp_key TO uni_backend_credentials_cert_fp`,
+		`ALTER TABLE backend_credentials RENAME CONSTRAINT backend_credentials_token_hash_key TO uni_backend_credentials_token_hash`,
+	} {
+		if r := connect().Exec(sql); r.Error != nil {
+			slog.Debug("constraint rename skipped", "sql", sql, "error", r.Error)
+		}
 	}
-	db, err = pgxpool.New(ctx, dbURL)
-	if err != nil {
-		slog.Error("failed to create database pool", "error", err)
-		os.Exit(1)
-	}
-	defer db.Close()
 
-	if _, err := db.Exec(ctx, createTables); err != nil {
-		slog.Error("failed to create tables", "error", err)
+	if err := connect().AutoMigrate(&State{}, &StateLock{}, &BackendCredential{}); err != nil {
+		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("database pool initialized")
+	slog.Info("database initialized")
 
 	// Rotate the gatekeeper service key every 25 minutes so credentials are always
 	// short-lived. GATEKEEPER_SERVICE_KEY must match the key in GATEKEEPER_SERVICES
@@ -687,7 +655,7 @@ func main() {
 	registry.StartKeyRotation(ctx, gatekeeperURL, "blueprints",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
-	mux := http.NewServeMux()
+	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /backend", handleCreateBackend)
 

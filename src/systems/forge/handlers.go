@@ -13,11 +13,11 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"gorm.io/gorm"
 )
 
 // envKeyRe matches POSIX-compliant environment variable names.
@@ -139,6 +139,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	span.SetAttributes(attribute.String("user.id", userID))
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil || !json.Valid(body) {
@@ -182,16 +183,24 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmdJSON, _ := json.Marshal(req.Command)
-	envJSON, _ := json.Marshal(req.Env)
 	executionID := uuid.New().String()
-
-	_, err = db.Exec(ctx,
-		`INSERT INTO executions (execution_id, user_id, image, command, env, timeout_secs, runner_class)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		executionID, userID, req.Image, cmdJSON, envJSON, req.Timeout, req.RunnerClass,
+	span.SetAttributes(
+		attribute.String("execution.id", executionID),
+		attribute.String("image", req.Image),
+		attribute.String("runner_class", req.RunnerClass),
 	)
-	if err != nil {
+
+	exec := &Execution{
+		ExecutionID: executionID,
+		UserID:      userID,
+		Image:       req.Image,
+		Command:     req.Command,
+		Env:         req.Env,
+		TimeoutSecs: req.Timeout,
+		RunnerClass: req.RunnerClass,
+		Status:      StatusPending,
+	}
+	if err := connect().WithContext(ctx).Create(exec).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		slog.Error("submit: insert execution", "error", err)
@@ -219,9 +228,13 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("execution.id", executionID),
+	)
 
 	exec, err := getExecution(ctx, executionID, userID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -232,6 +245,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(exec)
 }
@@ -246,32 +260,25 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	span.SetAttributes(attribute.String("user.id", userID))
 
-	rows, err := db.Query(ctx,
-		`SELECT execution_id, user_id, image, status, exit_code, created_at, started_at, ended_at, runner_class
-		 FROM executions
-		 WHERE user_id = $1
-		 ORDER BY created_at DESC
-		 LIMIT 100`,
-		userID,
-	)
-	if err != nil {
+	var executions []Execution
+	if err := connect().WithContext(ctx).
+		Select("execution_id, user_id, image, status, exit_code, created_at, started_at, ended_at, runner_class").
+		Where("user_id = ?", userID).
+		Order("created_at DESC").
+		Limit(100).
+		Find(&executions).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
-
-	executions := []Execution{}
-	for rows.Next() {
-		var e Execution
-		if err := rows.Scan(&e.ExecutionID, &e.UserID, &e.Image, &e.Status, &e.ExitCode, &e.CreatedAt, &e.StartedAt, &e.EndedAt, &e.RunnerClass); err != nil {
-			continue
-		}
-		executions = append(executions, e)
+	if executions == nil {
+		executions = []Execution{}
 	}
 
+	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(executions)
 }
@@ -288,9 +295,13 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		span.SetAttributes(
+			attribute.String("user.id", userID),
+			attribute.String("execution.id", executionID),
+		)
 
 		exec, err := getExecution(ctx, executionID, userID)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -306,11 +317,10 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 			http.Error(w, "execution already finished", http.StatusConflict)
 			return
 		case StatusPending:
-			_, err = db.Exec(ctx,
-				`UPDATE executions SET status = 'cancelled', ended_at = now() WHERE execution_id = $1 AND status = 'pending'`,
+			if err := connect().WithContext(ctx).Exec(
+				`UPDATE executions SET status = 'cancelled', ended_at = now() WHERE execution_id = ? AND status = 'pending'`,
 				executionID,
-			)
-			if err != nil {
+			).Error; err != nil {
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
@@ -319,6 +329,7 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		}
 
 		meterCancel.Add(ctx, 1)
+		span.SetStatus(codes.Ok, "")
 		slog.Info("execution cancelled", "execution_id", executionID, "user_id", userID)
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -328,13 +339,8 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 
 func getExecution(ctx context.Context, executionID, userID string) (Execution, error) {
 	var e Execution
-	err := db.QueryRow(ctx,
-		`SELECT execution_id, user_id, image, status, exit_code, stdout, stderr,
-		        created_at, started_at, ended_at, runner_class
-		 FROM executions
-		 WHERE execution_id = $1 AND user_id = $2`,
-		executionID, userID,
-	).Scan(&e.ExecutionID, &e.UserID, &e.Image, &e.Status, &e.ExitCode,
-		&e.Stdout, &e.Stderr, &e.CreatedAt, &e.StartedAt, &e.EndedAt, &e.RunnerClass)
+	err := connect().WithContext(ctx).
+		Where("execution_id = ? AND user_id = ?", executionID, userID).
+		First(&e).Error
 	return e, err
 }

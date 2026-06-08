@@ -257,7 +257,7 @@ func main() {
 		slog.Info("GitHub App configured", "app_id", appID)
 	}
 
-	mux := http.NewServeMux()
+	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	mux.HandleFunc("POST /rules", handleCreateRule)

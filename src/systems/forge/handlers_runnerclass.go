@@ -49,7 +49,7 @@ func handleListRunnerClasses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var classes []RunnerClass
-	if err := connectRC().WithContext(ctx).Order("name").Find(&classes).Error; err != nil {
+	if err := connect().WithContext(ctx).Order("name").Find(&classes).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -75,7 +75,7 @@ func handleGetRunnerClass(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var rc RunnerClass
-	if err := connectRC().WithContext(ctx).Where("name = ?", name).First(&rc).Error; err != nil {
+	if err := connect().WithContext(ctx).Where("name = ?", name).First(&rc).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -127,7 +127,7 @@ func handleCreateRunnerClass(w http.ResponseWriter, r *http.Request) {
 		TmpfsMB:       b.TmpfsMB,
 		Enabled:       b.Enabled,
 	}
-	if err := connectRC().WithContext(ctx).Create(&rc).Error; err != nil {
+	if err := connect().WithContext(ctx).Create(&rc).Error; err != nil {
 		if errors.Is(err, gorm.ErrDuplicatedKey) {
 			http.Error(w, "runner class already exists", http.StatusConflict)
 			return
@@ -171,7 +171,7 @@ func handleUpdateRunnerClass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := connectRC().WithContext(ctx).Model(&RunnerClass{}).Where("name = ?", name).Updates(map[string]any{
+	result := connect().WithContext(ctx).Model(&RunnerClass{}).Where("name = ?", name).Updates(map[string]any{
 		"memory_mb":      b.MemoryMB,
 		"cpu_millicores": b.CPUMillicores,
 		"pids_limit":     b.PidsLimit,
@@ -209,7 +209,7 @@ func handleDeleteRunnerClass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := connectRC().WithContext(ctx).Where("name = ?", name).Delete(&RunnerClass{})
+	result := connect().WithContext(ctx).Where("name = ?", name).Delete(&RunnerClass{})
 	if result.Error != nil {
 		span.RecordError(result.Error)
 		span.SetStatus(codes.Error, result.Error.Error())

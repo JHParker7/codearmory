@@ -3,7 +3,7 @@ module containers
 go 1.25.6
 
 require (
-	github.com/code-armory-app/codearmory_sdk v0.1.0
+	github.com/code-armory-app/codearmory_sdk v0.2.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0

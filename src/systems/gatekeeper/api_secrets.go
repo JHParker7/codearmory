@@ -16,9 +16,13 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-var adapterClient = &http.Client{Timeout: 10 * time.Second}
+var adapterClient = &http.Client{
+	Transport: otelhttp.NewTransport(http.DefaultTransport),
+	Timeout:   10 * time.Second,
+}
 
 // resolveVaultClient is the HTTP client used by resolveVault. Tests can
 // substitute a stub to bypass the SSRF-protected vaultClient.

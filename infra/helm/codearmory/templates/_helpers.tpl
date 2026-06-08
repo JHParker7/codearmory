@@ -238,6 +238,29 @@ Usage: {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
 {{- end }}
 
 {{/*
+initContainer that polls registry's /healthz until it returns HTTP 200.
+Inject into conductor so it never polls the registry before it is ready.
+Usage: {{- include "codearmory.initContainer.waitForRegistry" . | nindent 8 }}
+*/}}
+{{- define "codearmory.initContainer.waitForRegistry" -}}
+- name: wait-for-registry
+  image: {{ .Values.waitContainerImage | default "public.ecr.aws/docker/library/busybox:1.36" }}
+  command:
+    - sh
+    - -c
+    - >-
+      until wget -qO- http://{{ include "codearmory.fullname" . }}-registry:{{ .Values.registry.port }}/healthz
+      2>/dev/null; do echo "waiting for registry"; sleep 2; done
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65534
+    capabilities:
+      drop: ["ALL"]
+{{- end }}
+
+{{/*
 Forge service account name.
 */}}
 {{- define "codearmory.forge.serviceAccountName" -}}

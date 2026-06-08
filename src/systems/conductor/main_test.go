@@ -567,3 +567,60 @@ func TestHandleServiceProxy_SpoofHeaders_Stripped(t *testing.T) {
 		t.Error("X-Forwarded-For should not pass through spoofed value")
 	}
 }
+
+// ── handleInternalRefresh ─────────────────────────────────────────────────────
+
+func TestHandleInternalRefresh_NoKeyConfigured(t *testing.T) {
+	orig := conductorNotifyKey
+	conductorNotifyKey = ""
+	defer func() { conductorNotifyKey = orig }()
+
+	r := httptest.NewRequest(http.MethodPost, "/internal/refresh", nil)
+	r.Header.Set("X-Service-Key", "registry:somekey")
+	w := httptest.NewRecorder()
+	handleInternalRefresh(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401 when CONDUCTOR_NOTIFY_KEY is empty", w.Code)
+	}
+}
+
+func TestHandleInternalRefresh_WrongKey(t *testing.T) {
+	orig := conductorNotifyKey
+	conductorNotifyKey = "correct-key"
+	defer func() { conductorNotifyKey = orig }()
+
+	r := httptest.NewRequest(http.MethodPost, "/internal/refresh", nil)
+	r.Header.Set("X-Service-Key", "registry:wrong-key")
+	w := httptest.NewRecorder()
+	handleInternalRefresh(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401 for wrong key", w.Code)
+	}
+}
+
+func TestHandleInternalRefresh_MissingHeader(t *testing.T) {
+	orig := conductorNotifyKey
+	conductorNotifyKey = "correct-key"
+	defer func() { conductorNotifyKey = orig }()
+
+	r := httptest.NewRequest(http.MethodPost, "/internal/refresh", nil)
+	w := httptest.NewRecorder()
+	handleInternalRefresh(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401 when X-Service-Key header is absent", w.Code)
+	}
+}
+
+func TestHandleInternalRefresh_ValidKey(t *testing.T) {
+	orig := conductorNotifyKey
+	conductorNotifyKey = "correct-key"
+	defer func() { conductorNotifyKey = orig }()
+
+	r := httptest.NewRequest(http.MethodPost, "/internal/refresh", nil)
+	r.Header.Set("X-Service-Key", "registry:correct-key")
+	w := httptest.NewRecorder()
+	handleInternalRefresh(w, r)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got %d, want 202 for valid key", w.Code)
+	}
+}

@@ -22,11 +22,15 @@ func handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gitea").Start(r.Context(), "handleGetAccount")
 	defer span.End()
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getAccount", "gitea_integration/account")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getAccount", "gitea_integration/account")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	account, err := getAccount(ctx, userID)
 	if err != nil {
@@ -51,11 +55,15 @@ func handleLinkAccount(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gitea").Start(r.Context(), "handleLinkAccount")
 	defer span.End()
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "linkAccount", "gitea_integration/account")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "linkAccount", "gitea_integration/account")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	var req linkAccountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -141,11 +149,15 @@ func handleUnlinkAccount(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gitea").Start(r.Context(), "handleUnlinkAccount")
 	defer span.End()
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "unlinkAccount", "gitea_integration/account")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "unlinkAccount", "gitea_integration/account")
 	if !ok {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	account, err := getAccount(ctx, userID)
 	if err != nil {

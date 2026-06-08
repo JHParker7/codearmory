@@ -320,6 +320,7 @@ services:
     environment:
       API_URL: http://gatekeeper:8081
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
+      GATEKEEPER_SERVICE_KEY: test-service:test-service-local-secret
     depends_on:
       gatekeeper:
         condition: service_healthy

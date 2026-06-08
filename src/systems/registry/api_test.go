@@ -13,7 +13,7 @@ import (
 func TestRequireAuthWithRole_MissingHeader(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
-	if requireAuthWithRole(w, r, "") {
+	if _, ok := requireAuthWithRole(w, r, ""); ok {
 		t.Fatal("expected false when X-Service-Key header is absent")
 	}
 	if w.Code != http.StatusUnauthorized {
@@ -25,7 +25,7 @@ func TestRequireAuthWithRole_MalformedHeader_NoColon(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("X-Service-Key", "nameonly") // no colon
 	w := httptest.NewRecorder()
-	if requireAuthWithRole(w, r, "") {
+	if _, ok := requireAuthWithRole(w, r, ""); ok {
 		t.Fatal("expected false for malformed header")
 	}
 	if w.Code != http.StatusUnauthorized {
@@ -37,7 +37,7 @@ func TestRequireAuthWithRole_MalformedHeader_EmptyName(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("X-Service-Key", ":somekey") // name part is empty
 	w := httptest.NewRecorder()
-	if requireAuthWithRole(w, r, "") {
+	if _, ok := requireAuthWithRole(w, r, ""); ok {
 		t.Fatal("expected false for empty service name")
 	}
 	if w.Code != http.StatusUnauthorized {

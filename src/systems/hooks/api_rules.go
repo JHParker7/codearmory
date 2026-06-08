@@ -102,6 +102,10 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	var req createRuleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -181,6 +185,10 @@ func handleListRules(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	rules, err := listRules(ctx, userID, orgID)
 	if err != nil {
@@ -206,6 +214,10 @@ func handleGetRule(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	rule, err := getRule(ctx, id)
 	if err != nil {
@@ -239,6 +251,10 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	existing, err := getRule(ctx, id)
 	if err != nil {
@@ -338,6 +354,10 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	rule, err := getRule(ctx, id)
 	if err != nil {

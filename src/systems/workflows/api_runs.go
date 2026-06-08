@@ -108,6 +108,10 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	wf, err := getWorkflow(ctx, workflowID)
 	if err != nil {
@@ -201,6 +205,10 @@ func handleListRuns(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	runs, err := listRuns(ctx, userID, orgID, r.URL.Query().Get("workflow_id"))
 	if err != nil {
@@ -229,6 +237,10 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	run, err := getRun(ctx, id)
 	if err != nil {
@@ -271,6 +283,10 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 			span.SetStatus(codes.Error, "forbidden")
 			return
 		}
+		span.SetAttributes(
+			attribute.String("user.id", userID),
+			attribute.String("org.id", orgID),
+		)
 
 		run, err := getRun(ctx, id)
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"gorm.io/gorm"
 )
@@ -20,6 +21,10 @@ func handleListEvents(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	events, err := listEvents(ctx, userID, orgID, r.URL.Query().Get("repo"))
 	if err != nil {
@@ -45,6 +50,10 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, "forbidden")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+	)
 
 	event, err := getEvent(ctx, id)
 	if err != nil {

@@ -142,28 +142,28 @@ func tokenHash(token string) string {
 // checkCertCredential returns true when the TLS connection presents a valid
 // client cert whose fingerprint is registered for workspaceKey.
 func checkCertCredential(ctx context.Context, cs *tls.ConnectionState, workspaceKey string) bool {
-	if cs == nil || len(cs.PeerCertificates) == 0 {
+	if cs == nil || len(cs.VerifiedChains) == 0 || len(cs.VerifiedChains[0]) == 0 {
 		return false
 	}
-	fp := rawFingerprint(cs.PeerCertificates[0].Raw)
-	var expiresAt time.Time
-	err := db.QueryRow(ctx,
-		"SELECT expires_at FROM backend_credentials WHERE cert_fp=$1 AND workspace=$2",
-		fp, workspaceKey,
-	).Scan(&expiresAt)
-	return err == nil && time.Now().Before(expiresAt)
+	fp := rawFingerprint(cs.VerifiedChains[0][0].Raw)
+	var cred BackendCredential
+	result := connect().WithContext(ctx).
+		Select("expires_at").
+		Where("cert_fp = ? AND workspace = ?", fp, workspaceKey).
+		First(&cred)
+	return result.Error == nil && time.Now().Before(cred.ExpiresAt)
 }
 
 // checkTokenCredential returns true when the bp_ bearer token is registered
 // and still valid for workspaceKey.
 func checkTokenCredential(ctx context.Context, token, workspaceKey string) bool {
 	h := tokenHash(token)
-	var expiresAt time.Time
-	err := db.QueryRow(ctx,
-		"SELECT expires_at FROM backend_credentials WHERE token_hash=$1 AND workspace=$2",
-		h, workspaceKey,
-	).Scan(&expiresAt)
-	return err == nil && time.Now().Before(expiresAt)
+	var cred BackendCredential
+	result := connect().WithContext(ctx).
+		Select("expires_at").
+		Where("token_hash = ? AND workspace = ?", h, workspaceKey).
+		First(&cred)
+	return result.Error == nil && time.Now().Before(cred.ExpiresAt)
 }
 
 // requireWorkspaceAuth is the unified auth gate for state operations. It accepts,
@@ -285,7 +285,6 @@ func backendUsername(cc callerContext) string {
 	} else {
 		parts = append(parts, cc.UserID)
 	}
-	parts = append(parts, uuid.New().String())
 	return strings.Join(parts, "_")
 }
 
@@ -356,12 +355,15 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 	credID := uuid.New().String()
 	expiresAt := time.Now().UTC().Add(ttl)
 
-	_, err = db.Exec(ctx, `
-		INSERT INTO backend_credentials
-		  (credential_id, workspace, cert_fp, token_hash, created_by, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, credID, workspaceKey, certFP, th, cc.UserID, expiresAt)
-	if err != nil {
+	cred := BackendCredential{
+		CredentialID: credID,
+		Workspace:    workspaceKey,
+		CertFP:       certFP,
+		TokenHash:    th,
+		CreatedBy:    cc.UserID,
+		ExpiresAt:    expiresAt,
+	}
+	if err := connect().WithContext(ctx).Create(&cred).Error; err != nil {
 		slog.Error("backend: insert credential", "workspace", workspaceKey, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
