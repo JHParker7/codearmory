@@ -126,10 +126,20 @@ func handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	valid, status, msg := totpValidate(ctx, userID, req.Code, &cred)
-	if !valid {
-		span.SetStatus(codes.Error, msg)
-		http.Error(w, msg, status)
+	// Validate the code without recording replay state — enrollment confirmation
+	// is not an authentication event, and consuming the current time step here
+	// would block an immediate MFA login with the same code.
+	enrollSecret, err := decryptSecret(cred.EncSecret)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "decrypt failed")
+		slog.Error("totp confirm: decrypt failed", "user_id", userID, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if !totp.Validate(req.Code, enrollSecret) {
+		span.SetStatus(codes.Error, "invalid TOTP code")
+		http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
 		return
 	}
 
