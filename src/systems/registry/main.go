@@ -305,6 +305,29 @@ func loadManifest(ctx context.Context, path string) {
 	}
 }
 
+func notifyConductor(ctx context.Context) {
+	conductorURL := os.Getenv("CONDUCTOR_URL")
+	notifyKey := os.Getenv("CONDUCTOR_NOTIFY_KEY")
+	if conductorURL == "" || notifyKey == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, conductorURL+"/internal/refresh", nil)
+	if err != nil {
+		slog.Warn("conductor notify: failed to create request", "error", err)
+		return
+	}
+	req.Header.Set("X-Service-Key", "registry:"+notifyKey)
+	resp, err := registryHTTPClient.Do(req)
+	if err != nil {
+		slog.Warn("conductor notify: request failed", "error", err)
+		return
+	}
+	resp.Body.Close()
+	slog.Info("conductor notified of manifest update", "status", resp.StatusCode)
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -359,6 +382,7 @@ func main() {
 
 	if manifestPath := os.Getenv("MANIFEST_FILE"); manifestPath != "" {
 		loadManifest(ctx, manifestPath)
+		notifyConductor(ctx)
 	}
 
 	// Register Registry itself as a Gatekeeper service account so its identity rotates.

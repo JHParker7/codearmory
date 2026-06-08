@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -41,7 +42,8 @@ var (
 	gatekeeperURL       = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
 	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8084")
 	conductorForwardKey = os.Getenv("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
-	httpClient          = &http.Client{Timeout: 10 * time.Second}
+	conductorNotifyKey  = os.Getenv("CONDUCTOR_NOTIFY_KEY")  // shared secret allowing registry to push refresh notifications
+	httpClient          = &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport), Timeout: 10 * time.Second}
 	// getRegistryKey returns the current rotating service key used to authenticate
 	// conductor's requests to the registry. Set in main() via StartKeyRotation.
 	getRegistryKey func() string
@@ -197,6 +199,7 @@ func newProxy(target string) *httputil.ReverseProxy {
 		os.Exit(1)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(u)
+	proxy.Transport = otelhttp.NewTransport(http.DefaultTransport)
 	base := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		base(req)
@@ -741,6 +744,18 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	routeAndProxy(w, r, entry, paramVals, path)
 }
 
+// handleInternalRefresh is called by the registry after a manifest load to
+// trigger an immediate route-table update without waiting for the next poll.
+func handleInternalRefresh(w http.ResponseWriter, r *http.Request) {
+	expected := "registry:" + conductorNotifyKey
+	if conductorNotifyKey == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Service-Key")), []byte(expected)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	go refreshServiceCache(context.Background())
+	w.WriteHeader(http.StatusAccepted)
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func secret(name string) string {
@@ -781,15 +796,22 @@ func main() {
 	}
 	initMetrics()
 
+	// Reinitialize httpClient with an OTel-instrumented transport so that calls to
+	// gatekeeper and registry propagate the active trace context via traceparent headers.
+	httpClient = &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: otelhttp.NewTransport(http.DefaultTransport),
+	}
+
 	// Rotate conductor's registry service key every 25 minutes so the credential
 	// is always short-lived. The key is used in X-Service-Key on every GET /services call.
 	getRegistryKey = registry.StartKeyRotation(ctx, registryURL, "conductor", initialRegistryKey, 25*time.Minute)
 
-	// Warm the service cache, retrying until the registry is reachable.
+	// Warm the service cache, retrying until the registry returns services with endpoints.
 	for {
 		refreshServiceCache(ctx)
 		routingMu.RLock()
-		populated := len(servicesMap) > 0
+		populated := len(endpointsList) > 0
 		routingMu.RUnlock()
 		if populated {
 			break
@@ -802,9 +824,10 @@ func main() {
 		}
 	}
 
-	// Refresh the service registry every 30 seconds.
+	// Refresh the service registry every 5 minutes as a fallback; registry also
+	// pushes an immediate refresh via POST /internal/refresh after manifest loads.
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
@@ -818,6 +841,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("POST /internal/refresh", handleInternalRefresh)
 	mux.HandleFunc("GET /openapi.json", handleOpenAPISpec)
 	mux.HandleFunc("GET /docs", handleDocs)
 	mux.Handle("/{path...}", http.HandlerFunc(handleServiceProxy))
