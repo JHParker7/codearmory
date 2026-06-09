@@ -138,30 +138,21 @@ func (p *WorkerPool) loop(ctx context.Context) {
 }
 
 func (p *WorkerPool) tryOne(ctx context.Context) bool {
-	pickup, err := dequeueRun(ctx)
-	if err != nil {
-		return false
-	}
-	if pickup == nil {
+	run, err := (WorkflowRun{}).Dequeue(ctx)
+	if err != nil || run == nil {
 		return false
 	}
 
-	var inputs map[string]string
-	if err := json.Unmarshal(pickup.Inputs, &inputs); err != nil {
-		slog.Error("worker: unmarshal inputs", "run_id", pickup.RunID, "error", err)
-		return false
-	}
-
-	if pickup.Token != "" {
-		plainToken, err := decryptToken(pickup.Token)
+	if run.Token != "" {
+		plainToken, err := decryptToken(run.Token)
 		if err != nil {
-			slog.Error("worker: decrypt run token", "run_id", pickup.RunID, "error", err)
+			slog.Error("worker: decrypt run token", "run_id", run.RunID, "error", err)
 			return false
 		}
-		pickup.Token = plainToken
+		run.Token = plainToken
 	}
 
-	p.executeRun(ctx, pickup.RunID, pickup.WorkflowID, pickup.Token, pickup.RunSessionID, pickup.TriggeredBy, inputs)
+	p.executeRun(ctx, run.RunID, run.WorkflowID, run.Token, run.RunSessionID, run.TriggeredBy, run.Inputs)
 	return true
 }
 
@@ -192,7 +183,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			break
 		}
 
-		setRunCurrentStep(runCtx, runID, group.indices[0])
+		(WorkflowRun{RunID: runID}).SetCurrentStep(runCtx, group.indices[0])
 
 		if len(group.steps) == 1 {
 			ws := group.steps[0]
@@ -300,7 +291,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		attribute.String("workflow.id", workflowID),
 		attribute.String("status", finalStatus),
 	))
-	completeRun(context.Background(), runID, finalStatus)
+	(WorkflowRun{RunID: runID}).Complete(context.Background(), finalStatus)
 	revokeRunToken(context.Background(), store.getSessionID())
 	slog.Info("worker: run finished", "run_id", runID, "status", finalStatus)
 }
@@ -327,7 +318,7 @@ func (p *WorkerPool) rotateToken(ctx context.Context, store *tokenStore, runID, 
 			revokeRunToken(context.Background(), newSID)
 			continue
 		}
-		if dbErr := updateRunToken(ctx, runID, encNewToken, newSID); dbErr != nil {
+		if dbErr := (WorkflowRun{RunID: runID}).UpdateToken(ctx, encNewToken, newSID); dbErr != nil {
 			slog.Warn("worker: token rotation DB update failed, discarding new token", "run_id", runID, "error", dbErr)
 			revokeRunToken(context.Background(), newSID)
 			continue
@@ -625,15 +616,15 @@ func substitute(s string, inputs map[string]string) string {
 }
 
 func (p *WorkerPool) startStepRun(runID, stepRunID string, index int, name string) error {
-	return insertStepRun(runID, stepRunID, index, name)
+	return (WorkflowStepRun{StepRunID: stepRunID, RunID: runID, StepIndex: index, StepName: name}).Add(context.Background())
 }
 
 func (p *WorkerPool) finishStepRun(stepRunID, status string, output *string) {
-	markStepRunDone(stepRunID, status, output)
+	(WorkflowStepRun{StepRunID: stepRunID}).Complete(context.Background(), status, output)
 }
 
 func (p *WorkerPool) failRun(runID, sessionID string) {
-	markRunFailed(runID)
+	(WorkflowRun{RunID: runID}).Complete(context.Background(), StatusFailed)
 	revokeRunToken(context.Background(), sessionID)
 	slog.Warn("worker: run failed before first step", "run_id", runID)
 }

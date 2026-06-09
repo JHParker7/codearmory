@@ -474,94 +474,187 @@ func getStepRuns(ctx context.Context, runID string) ([]WorkflowStepRun, error) {
 	return stepRuns, nil
 }
 
-// ── Worker helpers ────────────────────────────────────────────────────────────
-
-// workerRunPickup holds the fields claimed when dequeuing a pending workflow run.
-type workerRunPickup struct {
-	RunID        string
-	WorkflowID   string
-	Inputs       []byte
-	Token        string
-	RunSessionID string
-	TriggeredBy  string
-}
-
-// dequeueRun claims one pending workflow run using FOR UPDATE SKIP LOCKED,
-// transitions it to 'running', and returns its fields.
+// Dequeue atomically claims one pending workflow run using FOR UPDATE SKIP LOCKED,
+// transitions it to 'running', and returns the claimed run.
 // Returns nil, nil when the queue is empty or the row is taken by a peer worker.
-func dequeueRun(ctx context.Context) (*workerRunPickup, error) {
+func (WorkflowRun) Dequeue(ctx context.Context) (*WorkflowRun, error) {
+	ctx, span := otel.Tracer("workflows").Start(ctx, "db.workflow_run.dequeue")
+	defer span.End()
+
 	tx := connect().WithContext(ctx).Begin()
 	if tx.Error != nil {
+		span.RecordError(tx.Error)
+		span.SetStatus(codes.Error, tx.Error.Error())
 		return nil, tx.Error
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	var pickup workerRunPickup
-	result := tx.Raw(`
-		SELECT run_id, workflow_id, inputs, token, run_session_id, triggered_by
-		FROM workflow_runs
-		WHERE status = 'pending'
-		ORDER BY created_at
-		LIMIT 1
-		FOR UPDATE SKIP LOCKED
-	`).Scan(&pickup)
+	var run WorkflowRun
+	result := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		Where("status = 'pending'").
+		Order("created_at").
+		Limit(1).
+		Find(&run)
 	if result.Error != nil {
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
 		return nil, result.Error
 	}
 	if result.RowsAffected == 0 {
+		span.SetStatus(codes.Ok, "")
 		return nil, nil
 	}
 
-	if r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", pickup.RunID); r.RowsAffected == 0 {
+	if r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", run.RunID); r.RowsAffected == 0 {
+		span.SetStatus(codes.Ok, "")
 		return nil, nil
 	}
 	if err := tx.Commit().Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-	return &pickup, nil
+
+	span.SetAttributes(attribute.String("run.id", run.RunID))
+	span.SetStatus(codes.Ok, "")
+	return &run, nil
 }
 
-// setRunCurrentStep records best-effort step progress for a running workflow.
-func setRunCurrentStep(ctx context.Context, runID string, step int) {
+// SetCurrentStep records best-effort step progress for a running workflow run.
+func (run WorkflowRun) SetCurrentStep(ctx context.Context, step int) {
 	connect().WithContext(ctx).Exec( //nolint:errcheck — best-effort progress tracking; failure doesn't affect step execution
-		"UPDATE workflow_runs SET current_step=? WHERE run_id=?", step, runID)
+		"UPDATE workflow_runs SET current_step=? WHERE run_id=?", step, run.RunID)
 }
 
-// completeRun marks a workflow run with its final status and clears credentials.
-func completeRun(ctx context.Context, runID, status string) {
-	connect().WithContext(ctx).Exec( //nolint:errcheck — if this fails the run stays in 'running'; the stuck-run recovery on next startup will fix it
+// Complete marks the run with its final status and clears credentials. Uses
+// context.Background() internally: the caller's context may be cancelled on
+// shutdown or user cancel, but the terminal state must always be persisted.
+func (run WorkflowRun) Complete(_ context.Context, status string) {
+	_, span := otel.Tracer("workflows").Start(context.Background(), "db.workflow_run.complete")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("run.id", run.RunID),
+		attribute.String("status", status),
+	)
+	if err := connect().WithContext(context.Background()).Exec(
 		"UPDATE workflow_runs SET status=?, ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
-		status, runID)
+		status, run.RunID,
+	).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return
+	}
+	span.SetStatus(codes.Ok, "")
 }
 
-// updateRunToken stores a newly-rotated token for an active run.
-func updateRunToken(ctx context.Context, runID, token, sessionID string) error {
-	return connect().WithContext(ctx).Exec(
+// UpdateToken stores a newly-rotated token for an active run.
+func (run WorkflowRun) UpdateToken(ctx context.Context, token, sessionID string) error {
+	ctx, span := otel.Tracer("workflows").Start(ctx, "db.workflow_run.update_token")
+	defer span.End()
+	span.SetAttributes(attribute.String("run.id", run.RunID))
+	if err := connect().WithContext(ctx).Exec(
 		"UPDATE workflow_runs SET token=?, run_session_id=? WHERE run_id=?",
-		token, sessionID, runID,
-	).Error
+		token, sessionID, run.RunID,
+	).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
 }
 
-// insertStepRun records the start of a step execution.
-func insertStepRun(runID, stepRunID string, index int, name string) error {
-	return connect().Exec(
+// ── WorkflowStepRun ───────────────────────────────────────────────────────────
+
+// Add inserts a new step run in 'running' state. Uses context.Background()
+// internally since the step record must land even if the caller's context
+// is near-cancelled at high parallelism.
+func (sr WorkflowStepRun) Add(_ context.Context) error {
+	_, span := otel.Tracer("workflows").Start(context.Background(), "db.step_run.add")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("step_run.id", sr.StepRunID),
+		attribute.String("run.id", sr.RunID),
+	)
+	if err := connect().Exec(
 		`INSERT INTO workflow_step_runs (step_run_id, run_id, step_index, step_name, status, started_at)
 		 VALUES (?, ?, ?, ?, 'running', now())`,
-		stepRunID, runID, index, name,
-	).Error
+		sr.StepRunID, sr.RunID, sr.StepIndex, sr.StepName,
+	).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
 }
 
-// markStepRunDone records a step's outcome. Best-effort; run status is authoritative.
-func markStepRunDone(stepRunID, status string, output *string) {
-	connect().WithContext(context.Background()).Exec( //nolint:errcheck — step result is best-effort; run status is the authoritative record
+func (sr WorkflowStepRun) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("workflows").Start(ctx, "db.step_run.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("step_run.id", sr.StepRunID))
+	if err := connect().WithContext(ctx).Save(&sr).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (sr WorkflowStepRun) Remove(_ context.Context) error {
+	return errors.New("WorkflowStepRun.Remove not implemented")
+}
+
+func (sr WorkflowStepRun) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("workflows").Start(ctx, "db.step_run.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("step_run.id", sr.StepRunID))
+	var out WorkflowStepRun
+	if err := connectRead().WithContext(ctx).Where("step_run_id=?", sr.StepRunID).First(&out).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return out, nil
+}
+
+func (sr WorkflowStepRun) List(ctx context.Context, limit, offset int) ([]db, error) {
+	ctx, span := otel.Tracer("workflows").Start(ctx, "db.step_run.list")
+	defer span.End()
+	span.SetAttributes(attribute.String("run.id", sr.RunID))
+	var stepRuns []WorkflowStepRun
+	q := connectRead().WithContext(ctx).Where("run_id=?", sr.RunID).Order("step_index")
+	if limit > 0 {
+		q = q.Limit(limit).Offset(offset)
+	}
+	if err := q.Find(&stepRuns).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	rows := make([]db, len(stepRuns))
+	for i, s := range stepRuns {
+		rows[i] = s
+	}
+	return rows, nil
+}
+
+// Complete records the step run's outcome. Best-effort; run status is authoritative.
+// Uses context.Background() internally as the run context may already be cancelled.
+func (sr WorkflowStepRun) Complete(_ context.Context, status string, output *string) {
+	_, span := otel.Tracer("workflows").Start(context.Background(), "db.step_run.complete")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("step_run.id", sr.StepRunID),
+		attribute.String("status", status),
+	)
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — step result is best-effort; run status is authoritative
 		`UPDATE workflow_step_runs SET status=?, response_body=?, ended_at=now() WHERE step_run_id=?`,
-		status, output, stepRunID)
-}
-
-// markRunFailed transitions a run to 'failed'. Best-effort; stuck-run recovery will catch this on restart.
-func markRunFailed(runID string) {
-	connect().WithContext(context.Background()).Exec( //nolint:errcheck — stuck-run recovery will catch this on restart
-		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=?", runID)
+		status, output, sr.StepRunID)
+	span.SetStatus(codes.Ok, "")
 }
 
 // recoverStuckRunsDB marks any runs left in 'running' state as 'failed' on startup.
