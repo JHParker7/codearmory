@@ -115,6 +115,7 @@ func doRequest(method, path string, body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", "armory-cli")
 	if t := bearerToken(); t != "" {
 		req.Header.Set("Authorization", "Bearer "+t)
 	}
@@ -126,7 +127,10 @@ func doRequest(method, path string, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}

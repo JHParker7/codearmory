@@ -57,11 +57,11 @@ var (
 const maxRequestBodyBytes = 64 * 1024
 
 var (
-	uuidHyphenRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	uuidHexRe    = regexp.MustCompile(`^[0-9a-f]{32}$`)
-	slugRe     = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
-	emailRe    = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
-	usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+	uuidHyphenRegex = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	uuidHexRegex    = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	slugRegex       = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+	emailRegex      = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+	usernameRegex   = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 )
 
 // paramTypeFor returns the validation type for a path param by name.
@@ -521,10 +521,10 @@ func lookupEndpoint(method, path string) (endpointEntry, bool) {
 // It accepts both the standard 36-char form and the 32-char hex form.
 func canonicalUUID(v string) (string, bool) {
 	v = strings.ToLower(v)
-	if uuidHyphenRe.MatchString(v) {
+	if uuidHyphenRegex.MatchString(v) {
 		return v, true
 	}
-	if uuidHexRe.MatchString(v) {
+	if uuidHexRegex.MatchString(v) {
 		return v[:8] + "-" + v[8:12] + "-" + v[12:16] + "-" + v[16:20] + "-" + v[20:], true
 	}
 	return "", false
@@ -550,7 +550,7 @@ func validatePathParams(w http.ResponseWriter, paramNames []string, paramValues 
 			}
 			out[i] = canonical
 		case "slug":
-			if !slugRe.MatchString(val) {
+			if !slugRegex.MatchString(val) {
 				http.Error(w, "invalid path parameter: "+name+" must be alphanumeric (hyphens/underscores allowed, max 64 chars)", http.StatusBadRequest)
 				return nil, false
 			}
@@ -609,13 +609,13 @@ func validateSignupBody(body []byte) error {
 	if req.Email == "" {
 		return fmt.Errorf("email is required")
 	}
-	if !emailRe.MatchString(req.Email) {
+	if !emailRegex.MatchString(req.Email) {
 		return fmt.Errorf("invalid email format")
 	}
 	if req.Username == "" {
 		return fmt.Errorf("username is required")
 	}
-	if !usernameRe.MatchString(req.Username) {
+	if !usernameRegex.MatchString(req.Username) {
 		return fmt.Errorf("invalid username: must be alphanumeric (hyphens/underscores allowed, max 64 chars)")
 	}
 	if req.Password == "" {
@@ -677,14 +677,27 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		}
 	}
 
+	span := trace.SpanFromContext(r.Context())
 	if userID != "" {
-		trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("user.id", userID))
+		span.SetAttributes(attribute.String("user.id", userID))
+	}
+	if ua := r.Header.Get("User-Agent"); strings.HasPrefix(ua, "armory-cli") {
+		span.SetAttributes(attribute.String("armory.client", "cli"))
 	}
 
+	svc.proxy.ServeHTTP(w, prepareForwardRequest(r, userID, svc, strippedPath))
+}
+
+// prepareForwardRequest clones r, strips client-supplied identity/routing
+// headers that backends must not trust, rewrites the path if a service-name
+// prefix was stripped, and injects X-User-ID (plus an HMAC token for
+// non-forwardAuth services). The caller's Authorization header is removed
+// for non-forwardAuth services so backend tokens cannot be replayed.
+func prepareForwardRequest(r *http.Request, userID string, svc serviceState, strippedPath string) *http.Request {
 	r2 := r.Clone(r.Context())
-	// Strip headers that could be used to spoof identity or routing metadata.
-	// X-Conductor-Token and X-Conductor-Timestamp are stripped here and only
-	// re-set below (conditionally), preventing clients from pre-loading them.
+
+	// Drop headers that a client could use to spoof identity. X-Conductor-*
+	// are stripped here and only re-added below so clients cannot pre-load them.
 	r2.Header.Del("X-User-ID")
 	r2.Header.Del("X-Conductor-Token")
 	r2.Header.Del("X-Conductor-Timestamp")
@@ -692,15 +705,11 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 	r2.Header.Del("X-Forwarded-Proto")
 	r2.Header.Del("X-Real-IP")
 
-	// Rewrite path when the service-name prefix was stripped.
 	if strippedPath != r.URL.Path {
 		r2.URL.Path = strippedPath
 		r2.URL.RawPath = ""
 	}
 
-	// Inject the authenticated user ID so backends don't need to decode the JWT.
-	// When CONDUCTOR_FORWARD_KEY is set, also inject an HMAC token so any
-	// forward_auth=false backend can verify X-User-ID was set by conductor.
 	if userID != "" {
 		r2.Header.Set("X-User-ID", userID)
 		if !svc.forwardAuth && conductorForwardKey != "" {
@@ -709,17 +718,14 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 			r2.Header.Set("X-Conductor-Timestamp", ts)
 		}
 	}
-
 	r2.Header.Set("X-Forwarded-For", sourceIP(r))
 
-	// Strip the bearer token before forwarding so backend services cannot replay
-	// it against other services. Services that need to re-verify the caller
-	// (e.g. gatekeeper itself) declare forward_auth=true in the registry.
+	// Services declaring forward_auth=true (e.g. gatekeeper) receive the
+	// original Bearer token. All others get it stripped to prevent replay.
 	if !svc.forwardAuth {
 		r2.Header.Del("Authorization")
 	}
-
-	svc.proxy.ServeHTTP(w, r2)
+	return r2
 }
 
 // handleServiceProxy is the universal handler. It uses hybrid routing:

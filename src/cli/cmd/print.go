@@ -45,6 +45,12 @@ var foreignKeyResolvers = map[string]resolverDef{
 // API lookups within a single render without caching across calls.
 var nameCache map[string]string
 
+// isForeignKeyField reports whether col is a foreign-key or user-reference
+// field whose UUID should be resolved to a human-readable name.
+func isForeignKeyField(col string) bool {
+	return strings.HasSuffix(col, "_id") || foreignKeyResolvers[col].path != ""
+}
+
 // resolvedNameForID returns a human-readable name for a UUID field value.
 // It checks the companion name field in obj first; if absent, makes an API call.
 func resolvedNameForID(field, uuid string, obj map[string]any) string {
@@ -143,7 +149,7 @@ func tableCellValue(col string, row map[string]any) string {
 
 	// Foreign key or user-reference field: resolve to name.
 	if uuid, ok := v.(string); ok && !primaryIDs[col] {
-		if strings.HasSuffix(col, "_id") || foreignKeyResolvers[col].path != "" {
+		if isForeignKeyField(col) {
 			if name := resolvedNameForID(col, uuid, row); name != "" {
 				if flagVerbose {
 					return truncate(name+" ("+uuid+")", 52)
@@ -185,7 +191,7 @@ func printRecord(obj map[string]any) {
 
 		// All *_id fields and user-reference fields (created_by, triggered_by, …).
 		uuid, isStr := val.(string)
-		if isStr && (strings.HasSuffix(k, "_id") || foreignKeyResolvers[k].path != "") {
+		if isStr && isForeignKeyField(k) {
 			// Suppress if a companion name field in this response already handles it.
 			if nameField, ok := pairedNameField[k]; ok {
 				if _, hasName := obj[nameField]; hasName {

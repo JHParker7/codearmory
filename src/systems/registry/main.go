@@ -26,8 +26,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/bcrypt"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 var (
@@ -101,14 +99,9 @@ func seedServiceAccounts(ctx context.Context, raw, role string) {
 		}
 
 		acct := ServiceAccountModel{AccountID: uuid.New().String(), Name: name, HashedKey: string(hash), Role: role}
-		result := connect().WithContext(ctx).
-			Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "name"}},
-				DoUpdates: clause.Assignments(map[string]any{"hashed_key": string(hash), "role": role, "updated_at": gorm.Expr("now()")}),
-			}).Create(&acct)
-		if result.Error != nil {
-			slog.Error("seedServiceAccounts: upsert failed", "name", name, "error", result.Error)
-		} else if result.RowsAffected > 0 {
+		if err := upsertServiceAccount(ctx, acct); err != nil {
+			slog.Error("seedServiceAccounts: upsert failed", "name", name, "error", err)
+		} else {
 			slog.Info("seedServiceAccounts: upserted", "name", name, "role", role)
 		}
 	}
@@ -141,8 +134,8 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("service.name", name))
 	slog.Info("rotate service key request", "service", name)
 
-	var acct ServiceAccountModel
-	if err := connect().WithContext(ctx).Where("name = ?", name).First(&acct).Error; err != nil {
+	acct, err := lookupServiceAccount(ctx, name)
+	if err != nil {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -177,9 +170,7 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := connect().WithContext(ctx).
-		Exec(`UPDATE registry_service_accounts SET hashed_key = ?, updated_at = now() WHERE name = ?`, string(newHash), name).
-		Error; err != nil {
+	if err := rotateServiceKeyDB(ctx, name, string(newHash)); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
 		slog.Error("rotate service key: db update failed", "service", name, "error", err)
@@ -237,99 +228,7 @@ func loadManifest(ctx context.Context, path string) {
 		return
 	}
 	for _, e := range entries {
-		hashedKey, err := hashServiceKey(e.ServiceKey)
-		if err != nil {
-			slog.Error("manifest: failed to hash service key", "name", e.Name, "error", err)
-			continue
-		}
-
-		db := connect().WithContext(ctx)
-		var svcModel ServiceModel
-		err = db.Where("name = ?", e.Name).First(&svcModel).Error
-		if err != nil {
-			svcModel = ServiceModel{
-				ServiceID:   uuid.New().String(),
-				Name:        e.Name,
-				URL:         e.URL,
-				Description: e.Description,
-				ForwardAuth: e.ForwardAuth,
-				ServiceKey:  hashedKey,
-			}
-			if err := db.Create(&svcModel).Error; err != nil {
-				slog.Error("manifest: failed to insert service", "name", e.Name, "error", err)
-				continue
-			}
-			slog.Info("manifest: service created", "name", e.Name)
-		} else {
-			if err := db.Exec(
-				`UPDATE services SET description = ?, forward_auth = ?, service_key = ?, active = true, updated_at = now() WHERE service_id = ?`,
-				e.Description, e.ForwardAuth, hashedKey, svcModel.ServiceID,
-			).Error; err != nil {
-				slog.Error("manifest: failed to update service", "name", e.Name, "error", err)
-				continue
-			}
-			slog.Info("manifest: service updated", "name", e.Name)
-		}
-		serviceID := svcModel.ServiceID
-		db.Exec(`DELETE FROM service_endpoints WHERE service_id = ?`, serviceID)       //nolint:errcheck
-		db.Exec(`DELETE FROM service_roles WHERE service_id = ?`, serviceID)           //nolint:errcheck
-		db.Exec(`DELETE FROM service_actions WHERE service_id = ?`, serviceID)         //nolint:errcheck
-		db.Exec(`DELETE FROM service_default_grants WHERE service_id = ?`, serviceID)  //nolint:errcheck
-		for _, ep := range e.Endpoints {
-			m := ServiceEndpointModel{
-				EndpointID: uuid.New().String(),
-				ServiceID:  serviceID,
-				Method:     ep.Method,
-				Path:       ep.Path,
-				Action:     ep.Action,
-				Resource:   ep.Resource,
-				Public:     ep.Public,
-			}
-			if err := db.Create(&m).Error; err != nil {
-				slog.Error("manifest: failed to insert endpoint", "service", e.Name, "path", ep.Path, "error", err)
-			}
-		}
-		slog.Info("manifest: endpoints registered", "name", e.Name, "count", len(e.Endpoints))
-		for _, a := range e.Actions {
-			if a.Name == "" || a.Method == "" || a.Path == "" {
-				continue
-			}
-			m := ServiceActionModel{
-				ActionID:       uuid.New().String(),
-				ServiceID:      serviceID,
-				Name:           a.Name,
-				Method:         a.Method,
-				Path:           a.Path,
-				BodyTransforms: jsonbBytes(a.BodyTransforms),
-				AsyncConfig:    jsonbBytes(a.Async),
-			}
-			if err := db.Create(&m).Error; err != nil {
-				slog.Error("manifest: failed to insert action", "service", e.Name, "action", a.Name, "error", err)
-			}
-		}
-		if len(e.Actions) > 0 {
-			slog.Info("manifest: actions registered", "name", e.Name, "count", len(e.Actions))
-		}
-		for _, g := range e.DefaultGrants {
-			if g.GrantOn == "" || len(g.Actions) == 0 || len(g.Resources) == 0 {
-				continue
-			}
-			actionsJSON, _ := json.Marshal(g.Actions)
-			resourcesJSON, _ := json.Marshal(g.Resources)
-			m := ServiceDefaultGrantModel{
-				GrantID:   uuid.New().String(),
-				ServiceID: serviceID,
-				GrantOn:   g.GrantOn,
-				Actions:   actionsJSON,
-				Resources: resourcesJSON,
-			}
-			if err := db.Create(&m).Error; err != nil {
-				slog.Error("manifest: failed to insert default grant", "service", e.Name, "grant_on", g.GrantOn, "error", err)
-			}
-		}
-		if len(e.DefaultGrants) > 0 {
-			slog.Info("manifest: default grants registered", "name", e.Name, "count", len(e.DefaultGrants))
-		}
+		loadManifestEntry(ctx, e)
 	}
 }
 
@@ -442,13 +341,8 @@ func main() {
 			}
 			name, svcURL := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 			svcModel := ServiceModel{ServiceID: uuid.New().String(), Name: name, URL: svcURL}
-			result := connect().WithContext(ctx).
-				Clauses(clause.OnConflict{
-					Columns:   []clause.Column{{Name: "name"}},
-					DoUpdates: clause.Assignments(map[string]any{"url": svcURL, "active": true, "updated_at": gorm.Expr("now()")}),
-				}).Create(&svcModel)
-			if result.Error != nil {
-				slog.Error("service seed failed", "name", name, "error", result.Error)
+			if err := upsertServiceModelByName(ctx, svcModel); err != nil {
+				slog.Error("service seed failed", "name", name, "error", err)
 			} else {
 				slog.Info("service seeded", "name", name)
 			}

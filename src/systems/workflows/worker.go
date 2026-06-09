@@ -203,63 +203,24 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 
 	slog.Info("worker: starting run", "run_id", runID, "workflow_id", workflowID)
 
-	wf, err := getWorkflow(runCtx, workflowID)
+	workflow, err := getWorkflow(runCtx, workflowID)
 	if err != nil {
 		slog.Error("worker: fetch workflow", "run_id", runID, "workflow_id", workflowID, "error", err)
 		p.failRun(runID, sessionID)
 		return
 	}
 
-	ts := newTokenStore(token, sessionID)
-
-	// Rotate the run token every 30–60 minutes so no single credential stays
-	// live for the full run duration. The old session is revoked after a 60 s
-	// grace period to avoid invalidating any in-flight step requests.
-	go func() {
-		for {
-			select {
-			case <-runCtx.Done():
-				return
-			case <-time.After(rotationInterval()):
-			}
-			newToken, newSID, err := createRunToken(runCtx, triggeredBy, wf.RoleID)
-			if err != nil {
-				slog.Warn("worker: token rotation failed", "run_id", runID, "error", err)
-				continue
-			}
-			encNewToken, err := encryptToken(newToken)
-			if err != nil {
-				slog.Warn("worker: token rotation encryption failed, discarding new token", "run_id", runID, "error", err)
-				revokeRunToken(context.Background(), newSID)
-				continue
-			}
-			if dbErr := connect().WithContext(runCtx).Exec(
-				"UPDATE workflow_runs SET token=?, run_session_id=? WHERE run_id=?",
-				encNewToken, newSID, runID,
-			).Error; dbErr != nil {
-				slog.Warn("worker: token rotation DB update failed, discarding new token", "run_id", runID, "error", dbErr)
-				revokeRunToken(context.Background(), newSID)
-				continue
-			}
-			oldSID := ts.swap(newToken, newSID)
-			slog.Info("worker: run token rotated", "run_id", runID)
-			go func(sid string) {
-				time.Sleep(60 * time.Second)
-				rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer rcancel()
-				revokeRunToken(rctx, sid)
-			}(oldSID)
-		}
-	}()
+	store := newTokenStore(token, sessionID)
+	go p.rotateToken(runCtx, store, runID, triggeredBy, workflow.RoleID)
 
 	finalStatus := StatusCompleted
-	for _, group := range groupSteps(wf.Steps) {
+	for _, group := range groupSteps(workflow.Steps) {
 		if runCtx.Err() != nil {
 			finalStatus = StatusCancelled
 			break
 		}
 
-		connect().WithContext(runCtx).Exec( //nolint:errcheck
+		connect().WithContext(runCtx).Exec( //nolint:errcheck — best-effort progress tracking; failure doesn't affect step execution
 			"UPDATE workflow_runs SET current_step=? WHERE run_id=?", group.indices[0], runID)
 
 		if len(group.steps) == 1 {
@@ -271,7 +232,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 				finalStatus = StatusFailed
 				break
 			}
-			output, stepErr := p.executeStep(runCtx, ts, ws.Step, inputs)
+			output, stepErr := p.executeStep(runCtx, store, ws.Step, inputs)
 			if stepErr != nil {
 				if errors.Is(stepErr, context.Canceled) {
 					p.finishStepRun(stepRunID, StatusCancelled, strPtr(stepErr.Error()))
@@ -315,17 +276,20 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		}
 
 		results := make(chan parallelResult, len(group.steps))
+		// sem is a counting semaphore: acquire by sending, release by receiving.
+		// The select allows a cancelled context to bypass the semaphore so the
+		// goroutine can exit immediately rather than blocking on a full channel.
 		sem := make(chan struct{}, maxParallelSteps)
 		for j, ws := range group.steps {
 			go func(j int, ws WorkflowStep) {
 				select {
-				case sem <- struct{}{}:
+				case sem <- struct{}{}: // acquire
 				case <-runCtx.Done():
 					results <- parallelResult{stepRunIDs[j], ws.Action, group.indices[j], "", context.Canceled}
 					return
 				}
-				defer func() { <-sem }()
-				out, err := p.executeStep(runCtx, ts, ws.Step, inputs)
+				defer func() { <-sem }() // release
+				out, err := p.executeStep(runCtx, store, ws.Step, inputs)
 				results <- parallelResult{stepRunIDs[j], ws.Action, group.indices[j], out, err}
 			}(j, ws)
 		}
@@ -365,19 +329,62 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		attribute.String("workflow.id", workflowID),
 		attribute.String("status", finalStatus),
 	))
-	connect().WithContext(context.Background()).Exec( //nolint:errcheck
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — if this fails the run stays in 'running'; the stuck-run recovery on next startup will fix it
 		"UPDATE workflow_runs SET status=?, ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
 		finalStatus, runID,
 	)
-	revokeRunToken(context.Background(), ts.getSessionID())
+	revokeRunToken(context.Background(), store.getSessionID())
 	slog.Info("worker: run finished", "run_id", runID, "status", finalStatus)
+}
+
+// rotateToken runs until ctx is cancelled, rotating the run credential every
+// 30–60 minutes so no single token stays live for the full run duration.
+// The outgoing session is revoked after a 60 s grace period to avoid
+// invalidating any in-flight step requests that still carry the old token.
+func (p *WorkerPool) rotateToken(ctx context.Context, store *tokenStore, runID, triggeredBy, roleID string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(rotationInterval()):
+		}
+		newToken, newSID, err := createRunToken(ctx, triggeredBy, roleID)
+		if err != nil {
+			slog.Warn("worker: token rotation failed", "run_id", runID, "error", err)
+			continue
+		}
+		encNewToken, err := encryptToken(newToken)
+		if err != nil {
+			slog.Warn("worker: token rotation encryption failed, discarding new token", "run_id", runID, "error", err)
+			revokeRunToken(context.Background(), newSID)
+			continue
+		}
+		if dbErr := connect().WithContext(ctx).Exec(
+			"UPDATE workflow_runs SET token=?, run_session_id=? WHERE run_id=?",
+			encNewToken, newSID, runID,
+		).Error; dbErr != nil {
+			slog.Warn("worker: token rotation DB update failed, discarding new token", "run_id", runID, "error", dbErr)
+			revokeRunToken(context.Background(), newSID)
+			continue
+		}
+		oldSID := store.swap(newToken, newSID)
+		slog.Info("worker: run token rotated", "run_id", runID)
+		go func(sid string) {
+			time.Sleep(60 * time.Second)
+			rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer rcancel()
+			revokeRunToken(rctx, sid)
+		}(oldSID)
+	}
 }
 
 // executeStep dispatches a step to either the http escape-hatch or the registry
 // action catalog. Returns the step output and a non-nil error on failure.
 // context.Canceled means the run was cancelled.
-func (p *WorkerPool) executeStep(ctx context.Context, ts *tokenStore, step Step, inputs map[string]string) (string, error) {
+func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step Step, inputs map[string]string) (string, error) {
 	with := substituteWith(step.With, inputs)
+	// Clamp to [defaultTimeout, maxTimeout]. Zero means "use default"; negative
+	// is treated the same way since a non-positive duration would fire immediately.
 	timeout := step.Timeout
 	if timeout <= 0 {
 		timeout = defaultTimeout
@@ -388,7 +395,7 @@ func (p *WorkerPool) executeStep(ctx context.Context, ts *tokenStore, step Step,
 	defer cancel()
 
 	if step.Action == ActionHTTP {
-		return p.executeHTTP(stepCtx, ts, with)
+		return p.executeHTTP(stepCtx, store, with)
 	}
 
 	actionCatalogMu.RLock()
@@ -397,12 +404,12 @@ func (p *WorkerPool) executeStep(ctx context.Context, ts *tokenStore, step Step,
 	if !ok {
 		return "", fmt.Errorf("unknown action %q — register it in the service catalog or use the http escape hatch", step.Action)
 	}
-	return p.executeAction(stepCtx, ts, def, with)
+	return p.executeAction(stepCtx, store, def, with)
 }
 
 // executeAction dispatches a catalog action: applies body transforms, sends the
 // HTTP request, then polls if the action is async.
-func (p *WorkerPool) executeAction(ctx context.Context, ts *tokenStore, def ActionDef, with map[string]any) (string, error) {
+func (p *WorkerPool) executeAction(ctx context.Context, store *tokenStore, def ActionDef, with map[string]any) (string, error) {
 	body := make(map[string]any, len(with))
 	for k, v := range with {
 		body[k] = v
@@ -440,7 +447,7 @@ func (p *WorkerPool) executeAction(ctx context.Context, ts *tokenStore, def Acti
 		return "", fmt.Errorf("build %s request: %w", def.Name, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if tok := ts.getToken(); tok != "" {
+	if tok := store.getToken(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 
@@ -474,12 +481,12 @@ func (p *WorkerPool) executeAction(ctx context.Context, ts *tokenStore, def Acti
 	if !ok || jobID == "" {
 		return "", fmt.Errorf("%s: async ID field %q is not a string", def.Name, def.Async.IDField)
 	}
-	return p.pollAction(ctx, ts, def, jobID)
+	return p.pollAction(ctx, store, def, jobID)
 }
 
 // pollAction polls the job status URL until a terminal state is reached or the
 // context is cancelled.
-func (p *WorkerPool) pollAction(ctx context.Context, ts *tokenStore, def ActionDef, jobID string) (string, error) {
+func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def ActionDef, jobID string) (string, error) {
 	interval := time.Duration(def.Async.PollIntervalSecs) * time.Second
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -499,7 +506,7 @@ func (p *WorkerPool) pollAction(ctx context.Context, ts *tokenStore, def ActionD
 		if err != nil {
 			return "", fmt.Errorf("build poll request: %w", err)
 		}
-		if tok := ts.getToken(); tok != "" {
+		if tok := store.getToken(); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 		}
 		resp, err := httpClient.Do(req)
@@ -574,7 +581,7 @@ func (p *WorkerPool) pollAction(ctx context.Context, ts *tokenStore, def ActionD
 
 // executeHTTP performs a raw HTTP call. All HTTP parameters come from With:
 // service, method, path, body (any), headers (map), expected_status (int).
-func (p *WorkerPool) executeHTTP(ctx context.Context, ts *tokenStore, with map[string]any) (string, error) {
+func (p *WorkerPool) executeHTTP(ctx context.Context, store *tokenStore, with map[string]any) (string, error) {
 	service := withString(with, "service")
 	serviceURLsMu.RLock()
 	baseURL, ok := serviceURLs[service]
@@ -608,7 +615,7 @@ func (p *WorkerPool) executeHTTP(ctx context.Context, ts *tokenStore, with map[s
 	if bodyReader != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if tok := ts.getToken(); tok != "" {
+	if tok := store.getToken(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	reservedHeaders := map[string]bool{
@@ -661,14 +668,14 @@ func (p *WorkerPool) startStepRun(runID, stepRunID string, index int, name strin
 }
 
 func (p *WorkerPool) finishStepRun(stepRunID, status string, output *string) {
-	connect().WithContext(context.Background()).Exec( //nolint:errcheck
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — step result is best-effort; run status is the authoritative record
 		`UPDATE workflow_step_runs SET status=?, response_body=?, ended_at=now() WHERE step_run_id=?`,
 		status, output, stepRunID,
 	)
 }
 
 func (p *WorkerPool) failRun(runID, sessionID string) {
-	connect().WithContext(context.Background()).Exec( //nolint:errcheck
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — stuck-run recovery will catch this on restart
 		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=?", runID,
 	)
 	revokeRunToken(context.Background(), sessionID)

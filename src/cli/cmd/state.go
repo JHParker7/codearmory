@@ -49,6 +49,8 @@ func init() {
 			if err != nil {
 				return err
 			}
+			// LOCK/UNLOCK are custom HTTP methods defined by the Terraform HTTP
+			// backend spec (hashicorp/go-tfe). They are not part of RFC 9110.
 			return apiCall("LOCK", "/state/"+args[0]+"/"+args[1], body)
 		},
 	}
