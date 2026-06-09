@@ -138,30 +138,11 @@ func (p *WorkerPool) loop(ctx context.Context) {
 }
 
 func (p *WorkerPool) tryOne(ctx context.Context) bool {
-	tx := connect().WithContext(ctx).Begin()
-	if tx.Error != nil {
+	pickup, err := dequeueRun(ctx)
+	if err != nil {
 		return false
 	}
-	defer tx.Rollback() //nolint:errcheck
-
-	type runPickup struct {
-		RunID        string
-		WorkflowID   string
-		Inputs       []byte
-		Token        string
-		RunSessionID string
-		TriggeredBy  string
-	}
-	var pickup runPickup
-	result := tx.Raw(`
-		SELECT run_id, workflow_id, inputs, token, run_session_id, triggered_by
-		FROM workflow_runs
-		WHERE status = 'pending'
-		ORDER BY created_at
-		LIMIT 1
-		FOR UPDATE SKIP LOCKED
-	`).Scan(&pickup)
-	if result.Error != nil || result.RowsAffected == 0 {
+	if pickup == nil {
 		return false
 	}
 
@@ -178,15 +159,6 @@ func (p *WorkerPool) tryOne(ctx context.Context) bool {
 			return false
 		}
 		pickup.Token = plainToken
-	}
-
-	if result := tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", pickup.RunID); result.RowsAffected == 0 {
-		slog.Warn("worker: status update matched no rows, skipping", "run_id", pickup.RunID)
-		return false
-	}
-	if err := tx.Commit().Error; err != nil {
-		slog.Error("worker: commit failed", "run_id", pickup.RunID, "error", err)
-		return false
 	}
 
 	p.executeRun(ctx, pickup.RunID, pickup.WorkflowID, pickup.Token, pickup.RunSessionID, pickup.TriggeredBy, inputs)
@@ -220,8 +192,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			break
 		}
 
-		connect().WithContext(runCtx).Exec( //nolint:errcheck — best-effort progress tracking; failure doesn't affect step execution
-			"UPDATE workflow_runs SET current_step=? WHERE run_id=?", group.indices[0], runID)
+		setRunCurrentStep(runCtx, runID, group.indices[0])
 
 		if len(group.steps) == 1 {
 			ws := group.steps[0]
@@ -329,10 +300,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		attribute.String("workflow.id", workflowID),
 		attribute.String("status", finalStatus),
 	))
-	connect().WithContext(context.Background()).Exec( //nolint:errcheck — if this fails the run stays in 'running'; the stuck-run recovery on next startup will fix it
-		"UPDATE workflow_runs SET status=?, ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
-		finalStatus, runID,
-	)
+	completeRun(context.Background(), runID, finalStatus)
 	revokeRunToken(context.Background(), store.getSessionID())
 	slog.Info("worker: run finished", "run_id", runID, "status", finalStatus)
 }
@@ -359,10 +327,7 @@ func (p *WorkerPool) rotateToken(ctx context.Context, store *tokenStore, runID, 
 			revokeRunToken(context.Background(), newSID)
 			continue
 		}
-		if dbErr := connect().WithContext(ctx).Exec(
-			"UPDATE workflow_runs SET token=?, run_session_id=? WHERE run_id=?",
-			encNewToken, newSID, runID,
-		).Error; dbErr != nil {
+		if dbErr := updateRunToken(ctx, runID, encNewToken, newSID); dbErr != nil {
 			slog.Warn("worker: token rotation DB update failed, discarding new token", "run_id", runID, "error", dbErr)
 			revokeRunToken(context.Background(), newSID)
 			continue
@@ -660,24 +625,15 @@ func substitute(s string, inputs map[string]string) string {
 }
 
 func (p *WorkerPool) startStepRun(runID, stepRunID string, index int, name string) error {
-	return connect().Exec(
-		`INSERT INTO workflow_step_runs (step_run_id, run_id, step_index, step_name, status, started_at)
-		 VALUES (?, ?, ?, ?, 'running', now())`,
-		stepRunID, runID, index, name,
-	).Error
+	return insertStepRun(runID, stepRunID, index, name)
 }
 
 func (p *WorkerPool) finishStepRun(stepRunID, status string, output *string) {
-	connect().WithContext(context.Background()).Exec( //nolint:errcheck — step result is best-effort; run status is the authoritative record
-		`UPDATE workflow_step_runs SET status=?, response_body=?, ended_at=now() WHERE step_run_id=?`,
-		status, output, stepRunID,
-	)
+	markStepRunDone(stepRunID, status, output)
 }
 
 func (p *WorkerPool) failRun(runID, sessionID string) {
-	connect().WithContext(context.Background()).Exec( //nolint:errcheck — stuck-run recovery will catch this on restart
-		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=?", runID,
-	)
+	markRunFailed(runID)
 	revokeRunToken(context.Background(), sessionID)
 	slog.Warn("worker: run failed before first step", "run_id", runID)
 }

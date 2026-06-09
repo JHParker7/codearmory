@@ -206,8 +206,8 @@ func handleInternalGetRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	var run WorkflowRun
-	if err := connect().WithContext(r.Context()).Where("run_id = ?", runID).First(&run).Error; err != nil {
+	run, err := getRun(r.Context(), runID)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
 		} else {

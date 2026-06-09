@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -470,5 +472,107 @@ func getStepRuns(ctx context.Context, runID string) ([]WorkflowStepRun, error) {
 		stepRuns = []WorkflowStepRun{}
 	}
 	return stepRuns, nil
+}
+
+// ── Worker helpers ────────────────────────────────────────────────────────────
+
+// workerRunPickup holds the fields claimed when dequeuing a pending workflow run.
+type workerRunPickup struct {
+	RunID        string
+	WorkflowID   string
+	Inputs       []byte
+	Token        string
+	RunSessionID string
+	TriggeredBy  string
+}
+
+// dequeueRun claims one pending workflow run using FOR UPDATE SKIP LOCKED,
+// transitions it to 'running', and returns its fields.
+// Returns nil, nil when the queue is empty or the row is taken by a peer worker.
+func dequeueRun(ctx context.Context) (*workerRunPickup, error) {
+	tx := connect().WithContext(ctx).Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var pickup workerRunPickup
+	result := tx.Raw(`
+		SELECT run_id, workflow_id, inputs, token, run_session_id, triggered_by
+		FROM workflow_runs
+		WHERE status = 'pending'
+		ORDER BY created_at
+		LIMIT 1
+		FOR UPDATE SKIP LOCKED
+	`).Scan(&pickup)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+
+	if r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", pickup.RunID); r.RowsAffected == 0 {
+		return nil, nil
+	}
+	if err := tx.Commit().Error; err != nil {
+		return nil, err
+	}
+	return &pickup, nil
+}
+
+// setRunCurrentStep records best-effort step progress for a running workflow.
+func setRunCurrentStep(ctx context.Context, runID string, step int) {
+	connect().WithContext(ctx).Exec( //nolint:errcheck — best-effort progress tracking; failure doesn't affect step execution
+		"UPDATE workflow_runs SET current_step=? WHERE run_id=?", step, runID)
+}
+
+// completeRun marks a workflow run with its final status and clears credentials.
+func completeRun(ctx context.Context, runID, status string) {
+	connect().WithContext(ctx).Exec( //nolint:errcheck — if this fails the run stays in 'running'; the stuck-run recovery on next startup will fix it
+		"UPDATE workflow_runs SET status=?, ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
+		status, runID)
+}
+
+// updateRunToken stores a newly-rotated token for an active run.
+func updateRunToken(ctx context.Context, runID, token, sessionID string) error {
+	return connect().WithContext(ctx).Exec(
+		"UPDATE workflow_runs SET token=?, run_session_id=? WHERE run_id=?",
+		token, sessionID, runID,
+	).Error
+}
+
+// insertStepRun records the start of a step execution.
+func insertStepRun(runID, stepRunID string, index int, name string) error {
+	return connect().Exec(
+		`INSERT INTO workflow_step_runs (step_run_id, run_id, step_index, step_name, status, started_at)
+		 VALUES (?, ?, ?, ?, 'running', now())`,
+		stepRunID, runID, index, name,
+	).Error
+}
+
+// markStepRunDone records a step's outcome. Best-effort; run status is authoritative.
+func markStepRunDone(stepRunID, status string, output *string) {
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — step result is best-effort; run status is the authoritative record
+		`UPDATE workflow_step_runs SET status=?, response_body=?, ended_at=now() WHERE step_run_id=?`,
+		status, output, stepRunID)
+}
+
+// markRunFailed transitions a run to 'failed'. Best-effort; stuck-run recovery will catch this on restart.
+func markRunFailed(runID string) {
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — stuck-run recovery will catch this on restart
+		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=?", runID)
+}
+
+// recoverStuckRunsDB marks any runs left in 'running' state as 'failed' on startup.
+func recoverStuckRunsDB() int64 {
+	result := connect().Exec(
+		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE status='running'",
+	)
+	if result.Error != nil {
+		slog.Error("startup: failed to recover stuck runs", "error", result.Error)
+		return 0
+	}
+	return result.RowsAffected
 }
 
