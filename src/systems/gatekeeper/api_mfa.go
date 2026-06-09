@@ -73,9 +73,7 @@ func handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Remove any previous unconfirmed enrollment before inserting a fresh one.
-	connect().WithContext(ctx).
-		Where("user_id = ? AND confirmed = ?", userID, false).
-		Delete(&TOTPCredential{})
+	deleteUnconfirmedTOTP(ctx, userID) //nolint:errcheck
 
 	cred := TOTPCredential{
 		CredentialID: uuid.New().String(),
@@ -203,17 +201,14 @@ func handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := connect().WithContext(ctx).
-		Model(&TOTPCredential{}).
-		Where("user_id = ? AND active = ?", userID, true).
-		Update("active", false)
-	if result.Error != nil {
-		span.RecordError(result.Error)
-		slog.Error("totp disable: db error", "user_id", userID, "error", result.Error)
+	n, dbErr := deactivateTOTP(ctx, userID)
+	if dbErr != nil {
+		span.RecordError(dbErr)
+		slog.Error("totp disable: db error", "user_id", userID, "error", dbErr)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if result.RowsAffected == 0 {
+	if n == 0 {
 		http.Error(w, "TOTP not enabled", http.StatusNotFound)
 		return
 	}
@@ -346,11 +341,8 @@ func consumeMFAPending(ctx context.Context, w http.ResponseWriter, token string)
 		http.Error(w, "MFA token expired", http.StatusUnauthorized)
 		return MFAPending{}, false
 	}
-	result := connect().WithContext(ctx).
-		Model(&MFAPending{}).
-		Where("token = ? AND used = ?", token, false).
-		Update("used", true)
-	if result.Error != nil || result.RowsAffected == 0 {
+	n, redeemErr := redeemMFAPending(ctx, token)
+	if redeemErr != nil || n == 0 {
 		http.Error(w, "invalid or expired MFA token", http.StatusUnauthorized)
 		return MFAPending{}, false
 	}
@@ -407,7 +399,7 @@ func newMFAPending(ctx context.Context, userID, oauthClientID, oauthRedirectURI,
 		OAuthState:       oauthState,
 		OAuthScope:       oauthScope,
 	}
-	if err := connect().WithContext(ctx).Create(&pending).Error; err != nil {
+	if err := pending.Add(ctx); err != nil {
 		return MFAPending{}, err
 	}
 	return pending, nil

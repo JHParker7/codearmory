@@ -864,7 +864,7 @@ func TestSeedServiceAccounts_CreatesNew(t *testing.T) {
 	})
 
 	t.Setenv("GATEKEEPER_SERVICES", name+"=bootstrapkey")
-	seedServiceAccounts(gormDB)
+	seedServiceAccounts(context.Background())
 
 	var svc ServiceAccount
 	if err := gormDB.Where("service_name = ?", name).First(&svc).Error; err != nil {
@@ -886,7 +886,7 @@ func TestSeedServiceAccounts_PreservesRotatedKey(t *testing.T) {
 
 	// First seed: create the account with the bootstrap key.
 	t.Setenv("GATEKEEPER_SERVICES", name+"=bootstrapkey")
-	seedServiceAccounts(gormDB)
+	seedServiceAccounts(context.Background())
 
 	// Simulate runtime key rotation: overwrite HashedKey with the rotated key's hash.
 	rotatedHash, err := bcrypt.GenerateFromPassword([]byte("rotatedkey"), 12)
@@ -900,7 +900,7 @@ func TestSeedServiceAccounts_PreservesRotatedKey(t *testing.T) {
 
 	// Second seed: simulates Gatekeeper restarting. HashedKey must be preserved;
 	// HashedBootstrapKey must be refreshed to the current bootstrap key.
-	seedServiceAccounts(gormDB)
+	seedServiceAccounts(context.Background())
 
 	var svc ServiceAccount
 	if err := gormDB.Where("service_name = ?", name).First(&svc).Error; err != nil {
