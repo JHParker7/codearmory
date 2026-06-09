@@ -88,15 +88,14 @@ var authStatusCmd = &cobra.Command{
 
 		switch {
 		case flagToken != "":
-			fmt.Printf("Token: %s... (--token flag)\n", flagToken[:min(20, len(flagToken))])
+			fmt.Println("Token: (set) (--token flag)")
 		case os.Getenv("CODEARMORY_TOKEN") != "":
-			t := os.Getenv("CODEARMORY_TOKEN")
-			fmt.Printf("Token: %s... (CODEARMORY_TOKEN)\n", t[:min(20, len(t))])
+			fmt.Println("Token: (set) (CODEARMORY_TOKEN)")
 		default:
 			if t, err := keyring.Get(keychainService, keychainAccount); err == nil && t != "" {
-				fmt.Printf("Token: %s... (keychain)\n", t[:min(20, len(t))])
-			} else if t := loadConfig().Token; t != "" {
-				fmt.Printf("Token: %s... (config file)\n", t[:min(20, len(t))])
+				fmt.Println("Token: (set) (keychain)")
+			} else if loadConfig().Token != "" {
+				fmt.Println("Token: (set) (config file)")
 			} else {
 				fmt.Println("Token: (not set — run `armory auth login`)")
 			}

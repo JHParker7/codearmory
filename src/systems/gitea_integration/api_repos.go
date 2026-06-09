@@ -17,9 +17,10 @@ func handleListRepos(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRepo", "gitea_integration/repos")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -59,9 +60,10 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createRepo", "gitea_integration/repos")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -108,9 +110,10 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRepo", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -122,6 +125,7 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -129,6 +133,7 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	repo, err := gitea.getRepo(ctx, owner, name, callerUsername)
 	if err != nil {
 		if isNotFoundErr(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
@@ -153,9 +158,10 @@ func handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteRepo", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -167,12 +173,14 @@ func handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
 	if err := gitea.deleteRepo(ctx, owner, name, callerUsername); err != nil {
 		if isNotFoundErr(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
@@ -197,9 +205,10 @@ func handleListBranches(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listBranch", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -211,6 +220,7 @@ func handleListBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -218,6 +228,7 @@ func handleListBranches(w http.ResponseWriter, r *http.Request) {
 	branches, err := gitea.listBranches(ctx, owner, name, callerUsername)
 	if err != nil {
 		if isNotFoundErr(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
@@ -242,9 +253,10 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTag", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -256,6 +268,7 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -263,6 +276,7 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 	tags, err := gitea.listTags(ctx, owner, name, callerUsername)
 	if err != nil {
 		if isNotFoundErr(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
@@ -287,9 +301,10 @@ func handleListReleases(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRelease", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -301,6 +316,7 @@ func handleListReleases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -308,6 +324,7 @@ func handleListReleases(w http.ResponseWriter, r *http.Request) {
 	releases, err := gitea.listReleases(ctx, owner, name, callerUsername)
 	if err != nil {
 		if isNotFoundErr(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
@@ -332,9 +349,10 @@ func handleListCommits(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listCommit", "gitea_integration/repos/"+owner+"/"+name)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -346,6 +364,7 @@ func handleListCommits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -362,6 +381,7 @@ func handleListCommits(w http.ResponseWriter, r *http.Request) {
 	commits, err := gitea.listCommits(ctx, owner, name, callerUsername, page, limit)
 	if err != nil {
 		if isNotFoundErr(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}

@@ -120,7 +120,7 @@ func handleV2(w http.ResponseWriter, r *http.Request) {
 	r.Header.Set("Authorization", "Bearer "+token)
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, action, resource)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 

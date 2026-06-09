@@ -32,7 +32,7 @@ func handleListTeams(w http.ResponseWriter, r *http.Request) {
 	slog.Info("list teams request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listTeam", "gatekeeper/teams") {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -95,7 +95,7 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	slog.Info("create team request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "createTeam", "gatekeeper/teams") {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -247,7 +247,7 @@ func handleGetTeam(w http.ResponseWriter, r *http.Request) {
 	slog.Info("get team request", "caller_id", callerID, "team_id", id)
 
 	if !requirePermission(w, r, "getTeam", "gatekeeper/teams/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -281,7 +281,7 @@ func handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	slog.Info("update team request", "caller_id", callerID, "team_id", id)
 
 	if !requirePermission(w, r, "updateTeam", "gatekeeper/teams/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -346,7 +346,7 @@ func handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
 	slog.Info("delete team request", "caller_id", callerID, "team_id", id)
 
 	if !requirePermission(w, r, "deleteTeam", "gatekeeper/teams/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")

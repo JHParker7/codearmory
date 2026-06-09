@@ -21,6 +21,9 @@ import (
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -119,27 +122,37 @@ var rotationMu sync.Map
 // The client must present its current key to authenticate; on success it must
 // immediately start using the returned key for all subsequent requests.
 func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("registry").Start(r.Context(), "handleRotateServiceKey")
+	defer span.End()
+
 	header := r.Header.Get("X-Service-Key")
 	if header == "" {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "missing X-Service-Key header", http.StatusUnauthorized)
 		return
 	}
 	idx := strings.Index(header, ":")
 	if idx < 1 {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "invalid X-Service-Key format, expected name:key", http.StatusUnauthorized)
 		return
 	}
 	name, key := header[:idx], header[idx+1:]
+	span.SetAttributes(attribute.String("service.name", name))
+	slog.Info("rotate service key request", "service", name)
 
 	var acct ServiceAccountModel
-	if err := connect().WithContext(r.Context()).Where("name = ?", name).First(&acct).Error; err != nil {
+	if err := connect().WithContext(ctx).Where("name = ?", name).First(&acct).Error; err != nil {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(acct.HashedKey), []byte(key)) != nil {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	span.AddEvent("auth.verified")
 
 	val, _ := rotationMu.LoadOrStore(name, &sync.Mutex{})
 	mu := val.(*sync.Mutex)
@@ -148,6 +161,8 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "rand failed")
 		slog.Error("rotate service key: rand failed", "service", name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -155,19 +170,25 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	newKey := hex.EncodeToString(raw)
 	newHash, err := bcrypt.GenerateFromPassword([]byte(newKey), 12)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "bcrypt failed")
 		slog.Error("rotate service key: bcrypt failed", "service", name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	if err := connect().WithContext(r.Context()).
+	if err := connect().WithContext(ctx).
 		Exec(`UPDATE registry_service_accounts SET hashed_key = ?, updated_at = now() WHERE name = ?`, string(newHash), name).
 		Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db update failed")
 		slog.Error("rotate service key: db update failed", "service", name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	span.AddEvent("db.write", trace.WithAttributes(attribute.String("service.name", name)))
 
+	span.SetStatus(codes.Ok, "")
 	slog.Info("registry service key rotated", "service", name)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"key": newKey}) //nolint:errcheck
@@ -316,9 +337,11 @@ func notifyService(ctx context.Context, name, target, key string) {
 	if target == "" || key == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	nctx, span := otel.Tracer("registry").Start(ctx, "notify."+name)
+	defer span.End()
+	nctx, cancel := context.WithTimeout(nctx, 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, nil)
+	req, err := http.NewRequestWithContext(nctx, http.MethodPost, target, nil)
 	if err != nil {
 		slog.Warn(name+" notify: failed to create request", "error", err)
 		return
@@ -448,6 +471,7 @@ func main() {
 
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
 	mux.HandleFunc("GET /system_health", handleSystemHealth)
 	mux.HandleFunc("GET /services", handleListServices)
 	mux.HandleFunc("POST /services", handleCreateService)

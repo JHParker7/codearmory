@@ -25,9 +25,10 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createComment", "tickets/tickets/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -36,14 +37,18 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 	t, err := getTicket(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
 		slog.Error("add comment: get ticket", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
 	if !canAccessTicket(t, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return
 	}
@@ -97,9 +102,10 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 	commentID := r.PathValue("comment_id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteComment", "tickets/tickets/"+ticketID+"/comments/"+commentID)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -108,14 +114,18 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 	t, err := getTicket(ctx, ticketID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
 		slog.Error("delete comment: get ticket", "ticket_id", ticketID, "user_id", userID, "error", err)
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
 	if !canAccessTicket(t, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return
 	}
@@ -124,15 +134,19 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 	existing, err := getComment(ctx, commentID, ticketID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "comment not found", http.StatusNotFound)
 			return
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
 		slog.Error("delete comment: lookup", "comment_id", commentID, "user_id", userID, "error", err)
 		http.Error(w, "failed to get comment", http.StatusInternalServerError)
 		return
 	}
 	// Ticket owners/org-members can moderate; author can always delete their own.
 	if existing.AuthorID != userID && !canAccessTicket(t, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

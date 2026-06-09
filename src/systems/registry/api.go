@@ -796,7 +796,10 @@ type serviceHealth struct {
 // calls /healthz on each concurrently, and caches the results for handleSystemHealth.
 func startHealthCollector(ctx context.Context) {
 	collect := func() {
-		healthRows, err := connect().WithContext(ctx).Raw(`SELECT name, url FROM services WHERE active = true`).Rows()
+		cctx, cspan := otel.Tracer("registry").Start(ctx, "health.collect")
+		defer cspan.End()
+
+		healthRows, err := connect().WithContext(cctx).Raw(`SELECT name, url FROM services WHERE active = true`).Rows()
 		if err != nil {
 			slog.Warn("health collector: db query failed", "error", err)
 			return
@@ -818,7 +821,7 @@ func startHealthCollector(ctx context.Context) {
 			wg.Add(1)
 			go func(name, svcURL string) {
 				defer wg.Done()
-				hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				hctx, cancel := context.WithTimeout(cctx, 5*time.Second)
 				defer cancel()
 				now := time.Now().UTC()
 				req, err := http.NewRequestWithContext(hctx, http.MethodGet, svcURL+"/healthz", nil)

@@ -63,7 +63,7 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 	slog.Info("create permissions request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "createPermissions", "gatekeeper/permissions") {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -156,7 +156,7 @@ func handleGetPermissions(w http.ResponseWriter, r *http.Request) {
 	slog.Info("get permissions request", "caller_id", callerID, "permissions_id", id)
 
 	if !requirePermission(w, r, "getPermissions", "gatekeeper/permissions/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -190,7 +190,7 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 	slog.Info("update permissions request", "caller_id", callerID, "permissions_id", id)
 
 	if !requirePermission(w, r, "updatePermissions", "gatekeeper/permissions/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -254,7 +254,7 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 		callerOrgID = callerRow.(User).OrgID
 	}
 	if p.OrgID != nil && (callerOrgID == nil || *p.OrgID != *callerOrgID) {
-		span.SetStatus(codes.Error, "forbidden: cross-org update")
+		span.SetStatus(codes.Ok, "")
 		slog.Warn("update permissions: cross-org attempt", "caller_id", callerID, "permissions_id", id)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -297,7 +297,7 @@ func handleDeletePermissions(w http.ResponseWriter, r *http.Request) {
 	slog.Info("delete permissions request", "caller_id", callerID, "permissions_id", id)
 
 	if !requirePermission(w, r, "deletePermissions", "gatekeeper/permissions/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -318,7 +318,7 @@ func handleDeletePermissions(w http.ResponseWriter, r *http.Request) {
 		callerOrgID = callerRow.(User).OrgID
 	}
 	if p.OrgID != nil && (callerOrgID == nil || *p.OrgID != *callerOrgID) {
-		span.SetStatus(codes.Error, "forbidden: cross-org delete")
+		span.SetStatus(codes.Ok, "")
 		slog.Warn("delete permissions: cross-org attempt", "caller_id", callerID, "permissions_id", id)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return

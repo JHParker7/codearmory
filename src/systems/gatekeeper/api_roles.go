@@ -14,6 +14,7 @@ import (
 )
 
 type roleRequest struct {
+	Name           string   `json:"name"`
 	PermissionsIDs []string `json:"permissions_ids"`
 	OrgID          *string  `json:"org_id"`
 }
@@ -28,7 +29,7 @@ func handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	slog.Info("create role request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "createRole", "gatekeeper/roles") {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -61,7 +62,7 @@ func handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role := Role{RoleID: uuid.New().String(), PermissionsIDs: req.PermissionsIDs, OrgID: orgID, OwnerID: callerID}
+	role := Role{RoleID: uuid.New().String(), Name: req.Name, PermissionsIDs: req.PermissionsIDs, OrgID: orgID, OwnerID: callerID}
 	if err := role.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
@@ -97,7 +98,7 @@ func handleGetRole(w http.ResponseWriter, r *http.Request) {
 	slog.Info("get role request", "caller_id", callerID, "role_id", id)
 
 	if !requirePermission(w, r, "getRole", "gatekeeper/roles/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -131,7 +132,7 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	slog.Info("update role request", "caller_id", callerID, "role_id", id)
 
 	if !requirePermission(w, r, "updateRole", "gatekeeper/roles/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -172,9 +173,12 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	role.PermissionsIDs = req.PermissionsIDs
+	if req.Name != "" {
+		role.Name = req.Name
+	}
 	if req.OrgID != nil {
 		if callerOrgID == nil || *req.OrgID != *callerOrgID {
-			span.SetStatus(codes.Error, "forbidden")
+			span.SetStatus(codes.Ok, "")
 			slog.Warn("update role: org_id does not match caller's org", "caller_id", callerID, "role_id", id)
 			http.Error(w, "org_id must match caller's org", http.StatusForbidden)
 			return
@@ -214,7 +218,7 @@ func handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	slog.Info("delete role request", "caller_id", callerID, "role_id", id)
 
 	if !requirePermission(w, r, "deleteRole", "gatekeeper/roles/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -253,4 +257,62 @@ func handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	slog.Info("delete role: success", "caller_id", callerID, "role_id", id)
 	writeAudit(ctx, callerID, "user", "role.delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func handleListRoles(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleListRoles")
+	defer span.End()
+	r = r.WithContext(ctx)
+
+	callerID, _ := ctx.Value(userIDKey).(string)
+	span.SetAttributes(attribute.String("caller.id", callerID))
+	slog.Info("list roles request", "caller_id", callerID)
+
+	if !requirePermission(w, r, "listRole", "gatekeeper/roles") {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	span.AddEvent("permission.granted")
+
+	limit, offset, ok := parsePagination(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "invalid pagination")
+		return
+	}
+
+	// Scope to the caller's org.
+	var callerOrgID *string
+	if callerRow, err := (User{UserID: callerID}).Get(ctx); err == nil {
+		callerOrgID = callerRow.(User).OrgID
+	}
+
+	q := r.URL.Query()
+	var filter Role
+	filter.OrgID = callerOrgID
+	if v := q.Get("role_id"); v != "" {
+		filter.RoleID = v
+	}
+	if v := q.Get("name"); v != "" {
+		filter.Name = v
+	}
+	if v := q.Get("owner_id"); v != "" {
+		filter.OwnerID = v
+	}
+
+	rows, err := filter.List(ctx, limit, offset)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "list roles failed")
+		slog.Warn("list roles: db error", "caller_id", callerID, "error", err)
+		http.Error(w, "failed to list roles", http.StatusInternalServerError)
+		return
+	}
+	roles := make([]Role, len(rows))
+	for i, row := range rows {
+		roles[i] = row.(Role)
+	}
+	span.SetStatus(codes.Ok, "")
+	slog.Info("list roles: success", "caller_id", callerID, "count", len(roles))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(roles) //nolint:errcheck
 }

@@ -59,9 +59,10 @@ func handleCreateStep(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createStep", "workflows/steps")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -87,6 +88,7 @@ func handleCreateStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if exists {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "a step with that name already exists", http.StatusConflict)
 		return
 	}
@@ -132,9 +134,10 @@ func handleListSteps(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listStep", "workflows/steps")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -161,9 +164,10 @@ func handleGetStep(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getStep", "workflows/steps/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -172,6 +176,7 @@ func handleGetStep(w http.ResponseWriter, r *http.Request) {
 	s, err := getStep(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "step not found", http.StatusNotFound)
 			return
 		}
@@ -181,6 +186,7 @@ func handleGetStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessStep(s, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "step not found", http.StatusNotFound)
 		return
 	}
@@ -197,9 +203,10 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateStep", "workflows/steps/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -208,14 +215,18 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 	existing, err := getStep(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "step not found", http.StatusNotFound)
 			return
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
 		slog.Error("update step: fetch error", "step_id", id, "error", err)
 		http.Error(w, "failed to get step", http.StatusInternalServerError)
 		return
 	}
 	if !canAccessStep(existing, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "step not found", http.StatusNotFound)
 		return
 	}
@@ -270,9 +281,10 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteStep", "workflows/steps/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -281,6 +293,7 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 	s, err := getStep(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "step not found", http.StatusNotFound)
 			return
 		}
@@ -290,6 +303,7 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessStep(s, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "step not found", http.StatusNotFound)
 		return
 	}

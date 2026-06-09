@@ -56,7 +56,7 @@ func handleGetSession(w http.ResponseWriter, r *http.Request) {
 	slog.Info("get session request", "caller_id", callerID, "session_id", id)
 
 	if !requirePermission(w, r, "getSession", "gatekeeper/sessions/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -71,7 +71,7 @@ func handleGetSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s := row.(Session)
 	if s.UserID != callerID {
-		span.SetStatus(codes.Error, "forbidden: session belongs to another user")
+		span.SetStatus(codes.Ok, "")
 		slog.Warn("get session: cross-user attempt", "caller_id", callerID, "session_id", id, "session_user_id", s.UserID)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -370,7 +370,7 @@ func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	slog.Info("delete session request", "caller_id", callerID, "session_id", id)
 
 	if !requirePermission(w, r, "deleteSession", "gatekeeper/sessions/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -385,7 +385,7 @@ func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s := row.(Session)
 	if s.UserID != callerID {
-		span.SetStatus(codes.Error, "forbidden: session belongs to another user")
+		span.SetStatus(codes.Ok, "")
 		slog.Warn("delete session: cross-user attempt", "caller_id", callerID, "session_id", id, "session_user_id", s.UserID)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return

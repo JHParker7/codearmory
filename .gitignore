@@ -38,3 +38,4 @@ load-tests/package-lock.json
 
 # Local security notes — never commit
 SECURITY_FINDINGS.md
+scripts/setup-pipeline.sh

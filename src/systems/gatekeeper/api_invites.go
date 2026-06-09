@@ -91,7 +91,7 @@ func handleListInvites(w http.ResponseWriter, r *http.Request) {
 	slog.Info("list invites request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listInvite", "gatekeeper/invites") {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -155,7 +155,7 @@ func handleCreateOrgInvite(w http.ResponseWriter, r *http.Request) {
 	slog.Info("create org invite request", "caller_id", callerID, "org_id", id)
 
 	if !requirePermission(w, r, "inviteUser", "gatekeeper/orgs/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -185,7 +185,7 @@ func handleCreateTeamInvite(w http.ResponseWriter, r *http.Request) {
 	slog.Info("create team invite request", "caller_id", callerID, "team_id", id)
 
 	if !requirePermission(w, r, "inviteUser", "gatekeeper/teams/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -290,7 +290,7 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	caller := callerRow.(User)
 	if caller.Email != invite.InviteeEmail {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		slog.Warn("accept invite: caller is not invitee", "caller_id", callerID, "invite_id", id)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -451,7 +451,7 @@ func handleDeclineInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	caller := callerRow.(User)
 	if caller.Email != invite.InviteeEmail {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		slog.Warn("decline invite: caller is not invitee", "caller_id", callerID, "invite_id", id)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -502,7 +502,7 @@ func handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
 	invite := row.(Invite)
 
 	if callerID != invite.InviterID {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		slog.Warn("delete invite: caller is not inviter", "caller_id", callerID, "invite_id", id)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return

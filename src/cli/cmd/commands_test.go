@@ -58,16 +58,16 @@ func TestUsersCmd_List_RunE(t *testing.T) {
 }
 
 func TestUsersCmd_Get_RunE(t *testing.T) {
-	srv, rec := recordingServer(t, http.StatusOK, `{"id":"abc"}`)
+	srv, rec := recordingServer(t, http.StatusOK, `{"user_id":"`+testUUID+`"}`)
 	setupCLI(t, srv)
 	silenceStdout(t)
 
 	sub := findSubcmd(t, usersCmd, "get")
-	if err := sub.RunE(sub, []string{"abc"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("users get: %v", err)
 	}
-	if rec.Path != "/users/abc" {
-		t.Errorf("path = %q, want /users/abc", rec.Path)
+	if rec.Path != "/users/"+testUUID {
+		t.Errorf("path = %q, want /users/%s", rec.Path, testUUID)
 	}
 }
 
@@ -77,11 +77,11 @@ func TestUsersCmd_Update_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, usersCmd, "update")
-	sub.Flags().Set("data", `{"username":"newname"}`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"uid-1"}); err != nil {
+	sub.Flags().Set("username", "newname") //nolint:errcheck
+	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("users update: %v", err)
 	}
-	if rec.Method != "PUT" || rec.Path != "/users/uid-1" {
+	if rec.Method != "PUT" || rec.Path != "/users/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "newname") {
@@ -89,15 +89,19 @@ func TestUsersCmd_Update_RunE(t *testing.T) {
 	}
 }
 
-func TestUsersCmd_Update_InvalidData_RunE(t *testing.T) {
+func TestUsersCmd_Update_NoFlags_RunE(t *testing.T) {
 	srv, _ := recordingServer(t, http.StatusOK, `{}`)
 	setupCLI(t, srv)
 	silenceStdout(t)
 
 	sub := findSubcmd(t, usersCmd, "update")
-	sub.Flags().Set("data", `not json`) //nolint:errcheck
+	sub.Flags().Set("username", "")  //nolint:errcheck
+	sub.Flags().Set("email", "")     //nolint:errcheck
+	sub.Flags().Set("firstname", "") //nolint:errcheck
+	sub.Flags().Set("lastname", "")  //nolint:errcheck
+	sub.Flags().Set("password", "")  //nolint:errcheck
 	if err := sub.RunE(sub, []string{"uid-1"}); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
+		t.Fatal("expected error when no flags provided, got nil")
 	}
 }
 
@@ -107,10 +111,10 @@ func TestUsersCmd_Delete_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, usersCmd, "delete")
-	if err := sub.RunE(sub, []string{"uid-del"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("users delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/users/uid-del" {
+	if rec.Method != "DELETE" || rec.Path != "/users/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -204,16 +208,16 @@ func TestOrgsCmd_List_RunE(t *testing.T) {
 }
 
 func TestOrgsCmd_Get_RunE(t *testing.T) {
-	srv, rec := recordingServer(t, http.StatusOK, `{"id":"org1"}`)
+	srv, rec := recordingServer(t, http.StatusOK, `{"org_id":"`+testUUID+`"}`)
 	setupCLI(t, srv)
 	silenceStdout(t)
 
 	sub := findSubcmd(t, orgsCmd, "get")
-	if err := sub.RunE(sub, []string{"org1"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("orgs get: %v", err)
 	}
-	if rec.Path != "/orgs/org1" {
-		t.Errorf("path = %q, want /orgs/org1", rec.Path)
+	if rec.Path != "/orgs/"+testUUID {
+		t.Errorf("path = %q, want /orgs/%s", rec.Path, testUUID)
 	}
 }
 
@@ -223,8 +227,7 @@ func TestOrgsCmd_Create_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, orgsCmd, "create")
-	sub.Flags().Set("data", `{"name":"acme"}`) //nolint:errcheck
-	if err := sub.RunE(sub, nil); err != nil {
+	if err := sub.RunE(sub, []string{"acme"}); err != nil {
 		t.Fatalf("orgs create: %v", err)
 	}
 	if rec.Method != "POST" || rec.Path != "/orgs" {
@@ -235,42 +238,20 @@ func TestOrgsCmd_Create_RunE(t *testing.T) {
 	}
 }
 
-func TestOrgsCmd_Create_InvalidData_RunE(t *testing.T) {
-	srv, _ := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	sub := findSubcmd(t, orgsCmd, "create")
-	sub.Flags().Set("data", `{bad json}`) //nolint:errcheck
-	if err := sub.RunE(sub, nil); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
-	}
-}
-
 func TestOrgsCmd_Update_RunE(t *testing.T) {
 	srv, rec := recordingServer(t, http.StatusOK, `{}`)
 	setupCLI(t, srv)
 	silenceStdout(t)
 
 	sub := findSubcmd(t, orgsCmd, "update")
-	sub.Flags().Set("data", `{"name":"renamed"}`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"org2"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID, "renamed"}); err != nil {
 		t.Fatalf("orgs update: %v", err)
 	}
-	if rec.Method != "PUT" || rec.Path != "/orgs/org2" {
+	if rec.Method != "PUT" || rec.Path != "/orgs/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
-}
-
-func TestOrgsCmd_Update_InvalidData_RunE(t *testing.T) {
-	srv, _ := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	sub := findSubcmd(t, orgsCmd, "update")
-	sub.Flags().Set("data", `not json`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"org2"}); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
+	if !strings.Contains(string(rec.Body), "renamed") {
+		t.Errorf("body missing org name: %q", rec.Body)
 	}
 }
 
@@ -280,10 +261,10 @@ func TestOrgsCmd_Delete_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, orgsCmd, "delete")
-	if err := sub.RunE(sub, []string{"org-del"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("orgs delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/orgs/org-del" {
+	if rec.Method != "DELETE" || rec.Path != "/orgs/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -294,27 +275,14 @@ func TestOrgsCmd_Invite_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, orgsCmd, "invite")
-	sub.Flags().Set("data", `{"user_id":"u9"}`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"org3"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID, "user@example.com"}); err != nil {
 		t.Fatalf("orgs invite: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/orgs/org3/invites" {
+	if rec.Method != "POST" || rec.Path != "/orgs/"+testUUID+"/invites" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
-	if !strings.Contains(string(rec.Body), "u9") {
-		t.Errorf("body missing user_id: %q", rec.Body)
-	}
-}
-
-func TestOrgsCmd_Invite_InvalidData_RunE(t *testing.T) {
-	srv, _ := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	sub := findSubcmd(t, orgsCmd, "invite")
-	sub.Flags().Set("data", `not json`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"org3"}); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
+	if !strings.Contains(string(rec.Body), "user@example.com") {
+		t.Errorf("body missing email: %q", rec.Body)
 	}
 }
 
@@ -335,16 +303,16 @@ func TestTeamsCmd_List_RunE(t *testing.T) {
 }
 
 func TestTeamsCmd_Get_RunE(t *testing.T) {
-	srv, rec := recordingServer(t, http.StatusOK, `{"id":"t1"}`)
+	srv, rec := recordingServer(t, http.StatusOK, `{"team_id":"`+testUUID+`"}`)
 	setupCLI(t, srv)
 	silenceStdout(t)
 
 	sub := findSubcmd(t, teamsCmd, "get")
-	if err := sub.RunE(sub, []string{"t1"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("teams get: %v", err)
 	}
-	if rec.Path != "/teams/t1" {
-		t.Errorf("path = %q", rec.Path)
+	if rec.Path != "/teams/"+testUUID {
+		t.Errorf("path = %q, want /teams/%s", rec.Path, testUUID)
 	}
 }
 
@@ -354,8 +322,7 @@ func TestTeamsCmd_Create_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, teamsCmd, "create")
-	sub.Flags().Set("data", `{"name":"backend"}`) //nolint:errcheck
-	if err := sub.RunE(sub, nil); err != nil {
+	if err := sub.RunE(sub, []string{"backend"}); err != nil {
 		t.Fatalf("teams create: %v", err)
 	}
 	if rec.Method != "POST" || rec.Path != "/teams" {
@@ -366,42 +333,20 @@ func TestTeamsCmd_Create_RunE(t *testing.T) {
 	}
 }
 
-func TestTeamsCmd_Create_InvalidData_RunE(t *testing.T) {
-	srv, _ := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	sub := findSubcmd(t, teamsCmd, "create")
-	sub.Flags().Set("data", `{bad}`) //nolint:errcheck
-	if err := sub.RunE(sub, nil); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
-	}
-}
-
 func TestTeamsCmd_Update_RunE(t *testing.T) {
 	srv, rec := recordingServer(t, http.StatusOK, `{}`)
 	setupCLI(t, srv)
 	silenceStdout(t)
 
 	sub := findSubcmd(t, teamsCmd, "update")
-	sub.Flags().Set("data", `{"name":"frontend"}`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"tid-1"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID, "frontend"}); err != nil {
 		t.Fatalf("teams update: %v", err)
 	}
-	if rec.Method != "PUT" || rec.Path != "/teams/tid-1" {
+	if rec.Method != "PUT" || rec.Path != "/teams/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
-}
-
-func TestTeamsCmd_Update_InvalidData_RunE(t *testing.T) {
-	srv, _ := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	sub := findSubcmd(t, teamsCmd, "update")
-	sub.Flags().Set("data", `bad`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"tid-1"}); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
+	if !strings.Contains(string(rec.Body), "frontend") {
+		t.Errorf("body missing team name: %q", rec.Body)
 	}
 }
 
@@ -411,10 +356,10 @@ func TestTeamsCmd_Delete_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, teamsCmd, "delete")
-	if err := sub.RunE(sub, []string{"tid-del"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("teams delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/teams/tid-del" {
+	if rec.Method != "DELETE" || rec.Path != "/teams/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -425,39 +370,29 @@ func TestTeamsCmd_Invite_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, teamsCmd, "invite")
-	sub.Flags().Set("data", `{"user_id":"u7"}`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"tid-2"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID, "user@example.com"}); err != nil {
 		t.Fatalf("teams invite: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/teams/tid-2/invites" {
+	if rec.Method != "POST" || rec.Path != "/teams/"+testUUID+"/invites" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
-}
-
-func TestTeamsCmd_Invite_InvalidData_RunE(t *testing.T) {
-	srv, _ := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	sub := findSubcmd(t, teamsCmd, "invite")
-	sub.Flags().Set("data", `not json`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"tid-2"}); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
+	if !strings.Contains(string(rec.Body), "user@example.com") {
+		t.Errorf("body missing email: %q", rec.Body)
 	}
 }
 
 // ── Roles command RunE ────────────────────────────────────────────────────────
 
 func TestRolesCmd_Get_RunE(t *testing.T) {
-	srv, rec := recordingServer(t, http.StatusOK, `{"id":"r1"}`)
+	srv, rec := recordingServer(t, http.StatusOK, `{"role_id":"`+testUUID+`","name":"myrole"}`)
 	setupCLI(t, srv)
 	silenceStdout(t)
 
 	sub := findSubcmd(t, rolesCmd, "get")
-	if err := sub.RunE(sub, []string{"r1"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("roles get: %v", err)
 	}
-	if rec.Path != "/roles/r1" {
+	if rec.Path != "/roles/"+testUUID {
 		t.Errorf("path = %q", rec.Path)
 	}
 }
@@ -468,27 +403,29 @@ func TestRolesCmd_Create_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, rolesCmd, "create")
-	sub.Flags().Set("data", `{"name":"admin"}`) //nolint:errcheck
+	sub.Flags().Set("permission", "perm-abc") //nolint:errcheck
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("roles create: %v", err)
 	}
 	if rec.Method != "POST" || rec.Path != "/roles" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
-	if !strings.Contains(string(rec.Body), "admin") {
-		t.Errorf("body missing role name: %q", rec.Body)
+	if !strings.Contains(string(rec.Body), "perm-abc") {
+		t.Errorf("body missing permission id: %q", rec.Body)
 	}
 }
 
-func TestRolesCmd_Create_InvalidData_RunE(t *testing.T) {
-	srv, _ := recordingServer(t, http.StatusOK, `{}`)
+func TestRolesCmd_Create_NoPerms_RunE(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusCreated, `{}`)
 	setupCLI(t, srv)
 	silenceStdout(t)
 
 	sub := findSubcmd(t, rolesCmd, "create")
-	sub.Flags().Set("data", `{bad}`) //nolint:errcheck
-	if err := sub.RunE(sub, nil); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
+	if err := sub.RunE(sub, nil); err != nil {
+		t.Fatalf("roles create (no perms): %v", err)
+	}
+	if rec.Method != "POST" || rec.Path != "/roles" {
+		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
 
@@ -498,24 +435,15 @@ func TestRolesCmd_Update_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, rolesCmd, "update")
-	sub.Flags().Set("data", `{"name":"viewer"}`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"rid-1"}); err != nil {
+	sub.Flags().Set("permission", "perm-xyz") //nolint:errcheck
+	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("roles update: %v", err)
 	}
-	if rec.Method != "PUT" || rec.Path != "/roles/rid-1" {
+	if rec.Method != "PUT" || rec.Path != "/roles/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
-}
-
-func TestRolesCmd_Update_InvalidData_RunE(t *testing.T) {
-	srv, _ := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	sub := findSubcmd(t, rolesCmd, "update")
-	sub.Flags().Set("data", `bad json`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"rid-1"}); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
+	if !strings.Contains(string(rec.Body), "perm-xyz") {
+		t.Errorf("body missing permission id: %q", rec.Body)
 	}
 }
 
@@ -525,10 +453,10 @@ func TestRolesCmd_Delete_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, rolesCmd, "delete")
-	if err := sub.RunE(sub, []string{"rid-del"}); err != nil {
+	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("roles delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/roles/rid-del" {
+	if rec.Method != "DELETE" || rec.Path != "/roles/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -555,27 +483,16 @@ func TestPermissionsCmd_Create_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, permissionsCmd, "create")
-	sub.Flags().Set("data", `{"action":"read","resource":"repos"}`) //nolint:errcheck
-	if err := sub.RunE(sub, nil); err != nil {
+	sub.Flags().Set("action", "read")            //nolint:errcheck
+	sub.Flags().Set("resource", "forge/repos/*") //nolint:errcheck
+	if err := sub.RunE(sub, []string{"read-repos", "forge"}); err != nil {
 		t.Fatalf("permissions create: %v", err)
 	}
 	if rec.Method != "POST" || rec.Path != "/permissions" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
-	if !strings.Contains(string(rec.Body), "repos") {
+	if !strings.Contains(string(rec.Body), "forge/repos") {
 		t.Errorf("body missing resource: %q", rec.Body)
-	}
-}
-
-func TestPermissionsCmd_Create_InvalidData_RunE(t *testing.T) {
-	srv, _ := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	sub := findSubcmd(t, permissionsCmd, "create")
-	sub.Flags().Set("data", `{bad}`) //nolint:errcheck
-	if err := sub.RunE(sub, nil); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
 	}
 }
 
@@ -585,24 +502,15 @@ func TestPermissionsCmd_Update_RunE(t *testing.T) {
 	silenceStdout(t)
 
 	sub := findSubcmd(t, permissionsCmd, "update")
-	sub.Flags().Set("data", `{"action":"write"}`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"pid-1"}); err != nil {
+	sub.Flags().Set("action", "write") //nolint:errcheck
+	if err := sub.RunE(sub, []string{"pid-1", "write-repos", "forge"}); err != nil {
 		t.Fatalf("permissions update: %v", err)
 	}
 	if rec.Method != "PUT" || rec.Path != "/permissions/pid-1" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
-}
-
-func TestPermissionsCmd_Update_InvalidData_RunE(t *testing.T) {
-	srv, _ := recordingServer(t, http.StatusOK, `{}`)
-	setupCLI(t, srv)
-	silenceStdout(t)
-
-	sub := findSubcmd(t, permissionsCmd, "update")
-	sub.Flags().Set("data", `bad`) //nolint:errcheck
-	if err := sub.RunE(sub, []string{"pid-1"}); err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
+	if !strings.Contains(string(rec.Body), "write") {
+		t.Errorf("body missing action: %q", rec.Body)
 	}
 }
 

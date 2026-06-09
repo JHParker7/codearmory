@@ -27,7 +27,7 @@ func handleListOrgs(w http.ResponseWriter, r *http.Request) {
 	slog.Info("list orgs request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listOrg", "gatekeeper/orgs") {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -97,7 +97,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	slog.Info("create org request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "createOrg", "gatekeeper/orgs") {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -204,7 +204,7 @@ func handleGetOrg(w http.ResponseWriter, r *http.Request) {
 	slog.Info("get org request", "caller_id", callerID, "org_id", id)
 
 	if !requirePermission(w, r, "getOrg", "gatekeeper/orgs/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -238,7 +238,7 @@ func handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
 	slog.Info("update org request", "caller_id", callerID, "org_id", id)
 
 	if !requirePermission(w, r, "updateOrg", "gatekeeper/orgs/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -304,7 +304,7 @@ func handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 	slog.Info("delete org request", "caller_id", callerID, "org_id", id)
 
 	if !requirePermission(w, r, "deleteOrg", "gatekeeper/orgs/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")

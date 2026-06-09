@@ -1,0 +1,515 @@
+openapi: 3.1.0
+info:
+  title: Forge — Sandboxed Code Execution
+  description: |
+    Runs user-submitted commands in isolated containers (Kubernetes or Docker).
+    Executions are queued and processed asynchronously by a worker pool.
+
+    ## Authentication
+
+    All endpoints require a Gatekeeper-issued Bearer token:
+    `Authorization: Bearer <token>`
+
+    Forge verifies permissions directly with Gatekeeper rather than trusting
+    the `X-User-ID` header injected by Conductor, to prevent privilege escalation
+    via a compromised gateway.
+
+    ## Allowed images
+
+    The operator configures an explicit allowlist of permitted container images
+    via the `ALLOWED_IMAGES` environment variable. Submissions referencing an
+    image not in the allowlist are rejected with `400 Bad Request`.
+
+    ## Environment variable restrictions
+
+    The `env` map must use POSIX-compliant key names (`[A-Za-z_][A-Za-z0-9_]*`).
+    Keys that could redirect interpreter or linker behaviour (e.g. `LD_PRELOAD`,
+    `PYTHONPATH`, `NODE_OPTIONS`) are explicitly blocked.
+  version: 1.0.0
+  contact:
+    email: jhp1403@gmail.com
+
+servers:
+  - url: http://localhost:8083
+    description: Local development server
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      operationId: healthz
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+
+  /executions:
+    post:
+      summary: Submit execution
+      operationId: submitExecution
+      description: |
+        Queues a new sandboxed execution. Returns `202 Accepted` immediately with
+        the `execution_id`. Poll `GET /executions/{id}` for status and output.
+
+        Constraints:
+        - `image` must appear in the `ALLOWED_IMAGES` allowlist
+        - `timeout` defaults to 30 s, capped at 3600 s
+        - `env` keys must match `[A-Za-z_][A-Za-z0-9_]*` and must not be in the
+          blocked-key denylist (interpreter/linker override variables)
+
+        Permission: `createExecution` on `forge/executions`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitRequest'
+            example:
+              image: alpine:3.19
+              command: [sh, -c, echo hello]
+              env:
+                MY_VAR: hello
+              timeout: 60
+      responses:
+        '202':
+          description: Execution queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  execution_id:
+                    type: string
+                    format: uuid
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    get:
+      summary: List executions
+      operationId: listExecutions
+      description: |
+        Returns the last 100 executions submitted by the caller, ordered by
+        `created_at` descending. `stdout` and `stderr` are not included in list
+        responses; use `GET /executions/{id}` to retrieve output.
+
+        Permission: `listExecution` on `forge/executions`.
+      responses:
+        '200':
+          description: List of executions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Execution'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /executions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+
+    get:
+      summary: Get execution
+      operationId: getExecution
+      description: |
+        Returns the full execution record, including `stdout` and `stderr` once
+        the execution has completed. Only the submitting user can retrieve their
+        own executions.
+
+        Permission: `getExecution` on `forge/executions/{id}`.
+      responses:
+        '200':
+          description: Execution record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Execution'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Cancel execution
+      operationId: cancelExecution
+      description: |
+        Cancels a `pending` or `running` execution. Returns `409` when the
+        execution has already reached a terminal state.
+
+        Permission: `deleteExecution` on `forge/executions/{id}`.
+      responses:
+        '204':
+          description: Execution cancelled
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Execution already in a terminal state
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /runner-classes:
+    get:
+      summary: List runner classes
+      operationId: listRunnerClasses
+      description: |
+        Returns all runner classes ordered by name.
+
+        Permission: `listRunnerClass` on `forge/runner-classes`.
+      responses:
+        '200':
+          description: List of runner classes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RunnerClass'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      summary: Create runner class
+      operationId: createRunnerClass
+      description: |
+        Creates a new runner class. Returns `409` if a class with the same name
+        already exists.
+
+        Permission: `createRunnerClass` on `forge/runner-classes`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunnerClassBody'
+      responses:
+        '201':
+          description: Runner class created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunnerClass'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Runner class already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /runner-classes/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Runner class name
+
+    get:
+      summary: Get runner class
+      operationId: getRunnerClass
+      description: |
+        Permission: `getRunnerClass` on `forge/runner-classes/{name}`.
+      responses:
+        '200':
+          description: Runner class
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunnerClass'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      summary: Update runner class
+      operationId: updateRunnerClass
+      description: |
+        Replaces all mutable fields of the named runner class. Changes take effect
+        immediately for new submissions — no restart required.
+
+        Permission: `updateRunnerClass` on `forge/runner-classes/{name}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunnerClassBody'
+      responses:
+        '200':
+          description: Updated runner class
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunnerClass'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete runner class
+      operationId: deleteRunnerClass
+      description: |
+        Deletes the named runner class. In-flight executions using this class are
+        unaffected; only new submissions are rejected.
+
+        Permission: `deleteRunnerClass` on `forge/runner-classes/{name}`.
+      responses:
+        '204':
+          description: Runner class deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Token issued by the Gatekeeper service
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Execution UUID
+
+  schemas:
+    SubmitRequest:
+      type: object
+      required:
+        - image
+        - command
+      properties:
+        image:
+          type: string
+          description: Container image. Must be in the operator-configured allowlist.
+          example: alpine:3.19
+        command:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: Command and arguments passed to the container entrypoint
+          example: [sh, -c, echo hello]
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Environment variables injected into the container.
+            Keys must match `[A-Za-z_][A-Za-z0-9_]*`. Interpreter/linker
+            override keys (e.g. `LD_PRELOAD`, `PYTHONPATH`) are blocked.
+        timeout:
+          type: integer
+          description: Execution timeout in seconds. Defaults to 30, capped at 3600.
+          default: 30
+          minimum: 1
+          maximum: 3600
+        runner_class:
+          type: string
+          description: |
+            Resource tier for the execution. Defaults to `standard`. Must be an
+            enabled runner class. Returns `400` if the class does not exist or is
+            disabled.
+          default: standard
+          example: standard
+
+    Execution:
+      type: object
+      properties:
+        execution_id:
+          type: string
+          format: uuid
+          readOnly: true
+        user_id:
+          type: string
+          format: uuid
+          readOnly: true
+        image:
+          type: string
+          example: alpine:3.19
+        command:
+          type: array
+          items:
+            type: string
+        env:
+          type: object
+          additionalProperties:
+            type: string
+        timeout:
+          type: integer
+          description: Configured timeout in seconds
+        runner_class:
+          type: string
+          description: Runner class used for this execution.
+          example: standard
+        status:
+          type: string
+          enum: [pending, running, completed, failed, timed_out, cancelled]
+        exit_code:
+          type: integer
+          nullable: true
+          description: Container exit code. Present when status is `completed` or `failed`.
+        stdout:
+          type: string
+          nullable: true
+          description: |
+            Standard output (up to 1 MB). Present on `GET /executions/{id}` once
+            execution is complete. Not included in list responses.
+        stderr:
+          type: string
+          nullable: true
+          description: |
+            Standard error (up to 1 MB). Present on `GET /executions/{id}` once
+            execution is complete. Not included in list responses.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+
+    RunnerClass:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Unique identifier for the runner class.
+          example: standard
+        memory_mb:
+          type: integer
+          description: Memory limit in megabytes.
+          example: 256
+        cpu_millicores:
+          type: integer
+          description: CPU limit in millicores (1000 = one full core).
+          example: 500
+        pids_limit:
+          type: integer
+          description: Maximum number of processes the container may create.
+          example: 64
+        tmpfs_mb:
+          type: integer
+          description: Size of the writable /tmp tmpfs in megabytes.
+          example: 64
+        enabled:
+          type: boolean
+          description: Whether this class can be selected for new submissions.
+          example: true
+
+    RunnerClassBody:
+      type: object
+      required:
+        - name
+        - memory_mb
+        - cpu_millicores
+        - pids_limit
+        - tmpfs_mb
+        - enabled
+      properties:
+        name:
+          type: string
+          description: Unique name for the runner class. Ignored on PUT (name comes from path).
+          example: gpu-small
+        memory_mb:
+          type: integer
+          description: Memory limit in megabytes. Minimum 64.
+          minimum: 64
+          example: 512
+        cpu_millicores:
+          type: integer
+          description: CPU limit in millicores. Minimum 100.
+          minimum: 100
+          example: 1000
+        pids_limit:
+          type: integer
+          description: Maximum process count. Minimum 8.
+          minimum: 8
+          example: 64
+        tmpfs_mb:
+          type: integer
+          description: /tmp size in megabytes. Minimum 16.
+          minimum: 16
+          example: 64
+        enabled:
+          type: boolean
+          description: Whether the class can be selected for new submissions.
+          example: true
+
+  responses:
+    BadRequest:
+      description: Invalid request body or parameters
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    Unauthorized:
+      description: Missing or invalid Authorization header
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    NotFound:
+      description: Execution not found or not owned by the caller
+      content:
+        text/plain:
+          schema:
+            type: string

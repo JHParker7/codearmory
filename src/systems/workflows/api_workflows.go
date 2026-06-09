@@ -130,9 +130,14 @@ var validMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE"}
 
 // handleListActions returns the current in-memory action catalog loaded from the registry.
 func handleListActions(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := gatekeeperClient.CheckPermissions(r.Context(), w, r, "listAction", "workflows/actions"); !ok {
+	ctx, span := otel.Tracer("workflows").Start(r.Context(), "handleListActions")
+	defer span.End()
+
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listAction", "workflows/actions"); !ok {
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 
 	actionCatalogMu.RLock()
 	catalog := make([]ActionDef, 0, len(actionCatalog))
@@ -168,9 +173,10 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createWorkflow", "workflows/workflows")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -262,9 +268,10 @@ func handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listWorkflow", "workflows/workflows")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -294,9 +301,10 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getWorkflow", "workflows/workflows/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -305,6 +313,7 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	wf, err := getWorkflow(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "workflow not found", http.StatusNotFound)
 			return
 		}
@@ -315,6 +324,7 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessWorkflow(wf, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
 	}
@@ -331,9 +341,10 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateWorkflow", "workflows/workflows/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -342,14 +353,18 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing, err := getWorkflow(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "workflow not found", http.StatusNotFound)
 			return
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
 		slog.Error("update workflow: fetch error", "workflow_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
 		return
 	}
 	if !canAccessWorkflow(existing, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
 	}
@@ -432,9 +447,10 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteWorkflow", "workflows/workflows/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -443,6 +459,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	wf, err := getWorkflow(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "workflow not found", http.StatusNotFound)
 			return
 		}
@@ -453,6 +470,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessWorkflow(wf, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
 	}

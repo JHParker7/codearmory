@@ -73,6 +73,10 @@ spec:
                   name: {{ $fullname }}-containers
                   key: registry-password
                   optional: true
+            {{- if .Values.giteaIntegration.enabled }}
+            - name: GITEA_INTEGRATION_URL
+              value: "http://{{ $fullname }}-gitea-integration:{{ .Values.giteaIntegration.port }}"
+            {{- end }}
             - name: GATEKEEPER_SERVICE_KEY
               valueFrom:
                 secretKeyRef:

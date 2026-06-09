@@ -21,8 +21,9 @@ const (
 )
 
 var (
-	flagURL   string
-	flagToken string
+	flagURL     string
+	flagToken   string
+	flagVerbose bool
 )
 
 type cliConfig struct {
@@ -132,13 +133,17 @@ func doRequest(method, path string, body []byte) ([]byte, error) {
 	return data, nil
 }
 
-// apiCall executes a request and pretty-prints the JSON response to stdout.
+// apiCall executes a request and prints a human-readable response to stdout.
 func apiCall(method, path string, body []byte) error {
 	data, err := doRequest(method, path, body)
 	if err != nil {
 		return err
 	}
-	printJSON(data)
+	if method == "DELETE" && len(strings.TrimSpace(string(data))) == 0 {
+		fmt.Println("Deleted.")
+		return nil
+	}
+	printResponse(data)
 	return nil
 }
 
@@ -200,5 +205,6 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVar(&flagURL, "url", "", "conductor base URL (overrides CODEARMORY_URL and config)")
 	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "", "bearer token (prefer CODEARMORY_TOKEN env var)")
+	rootCmd.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "v", false, "show all fields including IDs and timestamps")
 	rootCmd.PersistentFlags().MarkHidden("token") //nolint:errcheck
 }

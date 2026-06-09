@@ -82,7 +82,7 @@ func checkAndProxy(w http.ResponseWriter, r *http.Request, action, resource stri
 
 	r.Header.Set("Authorization", "Bearer "+token)
 	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, action, resource); !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return false
 	}
 

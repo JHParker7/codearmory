@@ -105,9 +105,10 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	workflowID := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "triggerRun", "workflows/runs")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -116,6 +117,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	wf, err := getWorkflow(ctx, workflowID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "workflow not found", http.StatusNotFound)
 			return
 		}
@@ -126,6 +128,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessWorkflow(wf, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
 	}
@@ -202,9 +205,10 @@ func handleListRuns(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRun", "workflows/runs")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -234,9 +238,10 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRun", "workflows/runs/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -245,14 +250,18 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 	run, err := getRun(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "run not found", http.StatusNotFound)
 			return
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
 		slog.Error("get run: db error", "run_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get run", http.StatusInternalServerError)
 		return
 	}
 	if !canAccessRun(run, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "run not found", http.StatusNotFound)
 		return
 	}
@@ -280,9 +289,10 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 		id := r.PathValue("id")
 		userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "cancelRun", "workflows/runs/"+id)
 		if !ok {
-			span.SetStatus(codes.Error, "forbidden")
+			span.SetStatus(codes.Ok, "")
 			return
 		}
+		span.AddEvent("permission.granted")
 		span.SetAttributes(
 			attribute.String("user.id", userID),
 			attribute.String("org.id", orgID),
@@ -291,6 +301,7 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 		run, err := getRun(ctx, id)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
+				span.SetStatus(codes.Ok, "")
 				http.Error(w, "run not found", http.StatusNotFound)
 				return
 			}
@@ -301,17 +312,21 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 			return
 		}
 		if !canAccessRun(run, userID, orgID) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "run not found", http.StatusNotFound)
 			return
 		}
 
 		affected, err := cancelRun(ctx, id)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "db update failed")
 			slog.Error("cancel run: db update", "run_id", id, "user_id", userID, "error", err)
 			http.Error(w, "failed to cancel run", http.StatusInternalServerError)
 			return
 		}
 		if affected == 0 {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "run is not in a cancellable state", http.StatusConflict)
 			return
 		}

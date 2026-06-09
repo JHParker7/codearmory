@@ -27,7 +27,7 @@ func handleInternalRegistryToken(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRegistryToken", "gitea_integration/registry-token")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.SetAttributes(

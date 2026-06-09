@@ -22,9 +22,10 @@ func handleListPulls(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listPull", "gitea_integration/repos/"+owner+"/"+name+"/pulls")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -36,6 +37,7 @@ func handleListPulls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -52,6 +54,7 @@ func handleListPulls(w http.ResponseWriter, r *http.Request) {
 	prs, err := gitea.listPulls(ctx, owner, name, state, callerUsername)
 	if err != nil {
 		if isNotFoundErr(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
@@ -76,9 +79,10 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createPull", "gitea_integration/repos/"+owner+"/"+name+"/pulls")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -90,6 +94,7 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -109,6 +114,7 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 	pr, err := gitea.createPull(ctx, owner, name, callerUsername, payload)
 	if err != nil {
 		if isNotFoundErr(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "repository not found", http.StatusNotFound)
 			return
 		}
@@ -138,9 +144,10 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getPull",
 		"gitea_integration/repos/"+owner+"/"+name+"/pulls/"+index)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -153,6 +160,7 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -160,6 +168,7 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 	pr, err := gitea.getPull(ctx, owner, name, index, callerUsername)
 	if err != nil {
 		if isNotFoundErr(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "pull request not found", http.StatusNotFound)
 			return
 		}
@@ -186,9 +195,10 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "mergePull",
 		"gitea_integration/repos/"+owner+"/"+name+"/pulls/"+index)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -201,6 +211,7 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -216,6 +227,7 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 
 	if err := gitea.mergePull(ctx, owner, name, index, callerUsername, payload); err != nil {
 		if isNotFoundErr(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "pull request not found", http.StatusNotFound)
 			return
 		}
