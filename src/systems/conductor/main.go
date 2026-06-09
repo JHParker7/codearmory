@@ -44,6 +44,11 @@ var (
 	conductorForwardKey = secret("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
 	conductorNotifyKey  = secret("CONDUCTOR_NOTIFY_KEY")  // shared secret allowing registry to push refresh notifications
 	httpClient          = &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport), Timeout: 10 * time.Second}
+	// gatekeeperClient and registryClient carry static peer.service attributes so
+	// Tempo's service-graph processor can label edges correctly even when SERVER
+	// spans arrive after the store expiry window.
+	gatekeeperClient *http.Client
+	registryClient   *http.Client
 	// getRegistryKey returns the current rotating service key used to authenticate
 	// conductor's requests to the registry. Set in main() via StartKeyRotation.
 	getRegistryKey func() string
@@ -192,14 +197,16 @@ func lookupEndpointForService(method, path, service string) (endpointEntry, []st
 	return endpointEntry{}, nil, false
 }
 
-func newProxy(target string) *httputil.ReverseProxy {
+func newProxy(target, peerService string) *httputil.ReverseProxy {
 	u, err := url.Parse(target)
 	if err != nil {
 		slog.Error("invalid proxy target", "url", target, "error", err)
 		os.Exit(1)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(u)
-	proxy.Transport = otelhttp.NewTransport(http.DefaultTransport)
+	proxy.Transport = otelhttp.NewTransport(http.DefaultTransport,
+		otelhttp.WithSpanOptions(trace.WithAttributes(attribute.String("peer.service", peerService))),
+	)
 	base := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		base(req)
@@ -252,14 +259,14 @@ func checkUserAuth(r *http.Request) (authOutcome, string) {
 
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
-		span.SetStatus(codes.Error, "no bearer token")
+		span.SetStatus(codes.Ok, "")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "no_token")))
 		return authUnauthorized, ""
 	}
 
 	userID, ok := getUserID(strings.TrimPrefix(auth, "Bearer "))
 	if !ok {
-		span.SetStatus(codes.Error, "malformed token")
+		span.SetStatus(codes.Ok, "")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "malformed_token")))
 		return authUnauthorized, ""
 	}
@@ -274,7 +281,7 @@ func checkUserAuth(r *http.Request) (authOutcome, string) {
 	}
 	req.Header.Set("Authorization", auth)
 
-	resp, err := httpClient.Do(req)
+	resp, err := gatekeeperClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -285,7 +292,7 @@ func checkUserAuth(r *http.Request) (authOutcome, string) {
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
-		span.SetStatus(codes.Error, "unauthorized")
+		span.SetStatus(codes.Ok, "")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "unauthorized")))
 		return authUnauthorized, userID
 	case resp.StatusCode >= 500:
@@ -293,7 +300,7 @@ func checkUserAuth(r *http.Request) (authOutcome, string) {
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "gatekeeper_error")))
 		return authForbidden, ""
 	case resp.StatusCode != http.StatusOK:
-		span.SetStatus(codes.Error, "user not found")
+		span.SetStatus(codes.Ok, "")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "user_not_found")))
 		return authForbidden, ""
 	}
@@ -395,7 +402,7 @@ func refreshServiceCache(ctx context.Context) {
 	}
 	req.Header.Set("X-Service-Key", "conductor:"+getRegistryKey())
 
-	resp, err := httpClient.Do(req)
+	resp, err := registryClient.Do(req)
 	if err != nil {
 		slog.Warn("service registry refresh failed", "error", err)
 		return
@@ -445,7 +452,7 @@ func refreshServiceCache(ctx context.Context) {
 		if old, ok := oldServices[s.Name]; ok && old.url == s.URL {
 			proxy = old.proxy
 		} else {
-			proxy = newProxy(s.URL)
+			proxy = newProxy(s.URL, s.Name)
 			slog.Info("service cache updated", "name", s.Name)
 		}
 
@@ -819,6 +826,20 @@ func main() {
 		Timeout:   10 * time.Second,
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 	}
+	// Per-service clients stamp peer.service on CLIENT spans so Tempo's service-graph
+	// processor can label edges even when SERVER spans arrive after the store expiry.
+	gatekeeperClient = &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: otelhttp.NewTransport(http.DefaultTransport,
+			otelhttp.WithSpanOptions(trace.WithAttributes(attribute.String("peer.service", "gatekeeper"))),
+		),
+	}
+	registryClient = &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: otelhttp.NewTransport(http.DefaultTransport,
+			otelhttp.WithSpanOptions(trace.WithAttributes(attribute.String("peer.service", "registry"))),
+		),
+	}
 
 	// Rotate conductor's registry service key every 25 minutes so the credential
 	// is always short-lived. The key is used in X-Service-Key on every GET /services call.
@@ -861,6 +882,8 @@ func main() {
 	mux.HandleFunc("POST /internal/refresh", handleInternalRefresh)
 	mux.HandleFunc("GET /openapi.json", handleOpenAPISpec)
 	mux.HandleFunc("GET /docs", handleDocs)
+	mux.HandleFunc("GET /docs/{service}", handleServiceDocs)
+	mux.HandleFunc("GET /docs/{service}/openapi.yaml", handleServiceSpec)
 	mux.Handle("/{path...}", http.HandlerFunc(handleServiceProxy))
 
 	port := envOrDefault("PORT", "8080")

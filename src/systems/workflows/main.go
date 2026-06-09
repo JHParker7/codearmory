@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/code-armory-app/codearmory_sdk/registry"
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -34,6 +36,9 @@ var (
 	// Seeded at startup from SERVICES env var and updated every 5 min from the registry.
 	serviceURLsMu sync.RWMutex
 	serviceURLs   = map[string]string{}
+	// hostToService is the reverse of serviceURLs: hostname → service name.
+	// Used by peerServiceTransport to stamp peer.service on OTel CLIENT spans.
+	hostToService = map[string]string{}
 
 	// actionCatalog maps action names to their definitions, polled from the registry.
 	actionCatalogMu sync.RWMutex
@@ -41,6 +46,34 @@ var (
 
 	httpClient *http.Client
 )
+
+// peerServiceTransport must be used as the INNER transport of otelhttp.NewTransport.
+// By the time its RoundTrip is called, otelhttp has already created the CLIENT span
+// and placed it in req.Context(), so SetAttributes correctly annotates that span.
+type peerServiceTransport struct {
+	base http.RoundTripper
+}
+
+func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	serviceURLsMu.RLock()
+	svc := hostToService[req.URL.Hostname()]
+	serviceURLsMu.RUnlock()
+	if svc != "" {
+		trace.SpanFromContext(req.Context()).SetAttributes(
+			attribute.String("peer.service", svc),
+		)
+	}
+	return t.base.RoundTrip(req)
+}
+
+// setServiceURL adds or updates a service in serviceURLs and hostToService.
+// Must be called with serviceURLsMu held for writing.
+func setServiceURL(name, rawURL string) {
+	serviceURLs[name] = rawURL
+	if u, err := url.Parse(rawURL); err == nil && u.Hostname() != "" {
+		hostToService[u.Hostname()] = name
+	}
+}
 
 func initHTTPClient() *http.Client {
 	tlsCfg := &tls.Config{}
@@ -63,7 +96,7 @@ func initHTTPClient() *http.Client {
 		tlsCfg.RootCAs = caPool
 	}
 	return &http.Client{
-		Transport: otelhttp.NewTransport(&http.Transport{TLSClientConfig: tlsCfg}),
+		Transport: otelhttp.NewTransport(&peerServiceTransport{base: &http.Transport{TLSClientConfig: tlsCfg}}),
 		Timeout:   10 * time.Second,
 	}
 }
@@ -103,7 +136,7 @@ func secretOrDefault(name, def string) string {
 func initServices() {
 	serviceURLsMu.Lock()
 	defer serviceURLsMu.Unlock()
-	serviceURLs["gatekeeper"] = gatekeeperURL
+	setServiceURL("gatekeeper", gatekeeperURL)
 	raw := os.Getenv("SERVICES")
 	if raw == "" {
 		return
@@ -115,7 +148,7 @@ func initServices() {
 			slog.Warn("initServices: invalid entry, expected name=url", "entry", entry)
 			continue
 		}
-		serviceURLs[strings.TrimSpace(name)] = strings.TrimSpace(url)
+		setServiceURL(strings.TrimSpace(name), strings.TrimSpace(url))
 	}
 	slog.Info("services registered", "count", len(serviceURLs))
 }
@@ -201,7 +234,7 @@ func refreshCatalog(ctx context.Context) {
 	serviceURLsMu.Lock()
 	for _, ra := range raw {
 		if ra.ServiceName != "" && ra.ServiceURL != "" {
-			serviceURLs[ra.ServiceName] = ra.ServiceURL
+			setServiceURL(ra.ServiceName, ra.ServiceURL)
 		}
 	}
 	serviceURLsMu.Unlock()
@@ -331,6 +364,7 @@ func main() {
 
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
 	mux.HandleFunc("GET /actions", handleListActions)
 
 	mux.HandleFunc("POST /steps", handleCreateStep)
