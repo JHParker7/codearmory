@@ -1,6 +1,10 @@
 package cmd
 
-import "github.com/spf13/cobra"
+import (
+	"encoding/json"
+
+	"github.com/spf13/cobra"
+)
 
 var orgsCmd = &cobra.Command{
 	Use:   "orgs",
@@ -8,50 +12,66 @@ var orgsCmd = &cobra.Command{
 }
 
 func init() {
-	var createData, updateData, inviteData string
-
 	createCmd := &cobra.Command{
-		Use:   "create",
+		Use:   "create <name>",
 		Short: "Create an organization",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, err := parseData(createData)
+			body, err := json.Marshal(map[string]string{"org_name": args[0]})
 			if err != nil {
 				return err
 			}
 			return apiCall("POST", "/orgs", body)
 		},
 	}
-	createCmd.Flags().StringVar(&createData, "data", "", "JSON body or @file")
 
 	updateCmd := &cobra.Command{
-		Use:   "update <id>",
+		Use:   "update <name-or-id> <new-name>",
 		Short: "Update an organization",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, err := parseData(updateData)
+			id, err := resolveOrgID(args[0])
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/orgs/"+args[0], body)
+			body, err := json.Marshal(map[string]string{"org_name": args[1]})
+			if err != nil {
+				return err
+			}
+			return apiCall("PUT", "/orgs/"+id, body)
 		},
 	}
-	updateCmd.Flags().StringVar(&updateData, "data", "", "JSON body or @file")
 
 	inviteCmd := &cobra.Command{
-		Use:   "invite <id>",
+		Use:   "invite <name-or-id> <email>",
 		Short: "Send an invite for an organization",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, err := parseData(inviteData)
+			id, err := resolveOrgID(args[0])
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/orgs/"+args[0]+"/invites", body)
+			body, err := json.Marshal(map[string]string{"email": args[1]})
+			if err != nil {
+				return err
+			}
+			return apiCall("POST", "/orgs/"+id+"/invites", body)
 		},
 	}
-	inviteCmd.Flags().StringVar(&inviteData, "data", "", "JSON body or @file")
 
 	orgsCmd.AddCommand(
+		&cobra.Command{
+			Use:   "mine",
+			Short: "Get your organization",
+			Args:  cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				id, err := myFieldID("org_id")
+				if err != nil {
+					return err
+				}
+				return apiCall("GET", "/orgs/"+id, nil)
+			},
+		},
 		&cobra.Command{
 			Use:   "list",
 			Short: "List all organizations",
@@ -59,17 +79,29 @@ func init() {
 		},
 		createCmd,
 		&cobra.Command{
-			Use:   "get <id>",
-			Short: "Get an organization by ID",
+			Use:   "get <name-or-id>",
+			Short: "Get an organization",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/orgs/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				id, err := resolveOrgID(args[0])
+				if err != nil {
+					return err
+				}
+				return apiCall("GET", "/orgs/"+id, nil)
+			},
 		},
 		updateCmd,
 		&cobra.Command{
-			Use:   "delete <id>",
+			Use:   "delete <name-or-id>",
 			Short: "Delete an organization",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/orgs/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				id, err := resolveOrgID(args[0])
+				if err != nil {
+					return err
+				}
+				return apiCall("DELETE", "/orgs/"+id, nil)
+			},
 		},
 		inviteCmd,
 	)

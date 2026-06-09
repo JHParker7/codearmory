@@ -18,7 +18,7 @@ func handleListRepositories(w http.ResponseWriter, r *http.Request) {
 
 	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRepository", "containers/repositories")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.SetAttributes(attribute.String("user.id", userID))
@@ -53,7 +53,7 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTag",
 		"containers/repositories/"+namespace+"/"+image)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.SetAttributes(
@@ -91,7 +91,7 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getManifest",
 		"containers/repositories/"+namespace+"/"+image)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.SetAttributes(
@@ -137,7 +137,7 @@ func handleDeleteManifest(w http.ResponseWriter, r *http.Request) {
 	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteManifest",
 		"containers/repositories/"+namespace+"/"+image)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.SetAttributes(

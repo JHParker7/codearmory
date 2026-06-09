@@ -137,9 +137,12 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 
 	userID, ok := checkGatekeeper(ctx, w, r, "createExecution", "forge/executions")
 	if !ok {
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.SetAttributes(attribute.String("user.id", userID))
+	span.AddEvent("permission.granted")
+	slog.Info("submit execution request", "user_id", userID)
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil || !json.Valid(body) {
@@ -226,15 +229,20 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	executionID := r.PathValue("id")
 	userID, ok := checkGatekeeper(ctx, w, r, "getExecution", "forge/executions/"+executionID)
 	if !ok {
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("execution.id", executionID),
 	)
+	span.AddEvent("permission.granted")
+	slog.Info("get execution request", "user_id", userID, "execution_id", executionID)
 
 	exec, err := getExecution(ctx, executionID, userID)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
+		span.SetStatus(codes.Error, "execution not found")
+		slog.Warn("get execution: not found", "user_id", userID, "execution_id", executionID)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -246,6 +254,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetStatus(codes.Ok, "")
+	slog.Info("get execution: success", "user_id", userID, "execution_id", executionID, "status", exec.Status)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(exec)
 }
@@ -258,9 +267,12 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 
 	userID, ok := checkGatekeeper(ctx, w, r, "listExecution", "forge/executions")
 	if !ok {
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.SetAttributes(attribute.String("user.id", userID))
+	span.AddEvent("permission.granted")
+	slog.Info("list executions request", "user_id", userID)
 
 	var executions []Execution
 	if err := connect().WithContext(ctx).
@@ -279,6 +291,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetStatus(codes.Ok, "")
+	slog.Info("list executions: success", "user_id", userID, "count", len(executions))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(executions)
 }
@@ -293,27 +306,35 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		executionID := r.PathValue("id")
 		userID, ok := checkGatekeeper(ctx, w, r, "deleteExecution", "forge/executions/"+executionID)
 		if !ok {
+			span.SetStatus(codes.Ok, "")
 			return
 		}
 		span.SetAttributes(
 			attribute.String("user.id", userID),
 			attribute.String("execution.id", executionID),
 		)
+		span.AddEvent("permission.granted")
+		slog.Info("cancel execution request", "user_id", userID, "execution_id", executionID)
 
 		exec, err := getExecution(ctx, executionID, userID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Error, "execution not found")
+			slog.Warn("cancel execution: not found", "user_id", userID, "execution_id", executionID)
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
+			slog.Error("cancel execution: db error", "user_id", userID, "execution_id", executionID, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 
 		switch exec.Status {
 		case StatusCompleted, StatusFailed, StatusTimedOut, StatusCancelled:
+			span.SetStatus(codes.Ok, "")
+			slog.Warn("cancel execution: already finished", "user_id", userID, "execution_id", executionID, "status", exec.Status)
 			http.Error(w, "execution already finished", http.StatusConflict)
 			return
 		case StatusPending:
@@ -321,6 +342,9 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 				`UPDATE executions SET status = 'cancelled', ended_at = now() WHERE execution_id = ? AND status = 'pending'`,
 				executionID,
 			).Error; err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "db update failed")
+				slog.Error("cancel execution: db update failed", "user_id", userID, "execution_id", executionID, "error", err)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 				return
 			}

@@ -21,6 +21,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -305,26 +309,36 @@ type backendResponse struct {
 }
 
 func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, span := otel.Tracer("blueprints").Start(r.Context(), "handleCreateBackend")
+	defer span.End()
+	r = r.WithContext(ctx)
 
 	token, ok := requireAuth(ctx, w, r)
 	if !ok {
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	if !checkPermissions(ctx, token, "states", "createBackend") {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	span.AddEvent("permission.granted")
 
 	cc, err := getCallerContext(ctx, token)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "resolve caller context failed")
 		slog.Error("backend: resolve caller context", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	span.SetAttributes(attribute.String("caller.id", cc.UserID))
+	slog.Info("create backend request", "caller_id", cc.UserID)
 
 	var req backendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		span.SetStatus(codes.Error, "invalid request body")
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -334,6 +348,7 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	workspaceKey := backendUsername(cc) + "/" + workspace
+	span.SetAttributes(attribute.String("workspace", workspaceKey))
 
 	ttl := defaultBackendTTL
 	if req.TTLSecs > 0 {
@@ -345,7 +360,9 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 
 	certPEM, keyPEM, certFP, err := generateClientCert(ttl)
 	if err != nil {
-		slog.Error("backend: generate client cert", "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "cert generation failed")
+		slog.Error("backend: generate client cert", "caller_id", cc.UserID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -364,10 +381,16 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    expiresAt,
 	}
 	if err := connect().WithContext(ctx).Create(&cred).Error; err != nil {
-		slog.Error("backend: insert credential", "workspace", workspaceKey, "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db insert failed")
+		slog.Error("backend: insert credential", "caller_id", cc.UserID, "workspace", workspaceKey, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	span.AddEvent("db.write", trace.WithAttributes(
+		attribute.String("credential.id", credID),
+		attribute.String("workspace", workspaceKey),
+	))
 
 	blueprintsURL := envOrDefault("BLUEPRINTS_EXTERNAL_URL", "http://blueprints:8084")
 	addr := fmt.Sprintf("%s/state/%s", blueprintsURL, workspaceKey)
@@ -377,16 +400,18 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 		Workspace:    workspaceKey,
 		BackendTF:    buildBackendTF(addr),
 		Env: map[string]string{
-			"TF_HTTP_USERNAME":               "_",
-			"TF_HTTP_PASSWORD":               bearerToken,
-			"TF_HTTP_CLIENT_CERTIFICATE_PEM": certPEM,
-			"TF_HTTP_CLIENT_PRIVATE_KEY_PEM": keyPEM,
+			"TF_HTTP_USERNAME":                  "_",
+			"TF_HTTP_PASSWORD":                  bearerToken,
+			"TF_HTTP_CLIENT_CERTIFICATE_PEM":    certPEM,
+			"TF_HTTP_CLIENT_PRIVATE_KEY_PEM":    keyPEM,
 			"TF_HTTP_CLIENT_CA_CERTIFICATE_PEM": string(clientCACertPEM),
 		},
 		ExpiresAt: expiresAt.Format(time.RFC3339),
 	}
 
-	slog.Info("backend credential created", "credential_id", credID, "workspace", workspaceKey, "ttl_secs", int(ttl.Seconds()))
+	span.SetAttributes(attribute.String("credential.id", credID))
+	span.SetStatus(codes.Ok, "")
+	slog.Info("backend credential created", "caller_id", cc.UserID, "credential_id", credID, "workspace", workspaceKey, "ttl_secs", int(ttl.Seconds()))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck

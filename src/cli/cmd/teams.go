@@ -1,6 +1,10 @@
 package cmd
 
-import "github.com/spf13/cobra"
+import (
+	"encoding/json"
+
+	"github.com/spf13/cobra"
+)
 
 var teamsCmd = &cobra.Command{
 	Use:   "teams",
@@ -8,50 +12,73 @@ var teamsCmd = &cobra.Command{
 }
 
 func init() {
-	var createData, updateData, inviteData string
+	var createRole string
 
 	createCmd := &cobra.Command{
-		Use:   "create",
+		Use:   "create <name>",
 		Short: "Create a team",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, err := parseData(createData)
+			payload := map[string]any{"team_name": args[0]}
+			if createRole != "" {
+				payload["role_id"] = createRole
+			}
+			body, err := json.Marshal(payload)
 			if err != nil {
 				return err
 			}
 			return apiCall("POST", "/teams", body)
 		},
 	}
-	createCmd.Flags().StringVar(&createData, "data", "", "JSON body or @file")
+	createCmd.Flags().StringVar(&createRole, "role", "", "Role ID to assign to the team")
 
 	updateCmd := &cobra.Command{
-		Use:   "update <id>",
+		Use:   "update <name-or-id> <new-name>",
 		Short: "Update a team",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, err := parseData(updateData)
+			id, err := resolveTeamID(args[0])
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/teams/"+args[0], body)
+			body, err := json.Marshal(map[string]string{"team_name": args[1]})
+			if err != nil {
+				return err
+			}
+			return apiCall("PUT", "/teams/"+id, body)
 		},
 	}
-	updateCmd.Flags().StringVar(&updateData, "data", "", "JSON body or @file")
 
 	inviteCmd := &cobra.Command{
-		Use:   "invite <id>",
+		Use:   "invite <name-or-id> <email>",
 		Short: "Send an invite for a team",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, err := parseData(inviteData)
+			id, err := resolveTeamID(args[0])
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/teams/"+args[0]+"/invites", body)
+			body, err := json.Marshal(map[string]string{"email": args[1]})
+			if err != nil {
+				return err
+			}
+			return apiCall("POST", "/teams/"+id+"/invites", body)
 		},
 	}
-	inviteCmd.Flags().StringVar(&inviteData, "data", "", "JSON body or @file")
 
 	teamsCmd.AddCommand(
+		&cobra.Command{
+			Use:   "mine",
+			Short: "Get your team",
+			Args:  cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				id, err := myFieldID("team_id")
+				if err != nil {
+					return err
+				}
+				return apiCall("GET", "/teams/"+id, nil)
+			},
+		},
 		&cobra.Command{
 			Use:   "list",
 			Short: "List all teams",
@@ -59,17 +86,29 @@ func init() {
 		},
 		createCmd,
 		&cobra.Command{
-			Use:   "get <id>",
-			Short: "Get a team by ID",
+			Use:   "get <name-or-id>",
+			Short: "Get a team",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/teams/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				id, err := resolveTeamID(args[0])
+				if err != nil {
+					return err
+				}
+				return apiCall("GET", "/teams/"+id, nil)
+			},
 		},
 		updateCmd,
 		&cobra.Command{
-			Use:   "delete <id>",
+			Use:   "delete <name-or-id>",
 			Short: "Delete a team",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/teams/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				id, err := resolveTeamID(args[0])
+				if err != nil {
+					return err
+				}
+				return apiCall("DELETE", "/teams/"+id, nil)
+			},
 		},
 		inviteCmd,
 	)

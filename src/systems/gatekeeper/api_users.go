@@ -89,7 +89,7 @@ func handleGetUser(w http.ResponseWriter, r *http.Request) {
 	slog.Info("get user request", "caller_id", callerID, "target_user_id", id)
 
 	if !requirePermission(w, r, "getUser", "gatekeeper/users/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -123,7 +123,7 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	slog.Info("update user request", "caller_id", callerID, "target_user_id", id)
 
 	if !requirePermission(w, r, "updateUser", "gatekeeper/users/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -209,7 +209,7 @@ func handleListUsers(w http.ResponseWriter, r *http.Request) {
 	slog.Info("list users request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listUser", "gatekeeper/users") {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -281,7 +281,7 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	slog.Info("delete user request", "caller_id", callerID, "target_user_id", id)
 
 	if !requirePermission(w, r, "deleteUser", "gatekeeper/users/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.AddEvent("permission.granted")
@@ -409,13 +409,50 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		createdPerms = append(createdPerms, perm)
 	}
 
+	// Pre-generate the role ID so the self-read permission can reference it.
+	roleID := uuid.New().String()
+
 	permIDs := make([]string, len(createdPerms))
 	for i, p := range createdPerms {
 		permIDs[i] = p.PermissionsID
 	}
+
+	// Grant the user read access on their own role and each of their permissions records.
+	// Resources list the role and every permissions ID explicitly (including the self-read
+	// record itself, whose ID we pre-generate here to avoid a circular dependency).
+	selfReadPermID := uuid.New().String()
+	selfResources := make([]string, 0, 2+len(permIDs))
+	selfResources = append(selfResources, "gatekeeper/roles/"+roleID)
+	for _, id := range permIDs {
+		selfResources = append(selfResources, "gatekeeper/permissions/"+id)
+	}
+	selfResources = append(selfResources, "gatekeeper/permissions/"+selfReadPermID)
+	selfReadPerm := Permissions{
+		Name:          fmt.Sprintf("gatekeeper self-read permissions for %s", req.Username),
+		PermissionsID: selfReadPermID,
+		Service:       "gatekeeper",
+		Actions:       []string{"getRole", "getPermissions"},
+		Resources:     selfResources,
+	}
+	if err = selfReadPerm.Add(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to create self-read permission")
+		slog.Error("signup failed: could not create self-read permission", "user_id", userID, "error", err)
+		for _, p := range createdPerms {
+			p.Remove(ctx) //nolint:errcheck
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	span.AddEvent("permission.created", trace.WithAttributes(
+		attribute.String("permissions.id", selfReadPermID),
+		attribute.String("permissions.service", "gatekeeper"),
+	))
+	slog.Info("self-read permission created", "user_id", userID, "permissions_id", selfReadPermID)
+
 	role := Role{
-		RoleID:         uuid.New().String(),
-		PermissionsIDs: permIDs,
+		RoleID:         roleID,
+		PermissionsIDs: append(permIDs, selfReadPermID),
 	}
 	if err = role.Add(ctx); err != nil {
 		span.RecordError(err)
@@ -424,6 +461,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		for _, p := range createdPerms {
 			p.Remove(ctx) //nolint:errcheck
 		}
+		selfReadPerm.Remove(ctx) //nolint:errcheck
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -448,6 +486,9 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 			if cleanErr := p.Remove(ctx); cleanErr != nil {
 				slog.Error("signup: failed to clean up orphaned permission", "permissions_id", p.PermissionsID, "error", cleanErr)
 			}
+		}
+		if cleanErr := selfReadPerm.Remove(ctx); cleanErr != nil {
+			slog.Error("signup: failed to clean up orphaned self-read permission", "permissions_id", selfReadPermID, "error", cleanErr)
 		}
 		if cleanErr := role.Remove(ctx); cleanErr != nil {
 			slog.Error("signup: failed to clean up orphaned role", "role_id", role.RoleID, "error", cleanErr)

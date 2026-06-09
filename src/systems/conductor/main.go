@@ -43,7 +43,7 @@ var (
 	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8084")
 	conductorForwardKey = secret("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
 	conductorNotifyKey  = secret("CONDUCTOR_NOTIFY_KEY")  // shared secret allowing registry to push refresh notifications
-	httpClient          = &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport), Timeout: 10 * time.Second}
+	httpClient          *http.Client // set in main() after telemetry.Setup so the transport uses the real OTel provider
 	// gatekeeperClient and registryClient carry static peer.service attributes so
 	// Tempo's service-graph processor can label edges correctly even when SERVER
 	// spans arrive after the store expiry window.
@@ -820,8 +820,6 @@ func main() {
 	}
 	initMetrics()
 
-	// Reinitialize httpClient with an OTel-instrumented transport so that calls to
-	// gatekeeper and registry propagate the active trace context via traceparent headers.
 	httpClient = &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
@@ -927,6 +925,11 @@ func main() {
 			tlsCfg.ClientAuth = tls.RequestClientCert
 		}
 		srv.TLSConfig = tlsCfg
+	}
+
+	if httpClient == nil || gatekeeperClient == nil || registryClient == nil {
+		slog.Error("BUG: HTTP clients not initialized before server start")
+		os.Exit(1)
 	}
 
 	go func() {

@@ -1,6 +1,10 @@
 package cmd
 
-import "github.com/spf13/cobra"
+import (
+	"encoding/json"
+
+	"github.com/spf13/cobra"
+)
 
 var rolesCmd = &cobra.Command{
 	Use:   "roles",
@@ -8,49 +12,112 @@ var rolesCmd = &cobra.Command{
 }
 
 func init() {
-	var createData, updateData string
+	var createPerms []string
+	var createOrg, createName string
+	var updatePerms []string
+	var updateOrg, updateName string
 
 	createCmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a role",
+		Long: `Create a role with an optional name and permission IDs.
+
+  armory roles create --name ci-runners --permission <perm-id>
+  armory roles create  # creates an unnamed empty role`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, err := parseData(createData)
+			payload := map[string]any{"permissions_ids": createPerms}
+			if createName != "" {
+				payload["name"] = createName
+			}
+			if createOrg != "" {
+				payload["org_id"] = createOrg
+			}
+			body, err := json.Marshal(payload)
 			if err != nil {
 				return err
 			}
 			return apiCall("POST", "/roles", body)
 		},
 	}
-	createCmd.Flags().StringVar(&createData, "data", "", "JSON body or @file")
+	createCmd.Flags().StringVar(&createName, "name", "", "Human-readable name for the role")
+	createCmd.Flags().StringArrayVar(&createPerms, "permission", nil, "Permission ID to include (repeatable)")
+	createCmd.Flags().StringVar(&createOrg, "org", "", "Organization ID to scope the role to")
 
 	updateCmd := &cobra.Command{
-		Use:   "update <id>",
+		Use:   "update <name-or-id>",
 		Short: "Update a role",
-		Args:  cobra.ExactArgs(1),
+		Long: `Replace a role's permission list (and optionally rename it).
+
+  armory roles update ci-runners --permission <perm-id>
+  armory roles update ci-runners --name ci-ops --permission <perm-id>
+  armory roles update <id>  # clears all permissions`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, err := parseData(updateData)
+			id, err := resolveRoleID(args[0])
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/roles/"+args[0], body)
+			payload := map[string]any{"permissions_ids": updatePerms}
+			if updateName != "" {
+				payload["name"] = updateName
+			}
+			if updateOrg != "" {
+				payload["org_id"] = updateOrg
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			return apiCall("PUT", "/roles/"+id, body)
 		},
 	}
-	updateCmd.Flags().StringVar(&updateData, "data", "", "JSON body or @file")
+	updateCmd.Flags().StringVar(&updateName, "name", "", "New name for the role")
+	updateCmd.Flags().StringArrayVar(&updatePerms, "permission", nil, "Permission ID to include (repeatable; replaces current list)")
+	updateCmd.Flags().StringVar(&updateOrg, "org", "", "Organization ID to scope the role to")
 
 	rolesCmd.AddCommand(
+		&cobra.Command{
+			Use:   "mine",
+			Short: "Get your role",
+			Args:  cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				id, err := myFieldID("role_id")
+				if err != nil {
+					return err
+				}
+				return apiCall("GET", "/roles/"+id, nil)
+			},
+		},
+		&cobra.Command{
+			Use:   "list",
+			Short: "List all roles",
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/roles", nil) },
+		},
 		createCmd,
 		&cobra.Command{
-			Use:   "get <id>",
-			Short: "Get a role by ID",
+			Use:   "get <name-or-id>",
+			Short: "Get a role",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/roles/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				id, err := resolveRoleID(args[0])
+				if err != nil {
+					return err
+				}
+				return apiCall("GET", "/roles/"+id, nil)
+			},
 		},
 		updateCmd,
 		&cobra.Command{
-			Use:   "delete <id>",
+			Use:   "delete <name-or-id>",
 			Short: "Delete a role",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/roles/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				id, err := resolveRoleID(args[0])
+				if err != nil {
+					return err
+				}
+				return apiCall("DELETE", "/roles/"+id, nil)
+			},
 		},
 	)
 	rootCmd.AddCommand(rolesCmd)

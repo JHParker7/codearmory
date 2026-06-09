@@ -1,0 +1,898 @@
+openapi: 3.1.0
+info:
+  title: Workflows — CI/CD Pipeline Orchestrator
+  description: |
+    Composes reusable **Steps** into **Workflows** and executes them against
+    registered backend services. Runs are queued and executed by a background
+    worker pool.
+
+    ## Two-layer model
+
+    A **Step** is a reusable, named action definition stored in the `steps`
+    table. It declares what to do (`action` + `with` config) and can be
+    referenced by many workflows. Changing a step affects every pipeline that
+    references it.
+
+    A **Workflow** is an ordered list of step references (`step_id` +
+    optional `parallel_group`). Steps sharing the same non-nil `parallel_group`
+    execute concurrently; the run waits for all before advancing.
+
+    ## Action types
+
+    Each step's `action` field is either:
+    - `"http"` — raw HTTP escape hatch. `with` must include `service` and
+      `path`; `method` defaults to `POST`.
+    - Any other string (e.g. `"forge/run"`, `"tickets/create"`) — looked up in
+      the action catalog loaded from the registry. `with` fields are
+      action-specific.
+
+    ## Authentication
+
+    All endpoints (except `/healthz` and the `/internal/*` endpoints) require
+    a Gatekeeper-issued Bearer token: `Authorization: Bearer <token>`
+
+    Authorisation is delegated to Gatekeeper. Requests from outside the
+    resource owner's org receive `404 Not Found` rather than `403 Forbidden`.
+
+    Internal endpoints (`/internal/*`) use HMAC-SHA256 authentication via
+    `X-Hooks-Token` and `X-Hooks-Timestamp` headers (hooks service only).
+
+    ## Input substitution
+
+    `${KEY}` placeholders in any string value inside a step's `with` map are
+    replaced with values from the run's `inputs` map at execution time.
+    Substitution applies recursively to nested maps and arrays. Unrecognised
+    keys are left as-is.
+  version: 2.0.0
+  contact:
+    email: jhp1403@gmail.com
+
+servers:
+  - url: http://localhost:8085
+    description: Local development server
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      operationId: healthz
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+
+  /actions:
+    get:
+      summary: List action catalog
+      operationId: listActions
+      description: |
+        Returns the current in-memory action catalog loaded from the registry.
+        The catalog refreshes every 5 minutes. Requires `REGISTRY_URL` and
+        `REGISTRY_SERVICE_KEY` to be configured.
+
+        Permission: `listAction` on `workflows/actions`.
+      responses:
+        '200':
+          description: Array of available action definitions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ActionDef'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /steps:
+    post:
+      summary: Create step
+      operationId: createStep
+      description: |
+        Creates a new reusable step definition. Step names must be unique per
+        user/org. `timeout` defaults to 30 and is capped at 3600 seconds.
+
+        For `http` action steps, `with.service` and `with.path` are required.
+        For catalog action steps, `with` fields are validated at execution time.
+
+        Permission: `createStep` on `workflows/steps`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateStepRequest'
+      responses:
+        '201':
+          description: Step created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Step'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A step with that name already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+
+    get:
+      summary: List steps
+      operationId: listSteps
+      description: |
+        Returns accessible steps (created by the caller or belonging to their
+        org). Supports an optional `name` substring filter.
+
+        Permission: `listStep` on `workflows/steps`.
+      parameters:
+        - name: name
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter steps by name (substring match)
+      responses:
+        '200':
+          description: List of steps
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Step'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /steps/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+
+    get:
+      summary: Get step
+      operationId: getStep
+      description: "Permission: `getStep` on `workflows/steps/{id}`."
+      responses:
+        '200':
+          description: Step definition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Step'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      summary: Update step
+      operationId: updateStep
+      description: |
+        Replaces all mutable step fields. Changes affect every workflow that
+        references this step.
+
+        Permission: `updateStep` on `workflows/steps/{id}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateStepRequest'
+      responses:
+        '200':
+          description: Updated step
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Step'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete step
+      operationId: deleteStep
+      description: |
+        Soft-deletes the step. Hidden from all subsequent API responses.
+
+        Permission: `deleteStep` on `workflows/steps/{id}`.
+      responses:
+        '204':
+          description: Step deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /workflows:
+    post:
+      summary: Create workflow
+      operationId: createWorkflow
+      description: |
+        Creates a new workflow from an ordered list of step references. Maximum
+        50 step refs. All referenced steps must exist and be accessible to the
+        caller.
+
+        Permission: `createWorkflow` on `workflows/workflows`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkflowRequest'
+      responses:
+        '201':
+          description: Workflow created (steps enriched with full definitions)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    get:
+      summary: List workflows
+      operationId: listWorkflows
+      description: |
+        Returns the last 100 workflows the caller created or that belong to
+        their org. `steps` is an empty array in list responses.
+
+        Permission: `listWorkflow` on `workflows/workflows`.
+      responses:
+        '200':
+          description: List of workflows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Workflow'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /workflows/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+
+    get:
+      summary: Get workflow
+      operationId: getWorkflow
+      description: |
+        Returns a workflow with its step refs enriched with full step
+        definitions from the steps table.
+
+        Permission: `getWorkflow` on `workflows/workflows/{id}`.
+      responses:
+        '200':
+          description: Workflow with enriched step definitions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      summary: Update workflow
+      operationId: updateWorkflow
+      description: |
+        Replaces the workflow's name, description, and full step reference list.
+        All referenced steps must exist and be accessible to the caller.
+
+        Permission: `updateWorkflow` on `workflows/workflows/{id}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkflowRequest'
+      responses:
+        '200':
+          description: Updated workflow with enriched step definitions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete workflow
+      operationId: deleteWorkflow
+      description: |
+        Soft-deletes the workflow. Hidden from all subsequent API responses.
+
+        Permission: `deleteWorkflow` on `workflows/workflows/{id}`.
+      responses:
+        '204':
+          description: Workflow deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /workflows/{id}/runs:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+
+    post:
+      summary: Trigger workflow run
+      operationId: triggerRun
+      description: |
+        Queues a new run of the workflow. The caller's Bearer token is stored
+        temporarily and forwarded as the `Authorization` header on each step
+        request. The token is cleared once the run reaches a terminal state.
+
+        Returns `202 Accepted` immediately; poll `GET /runs/{id}` for
+        completion.
+
+        Permission: `triggerRun` on `workflows/runs`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TriggerRunRequest'
+      responses:
+        '202':
+          description: Run queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /internal/workflows/{id}/runs:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+
+    post:
+      summary: Internal — trigger run (hooks service only)
+      operationId: internalTriggerRun
+      security: []
+      description: |
+        Trigger endpoint used exclusively by the hooks service. Not intended
+        for direct consumer use.
+
+        Requires two request headers signed with the shared `HOOKS_TRIGGER_KEY`:
+        - `X-Hooks-Token`: `hex(HMAC-SHA256(key, "hooks:{workflow_id}:{triggered_by}:{timestamp}"))`
+        - `X-Hooks-Timestamp`: Unix timestamp (seconds) used in the HMAC
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - triggered_by
+              properties:
+                triggered_by:
+                  type: string
+                org_id:
+                  type: string
+                inputs:
+                  type: object
+                  additionalProperties:
+                    type: string
+      responses:
+        '202':
+          description: Run queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRun'
+        '401':
+          description: Missing or invalid HMAC token
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /internal/workflows/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+
+    get:
+      summary: Internal — get workflow org (hooks service only)
+      operationId: internalGetWorkflow
+      security: []
+      description: |
+        Returns `{"org_id": "..."}` for the requested workflow. Used by the
+        hooks service to verify org ownership before triggering a run.
+
+        Same HMAC authentication as `POST /internal/workflows/{id}/runs`.
+      responses:
+        '200':
+          description: Workflow org info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  org_id:
+                    type: string
+        '401':
+          description: Missing or invalid HMAC token
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /internal/runs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+
+    get:
+      summary: Internal — get run status (hooks service only)
+      operationId: internalGetRun
+      security: []
+      description: |
+        Returns the current status of a run. Used by the GitHub App in the
+        hooks service to poll for run completion.
+
+        Same HMAC authentication as `POST /internal/workflows/{id}/runs`.
+      responses:
+        '200':
+          description: Run status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRun'
+        '401':
+          description: Missing or invalid HMAC token
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /runs:
+    get:
+      summary: List runs
+      operationId: listRuns
+      description: |
+        Returns the last 100 runs triggered by the caller or belonging to
+        their org. Supports an optional `workflow_id` filter. `step_runs` is
+        an empty array in list responses.
+
+        Permission: `listRun` on `workflows/runs`.
+      parameters:
+        - name: workflow_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filter runs by workflow ID
+      responses:
+        '200':
+          description: List of runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WorkflowRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /runs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+
+    get:
+      summary: Get run
+      operationId: getRun
+      description: |
+        Returns a run with its per-step execution records including `output`.
+
+        Permission: `getRun` on `workflows/runs/{id}`.
+      responses:
+        '200':
+          description: Run with step records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Cancel run
+      operationId: cancelRun
+      description: |
+        Cancels a run that is in `pending` or `running` state. Returns `409`
+        if the run has already reached a terminal state.
+
+        Permission: `cancelRun` on `workflows/runs/{id}`.
+      responses:
+        '204':
+          description: Run cancelled
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Run is not in a cancellable state (already terminal)
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Token issued by the Gatekeeper service
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Resource UUID
+
+  schemas:
+    ActionDef:
+      type: object
+      description: An action definition loaded from the registry action catalog.
+      properties:
+        name:
+          type: string
+          description: Unique action name used as the `action` field on a step
+          example: forge/run
+        service_name:
+          type: string
+          description: Name of the service that handles this action
+          example: forge
+        service_url:
+          type: string
+          description: Base URL of the service
+          example: http://forge:8083
+        method:
+          type: string
+          enum: [GET, POST, PUT, PATCH, DELETE]
+          example: POST
+        path:
+          type: string
+          description: Path on the target service
+          example: /executions
+
+    CreateStepRequest:
+      type: object
+      required:
+        - name
+        - action
+      properties:
+        name:
+          type: string
+          description: Human-readable name. Must be unique per user/org.
+          example: run-forge
+        description:
+          type: string
+          example: Execute a forge run
+        action:
+          type: string
+          description: |
+            `"http"` for the raw HTTP escape hatch, or a catalog action name
+            such as `"forge/run"` or `"tickets/create"`.
+          example: forge/run
+        with:
+          type: object
+          additionalProperties: true
+          description: |
+            Action-specific configuration. For `http`: requires `service` and
+            `path`; `method` defaults to `POST`; `body` and `headers` are
+            optional. For catalog actions: fields are action-specific and
+            validated at execution time. All string values support `${KEY}`
+            substitution from run inputs.
+          example:
+            image: alpine:3.19
+            command: ["sh", "-c", "echo ${VERSION}"]
+        timeout:
+          type: integer
+          description: Step timeout in seconds. Defaults to 30, capped at 3600.
+          default: 30
+          maximum: 3600
+          example: 300
+
+    Step:
+      type: object
+      properties:
+        step_id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          example: run-forge
+        description:
+          type: string
+        action:
+          type: string
+          example: forge/run
+        with:
+          type: object
+          additionalProperties: true
+        timeout:
+          type: integer
+          description: Step timeout in seconds
+          example: 300
+        created_by:
+          type: string
+          format: uuid
+          readOnly: true
+        org_id:
+          type: string
+          readOnly: true
+        active:
+          type: boolean
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    WorkflowStepRef:
+      type: object
+      description: |
+        A reference to a step within a workflow. Steps sharing the same
+        non-null `parallel_group` integer execute concurrently.
+      required:
+        - step_id
+      properties:
+        step_id:
+          type: string
+          format: uuid
+          description: ID of the step to execute
+        parallel_group:
+          type: integer
+          nullable: true
+          description: |
+            When non-null, steps with the same value run concurrently. The run
+            waits for all steps in a group before advancing. Must be
+            non-negative.
+          example: 1
+
+    WorkflowStep:
+      allOf:
+        - $ref: '#/components/schemas/Step'
+        - type: object
+          properties:
+            parallel_group:
+              type: integer
+              nullable: true
+              description: Parallel group assigned in the workflow, if any
+
+    Workflow:
+      type: object
+      properties:
+        workflow_id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          example: deploy-staging
+        description:
+          type: string
+        created_by:
+          type: string
+          format: uuid
+          readOnly: true
+        org_id:
+          type: string
+          readOnly: true
+        active:
+          type: boolean
+          readOnly: true
+        steps:
+          type: array
+          description: |
+            On GET /workflows/{id}: enriched with full step definitions.
+            On GET /workflows (list) and create/update responses: empty array.
+          items:
+            $ref: '#/components/schemas/WorkflowStep'
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    CreateWorkflowRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          example: deploy-staging
+        description:
+          type: string
+        steps:
+          type: array
+          description: |
+            Ordered list of step references. Maximum 50. All step_ids must
+            exist and be accessible to the caller.
+          items:
+            $ref: '#/components/schemas/WorkflowStepRef'
+          maxItems: 50
+
+    TriggerRunRequest:
+      type: object
+      properties:
+        inputs:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Key-value pairs substituted into step `with` string values via
+            `${KEY}` placeholders at execution time.
+          example:
+            VERSION: v1.2.3
+            ENV: staging
+
+    WorkflowRun:
+      type: object
+      properties:
+        run_id:
+          type: string
+          format: uuid
+          readOnly: true
+        workflow_id:
+          type: string
+          format: uuid
+        triggered_by:
+          type: string
+          format: uuid
+          readOnly: true
+        org_id:
+          type: string
+          readOnly: true
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        current_step:
+          type: integer
+          description: Zero-indexed position of the step currently executing
+        inputs:
+          type: object
+          additionalProperties:
+            type: string
+        step_runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkflowStepRun'
+          description: |
+            Populated on GET /runs/{id}; empty array in list and trigger
+            responses.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+
+    WorkflowStepRun:
+      type: object
+      properties:
+        step_run_id:
+          type: string
+          format: uuid
+        run_id:
+          type: string
+          format: uuid
+        step_index:
+          type: integer
+        step_name:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        output:
+          type: string
+          nullable: true
+          description: |
+            Action result stored after the step completes. For `http` steps,
+            this is the response body. For catalog actions, this is the action
+            output. Up to 1 MB is stored. Null while the step is pending or
+            running.
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+
+  responses:
+    BadRequest:
+      description: Invalid request body or parameters
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    Unauthorized:
+      description: Missing or invalid Authorization header
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        text/plain:
+          schema:
+            type: string
+
+    NotFound:
+      description: Resource not found or not accessible to the caller
+      content:
+        text/plain:
+          schema:
+            type: string

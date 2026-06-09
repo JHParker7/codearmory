@@ -259,6 +259,7 @@ func main() {
 
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
 
 	mux.HandleFunc("POST /rules", handleCreateRule)
 	mux.HandleFunc("GET /rules", handleListRules)

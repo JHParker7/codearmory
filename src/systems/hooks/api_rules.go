@@ -99,9 +99,10 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createRule", "hooks/rules")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -182,9 +183,10 @@ func handleListRules(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listRule", "hooks/rules")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -211,9 +213,10 @@ func handleGetRule(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRule", "hooks/rules/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -222,6 +225,7 @@ func handleGetRule(w http.ResponseWriter, r *http.Request) {
 	rule, err := getRule(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
 		}
@@ -232,6 +236,7 @@ func handleGetRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessRule(rule, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
@@ -248,9 +253,10 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateRule", "hooks/rules/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -259,6 +265,7 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	existing, err := getRule(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
 		}
@@ -269,6 +276,7 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessRule(existing, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
@@ -351,9 +359,10 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteRule", "hooks/rules/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -362,6 +371,7 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	rule, err := getRule(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
 		}
@@ -372,6 +382,7 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessRule(rule, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}

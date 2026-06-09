@@ -24,9 +24,10 @@ func handleGetAccount(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getAccount", "gitea_integration/account")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -35,6 +36,7 @@ func handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	account, err := getAccount(ctx, userID)
 	if err != nil {
 		if isDbNotFound(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "no gitea account linked", http.StatusNotFound)
 			return
 		}
@@ -57,9 +59,10 @@ func handleLinkAccount(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "linkAccount", "gitea_integration/account")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -90,7 +93,7 @@ func handleLinkAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if verifiedLogin != req.GiteaUsername {
-		span.SetStatus(codes.Error, "gitea username mismatch")
+		span.SetStatus(codes.Ok, "")
 		slog.Warn("link account: username mismatch", "user_id", userID, "claimed", req.GiteaUsername, "actual", verifiedLogin)
 		http.Error(w, "gitea_token does not belong to the claimed gitea_username", http.StatusUnprocessableEntity)
 		return
@@ -151,9 +154,10 @@ func handleUnlinkAccount(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "unlinkAccount", "gitea_integration/account")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -162,6 +166,7 @@ func handleUnlinkAccount(w http.ResponseWriter, r *http.Request) {
 	account, err := getAccount(ctx, userID)
 	if err != nil {
 		if isDbNotFound(err) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "no gitea account linked", http.StatusNotFound)
 			return
 		}

@@ -24,12 +24,17 @@ func TestMain(m *testing.M) {
 const testUUID = "550e8400-e29b-41d4-a716-446655440000"
 
 // withGatekeeperURL temporarily replaces the package-level gatekeeperURL and
-// restores it when the test completes.
+// gatekeeperClient, then restores them when the test completes.
 func withGatekeeperURL(t *testing.T, u string) {
 	t.Helper()
-	orig := gatekeeperURL
+	origURL := gatekeeperURL
+	origClient := gatekeeperClient
 	gatekeeperURL = u
-	t.Cleanup(func() { gatekeeperURL = orig })
+	gatekeeperClient = &http.Client{}
+	t.Cleanup(func() {
+		gatekeeperURL = origURL
+		gatekeeperClient = origClient
+	})
 }
 
 // withEndpoints replaces the global endpointsList for the duration of the test.

@@ -28,7 +28,7 @@ func handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("caller.id", callerID))
 
 	if !requirePermission(w, r, "listAuditLog", "gatekeeper/audit-logs") {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 
@@ -170,7 +170,7 @@ func handleListServicePermissionRequests(w http.ResponseWriter, r *http.Request)
 	slog.Info("list service permission requests", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listServicePermissionRequest", "gatekeeper/service-permission-requests") {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 
@@ -221,7 +221,7 @@ func handleGetServicePermissionRequest(w http.ResponseWriter, r *http.Request) {
 	slog.Info("get service permission request", "caller_id", callerID, "request_id", id)
 
 	if !requirePermission(w, r, "getServicePermissionRequest", "gatekeeper/service-permission-requests/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 
@@ -253,7 +253,7 @@ func handleApproveServicePermissionRequest(w http.ResponseWriter, r *http.Reques
 	slog.Info("approve service permission request", "caller_id", callerID, "request_id", id)
 
 	if !requirePermission(w, r, "approveServicePermissionRequest", "gatekeeper/service-permission-requests/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 
@@ -373,7 +373,7 @@ func handleDeclineServicePermissionRequest(w http.ResponseWriter, r *http.Reques
 	slog.Info("decline service permission request", "caller_id", callerID, "request_id", id)
 
 	if !requirePermission(w, r, "declineServicePermissionRequest", "gatekeeper/service-permission-requests/"+id) {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
 

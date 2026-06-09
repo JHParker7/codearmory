@@ -48,9 +48,10 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createTicket", "tickets/tickets")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -115,9 +116,10 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTicket", "tickets/tickets")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -158,9 +160,10 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getTicket", "tickets/tickets/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -169,6 +172,7 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 	t, err := getTicket(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
@@ -179,6 +183,7 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessTicket(t, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return
 	}
@@ -205,9 +210,10 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateTicket", "tickets/tickets/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -216,6 +222,7 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	existing, err := getTicket(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
@@ -226,6 +233,7 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessTicket(existing, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return
 	}
@@ -308,9 +316,10 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteTicket", "tickets/tickets/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -319,6 +328,7 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 	t, err := getTicket(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "ticket not found", http.StatusNotFound)
 			return
 		}
@@ -329,6 +339,7 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canAccessTicket(t, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return
 	}

@@ -1,0 +1,1759 @@
+openapi: 3.0.3
+
+info:
+  title: Gatekeeper
+  description: |
+    Authentication and user management service with role-based access control (RBAC)
+    and multi-tenant organisation support.
+
+    ## Authentication
+
+    All endpoints except `POST /signup` and `POST /login` require a valid
+    `Authorization: Bearer <token>` header. Obtain a token via `POST /login`.
+
+    ## Permission model
+
+    Protected endpoints enforce two layers of access control:
+
+    1. **JWT verification** — the middleware validates the token signature against
+       the public key stored in the session record.
+    2. **Permission check** — every handler calls `checkPermissions(userID, service, action, resource)`.
+       The user's role must contain a `Permissions` record where:
+       - `service` matches `"gatekeeper"`
+       - `actions` array contains the required action
+       - `resources` array contains the required resource path
+
+    Resource path conventions:
+    - Collection operations (create): `gatekeeper/{type}s` — e.g. `gatekeeper/orgs`
+    - Instance operations: `gatekeeper/{type}s/{id}` — e.g. `gatekeeper/orgs/abc-123`
+
+    On signup every user automatically receives a role granting `getUser`,
+    `updateUser`, and `deleteUser` on their own user resource
+    (`gatekeeper/users/{user_id}`). All other permissions must be explicitly granted
+    by an administrator.
+
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+security: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # ── Request bodies ──────────────────────────────────────────────────────
+
+    SignupRequest:
+      type: object
+      required: [email, username, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        username:
+          type: string
+          example: alice
+        password:
+          type: string
+          format: password
+          example: s3cr3t
+        firstname:
+          type: string
+          example: Alice
+        lastname:
+          type: string
+          example: Smith
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          format: password
+          example: s3cr3t
+
+    CheckPermissionsRequest:
+      type: object
+      required: [service, action, resource]
+      properties:
+        service:
+          type: string
+          example: gatekeeper
+        action:
+          type: string
+          example: getUser
+        resource:
+          type: string
+          example: gatekeeper/users/abc-123
+
+    UpdateUserRequest:
+      type: object
+      required: [email, username]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        username:
+          type: string
+          example: alice
+        password:
+          type: string
+          format: password
+          description: Omit to leave the password unchanged.
+          example: newpassword
+        firstname:
+          type: string
+          example: Alice
+        lastname:
+          type: string
+          example: Smith
+
+    OrgRequest:
+      type: object
+      required: [org_name]
+      properties:
+        org_name:
+          type: string
+          example: Acme Corp
+
+    TeamRequest:
+      type: object
+      required: [team_name]
+      properties:
+        team_name:
+          type: string
+          example: Engineering
+        role_id:
+          type: string
+          nullable: true
+          example: role-uuid-here
+
+    RoleRequest:
+      type: object
+      properties:
+        permissions_ids:
+          type: array
+          items:
+            type: string
+          example: [perm-uuid-1, perm-uuid-2]
+        org_id:
+          type: string
+          nullable: true
+          example: org-uuid-here
+
+    PermissionsRequest:
+      type: object
+      required: [service]
+      properties:
+        name:
+          type: string
+          example: Read users
+        service:
+          type: string
+          example: gatekeeper
+        actions:
+          type: array
+          items:
+            type: string
+          example: [getUser, updateUser]
+        resources:
+          type: array
+          items:
+            type: string
+          example: [gatekeeper/users/abc-123]
+
+    InviteRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          example: bob@example.com
+
+    # ── Response bodies ─────────────────────────────────────────────────────
+
+    SignupResponse:
+      type: object
+      properties:
+        user_id:
+          type: string
+          example: abc-123
+        email:
+          type: string
+          example: alice@example.com
+        username:
+          type: string
+          example: alice
+        firstname:
+          type: string
+          example: Alice
+        lastname:
+          type: string
+          example: Smith
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: "Signed ES256 JWT. Include as `Authorization: Bearer <token>`."
+          example: eyJhbGciOiJFUzI1NiJ9...
+
+    CheckPermissionsResponse:
+      type: object
+      properties:
+        authorized:
+          type: boolean
+          example: true
+
+    User:
+
+      type: object
+      properties:
+        user_id:
+          type: string
+        email:
+          type: string
+        username:
+          type: string
+        firstname:
+          type: string
+        lastname:
+          type: string
+        org_id:
+          type: string
+          nullable: true
+        team_id:
+          type: string
+          nullable: true
+        role_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        active:
+          type: boolean
+
+    Org:
+      type: object
+      properties:
+        org_id:
+          type: string
+          example: org-uuid-here
+        org_name:
+          type: string
+          example: Acme Corp
+        owner_id:
+          type: string
+          example: user-uuid-here
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        active:
+          type: boolean
+
+    Team:
+      type: object
+      properties:
+        team_id:
+          type: string
+          example: team-uuid-here
+        team_name:
+          type: string
+          example: Engineering
+        role_id:
+          type: string
+          nullable: true
+          example: role-uuid-here
+        owner_id:
+          type: string
+          example: user-uuid-here
+        org_id:
+          type: string
+          nullable: true
+          example: org-uuid-here
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        active:
+          type: boolean
+
+    Role:
+      type: object
+      properties:
+        role_id:
+          type: string
+          example: role-uuid-here
+        permissions_ids:
+          type: array
+          items:
+            type: string
+          example: [perm-uuid-1]
+        org_id:
+          type: string
+          nullable: true
+          example: org-uuid-here
+        owner_id:
+          type: string
+          example: user-uuid-here
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        active:
+          type: boolean
+
+    Permissions:
+      type: object
+      properties:
+        permissions_id:
+          type: string
+          example: perm-uuid-here
+        name:
+          type: string
+          example: Read users
+        service:
+          type: string
+          example: gatekeeper
+        actions:
+          type: array
+          items:
+            type: string
+          example: [getUser]
+        resources:
+          type: array
+          items:
+            type: string
+          example: [gatekeeper/users/abc-123]
+        owner_id:
+          type: string
+          example: user-uuid-here
+        org_id:
+          type: string
+          nullable: true
+          example: org-uuid-here
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        active:
+          type: boolean
+
+    Session:
+      type: object
+      description: JWT and public key fields are never returned; use `POST /login` to obtain a token.
+      properties:
+        session_id:
+          type: string
+          example: session-uuid-here
+        user_id:
+          type: string
+          example: user-uuid-here
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        active:
+          type: boolean
+
+    Invite:
+      type: object
+      properties:
+        invite_id:
+          type: string
+          example: invite-uuid-here
+        inviter_id:
+          type: string
+          example: user-uuid-here
+        invitee_email:
+          type: string
+          example: bob@example.com
+        resource_type:
+          type: string
+          enum: [org, team]
+          example: org
+        resource_id:
+          type: string
+          example: org-uuid-here
+        status:
+          type: string
+          enum: [pending, accepted, declined]
+          example: pending
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SecretRequest:
+      type: object
+      required: [name, value]
+      properties:
+        name:
+          type: string
+          example: MY_KEY
+        value:
+          type: string
+          format: password
+          example: s3cr3t
+
+    SecretUpdateRequest:
+      type: object
+      required: [value]
+      properties:
+        name:
+          type: string
+          example: NEW_NAME
+        value:
+          type: string
+          format: password
+          example: new_value
+
+    ProviderRequest:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [builtin, doppler, vault, aws_sm]
+          example: doppler
+        config:
+          type: object
+          description: |
+            Provider-specific configuration object, stored encrypted.
+            - **builtin**: no config required
+            - **doppler**: `{"service_token": "...", "project": "...", "config": "..."}`
+            - **vault**: `{"address": "https://vault:8200", "token": "...", "namespace": "...", "mount": "secret"}`
+            - **aws_sm**: `{"region": "us-east-1"}` (optional; uses IAM role if omitted)
+          additionalProperties: true
+
+    ResolveSecretsRequest:
+      type: object
+      required: [org_id, names]
+      properties:
+        org_id:
+          type: string
+          example: org-uuid-here
+        names:
+          type: array
+          items:
+            type: string
+          example: [DB_PASSWORD, API_KEY]
+
+    Secret:
+      type: object
+      description: Secret metadata. The value is never returned by any API endpoint.
+      properties:
+        secret_id:
+          type: string
+          example: secret-uuid-here
+        org_id:
+          type: string
+          example: org-uuid-here
+        name:
+          type: string
+          example: MY_KEY
+        created_by:
+          type: string
+          example: user-uuid-here
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SecretProvider:
+      type: object
+      description: Org secret provider configuration. The config blob is never returned.
+      properties:
+        org_id:
+          type: string
+          example: org-uuid-here
+        provider:
+          type: string
+          enum: [builtin, doppler, vault, aws_sm]
+          example: doppler
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: missing or invalid authorization header
+    Forbidden:
+      description: Authenticated user lacks the required permission.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: forbidden
+    NotFound:
+      description: Resource not found.
+      content:
+        text/plain:
+          schema:
+            type: string
+
+paths:
+  # ── Auth ──────────────────────────────────────────────────────────────────
+
+  /signup:
+    post:
+      summary: Create a new user account
+      description: |
+        Registers a new user. On success, creates a default role granting
+        `getUser`, `updateUser`, and `deleteUser` on the new user's own resource.
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignupRequest"
+      responses:
+        "201":
+          description: User created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignupResponse"
+        "400":
+          description: Missing required fields or invalid JSON.
+        "409":
+          description: Email or username already in use.
+        "500":
+          description: Internal server error.
+
+  /login:
+    post:
+      summary: Authenticate and obtain a JWT
+      description: |
+        Validates credentials and creates a new session. Returns a signed ES256
+        JWT valid for 24 hours. Pass it as `Authorization: Bearer <token>` on
+        subsequent requests.
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          description: Missing email or password.
+        "401":
+          description: Invalid credentials.
+        "500":
+          description: Internal server error.
+
+  /check_permissions:
+    get:
+      summary: Check whether the caller holds a given permission
+      description: |
+        Returns `{"authorized": true}` if the authenticated user's role contains
+        a Permissions record matching the provided `service`, `action`, and
+        `resource`. Returns `{"authorized": false}` if no matching permission is
+        found.
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CheckPermissionsRequest"
+      responses:
+        "200":
+          description: Permission check result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckPermissionsResponse"
+        "400":
+          description: Invalid request body or internal permission lookup error.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Authenticated user record not found.
+
+  # ── Users ─────────────────────────────────────────────────────────────────
+
+  /users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: User UUID
+
+    get:
+      summary: Get a user
+      description: |
+        Returns the user's profile. Password hash is never included.
+
+        **Required permission:** `getUser` on `gatekeeper/users/{id}`
+      tags: [Users]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      summary: Update a user
+      description: |
+        Updates profile fields. `org_id`, `team_id`, and `role_id` cannot be
+        changed through this endpoint — use the respective resource endpoints
+        and then assign via an administrative role update.
+
+        **Required permission:** `updateUser` on `gatekeeper/users/{id}`
+      tags: [Users]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: Updated user profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Missing required fields or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+    delete:
+      summary: Delete a user
+      description: |
+        Soft-deletes the user (sets `active = false`).
+
+        **Required permission:** `deleteUser` on `gatekeeper/users/{id}`
+      tags: [Users]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: User deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+  # ── Orgs ──────────────────────────────────────────────────────────────────
+
+  /orgs:
+    post:
+      summary: Create an organisation
+      description: |
+        **Required permission:** `createOrg` on `gatekeeper/orgs`
+      tags: [Orgs]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrgRequest"
+      responses:
+        "201":
+          description: Organisation created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Org"
+        "400":
+          description: Missing org_name or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Internal server error.
+
+  /orgs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Org UUID
+
+    get:
+      summary: Get an organisation
+      description: |
+        **Required permission:** `getOrg` on `gatekeeper/orgs/{id}`
+      tags: [Orgs]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Organisation record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Org"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      summary: Update an organisation
+      description: |
+        **Required permission:** `updateOrg` on `gatekeeper/orgs/{id}`
+      tags: [Orgs]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrgRequest"
+      responses:
+        "200":
+          description: Updated organisation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Org"
+        "400":
+          description: Missing org_name or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+    delete:
+      summary: Delete an organisation
+      description: |
+        Soft-deletes the organisation.
+
+        **Required permission:** `deleteOrg` on `gatekeeper/orgs/{id}`
+      tags: [Orgs]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Organisation deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+  # ── Teams ─────────────────────────────────────────────────────────────────
+
+  /teams:
+    post:
+      summary: Create a team
+      description: |
+        **Required permission:** `createTeam` on `gatekeeper/teams`
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamRequest"
+      responses:
+        "201":
+          description: Team created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          description: Missing team_name or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Internal server error.
+
+  /teams/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Team UUID
+
+    get:
+      summary: Get a team
+      description: |
+        **Required permission:** `getTeam` on `gatekeeper/teams/{id}`
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Team record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      summary: Update a team
+      description: |
+        **Required permission:** `updateTeam` on `gatekeeper/teams/{id}`
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamRequest"
+      responses:
+        "200":
+          description: Updated team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          description: Missing team_name or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+    delete:
+      summary: Delete a team
+      description: |
+        Soft-deletes the team.
+
+        **Required permission:** `deleteTeam` on `gatekeeper/teams/{id}`
+      tags: [Teams]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Team deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+  # ── Roles ─────────────────────────────────────────────────────────────────
+
+  /roles:
+    post:
+      summary: Create a role
+      description: |
+        **Required permission:** `createRole` on `gatekeeper/roles`
+      tags: [Roles]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleRequest"
+      responses:
+        "201":
+          description: Role created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+        "400":
+          description: Invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Internal server error.
+
+  /roles/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Role UUID
+
+    get:
+      summary: Get a role
+      description: |
+        **Required permission:** `getRole` on `gatekeeper/roles/{id}`
+      tags: [Roles]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Role record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      summary: Update a role
+      description: |
+        Replaces the role's `permissions_ids` list and `org_id`.
+
+        **Required permission:** `updateRole` on `gatekeeper/roles/{id}`
+      tags: [Roles]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleRequest"
+      responses:
+        "200":
+          description: Updated role.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+        "400":
+          description: Invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+    delete:
+      summary: Delete a role
+      description: |
+        Soft-deletes the role.
+
+        **Required permission:** `deleteRole` on `gatekeeper/roles/{id}`
+      tags: [Roles]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Role deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+  # ── Permissions ───────────────────────────────────────────────────────────
+
+  /permissions:
+    post:
+      summary: Create a permissions record
+      description: |
+        A Permissions record declares which `actions` may be performed on which
+        `resources` for a given `service`. Assign it to a Role via
+        `PUT /roles/{id}`.
+
+        **Required permission:** `createPermissions` on `gatekeeper/permissions`
+      tags: [Permissions]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PermissionsRequest"
+      responses:
+        "201":
+          description: Permissions record created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Permissions"
+        "400":
+          description: Missing service or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Internal server error.
+
+  /permissions/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Permissions UUID
+
+    get:
+      summary: Get a permissions record
+      description: |
+        **Required permission:** `getPermissions` on `gatekeeper/permissions/{id}`
+      tags: [Permissions]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Permissions record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Permissions"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      summary: Update a permissions record
+      description: |
+        Replaces `actions`, `resources`, `service`, and `name`.
+
+        **Required permission:** `updatePermissions` on `gatekeeper/permissions/{id}`
+      tags: [Permissions]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PermissionsRequest"
+      responses:
+        "200":
+          description: Updated permissions record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Permissions"
+        "400":
+          description: Missing service or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+    delete:
+      summary: Delete a permissions record
+      description: |
+        Soft-deletes the permissions record.
+
+        **Required permission:** `deletePermissions` on `gatekeeper/permissions/{id}`
+      tags: [Permissions]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Permissions record deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+  # ── Sessions ──────────────────────────────────────────────────────────────
+
+  /sessions/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Session UUID
+
+    get:
+      summary: Get a session
+      description: |
+        Returns session metadata. The JWT and public key are never included in
+        the response. Use `POST /login` to obtain a token.
+
+        **Owner-only:** only the user who owns the session may retrieve it.
+        Cross-user access returns 403 even when the caller holds the required
+        permission.
+
+        **Required permission:** `getSession` on `gatekeeper/sessions/{id}`
+      tags: [Sessions]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Session metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      summary: Delete (invalidate) a session
+      description: |
+        Soft-deletes the session, causing the associated JWT to be rejected on
+        all subsequent requests.
+
+        **Owner-only:** only the user who owns the session may delete it.
+        Cross-user access returns 403 even when the caller holds the required
+        permission.
+
+        **Required permission:** `deleteSession` on `gatekeeper/sessions/{id}`
+      tags: [Sessions]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Session invalidated.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+  # ── Invites ───────────────────────────────────────────────────────────────
+
+  /orgs/{id}/invites:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Org UUID
+    post:
+      summary: Invite a user to an organisation
+      description: |
+        Sends an invitation to the given email address to join the org.
+        The invitee does not need to be a registered user yet.
+
+        **Required permission:** `inviteUser` on `gatekeeper/orgs/{id}`
+      tags: [Invites]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InviteRequest"
+      responses:
+        "201":
+          description: Invite created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invite"
+        "400":
+          description: Missing email or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Org not found.
+        "500":
+          description: Internal server error.
+
+  /teams/{id}/invites:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Team UUID
+    post:
+      summary: Invite a user to a team
+      description: |
+        Sends an invitation to the given email address to join the team.
+
+        **Required permission:** `inviteUser` on `gatekeeper/teams/{id}`
+      tags: [Invites]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InviteRequest"
+      responses:
+        "201":
+          description: Invite created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invite"
+        "400":
+          description: Missing email or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Team not found.
+        "500":
+          description: Internal server error.
+
+  /invites/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Invite UUID
+
+    get:
+      summary: Get an invite
+      description: |
+        Returns the invite record. Only the inviter and the invitee may view an
+        invite — all other callers receive 404.
+      tags: [Invites]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Invite record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invite"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      summary: Revoke an invite
+      description: |
+        Soft-deletes the invite, preventing the invitee from accepting it.
+        Only the inviter may cancel an invite — no permission record is required.
+      tags: [Invites]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Invite revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller is not the inviter.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+
+  /invites/{id}/accept:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Invite UUID
+    post:
+      summary: Accept an invite
+      description: |
+        Accepts the invite and assigns the caller to the invited org or team.
+        For an org invite, sets `org_id` on the caller's user record.
+        For a team invite, sets `team_id`. The operation is atomic.
+
+        Only the invitee (matched by email) may accept.
+      tags: [Invites]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Invite accepted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller is not the invitee.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Invite already accepted or declined.
+        "410":
+          description: Invite has expired.
+        "500":
+          description: Internal server error.
+
+  /invites/{id}/decline:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Invite UUID
+    post:
+      summary: Decline an invite
+      description: |
+        Marks the invite as declined. Only the invitee may decline.
+        Already-resolved invites return 409.
+      tags: [Invites]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Invite declined.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller is not the invitee.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Invite already accepted or declined.
+        "500":
+          description: Internal server error.
+
+  # ── Secrets ───────────────────────────────────────────────────────────────
+
+  /secrets:
+    post:
+      summary: Create a secret
+      description: |
+        Creates an encrypted secret scoped to the caller's org. The value is
+        write-only and never returned by the API.
+
+        **Required permission:** `createSecret` on `gatekeeper/secrets`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretRequest"
+      responses:
+        "201":
+          description: Secret created. Value is omitted from the response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Secret"
+        "400":
+          description: Missing name/value, invalid JSON, or caller has no org.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A secret with that name already exists in the org.
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+    get:
+      summary: List secrets
+      description: |
+        Returns all active secrets for the caller's org. Values are never
+        included in the response.
+
+        **Required permission:** `listSecret` on `gatekeeper/secrets`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: List of secret metadata for the caller's org.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Secret"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+  /secrets/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Secret UUID
+
+    put:
+      summary: Update a secret
+      description: |
+        Replaces the encrypted value (and optionally the name) of an existing
+        secret. The caller must belong to the same org as the secret.
+
+        **Required permission:** `updateSecret` on `gatekeeper/secrets/{id}`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretUpdateRequest"
+      responses:
+        "200":
+          description: Updated secret metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Secret"
+        "400":
+          description: Missing value or invalid JSON.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Internal server error.
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+    delete:
+      summary: Delete a secret
+      description: |
+        Soft-deletes the secret (sets `active = false`). The caller must belong
+        to the same org as the secret.
+
+        **Required permission:** `deleteSecret` on `gatekeeper/secrets/{id}`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Secret deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+  # ── Org secret provider ───────────────────────────────────────────────────
+
+  /orgs/{id}/secret-provider:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Org UUID
+
+    get:
+      summary: Get the org's secret provider configuration
+      description: |
+        Returns the configured secret provider for the org. The provider config
+        blob is never returned — only the provider name and timestamps.
+
+        **Required permission:** `getSecretProvider` on `gatekeeper/orgs/{id}`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Secret provider configuration (config blob omitted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecretProvider"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No secret provider configured for this org.
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+    put:
+      summary: Configure the org's secret provider
+      description: |
+        Sets or replaces the org's secret provider. The config object is
+        provider-specific and stored encrypted. Supported providers:
+
+        - **builtin** — no config required; secrets stored in the `secrets` table
+        - **doppler** — `{"service_token": "...", "project": "...", "config": "..."}`
+        - **vault** — `{"address": "...", "token": "...", "namespace": "...", "mount": "secret"}`
+        - **aws_sm** — `{"region": "us-east-1"}` (optional; uses IAM role if omitted)
+
+        **Required permission:** `updateSecretProvider` on `gatekeeper/orgs/{id}`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderRequest"
+      responses:
+        "200":
+          description: Updated secret provider record (config blob omitted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecretProvider"
+        "400":
+          description: Invalid provider value or request body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Internal server error.
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+    delete:
+      summary: Remove the org's secret provider configuration
+      description: |
+        Deletes the org's secret provider record. Subsequent secret resolves
+        will fall back to the builtin provider.
+
+        **Required permission:** `deleteSecretProvider` on `gatekeeper/orgs/{id}`
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Secrets]
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Provider configuration removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+  # ── Internal ──────────────────────────────────────────────────────────────
+
+  /internal/secrets/resolve:
+    post:
+      summary: Resolve (decrypt) named secrets for an org
+      description: |
+        Internal endpoint called by the workflow worker to retrieve plaintext
+        secret values for a pipeline run. Uses the org's configured secret
+        provider (or builtin if none is set).
+
+        Authentication is via `X-Service-Key: name:key` service auth, not a
+        user JWT. The calling service must be registered in `PERMITTED_SERVICES`.
+
+        Returns 503 if `GATEKEEPER_SECRETS_KEY` is not configured.
+      tags: [Internal]
+      security: []
+      parameters:
+        - name: X-Service-Key
+          in: header
+          required: true
+          schema:
+            type: string
+          description: "Service authentication header in the form `name:key`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveSecretsRequest"
+      responses:
+        "200":
+          description: Map of secret name to plaintext value.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+                example:
+                  DB_PASSWORD: s3cr3t
+                  API_KEY: abc123
+        "400":
+          description: Missing org_id/names, invalid JSON, or a requested secret was not found.
+        "401":
+          description: Missing or invalid X-Service-Key.
+        "503":
+          description: Secrets not available — GATEKEEPER_SECRETS_KEY not configured.
+
+tags:
+  - name: Auth
+    description: Signup, login, and permission checks.
+  - name: Users
+    description: User profile management.
+  - name: Orgs
+    description: Organisation management.
+  - name: Teams
+    description: Team management.
+  - name: Roles
+    description: Role management (binds permissions to users/teams).
+  - name: Permissions
+    description: Permission record management.
+  - name: Sessions
+    description: Session lifecycle management.
+  - name: Invites
+    description: Org and team invitations.
+  - name: Secrets
+    description: Secrets management — create, list, update, delete encrypted secrets and configure per-org secret providers.
+  - name: Internal
+    description: Internal service-to-service endpoints. Not exposed through Conductor.

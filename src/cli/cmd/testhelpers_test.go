@@ -7,7 +7,18 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"github.com/zalando/go-keyring"
 )
+
+// testUUID is a valid UUID used in tests that need to bypass name resolution
+// (looksLikeUUID returns true, so no list call is made).
+const testUUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+func TestMain(m *testing.M) {
+	keyring.MockInit()
+	os.Exit(m.Run())
+}
 
 // requestRecord captures one inbound HTTP request from the test server.
 type requestRecord struct {

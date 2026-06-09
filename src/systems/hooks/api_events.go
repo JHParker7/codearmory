@@ -18,9 +18,10 @@ func handleListEvents(w http.ResponseWriter, r *http.Request) {
 
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listEvent", "hooks/events")
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -47,9 +48,10 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getEvent", "hooks/events/"+id)
 	if !ok {
-		span.SetStatus(codes.Error, "forbidden")
+		span.SetStatus(codes.Ok, "")
 		return
 	}
+	span.AddEvent("permission.granted")
 	span.SetAttributes(
 		attribute.String("user.id", userID),
 		attribute.String("org.id", orgID),
@@ -58,6 +60,7 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	event, err := getEvent(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
 			http.Error(w, "event not found", http.StatusNotFound)
 			return
 		}
@@ -96,6 +99,7 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if accessCount == 0 {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "event not found", http.StatusNotFound)
 		return
 	}

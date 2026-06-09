@@ -34,11 +34,14 @@ var (
 
 	// serviceURLs maps registered service names to their base URLs.
 	// Seeded at startup from SERVICES env var and updated every 5 min from the registry.
-	serviceURLsMu sync.RWMutex
-	serviceURLs   = map[string]string{}
+	serviceURLsMu      sync.RWMutex
+	serviceURLs        = map[string]string{}
 	// hostToService is the reverse of serviceURLs: hostname → service name.
 	// Used by peerServiceTransport to stamp peer.service on OTel CLIENT spans.
-	hostToService = map[string]string{}
+	hostToService      = map[string]string{}
+	// catalogServiceNames tracks which names in serviceURLs came from the registry
+	// catalog (vs. env-seeded). Used to evict stale entries on each refresh.
+	catalogServiceNames = map[string]bool{}
 
 	// actionCatalog maps action names to their definitions, polled from the registry.
 	actionCatalogMu sync.RWMutex
@@ -230,11 +233,26 @@ func refreshCatalog(ctx context.Context) {
 	actionCatalog = newCatalog
 	actionCatalogMu.Unlock()
 
-	// Also update serviceURLs with any new service URLs from the catalog.
+	// Replace catalog-derived service URLs with the fresh set, evicting stale entries.
 	serviceURLsMu.Lock()
+	newCatalogNames := make(map[string]bool, len(raw))
 	for _, ra := range raw {
 		if ra.ServiceName != "" && ra.ServiceURL != "" {
 			setServiceURL(ra.ServiceName, ra.ServiceURL)
+			newCatalogNames[ra.ServiceName] = true
+		}
+	}
+	for name := range catalogServiceNames {
+		if !newCatalogNames[name] {
+			delete(serviceURLs, name)
+		}
+	}
+	catalogServiceNames = newCatalogNames
+	// Rebuild hostToService from scratch so renamed/moved service hostnames are evicted.
+	hostToService = make(map[string]string, len(serviceURLs))
+	for name, rawURL := range serviceURLs {
+		if u, err := url.Parse(rawURL); err == nil && u.Hostname() != "" {
+			hostToService[u.Hostname()] = name
 		}
 	}
 	serviceURLsMu.Unlock()

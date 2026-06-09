@@ -202,6 +202,7 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
 	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, envInt("SIGNUP_RATE_LIMIT", 10), envDuration("SIGNUP_RATE_WINDOW", 10*time.Minute), handleSignup))
 	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleLogin))
 	mux.HandleFunc("POST /mfa/verify", rateLimitMiddleware("mfa-verify", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleMFAVerify))
@@ -245,6 +246,7 @@ func main() {
 	mux.Handle("DELETE /teams/{id}", mw(handleDeleteTeam))
 
 	mux.Handle("POST /roles", mw(handleCreateRole))
+	mux.Handle("GET /roles", mw(handleListRoles))
 	mux.Handle("GET /roles/{id}", mw(handleGetRole))
 	mux.Handle("PUT /roles/{id}", mw(handleUpdateRole))
 	mux.Handle("DELETE /roles/{id}", mw(handleDeleteRole))

@@ -83,7 +83,7 @@ func requirePermission(w http.ResponseWriter, r *http.Request, action, resource 
 		return false
 	}
 	if !ok {
-		span.SetStatus(codes.Error, "permission denied")
+		span.SetStatus(codes.Ok, "")
 		slog.Warn("permission denied", "user_id", userID, "action", action, "resource", resource)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false
