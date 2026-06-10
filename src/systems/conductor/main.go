@@ -794,6 +794,95 @@ func secret(name string) string {
 	return os.Getenv(name)
 }
 
+// handleServicesHealth checks /healthz on every registered backend service
+// concurrently and returns a JSON summary of their status.
+func handleServicesHealth(w http.ResponseWriter, r *http.Request) {
+	routingMu.RLock()
+	snapshot := make(map[string]serviceState, len(servicesMap))
+	for k, v := range servicesMap {
+		snapshot[k] = v
+	}
+	routingMu.RUnlock()
+
+	type serviceHealth struct {
+		Name    string `json:"name"`
+		URL     string `json:"url"`
+		Status  string `json:"status"`
+		Latency string `json:"latency_ms,omitempty"`
+		Error   string `json:"error,omitempty"`
+	}
+
+	results := make([]serviceHealth, 0, len(snapshot))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for name, svc := range snapshot {
+		wg.Add(1)
+		go func(name string, svc serviceState) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+
+			target := strings.TrimRight(svc.url, "/") + "/healthz"
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+			if err != nil {
+				mu.Lock()
+				results = append(results, serviceHealth{Name: name, URL: svc.url, Status: "unhealthy", Error: err.Error()})
+				mu.Unlock()
+				return
+			}
+
+			start := time.Now()
+			resp, err := httpClient.Do(req)
+			elapsed := time.Since(start)
+			if err != nil {
+				mu.Lock()
+				results = append(results, serviceHealth{Name: name, URL: svc.url, Status: "unhealthy", Error: err.Error()})
+				mu.Unlock()
+				return
+			}
+			resp.Body.Close()
+
+			status := "healthy"
+			if resp.StatusCode >= 500 {
+				status = "unhealthy"
+			} else if resp.StatusCode >= 400 {
+				status = "degraded"
+			}
+
+			mu.Lock()
+			results = append(results, serviceHealth{
+				Name:    name,
+				URL:     svc.url,
+				Status:  status,
+				Latency: strconv.FormatInt(elapsed.Milliseconds(), 10),
+			})
+			mu.Unlock()
+		}(name, svc)
+	}
+	wg.Wait()
+
+	overall := "healthy"
+	for _, r := range results {
+		if r.Status == "unhealthy" {
+			overall = "unhealthy"
+			break
+		} else if r.Status == "degraded" && overall == "healthy" {
+			overall = "degraded"
+		}
+	}
+
+	type response struct {
+		Status   string          `json:"status"`
+		Services []serviceHealth `json:"services"`
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if overall == "unhealthy" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	json.NewEncoder(w).Encode(response{Status: overall, Services: results})
+}
+
 func main() {
 	initialRegistryKey := secret("REGISTRY_SERVICE_KEY")
 	if initialRegistryKey == "" {
@@ -877,6 +966,7 @@ func main() {
 
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /health", handleServicesHealth)
 	mux.HandleFunc("POST /internal/refresh", handleInternalRefresh)
 	mux.HandleFunc("GET /openapi.json", handleOpenAPISpec)
 	mux.HandleFunc("GET /docs", handleDocs)
