@@ -187,8 +187,13 @@ func (e Execution) Complete(_ context.Context, status string, result RunResult) 
 // as running. Returns the claimed execution and true on success; false when no
 // pending work is available.
 func claimPendingExecution(ctx context.Context) (Execution, bool) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.claim_pending_execution")
+	defer span.End()
+
 	tx := connect().WithContext(ctx).Begin()
 	if tx.Error != nil {
+		span.RecordError(tx.Error)
+		span.SetStatus(codes.Error, tx.Error.Error())
 		return Execution{}, false
 	}
 
@@ -213,11 +218,14 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 	`).Scan(&raw)
 	if result.Error != nil {
 		tx.Rollback() //nolint:errcheck
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
 		slog.Error("worker: query pending row", "error", result.Error)
 		return Execution{}, false
 	}
 	if result.RowsAffected == 0 {
 		tx.Rollback() //nolint:errcheck
+		span.SetStatus(codes.Ok, "")
 		return Execution{}, false
 	}
 
@@ -230,24 +238,34 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 
 	if err := json.Unmarshal(raw.Command, &exec.Command); err != nil {
 		tx.Rollback() //nolint:errcheck
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		slog.Error("worker: unmarshal command", "execution_id", exec.ExecutionID, "error", err)
 		return Execution{}, false
 	}
 	if err := json.Unmarshal(raw.Env, &exec.Env); err != nil {
 		tx.Rollback() //nolint:errcheck
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		slog.Error("worker: unmarshal env", "execution_id", exec.ExecutionID, "error", err)
 		return Execution{}, false
 	}
 
 	if err := tx.Exec(`UPDATE executions SET status = 'running', started_at = now() WHERE execution_id = ?`, exec.ExecutionID).Error; err != nil {
 		tx.Rollback() //nolint:errcheck
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		slog.Error("worker: mark running", "execution_id", exec.ExecutionID, "error", err)
 		return Execution{}, false
 	}
 	if err := tx.Commit().Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return Execution{}, false
 	}
 
+	span.SetAttributes(attribute.String("execution.id", exec.ExecutionID))
+	span.SetStatus(codes.Ok, "")
 	return exec, true
 }
 
