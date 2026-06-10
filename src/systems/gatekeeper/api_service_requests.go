@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -14,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // handleListAuditLogs returns paginated audit log entries, newest first.
@@ -266,81 +264,7 @@ func handleApproveServicePermissionRequest(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var spr ServicePermissionRequest
-	now := time.Now()
-	err := connect().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Re-read with FOR UPDATE so concurrent approvals serialise here.
-		// The first transaction to commit wins; the second sees status != "pending".
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("request_id = ? AND active = ?", id, true).
-			First(&spr).Error; err != nil {
-			return err
-		}
-		if spr.Status != "pending" {
-			return fmt.Errorf("request is not pending")
-		}
-
-		// Load the service account.
-		var svcAcct ServiceAccount
-		if err := tx.Where("service_name = ? AND active = ?", spr.ServiceName, true).First(&svcAcct).Error; err != nil {
-			return err
-		}
-
-		// Ensure the service account has a role, creating one if absent.
-		var role Role
-		if svcAcct.RoleID == nil {
-			role = Role{
-				RoleID:         uuid.New().String(),
-				OwnerID:        callerID,
-				Active:         true,
-				PermissionsIDs: []string{},
-			}
-			if err := tx.Create(&role).Error; err != nil {
-				return err
-			}
-			svcAcct.RoleID = &role.RoleID
-			svcAcct.UpdatedAt = now
-			if err := tx.Save(&svcAcct).Error; err != nil {
-				return err
-			}
-		} else {
-			if err := tx.Where("role_id = ? AND active = ?", *svcAcct.RoleID, true).First(&role).Error; err != nil {
-				return err
-			}
-		}
-
-		// Create the permission record.
-		perm := Permissions{
-			PermissionsID: uuid.New().String(),
-			Name:          spr.Name,
-			Service:       spr.Service,
-			Actions:       spr.Actions,
-			Resources:     spr.Resources,
-			OwnerID:       callerID,
-			Active:        true,
-		}
-		if err := tx.Create(&perm).Error; err != nil {
-			return err
-		}
-
-		// Append to the role.
-		if role.PermissionsIDs == nil {
-			role.PermissionsIDs = []string{}
-		}
-		role.PermissionsIDs = append(role.PermissionsIDs, perm.PermissionsID)
-		role.UpdatedAt = now
-		if err := tx.Save(&role).Error; err != nil {
-			return err
-		}
-		cacheDel(ctx, "gk:role:"+role.RoleID)
-
-		// Mark the request approved.
-		spr.Status = "approved"
-		spr.ResolvedBy = &callerID
-		spr.ResolvedAt = &now
-		spr.UpdatedAt = now
-		return tx.Save(&spr).Error
-	})
+	spr, err := approveServicePermissionRequestAtomic(ctx, id, callerID)
 	if err != nil {
 		if err.Error() == "request is not pending" {
 			span.SetStatus(codes.Error, "not pending")

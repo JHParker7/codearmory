@@ -305,7 +305,7 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("user.id", id)))
 
-	if err := connect().WithContext(ctx).Model(&Session{}).Where("user_id = ?", id).Update("active", false).Error; err != nil {
+	if err := deactivateUserSessions(ctx, id); err != nil {
 		slog.Error("delete user: failed to invalidate sessions", "caller_id", callerID, "target_user_id", id, "error", err)
 	} else {
 		cacheDelUserSessions(ctx, id)
@@ -562,8 +562,8 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	// constant whether or not the email exists, preventing user enumeration via timing.
 	const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 
-	var user User
-	if err := connect().WithContext(ctx).Where("email = ? AND active = ?", req.Email, true).First(&user).Error; err != nil {
+	user, userErr := getUserByEmail(ctx, req.Email)
+	if userErr != nil {
 		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(req.Password)) //nolint:errcheck
 		span.SetStatus(codes.Error, "user not found")
 		slog.Warn("login failed: user not found or inactive")

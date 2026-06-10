@@ -123,6 +123,8 @@ func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Copy in both directions concurrently. Each goroutine signals done when the
+	// connection half-closes; we wait for both so neither side is closed early.
 	done := make(chan struct{}, 2)
 	go func() { io.Copy(target, clientConn); done <- struct{}{} }()    //nolint:errcheck
 	go func() { io.Copy(clientConn, target); done <- struct{}{} }()    //nolint:errcheck

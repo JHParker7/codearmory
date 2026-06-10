@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -257,23 +256,22 @@ func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey string)
 		slog.Warn("state cache: decrypt failed, evicting", "workspace", workspaceKey)
 	}
 
-	var state State
-	result := connect().WithContext(ctx).Where("workspace = ?", workspaceKey).First(&state)
-	if result.RowsAffected == 0 {
+	row, err := (State{Workspace: workspaceKey}).Get(ctx)
+	if isDbNotFound(err) {
 		slog.Info("state not found", "workspace", workspaceKey)
 		span.SetStatus(codes.Ok, "")
 		meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "not_found")))
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if result.Error != nil {
-		span.RecordError(result.Error)
-		span.SetStatus(codes.Error, result.Error.Error())
-		slog.Error("state read failed", "workspace", workspaceKey, "error", result.Error)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.Error("state read failed", "workspace", workspaceKey, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	data := state.Data
+	data := row.(State).Data
 
 	plaintext, err := decrypt(data)
 	if err != nil {
@@ -320,67 +318,19 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 
 	lockID := r.URL.Query().Get("ID")
 
-	tx := connect().WithContext(ctx).Begin()
-	if tx.Error != nil {
-		span.RecordError(tx.Error)
-		span.SetStatus(codes.Error, tx.Error.Error())
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	var existingLock string
-	// FOR UPDATE serializes concurrent requests on the same workspace row, preventing
-	// TOCTOU races between the lock check and the subsequent state write.
-	lockResult := tx.Raw("SELECT lock_data FROM locks WHERE workspace = ? FOR UPDATE", workspaceKey).Scan(&existingLock)
-	if lockResult.Error != nil {
-		span.RecordError(lockResult.Error)
-		span.SetStatus(codes.Error, lockResult.Error.Error())
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	if lockResult.RowsAffected > 0 {
-		// Workspace is locked — caller must supply the matching lock ID.
-		if lockID == "" {
-			slog.Warn("state update rejected: workspace is locked", "workspace", workspaceKey)
+	existingLock, upsertErr := (State{Workspace: workspaceKey}).UpsertAtomic(ctx, body, lockID)
+	if upsertErr != nil {
+		if errors.Is(upsertErr, ErrWorkspaceLocked) || errors.Is(upsertErr, ErrLockIDMismatch) {
+			slog.Warn("state update rejected: lock conflict", "workspace", workspaceKey)
 			span.SetStatus(codes.Error, "locked")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
 			w.Write([]byte(existingLock)) //nolint:errcheck
 			return
 		}
-		var lockObj map[string]any
-		if err := json.Unmarshal([]byte(existingLock), &lockObj); err != nil {
-			slog.Error("state update rejected: corrupt lock data", "workspace", workspaceKey, "error", err)
-			span.SetStatus(codes.Error, "corrupt lock data")
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-		if id, _ := lockObj["ID"].(string); subtle.ConstantTimeCompare([]byte(id), []byte(lockID)) != 1 {
-			slog.Warn("state update rejected: lock id mismatch", "workspace", workspaceKey)
-			span.SetStatus(codes.Error, "lock id mismatch")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusConflict)
-			w.Write([]byte(existingLock)) //nolint:errcheck
-			return
-		}
-	}
-
-	if err := tx.Exec(
-		`INSERT INTO states (workspace, data) VALUES (?, ?) ON CONFLICT (workspace) DO UPDATE SET data = ?, updated_at = now()`,
-		workspaceKey, body, body,
-	).Error; err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		slog.Error("state update failed", "workspace", workspaceKey, "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(upsertErr)
+		span.SetStatus(codes.Error, upsertErr.Error())
+		slog.Error("state update failed", "workspace", workspaceKey, "error", upsertErr)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -402,7 +352,7 @@ func handleDeleteState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 		return
 	}
 
-	if err := connect().WithContext(ctx).Exec("DELETE FROM states WHERE workspace = ?", workspaceKey).Error; err != nil {
+	if err := (State{Workspace: workspaceKey}).Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		slog.Error("state delete failed", "workspace", workspaceKey, "error", err)
@@ -440,47 +390,20 @@ func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey string
 		return
 	}
 
-	tx := connect().WithContext(ctx).Begin()
-	if tx.Error != nil {
-		span.RecordError(tx.Error)
-		span.SetStatus(codes.Error, tx.Error.Error())
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	var existingLock string
-	// FOR UPDATE serializes concurrent lock acquisitions on the same workspace, so two
-	// callers racing to lock the same workspace can't both see it as unlocked.
-	lockResult := tx.Raw("SELECT lock_data FROM locks WHERE workspace = ? FOR UPDATE", workspaceKey).Scan(&existingLock)
-	if lockResult.Error != nil {
-		span.RecordError(lockResult.Error)
-		span.SetStatus(codes.Error, lockResult.Error.Error())
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	if lockResult.RowsAffected > 0 {
-		slog.Warn("lock conflict", "workspace", workspaceKey)
-		span.SetStatus(codes.Error, "lock conflict")
-		meterLockState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "conflict")))
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusLocked)
-		w.Write([]byte(existingLock)) //nolint:errcheck
-		return
-	}
-
-	if err := tx.Exec("INSERT INTO locks (workspace, lock_data) VALUES (?, ?)", workspaceKey, string(body)).Error; err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		slog.Error("lock insert failed", "workspace", workspaceKey, "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+	existingLock, lockErr := (StateLock{Workspace: workspaceKey}).LockAtomic(ctx, string(body))
+	if lockErr != nil {
+		if errors.Is(lockErr, ErrAlreadyLocked) {
+			slog.Warn("lock conflict", "workspace", workspaceKey)
+			span.SetStatus(codes.Error, "lock conflict")
+			meterLockState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "conflict")))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusLocked)
+			w.Write([]byte(existingLock)) //nolint:errcheck
+			return
+		}
+		span.RecordError(lockErr)
+		span.SetStatus(codes.Error, lockErr.Error())
+		slog.Error("lock insert failed", "workspace", workspaceKey, "error", lockErr)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -509,61 +432,21 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 		return
 	}
 
-	tx := connect().WithContext(ctx).Begin()
-	if tx.Error != nil {
-		span.RecordError(tx.Error)
-		span.SetStatus(codes.Error, tx.Error.Error())
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	var existingLock string
-	// FOR UPDATE serializes concurrent unlock attempts on the same workspace row.
-	// RowsAffected == 0 (workspace already unlocked) falls through to a no-op commit,
-	// making unlock idempotent — Terraform expects a 200 even when the lock is already gone.
-	lockResult := tx.Raw("SELECT lock_data FROM locks WHERE workspace = ? FOR UPDATE", workspaceKey).Scan(&existingLock)
-	if lockResult.Error != nil {
-		span.RecordError(lockResult.Error)
-		span.SetStatus(codes.Error, lockResult.Error.Error())
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+	var reqID string
+	if len(body) > 0 {
+		var reqData map[string]any
+		if json.Unmarshal(body, &reqData) == nil {
+			reqID, _ = reqData["ID"].(string)
+		}
 	}
 
-	if lockResult.RowsAffected > 0 {
-		// Workspace is locked — caller must supply the matching lock ID.
-		var reqID string
-		if len(body) > 0 {
-			var reqData map[string]any
-			if json.Unmarshal(body, &reqData) == nil {
-				reqID, _ = reqData["ID"].(string)
-			}
-		}
-		var lockData map[string]any
-		if err := json.Unmarshal([]byte(existingLock), &lockData); err != nil {
-			slog.Error("unlock rejected: corrupt lock data", "workspace", workspaceKey, "error", err)
-			span.SetStatus(codes.Error, "corrupt lock data")
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-		storedID, _ := lockData["ID"].(string)
-		if reqID == "" || reqID != storedID {
+	if err := (StateLock{Workspace: workspaceKey}).UnlockAtomic(ctx, reqID); err != nil {
+		if errors.Is(err, ErrLockIDMismatch) {
 			slog.Warn("unlock rejected: lock id mismatch", "workspace", workspaceKey)
 			span.SetStatus(codes.Error, "lock id mismatch")
 			http.Error(w, "lock ID mismatch", http.StatusConflict)
 			return
 		}
-
-		if err := tx.Exec("DELETE FROM locks WHERE workspace = ?", workspaceKey).Error; err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			slog.Error("lock delete failed", "workspace", workspaceKey, "error", err)
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	if err := tx.Commit().Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)

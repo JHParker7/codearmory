@@ -33,7 +33,7 @@ func handleGetAccount(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	account, err := getAccount(ctx, userID)
+	row, err := (GiteaAccount{UserID: userID}).Get(ctx)
 	if err != nil {
 		if isDbNotFound(err) {
 			span.SetStatus(codes.Ok, "")
@@ -46,6 +46,7 @@ func handleGetAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get account", http.StatusInternalServerError)
 		return
 	}
+	account := row.(GiteaAccount)
 
 	span.SetAttributes(attribute.String("account.gitea_username", account.GiteaUsername))
 	span.SetStatus(codes.Ok, "")
@@ -99,16 +100,16 @@ func handleLinkAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existing, err := getAccount(ctx, userID)
+	existingRow, err := (GiteaAccount{UserID: userID}).Get(ctx)
 	now := time.Now().UTC()
 	if isDbNotFound(err) {
-		account := GiteaAccount{
+		newAccount := GiteaAccount{
 			UserID:        userID,
 			GiteaUsername: req.GiteaUsername,
 			CreatedAt:     now,
 			UpdatedAt:     now,
 		}
-		if err := account.Add(ctx); err != nil {
+		if err := newAccount.Add(ctx); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "db insert failed")
 			slog.Error("link account: db error", "user_id", userID, "error", err)
@@ -120,7 +121,7 @@ func handleLinkAccount(w http.ResponseWriter, r *http.Request) {
 		slog.Info("gitea account linked", "user_id", userID, "gitea_username", req.GiteaUsername)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(account) //nolint:errcheck
+		json.NewEncoder(w).Encode(newAccount) //nolint:errcheck
 		return
 	}
 	if err != nil {
@@ -130,6 +131,7 @@ func handleLinkAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to link account", http.StatusInternalServerError)
 		return
 	}
+	existing := existingRow.(GiteaAccount)
 
 	existing.GiteaUsername = req.GiteaUsername
 	existing.UpdatedAt = now
@@ -163,7 +165,7 @@ func handleUnlinkAccount(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	account, err := getAccount(ctx, userID)
+	row, err := (GiteaAccount{UserID: userID}).Get(ctx)
 	if err != nil {
 		if isDbNotFound(err) {
 			span.SetStatus(codes.Ok, "")
@@ -176,6 +178,7 @@ func handleUnlinkAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to unlink account", http.StatusInternalServerError)
 		return
 	}
+	account := row.(GiteaAccount)
 
 	if err := account.Remove(ctx); err != nil {
 		span.RecordError(err)

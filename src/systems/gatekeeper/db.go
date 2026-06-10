@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -1132,4 +1136,558 @@ func (invite Invite) Get(ctx context.Context) (db, error) {
 	}
 	span.SetStatus(codes.Ok, "")
 	return newInvite, nil
+}
+
+// ── Lookup helpers ────────────────────────────────────────────────────────────
+
+// getUserByEmail returns the active user with the given email address.
+func getUserByEmail(ctx context.Context, email string) (User, error) {
+	var user User
+	if err := connectRead().WithContext(ctx).Where("email = ? AND active = ?", email, true).First(&user).Error; err != nil {
+		return User{}, err
+	}
+	return user, nil
+}
+
+// ── OAuthClient ───────────────────────────────────────────────────────────────
+
+func (c OAuthClient) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.oauth_client.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("client.id", c.ClientID))
+	if err := connect().WithContext(ctx).Create(&c).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (c OAuthClient) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.oauth_client.update")
+	defer span.End()
+	if err := connect().WithContext(ctx).Save(&c).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (c OAuthClient) Remove(ctx context.Context) error { return nil }
+
+func (c OAuthClient) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.oauth_client.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("client.id", c.ClientID))
+	var result OAuthClient
+	if err := connectRead().WithContext(ctx).Where("client_id = ? AND active = ?", c.ClientID, true).First(&result).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return result, nil
+}
+
+func (c OAuthClient) List(ctx context.Context, limit, offset int) ([]db, error) {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.oauth_client.list")
+	defer span.End()
+	var clients []OAuthClient
+	q := connectRead().WithContext(ctx).Where("active = ?", true)
+	if limit > 0 {
+		q = q.Limit(limit).Offset(offset)
+	}
+	if err := q.Find(&clients).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	result := make([]db, len(clients))
+	for i, cl := range clients {
+		result[i] = cl
+	}
+	return result, nil
+}
+
+// getOAuthClientByClientID returns the active OAuth client with the given client ID.
+func getOAuthClientByClientID(ctx context.Context, clientID string) (OAuthClient, error) {
+	row, err := (OAuthClient{ClientID: clientID}).Get(ctx)
+	if err != nil {
+		return OAuthClient{}, err
+	}
+	return row.(OAuthClient), nil
+}
+
+// listOAuthClients returns all active OAuth clients.
+func listOAuthClients(ctx context.Context) ([]OAuthClient, error) {
+	rows, err := (OAuthClient{}).List(ctx, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	clients := make([]OAuthClient, len(rows))
+	for i, r := range rows {
+		clients[i] = r.(OAuthClient)
+	}
+	return clients, nil
+}
+
+// deactivateOAuthClient soft-deletes an OAuth client by client ID.
+// Returns the number of rows affected.
+func deactivateOAuthClient(ctx context.Context, id string) (int64, error) {
+	result := connect().WithContext(ctx).Model(&OAuthClient{}).Where("client_id = ?", id).Update("active", false)
+	return result.RowsAffected, result.Error
+}
+
+// ── OAuthCode ─────────────────────────────────────────────────────────────────
+
+func (c OAuthCode) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.oauth_code.add")
+	defer span.End()
+	if err := connect().WithContext(ctx).Create(&c).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (c OAuthCode) Update(ctx context.Context) error  { return nil }
+func (c OAuthCode) Remove(ctx context.Context) error  { return nil }
+func (c OAuthCode) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.oauth_code.get")
+	defer span.End()
+	var result OAuthCode
+	if err := connectRead().WithContext(ctx).Where("code = ?", c.Code).First(&result).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return result, nil
+}
+func (c OAuthCode) List(ctx context.Context, limit, offset int) ([]db, error) { return nil, nil }
+
+// getOAuthCode returns an unused authorization code for the given client.
+func getOAuthCode(ctx context.Context, code, clientID string) (OAuthCode, error) {
+	var result OAuthCode
+	if err := connectRead().WithContext(ctx).
+		Where("code = ? AND client_id = ? AND used = ?", code, clientID, false).
+		First(&result).Error; err != nil {
+		return OAuthCode{}, err
+	}
+	return result, nil
+}
+
+// redeemOAuthCode atomically marks an unused authorization code as used.
+// Returns the number of rows affected (0 if already redeemed by a peer request).
+func redeemOAuthCode(ctx context.Context, code string) (int64, error) {
+	result := connect().WithContext(ctx).
+		Model(&OAuthCode{}).
+		Where("code = ? AND used = ?", code, false).
+		Update("used", true)
+	return result.RowsAffected, result.Error
+}
+
+// ── MFAPending ────────────────────────────────────────────────────────────────
+
+func (m MFAPending) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.mfa_pending.add")
+	defer span.End()
+	if err := connect().WithContext(ctx).Create(&m).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (m MFAPending) Update(ctx context.Context) error  { return nil }
+func (m MFAPending) Remove(ctx context.Context) error  { return nil }
+func (m MFAPending) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.mfa_pending.get")
+	defer span.End()
+	var result MFAPending
+	if err := connectRead().WithContext(ctx).Where("token = ?", m.Token).First(&result).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return result, nil
+}
+func (m MFAPending) List(ctx context.Context, limit, offset int) ([]db, error) { return nil, nil }
+
+// redeemMFAPending atomically marks an unused MFA pending token as used.
+// Returns the number of rows affected.
+func redeemMFAPending(ctx context.Context, token string) (int64, error) {
+	result := connect().WithContext(ctx).
+		Model(&MFAPending{}).
+		Where("token = ? AND used = ?", token, false).
+		Update("used", true)
+	return result.RowsAffected, result.Error
+}
+
+// ── Secret ────────────────────────────────────────────────────────────────────
+
+func (s Secret) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.secret.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("secret.id", s.SecretID))
+	if err := connect().WithContext(ctx).Create(&s).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (s Secret) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.secret.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("secret.id", s.SecretID))
+	if err := connect().WithContext(ctx).Save(&s).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (s Secret) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.secret.remove")
+	defer span.End()
+	span.SetAttributes(attribute.String("secret.id", s.SecretID))
+	if err := connect().WithContext(ctx).Model(&s).Update("active", false).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (s Secret) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.secret.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("secret.id", s.SecretID))
+	var result Secret
+	if err := connectRead().WithContext(ctx).Where("secret_id = ? AND active = true", s.SecretID).First(&result).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return result, nil
+}
+
+func (s Secret) List(ctx context.Context, limit, offset int) ([]db, error) {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.secret.list")
+	defer span.End()
+	var secrets []Secret
+	q := connectRead().WithContext(ctx).Where(s)
+	if limit > 0 {
+		q = q.Limit(limit).Offset(offset)
+	}
+	if err := q.Find(&secrets).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	result := make([]db, len(secrets))
+	for i, sec := range secrets {
+		result[i] = sec
+	}
+	return result, nil
+}
+
+// getSecretByID returns an active secret by ID.
+func getSecretByID(ctx context.Context, id string) (Secret, error) {
+	row, err := (Secret{SecretID: id}).Get(ctx)
+	if err != nil {
+		return Secret{}, err
+	}
+	return row.(Secret), nil
+}
+
+// ── OrgSecretProvider ─────────────────────────────────────────────────────────
+
+func (p OrgSecretProvider) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.org_secret_provider.add")
+	defer span.End()
+	if err := connect().WithContext(ctx).Create(&p).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (p OrgSecretProvider) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.org_secret_provider.update")
+	defer span.End()
+	if err := connect().WithContext(ctx).Save(&p).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (p OrgSecretProvider) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.org_secret_provider.remove")
+	defer span.End()
+	if err := connect().WithContext(ctx).Delete(&OrgSecretProvider{}, "org_id = ?", p.OrgID).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (p OrgSecretProvider) Get(ctx context.Context) (db, error)               { return nil, nil }
+func (p OrgSecretProvider) List(ctx context.Context, limit, offset int) ([]db, error) {
+	return nil, nil
+}
+
+// ── Misc write helpers ────────────────────────────────────────────────────────
+
+// syncServiceAccountBootstrapKey updates the hashed_key column to match the
+// bootstrap hash after the bootstrap key fallback path succeeds in requireServiceAuth.
+func syncServiceAccountBootstrapKey(ctx context.Context, name, hash string) error {
+	return connect().WithContext(ctx).Model(&ServiceAccount{}).
+		Where("service_name = ?", name).
+		Update("hashed_key", hash).Error
+}
+
+// deleteUnconfirmedTOTP removes any pending (unconfirmed) TOTP enrollment for a user.
+func deleteUnconfirmedTOTP(ctx context.Context, userID string) error {
+	return connect().WithContext(ctx).
+		Where("user_id = ? AND confirmed = ?", userID, false).
+		Delete(&TOTPCredential{}).Error
+}
+
+// deactivateTOTP deactivates all active TOTP credentials for a user.
+// Returns the number of rows affected.
+func deactivateTOTP(ctx context.Context, userID string) (int64, error) {
+	result := connect().WithContext(ctx).
+		Model(&TOTPCredential{}).
+		Where("user_id = ? AND active = ?", userID, true).
+		Update("active", false)
+	return result.RowsAffected, result.Error
+}
+
+// clearOrgMembership clears the org_id field on all users that belong to orgID.
+func clearOrgMembership(ctx context.Context, orgID string) error {
+	return connect().WithContext(ctx).Model(&User{}).Where("org_id = ?", orgID).Update("org_id", nil).Error
+}
+
+// getUserIDsByTeam returns the user_id of all users in a team.
+func getUserIDsByTeam(ctx context.Context, teamID string) ([]string, error) {
+	var ids []string
+	if err := connect().WithContext(ctx).Model(&User{}).Where("team_id = ?", teamID).Pluck("user_id", &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// clearTeamMembership clears the team_id field on all users that belong to teamID.
+func clearTeamMembership(ctx context.Context, teamID string) error {
+	return connect().WithContext(ctx).Model(&User{}).Where("team_id = ?", teamID).Update("team_id", nil).Error
+}
+
+// countUsersByRole returns the number of active users assigned to roleID.
+func countUsersByRole(ctx context.Context, roleID string) (int64, error) {
+	var count int64
+	if err := connect().WithContext(ctx).Model(&User{}).Where("role_id = ? AND active = ?", roleID, true).Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// countTeamsByRole returns the number of active teams assigned to roleID.
+func countTeamsByRole(ctx context.Context, roleID string) (int64, error) {
+	var count int64
+	if err := connect().WithContext(ctx).Model(&Team{}).Where("role_id = ? AND active = ?", roleID, true).Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// deactivateUserSessions sets active=false on all sessions for a user.
+func deactivateUserSessions(ctx context.Context, userID string) error {
+	return connect().WithContext(ctx).Model(&Session{}).Where("user_id = ?", userID).Update("active", false).Error
+}
+
+// applyGrantsForResource grants service permissions to userID using the write connection.
+// This is a non-transactional convenience wrapper; use grantServicePermissions directly
+// when inside a *gorm.DB transaction.
+func applyGrantsForResource(ctx context.Context, service, userID, name string, actions []string, resource string) error {
+	return grantServicePermissions(ctx, connect().WithContext(ctx), service, userID, name, actions, resource)
+}
+
+// upsertServiceAccountDB upserts a gatekeeper service account by name.
+// If the account already exists only HashedBootstrapKey is refreshed;
+// HashedKey is preserved so keys rotated at runtime survive restarts.
+func upsertServiceAccountDB(ctx context.Context, name, hash string) {
+	var existing ServiceAccount
+	err := connect().WithContext(ctx).Where("service_name = ?", name).First(&existing).Error
+	if err == nil {
+		if err2 := connect().WithContext(ctx).Model(&ServiceAccount{}).Where("service_name = ?", name).
+			Update("hashed_bootstrap_key", hash).Error; err2 != nil {
+			slog.Error("seedServiceAccounts: update bootstrap key failed", "name", name, "error", err2)
+		} else {
+			slog.Debug("seedServiceAccounts: account exists, bootstrap key refreshed", "name", name)
+		}
+		return
+	}
+	svc := ServiceAccount{
+		ServiceAccountID:   uuid.New().String(),
+		ServiceName:        name,
+		HashedKey:          hash,
+		HashedBootstrapKey: hash,
+		Active:             true,
+	}
+	if err := connect().WithContext(ctx).Create(&svc).Error; err != nil {
+		slog.Error("seedServiceAccounts: create failed", "name", name, "error", err)
+	} else {
+		slog.Info("seedServiceAccounts: created", "name", name)
+	}
+}
+
+// ── Complex transactions ──────────────────────────────────────────────────────
+
+// approveServicePermissionRequestAtomic approves a pending service permission
+// request inside a serialised FOR UPDATE transaction.
+// Returns the approved request (for audit logging) or an error.
+// A "request is not pending" error means a concurrent approver won the race.
+func approveServicePermissionRequestAtomic(ctx context.Context, requestID, callerID string) (ServicePermissionRequest, error) {
+	var spr ServicePermissionRequest
+	now := time.Now()
+	err := connect().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("request_id = ? AND active = ?", requestID, true).
+			First(&spr).Error; err != nil {
+			return err
+		}
+		if spr.Status != "pending" {
+			return fmt.Errorf("request is not pending")
+		}
+
+		var svcAcct ServiceAccount
+		if err := tx.Where("service_name = ? AND active = ?", spr.ServiceName, true).First(&svcAcct).Error; err != nil {
+			return err
+		}
+
+		var role Role
+		if svcAcct.RoleID == nil {
+			role = Role{
+				RoleID:         uuid.New().String(),
+				OwnerID:        callerID,
+				Active:         true,
+				PermissionsIDs: []string{},
+			}
+			if err := tx.Create(&role).Error; err != nil {
+				return err
+			}
+			svcAcct.RoleID = &role.RoleID
+			svcAcct.UpdatedAt = now
+			if err := tx.Save(&svcAcct).Error; err != nil {
+				return err
+			}
+		} else {
+			if err := tx.Where("role_id = ? AND active = ?", *svcAcct.RoleID, true).First(&role).Error; err != nil {
+				return err
+			}
+		}
+
+		perm := Permissions{
+			PermissionsID: uuid.New().String(),
+			Name:          spr.Name,
+			Service:       spr.Service,
+			Actions:       spr.Actions,
+			Resources:     spr.Resources,
+			OwnerID:       callerID,
+			Active:        true,
+		}
+		if err := tx.Create(&perm).Error; err != nil {
+			return err
+		}
+
+		if role.PermissionsIDs == nil {
+			role.PermissionsIDs = []string{}
+		}
+		role.PermissionsIDs = append(role.PermissionsIDs, perm.PermissionsID)
+		role.UpdatedAt = now
+		if err := tx.Save(&role).Error; err != nil {
+			return err
+		}
+		cacheDel(ctx, "gk:role:"+role.RoleID)
+
+		spr.Status = "approved"
+		spr.ResolvedBy = &callerID
+		spr.ResolvedAt = &now
+		spr.UpdatedAt = now
+		return tx.Save(&spr).Error
+	})
+	return spr, err
+}
+
+// acceptInviteAtomic accepts an invite atomically: locks the invite and user
+// rows, updates membership, marks the invite accepted, and grants the member
+// permission — all in a single transaction.
+// Returns sentinel errors "invite is not pending", "already in org", "already in team"
+// for concurrency conflicts that map to HTTP 409.
+func acceptInviteAtomic(ctx context.Context, inviteID, callerID string, invite Invite, permName, memberAction, permResource string) error {
+	return connect().Transaction(func(tx *gorm.DB) error {
+		var fresh Invite
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("invite_id = ? AND active = ?", inviteID, true).
+			First(&fresh).Error; err != nil {
+			return err
+		}
+		if fresh.Status != "pending" {
+			return errors.New("invite is not pending")
+		}
+
+		var freshCaller User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("user_id = ? AND active = ?", callerID, true).
+			First(&freshCaller).Error; err != nil {
+			return err
+		}
+		switch invite.ResourceType {
+		case "org":
+			if freshCaller.OrgID != nil && *freshCaller.OrgID != invite.ResourceID {
+				return errors.New("already in org")
+			}
+			freshCaller.OrgID = &invite.ResourceID
+		case "team":
+			if freshCaller.TeamID != nil && *freshCaller.TeamID != invite.ResourceID {
+				return errors.New("already in team")
+			}
+			freshCaller.TeamID = &invite.ResourceID
+		}
+		freshCaller.UpdatedAt = time.Now()
+
+		fresh.Status = "accepted"
+		if err := tx.Save(&freshCaller).Error; err != nil {
+			return err
+		}
+		if err := tx.Save(&fresh).Error; err != nil {
+			return err
+		}
+		return grantPermissions(ctx, tx, callerID, permName, []string{memberAction}, permResource)
+	})
 }

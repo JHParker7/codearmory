@@ -12,7 +12,7 @@ import (
 // header value. Writes an HTTP error and returns ("", false) if the user has
 // not yet linked a Gitea account.
 func sudoFor(ctx context.Context, w http.ResponseWriter, userID string) (string, bool) {
-	account, err := getAccount(ctx, userID)
+	row, err := (GiteaAccount{UserID: userID}).Get(ctx)
 	if err != nil {
 		if isDbNotFound(err) {
 			http.Error(w, "gitea account not linked — call PUT /account first", http.StatusUnprocessableEntity)
@@ -21,7 +21,7 @@ func sudoFor(ctx context.Context, w http.ResponseWriter, userID string) (string,
 		http.Error(w, "failed to resolve gitea account", http.StatusInternalServerError)
 		return "", false
 	}
-	return account.GiteaUsername, true
+	return row.(GiteaAccount).GiteaUsername, true
 }
 
 // ownerAllowed returns true when the caller may act on a repo under {owner}:

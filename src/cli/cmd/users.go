@@ -139,14 +139,9 @@ func myFieldID(field string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	val := profile[field]
-	if val == nil {
-		resource := strings.TrimSuffix(field, "_id")
-		return "", fmt.Errorf("you are not a member of any %s", resource)
-	}
-	id, ok := val.(string)
+	resource := strings.TrimSuffix(field, "_id")
+	id, ok := profile[field].(string)
 	if !ok || id == "" {
-		resource := strings.TrimSuffix(field, "_id")
 		return "", fmt.Errorf("you are not a member of any %s", resource)
 	}
 	return id, nil

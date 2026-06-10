@@ -262,7 +262,7 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wasTerminal := existing.Status == StatusResolved || existing.Status == StatusClosed
+	wasOpen := existing.Status != StatusResolved && existing.Status != StatusClosed
 
 	existing.Title = req.Title
 	existing.Description = req.Description
@@ -281,8 +281,8 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nowTerminal := req.Status == StatusResolved || req.Status == StatusClosed
-	if !wasTerminal && nowTerminal {
+	isNowTerminal := req.Status == StatusResolved || req.Status == StatusClosed
+	if wasOpen && isNowTerminal {
 		meterTicketsResolved.Add(ctx, 1, metric.WithAttributes(attribute.String("status", req.Status)))
 	}
 

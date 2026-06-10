@@ -152,8 +152,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 }
 
 func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, jobName string) (RunResult, error) {
-	// Add a buffer over the job's own ActiveDeadlineSeconds so we don't leave
-	// orphaned goroutines if Kubernetes is slow to enforce the deadline.
+	// Add 60 s over the job's ActiveDeadlineSeconds so the poll loop doesn't
+	// time out before K8s marks the job failed — otherwise we'd return an
+	// ambiguous context error instead of the clear "timed out after Ns" one.
 	deadline := time.Duration(exec.TimeoutSecs+60) * time.Second
 	pollCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
@@ -196,7 +197,7 @@ done:
 
 	if timedOut {
 		return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: exitCode},
-			fmt.Errorf("timed out after %ds", exec.TimeoutSecs)
+			fmt.Errorf("timed out after %ds: %w", exec.TimeoutSecs, context.DeadlineExceeded)
 	}
 
 	// Attempt to get the real exit code from the pod's container status.
