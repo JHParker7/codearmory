@@ -32,6 +32,26 @@ const (
 	authForbidden
 )
 
+// jwtExpClaim decodes the JWT payload and returns the exp claim value.
+// Returns (0, false) if the token is not a valid JWT or has no exp claim.
+func jwtExpClaim(token string) (int64, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return 0, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return 0, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		return 0, false
+	}
+	return claims.Exp, true
+}
+
 // getUserID decodes the JWT payload (without signature verification — that
 // happens inside Gatekeeper when we call GET /users/{id}) and returns the sub
 // claim, which Gatekeeper sets to the user's UUID.
@@ -77,10 +97,21 @@ func checkUserAuth(r *http.Request) (authOutcome, string, string) {
 	// Decode JWT locally (no sig verify) to validate basic structure and extract
 	// the sub claim for suspicious-activity tracking. Tokens that aren't even
 	// valid JWTs are rejected here to avoid unnecessary gatekeeper calls.
-	suspectID, ok := getUserID(strings.TrimPrefix(auth, "Bearer "))
+	token := strings.TrimPrefix(auth, "Bearer ")
+	suspectID, ok := getUserID(token)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "malformed_token")))
+		return authUnauthorized, "", ""
+	}
+
+	// Expired tokens are not suspicious — the user just needs to re-authenticate.
+	// Return early without calling gatekeeper and without incrementing the
+	// suspect counter so a run of TUI retries with a stale token never triggers
+	// the IP block.
+	if exp, ok := jwtExpClaim(token); ok && time.Now().Unix() > exp {
+		span.SetStatus(codes.Ok, "")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "expired_token")))
 		return authUnauthorized, "", ""
 	}
 

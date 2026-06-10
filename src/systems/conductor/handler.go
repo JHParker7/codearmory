@@ -169,6 +169,11 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 
 	var userID, normalizedAuth string
 	if !entry.public {
+		if ip := sourceIP(r); isBlocked(ip) {
+			slog.Warn("request rejected: IP is blocked", "source_ip", ip, "path", r.URL.Path)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		var outcome authOutcome
 		outcome, userID, normalizedAuth = checkUserAuth(r)
 		switch outcome {
@@ -254,13 +259,6 @@ func prepareForwardRequest(r *http.Request, userID, normalizedAuth string, svc s
 //  2. Otherwise, try matching the full path against all registered endpoints.
 //     Returns 404 if no match is found.
 func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
-	ip := sourceIP(r)
-	if isBlocked(ip) {
-		slog.Warn("request rejected: IP is blocked", "source_ip", ip, "path", r.URL.Path)
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-
 	path := r.URL.Path
 
 	// Step 1: service-name prefix routing (e.g. /blueprints/state/... or /forge/executions)
