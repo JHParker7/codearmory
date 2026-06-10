@@ -1,14 +1,44 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 )
+
+// makeTestJWT constructs a minimal syntactically-valid JWT with the given exp claim.
+// The signature is fake — this is only used for local decoding tests.
+func makeTestJWT(exp int64) string {
+	payload, _ := json.Marshal(map[string]any{"exp": exp, "sub": "test-user"})
+	return "eyJhbGciOiJIUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(payload) + ".fakesig"
+}
+
+// captureStdoutDuring runs fn, captures everything written to os.Stdout, and
+// returns it. Panics if the pipe can't be created.
+func captureStdoutDuring(fn func()) string {
+	r, w, err := os.Pipe()
+	if err != nil {
+		panic(err)
+	}
+	saved := os.Stdout
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = saved
+	var buf bytes.Buffer
+	io.Copy(&buf, r) //nolint:errcheck
+	r.Close()
+	return buf.String()
+}
 
 func TestLogin_Success(t *testing.T) {
 	keyring.MockInit()
@@ -228,5 +258,141 @@ func TestLogin_StoreTokenError(t *testing.T) {
 
 	if err := loginCmd.RunE(loginCmd, nil); err == nil {
 		t.Fatal("expected error when token cannot be stored, got nil")
+	}
+}
+
+func TestJWTExpiry_FutureExp(t *testing.T) {
+	exp := time.Now().Add(time.Hour).Unix()
+	tok := makeTestJWT(exp)
+	got, ok := jwtExpiry(tok)
+	if !ok {
+		t.Fatal("jwtExpiry returned false for valid JWT")
+	}
+	if got.Unix() != exp {
+		t.Errorf("jwtExpiry exp = %d, want %d", got.Unix(), exp)
+	}
+}
+
+func TestJWTExpiry_PastExp(t *testing.T) {
+	exp := time.Now().Add(-time.Hour).Unix()
+	tok := makeTestJWT(exp)
+	got, ok := jwtExpiry(tok)
+	if !ok {
+		t.Fatal("jwtExpiry returned false for JWT with past exp")
+	}
+	if got.Unix() != exp {
+		t.Errorf("jwtExpiry exp = %d, want %d", got.Unix(), exp)
+	}
+}
+
+func TestJWTExpiry_NoExp(t *testing.T) {
+	payload, _ := json.Marshal(map[string]string{"sub": "user"})
+	tok := "eyJhbGciOiJIUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+	_, ok := jwtExpiry(tok)
+	if ok {
+		t.Fatal("jwtExpiry should return false for JWT without exp claim")
+	}
+}
+
+func TestJWTExpiry_NotAJWT(t *testing.T) {
+	_, ok := jwtExpiry("not-a-jwt")
+	if ok {
+		t.Fatal("jwtExpiry should return false for non-JWT string")
+	}
+}
+
+func TestFriendlyDuration_Formats(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{2*time.Hour + 15*time.Minute, "2h15m"},
+		{3 * time.Hour, "3h"},
+		{45 * time.Minute, "45m"},
+		{30 * time.Second, "less than a minute"},
+		{-(2*time.Hour + 15*time.Minute), "2h15m"},
+	}
+	for _, tc := range cases {
+		if got := friendlyDuration(tc.d); got != tc.want {
+			t.Errorf("friendlyDuration(%v) = %q, want %q", tc.d, got, tc.want)
+		}
+	}
+}
+
+func TestBearerToken_ExpiredStoredToken(t *testing.T) {
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	t.Cleanup(func() { flagToken = "" })
+	flagToken = ""
+
+	expiredTok := makeTestJWT(time.Now().Add(-time.Hour).Unix())
+	keyring.Set(keychainService, keychainAccount, expiredTok) //nolint:errcheck
+
+	if got := bearerToken(); got != "" {
+		t.Errorf("bearerToken() = %q for expired keychain token, want empty", got)
+	}
+}
+
+func TestBearerToken_ExpiredConfigToken(t *testing.T) {
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	t.Cleanup(func() { flagToken = "" })
+	flagToken = ""
+
+	expiredTok := makeTestJWT(time.Now().Add(-time.Hour).Unix())
+	saveConfig(cliConfig{Token: expiredTok}) //nolint:errcheck
+
+	if got := bearerToken(); got != "" {
+		t.Errorf("bearerToken() = %q for expired config token, want empty", got)
+	}
+}
+
+func TestAuthStatus_ExpiredToken(t *testing.T) {
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	t.Cleanup(func() { flagToken = ""; flagURL = "" })
+	flagToken = ""
+	flagURL = "http://test:8082"
+
+	expiredTok := makeTestJWT(time.Now().Add(-time.Hour).Unix())
+	keyring.Set(keychainService, keychainAccount, expiredTok) //nolint:errcheck
+
+	out := captureStdoutDuring(func() {
+		if err := authStatusCmd.RunE(authStatusCmd, nil); err != nil {
+			t.Fatalf("status: %v", err)
+		}
+	})
+	if !strings.Contains(out, "expired") {
+		t.Errorf("authStatusCmd output should indicate expired token, got: %q", out)
+	}
+	if !strings.Contains(out, "auth login") {
+		t.Errorf("authStatusCmd output should hint at auth login, got: %q", out)
+	}
+}
+
+func TestAuthStatus_ValidToken(t *testing.T) {
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	t.Cleanup(func() { flagToken = ""; flagURL = "" })
+	flagToken = ""
+	flagURL = "http://test:8082"
+
+	validTok := makeTestJWT(time.Now().Add(2 * time.Hour).Unix())
+	keyring.Set(keychainService, keychainAccount, validTok) //nolint:errcheck
+
+	out := captureStdoutDuring(func() {
+		if err := authStatusCmd.RunE(authStatusCmd, nil); err != nil {
+			t.Fatalf("status: %v", err)
+		}
+	})
+	if !strings.Contains(out, "valid") {
+		t.Errorf("authStatusCmd output should indicate valid token, got: %q", out)
+	}
+	if !strings.Contains(out, "expires in") {
+		t.Errorf("authStatusCmd output should show expiry time, got: %q", out)
 	}
 }

@@ -73,9 +73,16 @@ func bearerToken() string {
 		return t
 	}
 	if t, err := keyring.Get(keychainService, keychainAccount); err == nil && t != "" {
+		if exp, ok := jwtExpiry(t); ok && time.Now().After(exp) {
+			return ""
+		}
 		return t
 	}
-	return loadConfig().Token
+	t := loadConfig().Token
+	if exp, ok := jwtExpiry(t); ok && time.Now().After(exp) {
+		return ""
+	}
+	return t
 }
 
 // storeToken saves the token to the OS keychain. If the keychain is
