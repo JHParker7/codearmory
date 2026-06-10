@@ -73,14 +73,14 @@ func makeTestJWT(id string) string {
 }
 
 // mockGatekeeper creates a test server that simulates Gatekeeper's
-// GET /users/{id} endpoint. authorized controls whether it returns 200 or 401.
+// GET /auth/validate endpoint. authorized controls whether it returns 200 or 401.
 func mockGatekeeper(t *testing.T, authorized bool) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/users/") && r.Method == http.MethodGet {
+		if r.URL.Path == "/auth/validate" && r.Method == http.MethodGet {
 			if authorized {
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]string{"user_id": testUUID})
+				json.NewEncoder(w).Encode(map[string]any{"subject": testUUID, "subject_type": "user"})
 				return
 			}
 			w.WriteHeader(http.StatusUnauthorized)
@@ -223,7 +223,7 @@ func TestCheckUserAuth_Allowed(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 
-	got, id := checkUserAuth(r)
+	got, id, _ := checkUserAuth(r)
 	if got != authAllowed {
 		t.Fatalf("expected authAllowed, got %d", got)
 	}
@@ -234,7 +234,7 @@ func TestCheckUserAuth_Allowed(t *testing.T) {
 
 func TestCheckUserAuth_Unauthorized_NoToken(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
-	if got, _ := checkUserAuth(r); got != authUnauthorized {
+	if got, _, _ := checkUserAuth(r); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized, got %d", got)
 	}
 }
@@ -242,7 +242,7 @@ func TestCheckUserAuth_Unauthorized_NoToken(t *testing.T) {
 func TestCheckUserAuth_Unauthorized_MalformedToken(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer notajwt")
-	if got, _ := checkUserAuth(r); got != authUnauthorized {
+	if got, _, _ := checkUserAuth(r); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized for malformed JWT, got %d", got)
 	}
 }
@@ -255,7 +255,7 @@ func TestCheckUserAuth_Unauthorized_GatekeeperRejects(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 
-	if got, _ := checkUserAuth(r); got != authUnauthorized {
+	if got, _, _ := checkUserAuth(r); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized when gatekeeper rejects, got %d", got)
 	}
 }

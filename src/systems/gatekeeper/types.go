@@ -65,6 +65,8 @@ type User struct {
 // ScopedRoleID, when set, restricts permission checks to only the permissions in
 // that role — regardless of the user's own role or team membership. Used by
 // run-scoped tokens to enforce the workflow's minimal permission set.
+// ClientID is set (and UserID is empty) for sessions issued via the OAuth2
+// client_credentials grant. Permission checks use the client's assigned role.
 type Session struct {
 	SessionID    string    `gorm:"column:session_id;primaryKey"`
 	CreatedAt    time.Time `gorm:"column:created_at"`
@@ -74,6 +76,7 @@ type Session struct {
 	PubKey       string    `gorm:"column:pub_key"`
 	Active       bool      `gorm:"column:active;default:true"`
 	ScopedRoleID *string   `gorm:"column:scoped_role_id"`
+	ClientID     *string   `gorm:"column:client_id"`
 }
 
 // Invite represents a pending or resolved invitation for a user to join an Org or Team.
@@ -218,14 +221,16 @@ func (OrgSecretProvider) TableName() string { return "org_secret_providers" }
 // OAuthClient is a registered OAuth 2.0 / OIDC client (e.g. a Forgejo instance).
 // The client secret is stored only as a bcrypt hash; the plaintext is returned
 // once at creation time and never again.
+// RoleID, when set, is used for client_credentials permission checks.
 type OAuthClient struct {
-	ClientID     string    `json:"client_id"     gorm:"column:client_id;primaryKey"`
-	Name         string    `json:"name"          gorm:"column:name"`
-	SecretHash   string    `json:"-"             gorm:"column:secret_hash"`
-	RedirectURIs []string  `json:"redirect_uris" gorm:"column:redirect_uris;serializer:json"`
-	OrgID        string    `json:"org_id"        gorm:"column:org_id;default:''"`
-	Active       bool      `json:"active"        gorm:"column:active;default:true"`
-	CreatedAt    time.Time `json:"created_at"    gorm:"column:created_at"`
+	ClientID     string    `json:"client_id"            gorm:"column:client_id;primaryKey"`
+	Name         string    `json:"name"                 gorm:"column:name"`
+	SecretHash   string    `json:"-"                    gorm:"column:secret_hash"`
+	RedirectURIs []string  `json:"redirect_uris"        gorm:"column:redirect_uris;serializer:json"`
+	OrgID        string    `json:"org_id"               gorm:"column:org_id;default:''"`
+	RoleID       *string   `json:"role_id,omitempty"    gorm:"column:role_id"`
+	Active       bool      `json:"active"               gorm:"column:active;default:true"`
+	CreatedAt    time.Time `json:"created_at"           gorm:"column:created_at"`
 }
 
 func (OAuthClient) TableName() string { return "oauth_clients" }
