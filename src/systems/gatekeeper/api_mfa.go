@@ -204,11 +204,13 @@ func handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 	n, dbErr := deactivateTOTP(ctx, userID)
 	if dbErr != nil {
 		span.RecordError(dbErr)
+		span.SetStatus(codes.Error, dbErr.Error())
 		slog.Error("totp disable: db error", "user_id", userID, "error", dbErr)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	if n == 0 {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "TOTP not enabled", http.StatusNotFound)
 		return
 	}
