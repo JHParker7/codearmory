@@ -255,7 +255,7 @@ func handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenString, sessionID, err := issueSession(ctx, pending.UserID)
+	tokenString, sessionID, expiresAt, err := issueSession(ctx, pending.UserID)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "session creation failed")
@@ -272,6 +272,7 @@ func handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 		writeAudit(ctx, pending.UserID, "user", "session.create", sessionID, userRow.(User).Username)
 	}
 
+	setSessionCookie(w, tokenString, expiresAt)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": tokenString}) //nolint:errcheck
 }
@@ -279,11 +280,11 @@ func handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 // issueSession creates a new gatekeeper session for userID and returns the signed
-// JWT and sessionID. It respects SESSION_TTL_HOURS (default 24h, max 720h).
-func issueSession(ctx context.Context, userID string) (token, sessionID string, err error) {
+// JWT, sessionID, and expiry time. It respects SESSION_TTL_HOURS (default 24h, max 720h).
+func issueSession(ctx context.Context, userID string) (token, sessionID string, expiresAt time.Time, err error) {
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	sessionID = uuid.New().String()
 	const maxTTLHours = 720
@@ -296,9 +297,10 @@ func issueSession(ctx context.Context, userID string) (token, sessionID string, 
 			ttlHours = n
 		}
 	}
-	expiresAt := time.Now().Add(time.Duration(ttlHours) * time.Hour).UTC().Truncate(time.Second)
+	expiresAt = time.Now().Add(time.Duration(ttlHours) * time.Hour).UTC().Truncate(time.Second)
 
-	tokenString, err := jwt.NewWithClaims(jwt.SigningMethodES256, authClaims{
+	var tokenString string
+	tokenString, err = jwt.NewWithClaims(jwt.SigningMethodES256, authClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "gatekeeper",
 			Subject:   userID,
@@ -308,12 +310,12 @@ func issueSession(ctx context.Context, userID string) (token, sessionID string, 
 		},
 	}).SignedString(privKey)
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 
 	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	session := Session{
 		SessionID: sessionID,
@@ -322,9 +324,9 @@ func issueSession(ctx context.Context, userID string) (token, sessionID string, 
 		PubKey:    string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})),
 	}
 	if err := session.Add(ctx); err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
-	return tokenString, sessionID, nil
+	return tokenString, sessionID, expiresAt, nil
 }
 
 // consumeMFAPending atomically marks a pending MFA token as used and returns it.

@@ -180,6 +180,7 @@ func main() {
 	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
 	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, envInt("SIGNUP_RATE_LIMIT", 10), envDuration("SIGNUP_RATE_WINDOW", 10*time.Minute), handleSignup))
 	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleLogin))
+	mux.HandleFunc("POST /logout", handleLogout)
 	mux.HandleFunc("POST /mfa/verify", rateLimitMiddleware("mfa-verify", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleMFAVerify))
 
 	// OIDC provider — used by Forgejo/Gitea and any other OAuth2 client.
@@ -195,6 +196,7 @@ func main() {
 	mux.HandleFunc("GET /internal/oauth/clients", handleListOAuthClients)
 	mux.HandleFunc("DELETE /internal/oauth/clients/{id}", handleDeleteOAuthClient)
 	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
+	mux.Handle("GET /auth/validate", authMiddleware(http.HandlerFunc(handleAuthValidate)))
 
 	mw := func(h http.HandlerFunc) http.Handler { return authMiddleware(http.HandlerFunc(h)) }
 

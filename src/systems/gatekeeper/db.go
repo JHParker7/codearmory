@@ -470,7 +470,9 @@ func (session Session) Add(ctx context.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
-	cacheTrackUserSession(ctx, session.UserID, session.SessionID)
+	if session.UserID != "" {
+		cacheTrackUserSession(ctx, session.UserID, session.SessionID)
+	}
 	span.SetStatus(codes.Ok, "")
 	return nil
 }

@@ -25,6 +25,40 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// setSessionCookie writes an HttpOnly session cookie carrying the JWT. Defaults
+// to Secure=true; set COOKIE_SECURE=false to disable (local HTTP dev only).
+func setSessionCookie(w http.ResponseWriter, token string, expiresAt time.Time) {
+	maxAge := int(time.Until(expiresAt).Seconds())
+	if maxAge <= 0 {
+		return
+	}
+	secure := os.Getenv("COOKIE_SECURE") != "false"
+	http.SetCookie(w, &http.Cookie{
+		Name:     "armory_session",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   secure,
+	})
+}
+
+// handleLogout clears the session cookie. Callers that used JWT-only auth can
+// delete their own session via DELETE /sessions/{id}.
+func handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "armory_session",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   os.Getenv("COOKIE_SECURE") != "false",
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // userResponse is the safe public shape of a User — HashedPassword is deliberately omitted.
 type userResponse struct {
 	UserID    string    `json:"user_id"`
@@ -680,6 +714,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	slog.Info("login successful", "user_id", user.UserID, "session_id", sessionID)
 	writeAudit(ctx, user.UserID, "user", "session.create", sessionID, user.Username)
 
+	setSessionCookie(w, tokenString, expiresAt)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": tokenString})
 }

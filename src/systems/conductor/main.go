@@ -248,36 +248,43 @@ func getUserID(token string) (string, bool) {
 	return canonicalUUID(claims.Sub)
 }
 
-// checkUserAuth verifies that the caller has a valid, active account.
-// It decodes the JWT locally to extract the user ID, then calls Gatekeeper's
-// GET /users/{id} endpoint — which performs full JWT signature verification —
-// to confirm the user exists and the token is genuine.
-// Permission checking is left to each backend service.
-func checkUserAuth(r *http.Request) (authOutcome, string) {
+// checkUserAuth verifies that the caller has a valid token by calling Gatekeeper's
+// GET /auth/validate. Accepts both Bearer tokens and the armory_session cookie.
+// Returns (outcome, subjectID, normalizedAuth) where normalizedAuth is the
+// "Bearer <token>" string used so callers can forward it when needed.
+func checkUserAuth(r *http.Request) (authOutcome, string, string) {
 	ctx, span := otel.Tracer("conductor").Start(r.Context(), "checkUserAuth")
 	defer span.End()
 
+	// Accept Bearer token from Authorization header or armory_session cookie.
 	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		if cookie, err := r.Cookie("armory_session"); err == nil && cookie.Value != "" {
+			auth = "Bearer " + cookie.Value
+		}
+	}
 	if !strings.HasPrefix(auth, "Bearer ") {
 		span.SetStatus(codes.Ok, "")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "no_token")))
-		return authUnauthorized, ""
+		return authUnauthorized, "", ""
 	}
 
-	userID, ok := getUserID(strings.TrimPrefix(auth, "Bearer "))
+	// Decode JWT locally (no sig verify) to validate basic structure and extract
+	// the sub claim for suspicious-activity tracking. Tokens that aren't even
+	// valid JWTs are rejected here to avoid unnecessary gatekeeper calls.
+	suspectID, ok := getUserID(strings.TrimPrefix(auth, "Bearer "))
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "malformed_token")))
-		return authUnauthorized, ""
+		return authUnauthorized, "", ""
 	}
-	span.SetAttributes(attribute.String("user.id", userID))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		gatekeeperURL+"/users/"+url.PathEscape(userID), nil)
+		gatekeeperURL+"/auth/validate", nil)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return authUnauthorized, ""
+		return authUnauthorized, "", ""
 	}
 	req.Header.Set("Authorization", auth)
 
@@ -285,29 +292,37 @@ func checkUserAuth(r *http.Request) (authOutcome, string) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return authUnauthorized, ""
+		return authUnauthorized, "", ""
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		span.SetStatus(codes.Ok, "")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "unauthorized")))
-		return authUnauthorized, userID
+		return authUnauthorized, suspectID, ""
 	case resp.StatusCode >= 500:
 		span.SetStatus(codes.Error, "gatekeeper error")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "gatekeeper_error")))
-		return authForbidden, ""
+		return authForbidden, "", ""
 	case resp.StatusCode != http.StatusOK:
 		span.SetStatus(codes.Ok, "")
-		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "user_not_found")))
-		return authForbidden, ""
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "auth_failed")))
+		return authForbidden, "", ""
 	}
 
+	var result struct {
+		Subject string `json:"subject"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Subject == "" {
+		span.SetStatus(codes.Error, "invalid validate response")
+		return authForbidden, "", ""
+	}
+
+	span.SetAttributes(attribute.String("user.id", result.Subject))
 	span.SetStatus(codes.Ok, "")
 	meterAllowed.Add(ctx, 1)
-	return authAllowed, userID
+	return authAllowed, result.Subject, auth
 }
 
 // ── Suspicious-activity block list ───────────────────────────────────────────
@@ -658,10 +673,10 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		r.ContentLength = int64(len(body))
 	}
 
-	var userID string
+	var userID, normalizedAuth string
 	if !entry.public {
 		var outcome authOutcome
-		outcome, userID = checkUserAuth(r)
+		outcome, userID, normalizedAuth = checkUserAuth(r)
 		switch outcome {
 		case authUnauthorized:
 			if userID != "" {
@@ -685,7 +700,7 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		span.SetAttributes(attribute.String("armory.client", "cli"))
 	}
 
-	svc.proxy.ServeHTTP(w, prepareForwardRequest(r, userID, svc, strippedPath))
+	svc.proxy.ServeHTTP(w, prepareForwardRequest(r, userID, normalizedAuth, svc, strippedPath))
 }
 
 // prepareForwardRequest clones r, strips client-supplied identity/routing
@@ -693,7 +708,9 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 // prefix was stripped, and injects X-User-ID (plus an HMAC token for
 // non-forwardAuth services). The caller's Authorization header is removed
 // for non-forwardAuth services so backend tokens cannot be replayed.
-func prepareForwardRequest(r *http.Request, userID string, svc serviceState, strippedPath string) *http.Request {
+// normalizedAuth is the "Bearer <token>" string extracted during auth (may
+// differ from r's Authorization header when auth arrived via cookie).
+func prepareForwardRequest(r *http.Request, userID, normalizedAuth string, svc serviceState, strippedPath string) *http.Request {
 	r2 := r.Clone(r.Context())
 
 	// Drop headers that a client could use to spoof identity. X-Conductor-*
@@ -708,6 +725,12 @@ func prepareForwardRequest(r *http.Request, userID string, svc serviceState, str
 	if strippedPath != r.URL.Path {
 		r2.URL.Path = strippedPath
 		r2.URL.RawPath = ""
+	}
+
+	// If auth arrived via cookie, inject the token as Authorization so that
+	// forward_auth=true backends (e.g. gatekeeper) receive it properly.
+	if normalizedAuth != "" && r2.Header.Get("Authorization") == "" {
+		r2.Header.Set("Authorization", normalizedAuth)
 	}
 
 	if userID != "" {
@@ -725,6 +748,8 @@ func prepareForwardRequest(r *http.Request, userID string, svc serviceState, str
 	if !svc.forwardAuth {
 		r2.Header.Del("Authorization")
 	}
+	// Strip the session cookie so it isn't forwarded to backends.
+	r2.Header.Del("Cookie")
 	return r2
 }
 
