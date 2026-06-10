@@ -505,7 +505,13 @@ func (WorkflowRun) Dequeue(ctx context.Context) (*WorkflowRun, error) {
 		return nil, nil
 	}
 
-	if r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", run.RunID); r.RowsAffected == 0 {
+	r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", run.RunID)
+	if r.Error != nil {
+		span.RecordError(r.Error)
+		span.SetStatus(codes.Error, r.Error.Error())
+		return nil, r.Error
+	}
+	if r.RowsAffected == 0 {
 		span.SetStatus(codes.Ok, "")
 		return nil, nil
 	}
