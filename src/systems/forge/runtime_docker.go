@@ -83,7 +83,7 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 		if pullErr != nil {
 			return RunResult{}, fmt.Errorf("image pull: %w", pullErr)
 		}
-		io.Copy(io.Discard, reader)
+		io.Copy(io.Discard, reader) //nolint:errcheck — pull progress stream; failure here doesn't affect image availability
 		reader.Close()
 	}
 

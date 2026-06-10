@@ -35,7 +35,7 @@ func handleInternalRegistryToken(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	account, err := getAccount(ctx, userID)
+	accountRow, err := (GiteaAccount{UserID: userID}).Get(ctx)
 	if err != nil {
 		if isDbNotFound(err) {
 			http.Error(w, "no gitea account linked", http.StatusNotFound)
@@ -47,6 +47,7 @@ func handleInternalRegistryToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	account := accountRow.(GiteaAccount)
 
 	username := account.GiteaUsername
 

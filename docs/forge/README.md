@@ -179,7 +179,7 @@ All endpoints require a Gatekeeper-issued Bearer token (`Authorization: Bearer <
 ### Submit an execution
 
 ```bash
-curl -X POST http://conductor:8082/executions \
+curl -X POST http://conductor:8080/executions \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{

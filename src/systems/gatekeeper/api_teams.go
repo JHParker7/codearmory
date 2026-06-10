@@ -204,7 +204,6 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		"user_id":  callerID,
 		"username": owner.Username,
 	}
-	db := connect().WithContext(ctx)
 	teamGrants := defaultGrantsFor("team")
 	if len(teamGrants) == 0 {
 		slog.Error("create team: no default grants for 'team' — owner will have no permissions; check that the registry is reachable and has default_grants seeded", "team_id", team.TeamID, "caller_id", callerID)
@@ -215,7 +214,7 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		permName := fmt.Sprintf("%s-%s %s permissions", owner.Username, team.TeamName, grant.ServiceName)
 		resources := applyGrantTemplates(grant.Resources, templateVars)
 		for _, resource := range resources {
-			if err := grantServicePermissions(ctx, db, grant.ServiceName, callerID, permName, grant.Actions, resource); err != nil {
+			if err := applyGrantsForResource(ctx, grant.ServiceName, callerID, permName, grant.Actions, resource); err != nil {
 				span.RecordError(err)
 				span.SetStatus(codes.Error, "failed to grant owner permissions")
 				slog.Error("create team: failed to grant owner permissions", "caller_id", callerID, "team_id", team.TeamID, "service", grant.ServiceName, "error", err)
@@ -372,11 +371,11 @@ func handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
 
 	// Soft delete does not cascade; clear team_id on members so checkPermissions
 	// doesn't attempt to load the now-inactive team and deny access.
-	var memberIDs []string
-	if err := connect().WithContext(ctx).Model(&User{}).Where("team_id = ?", id).Pluck("user_id", &memberIDs).Error; err != nil {
-		slog.Error("delete team: failed to load member IDs for cache invalidation", "caller_id", callerID, "team_id", id, "error", err)
+	memberIDs, memberErr := getUserIDsByTeam(ctx, id)
+	if memberErr != nil {
+		slog.Error("delete team: failed to load member IDs for cache invalidation", "caller_id", callerID, "team_id", id, "error", memberErr)
 	}
-	if err := connect().WithContext(ctx).Model(&User{}).Where("team_id = ?", id).Update("team_id", nil).Error; err != nil {
+	if err := clearTeamMembership(ctx, id); err != nil {
 		slog.Error("delete team: failed to clear team membership", "caller_id", callerID, "team_id", id, "error", err)
 	} else {
 		for _, uid := range memberIDs {

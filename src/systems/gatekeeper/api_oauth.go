@@ -243,8 +243,8 @@ func parseOAuthParams(w http.ResponseWriter, r *http.Request, fromForm bool) (oa
 		return oauthParams{}, false
 	}
 
-	var client OAuthClient
-	if err := connect().WithContext(r.Context()).Where("client_id = ? AND active = ?", clientID, true).First(&client).Error; err != nil {
+	client, err := getOAuthClientByClientID(r.Context(), clientID)
+	if err != nil {
 		http.Error(w, "unknown client_id", http.StatusBadRequest)
 		return oauthParams{}, false
 	}
@@ -335,8 +335,8 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Constant-time dummy hash prevents user-enumeration via timing differences.
 	const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
-	var user User
-	if err := connect().WithContext(r.Context()).Where("email = ? AND active = ?", email, true).First(&user).Error; err != nil {
+	user, err := getUserByEmail(r.Context(), email)
+	if err != nil {
 		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password)) //nolint:errcheck
 		slog.Warn("oauth authorize: user not found", "email", email)
 		renderError("Invalid email or password.")
@@ -370,7 +370,7 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:   time.Now().Add(10 * time.Minute).UTC(),
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := connect().WithContext(r.Context()).Create(&code).Error; err != nil {
+	if err := code.Add(r.Context()); err != nil {
 		slog.Error("oauth authorize: persist code failed", "error", err)
 		oauthRedirectError(w, r, params.redirectURI, params.state, "server_error", "failed to create authorization code")
 		return
@@ -402,8 +402,8 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var client OAuthClient
-	if err := connect().WithContext(r.Context()).Where("client_id = ? AND active = ?", clientID, true).First(&client).Error; err != nil {
+	client, err := getOAuthClientByClientID(r.Context(), clientID)
+	if err != nil {
 		tokenError(w, "invalid_client", "client not found")
 		return
 	}
@@ -412,10 +412,8 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var authCode OAuthCode
-	if err := connect().WithContext(r.Context()).
-		Where("code = ? AND client_id = ? AND used = ?", r.FormValue("code"), clientID, false).
-		First(&authCode).Error; err != nil {
+	authCode, err := getOAuthCode(r.Context(), r.FormValue("code"), clientID)
+	if err != nil {
 		tokenError(w, "invalid_grant", "authorization code not found or already used")
 		return
 	}
@@ -430,11 +428,8 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 
 	// Atomically mark the code as used. RowsAffected == 0 means a concurrent
 	// request already redeemed it, preventing double-issuance of sessions.
-	result := connect().WithContext(r.Context()).
-		Model(&OAuthCode{}).
-		Where("code = ? AND used = ?", authCode.Code, false).
-		Update("used", true)
-	if result.Error != nil || result.RowsAffected == 0 {
+	n, redeemErr := redeemOAuthCode(r.Context(), authCode.Code)
+	if redeemErr != nil || n == 0 {
 		tokenError(w, "invalid_grant", "authorization code already used")
 		return
 	}
@@ -538,7 +533,7 @@ func handleCreateOAuthClient(w http.ResponseWriter, r *http.Request) {
 		Active:       true,
 		CreatedAt:    time.Now().UTC(),
 	}
-	if err := connect().WithContext(r.Context()).Create(&client).Error; err != nil {
+	if err := client.Add(r.Context()); err != nil {
 		slog.Error("oauth client: create failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -560,8 +555,8 @@ func handleListOAuthClients(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireServiceAuth(w, r); !ok {
 		return
 	}
-	var clients []OAuthClient
-	if err := connect().WithContext(r.Context()).Where("active = ?", true).Find(&clients).Error; err != nil {
+	clients, err := listOAuthClients(r.Context())
+	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -574,12 +569,12 @@ func handleDeleteOAuthClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	result := connect().WithContext(r.Context()).Model(&OAuthClient{}).Where("client_id = ?", id).Update("active", false)
-	if result.Error != nil {
+	n, err := deactivateOAuthClient(r.Context(), id)
+	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if result.RowsAffected == 0 {
+	if n == 0 {
 		http.Error(w, "client not found", http.StatusNotFound)
 		return
 	}
@@ -681,7 +676,7 @@ func handleOAuthMFAPost(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:   time.Now().Add(10 * time.Minute).UTC(),
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := connect().WithContext(ctx).Create(&authCode).Error; err != nil {
+	if err := authCode.Add(ctx); err != nil {
 		slog.Error("oauth mfa: persist auth code failed", "error", err)
 		oauthRedirectError(w, r, pending.OAuthRedirectURI, pending.OAuthState, "server_error", "failed to create authorization code")
 		return

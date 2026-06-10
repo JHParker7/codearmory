@@ -459,3 +459,33 @@ func claimDueRetries(ctx context.Context, n int) ([]HookTriggerRetry, error) {
 func retryBackoff(attempt int) time.Duration {
 	return time.Duration(min(60*(1<<(attempt-1)), 900)) * time.Second
 }
+
+// markTriggerTriggered sets a trigger's status to "triggered" and records the run ID.
+func markTriggerTriggered(ctx context.Context, triggerID string, runID *string) error {
+	return connect().WithContext(ctx).Model(&HookTrigger{}).
+		Where("trigger_id = ?", triggerID).
+		Updates(map[string]any{"status": "triggered", "run_id": runID}).Error
+}
+
+// markTriggerFailed sets a trigger's status to "failed" with the given error message.
+func markTriggerFailed(ctx context.Context, triggerID, errMsg string) error {
+	return connect().WithContext(ctx).Model(&HookTrigger{}).
+		Where("trigger_id = ?", triggerID).
+		Updates(map[string]any{"status": "failed", "error": errMsg}).Error
+}
+
+// deleteRetry removes a retry record by ID.
+func deleteRetry(ctx context.Context, retryID string) error {
+	return connect().WithContext(ctx).Delete(&HookTriggerRetry{RetryID: retryID}).Error
+}
+
+// advanceRetry schedules a retry record for its next attempt.
+func advanceRetry(ctx context.Context, retryID string, attempt int, lastError string, nextRetryAt time.Time) error {
+	return connect().WithContext(ctx).Model(&HookTriggerRetry{}).
+		Where("retry_id = ?", retryID).
+		Updates(map[string]any{
+			"attempt":       attempt,
+			"last_error":    lastError,
+			"next_retry_at": nextRetryAt,
+		}).Error
+}

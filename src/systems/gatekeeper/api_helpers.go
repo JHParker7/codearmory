@@ -723,9 +723,7 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 			return ServiceAccount{}, false
 		}
 		slog.Warn("service auth: bootstrap key fallback used; service will re-rotate", "service", name)
-		if err2 := connect().WithContext(r.Context()).Model(&ServiceAccount{}).
-			Where("service_name = ?", name).
-			Update("hashed_key", svc.HashedBootstrapKey).Error; err2 != nil {
+		if err2 := syncServiceAccountBootstrapKey(r.Context(), name, svc.HashedBootstrapKey); err2 != nil {
 			slog.Error("service auth: failed to sync hashed_key from bootstrap", "service", name, "error", err2)
 		}
 	}

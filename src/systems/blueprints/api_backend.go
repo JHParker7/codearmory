@@ -150,24 +150,14 @@ func checkCertCredential(ctx context.Context, cs *tls.ConnectionState, workspace
 		return false
 	}
 	fp := rawFingerprint(cs.VerifiedChains[0][0].Raw)
-	var cred BackendCredential
-	result := connect().WithContext(ctx).
-		Select("expires_at").
-		Where("cert_fp = ? AND workspace = ?", fp, workspaceKey).
-		First(&cred)
-	return result.Error == nil && time.Now().Before(cred.ExpiresAt)
+	return (BackendCredential{CertFP: fp, Workspace: workspaceKey}).CheckCert(ctx)
 }
 
 // checkTokenCredential returns true when the bp_ bearer token is registered
 // and still valid for workspaceKey.
 func checkTokenCredential(ctx context.Context, token, workspaceKey string) bool {
 	h := tokenHash(token)
-	var cred BackendCredential
-	result := connect().WithContext(ctx).
-		Select("expires_at").
-		Where("token_hash = ? AND workspace = ?", h, workspaceKey).
-		First(&cred)
-	return result.Error == nil && time.Now().Before(cred.ExpiresAt)
+	return (BackendCredential{TokenHash: h, Workspace: workspaceKey}).CheckToken(ctx)
 }
 
 // requireWorkspaceAuth is the unified auth gate for state operations. It accepts,
@@ -380,7 +370,7 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:    cc.UserID,
 		ExpiresAt:    expiresAt,
 	}
-	if err := connect().WithContext(ctx).Create(&cred).Error; err != nil {
+	if err := cred.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		slog.Error("backend: insert credential", "caller_id", cc.UserID, "workspace", workspaceKey, "error", err)

@@ -84,8 +84,8 @@ def pytest_sessionfinish(session, exitstatus):
             {"uids": user_ids, "emails": user_emails},
         )
 
-        # Step 1: delete all permissions_checks that reference test data, commit
-        # immediately so this survives even if later deletes fail.
+        # Step 1: delete leaf rows that foreign-key into sessions/permissions_checks,
+        # then commit so this cleanup survives even if later deletes fail.
         conn.execute(sa.text("DELETE FROM sessions WHERE user_id = ANY(:uids)"), {"uids": user_ids})
         conn.execute(sa.text("DELETE FROM permissions_checks WHERE user_id = ANY(:uids)"), {"uids": user_ids})
         if team_ids:
@@ -94,7 +94,8 @@ def pytest_sessionfinish(session, exitstatus):
             conn.execute(sa.text("DELETE FROM permissions_checks WHERE org_id = ANY(:oids)"), {"oids": org_ids})
         conn.commit()
 
-        # Step 2: clear membership / ownership FKs, then delete orgs and teams.
+        # Step 2: null out FK columns before deleting parents (users → orgs → teams → roles)
+        # to avoid FK constraint violations. Order matters: memberships first, then owners.
         conn.execute(sa.text("UPDATE users SET org_id = NULL WHERE user_id = ANY(:uids)"), {"uids": user_ids})
         conn.execute(sa.text("UPDATE users SET team_id = NULL WHERE user_id = ANY(:uids)"), {"uids": user_ids})
         conn.execute(sa.text("UPDATE teams SET owner_id = NULL WHERE owner_id = ANY(:uids)"), {"uids": user_ids})

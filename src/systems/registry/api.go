@@ -163,8 +163,8 @@ func requireAuthWithRole(w http.ResponseWriter, r *http.Request, requiredRole st
 	}
 	name, key := header[:idx], header[idx+1:]
 
-	var acct ServiceAccountModel
-	if err := connect().WithContext(r.Context()).Where("name = ?", name).First(&acct).Error; err != nil {
+	acct, err := lookupServiceAccount(r.Context(), name)
+	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return "", false
 	}
@@ -239,56 +239,11 @@ func handleListActions(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("caller.service", caller))
 
-	sqlRows, err := connect().WithContext(ctx).Raw(`
-		SELECT sa.action_id, sa.service_id, s.name, s.url,
-		       sa.name, sa.method, sa.path,
-		       sa.body_transforms, sa.async_config,
-		       sa.active, sa.created_at, sa.updated_at,
-		       COALESCE(se.action, ''), COALESCE(se.resource, '')
-		FROM service_actions sa
-		JOIN services s ON sa.service_id = s.service_id
-		LEFT JOIN service_endpoints se
-		       ON se.service_id = sa.service_id
-		      AND se.method     = sa.method
-		      AND se.path       = sa.path
-		      AND se.active     = true
-		WHERE sa.active = true AND s.active = true
-		ORDER BY sa.name
-	`).Rows()
+	actions, err := listAllActions(ctx)
 	if err != nil {
 		slog.Error("list actions: query", "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	defer sqlRows.Close()
-
-	var actions []ServiceAction
-	for sqlRows.Next() {
-		var a ServiceAction
-		var bodyTransforms, asyncConfig []byte
-		if err := sqlRows.Scan(
-			&a.ActionID, &a.ServiceID, &a.ServiceName, &a.ServiceURL,
-			&a.Name, &a.Method, &a.Path,
-			&bodyTransforms, &asyncConfig,
-			&a.Active, &a.CreatedAt, &a.UpdatedAt,
-			&a.GkAction, &a.GkResource,
-		); err != nil {
-			slog.Error("list actions: scan", "error", err)
-			continue
-		}
-		a.BodyTransforms = json.RawMessage(bodyTransforms)
-		a.AsyncConfig = json.RawMessage(asyncConfig)
-		if a.GkAction != "" {
-			a.GkService = a.ServiceName
-		}
-		actions = append(actions, a)
-	}
-	if sqlRows.Err() != nil {
-		slog.Error("list actions: rows", "error", sqlRows.Err())
-		span.RecordError(sqlRows.Err())
-		span.SetStatus(codes.Error, "db rows error")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -314,9 +269,7 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("caller.service", caller))
 
-	svcSQLRows, err := connect().WithContext(ctx).Raw(
-		`SELECT service_id, name, url, description, forward_auth, active, created_at, updated_at
-		 FROM services WHERE active = true ORDER BY name`).Rows()
+	result, err := listServicesWithEndpoints(ctx)
 	if err != nil {
 		slog.Error("list services: query", "error", err)
 		span.RecordError(err)
@@ -324,79 +277,8 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	defer svcSQLRows.Close()
 
-	var svcs []Service
-	for svcSQLRows.Next() {
-		var s Service
-		if err := svcSQLRows.Scan(&s.ServiceID, &s.Name, &s.URL, &s.Description, &s.ForwardAuth, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
-			slog.Error("list services: scan", "error", err)
-			continue
-		}
-		svcs = append(svcs, s)
-	}
-	if svcSQLRows.Err() != nil {
-		slog.Error("list services: rows", "error", svcSQLRows.Err())
-		span.RecordError(svcSQLRows.Err())
-		span.SetStatus(codes.Error, "db rows error")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	// Collect service IDs for batch sub-queries — avoids N+1 round-trips.
-	svcIndex := make(map[string]int, len(svcs))
-	svcIDs := make([]string, len(svcs))
-	result := make([]serviceWithEndpoints, len(svcs))
-	for i, s := range svcs {
-		result[i] = serviceWithEndpoints{Service: s, Roles: []ServiceRole{}, Endpoints: []ServiceEndpoint{}}
-		svcIDs[i] = s.ServiceID
-		svcIndex[s.ServiceID] = i
-	}
-
-	if len(svcIDs) > 0 {
-		roleRows, err := connect().WithContext(ctx).Raw(
-			`SELECT role_id, service_id, name, description, created_at
-			 FROM service_roles WHERE service_id IN (?) ORDER BY service_id, name`,
-			svcIDs).Rows()
-		if err != nil {
-			slog.Error("list services: query roles", "error", err)
-		} else {
-			for roleRows.Next() {
-				var sr ServiceRole
-				if err := roleRows.Scan(&sr.RoleID, &sr.ServiceID, &sr.Name, &sr.Description, &sr.CreatedAt); err != nil {
-					slog.Error("list services: scan role", "error", err)
-					continue
-				}
-				if i, ok := svcIndex[sr.ServiceID]; ok {
-					result[i].Roles = append(result[i].Roles, sr)
-				}
-			}
-			roleRows.Close()
-		}
-
-		epRows, err := connect().WithContext(ctx).Raw(
-			`SELECT endpoint_id, service_id, method, path, action, resource, public, active, created_at, updated_at
-			 FROM service_endpoints WHERE service_id IN (?) AND active = true ORDER BY service_id`,
-			svcIDs).Rows()
-		if err != nil {
-			slog.Error("list services: query endpoints", "error", err)
-		} else {
-			for epRows.Next() {
-				var ep ServiceEndpoint
-				if err := epRows.Scan(&ep.EndpointID, &ep.ServiceID, &ep.Method, &ep.Path,
-					&ep.Action, &ep.Resource, &ep.Public, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
-					slog.Error("list services: scan endpoint", "error", err)
-					continue
-				}
-				if i, ok := svcIndex[ep.ServiceID]; ok {
-					result[i].Endpoints = append(result[i].Endpoints, ep)
-				}
-			}
-			epRows.Close()
-		}
-	}
-
-	span.SetAttributes(attribute.Int("services.count", len(svcs)))
+	span.SetAttributes(attribute.Int("services.count", len(result)))
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
@@ -452,7 +334,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		ForwardAuth: req.ForwardAuth,
 		ServiceKey:  hashedKey,
 	}
-	if err := connect().WithContext(ctx).Create(&newSvcModel).Error; err != nil {
+	if err := newSvcModel.Add(ctx); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			span.SetStatus(codes.Error, "service already registered")
 			http.Error(w, "service already registered", http.StatusConflict)
@@ -466,16 +348,16 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("service.id", id))
 
-	var svc Service
-	var fetchedModel ServiceModel
-	if err := connect().WithContext(ctx).Where("service_id = ?", id).First(&fetchedModel).Error; err != nil {
+	fetchedRow, err := (ServiceModel{ServiceID: id}).Get(ctx)
+	if err != nil {
 		slog.Error("create service: fetch after insert", "error", err, "service_id", id)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "fetch after insert failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	svc = Service{
+	fetchedModel := fetchedRow.(ServiceModel)
+	svc := Service{
 		ServiceID:   fetchedModel.ServiceID,
 		Name:        fetchedModel.Name,
 		URL:         fetchedModel.URL,
@@ -508,18 +390,16 @@ func handleDeleteService(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	span.SetAttributes(attribute.String("service.id", id))
 
-	delResult := connect().WithContext(ctx).Exec(
-		`UPDATE services SET active = false, updated_at = now() WHERE service_id = ? AND active = true`, id)
-	if delResult.Error != nil {
-		slog.Error("delete service: db", "error", delResult.Error, "service_id", id)
-		span.RecordError(delResult.Error)
+	if err := (ServiceModel{ServiceID: id}).Remove(ctx); err != nil {
+		if isDbNotFound(err) {
+			span.SetStatus(codes.Error, "not found")
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("delete service: db", "error", err, "service_id", id)
+		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	if delResult.RowsAffected == 0 {
-		span.SetStatus(codes.Error, "not found")
-		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	span.SetStatus(codes.Ok, "")
@@ -543,31 +423,12 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("service.id", id))
 
 	var req struct {
-		URL         string `json:"url"`
-		Description string `json:"description"`
-		Roles       []struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
-		} `json:"roles"`
-		Endpoints []struct {
-			Method   string `json:"method"`
-			Path     string `json:"path"`
-			Action   string `json:"action"`
-			Resource string `json:"resource"`
-			Public   bool   `json:"public"`
-		} `json:"endpoints"`
-		Actions []struct {
-			Name           string          `json:"name"`
-			Method         string          `json:"method"`
-			Path           string          `json:"path"`
-			BodyTransforms json.RawMessage `json:"body_transforms,omitempty"`
-			Async          json.RawMessage `json:"async,omitempty"`
-		} `json:"actions"`
-		DefaultGrants []struct {
-			GrantOn   string   `json:"grant_on"`
-			Actions   []string `json:"actions"`
-			Resources []string `json:"resources"`
-		} `json:"default_grants"`
+		URL           string               `json:"url"`
+		Description   string               `json:"description"`
+		Roles         []manifestRoleSpec   `json:"roles"`
+		Endpoints     []manifestEndpointSpec `json:"endpoints"`
+		Actions       []manifestActionEntry `json:"actions"`
+		DefaultGrants []manifestDefaultGrant `json:"default_grants"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.SetStatus(codes.Error, "bad request")
@@ -582,138 +443,16 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	tx := connect().WithContext(ctx).Begin()
-	if tx.Error != nil {
-		span.RecordError(tx.Error)
-		span.SetStatus(codes.Error, "begin tx failed")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	// Verify service exists.
-	var exists bool
-	existsResult := tx.Raw(`SELECT true FROM services WHERE service_id = ? AND active = true`, id).Scan(&exists)
-	if existsResult.Error != nil || existsResult.RowsAffected == 0 {
-		span.SetStatus(codes.Error, "not found")
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-
-	if req.URL != "" {
-		if err := tx.Exec(`UPDATE services SET url = ?, updated_at = now() WHERE service_id = ?`, req.URL, id).Error; err != nil {
-			slog.Error("update endpoints: set url", "error", err, "service_id", id)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "set url failed")
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+	if err := replaceServiceManifest(ctx, id, req.URL, req.Description,
+		req.Roles, req.Endpoints, req.Actions, req.DefaultGrants); err != nil {
+		if isDbNotFound(err) {
+			span.SetStatus(codes.Error, "not found")
+			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-	}
-	if req.Description != "" {
-		if err := tx.Exec(`UPDATE services SET description = ?, updated_at = now() WHERE service_id = ?`, req.Description, id).Error; err != nil {
-			slog.Error("update endpoints: set description", "error", err, "service_id", id)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "set description failed")
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	if err := tx.Exec(`DELETE FROM service_roles WHERE service_id = ?`, id).Error; err != nil {
+		slog.Error("update endpoints: db", "error", err, "service_id", id)
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "delete roles failed")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	for _, role := range req.Roles {
-		if role.Name == "" {
-			continue
-		}
-		if err := tx.Exec(
-			`INSERT INTO service_roles (role_id, service_id, name, description) VALUES (?, ?, ?, ?)`,
-			uuid.New().String(), id, role.Name, role.Description).Error; err != nil {
-			slog.Error("update endpoints: insert role", "error", err, "service_id", id)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "insert role failed")
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	if err := tx.Exec(`DELETE FROM service_endpoints WHERE service_id = ?`, id).Error; err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "delete endpoints failed")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	for _, ep := range req.Endpoints {
-		if ep.Method == "" || ep.Path == "" || ep.Action == "" || ep.Resource == "" {
-			continue
-		}
-		if err := tx.Exec(
-			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			uuid.New().String(), id, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public).Error; err != nil {
-			slog.Error("update endpoints: insert endpoint", "error", err, "service_id", id)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "insert endpoint failed")
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	if err := tx.Exec(`DELETE FROM service_actions WHERE service_id = ?`, id).Error; err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "delete actions failed")
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	for _, a := range req.Actions {
-		if a.Name == "" || a.Method == "" || a.Path == "" {
-			continue
-		}
-		if err := tx.Exec(
-			`INSERT INTO service_actions (action_id, service_id, name, method, path, body_transforms, async_config)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			uuid.New().String(), id, a.Name, a.Method, a.Path,
-			jsonbBytes(a.BodyTransforms), jsonbBytes(a.Async)).Error; err != nil {
-			slog.Error("update endpoints: insert action", "error", err, "service_id", id, "action_name", a.Name)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "insert action failed")
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	if len(req.DefaultGrants) > 0 {
-		if err := tx.Exec(`DELETE FROM service_default_grants WHERE service_id = ?`, id).Error; err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "delete default grants failed")
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-		for _, g := range req.DefaultGrants {
-			if g.GrantOn == "" || len(g.Actions) == 0 || len(g.Resources) == 0 {
-				continue
-			}
-			actionsJSON, _ := json.Marshal(g.Actions)
-			resourcesJSON, _ := json.Marshal(g.Resources)
-			if err := tx.Exec(
-				`INSERT INTO service_default_grants (grant_id, service_id, grant_on, actions, resources)
-				 VALUES (?, ?, ?, ?, ?)`,
-				uuid.New().String(), id, g.GrantOn, actionsJSON, resourcesJSON).Error; err != nil {
-				slog.Error("update endpoints: insert default grant", "error", err, "service_id", id)
-				span.RecordError(err)
-				span.SetStatus(codes.Error, "insert default grant failed")
-				http.Error(w, "internal server error", http.StatusInternalServerError)
-				return
-			}
-		}
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		slog.Error("update endpoints: commit", "error", err, "service_id", id)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "commit failed")
+		span.SetStatus(codes.Error, "db failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -735,36 +474,13 @@ func handleListDefaultGrants(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("caller.service", caller))
 
-	grantSQLRows, err := connect().WithContext(ctx).Raw(
-		`SELECT g.grant_id, g.service_id, s.name, g.grant_on, g.actions, g.resources, g.created_at, g.updated_at
-		 FROM service_default_grants g
-		 JOIN services s ON s.service_id = g.service_id AND s.active = true
-		 ORDER BY s.name, g.grant_on`,
-	).Rows()
+	grants, err := listAllDefaultGrants(ctx)
 	if err != nil {
 		slog.Error("list default grants: db", "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
-	}
-	defer grantSQLRows.Close()
-
-	var grants []ServiceDefaultGrant
-	for grantSQLRows.Next() {
-		var g ServiceDefaultGrant
-		var actionsRaw, resourcesRaw []byte
-		if err := grantSQLRows.Scan(&g.GrantID, &g.ServiceID, &g.ServiceName, &g.GrantOn,
-			&actionsRaw, &resourcesRaw, &g.CreatedAt, &g.UpdatedAt); err != nil {
-			slog.Error("list default grants: scan", "error", err)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "scan failed")
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-		json.Unmarshal(actionsRaw, &g.Actions)     //nolint:errcheck
-		json.Unmarshal(resourcesRaw, &g.Resources) //nolint:errcheck
-		grants = append(grants, g)
 	}
 	if grants == nil {
 		grants = []ServiceDefaultGrant{}
@@ -799,20 +515,16 @@ func startHealthCollector(ctx context.Context) {
 		cctx, cspan := otel.Tracer("registry").Start(ctx, "health.collect")
 		defer cspan.End()
 
-		healthRows, err := connect().WithContext(cctx).Raw(`SELECT name, url FROM services WHERE active = true`).Rows()
+		rawSvcs, err := queryActiveServiceURLs(cctx)
 		if err != nil {
 			slog.Warn("health collector: db query failed", "error", err)
 			return
 		}
 		type svc struct{ name, url string }
-		var svcs []svc
-		for healthRows.Next() {
-			var s svc
-			if err := healthRows.Scan(&s.name, &s.url); err == nil {
-				svcs = append(svcs, s)
-			}
+		svcs := make([]svc, len(rawSvcs))
+		for i, s := range rawSvcs {
+			svcs[i] = svc{name: s.Name, url: s.URL}
 		}
-		healthRows.Close()
 
 		results := make(map[string]serviceHealth, len(svcs))
 		var mu sync.Mutex

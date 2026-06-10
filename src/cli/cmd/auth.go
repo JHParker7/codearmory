@@ -15,6 +15,8 @@ var authCmd = &cobra.Command{
 	Short: "Manage authentication",
 }
 
+// readPassword is a function variable so tests can inject a fake implementation
+// without spawning a real terminal.
 var readPassword = func() (string, error) {
 	fmt.Fprint(os.Stderr, "Password: ")
 	raw, err := term.ReadPassword(int(os.Stdin.Fd()))

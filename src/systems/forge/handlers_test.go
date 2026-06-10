@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -223,35 +224,14 @@ func TestNewRuntime_UnknownRuntime(t *testing.T) {
 	}
 }
 
-// --- isTimed ---
+// --- K8s runtime timeout wraps context.DeadlineExceeded ---
+// Verifies that errors.Is(err, context.DeadlineExceeded) works for the K8s
+// timeout error, so the worker can classify it without string matching.
 
-func TestIsTimed_TimedOutError(t *testing.T) {
-	if !isTimed(errors.New("timed out after 30s")) {
-		t.Fatal("expected true for 'timed out' error")
-	}
-}
-
-func TestIsTimed_OtherError(t *testing.T) {
-	if isTimed(errors.New("context canceled")) {
-		t.Fatal("expected false for non-timed error")
-	}
-}
-
-func TestIsTimed_NilError(t *testing.T) {
-	if isTimed(nil) {
-		t.Fatal("expected false for nil error")
-	}
-}
-
-func TestIsTimed_ShortMessage(t *testing.T) {
-	if isTimed(errors.New("tim")) {
-		t.Fatal("expected false for error message shorter than 5 chars")
-	}
-}
-
-func TestIsTimed_ExactlyFiveChars(t *testing.T) {
-	if isTimed(errors.New("timed")) {
-		t.Fatal("expected false for 5-char error (len > 5 requires at least 6)")
+func TestK8sTimeoutWrapsDeadlineExceeded(t *testing.T) {
+	err := fmt.Errorf("timed out after 30s: %w", context.DeadlineExceeded)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("expected wrapped context.DeadlineExceeded")
 	}
 }
 

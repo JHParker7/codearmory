@@ -298,15 +298,8 @@ func limitBody(next http.Handler) http.Handler {
 // crash) as 'failed' so they do not block the worker queue indefinitely.
 // Sessions are nulled out; their JWTs expire naturally within the 1-hour TTL.
 func recoverStuckRuns() {
-	result := connect().Exec(
-		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE status='running'",
-	)
-	if result.Error != nil {
-		slog.Error("startup: failed to recover stuck runs", "error", result.Error)
-		return
-	}
-	if result.RowsAffected > 0 {
-		slog.Warn("startup: recovered stuck runs from previous pod", "count", result.RowsAffected)
+	if n := recoverStuckRunsDB(); n > 0 {
+		slog.Warn("startup: recovered stuck runs from previous pod", "count", n)
 	}
 }
 

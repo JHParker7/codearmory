@@ -124,9 +124,9 @@ All variables support a `_FILE` suffix variant (e.g. `DATABASE_URL_FILE`) that r
 cd src/systems/workflows
 DATABASE_URL=postgresql://postgres:pass@localhost:5432/workflows \
   GATEKEEPER_URL=http://localhost:8080 \
-  REGISTRY_URL=http://localhost:8086 \
+  REGISTRY_URL=http://localhost:8084 \
   REGISTRY_SERVICE_KEY=your-registry-key \
-  SERVICES=forge=http://localhost:8083,blueprints=http://localhost:8081 \
+  SERVICES=forge=http://localhost:8083,blueprints=http://localhost:8084 \
   go run .
 ```
 
@@ -138,12 +138,12 @@ docker build -t workflows:latest .
 
 docker run -p 8085:8085 \
   -e DATABASE_URL=postgresql://postgres:pass@db:5432/workflows \
-  -e GATEKEEPER_URL=http://gatekeeper:8080 \
+  -e GATEKEEPER_URL=http://gatekeeper:8081 \
   -e GATEKEEPER_SERVICE_KEY=your-service-key \
   -e HOOKS_TRIGGER_KEY=your-hmac-secret \
-  -e REGISTRY_URL=http://registry:8086 \
+  -e REGISTRY_URL=http://registry:8084 \
   -e REGISTRY_SERVICE_KEY=your-registry-key \
-  -e SERVICES=forge=http://forge:8083,blueprints=http://blueprints:8081 \
+  -e SERVICES=forge=http://forge:8083,blueprints=http://blueprints:8084 \
   workflows:latest
 ```
 

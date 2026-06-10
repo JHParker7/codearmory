@@ -38,7 +38,13 @@ type dslNode struct {
 	groupIndex int // unique across parallel groups in this DSL
 }
 
-// parseDSL tokenises "a->b->[c,d]->e" into ordered nodes.
+// parseDSL tokenises a pipeline DSL string into ordered nodes.
+// Grammar: steps are separated by "->"; a parallel group is written as
+// "[step1,step2,...]" and results in a single node with multiple names.
+// Examples:
+//
+//	"build->test->deploy"          — three sequential steps
+//	"build->[lint,test]->deploy"   — lint and test run in parallel
 func parseDSL(dsl string) ([]dslNode, error) {
 	segments := strings.Split(dsl, "->")
 	var nodes []dslNode

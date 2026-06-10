@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,8 +13,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type inviteRequest struct {
@@ -340,49 +337,7 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = connect().Transaction(func(tx *gorm.DB) error {
-		// Lock the invite row to serialise concurrent accept attempts on the same invite.
-		var fresh Invite
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("invite_id = ? AND active = ?", id, true).
-			First(&fresh).Error; err != nil {
-			return err
-		}
-		if fresh.Status != "pending" {
-			return errors.New("invite is not pending")
-		}
-
-		// Lock the user row to prevent two concurrent accepts of different invites
-		// for the same user from both passing the membership check and committing.
-		var freshCaller User
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("user_id = ? AND active = ?", callerID, true).
-			First(&freshCaller).Error; err != nil {
-			return err
-		}
-		switch invite.ResourceType {
-		case "org":
-			if freshCaller.OrgID != nil && *freshCaller.OrgID != invite.ResourceID {
-				return errors.New("already in org")
-			}
-			freshCaller.OrgID = &invite.ResourceID
-		case "team":
-			if freshCaller.TeamID != nil && *freshCaller.TeamID != invite.ResourceID {
-				return errors.New("already in team")
-			}
-			freshCaller.TeamID = &invite.ResourceID
-		}
-		freshCaller.UpdatedAt = time.Now()
-
-		fresh.Status = "accepted"
-		if err := tx.Save(&freshCaller).Error; err != nil {
-			return err
-		}
-		if err := tx.Save(&fresh).Error; err != nil {
-			return err
-		}
-		return grantPermissions(ctx, tx, callerID, permName, []string{memberAction}, permResource)
-	})
+	err = acceptInviteAtomic(ctx, id, callerID, invite, permName, memberAction, permResource)
 	if err != nil {
 		switch err.Error() {
 		case "invite is not pending":
