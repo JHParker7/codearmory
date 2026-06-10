@@ -607,8 +607,16 @@ func handleCreateOAuthClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.RoleID != "" {
-		if _, err := (Role{RoleID: req.RoleID}).Get(r.Context()); err != nil {
+		roleRow, err := (Role{RoleID: req.RoleID}).Get(r.Context())
+		if err != nil {
 			http.Error(w, "role not found", http.StatusBadRequest)
+			return
+		}
+		role := roleRow.(Role)
+		// Prevent cross-org privilege escalation: the role must belong to the same
+		// org as the client being created.
+		if role.OrgID != nil && *role.OrgID != req.OrgID {
+			http.Error(w, "role does not belong to the specified org", http.StatusForbidden)
 			return
 		}
 	}
