@@ -8,7 +8,7 @@ Conductor is the public-facing API gateway. Every REST API request from external
 Client (Bearer JWT)
   |
   v
-Conductor :8082
+Conductor :8080
   |
   +-- 1. Block list check (per IP+userID pair)
   |

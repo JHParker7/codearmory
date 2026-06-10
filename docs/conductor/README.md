@@ -8,7 +8,7 @@ Lightweight API gateway. Conductor acts as an identity filter — it verifies th
 Client
   │
   ▼
-Conductor :8082
+Conductor :8080
   │
   ├── block list check (skipped when token is missing or malformed)
   │     (source IP, user ID) blocked after 10 post-auth 401s? → 403 Forbidden
@@ -60,7 +60,7 @@ Conductor polls the Registry every 30 seconds to refresh its in-memory service a
 | `REGISTRY_URL` | `http://localhost:8084` | Base URL of the Registry service |
 | `REGISTRY_READ_KEY` | — | **Required.** Shared secret for authenticating reads from the Registry. |
 | `CONDUCTOR_FORWARD_KEY` | — | Shared secret used to sign `X-User-ID` headers forwarded to backend services. When set, Conductor injects `X-Conductor-Token` (HMAC-SHA256) and `X-Conductor-Timestamp` so backends can verify the header was injected by Conductor. Should match the value configured on each backend (e.g. Forge). |
-| `PORT` | `8082` | Port the server listens on |
+| `PORT` | `8080` | Port the server listens on |
 | `TLS_CERT_FILE` | — | Path to PEM-encoded TLS certificate. Required with `TLS_KEY_FILE` to enable HTTPS. |
 | `TLS_KEY_FILE` | — | Path to PEM-encoded TLS private key. Required with `TLS_CERT_FILE` to enable HTTPS. |
 | `OTEL_SERVICE_NAME` | `conductor` | Service name reported in traces and metrics |
@@ -83,8 +83,8 @@ go run .
 cd src/systems/conductor
 docker build -t conductor:latest .
 
-docker run -p 8082:8082 \
-  -e GATEKEEPER_URL=http://gatekeeper:8080 \
+docker run -p 8080:8080 \
+  -e GATEKEEPER_URL=http://gatekeeper:8081 \
   -e REGISTRY_URL=http://registry:8084 \
   -e REGISTRY_READ_KEY=your-read-key \
   conductor:latest

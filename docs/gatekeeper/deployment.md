@@ -13,11 +13,11 @@ Services:
 
 | Service | Port | Description |
 |---------|------|-------------|
-| gatekeeper | 8080 | Auth, RBAC, user management |
-| blueprints | 8081 | OpenTofu/Terraform state backend |
-| conductor | 8082 | API gateway |
+| gatekeeper | 8081 | Auth, RBAC, user management |
+| blueprints | 8084 | OpenTofu/Terraform state backend |
+| conductor | 8080 | API gateway |
 | forge | 8083 | Sandboxed execution service |
-| registry | 8084 | Service discovery and endpoint registry |
+| registry | 8082 | Service discovery and endpoint registry |
 | postgres | 5432 | Primary datastore |
 | redis | 6379 | Permission-check and user cache |
 
@@ -32,7 +32,7 @@ docker pull ghcr.io/code-armory-app/gatekeeper:alpha-latest
 The Helm chart is at `infra/helm/gatekeeper`. It deploys:
 
 - **Deployment** — gatekeeper pods (replica count managed by HPA)
-- **Service** — ClusterIP on port 8080
+- **Service** — ClusterIP on port 8081
 - **Ingress** — nginx ingress controller routes external HTTP(S) traffic to the service
 - **HorizontalPodAutoscaler** — scales between 3 and 10 replicas based on CPU (70%) and memory (80%)
 
@@ -67,7 +67,7 @@ helm upgrade gatekeeper ./infra/helm/gatekeeper \
 | `image.tag` | `0.0.4` | Image tag |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `service.type` | `ClusterIP` | Kubernetes service type |
-| `service.port` | `8080` | Service port |
+| `service.port` | `8081` | Service port |
 | `ingress.enabled` | `true` | Enable nginx Ingress |
 | `ingress.className` | `nginx` | Ingress class |
 | `ingress.host` | `""` | Hostname to route (required) |

@@ -30,7 +30,7 @@
         v                    v                       v
 +---------------+    +----------------+    +------------------+
 |   Conductor   |    |   Blueprints   |    |     Hooks        |
-|   :8082       |    |   :8081        |    |     :8087        |
+|   :8080       |    |   :8084        |    |     :8087        |
 |   API gateway |    |   Terraform    |    |  Rule match      |
 |   RBAC proxy  |    |   state store  |    |  + dispatch      |
 +-------+-------+    +-------+--------+    +--------+---------+
@@ -39,9 +39,9 @@
         |                    v                       v
   +-----+------+     +----------------+    +------------------+
   |            |     |   Gatekeeper   |    |   Workflows      |
-  v            v     |   :8080        |    |   :8085          |
+  v            v     |   :8081        |    |   :8085          |
 Gatekeeper  Registry |   Auth / RBAC  |    |   Worker pool    |
-:8080       :8084    |   JWT issuance |    |   Step runner    |
+:8081       :8082    |   JWT issuance |    |   Step runner    |
             |        +----------------+    +--------+---------+
             |                                       |
             | 30-second poll                        | HTTP steps

@@ -24,7 +24,7 @@ Registry :8084
               |
               | GET /services (READ_KEY)  every 30 s
               v
-        Conductor :8082
+        Conductor :8080
           routing table (in-memory)
 ```
 
@@ -51,7 +51,7 @@ The submitted URL is validated before storage to prevent SSRF attacks through th
 
 ### Via `SERVICES` env var
 
-`SERVICES=forge=http://forge:8083,blueprints=http://blueprints:8081` seeds services on startup without URL validation. Intended for internal Docker / Kubernetes DNS names.
+`SERVICES=forge=http://forge:8083,blueprints=http://blueprints:8084` seeds services on startup without URL validation. Intended for internal Docker / Kubernetes DNS names.
 
 ### Via `MANIFEST_FILE`
 

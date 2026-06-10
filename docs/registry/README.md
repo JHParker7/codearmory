@@ -13,7 +13,7 @@ Registry :8084
   │  stores service URL + endpoint manifest in PostgreSQL
   │
   ▼
-Conductor :8082
+Conductor :8080
   │  GET /services  (every 30 s, authenticated with READ_KEY)
   │  builds reverse-proxy map + endpoint list
   │
@@ -33,7 +33,7 @@ Conductor :8082
 | `DATABASE_URL` | — | **Required.** PostgreSQL connection string |
 | `ADMIN_KEY` | — | **Required.** Bearer token for write operations (create/delete services, update endpoints) |
 | `READ_KEY` | — | **Required.** Bearer token for read operations (`GET /services`). Also accepted by all write endpoints. |
-| `SERVICES` | — | Comma-separated `name=url` pairs to seed on startup (e.g. `blueprints=http://blueprints:8081,forge=http://forge:8083`). Idempotent — updates the URL if the service already exists. |
+| `SERVICES` | — | Comma-separated `name=url` pairs to seed on startup (e.g. `blueprints=http://blueprints:8084,forge=http://forge:8083`). Idempotent — updates the URL if the service already exists. |
 | `MANIFEST_FILE` | — | Path to a JSON manifest file that seeds full service definitions (URL, endpoints, `service_key`) on startup. Bypasses SSRF validation — use only for trusted internal service URLs (e.g. Docker Compose or Kubernetes service names). |
 | `PORT` | `8084` | Port the server listens on |
 | `OTEL_SERVICE_NAME` | `registry` | Service name reported in traces and metrics |
