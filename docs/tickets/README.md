@@ -18,11 +18,26 @@ All authorisation is delegated to Gatekeeper via `POST {GATEKEEPER_URL}/check_pe
 | `GATEKEEPER_URL` | `http://localhost:8080` | Gatekeeper base URL |
 | `GATEKEEPER_SERVICE_KEY` | — | Service key for key rotation with Gatekeeper |
 | `PORT` | `8086` | Port the server listens on |
+| `HOOKS_URL` | — | Hooks service base URL. Set together with `HOOKS_TRIGGER_KEY` to enable the optional hooks integration (see below). Empty disables it. |
+| `HOOKS_TRIGGER_KEY` | — | Shared HMAC secret for emitting ticket events to the hooks service. Must match the hooks service's `HOOKS_TRIGGER_KEY`. |
 | `OTEL_SERVICE_NAME` | `tickets` | OTel service name |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTel Collector HTTP endpoint. Omit to disable telemetry. |
 | `LOG_LEVEL` | `info` | Set to `debug` for verbose output. |
 
 All variables support a `_FILE` suffix variant (e.g. `DATABASE_URL_FILE`) that reads the value from a file path — useful for Docker secrets and Kubernetes secret mounts.
+
+## Hooks integration (optional)
+
+When `HOOKS_URL` and `HOOKS_TRIGGER_KEY` are configured, ticket lifecycle changes are emitted to the [hooks](../hooks/README.md) service as events that users can route to workflows via pipeline rules. Emission is best-effort and asynchronous: it never blocks or fails a ticket request, and is a silent no-op when unconfigured.
+
+| Event | When |
+|-------|------|
+| `ticket.created` | A ticket is created |
+| `ticket.updated` | A ticket is updated (any field) |
+| `ticket.status_changed` | An update changed the ticket's `status` (adds `old_status`/`new_status`) |
+| `ticket.deleted` | A ticket is deleted |
+
+To act on these, create a hooks rule with source (`repo`) `tickets`. See the [hooks README](../hooks/README.md#tickets-integration) for details. Matching is confined to the ticket's org (or owner for personal tickets), so events never cross tenants.
 
 ## API
 
