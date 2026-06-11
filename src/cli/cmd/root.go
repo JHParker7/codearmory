@@ -67,9 +67,15 @@ func conductorURL() string {
 
 func bearerToken() string {
 	if flagToken != "" {
+		if exp, ok := jwtExpiry(flagToken); ok && time.Now().After(exp) {
+			return ""
+		}
 		return flagToken
 	}
 	if t := os.Getenv("CODEARMORY_TOKEN"); t != "" {
+		if exp, ok := jwtExpiry(t); ok && time.Now().After(exp) {
+			return ""
+		}
 		return t
 	}
 	if t, err := keyring.Get(keychainService, keychainAccount); err == nil && t != "" {

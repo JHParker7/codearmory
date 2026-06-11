@@ -8,22 +8,22 @@ import (
 
 // resolveOrgID accepts an org name or UUID and returns the org_id.
 func resolveOrgID(nameOrID string) (string, error) {
-	return resolveID("/orgs", "org_id", nameOrID, "org_name")
+	return resolveID("/gatekeeper/orgs", "org_id", nameOrID, "org_name")
 }
 
 // resolveTeamID accepts a team name or UUID and returns the team_id.
 func resolveTeamID(nameOrID string) (string, error) {
-	return resolveID("/teams", "team_id", nameOrID, "team_name")
+	return resolveID("/gatekeeper/teams", "team_id", nameOrID, "team_name")
 }
 
 // resolveUserID accepts a username, email, or UUID and returns the user_id.
 func resolveUserID(nameOrID string) (string, error) {
-	return resolveID("/users", "user_id", nameOrID, "username", "email")
+	return resolveID("/gatekeeper/users", "user_id", nameOrID, "username", "email")
 }
 
 // resolveRoleID accepts a role name or UUID and returns the role_id.
 func resolveRoleID(nameOrID string) (string, error) {
-	return resolveID("/roles", "role_id", nameOrID, "name")
+	return resolveID("/gatekeeper/roles", "role_id", nameOrID, "name")
 }
 
 // resolveID looks up nameOrID against the given list endpoint.

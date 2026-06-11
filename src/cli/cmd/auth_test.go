@@ -58,8 +58,8 @@ func TestLogin_Success(t *testing.T) {
 	}
 
 	// Correct request was sent
-	if rec.Method != http.MethodPost || rec.Path != "/login" {
-		t.Errorf("request = %s %s, want POST /login", rec.Method, rec.Path)
+	if rec.Method != http.MethodPost || rec.Path != "/gatekeeper/login" {
+		t.Errorf("request = %s %s, want POST /gatekeeper/login", rec.Method, rec.Path)
 	}
 	var body map[string]string
 	json.Unmarshal(rec.Body, &body) //nolint:errcheck
@@ -129,7 +129,7 @@ func TestSignup_SendsCorrectBody(t *testing.T) {
 		t.Fatalf("signup: %v", err)
 	}
 
-	if rec.Method != http.MethodPost || rec.Path != "/signup" {
+	if rec.Method != http.MethodPost || rec.Path != "/gatekeeper/signup" {
 		t.Errorf("request = %s %s, want POST /signup", rec.Method, rec.Path)
 	}
 	var body map[string]string

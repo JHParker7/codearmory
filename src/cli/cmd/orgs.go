@@ -21,7 +21,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/orgs", body)
+			return apiCall("POST", "/gatekeeper/orgs", body)
 		},
 	}
 
@@ -38,7 +38,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/orgs/"+id, body)
+			return apiCall("PUT", "/gatekeeper/orgs/"+id, body)
 		},
 	}
 
@@ -55,7 +55,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/orgs/"+id+"/invites", body)
+			return apiCall("POST", "/gatekeeper/orgs/"+id+"/invites", body)
 		},
 	}
 
@@ -69,13 +69,13 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("GET", "/orgs/"+id, nil)
+				return apiCall("GET", "/gatekeeper/orgs/"+id, nil)
 			},
 		},
 		&cobra.Command{
 			Use:   "list",
 			Short: "List all organizations",
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/orgs", nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gatekeeper/orgs", nil) },
 		},
 		createCmd,
 		&cobra.Command{
@@ -87,7 +87,7 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("GET", "/orgs/"+id, nil)
+				return apiCall("GET", "/gatekeeper/orgs/"+id, nil)
 			},
 		},
 		updateCmd,
@@ -100,7 +100,7 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("DELETE", "/orgs/"+id, nil)
+				return apiCall("DELETE", "/gatekeeper/orgs/"+id, nil)
 			},
 		},
 		inviteCmd,

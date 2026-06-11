@@ -375,3 +375,120 @@ class TestErrorHandling:
         )
         assert rc != 0
         assert err.strip() != ""
+
+
+# ---------------------------------------------------------------------------
+# CI TUI — command registration and underlying API calls
+# ---------------------------------------------------------------------------
+
+
+class TestCITUI:
+    """Verify the `ci tui` command is registered and its help text is coherent."""
+
+    def test_ci_tui_help_exits_zero(self, run_cli):
+        _, _, rc = run_cli("ci", "tui", "--help")
+        assert rc == 0
+
+    def test_ci_tui_help_mentions_browse(self, run_cli):
+        out, _, _ = run_cli("ci", "tui", "--help")
+        assert "browse" in out.lower() or "pipeline" in out.lower() or "interactive" in out.lower()
+
+    def test_ci_tui_help_rejects_extra_args(self, run_cli):
+        _, _, rc = run_cli("ci", "tui", "unexpected-arg")
+        assert rc != 0
+
+
+class TestCICmds:
+    """Smoke-test the non-interactive CI commands that back the TUI views.
+
+    These verify the full path from CLI binary → conductor → workflows service,
+    covering the same endpoints the TUI calls when loading its views.
+    """
+
+    def test_list_pipelines_requires_auth(self, run_cli):
+        _, _, rc = run_cli("ci", "list", "pipelines")
+        assert rc != 0
+
+    def test_list_pipelines_with_auth_exits_zero(self, run_cli, token):
+        _, _, rc = run_cli("ci", "list", "pipelines", token=token)
+        assert rc == 0
+
+    def test_list_runs_requires_auth(self, run_cli):
+        _, _, rc = run_cli("ci", "list", "runs")
+        assert rc != 0
+
+    def test_list_runs_with_auth_exits_zero(self, run_cli, token):
+        _, _, rc = run_cli("ci", "list", "runs", token=token)
+        assert rc == 0
+
+    def test_list_steps_with_auth_exits_zero(self, run_cli, token):
+        _, _, rc = run_cli("ci", "list", "steps", token=token)
+        assert rc == 0
+
+    def test_get_run_nonexistent_exits_nonzero(self, run_cli, token):
+        import uuid as _uuid
+        _, _, rc = run_cli("ci", "get", "run", str(_uuid.uuid4()), token=token)
+        assert rc != 0
+
+    def test_create_pipeline_lifecycle(self, run_cli, token):
+        """Create a step, pipeline, trigger a run, then list runs to verify TUI data path."""
+        import json as _json
+        import uuid as _uuid
+
+        step_name = f"tui-test-step-{_uuid.uuid4().hex[:8]}"
+
+        # Create step.
+        out, _, rc = run_cli(
+            "ci", "create", "step", step_name,
+            "--action", "http",
+            "--with", '{"service":"gatekeeper","method":"GET","path":"/healthz"}',
+            "--timeout", "10",
+            token=token,
+        )
+        assert rc == 0, f"step create failed: {out}"
+        step = _json.loads(out)
+        step_id = step["step_id"]
+
+        # Create pipeline referencing the step.
+        pipeline_name = f"tui-test-pipeline-{_uuid.uuid4().hex[:8]}"
+        out, _, rc = run_cli(
+            "ci", "create", "pipeline", pipeline_name, "main", step_name,
+            token=token,
+        )
+        assert rc == 0, f"pipeline create failed: {out}"
+        pipeline = _json.loads(out)
+        pipeline_id = pipeline["workflow_id"]
+
+        # List pipelines — the new pipeline should appear.
+        out, _, rc = run_cli("ci", "list", "pipelines", token=token)
+        assert rc == 0
+        pipelines = _json.loads(out)
+        ids = [p["workflow_id"] for p in pipelines]
+        assert pipeline_id in ids, f"pipeline {pipeline_id} not in list: {ids}"
+
+        # Trigger a run.
+        out, _, rc = run_cli("ci", "run", "pipeline", pipeline_id, token=token)
+        assert rc == 0, f"run failed: {out}"
+        run = _json.loads(out)
+        run_id = run["run_id"]
+
+        # List runs filtered to this pipeline — the run should be present.
+        out, _, rc = run_cli(
+            "ci", "list", "runs", "--pipeline", pipeline_id,
+            token=token,
+        )
+        assert rc == 0
+        runs = _json.loads(out)
+        run_ids = [r["run_id"] for r in runs]
+        assert run_id in run_ids, f"run {run_id} not in list: {run_ids}"
+
+        # Get the run detail — this is the exact call the TUI's run-detail view makes.
+        out, _, rc = run_cli("ci", "get", "run", run_id, token=token)
+        assert rc == 0, f"get run failed: {out}"
+        detail = _json.loads(out)
+        assert detail["run_id"] == run_id
+
+        # Cleanup.
+        run_cli("ci", "cancel", "run", run_id, token=token)
+        run_cli("ci", "delete", "pipeline", pipeline_id, token=token)
+        run_cli("ci", "delete", "step", step_id, token=token)

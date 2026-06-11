@@ -112,7 +112,7 @@ If --email is omitted the command prompts for it interactively.
 			return fmt.Errorf("reading password: %w", err)
 		}
 		body, _ := json.Marshal(map[string]string{"email": email, "password": password})
-		data, err := doRequest("POST", "/login", body)
+		data, err := doRequest("POST", "/gatekeeper/login", body)
 		if err != nil {
 			return err
 		}
@@ -146,7 +146,7 @@ var signupCmd = &cobra.Command{
 			"username": username,
 			"password": password,
 		})
-		return apiCall("POST", "/signup", body)
+		return apiCall("POST", "/gatekeeper/signup", body)
 	},
 }
 

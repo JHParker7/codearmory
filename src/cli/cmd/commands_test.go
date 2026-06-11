@@ -52,7 +52,7 @@ func TestUsersCmd_List_RunE(t *testing.T) {
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("users list: %v", err)
 	}
-	if rec.Method != "GET" || rec.Path != "/users" {
+	if rec.Method != "GET" || rec.Path != "/gatekeeper/users" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -66,7 +66,7 @@ func TestUsersCmd_Get_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("users get: %v", err)
 	}
-	if rec.Path != "/users/"+testUUID {
+	if rec.Path != "/gatekeeper/users/"+testUUID {
 		t.Errorf("path = %q, want /users/%s", rec.Path, testUUID)
 	}
 }
@@ -81,7 +81,7 @@ func TestUsersCmd_Update_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("users update: %v", err)
 	}
-	if rec.Method != "PUT" || rec.Path != "/users/"+testUUID {
+	if rec.Method != "PUT" || rec.Path != "/gatekeeper/users/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "newname") {
@@ -114,7 +114,7 @@ func TestUsersCmd_Delete_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("users delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/users/"+testUUID {
+	if rec.Method != "DELETE" || rec.Path != "/gatekeeper/users/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -130,7 +130,7 @@ func TestInvitesCmd_List_RunE(t *testing.T) {
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("invites list: %v", err)
 	}
-	if rec.Method != "GET" || rec.Path != "/invites" {
+	if rec.Method != "GET" || rec.Path != "/gatekeeper/invites" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -144,7 +144,7 @@ func TestInvitesCmd_Get_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"inv1"}); err != nil {
 		t.Fatalf("invites get: %v", err)
 	}
-	if rec.Path != "/invites/inv1" {
+	if rec.Path != "/gatekeeper/invites/inv1" {
 		t.Errorf("path = %q, want /invites/inv1", rec.Path)
 	}
 }
@@ -158,7 +158,7 @@ func TestInvitesCmd_Accept_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"inv2"}); err != nil {
 		t.Fatalf("invites accept: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/invites/inv2/accept" {
+	if rec.Method != "POST" || rec.Path != "/gatekeeper/invites/inv2/accept" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -172,7 +172,7 @@ func TestInvitesCmd_Decline_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"inv3"}); err != nil {
 		t.Fatalf("invites decline: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/invites/inv3/decline" {
+	if rec.Method != "POST" || rec.Path != "/gatekeeper/invites/inv3/decline" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -186,7 +186,7 @@ func TestInvitesCmd_Delete_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"inv4"}); err != nil {
 		t.Fatalf("invites delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/invites/inv4" {
+	if rec.Method != "DELETE" || rec.Path != "/gatekeeper/invites/inv4" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -202,7 +202,7 @@ func TestOrgsCmd_List_RunE(t *testing.T) {
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("orgs list: %v", err)
 	}
-	if rec.Method != "GET" || rec.Path != "/orgs" {
+	if rec.Method != "GET" || rec.Path != "/gatekeeper/orgs" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -216,7 +216,7 @@ func TestOrgsCmd_Get_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("orgs get: %v", err)
 	}
-	if rec.Path != "/orgs/"+testUUID {
+	if rec.Path != "/gatekeeper/orgs/"+testUUID {
 		t.Errorf("path = %q, want /orgs/%s", rec.Path, testUUID)
 	}
 }
@@ -230,7 +230,7 @@ func TestOrgsCmd_Create_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"acme"}); err != nil {
 		t.Fatalf("orgs create: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/orgs" {
+	if rec.Method != "POST" || rec.Path != "/gatekeeper/orgs" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "acme") {
@@ -247,7 +247,7 @@ func TestOrgsCmd_Update_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID, "renamed"}); err != nil {
 		t.Fatalf("orgs update: %v", err)
 	}
-	if rec.Method != "PUT" || rec.Path != "/orgs/"+testUUID {
+	if rec.Method != "PUT" || rec.Path != "/gatekeeper/orgs/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "renamed") {
@@ -264,7 +264,7 @@ func TestOrgsCmd_Delete_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("orgs delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/orgs/"+testUUID {
+	if rec.Method != "DELETE" || rec.Path != "/gatekeeper/orgs/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -278,7 +278,7 @@ func TestOrgsCmd_Invite_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID, "user@example.com"}); err != nil {
 		t.Fatalf("orgs invite: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/orgs/"+testUUID+"/invites" {
+	if rec.Method != "POST" || rec.Path != "/gatekeeper/orgs/"+testUUID+"/invites" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "user@example.com") {
@@ -297,7 +297,7 @@ func TestTeamsCmd_List_RunE(t *testing.T) {
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("teams list: %v", err)
 	}
-	if rec.Method != "GET" || rec.Path != "/teams" {
+	if rec.Method != "GET" || rec.Path != "/gatekeeper/teams" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -311,7 +311,7 @@ func TestTeamsCmd_Get_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("teams get: %v", err)
 	}
-	if rec.Path != "/teams/"+testUUID {
+	if rec.Path != "/gatekeeper/teams/"+testUUID {
 		t.Errorf("path = %q, want /teams/%s", rec.Path, testUUID)
 	}
 }
@@ -325,7 +325,7 @@ func TestTeamsCmd_Create_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"backend"}); err != nil {
 		t.Fatalf("teams create: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/teams" {
+	if rec.Method != "POST" || rec.Path != "/gatekeeper/teams" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "backend") {
@@ -342,7 +342,7 @@ func TestTeamsCmd_Update_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID, "frontend"}); err != nil {
 		t.Fatalf("teams update: %v", err)
 	}
-	if rec.Method != "PUT" || rec.Path != "/teams/"+testUUID {
+	if rec.Method != "PUT" || rec.Path != "/gatekeeper/teams/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "frontend") {
@@ -359,7 +359,7 @@ func TestTeamsCmd_Delete_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("teams delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/teams/"+testUUID {
+	if rec.Method != "DELETE" || rec.Path != "/gatekeeper/teams/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -373,7 +373,7 @@ func TestTeamsCmd_Invite_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID, "user@example.com"}); err != nil {
 		t.Fatalf("teams invite: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/teams/"+testUUID+"/invites" {
+	if rec.Method != "POST" || rec.Path != "/gatekeeper/teams/"+testUUID+"/invites" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "user@example.com") {
@@ -392,7 +392,7 @@ func TestRolesCmd_Get_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("roles get: %v", err)
 	}
-	if rec.Path != "/roles/"+testUUID {
+	if rec.Path != "/gatekeeper/roles/"+testUUID {
 		t.Errorf("path = %q", rec.Path)
 	}
 }
@@ -407,7 +407,7 @@ func TestRolesCmd_Create_RunE(t *testing.T) {
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("roles create: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/roles" {
+	if rec.Method != "POST" || rec.Path != "/gatekeeper/roles" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "perm-abc") {
@@ -424,7 +424,7 @@ func TestRolesCmd_Create_NoPerms_RunE(t *testing.T) {
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("roles create (no perms): %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/roles" {
+	if rec.Method != "POST" || rec.Path != "/gatekeeper/roles" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -439,7 +439,7 @@ func TestRolesCmd_Update_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("roles update: %v", err)
 	}
-	if rec.Method != "PUT" || rec.Path != "/roles/"+testUUID {
+	if rec.Method != "PUT" || rec.Path != "/gatekeeper/roles/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "perm-xyz") {
@@ -456,7 +456,7 @@ func TestRolesCmd_Delete_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{testUUID}); err != nil {
 		t.Fatalf("roles delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/roles/"+testUUID {
+	if rec.Method != "DELETE" || rec.Path != "/gatekeeper/roles/"+testUUID {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -472,7 +472,7 @@ func TestPermissionsCmd_Get_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"p1"}); err != nil {
 		t.Fatalf("permissions get: %v", err)
 	}
-	if rec.Path != "/permissions/p1" {
+	if rec.Path != "/gatekeeper/permissions/p1" {
 		t.Errorf("path = %q", rec.Path)
 	}
 }
@@ -488,7 +488,7 @@ func TestPermissionsCmd_Create_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"read-repos", "forge"}); err != nil {
 		t.Fatalf("permissions create: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/permissions" {
+	if rec.Method != "POST" || rec.Path != "/gatekeeper/permissions" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "forge/repos") {
@@ -506,7 +506,7 @@ func TestPermissionsCmd_Update_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"pid-1", "write-repos", "forge"}); err != nil {
 		t.Fatalf("permissions update: %v", err)
 	}
-	if rec.Method != "PUT" || rec.Path != "/permissions/pid-1" {
+	if rec.Method != "PUT" || rec.Path != "/gatekeeper/permissions/pid-1" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "write") {
@@ -523,7 +523,7 @@ func TestPermissionsCmd_Delete_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"pid-del"}); err != nil {
 		t.Fatalf("permissions delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/permissions/pid-del" {
+	if rec.Method != "DELETE" || rec.Path != "/gatekeeper/permissions/pid-del" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -539,7 +539,7 @@ func TestSessionsCmd_Get_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"s1"}); err != nil {
 		t.Fatalf("sessions get: %v", err)
 	}
-	if rec.Method != "GET" || rec.Path != "/sessions/s1" {
+	if rec.Method != "GET" || rec.Path != "/gatekeeper/sessions/s1" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -553,7 +553,7 @@ func TestSessionsCmd_Delete_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"s-del"}); err != nil {
 		t.Fatalf("sessions delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/sessions/s-del" {
+	if rec.Method != "DELETE" || rec.Path != "/gatekeeper/sessions/s-del" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -569,7 +569,7 @@ func TestStateCmd_Get_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"alice", "prod"}); err != nil {
 		t.Fatalf("state get: %v", err)
 	}
-	if rec.Method != "GET" || rec.Path != "/state/alice/prod" {
+	if rec.Method != "GET" || rec.Path != "/blueprints/state/alice/prod" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -589,7 +589,7 @@ func TestStateCmd_Push_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"alice", "prod"}); err != nil {
 		t.Fatalf("state push: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/state/alice/prod" {
+	if rec.Method != "POST" || rec.Path != "/blueprints/state/alice/prod" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), `"serial":5`) {
@@ -618,7 +618,7 @@ func TestStateCmd_Delete_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"alice", "prod"}); err != nil {
 		t.Fatalf("state delete: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/state/alice/prod" {
+	if rec.Method != "DELETE" || rec.Path != "/blueprints/state/alice/prod" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }
@@ -633,7 +633,7 @@ func TestStateCmd_Lock_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"alice", "prod"}); err != nil {
 		t.Fatalf("state lock: %v", err)
 	}
-	if rec.Method != "LOCK" || rec.Path != "/state/alice/prod" {
+	if rec.Method != "LOCK" || rec.Path != "/blueprints/state/alice/prod" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 	if !strings.Contains(string(rec.Body), "lock-abc") {
@@ -663,7 +663,7 @@ func TestStateCmd_Unlock_RunE(t *testing.T) {
 	if err := sub.RunE(sub, []string{"alice", "prod"}); err != nil {
 		t.Fatalf("state unlock: %v", err)
 	}
-	if rec.Method != "UNLOCK" || rec.Path != "/state/alice/prod" {
+	if rec.Method != "UNLOCK" || rec.Path != "/blueprints/state/alice/prod" {
 		t.Errorf("request = %s %s", rec.Method, rec.Path)
 	}
 }

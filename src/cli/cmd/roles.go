@@ -36,7 +36,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/roles", body)
+			return apiCall("POST", "/gatekeeper/roles", body)
 		},
 	}
 	createCmd.Flags().StringVar(&createName, "name", "", "Human-readable name for the role")
@@ -68,7 +68,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/roles/"+id, body)
+			return apiCall("PUT", "/gatekeeper/roles/"+id, body)
 		},
 	}
 	updateCmd.Flags().StringVar(&updateName, "name", "", "New name for the role")
@@ -85,13 +85,13 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("GET", "/roles/"+id, nil)
+				return apiCall("GET", "/gatekeeper/roles/"+id, nil)
 			},
 		},
 		&cobra.Command{
 			Use:   "list",
 			Short: "List all roles",
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/roles", nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gatekeeper/roles", nil) },
 		},
 		createCmd,
 		&cobra.Command{
@@ -103,7 +103,7 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("GET", "/roles/"+id, nil)
+				return apiCall("GET", "/gatekeeper/roles/"+id, nil)
 			},
 		},
 		updateCmd,
@@ -116,7 +116,7 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("DELETE", "/roles/"+id, nil)
+				return apiCall("DELETE", "/gatekeeper/roles/"+id, nil)
 			},
 		},
 	)

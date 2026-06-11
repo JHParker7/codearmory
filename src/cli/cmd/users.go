@@ -59,7 +59,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/users/"+id, body)
+			return apiCall("PUT", "/gatekeeper/users/"+id, body)
 		},
 	}
 	updateCmd.Flags().StringVar(&updateEmail, "email", "", "New email address")
@@ -78,13 +78,13 @@ func init() {
 				if err != nil {
 					return fmt.Errorf("not logged in or invalid token — run `armory auth login`")
 				}
-				return apiCall("GET", "/users/"+id, nil)
+				return apiCall("GET", "/gatekeeper/users/"+id, nil)
 			},
 		},
 		&cobra.Command{
 			Use:   "list",
 			Short: "List all users",
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/users", nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gatekeeper/users", nil) },
 		},
 		&cobra.Command{
 			Use:   "get <name-or-id>",
@@ -95,7 +95,7 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("GET", "/users/"+id, nil)
+				return apiCall("GET", "/gatekeeper/users/"+id, nil)
 			},
 		},
 		updateCmd,
@@ -108,7 +108,7 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("DELETE", "/users/"+id, nil)
+				return apiCall("DELETE", "/gatekeeper/users/"+id, nil)
 			},
 		},
 	)
@@ -121,7 +121,7 @@ func myProfile() (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("not logged in or invalid token — run `armory auth login`")
 	}
-	data, err := doRequest("GET", "/users/"+sub, nil)
+	data, err := doRequest("GET", "/gatekeeper/users/"+sub, nil)
 	if err != nil {
 		return nil, err
 	}

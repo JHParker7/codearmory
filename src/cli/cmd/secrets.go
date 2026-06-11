@@ -29,7 +29,7 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("POST", "/secrets", body)
+				return apiCall("POST", "/gatekeeper/secrets", body)
 			},
 		},
 
@@ -38,7 +38,7 @@ func init() {
 			Use:   "list",
 			Short: "List secrets (names only — values are never returned)",
 			Args:  cobra.NoArgs,
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/secrets", nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gatekeeper/secrets", nil) },
 		},
 
 		// ── armory secrets update ─────────────────────────────────────────────
@@ -49,7 +49,7 @@ func init() {
 			Use:   "delete <id>",
 			Short: "Delete a secret",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/secrets/"+args[0], nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/gatekeeper/secrets/"+args[0], nil) },
 		},
 
 		// ── armory secrets provider ───────────────────────────────────────────
@@ -76,7 +76,7 @@ func secretsUpdateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/secrets/"+args[0], body)
+			return apiCall("PUT", "/gatekeeper/secrets/"+args[0], body)
 		},
 	}
 	cmd.Flags().StringVar(&value, "value", "", "New secret value (required)")
@@ -117,7 +117,7 @@ func secretsProviderCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/orgs/"+orgID+"/secret-provider", body)
+			return apiCall("PUT", "/gatekeeper/orgs/"+orgID+"/secret-provider", body)
 		},
 	}
 	setCmd.Flags().StringVar(&providerConfig, "config", "", "Provider-specific config as JSON (e.g. vault address)")
@@ -127,14 +127,14 @@ func secretsProviderCmd() *cobra.Command {
 			Use:   "get <org-id>",
 			Short: "Get the current secret provider for an org",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/orgs/"+args[0]+"/secret-provider", nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gatekeeper/orgs/"+args[0]+"/secret-provider", nil) },
 		},
 		setCmd,
 		&cobra.Command{
 			Use:   "delete <org-id>",
 			Short: "Remove the external secret provider (resets to built-in)",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/orgs/"+args[0]+"/secret-provider", nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/gatekeeper/orgs/"+args[0]+"/secret-provider", nil) },
 		},
 	)
 

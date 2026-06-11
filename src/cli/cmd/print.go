@@ -31,14 +31,14 @@ type resolverDef struct{ path, field string }
 // via the API when no companion name field is present in the same response.
 // Also covers org_id/team_id/user_id as fallback when no companion name exists.
 var foreignKeyResolvers = map[string]resolverDef{
-	"org_id":       {"/orgs/%s", "org_name"},
-	"team_id":      {"/teams/%s", "team_name"},
-	"user_id":      {"/users/%s", "username"},
-	"owner_id":     {"/users/%s", "username"},
-	"created_by":   {"/users/%s", "username"},
-	"triggered_by": {"/users/%s", "username"},
-	"inviter_id":   {"/users/%s", "username"},
-	"assignee_id":  {"/users/%s", "username"},
+	"org_id":       {"/gatekeeper/orgs/%s", "org_name"},
+	"team_id":      {"/gatekeeper/teams/%s", "team_name"},
+	"user_id":      {"/gatekeeper/users/%s", "username"},
+	"owner_id":     {"/gatekeeper/users/%s", "username"},
+	"created_by":   {"/gatekeeper/users/%s", "username"},
+	"triggered_by": {"/gatekeeper/users/%s", "username"},
+	"inviter_id":   {"/gatekeeper/users/%s", "username"},
+	"assignee_id":  {"/gatekeeper/users/%s", "username"},
 }
 
 // nameCache is reset at the start of each printResponse call to deduplicate

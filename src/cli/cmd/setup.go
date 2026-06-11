@@ -317,14 +317,14 @@ func setupAuth(email, username string, signup bool) error {
 			"username": username,
 			"password": password,
 		})
-		if _, err := doRequest("POST", "/signup", body); err != nil {
+		if _, err := doRequest("POST", "/gatekeeper/signup", body); err != nil {
 			return fmt.Errorf("signup: %w", err)
 		}
 		fmt.Fprintln(os.Stderr, "Account created.")
 	}
 
 	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
-	data, err := doRequest("POST", "/login", body)
+	data, err := doRequest("POST", "/gatekeeper/login", body)
 	if err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
