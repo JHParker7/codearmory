@@ -318,7 +318,7 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		memberAction = "getOrg"
-		permResource = fmt.Sprintf("gatekeeper/orgs/%s", invite.ResourceID)
+		permResource = fmt.Sprintf("%s/gatekeeper/orgs/%s", caller.Username, invite.ResourceID)
 		permName = fmt.Sprintf("%s-org-member-read", caller.Username)
 	case "team":
 		if caller.TeamID != nil && *caller.TeamID != invite.ResourceID {
@@ -328,7 +328,7 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		memberAction = "getTeam"
-		permResource = fmt.Sprintf("gatekeeper/teams/%s", invite.ResourceID)
+		permResource = fmt.Sprintf("%s/gatekeeper/teams/%s", caller.Username, invite.ResourceID)
 		permName = fmt.Sprintf("%s-team-member-read", caller.Username)
 	default:
 		span.SetStatus(codes.Error, "unknown resource type")

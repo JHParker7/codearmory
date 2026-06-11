@@ -73,14 +73,15 @@ func makeTestJWT(id string) string {
 }
 
 // mockGatekeeper creates a test server that simulates Gatekeeper's
-// GET /auth/validate endpoint. authorized controls whether it returns 200 or 401.
+// POST /check_permissions endpoint. authorized controls whether it returns an
+// authorized response or 401.
 func mockGatekeeper(t *testing.T, authorized bool) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/auth/validate" && r.Method == http.MethodGet {
+		if r.URL.Path == "/check_permissions" && r.Method == http.MethodPost {
 			if authorized {
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{"subject": testUUID, "subject_type": "user"})
+				json.NewEncoder(w).Encode(map[string]any{"authorized": true, "user_id": testUUID})
 				return
 			}
 			w.WriteHeader(http.StatusUnauthorized)
@@ -223,7 +224,7 @@ func TestCheckUserAuth_Allowed(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 
-	got, id, _ := checkUserAuth(r)
+	got, id, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things")
 	if got != authAllowed {
 		t.Fatalf("expected authAllowed, got %d", got)
 	}
@@ -234,7 +235,7 @@ func TestCheckUserAuth_Allowed(t *testing.T) {
 
 func TestCheckUserAuth_Unauthorized_NoToken(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
-	if got, _, _ := checkUserAuth(r); got != authUnauthorized {
+	if got, _, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things"); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized, got %d", got)
 	}
 }
@@ -242,7 +243,7 @@ func TestCheckUserAuth_Unauthorized_NoToken(t *testing.T) {
 func TestCheckUserAuth_Unauthorized_MalformedToken(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer notajwt")
-	if got, _, _ := checkUserAuth(r); got != authUnauthorized {
+	if got, _, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things"); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized for malformed JWT, got %d", got)
 	}
 }
@@ -255,7 +256,7 @@ func TestCheckUserAuth_Unauthorized_GatekeeperRejects(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 
-	if got, _, _ := checkUserAuth(r); got != authUnauthorized {
+	if got, _, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things"); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized when gatekeeper rejects, got %d", got)
 	}
 }
@@ -364,18 +365,16 @@ func TestHandleServiceProxy_UnregisteredPath_Returns404(t *testing.T) {
 	}
 }
 
-func TestHandleServiceProxy_ServiceUnavailable_Returns503(t *testing.T) {
-	entry := makeEntry(http.MethodGet, "/things", "read", "thing")
-	entry.public = true
-	withEndpoints(t, []endpointEntry{entry})
-	withServices(t, map[string]serviceState{}) // no service entry for "testsvc"
+func TestHandleServiceProxy_UnknownService_Returns404(t *testing.T) {
+	withEndpoints(t, nil)
+	withServices(t, map[string]serviceState{}) // no registered services
 
-	req := httptest.NewRequest(http.MethodGet, "/things", nil)
+	req := httptest.NewRequest(http.MethodGet, "/testsvc/things", nil)
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 when service not in map, got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown service prefix, got %d", w.Code)
 	}
 }
 
@@ -391,7 +390,7 @@ func TestHandleServiceProxy_PublicEndpoint_NoAuthRequired(t *testing.T) {
 		"gatekeeper": {url: backend.URL, proxy: proxyTo(t, backend.URL), forwardAuth: true},
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/gatekeeper/signup", strings.NewReader(`{}`))
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
@@ -412,7 +411,7 @@ func TestHandleServiceProxy_PrivateEndpoint_NoToken_Returns401(t *testing.T) {
 		"gatekeeper": {url: backend.URL, proxy: proxyTo(t, backend.URL)},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/users", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gatekeeper/users", nil)
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
@@ -436,7 +435,7 @@ func TestHandleServiceProxy_PrivateEndpoint_GatekeeperAllows_Proxies(t *testing.
 		"gatekeeper": {url: backend.URL, proxy: proxyTo(t, backend.URL), forwardAuth: true},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/profile", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gatekeeper/profile", nil)
 	req.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
@@ -461,7 +460,7 @@ func TestHandleServiceProxy_PrivateEndpoint_GatekeeperDenies_Returns401(t *testi
 		"testsvc": {url: backend.URL, proxy: proxyTo(t, backend.URL)},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req := httptest.NewRequest(http.MethodGet, "/testsvc/admin", nil)
 	req.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
@@ -487,7 +486,7 @@ func TestHandleServiceProxy_ForwardAuth_PassesToken(t *testing.T) {
 		"gatekeeper": {url: backend.URL, proxy: proxyTo(t, backend.URL), forwardAuth: true},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/profile", nil)
+	req := httptest.NewRequest(http.MethodGet, "/gatekeeper/profile", nil)
 	req.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
@@ -516,7 +515,7 @@ func TestHandleServiceProxy_NoForwardAuth_StripsToken(t *testing.T) {
 		"datasvc": {url: backend.URL, proxy: proxyTo(t, backend.URL), forwardAuth: false},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/data", nil)
+	req := httptest.NewRequest(http.MethodGet, "/datasvc/data", nil)
 	req.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
@@ -550,7 +549,7 @@ func TestHandleServiceProxy_SpoofHeaders_Stripped(t *testing.T) {
 		"testsvc": {url: backend.URL, proxy: proxyTo(t, backend.URL)},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/pub", nil)
+	req := httptest.NewRequest(http.MethodGet, "/testsvc/pub", nil)
 	req.Header.Set("X-User-ID", "injected")
 	req.Header.Set("X-Forwarded-Host", "evil.com")
 	req.Header.Set("X-Real-IP", "1.2.3.4")

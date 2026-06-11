@@ -197,21 +197,6 @@ func parseParamNames(pattern string) []string {
 	return names
 }
 
-// lookupEndpointFull finds the best matching endpoint for method+path across all
-// services, and returns any captured path-param values.
-func lookupEndpointFull(method, path string) (endpointEntry, []string, bool) {
-	routingMu.RLock()
-	defer routingMu.RUnlock()
-	for _, e := range endpointsList {
-		if e.method != method {
-			continue
-		}
-		if m := e.pattern.FindStringSubmatch(path); m != nil {
-			return e, m[1:], true
-		}
-	}
-	return endpointEntry{}, nil, false
-}
 
 // lookupEndpointForService finds a matching endpoint restricted to a specific service.
 func lookupEndpointForService(method, path, service string) (endpointEntry, []string, bool) {

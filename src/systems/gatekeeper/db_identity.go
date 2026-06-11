@@ -136,12 +136,16 @@ func (org Org) Update(ctx context.Context) error {
 	return nil
 }
 
-// Remove soft-deletes the org by setting active = false.
+// Remove soft-deletes the org by setting active = false. The org_name is also
+// mangled to "__deleted__<id>" so the original name is freed for reuse — without
+// this, the unique index on org_name would block recreating the same org after
+// deletion (name is immutable from the org's perspective once freed).
 func (org Org) Remove(ctx context.Context) error {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.org.remove")
 	defer span.End()
 	span.SetAttributes(attribute.String("org.id", org.OrgID))
-	if err := connect().WithContext(ctx).Model(&Org{}).Where("org_id = ?", org.OrgID).Update("active", false).Error; err != nil {
+	if err := connect().WithContext(ctx).Model(&Org{}).Where("org_id = ?", org.OrgID).
+		Updates(map[string]any{"active": false, "org_name": "__deleted__" + org.OrgID}).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return err

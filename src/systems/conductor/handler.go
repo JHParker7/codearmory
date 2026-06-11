@@ -136,6 +136,20 @@ func validateSignupBody(body []byte) error {
 	return nil
 }
 
+// resolveResource substitutes path-param placeholders in a manifest resource
+// template with the canonical param values captured during route matching.
+// E.g. resolveResource("forge/executions/{id}", ["id"], ["abc-123"]) →
+// "forge/executions/abc-123".
+func resolveResource(template string, paramNames, paramValues []string) string {
+	r := template
+	for i, name := range paramNames {
+		if i < len(paramValues) {
+			r = strings.ReplaceAll(r, "{"+name+"}", paramValues[i])
+		}
+	}
+	return r
+}
+
 // routeAndProxy finds the endpoint for method+path (using hybrid routing), checks
 // auth/RBAC, and forwards to the backend. strippedPath is the path to forward
 // (may differ from r.URL.Path when a service-name prefix was stripped).
@@ -169,13 +183,9 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 
 	var userID, normalizedAuth string
 	if !entry.public {
-		if ip := sourceIP(r); isBlocked(ip) {
-			slog.Warn("request rejected: IP is blocked", "source_ip", ip, "path", r.URL.Path)
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
+		resource := resolveResource(entry.resource, entry.paramNames, paramValues)
 		var outcome authOutcome
-		outcome, userID, normalizedAuth = checkUserAuth(r)
+		outcome, userID, normalizedAuth = checkUserAuth(r, entry.serviceName, entry.action, resource)
 		switch outcome {
 		case authUnauthorized:
 			if userID != "" {
@@ -184,7 +194,13 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		case authForbidden:
+			if userID != "" {
+				recordSuspect(sourceIP(r), userID, r.Method, r.URL.Path)
+			}
 			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		case authError:
+			http.Error(w, "service unavailable", http.StatusBadGateway)
 			return
 		default:
 			resetSuspect(sourceIP(r))
@@ -259,9 +275,15 @@ func prepareForwardRequest(r *http.Request, userID, normalizedAuth string, svc s
 //  2. Otherwise, try matching the full path against all registered endpoints.
 //     Returns 404 if no match is found.
 func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
+	if ip := sourceIP(r); isBlocked(ip) {
+		slog.Warn("request rejected: IP is blocked", "source_ip", ip, "path", r.URL.Path)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	path := r.URL.Path
 
-	// Step 1: service-name prefix routing (e.g. /blueprints/state/... or /forge/executions)
+	// All routes require a service-name prefix (e.g. /forge/executions, /gatekeeper/login).
 	trimmed := strings.TrimPrefix(path, "/")
 	if slashIdx := strings.Index(trimmed, "/"); slashIdx > 0 {
 		svcName := trimmed[:slashIdx]
@@ -282,13 +304,7 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 2: full-path endpoint matching (e.g. gatekeeper's /signup, /users/{id})
-	entry, paramVals, ok := lookupEndpointFull(r.Method, path)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	routeAndProxy(w, r, entry, paramVals, path)
+	http.NotFound(w, r)
 }
 
 // handleInternalRefresh is called by the registry after a manifest load to

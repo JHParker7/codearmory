@@ -11,7 +11,7 @@ type Org struct {
 	OrgID     string    `json:"org_id"     gorm:"column:org_id;primaryKey"`
 	CreatedAt time.Time `json:"created_at" gorm:"column:created_at"`
 	UpdatedAt time.Time `json:"updated_at" gorm:"column:updated_at"`
-	OrgName   string    `json:"org_name"   gorm:"column:org_name"`
+	OrgName   string    `json:"org_name"   gorm:"column:org_name;uniqueIndex"`
 	OwnerID   string    `json:"owner_id"   gorm:"column:owner_id"`
 	Active    bool      `json:"active"     gorm:"column:active;default:true"`
 }

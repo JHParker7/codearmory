@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -30,6 +31,7 @@ const (
 	authAllowed authOutcome = iota
 	authUnauthorized
 	authForbidden
+	authError // upstream unavailable or returned 5xx — map to 502, not 401/403
 )
 
 // jwtExpClaim decodes the JWT payload and returns the exp claim value.
@@ -73,11 +75,13 @@ func getUserID(token string) (string, bool) {
 	return canonicalUUID(claims.Sub)
 }
 
-// checkUserAuth verifies that the caller has a valid token by calling Gatekeeper's
-// GET /auth/validate. Accepts both Bearer tokens and the armory_session cookie.
-// Returns (outcome, subjectID, normalizedAuth) where normalizedAuth is the
-// "Bearer <token>" string used so callers can forward it when needed.
-func checkUserAuth(r *http.Request) (authOutcome, string, string) {
+// checkUserAuth verifies that the caller has a valid token and is authorised for
+// the given (service, action, resource) triple by calling Gatekeeper's
+// POST /check_permissions. Gatekeeper scopes the resource to the authenticated
+// user or org internally before evaluating. Accepts both Bearer tokens and the
+// armory_session cookie. Returns (outcome, subjectID, normalizedAuth) where
+// normalizedAuth is the "Bearer <token>" string used so callers can forward it.
+func checkUserAuth(r *http.Request, service, action, resource string) (authOutcome, string, string) {
 	ctx, span := otel.Tracer("conductor").Start(r.Context(), "checkUserAuth")
 	defer span.End()
 
@@ -115,20 +119,27 @@ func checkUserAuth(r *http.Request) (authOutcome, string, string) {
 		return authUnauthorized, "", ""
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		gatekeeperURL+"/auth/validate", nil)
+	body, _ := json.Marshal(map[string]string{
+		"service":  service,
+		"action":   action,
+		"resource": resource,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		gatekeeperURL+"/check_permissions", bytes.NewReader(body))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return authUnauthorized, "", ""
 	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", auth)
 
 	resp, err := gatekeeperClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return authUnauthorized, "", ""
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "gatekeeper_unreachable")))
+		return authError, "", ""
 	}
 	defer resp.Body.Close()
 
@@ -141,7 +152,7 @@ func checkUserAuth(r *http.Request) (authOutcome, string, string) {
 		span.SetAttributes(attribute.Int("http.response_status_code", resp.StatusCode))
 		span.SetStatus(codes.Error, "gatekeeper error")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "gatekeeper_error")))
-		return authForbidden, "", ""
+		return authError, "", ""
 	case resp.StatusCode != http.StatusOK:
 		span.SetStatus(codes.Ok, "")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "auth_failed")))
@@ -149,19 +160,30 @@ func checkUserAuth(r *http.Request) (authOutcome, string, string) {
 	}
 
 	var result struct {
-		Subject string `json:"subject"`
+		Authorized bool   `json:"authorized"`
+		UserID     string `json:"user_id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Subject == "" {
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "invalid validate response")
+		span.SetStatus(codes.Error, "invalid check_permissions response")
 		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "invalid_response")))
 		return authForbidden, "", ""
 	}
+	if result.UserID == "" {
+		span.SetStatus(codes.Error, "check_permissions returned empty user_id")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "invalid_response")))
+		return authForbidden, "", ""
+	}
+	if !result.Authorized {
+		span.SetStatus(codes.Ok, "")
+		meterRejected.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "forbidden")))
+		return authForbidden, suspectID, ""
+	}
 
-	span.SetAttributes(attribute.String("user.id", result.Subject))
+	span.SetAttributes(attribute.String("user.id", result.UserID))
 	span.SetStatus(codes.Ok, "")
 	meterAllowed.Add(ctx, 1)
-	return authAllowed, result.Subject, auth
+	return authAllowed, result.UserID, auth
 }
 
 // ── Suspicious-activity block list ───────────────────────────────────────────

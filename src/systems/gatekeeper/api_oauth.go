@@ -619,6 +619,10 @@ func handleCreateOAuthClient(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "role does not belong to the specified org", http.StatusForbidden)
 			return
 		}
+		if role.OrgID == nil && req.OrgID != "" {
+			http.Error(w, "global roles cannot be assigned to org-scoped clients", http.StatusForbidden)
+			return
+		}
 	}
 
 	rawSecret := make([]byte, 32)

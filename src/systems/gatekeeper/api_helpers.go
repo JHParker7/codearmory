@@ -258,6 +258,22 @@ func matchPermission(perm Permissions, service, action, resource string) bool {
 	return false
 }
 
+// scopeResource prepends the username to resource unless the resource is already
+// scoped to that user (starts with "<username>/") or to their org (starts with
+// "org/<orgName>/"). If username is empty the resource is returned unchanged.
+func scopeResource(resource, username, orgName string) string {
+	if username == "" {
+		return resource
+	}
+	if strings.HasPrefix(resource, username+"/") {
+		return resource
+	}
+	if orgName != "" && strings.HasPrefix(resource, "org/"+orgName+"/") {
+		return resource
+	}
+	return username + "/" + resource
+}
+
 // checkPermissions resolves the caller's effective permissions by walking both
 // their direct role and their team's role, then returns true on the first
 // matching (service, action, resource) triple. Resource matching supports exact
@@ -294,6 +310,17 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 	user := row.(User)
 	permissionCheck.TeamID = user.TeamID
 	permissionCheck.OrgID = user.OrgID
+
+	// Scope the resource to the authenticated user. If the resource is already
+	// prefixed with "<username>/" or "org/<orgName>/" it is left unchanged so
+	// that callers who pre-scope (e.g. conductor) are not double-prefixed.
+	orgName := ""
+	if user.OrgID != nil {
+		if orgRow, err2 := (Org{OrgID: *user.OrgID}).Get(ctx); err2 == nil {
+			orgName = orgRow.(Org).OrgName
+		}
+	}
+	resource = scopeResource(resource, user.Username, orgName)
 
 	// When the session carries a scoped role (workflow run token), evaluate only
 	// the permissions in that role — the user's own role and team are bypassed.
@@ -546,6 +573,18 @@ func checkClientPermissions(ctx context.Context, clientID, service, action, reso
 	if client.OrgID != "" {
 		orgID = &client.OrgID
 	}
+
+	// Scope the resource to the client's org. If the resource is already prefixed
+	// with "org/<orgName>/" it is left unchanged.
+	if orgID != nil {
+		if orgRow, err2 := (Org{OrgID: *orgID}).Get(ctx); err2 == nil {
+			orgName := orgRow.(Org).OrgName
+			if orgName != "" && !strings.HasPrefix(resource, "org/"+orgName+"/") {
+				resource = "org/" + orgName + "/" + resource
+			}
+		}
+	}
+
 	if client.RoleID == nil {
 		return false, orgID, nil
 	}
@@ -582,15 +621,26 @@ func handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 	subject := userID
 	subjectType := "user"
 	var orgID *string
+	var username, orgName string
 
 	if clientID != "" {
 		subject = clientID
 		subjectType = "client"
 		if client, err := getOAuthClientByClientID(ctx, clientID); err == nil && client.OrgID != "" {
 			orgID = &client.OrgID
+			if orgRow, err2 := (Org{OrgID: client.OrgID}).Get(ctx); err2 == nil {
+				orgName = orgRow.(Org).OrgName
+			}
 		}
 	} else if userRow, err := (User{UserID: userID}).Get(ctx); err == nil {
-		orgID = userRow.(User).OrgID
+		user := userRow.(User)
+		username = user.Username
+		orgID = user.OrgID
+		if orgID != nil {
+			if orgRow, err2 := (Org{OrgID: *orgID}).Get(ctx); err2 == nil {
+				orgName = orgRow.(Org).OrgName
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -598,6 +648,8 @@ func handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 		"subject":      subject,
 		"subject_type": subjectType,
 		"org_id":       orgID,
+		"username":     username,
+		"org_name":     orgName,
 	})
 }
 
@@ -641,7 +693,9 @@ func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, 
 		if err := db.Save(&user).Error; err != nil {
 			return err
 		}
-		cacheDel(ctx, "gk:user:"+user.UserID)
+		// Use a detached context so cache invalidation is not skipped if the
+		// caller's request context is cancelled after the DB write commits.
+		cacheDel(context.WithoutCancel(ctx), "gk:user:"+user.UserID)
 	} else {
 		if err := db.Where("role_id = ? AND active = ?", *user.RoleID, true).First(&role).Error; err != nil {
 			return err
@@ -669,7 +723,7 @@ func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, 
 	if err := db.Save(&role).Error; err != nil {
 		return err
 	}
-	cacheDel(ctx, "gk:role:"+role.RoleID)
+	cacheDel(context.WithoutCancel(ctx), "gk:role:"+role.RoleID)
 	return nil
 }
 

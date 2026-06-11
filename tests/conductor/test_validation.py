@@ -26,28 +26,28 @@ def rand_id():
 
 class TestSignupValidation:
     def test_missing_email_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "username": "validuser",
             "password": "password123",
         })
         assert resp.status_code == 400
 
     def test_missing_username_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": "a@example.com",
             "password": "password123",
         })
         assert resp.status_code == 400
 
     def test_missing_password_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": "a@example.com",
             "username": "validuser",
         })
         assert resp.status_code == 400
 
     def test_empty_email_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": "",
             "username": "validuser",
             "password": "password123",
@@ -55,7 +55,7 @@ class TestSignupValidation:
         assert resp.status_code == 400
 
     def test_invalid_email_format_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": "notanemail",
             "username": "validuser",
             "password": "password123",
@@ -63,7 +63,7 @@ class TestSignupValidation:
         assert resp.status_code == 400
 
     def test_email_missing_tld_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": "user@nodot",
             "username": "validuser",
             "password": "password123",
@@ -71,7 +71,7 @@ class TestSignupValidation:
         assert resp.status_code == 400
 
     def test_username_with_spaces_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": "a@example.com",
             "username": "bad user",
             "password": "password123",
@@ -79,7 +79,7 @@ class TestSignupValidation:
         assert resp.status_code == 400
 
     def test_username_with_special_chars_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": "a@example.com",
             "username": "bad@user!",
             "password": "password123",
@@ -87,7 +87,7 @@ class TestSignupValidation:
         assert resp.status_code == 400
 
     def test_username_too_long_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": "a@example.com",
             "username": "a" * 65,
             "password": "password123",
@@ -95,7 +95,7 @@ class TestSignupValidation:
         assert resp.status_code == 400
 
     def test_password_too_short_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": "a@example.com",
             "username": "validuser",
             "password": "short",
@@ -104,7 +104,7 @@ class TestSignupValidation:
 
     def test_non_json_body_returns_400(self, base_url):
         resp = requests.post(
-            f"{base_url}/signup",
+            f"{base_url}/gatekeeper/signup",
             data="not json",
             headers={"Content-Type": "application/json"},
         )
@@ -112,7 +112,7 @@ class TestSignupValidation:
 
     def test_body_too_large_returns_413(self, base_url):
         resp = requests.post(
-            f"{base_url}/signup",
+            f"{base_url}/gatekeeper/signup",
             data="x" * (65 * 1024),
             headers={"Content-Type": "application/json"},
         )
@@ -120,7 +120,7 @@ class TestSignupValidation:
 
     def test_valid_signup_still_succeeds(self, base_url):
         uid = rand_id()[:8]
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": f"val_{uid}@example.com",
             "username": f"val_{uid}",
             "password": "password123",
@@ -129,7 +129,7 @@ class TestSignupValidation:
 
     def test_username_with_hyphens_and_underscores_accepted(self, base_url):
         uid = rand_id()[:6]
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": f"slug_{uid}@example.com",
             "username": f"slug-{uid}_ok",
             "password": "password123",
@@ -144,31 +144,31 @@ class TestSignupValidation:
 
 class TestLoginValidation:
     def test_missing_email_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/login", json={"password": "password123"})
+        resp = requests.post(f"{base_url}/gatekeeper/login", json={"password": "password123"})
         assert resp.status_code == 400
 
     def test_missing_password_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/login", json={"email": "a@example.com"})
+        resp = requests.post(f"{base_url}/gatekeeper/login", json={"email": "a@example.com"})
         assert resp.status_code == 400
 
     def test_empty_email_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/login", json={"email": "", "password": "password123"})
+        resp = requests.post(f"{base_url}/gatekeeper/login", json={"email": "", "password": "password123"})
         assert resp.status_code == 400
 
     def test_empty_password_returns_400(self, base_url):
-        resp = requests.post(f"{base_url}/login", json={"email": "a@example.com", "password": ""})
+        resp = requests.post(f"{base_url}/gatekeeper/login", json={"email": "a@example.com", "password": ""})
         assert resp.status_code == 400
 
     def test_non_json_body_returns_400(self, base_url):
         resp = requests.post(
-            f"{base_url}/login",
+            f"{base_url}/gatekeeper/login",
             data="not json",
             headers={"Content-Type": "application/json"},
         )
         assert resp.status_code == 400
 
     def test_valid_login_still_succeeds(self, base_url, new_user):
-        resp = requests.post(f"{base_url}/login", json={
+        resp = requests.post(f"{base_url}/gatekeeper/login", json={
             "email": new_user["email"],
             "password": new_user["password"],
         })
@@ -188,36 +188,36 @@ class TestUUIDPathValidation:
         assert resp.status_code == 400, f"{method.upper()} {path} → {resp.status_code}"
 
     def test_get_user_non_uuid_returns_400(self, base_url, token):
-        self._check(base_url, token, "get", "/users/not-a-uuid")
+        self._check(base_url, token, "get", "/gatekeeper/users/not-a-uuid")
 
     def test_get_user_numeric_id_returns_400(self, base_url, token):
-        self._check(base_url, token, "get", "/users/12345")
+        self._check(base_url, token, "get", "/gatekeeper/users/12345")
 
     def test_delete_user_non_uuid_returns_400(self, base_url, token):
-        self._check(base_url, token, "delete", "/users/not-a-uuid")
+        self._check(base_url, token, "delete", "/gatekeeper/users/not-a-uuid")
 
     def test_get_org_non_uuid_returns_400(self, base_url, token):
-        self._check(base_url, token, "get", "/orgs/not-a-uuid")
+        self._check(base_url, token, "get", "/gatekeeper/orgs/not-a-uuid")
 
     def test_get_team_non_uuid_returns_400(self, base_url, token):
-        self._check(base_url, token, "get", "/teams/not-a-uuid")
+        self._check(base_url, token, "get", "/gatekeeper/teams/not-a-uuid")
 
     def test_get_role_non_uuid_returns_400(self, base_url, token):
-        self._check(base_url, token, "get", "/roles/not-a-uuid")
+        self._check(base_url, token, "get", "/gatekeeper/roles/not-a-uuid")
 
     def test_get_permissions_non_uuid_returns_400(self, base_url, token):
-        self._check(base_url, token, "get", "/permissions/not-a-uuid")
+        self._check(base_url, token, "get", "/gatekeeper/permissions/not-a-uuid")
 
     def test_get_session_non_uuid_returns_400(self, base_url, token):
-        self._check(base_url, token, "get", "/sessions/not-a-uuid")
+        self._check(base_url, token, "get", "/gatekeeper/sessions/not-a-uuid")
 
     def test_get_invite_non_uuid_returns_400(self, base_url, token):
-        self._check(base_url, token, "get", "/invites/not-a-uuid")
+        self._check(base_url, token, "get", "/gatekeeper/invites/not-a-uuid")
 
     def test_valid_uuid_is_forwarded(self, base_url, token, new_user):
         """A valid UUID passes conductor's check; Gatekeeper decides the outcome."""
         resp = requests.get(
-            f"{base_url}/users/{new_user['user_id']}",
+            f"{base_url}/gatekeeper/users/{new_user['user_id']}",
             headers=bearer(token),
         )
         assert resp.status_code != 400
@@ -232,31 +232,31 @@ class TestSlugPathValidation:
     """Conductor must reject path segments that fail the slug pattern with 400."""
 
     def test_username_with_slash_returns_400(self, base_url, token):
-        resp = requests.get(f"{base_url}/state/bad/slash/dev", headers=bearer(token))
+        resp = requests.get(f"{base_url}/blueprints/state/bad/slash/dev", headers=bearer(token))
         # Go's mux normalises the path; the extra segment won't match the pattern.
         # Any response other than 400 from the slug check is also acceptable here,
         # but a correctly structured bad slug in the right position must be caught.
         pass  # covered by explicit slug tests below
 
     def test_username_with_special_chars_returns_400(self, base_url, token):
-        resp = requests.get(f"{base_url}/state/bad!user/dev", headers=bearer(token))
+        resp = requests.get(f"{base_url}/blueprints/state/bad!user/dev", headers=bearer(token))
         assert resp.status_code == 400
 
     def test_workspace_with_special_chars_returns_400(self, base_url, token):
-        resp = requests.get(f"{base_url}/state/alice/bad!workspace", headers=bearer(token))
+        resp = requests.get(f"{base_url}/blueprints/state/alice/bad!workspace", headers=bearer(token))
         assert resp.status_code == 400
 
     def test_username_too_long_returns_400(self, base_url, token):
-        resp = requests.get(f"{base_url}/state/{'a' * 65}/dev", headers=bearer(token))
+        resp = requests.get(f"{base_url}/blueprints/state/{'a' * 65}/dev", headers=bearer(token))
         assert resp.status_code == 400
 
     def test_valid_slugs_are_forwarded(self, base_url, token):
         """Valid slug path params pass conductor; Blueprints decides the outcome."""
-        resp = requests.get(f"{base_url}/state/alice/dev", headers=bearer(token))
+        resp = requests.get(f"{base_url}/blueprints/state/alice/dev", headers=bearer(token))
         assert resp.status_code != 400
 
     def test_slug_with_hyphens_and_underscores_accepted(self, base_url, token):
-        resp = requests.get(f"{base_url}/state/my-user_123/my-workspace_456", headers=bearer(token))
+        resp = requests.get(f"{base_url}/blueprints/state/my-user_123/my-workspace_456", headers=bearer(token))
         assert resp.status_code != 400
 
 
@@ -283,37 +283,37 @@ class TestJSONBodyValidation:
         )
 
     def test_post_orgs_invalid_json_returns_400(self, base_url, token):
-        resp = self._post(base_url, token, "/orgs", b"not json")
+        resp = self._post(base_url, token, "/gatekeeper/orgs", b"not json")
         assert resp.status_code == 400
 
     def test_post_orgs_truncated_json_returns_400(self, base_url, token):
-        resp = self._post(base_url, token, "/orgs", b'{"name":')
+        resp = self._post(base_url, token, "/gatekeeper/orgs", b'{"name":')
         assert resp.status_code == 400
 
     def test_put_user_invalid_json_returns_400(self, base_url, token, new_user):
-        resp = self._put(base_url, token, f"/users/{new_user['user_id']}", b"not json")
+        resp = self._put(base_url, token, f"/gatekeeper/users/{new_user['user_id']}", b"not json")
         assert resp.status_code == 400
 
     def test_post_teams_invalid_json_returns_400(self, base_url, token):
-        resp = self._post(base_url, token, "/teams", b"[unclosed")
+        resp = self._post(base_url, token, "/gatekeeper/teams", b"[unclosed")
         assert resp.status_code == 400
 
     def test_post_roles_invalid_json_returns_400(self, base_url, token):
-        resp = self._post(base_url, token, "/roles", b"not json at all")
+        resp = self._post(base_url, token, "/gatekeeper/roles", b"not json at all")
         assert resp.status_code == 400
 
     def test_post_permissions_invalid_json_returns_400(self, base_url, token):
-        resp = self._post(base_url, token, "/permissions", b"not json")
+        resp = self._post(base_url, token, "/gatekeeper/permissions", b"not json")
         assert resp.status_code == 400
 
     def test_put_org_invalid_json_returns_400(self, base_url, token, new_user):
         # Use a random UUID — conductor validates JSON before touching the backend.
         import uuid
-        resp = self._put(base_url, token, f"/orgs/{uuid.uuid4()}", b"bad json")
+        resp = self._put(base_url, token, f"/gatekeeper/orgs/{uuid.uuid4()}", b"bad json")
         assert resp.status_code == 400
 
     def test_valid_json_body_is_forwarded(self, base_url, token):
         """A syntactically valid JSON body passes conductor; backend decides the outcome."""
-        resp = self._post(base_url, token, "/orgs", b'{"org_name": "test-org"}')
+        resp = self._post(base_url, token, "/gatekeeper/orgs", b'{"org_name": "test-org"}')
         assert resp.status_code != 400
 

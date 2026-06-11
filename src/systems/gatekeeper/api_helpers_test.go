@@ -23,13 +23,16 @@ import (
 
 // createAuthorizedUser creates a user with a role granting action on resource within the
 // "gatekeeper" service. Both the permission, role, and user are cleaned up after the test.
+// The permission resource is stored as "<username>/<resource>" to match the scoping that
+// checkPermissions applies (it prepends the username to unscoped resources).
 func createAuthorizedUser(t *testing.T, action, resource string) User {
 	t.Helper()
+	username := "user-" + uuid.New().String()
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Service:       "gatekeeper",
 		Actions:       []string{action},
-		Resources:     []string{resource},
+		Resources:     []string{username + "/" + resource},
 	}
 	if err := perm.Add(context.Background()); err != nil {
 		t.Fatalf("createAuthorizedUser perm: %v", err)
@@ -45,7 +48,7 @@ func createAuthorizedUser(t *testing.T, action, resource string) User {
 	u := User{
 		UserID:         uuid.New().String(),
 		Email:          uuid.New().String() + "@test.com",
-		Username:       "user-" + uuid.New().String(),
+		Username:       username,
 		HashedPassword: "hash",
 		RoleID:         &role.RoleID,
 	}
@@ -59,13 +62,15 @@ func createAuthorizedUser(t *testing.T, action, resource string) User {
 // createAuthorizedUserViaTeam creates a user whose permission comes through a team role rather
 // than a directly-assigned role. The chain created is: permission → role → team (with that role)
 // → user (with TeamID, no direct RoleID). All records are cleaned up after the test.
+// The permission resource is stored as "<username>/<resource>" to match checkPermissions' scoping.
 func createAuthorizedUserViaTeam(t *testing.T, action, resource string) User {
 	t.Helper()
+	username := "user-" + uuid.New().String()
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Service:       "gatekeeper",
 		Actions:       []string{action},
-		Resources:     []string{resource},
+		Resources:     []string{username + "/" + resource},
 	}
 	if err := perm.Add(context.Background()); err != nil {
 		t.Fatalf("createAuthorizedUserViaTeam perm: %v", err)
@@ -94,7 +99,7 @@ func createAuthorizedUserViaTeam(t *testing.T, action, resource string) User {
 	u := User{
 		UserID:         uuid.New().String(),
 		Email:          uuid.New().String() + "@test.com",
-		Username:       "user-" + uuid.New().String(),
+		Username:       username,
 		HashedPassword: "hash",
 		TeamID:         &team.TeamID,
 		RoleID:         &userRole.RoleID,
@@ -302,11 +307,12 @@ func TestCheckPermissions_NoRoleReturnsFalse(t *testing.T) {
 }
 
 func TestCheckPermissions_Match(t *testing.T) {
+	username := "user-" + uuid.New().String()
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Service:       "my-service",
 		Actions:       []string{"read"},
-		Resources:     []string{"my-resource"},
+		Resources:     []string{username + "/my-resource"},
 	}
 	if err := perm.Add(context.Background()); err != nil {
 		t.Fatal(err)
@@ -322,7 +328,7 @@ func TestCheckPermissions_Match(t *testing.T) {
 	u := User{
 		UserID:         uuid.New().String(),
 		Email:          uuid.New().String() + "@test.com",
-		Username:       "user-" + uuid.New().String(),
+		Username:       username,
 		HashedPassword: "hash",
 		RoleID:         &role.RoleID,
 	}
@@ -380,11 +386,12 @@ func TestCheckPermissions_NoMatch(t *testing.T) {
 }
 
 func TestCheckPermissions_MatchViaTeamRole(t *testing.T) {
+	username := "user-" + uuid.New().String()
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Service:       "team-service",
 		Actions:       []string{"read"},
-		Resources:     []string{"team-resource"},
+		Resources:     []string{username + "/team-resource"},
 	}
 	if err := perm.Add(context.Background()); err != nil {
 		t.Fatal(err)
@@ -406,7 +413,7 @@ func TestCheckPermissions_MatchViaTeamRole(t *testing.T) {
 	u := User{
 		UserID:         uuid.New().String(),
 		Email:          uuid.New().String() + "@test.com",
-		Username:       "user-" + uuid.New().String(),
+		Username:       username,
 		HashedPassword: "hash",
 		TeamID:         &team.TeamID,
 	}
@@ -472,11 +479,12 @@ func TestCheckPermissions_NoMatchViaTeamRole(t *testing.T) {
 func TestCheckPermissions_SoftDeletedTeamSkipped(t *testing.T) {
 	// Permission via direct role; team is soft-deleted (stale team_id on user).
 	// checkPermissions must skip the missing team and still grant access.
+	username := "user-" + uuid.New().String()
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Service:       "my-service",
 		Actions:       []string{"read"},
-		Resources:     []string{"my-resource"},
+		Resources:     []string{username + "/my-resource"},
 	}
 	if err := perm.Add(context.Background()); err != nil {
 		t.Fatal(err)
@@ -500,7 +508,7 @@ func TestCheckPermissions_SoftDeletedTeamSkipped(t *testing.T) {
 	u := User{
 		UserID:         uuid.New().String(),
 		Email:          uuid.New().String() + "@test.com",
-		Username:       "user-" + uuid.New().String(),
+		Username:       username,
 		HashedPassword: "hash",
 		RoleID:         &role.RoleID,
 		TeamID:         &deletedTeam.TeamID, // stale reference
@@ -520,11 +528,12 @@ func TestCheckPermissions_SoftDeletedTeamSkipped(t *testing.T) {
 }
 
 func TestCheckPermissions_TeamAndDirectRoleAccumulate(t *testing.T) {
+	username := "user-" + uuid.New().String()
 	directPerm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Service:       "direct-service",
 		Actions:       []string{"write"},
-		Resources:     []string{"direct-resource"},
+		Resources:     []string{username + "/direct-resource"},
 	}
 	if err := directPerm.Add(context.Background()); err != nil {
 		t.Fatal(err)
@@ -541,7 +550,7 @@ func TestCheckPermissions_TeamAndDirectRoleAccumulate(t *testing.T) {
 		PermissionsID: uuid.New().String(),
 		Service:       "team-service",
 		Actions:       []string{"read"},
-		Resources:     []string{"team-resource"},
+		Resources:     []string{username + "/team-resource"},
 	}
 	if err := teamPerm.Add(context.Background()); err != nil {
 		t.Fatal(err)
@@ -563,7 +572,7 @@ func TestCheckPermissions_TeamAndDirectRoleAccumulate(t *testing.T) {
 	u := User{
 		UserID:         uuid.New().String(),
 		Email:          uuid.New().String() + "@test.com",
-		Username:       "user-" + uuid.New().String(),
+		Username:       username,
 		HashedPassword: "hash",
 		RoleID:         &directRole.RoleID,
 		TeamID:         &team.TeamID,
@@ -619,11 +628,12 @@ func TestHandleCheckPermissions_NoRole(t *testing.T) {
 }
 
 func TestHandleCheckPermissions_Authorized(t *testing.T) {
+	username := "user-" + uuid.New().String()
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Service:       "my-service",
 		Actions:       []string{"read"},
-		Resources:     []string{"my-resource"},
+		Resources:     []string{username + "/my-resource"},
 	}
 	if err := perm.Add(context.Background()); err != nil {
 		t.Fatal(err)
@@ -639,7 +649,7 @@ func TestHandleCheckPermissions_Authorized(t *testing.T) {
 	u := User{
 		UserID:         uuid.New().String(),
 		Email:          uuid.New().String() + "@test.com",
-		Username:       "user-" + uuid.New().String(),
+		Username:       username,
 		HashedPassword: "hash",
 		RoleID:         &role.RoleID,
 	}
@@ -922,11 +932,18 @@ func TestParseECPublicKey_RSAKeyRejected(t *testing.T) {
 
 func makePermUser(t *testing.T, service string, actions []string, resources []string) User {
 	t.Helper()
+	username := "user-" + uuid.New().String()
+	// Prefix each resource with the username so checkPermissions' scoping (which prepends
+	// "<username>/" to unscoped resources) doesn't produce a mismatch.
+	scoped := make([]string, len(resources))
+	for i, r := range resources {
+		scoped[i] = username + "/" + r
+	}
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
 		Service:       service,
 		Actions:       actions,
-		Resources:     resources,
+		Resources:     scoped,
 	}
 	if err := perm.Add(context.Background()); err != nil {
 		t.Fatalf("makePermUser perm: %v", err)
@@ -942,7 +959,7 @@ func makePermUser(t *testing.T, service string, actions []string, resources []st
 	u := User{
 		UserID:         uuid.New().String(),
 		Email:          uuid.New().String() + "@test.com",
-		Username:       "user-" + uuid.New().String(),
+		Username:       username,
 		HashedPassword: "hash",
 		RoleID:         &role.RoleID,
 	}

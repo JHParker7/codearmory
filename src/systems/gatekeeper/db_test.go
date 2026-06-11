@@ -33,17 +33,19 @@ func TestMain(m *testing.M) {
 	initSecretsEncryption()
 
 	// Seed gatekeeper's own default grants so org/team/user creation tests can grant owner permissions.
+	// Resources use {username}/ prefix so the scoping in checkPermissions (which prepends
+	// "<username>/" to unscoped resources) matches the stored permission strings.
 	defaultGrantsMu.Lock()
 	cachedGrants = []DefaultGrant{
 		{ServiceName: "gatekeeper", GrantOn: "user",
 			Actions:   []string{"getUser", "updateUser", "deleteUser", "createOrg", "createTeam"},
-			Resources: []string{"gatekeeper/users/{user_id}", "gatekeeper/orgs", "gatekeeper/teams"}},
+			Resources: []string{"{username}/gatekeeper/users/{user_id}", "{username}/gatekeeper/orgs", "{username}/gatekeeper/teams"}},
 		{ServiceName: "gatekeeper", GrantOn: "org",
 			Actions:   []string{"getOrg", "updateOrg", "deleteOrg", "inviteUser"},
-			Resources: []string{"gatekeeper/orgs/{org_id}"}},
+			Resources: []string{"{username}/gatekeeper/orgs/{org_id}"}},
 		{ServiceName: "gatekeeper", GrantOn: "team",
 			Actions:   []string{"getTeam", "updateTeam", "deleteTeam", "inviteUser"},
-			Resources: []string{"gatekeeper/teams/{team_id}"}},
+			Resources: []string{"{username}/gatekeeper/teams/{team_id}"}},
 	}
 	defaultGrantsMu.Unlock()
 

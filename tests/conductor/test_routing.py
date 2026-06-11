@@ -1,14 +1,14 @@
 """Integration tests for conductor's request routing.
 
-Conductor routes based on path prefix:
-  - POST /signup, POST /login            → Gatekeeper (no auth check)
-  - /blueprints/state/{username}/{...}   → Blueprints (after user-existence check)
-  - /forge/executions/{...}              → Forge (after user-existence check)
-  - /gatekeeper/{...} or bare paths      → Gatekeeper (after user-existence check)
+All routes must include a service-name prefix as the first path segment:
+  - POST /gatekeeper/signup, POST /gatekeeper/login  → Gatekeeper (no auth check)
+  - /blueprints/state/{username}/{...}               → Blueprints
+  - /forge/executions/{...}                          → Forge
+  - /gatekeeper/{...}                                → Gatekeeper
 
 The service name is stripped before forwarding, so /blueprints/state/alice/dev
-becomes /state/alice/dev when it reaches Blueprints. Permission checks are
-performed by each backend, not by conductor.
+becomes /state/alice/dev when it reaches Blueprints. Conductor enforces RBAC
+by calling Gatekeeper's POST /check_permissions before forwarding each request.
 """
 
 import uuid
@@ -30,9 +30,9 @@ def rand_id():
 
 class TestGatekeeperRouting:
     def test_own_user_returns_gatekeeper_user_shape(self, base_url, token, new_user):
-        """GET /users/{id} → Gatekeeper; response contains user_id and username."""
+        """GET /gatekeeper/users/{id} → Gatekeeper; response contains user_id and username."""
         resp = requests.get(
-            f"{base_url}/users/{new_user['user_id']}",
+            f"{base_url}/gatekeeper/users/{new_user['user_id']}",
             headers=bearer(token),
         )
         assert resp.status_code == 200
@@ -40,8 +40,8 @@ class TestGatekeeperRouting:
         assert "user_id" in body
         assert "username" in body
 
-    def test_unknown_path_returns_gatekeeper_404(self, base_url, token):
-        """An unregistered path is forwarded to Gatekeeper, which returns 404."""
+    def test_unknown_service_returns_404(self, base_url, token):
+        """A path whose first segment is not a registered service name returns 404."""
         resp = requests.get(
             f"{base_url}/no/such/path/{rand_id()}",
             headers=bearer(token),
@@ -49,13 +49,13 @@ class TestGatekeeperRouting:
         assert resp.status_code == 404
 
     def test_orgs_collection_route_reaches_gatekeeper(self, base_url, token):
-        """GET /orgs is a Gatekeeper route; a user without permission gets 403."""
-        resp = requests.get(f"{base_url}/orgs", headers=bearer(token))
+        """GET /gatekeeper/orgs is a Gatekeeper route; a user without listOrg permission gets 403."""
+        resp = requests.get(f"{base_url}/gatekeeper/orgs", headers=bearer(token))
         assert resp.status_code == 403
 
     def test_post_signup_forwarded_without_auth(self, base_url):
         uid = rand_id()[:8]
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": f"rt_{uid}@example.com",
             "username": f"rt_{uid}",
             "password": "password123",
@@ -63,7 +63,7 @@ class TestGatekeeperRouting:
         assert resp.status_code == 201
 
     def test_post_login_forwarded_without_auth(self, base_url, new_user):
-        resp = requests.post(f"{base_url}/login", json={
+        resp = requests.post(f"{base_url}/gatekeeper/login", json={
             "email": new_user["email"],
             "password": new_user["password"],
         })
@@ -73,55 +73,55 @@ class TestGatekeeperRouting:
 # ---------------------------------------------------------------------------
 # Blueprints routes
 # ---------------------------------------------------------------------------
-# These tests require Blueprints to be running. Blueprints calls Gatekeeper for
-# permission checks and returns 403 when the caller lacks the required permission.
-# Conductor strips the /blueprints prefix before forwarding.
+# All blueprints routes require the /blueprints service prefix. Conductor strips
+# it before forwarding, so /blueprints/state/alice/dev becomes /state/alice/dev
+# at the Blueprints backend. Conductor enforces RBAC before forwarding.
 
 
 class TestBlueprintsRouting:
     def test_user_scoped_state_reaches_blueprints(self, base_url, token, new_user):
-        """/state/{username}/{workspace} is routed to Blueprints.
+        """/blueprints/state/{username}/{workspace} is routed to Blueprints.
 
         Users have permission to access their own state namespace, so an empty
         workspace returns 204. Gatekeeper has no /state/ route and would return
         404, so a non-404 here confirms the request reached Blueprints.
         """
         resp = requests.get(
-            f"{base_url}/state/{new_user['username']}/dev",
+            f"{base_url}/blueprints/state/{new_user['username']}/dev",
             headers=bearer(token),
         )
         assert resp.status_code != 404
 
     def test_deep_user_scoped_path_reaches_blueprints(self, base_url, token, new_user):
         resp = requests.get(
-            f"{base_url}/state/{new_user['username']}/team/workspace",
+            f"{base_url}/blueprints/state/{new_user['username']}/team/workspace",
             headers=bearer(token),
         )
-        # Conductor strips at /state/{username}/{workspace}; extra segments are
-        # forwarded as-is and Blueprints returns 404 or 403.
+        # Extra path segments beyond {workspace} are forwarded as-is;
+        # Blueprints returns 404 or 403 for unrecognised sub-paths.
         assert resp.status_code in (403, 404)
 
     def test_blueprints_lock_route_requires_auth(self, base_url):
         """LOCK on a state path is blocked by conductor when no token is present."""
         resp = requests.request(
             "LOCK",
-            f"{base_url}/state/alice/dev",
+            f"{base_url}/blueprints/state/alice/dev",
         )
         assert resp.status_code == 401
 
     def test_blueprints_unlock_route_requires_auth(self, base_url):
         resp = requests.request(
             "UNLOCK",
-            f"{base_url}/state/alice/dev",
+            f"{base_url}/blueprints/state/alice/dev",
         )
         assert resp.status_code == 401
 
     def test_state_delete_requires_auth(self, base_url):
-        resp = requests.delete(f"{base_url}/state/alice/dev")
+        resp = requests.delete(f"{base_url}/blueprints/state/alice/dev")
         assert resp.status_code == 401
 
     def test_state_post_requires_auth(self, base_url):
-        resp = requests.post(f"{base_url}/state/alice/dev", json={})
+        resp = requests.post(f"{base_url}/blueprints/state/alice/dev", json={})
         assert resp.status_code == 401
 
 
@@ -156,10 +156,10 @@ class TestConductorNativeEndpoints:
         resp = requests.get(f"{base_url}/docs")
         assert "text/html" in resp.headers.get("Content-Type", "")
 
-    def test_docs_references_openapi_spec(self, base_url):
-        """Swagger UI page should reference /openapi.json."""
+    def test_docs_lists_services(self, base_url):
+        """Docs page lists registered services with links to per-service docs."""
         resp = requests.get(f"{base_url}/docs")
-        assert "/openapi.json" in resp.text
+        assert "/docs/" in resp.text
 
 
 # ---------------------------------------------------------------------------

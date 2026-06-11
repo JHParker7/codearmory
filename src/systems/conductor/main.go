@@ -70,7 +70,6 @@ func handleServicesHealth(w http.ResponseWriter, r *http.Request) {
 
 	type serviceHealth struct {
 		Name    string `json:"name"`
-		URL     string `json:"url"`
 		Status  string `json:"status"`
 		Latency string `json:"latency_ms,omitempty"`
 		Error   string `json:"error,omitempty"`
@@ -91,7 +90,7 @@ func handleServicesHealth(w http.ResponseWriter, r *http.Request) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 			if err != nil {
 				mu.Lock()
-				results = append(results, serviceHealth{Name: name, URL: svc.url, Status: "unhealthy", Error: err.Error()})
+				results = append(results, serviceHealth{Name: name, Status: "unhealthy", Error: err.Error()})
 				mu.Unlock()
 				return
 			}
@@ -101,7 +100,7 @@ func handleServicesHealth(w http.ResponseWriter, r *http.Request) {
 			elapsed := time.Since(start)
 			if err != nil {
 				mu.Lock()
-				results = append(results, serviceHealth{Name: name, URL: svc.url, Status: "unhealthy", Error: err.Error()})
+				results = append(results, serviceHealth{Name: name, Status: "unhealthy", Error: err.Error()})
 				mu.Unlock()
 				return
 			}
@@ -117,7 +116,6 @@ func handleServicesHealth(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			results = append(results, serviceHealth{
 				Name:    name,
-				URL:     svc.url,
 				Status:  status,
 				Latency: strconv.FormatInt(elapsed.Milliseconds(), 10),
 			})

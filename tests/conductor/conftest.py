@@ -107,7 +107,7 @@ def new_user(base_url):
         "username": f"user_{uid}",
         "password": "password123",
     }
-    resp = requests.post(f"{base_url}/signup", json=payload)
+    resp = requests.post(f"{base_url}/gatekeeper/signup", json=payload)
     assert resp.status_code == 201, f"fixture setup failed: {resp.text}"
     payload["user_id"] = resp.json()["user_id"]
     return payload
@@ -116,7 +116,7 @@ def new_user(base_url):
 @pytest.fixture
 def token(base_url, new_user):
     resp = requests.post(
-        f"{base_url}/login",
+        f"{base_url}/gatekeeper/login",
         json={"email": new_user["email"], "password": new_user["password"]},
     )
     assert resp.status_code == 200, f"token fixture login failed: {resp.text}"
