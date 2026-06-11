@@ -27,7 +27,7 @@ func handleListEvents(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	events, err := listEvents(ctx, userID, orgID, r.URL.Query().Get("repo"))
+	events, err := listEvents(ctx, userID, orgID, r.URL.Query().Get("source"))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
@@ -93,7 +93,7 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	// Fallback for events that matched no rules (status='received'): check
 	// whether the caller has any active rule for this repo.
 	if accessCount == 0 {
-		accessCount, err = countRulesForRepo(ctx, event.Repo, userID, orgID)
+		accessCount, err = countRulesForRepo(ctx, event.Source, userID, orgID)
 		if err != nil {
 			slog.Warn("get event: repo fallback check failed", "event_id", id, "error", err)
 		}

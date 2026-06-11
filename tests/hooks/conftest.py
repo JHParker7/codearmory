@@ -63,12 +63,12 @@ def workflow(bearer):
     assert step_res.status_code == 201, f"step creation failed: {step_res.text}"
     step_id = step_res.json()["step_id"]
 
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines", headers=bearer, json={
         "name": f"hooks-test-wf-{uuid.uuid4().hex[:6]}",
         "steps": [{"step_id": step_id}],
     })
     assert res.status_code == 201, f"workflow creation failed: {res.text}"
     wf = res.json()
     yield wf
-    requests.delete(f"{WORKFLOWS_URL}/workflows/{wf['workflow_id']}", headers=bearer)
+    requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf['workflow_id']}", headers=bearer)
     requests.delete(f"{WORKFLOWS_URL}/steps/{step_id}", headers=bearer)

@@ -258,6 +258,10 @@ func main() {
 	mux.HandleFunc("DELETE /rules/{id}", handleDeleteRule)
 
 	mux.HandleFunc("POST /hooks", handleWebhook)
+	mux.HandleFunc("POST /hooks/git", handleGitWebhook)
+	// Internal: trusted services (e.g. tickets) emit lifecycle events here,
+	// authenticated by the shared HOOKS_TRIGGER_KEY HMAC rather than conductor.
+	mux.HandleFunc("POST /internal/events", handleInternalEvent)
 	if ghApp != nil {
 		mux.HandleFunc("POST /hooks/github", handleGitHubWebhook(ghApp))
 	}

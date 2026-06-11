@@ -207,10 +207,14 @@ def test_list_events_filter_by_repo(bearer, push_rule):
         assert ev["repo"] == "ci/myapp"
 
 def test_get_event_found(bearer, push_rule):
-    res = requests.post(f"{HOOKS_URL}/hooks", json={
-        "repo": "ci/myapp", "event": "push",
-        "ref": "refs/heads/main", "commit": "get-event-test",
-    })
+    import json as _json
+    payload = {"repo": "ci/myapp", "event": "push",
+               "ref": "refs/heads/main", "commit": "get-event-test"}
+    body = _json.dumps(payload).encode()
+    sig = _sign(_PUSH_SECRET, body)
+    res = requests.post(f"{HOOKS_URL}/hooks", data=body,
+                        headers={"Content-Type": "application/json",
+                                 "X-Hub-Signature-256": sig})
     event_id = res.json()["event_id"]
     time.sleep(0.5)
 

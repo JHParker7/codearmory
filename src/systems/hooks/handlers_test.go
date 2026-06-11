@@ -161,6 +161,21 @@ func TestMatchesRefFilter_PrefixGlob(t *testing.T) {
 	}
 }
 
+func TestMatchesRefFilter_WildcardGlob(t *testing.T) {
+	if !matchesRefFilter("refs/heads/feat*", "refs/heads/feature-login") {
+		t.Fatal("wildcard pattern should match branch starting with prefix")
+	}
+	if !matchesRefFilter("refs/tags/v[0-9]*", "refs/tags/v1.2.3") {
+		t.Fatal("character-class pattern should match tagged version")
+	}
+	if matchesRefFilter("refs/heads/feat*", "refs/heads/main") {
+		t.Fatal("wildcard pattern should not match branch outside prefix")
+	}
+	if matchesRefFilter("refs/heads/feat*", "refs/heads/feat/sub") {
+		t.Fatal("wildcard * should not cross a path separator")
+	}
+}
+
 func TestMatchesRefFilter_Mismatch(t *testing.T) {
 	if matchesRefFilter("refs/heads/main", "refs/heads/develop") {
 		t.Fatal("should not match mismatched exact ref")
@@ -234,10 +249,10 @@ func TestHandleGetRule_Unauthorized(t *testing.T) {
 	}
 }
 
-// ── handleWebhook validation ──────────────────────────────────────────────────
+// ── handleWebhook validation (generic endpoint) ───────────────────────────────
 
-func TestHandleWebhook_MissingRepo(t *testing.T) {
-	body, _ := json.Marshal(map[string]string{"event": "push"})
+func TestHandleWebhook_MissingSource(t *testing.T) {
+	body, _ := json.Marshal(map[string]string{"event": "deploy"})
 	r := httptest.NewRequest(http.MethodPost, "/hooks", bytes.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -248,7 +263,7 @@ func TestHandleWebhook_MissingRepo(t *testing.T) {
 }
 
 func TestHandleWebhook_MissingEvent(t *testing.T) {
-	body, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo"})
+	body, _ := json.Marshal(map[string]string{"source": "myapp"})
 	r := httptest.NewRequest(http.MethodPost, "/hooks", bytes.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -261,11 +276,38 @@ func TestHandleWebhook_MissingEvent(t *testing.T) {
 	}
 }
 
+// ── handleGitWebhook validation (git adapter) ─────────────────────────────────
+
+func TestHandleGitWebhook_MissingRepo(t *testing.T) {
+	body, _ := json.Marshal(map[string]string{"event": "push"})
+	r := httptest.NewRequest(http.MethodPost, "/hooks/git", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handleGitWebhook(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleGitWebhook_MissingEvent(t *testing.T) {
+	body, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo"})
+	r := httptest.NewRequest(http.MethodPost, "/hooks/git", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handleGitWebhook(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "event") {
+		t.Fatalf("expected 'event' in error body, got %q", w.Body.String())
+	}
+}
+
 // ── handleCreateRule validation ───────────────────────────────────────────────
 
 func TestHandleCreateRule_MissingName(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
-	body := `{"repo":"owner/repo","events":["push"],"workflow_id":"wf-1","secret":"s3cr3t"}`
+	body := `{"source":"owner/repo","events":["push"],"workflow_id":"wf-1","secret":"s3cr3t"}`
 	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString(body))
 	r.Header.Set("Authorization", "Bearer tok")
 	w := httptest.NewRecorder()
@@ -275,7 +317,7 @@ func TestHandleCreateRule_MissingName(t *testing.T) {
 	}
 }
 
-func TestHandleCreateRule_MissingRepo(t *testing.T) {
+func TestHandleCreateRule_MissingSource(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
 	body := `{"name":"ci","events":["push"],"workflow_id":"wf-1","secret":"s3cr3t"}`
 	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString(body))
@@ -289,7 +331,7 @@ func TestHandleCreateRule_MissingRepo(t *testing.T) {
 
 func TestHandleCreateRule_EmptyEvents(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
-	body := `{"name":"ci","repo":"owner/repo","events":[],"workflow_id":"wf-1","secret":"s3cr3t"}`
+	body := `{"name":"ci","source":"owner/repo","events":[],"workflow_id":"wf-1","secret":"s3cr3t"}`
 	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString(body))
 	r.Header.Set("Authorization", "Bearer tok")
 	w := httptest.NewRecorder()
@@ -301,7 +343,7 @@ func TestHandleCreateRule_EmptyEvents(t *testing.T) {
 
 func TestHandleCreateRule_MissingWorkflowID(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
-	body := `{"name":"ci","repo":"owner/repo","events":["push"],"secret":"s3cr3t"}`
+	body := `{"name":"ci","source":"owner/repo","events":["push"],"secret":"s3cr3t"}`
 	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString(body))
 	r.Header.Set("Authorization", "Bearer tok")
 	w := httptest.NewRecorder()
@@ -313,7 +355,7 @@ func TestHandleCreateRule_MissingWorkflowID(t *testing.T) {
 
 func TestHandleCreateRule_MissingSecret(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
-	body := `{"name":"ci","repo":"owner/repo","events":["push"],"workflow_id":"wf-1"}`
+	body := `{"name":"ci","source":"owner/repo","events":["push"],"workflow_id":"wf-1"}`
 	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewBufferString(body))
 	r.Header.Set("Authorization", "Bearer tok")
 	w := httptest.NewRecorder()
@@ -327,7 +369,7 @@ func TestHandleCreateRule_EmptySecret(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"org-1"}`)
 	empty := ""
 	body, _ := json.Marshal(createRuleRequest{
-		Name: "ci", Repo: "owner/repo", Events: []string{"push"}, WorkflowID: "wf-1", Secret: &empty,
+		Name: "ci", Source: "owner/repo", Events: []string{"push"}, WorkflowID: "wf-1", Secret: &empty,
 	})
 	r := httptest.NewRequest(http.MethodPost, "/rules", bytes.NewReader(body))
 	r.Header.Set("Authorization", "Bearer tok")
