@@ -24,20 +24,20 @@ def poll_until_done(bearer, run_id, timeout=30):
 @pytest.fixture(scope="module")
 def workflow(bearer, healthz_step_id):
     """Create a reusable single-step workflow for run tests."""
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines", headers=bearer, json={
         "name": f"run-test-pipeline-{uuid.uuid4().hex[:6]}",
         "steps": [{"step_id": healthz_step_id}],
     })
     assert res.status_code == 201, f"setup failed: {res.text}"
     wf = res.json()
     yield wf
-    requests.delete(f"{WORKFLOWS_URL}/workflows/{wf['workflow_id']}", headers=bearer)
+    requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf['workflow_id']}", headers=bearer)
 
 
 @pytest.fixture(scope="module")
 def multi_step_workflow(bearer, healthz_step_id, second_step_id):
     """Create a two-step workflow for sequential-execution tests."""
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines", headers=bearer, json={
         "name": f"multi-step-pipeline-{uuid.uuid4().hex[:6]}",
         "steps": [
             {"step_id": healthz_step_id},
@@ -47,13 +47,13 @@ def multi_step_workflow(bearer, healthz_step_id, second_step_id):
     assert res.status_code == 201, f"setup failed: {res.text}"
     wf = res.json()
     yield wf
-    requests.delete(f"{WORKFLOWS_URL}/workflows/{wf['workflow_id']}", headers=bearer)
+    requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf['workflow_id']}", headers=bearer)
 
 
 # ── Authentication ─────────────────────────────────────────────────────────────
 
 def test_trigger_unauthorized(workflow):
-    res = requests.post(f"{WORKFLOWS_URL}/workflows/{workflow['workflow_id']}/runs")
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines/{workflow['workflow_id']}/runs")
     assert res.status_code == 401
 
 
@@ -76,7 +76,7 @@ def test_cancel_run_unauthorized():
 
 def test_trigger_nonexistent_workflow(bearer):
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/00000000-0000-0000-0000-000000000000/runs",
+        f"{WORKFLOWS_URL}/pipelines/00000000-0000-0000-0000-000000000000/runs",
         headers=bearer,
     )
     assert res.status_code == 404
@@ -86,7 +86,7 @@ def test_trigger_nonexistent_workflow(bearer):
 
 def test_trigger_returns_202(bearer, workflow):
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/{workflow['workflow_id']}/runs",
+        f"{WORKFLOWS_URL}/pipelines/{workflow['workflow_id']}/runs",
         headers=bearer,
     )
     assert res.status_code == 202, f"got {res.status_code}: {res.text}"
@@ -94,7 +94,7 @@ def test_trigger_returns_202(bearer, workflow):
 
 def test_trigger_response_shape(bearer, workflow):
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/{workflow['workflow_id']}/runs",
+        f"{WORKFLOWS_URL}/pipelines/{workflow['workflow_id']}/runs",
         headers=bearer,
     )
     assert res.status_code == 202
@@ -107,7 +107,7 @@ def test_trigger_response_shape(bearer, workflow):
 
 def test_trigger_with_inputs(bearer, workflow):
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/{workflow['workflow_id']}/runs",
+        f"{WORKFLOWS_URL}/pipelines/{workflow['workflow_id']}/runs",
         headers=bearer,
         json={"inputs": {"DEPLOY_ENV": "staging", "VERSION": "v1.2.3"}},
     )
@@ -127,7 +127,7 @@ def test_get_run_not_found(bearer):
 
 def test_get_run_found(bearer, workflow):
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/{workflow['workflow_id']}/runs",
+        f"{WORKFLOWS_URL}/pipelines/{workflow['workflow_id']}/runs",
         headers=bearer,
     )
     run_id = res.json()["run_id"]
@@ -148,7 +148,7 @@ def test_list_runs_returns_array(bearer):
 
 def test_list_runs_filter_by_workflow(bearer, workflow):
     wf_id = workflow["workflow_id"]
-    res = requests.post(f"{WORKFLOWS_URL}/workflows/{wf_id}/runs", headers=bearer)
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines/{wf_id}/runs", headers=bearer)
     assert res.status_code == 202
 
     res = requests.get(f"{WORKFLOWS_URL}/runs?workflow_id={wf_id}", headers=bearer)
@@ -163,7 +163,7 @@ def test_list_runs_filter_by_workflow(bearer, workflow):
 def test_run_completes_successfully(bearer, workflow):
     """A single-step workflow calling GET /healthz should complete."""
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/{workflow['workflow_id']}/runs",
+        f"{WORKFLOWS_URL}/pipelines/{workflow['workflow_id']}/runs",
         headers=bearer,
     )
     assert res.status_code == 202
@@ -175,7 +175,7 @@ def test_run_completes_successfully(bearer, workflow):
 
 def test_completed_run_has_step_runs(bearer, workflow):
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/{workflow['workflow_id']}/runs",
+        f"{WORKFLOWS_URL}/pipelines/{workflow['workflow_id']}/runs",
         headers=bearer,
     )
     run_id = res.json()["run_id"]
@@ -189,7 +189,7 @@ def test_completed_run_has_step_runs(bearer, workflow):
 
 def test_multi_step_run_completes(bearer, multi_step_workflow):
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/{multi_step_workflow['workflow_id']}/runs",
+        f"{WORKFLOWS_URL}/pipelines/{multi_step_workflow['workflow_id']}/runs",
         headers=bearer,
     )
     assert res.status_code == 202
@@ -219,14 +219,14 @@ def test_run_fails_on_bad_expected_status(bearer, healthz_step_id):
     assert bad_step_res.status_code == 201
     bad_step_id = bad_step_res.json()["step_id"]
 
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines", headers=bearer, json={
         "name": f"failing-pipeline-{uuid.uuid4().hex[:6]}",
         "steps": [{"step_id": bad_step_id}],
     })
     assert res.status_code == 201
     wf_id = res.json()["workflow_id"]
 
-    res = requests.post(f"{WORKFLOWS_URL}/workflows/{wf_id}/runs", headers=bearer)
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines/{wf_id}/runs", headers=bearer)
     assert res.status_code == 202
     run_id = res.json()["run_id"]
 
@@ -234,7 +234,7 @@ def test_run_fails_on_bad_expected_status(bearer, healthz_step_id):
     assert result["status"] == "failed"
     assert result["step_runs"][0]["status"] == "failed"
 
-    requests.delete(f"{WORKFLOWS_URL}/workflows/{wf_id}", headers=bearer)
+    requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf_id}", headers=bearer)
     requests.delete(f"{WORKFLOWS_URL}/steps/{bad_step_id}", headers=bearer)
 
 
@@ -254,7 +254,7 @@ def test_input_substitution_in_path(bearer):
     assert param_step_res.status_code == 201
     param_step_id = param_step_res.json()["step_id"]
 
-    res = requests.post(f"{WORKFLOWS_URL}/workflows", headers=bearer, json={
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines", headers=bearer, json={
         "name": f"substitution-pipeline-{uuid.uuid4().hex[:6]}",
         "steps": [{"step_id": param_step_id}],
     })
@@ -262,7 +262,7 @@ def test_input_substitution_in_path(bearer):
     wf_id = res.json()["workflow_id"]
 
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/{wf_id}/runs",
+        f"{WORKFLOWS_URL}/pipelines/{wf_id}/runs",
         headers=bearer,
         json={"inputs": {"ENDPOINT": "healthz"}},
     )
@@ -272,7 +272,7 @@ def test_input_substitution_in_path(bearer):
     result = poll_until_done(bearer, run_id)
     assert result["status"] == "completed", f"step_runs: {result['step_runs']}"
 
-    requests.delete(f"{WORKFLOWS_URL}/workflows/{wf_id}", headers=bearer)
+    requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf_id}", headers=bearer)
     requests.delete(f"{WORKFLOWS_URL}/steps/{param_step_id}", headers=bearer)
 
 
@@ -288,7 +288,7 @@ def test_cancel_not_found(bearer):
 
 def test_cancel_completed_run_returns_conflict(bearer, workflow):
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/{workflow['workflow_id']}/runs",
+        f"{WORKFLOWS_URL}/pipelines/{workflow['workflow_id']}/runs",
         headers=bearer,
     )
     run_id = res.json()["run_id"]
@@ -300,7 +300,7 @@ def test_cancel_completed_run_returns_conflict(bearer, workflow):
 
 def test_cancel_pending_run(bearer, workflow):
     res = requests.post(
-        f"{WORKFLOWS_URL}/workflows/{workflow['workflow_id']}/runs",
+        f"{WORKFLOWS_URL}/pipelines/{workflow['workflow_id']}/runs",
         headers=bearer,
     )
     assert res.status_code == 202

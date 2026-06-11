@@ -56,7 +56,7 @@ func TestMain(m *testing.M) {
 // ── checkGatekeeper ───────────────────────────────────────────────────────────
 
 func TestCheckGatekeeper_NoToken(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/workflows", nil)
+	r := httptest.NewRequest(http.MethodGet, "/pipelines", nil)
 	w := httptest.NewRecorder()
 	_, _, ok := gatekeeperClient.CheckPermissions(r.Context(), w, r, "listWorkflow", "workflows/workflows")
 	if ok {
@@ -69,7 +69,7 @@ func TestCheckGatekeeper_NoToken(t *testing.T) {
 
 func TestCheckGatekeeper_Authorized(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-abc","org_id":"org-1"}`)
-	r := httptest.NewRequest(http.MethodGet, "/workflows", nil)
+	r := httptest.NewRequest(http.MethodGet, "/pipelines", nil)
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
 	id, org, ok := gatekeeperClient.CheckPermissions(r.Context(), w, r, "listWorkflow", "workflows/workflows")
@@ -86,7 +86,7 @@ func TestCheckGatekeeper_Authorized(t *testing.T) {
 
 func TestCheckGatekeeper_Forbidden(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":false,"user_id":"user-abc"}`)
-	r := httptest.NewRequest(http.MethodGet, "/workflows", nil)
+	r := httptest.NewRequest(http.MethodGet, "/pipelines", nil)
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
 	_, _, ok := gatekeeperClient.CheckPermissions(r.Context(), w, r, "listWorkflow", "workflows/workflows")
@@ -103,7 +103,7 @@ func TestCheckGatekeeper_GatekeeperDown(t *testing.T) {
 	gatekeeperClient.URL = "http://127.0.0.1:1" // nothing listening
 	t.Cleanup(func() { gatekeeperClient.URL = orig })
 
-	r := httptest.NewRequest(http.MethodGet, "/workflows", nil)
+	r := httptest.NewRequest(http.MethodGet, "/pipelines", nil)
 	r.Header.Set("Authorization", "Bearer sometoken")
 	w := httptest.NewRecorder()
 	_, _, ok := gatekeeperClient.CheckPermissions(r.Context(), w, r, "listWorkflow", "workflows/workflows")
@@ -426,7 +426,7 @@ func TestExecuteStep_HTTPSubstitutesInputsInBody(t *testing.T) {
 // ── handler auth (no-DB) ──────────────────────────────────────────────────────
 
 func TestHandleCreateWorkflow_Unauthorized(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/workflows", nil)
+	r := httptest.NewRequest(http.MethodPost, "/pipelines", nil)
 	w := httptest.NewRecorder()
 	handleCreateWorkflow(w, r)
 	if w.Code != http.StatusUnauthorized {
@@ -436,7 +436,7 @@ func TestHandleCreateWorkflow_Unauthorized(t *testing.T) {
 
 func TestHandleCreateWorkflow_InvalidBody(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
-	r := httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewBufferString("not-json"))
+	r := httptest.NewRequest(http.MethodPost, "/pipelines", bytes.NewBufferString("not-json"))
 	r.Header.Set("Authorization", "Bearer tok")
 	w := httptest.NewRecorder()
 	handleCreateWorkflow(w, r)
@@ -448,7 +448,7 @@ func TestHandleCreateWorkflow_InvalidBody(t *testing.T) {
 func TestHandleCreateWorkflow_MissingName(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
 	body := `{"steps":[{"step_id":"some-id"}]}`
-	r := httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewBufferString(body))
+	r := httptest.NewRequest(http.MethodPost, "/pipelines", bytes.NewBufferString(body))
 	r.Header.Set("Authorization", "Bearer tok")
 	w := httptest.NewRecorder()
 	handleCreateWorkflow(w, r)
@@ -460,7 +460,7 @@ func TestHandleCreateWorkflow_MissingName(t *testing.T) {
 func TestHandleCreateWorkflow_StepWithoutID(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
 	body := `{"name":"my-wf","steps":[{}]}`
-	r := httptest.NewRequest(http.MethodPost, "/workflows", bytes.NewBufferString(body))
+	r := httptest.NewRequest(http.MethodPost, "/pipelines", bytes.NewBufferString(body))
 	r.Header.Set("Authorization", "Bearer tok")
 	w := httptest.NewRecorder()
 	handleCreateWorkflow(w, r)
@@ -470,7 +470,7 @@ func TestHandleCreateWorkflow_StepWithoutID(t *testing.T) {
 }
 
 func TestHandleTriggerRun_Unauthorized(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/workflows/some-id/runs", nil)
+	r := httptest.NewRequest(http.MethodPost, "/pipelines/some-id/runs", nil)
 	r.SetPathValue("id", "some-id")
 	w := httptest.NewRecorder()
 	handleTriggerRun(w, r)
@@ -480,7 +480,7 @@ func TestHandleTriggerRun_Unauthorized(t *testing.T) {
 }
 
 func TestHandleListWorkflows_Unauthorized(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/workflows", nil)
+	r := httptest.NewRequest(http.MethodGet, "/pipelines", nil)
 	w := httptest.NewRecorder()
 	handleListWorkflows(w, r)
 	if w.Code != http.StatusUnauthorized {
@@ -850,7 +850,7 @@ func TestHandleDeleteStep_Unauthorized(t *testing.T) {
 // ── workflow handler auth (no-DB) ─────────────────────────────────────────────
 
 func TestHandleGetWorkflow_Unauthorized(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/workflows/some-id", nil)
+	r := httptest.NewRequest(http.MethodGet, "/pipelines/some-id", nil)
 	r.SetPathValue("id", "some-id")
 	w := httptest.NewRecorder()
 	handleGetWorkflow(w, r)
@@ -860,7 +860,7 @@ func TestHandleGetWorkflow_Unauthorized(t *testing.T) {
 }
 
 func TestHandleUpdateWorkflow_Unauthorized(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPut, "/workflows/some-id", nil)
+	r := httptest.NewRequest(http.MethodPut, "/pipelines/some-id", nil)
 	r.SetPathValue("id", "some-id")
 	w := httptest.NewRecorder()
 	handleUpdateWorkflow(w, r)
@@ -870,7 +870,7 @@ func TestHandleUpdateWorkflow_Unauthorized(t *testing.T) {
 }
 
 func TestHandleDeleteWorkflow_Unauthorized(t *testing.T) {
-	r := httptest.NewRequest(http.MethodDelete, "/workflows/some-id", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/pipelines/some-id", nil)
 	r.SetPathValue("id", "some-id")
 	w := httptest.NewRecorder()
 	handleDeleteWorkflow(w, r)

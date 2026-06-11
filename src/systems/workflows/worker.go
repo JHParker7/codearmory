@@ -392,12 +392,25 @@ func (p *WorkerPool) executeAction(ctx context.Context, store *tokenStore, def A
 		}
 	}
 
+	// Substitute {param} placeholders in the action path from the with map,
+	// removing those keys from the body so they aren't double-sent.
+	resolvedPath := def.Path
+	for k, v := range body {
+		placeholder := "{" + k + "}"
+		if strings.Contains(resolvedPath, placeholder) {
+			if sv, ok := v.(string); ok {
+				resolvedPath = strings.ReplaceAll(resolvedPath, placeholder, sv)
+				delete(body, k)
+			}
+		}
+	}
+
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return "", fmt.Errorf("marshal %s payload: %w", def.Name, err)
 	}
 
-	url := strings.TrimRight(def.ServiceURL, "/") + def.Path
+	url := strings.TrimRight(def.ServiceURL, "/") + resolvedPath
 	req, err := http.NewRequestWithContext(ctx, def.Method, url, bytes.NewReader(payload))
 	if err != nil {
 		return "", fmt.Errorf("build %s request: %w", def.Name, err)
