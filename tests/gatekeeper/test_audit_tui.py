@@ -11,8 +11,8 @@ def test_list_audit_logs_unauthorized(base_url):
 
 # ── Response shape ────────────────────────────────────────────────────────────
 
-def test_list_audit_logs_returns_array(base_url, token):
-    headers = {"Authorization": f"Bearer {token}"}
+def test_list_audit_logs_returns_array(base_url, admin_token):
+    headers = {"Authorization": f"Bearer {admin_token['token']}"}
     res = requests.get(f"{base_url}/audit-logs", headers=headers)
     assert res.status_code == 200
     assert isinstance(res.json(), list)
@@ -57,18 +57,18 @@ def test_list_audit_logs_created_at_is_string(base_url, admin_token):
 
 # ── Pagination ────────────────────────────────────────────────────────────────
 
-def test_list_audit_logs_accepts_limit_and_offset(base_url, token):
+def test_list_audit_logs_accepts_limit_and_offset(base_url, admin_token):
     """The TUI sends ?limit=50&offset=N — server must accept these params."""
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {admin_token['token']}"}
     res = requests.get(f"{base_url}/audit-logs", headers=headers,
                        params={"limit": 50, "offset": 0})
     assert res.status_code == 200
     assert isinstance(res.json(), list)
 
 
-def test_list_audit_logs_offset_beyond_end_returns_empty(base_url, token):
+def test_list_audit_logs_offset_beyond_end_returns_empty(base_url, admin_token):
     """A large offset should return an empty array, not an error."""
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {admin_token['token']}"}
     res = requests.get(f"{base_url}/audit-logs", headers=headers,
                        params={"limit": 50, "offset": 999999})
     assert res.status_code == 200
@@ -86,13 +86,9 @@ def test_list_audit_logs_limit_respected(base_url, admin_token):
 
 # ── Visibility: users can only see their own audit entries ────────────────────
 
-def test_audit_logs_scoped_to_requesting_user(base_url, new_user, token):
-    """Regular users must not see audit entries for other actors."""
-    # The token fixture is for new_user. Any entries returned must belong to that user.
+def test_regular_user_forbidden_from_audit_logs(base_url, token):
+    """Audit logs are admin-only: a regular user without the listAuditLog
+    permission is forbidden, so they cannot see any actor's entries."""
     headers = {"Authorization": f"Bearer {token}"}
     res = requests.get(f"{base_url}/audit-logs", headers=headers)
-    assert res.status_code == 200
-    for entry in res.json():
-        assert entry["actor_id"] == new_user["user_id"], (
-            f"got entry from actor {entry['actor_id']}, expected {new_user['user_id']}"
-        )
+    assert res.status_code == 403

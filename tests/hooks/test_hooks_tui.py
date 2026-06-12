@@ -25,7 +25,7 @@ def test_list_rules_item_has_required_fields(bearer, workflow):
     """The TUI reads rule_id, name, repo, events, workflow_id from the rules list."""
     rule = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
         "name": f"tui-shape-{uuid.uuid4().hex[:6]}",
-        "repo": "org/tui-repo",
+        "source": "org/tui-repo",
         "events": ["push"],
         "workflow_id": workflow["workflow_id"],
         "secret": "tui-shape-secret",
@@ -39,7 +39,7 @@ def test_list_rules_item_has_required_fields(bearer, workflow):
     matching = [r for r in items if r.get("rule_id") == rule_id]
     assert matching, "created rule not in list"
     item = matching[0]
-    for field in ("rule_id", "name", "repo", "events", "workflow_id"):
+    for field in ("rule_id", "name", "source", "events", "workflow_id"):
         assert field in item, f"missing field: {field}"
 
     # cleanup
@@ -52,7 +52,7 @@ def test_delete_rule_success(bearer, workflow):
     """TUI sends DELETE /rules/{id} when user confirms deletion."""
     rule = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
         "name": f"tui-del-{uuid.uuid4().hex[:6]}",
-        "repo": "org/tui-del",
+        "source": "org/tui-del",
         "events": ["push"],
         "workflow_id": workflow["workflow_id"],
         "secret": "tui-del-secret",
@@ -90,7 +90,7 @@ def test_list_events_item_has_required_fields(bearer):
     """The TUI reads event_id, repo, event, status, created_at from each event."""
     # Fire a webhook to ensure at least one event exists.
     requests.post(f"{HOOKS_URL}/hooks", json={
-        "repo": "org/tui-events-shape",
+        "source": "org/tui-events-shape",
         "event": "push",
         "ref": "refs/heads/main",
     })
@@ -101,33 +101,33 @@ def test_list_events_item_has_required_fields(bearer):
     if not items:
         return  # no events yet — acceptable in a clean test env
     item = items[0]
-    for field in ("event_id", "repo", "event_type", "status", "created_at"):
+    for field in ("event_id", "source", "event_type", "status", "created_at"):
         assert field in item, f"missing field: {field}"
 
 
 def test_list_events_filter_by_repo(bearer):
-    """The TUI sends ?repo=<url-encoded-repo> to filter events for a rule's repo."""
+    """The TUI sends ?source=<url-encoded-source> to filter events for a rule's source."""
     unique_repo = f"org/tui-filter-{uuid.uuid4().hex[:8]}"
     requests.post(f"{HOOKS_URL}/hooks", json={
-        "repo": unique_repo,
+        "source": unique_repo,
         "event": "push",
         "ref": "refs/heads/main",
     })
 
     res = requests.get(f"{HOOKS_URL}/events", headers=bearer,
-                       params={"repo": unique_repo})
+                       params={"source": unique_repo})
     assert res.status_code == 200
     items = res.json()
     assert isinstance(items, list)
     for item in items:
-        assert item["repo"] == unique_repo, (
-            f"filter by repo returned event from wrong repo: {item['repo']}"
+        assert item["source"] == unique_repo, (
+            f"filter by repo returned event from wrong repo: {item['source']}"
         )
 
 
 def test_list_events_filter_no_match_returns_empty_array(bearer):
     res = requests.get(f"{HOOKS_URL}/events", headers=bearer,
-                       params={"repo": "org/definitely-does-not-exist-xyz"})
+                       params={"source": "org/definitely-does-not-exist-xyz"})
     assert res.status_code == 200
     assert res.json() == []
 
@@ -137,7 +137,7 @@ def test_list_events_filter_no_match_returns_empty_array(bearer):
 def test_event_detail_has_required_fields(bearer):
     """The TUI reads event_id, repo, event, status, triggers, created_at from detail."""
     requests.post(f"{HOOKS_URL}/hooks", json={
-        "repo": "org/tui-detail",
+        "source": "org/tui-detail",
         "event": "push",
         "ref": "refs/heads/main",
     })
@@ -152,7 +152,7 @@ def test_event_detail_has_required_fields(bearer):
     res = requests.get(f"{HOOKS_URL}/events/{eid}", headers=bearer)
     assert res.status_code == 200
     body = res.json()
-    for field in ("event_id", "repo", "event_type", "status", "created_at"):
+    for field in ("event_id", "source", "event_type", "status", "created_at"):
         assert field in body, f"missing field: {field}"
     assert "triggers" in body, "missing triggers field — TUI renders trigger run_ids"
     assert isinstance(body["triggers"], list)
@@ -170,7 +170,7 @@ def test_trigger_item_has_required_fields(bearer, workflow):
     repo = f"org/tui-trigger-{uuid.uuid4().hex[:8]}"
     rule = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
         "name": f"tui-trigger-{uuid.uuid4().hex[:6]}",
-        "repo": repo,
+        "source": repo,
         "events": ["push"],
         "workflow_id": workflow["workflow_id"],
         "secret": "tui-trigger-secret",
@@ -178,7 +178,7 @@ def test_trigger_item_has_required_fields(bearer, workflow):
     assert rule.status_code == 201, rule.text
     rule_id = rule.json()["rule_id"]
 
-    _payload = {"repo": repo, "event": "push", "ref": "refs/heads/main"}
+    _payload = {"source": repo, "event": "push", "ref": "refs/heads/main"}
     _body = _json.dumps(_payload).encode()
     _sig = _sign("tui-trigger-secret", _body)
     webhook = requests.post(f"{HOOKS_URL}/hooks", data=_body,
@@ -187,7 +187,7 @@ def test_trigger_item_has_required_fields(bearer, workflow):
     assert webhook.status_code == 200, webhook.text
 
     events = requests.get(f"{HOOKS_URL}/events", headers=bearer,
-                          params={"repo": repo})
+                          params={"source": repo})
     assert events.status_code == 200
     items = events.json()
     assert items, "expected at least one event after webhook"
