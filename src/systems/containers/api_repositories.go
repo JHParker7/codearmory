@@ -50,10 +50,16 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 	image := r.PathValue("image")
 	name := namespace + "/" + image
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTag",
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listTag",
 		"containers/repositories/"+namespace+"/"+image)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
+		return
+	}
+	if !namespaceAllowed(ctx, r, userID, orgID, namespace) {
+		span.SetStatus(codes.Ok, "")
+		slog.Warn("list tags: namespace not owned by caller", "user_id", userID, "namespace", namespace)
+		http.Error(w, "repository not found", http.StatusNotFound)
 		return
 	}
 	span.SetAttributes(
@@ -88,10 +94,16 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 	reference := r.PathValue("reference")
 	name := namespace + "/" + image
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getManifest",
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getManifest",
 		"containers/repositories/"+namespace+"/"+image)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
+		return
+	}
+	if !namespaceAllowed(ctx, r, userID, orgID, namespace) {
+		span.SetStatus(codes.Ok, "")
+		slog.Warn("get manifest: namespace not owned by caller", "user_id", userID, "namespace", namespace)
+		http.Error(w, "manifest not found", http.StatusNotFound)
 		return
 	}
 	span.SetAttributes(
@@ -134,10 +146,16 @@ func handleDeleteManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteManifest",
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteManifest",
 		"containers/repositories/"+namespace+"/"+image)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
+		return
+	}
+	if !namespaceAllowed(ctx, r, userID, orgID, namespace) {
+		span.SetStatus(codes.Ok, "")
+		slog.Warn("delete manifest: namespace not owned by caller", "user_id", userID, "namespace", namespace)
+		http.Error(w, "manifest not found", http.StatusNotFound)
 		return
 	}
 	span.SetAttributes(
