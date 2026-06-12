@@ -183,6 +183,15 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 
 	var userID, normalizedAuth string
 	if !entry.public {
+		// The IP-block check only applies to non-public routes so a blocked IP can
+		// still reach public recovery endpoints (e.g. /gatekeeper/login,
+		// /gatekeeper/signup). Hoisting this to the top of handleServiceProxy would
+		// re-block those public routes and revert fix a261f5a.
+		if ip := sourceIP(r); isBlocked(ip) {
+			slog.Warn("request rejected: IP is blocked", "source_ip", ip, "path", r.URL.Path)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		resource := resolveResource(entry.resource, entry.paramNames, paramValues)
 		var outcome authOutcome
 		outcome, userID, normalizedAuth = checkUserAuth(r, entry.serviceName, entry.action, resource)
@@ -275,12 +284,6 @@ func prepareForwardRequest(r *http.Request, userID, normalizedAuth string, svc s
 //  2. Otherwise, try matching the full path against all registered endpoints.
 //     Returns 404 if no match is found.
 func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
-	if ip := sourceIP(r); isBlocked(ip) {
-		slog.Warn("request rejected: IP is blocked", "source_ip", ip, "path", r.URL.Path)
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-
 	path := r.URL.Path
 
 	// All routes require a service-name prefix (e.g. /forge/executions, /gatekeeper/login).
