@@ -28,6 +28,15 @@ func syncServiceAccountBootstrapKey(ctx context.Context, name, hash string) erro
 		Update("hashed_key", hash).Error
 }
 
+// getUserIDsByOrg returns the user_id of all users in an org.
+func getUserIDsByOrg(ctx context.Context, orgID string) ([]string, error) {
+	var ids []string
+	if err := connect().WithContext(ctx).Model(&User{}).Where("org_id = ?", orgID).Pluck("user_id", &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // clearOrgMembership clears the org_id field on all users that belong to orgID.
 func clearOrgMembership(ctx context.Context, orgID string) error {
 	return connect().WithContext(ctx).Model(&User{}).Where("org_id = ?", orgID).Update("org_id", nil).Error
