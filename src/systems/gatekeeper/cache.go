@@ -91,6 +91,9 @@ func redisRateLimit(ctx context.Context, endpoint, ip string, maxAttempts int, w
 		return true
 	}
 	secs := int64(window.Seconds())
+	if secs <= 0 {
+		secs = 1 // sub-second windows truncate to 0; guard against divide-by-zero panic
+	}
 	bucket := time.Now().Unix() / secs
 	key := fmt.Sprintf("gk:rl:%s:%s:%d", endpoint, ip, bucket)
 	n, err := rlScript.Run(ctx, redisClient, []string{key}, secs*2).Int64()
