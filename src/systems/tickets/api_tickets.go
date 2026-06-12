@@ -317,8 +317,15 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	existing.Status = req.Status
 	existing.Priority = req.Priority
-	existing.Timescale = req.Timescale
-	existing.DueDate = dueDate
+	// Guard Timescale/DueDate like the nullable fields below so a partial PUT that
+	// omits them doesn't silently wipe the stored values. Timescale is a plain
+	// string (empty = omitted); DueDate is a pointer (nil = omitted, "" = clear).
+	if req.Timescale != "" {
+		existing.Timescale = req.Timescale
+	}
+	if req.DueDate != nil {
+		existing.DueDate = dueDate
+	}
 	if req.AssigneeID != nil {
 		existing.AssigneeID = req.AssigneeID
 	}

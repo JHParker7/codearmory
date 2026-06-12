@@ -199,7 +199,11 @@ func handleDeleteFieldDef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := row.(TicketFieldDef)
-	if f.OrgID != "" && f.OrgID != orgID {
+	// Strict org match (mirrors handleUpdateFieldDef): an org may only delete its
+	// own field defs. Global seeded defs (OrgID="") are never org-owned, so this
+	// also prevents any org from deleting them — which would break ticket creation
+	// platform-wide by removing the default statuses.
+	if f.OrgID != orgID {
 		http.Error(w, "field def not found", http.StatusNotFound)
 		return
 	}
