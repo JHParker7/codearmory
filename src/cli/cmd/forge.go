@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -27,6 +29,7 @@ func init() {
 		execTimeout     int
 		execEnvs        []string
 		execRunnerClass string
+		execWait        bool
 	)
 
 	runCmd := &cobra.Command{
@@ -72,13 +75,35 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/forge/executions", body)
+			data, err := doRequest("POST", "/forge/executions", body)
+			if err != nil {
+				return err
+			}
+			var resp struct {
+				ExecutionID string `json:"execution_id"`
+			}
+			if err := json.Unmarshal(data, &resp); err != nil || resp.ExecutionID == "" {
+				printResponse(data) // unexpected shape — fall back to the standard render
+				return nil
+			}
+			if execWait {
+				fmt.Fprintf(os.Stderr, "forge job: %s started\n", resp.ExecutionID)
+				if err := waitForExecution(resp.ExecutionID, execTimeout); err != nil {
+					cmd.SilenceUsage = true // the job ran but failed — not a CLI usage error
+					return err
+				}
+				return nil
+			}
+			fmt.Printf("forge job: %s started\n", resp.ExecutionID)
+			fmt.Printf("track output with: armory forge exec get %s\n", resp.ExecutionID)
+			return nil
 		},
 	}
 	runCmd.Flags().StringVar(&execImage, "image", "", "Container image to run (required)")
 	runCmd.Flags().IntVar(&execTimeout, "timeout", 0, "Timeout in seconds (default: server default)")
 	runCmd.Flags().StringArrayVar(&execEnvs, "env", nil, "Environment variable KEY=VALUE (repeatable)")
 	runCmd.Flags().StringVar(&execRunnerClass, "runner-class", "", "Runner class name (default: standard)")
+	runCmd.Flags().BoolVar(&execWait, "wait", false, "Wait for the execution to finish, print its output, and exit non-zero if it failed")
 
 	var execListStatus string
 
@@ -101,9 +126,16 @@ func init() {
 		listExecCmd,
 		&cobra.Command{
 			Use:   "get <id>",
-			Short: "Get an execution",
+			Short: "Get an execution, including its stdout and stderr",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/forge/executions/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				data, err := doRequest("GET", "/forge/executions/"+args[0], nil)
+				if err != nil {
+					return err
+				}
+				printExecution(data)
+				return nil
+			},
 		},
 		&cobra.Command{
 			Use:   "cancel <id>",
@@ -224,4 +256,121 @@ func init() {
 
 	forgeCmd.AddCommand(execCmd, rcCmd)
 	rootCmd.AddCommand(forgeCmd)
+}
+
+// waitForExecution polls a forge execution until it reaches a terminal state,
+// then prints its captured output. serverTimeout is the execution's --timeout
+// (0 = server default) and bounds how long we poll. It returns a non-nil error
+// when the job failed, timed out, or was cancelled so the CLI exits non-zero.
+func waitForExecution(id string, serverTimeout int) error {
+	const pollInterval = 2 * time.Second
+	maxWait := time.Hour
+	if serverTimeout > 0 {
+		maxWait = time.Duration(serverTimeout)*time.Second + 30*time.Second
+	}
+	deadline := time.Now().Add(maxWait)
+	fmt.Fprintln(os.Stderr, "waiting for completion…")
+
+	for {
+		data, err := doRequest("GET", "/forge/executions/"+id, nil)
+		if err != nil {
+			return err
+		}
+		var ex struct {
+			Status   string  `json:"status"`
+			Image    string  `json:"image"`
+			Stdout   *string `json:"stdout"`
+			Stderr   *string `json:"stderr"`
+			ExitCode *int    `json:"exit_code"`
+		}
+		if err := json.Unmarshal(data, &ex); err != nil {
+			return fmt.Errorf("unexpected execution response: %s", data)
+		}
+
+		switch ex.Status {
+		case "completed":
+			printStream(os.Stdout, ex.Stdout)
+			printStream(os.Stderr, ex.Stderr)
+			return nil
+		case "failed", "timed_out":
+			// Surface whatever the job produced on the matching streams so the real
+			// error (usually on stderr) is visible right above the summary line.
+			printStream(os.Stdout, ex.Stdout)
+			printStream(os.Stderr, ex.Stderr)
+
+			ctxStr := ""
+			if ex.Image != "" {
+				ctxStr = " (image " + ex.Image + ")"
+			}
+			if ex.Status == "timed_out" {
+				if serverTimeout > 0 {
+					return fmt.Errorf("forge job %s%s timed out after %ds — raise --timeout or check the command", id, ctxStr, serverTimeout)
+				}
+				return fmt.Errorf("forge job %s%s timed out", id, ctxStr)
+			}
+
+			exit := "failed"
+			if ex.ExitCode != nil {
+				exit = fmt.Sprintf("exited with code %d", *ex.ExitCode)
+			}
+			if nonEmpty(ex.Stdout) || nonEmpty(ex.Stderr) {
+				return fmt.Errorf("forge job %s%s %s — see output above", id, ctxStr, exit)
+			}
+			return fmt.Errorf("forge job %s%s %s but captured no output — run `armory forge exec get %s -v` for details", id, ctxStr, exit, id)
+		case "cancelled":
+			return fmt.Errorf("forge job %s was cancelled", id)
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("gave up waiting for forge job %s after %s (last status %q); it may still be running — check `armory forge exec get %s`", id, maxWait, ex.Status, id)
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+// printStream writes a captured output stream to w with a guaranteed trailing newline.
+func printStream(w *os.File, s *string) {
+	if s == nil || *s == "" {
+		return
+	}
+	fmt.Fprint(w, *s)
+	if !strings.HasSuffix(*s, "\n") {
+		fmt.Fprintln(w)
+	}
+}
+
+// nonEmpty reports whether s points to a non-blank string.
+func nonEmpty(s *string) bool { return s != nil && strings.TrimSpace(*s) != "" }
+
+// printExecution renders an execution's metadata record followed by its captured
+// stdout and stderr — which the generic record view omits, making failures hard
+// to debug. Both streams are written to stdout under clear labels.
+func printExecution(data []byte) {
+	printResponse(data) // metadata record (stdout/stderr intentionally omitted there)
+
+	var ex struct {
+		Stdout *string `json:"stdout"`
+		Stderr *string `json:"stderr"`
+		Status string  `json:"status"`
+	}
+	if json.Unmarshal(data, &ex) != nil {
+		return
+	}
+
+	if nonEmpty(ex.Stdout) {
+		fmt.Println("\nstdout:")
+		printStream(os.Stdout, ex.Stdout)
+	}
+	if nonEmpty(ex.Stderr) {
+		fmt.Println("\nstderr:")
+		printStream(os.Stdout, ex.Stderr)
+	}
+	if !nonEmpty(ex.Stdout) && !nonEmpty(ex.Stderr) {
+		switch ex.Status {
+		case "pending", "running":
+			fmt.Printf("\n(no output yet — execution is %s)\n", ex.Status)
+		default:
+			fmt.Println("\n(no output was captured for this execution)")
+		}
+	}
 }
