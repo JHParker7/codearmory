@@ -85,6 +85,24 @@ def test_submit_and_complete(bearer):
     assert "hello" in (result.get("stdout") or "")
 
 
+def test_direct_command_runs_and_returns_output(bearer):
+    """Run a command directly (no shell wrapper) and verify its exact stdout —
+    the scenario that surfaced the K8s non-root admission bug, where the container
+    never started so every command 'failed' with exit 1 and empty output."""
+    res = requests.post(f"{FORGE_URL}/executions", headers=bearer, json={
+        "image": "alpine:3.19",
+        "command": ["echo", "hello world"],
+        "timeout": 30,
+    })
+    assert res.status_code == 202
+    execution_id = res.json()["execution_id"]
+
+    result = poll_until_done(bearer, execution_id)
+    assert result["status"] == "completed", result
+    assert result["exit_code"] == 0, result
+    assert (result.get("stdout") or "").strip() == "hello world", result
+
+
 def test_failed_command(bearer):
     res = requests.post(f"{FORGE_URL}/executions", headers=bearer, json={
         "image": "alpine:3.19",
@@ -97,6 +115,41 @@ def test_failed_command(bearer):
     result = poll_until_done(bearer, execution_id)
     assert result["status"] == "failed"
     assert result["exit_code"] != 0
+
+
+def test_failed_command_captures_output(bearer):
+    """A non-zero exit must still capture stdout and record the real exit code,
+    so failures are debuggable rather than an empty 'failed' record."""
+    res = requests.post(f"{FORGE_URL}/executions", headers=bearer, json={
+        "image": "alpine:3.19",
+        "command": ["sh", "-c", "echo before-fail; exit 3"],
+        "timeout": 30,
+    })
+    assert res.status_code == 202
+    execution_id = res.json()["execution_id"]
+
+    result = poll_until_done(bearer, execution_id)
+    assert result["status"] == "failed"
+    assert result["exit_code"] == 3
+    assert "before-fail" in (result.get("stdout") or ""), result
+
+
+def test_stderr_is_captured(bearer):
+    """Output written to stderr must be captured so the failure reason is visible.
+    Asserted against the combined output to stay runtime-agnostic — the Kubernetes
+    runtime merges stdout and stderr into a single stream."""
+    res = requests.post(f"{FORGE_URL}/executions", headers=bearer, json={
+        "image": "alpine:3.19",
+        "command": ["sh", "-c", "echo oops 1>&2; exit 1"],
+        "timeout": 30,
+    })
+    assert res.status_code == 202
+    execution_id = res.json()["execution_id"]
+
+    result = poll_until_done(bearer, execution_id)
+    assert result["status"] == "failed"
+    combined = (result.get("stdout") or "") + (result.get("stderr") or "")
+    assert "oops" in combined, f"expected 'oops' in captured output, got {result}"
 
 
 def test_timeout_enforced(bearer):
