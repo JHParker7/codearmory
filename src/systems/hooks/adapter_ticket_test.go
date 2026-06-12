@@ -10,9 +10,9 @@ import (
 )
 
 // signInternalEvent reproduces the token the tickets service sends.
-func signInternalEvent(key, source, event, ts string) string {
+func signInternalEvent(key, source, event, orgID, createdBy, ts string) string {
 	mac := hmac.New(sha256.New, []byte(key))
-	fmt.Fprintf(mac, "event:%s:%s:%s", source, event, ts)
+	fmt.Fprintf(mac, "event:%s:%s:%s:%s:%s", source, event, orgID, createdBy, ts)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -20,7 +20,7 @@ func TestVerifyInternalEvent_NoKey(t *testing.T) {
 	orig := hooksTriggerKey
 	hooksTriggerKey = ""
 	defer func() { hooksTriggerKey = orig }()
-	if verifyInternalEvent("tickets", "ticket.status_changed", "tok", "123") {
+	if verifyInternalEvent("tickets", "ticket.status_changed", "org-1", "alice", "tok", "123") {
 		t.Fatal("expected false when key is empty")
 	}
 }
@@ -29,7 +29,7 @@ func TestVerifyInternalEvent_InvalidTimestamp(t *testing.T) {
 	orig := hooksTriggerKey
 	hooksTriggerKey = "secret"
 	defer func() { hooksTriggerKey = orig }()
-	if verifyInternalEvent("tickets", "ticket.created", "tok", "not-a-number") {
+	if verifyInternalEvent("tickets", "ticket.created", "org-1", "alice", "tok", "not-a-number") {
 		t.Fatal("expected false for non-numeric timestamp")
 	}
 }
@@ -39,8 +39,8 @@ func TestVerifyInternalEvent_Expired(t *testing.T) {
 	hooksTriggerKey = "secret"
 	defer func() { hooksTriggerKey = orig }()
 	oldTS := fmt.Sprintf("%d", time.Now().Unix()-60)
-	tok := signInternalEvent("secret", "tickets", "ticket.created", oldTS)
-	if verifyInternalEvent("tickets", "ticket.created", tok, oldTS) {
+	tok := signInternalEvent("secret", "tickets", "ticket.created", "org-1", "alice", oldTS)
+	if verifyInternalEvent("tickets", "ticket.created", "org-1", "alice", tok, oldTS) {
 		t.Fatal("expected false for timestamp older than 30 s")
 	}
 }
@@ -50,7 +50,7 @@ func TestVerifyInternalEvent_WrongSignature(t *testing.T) {
 	hooksTriggerKey = "secret"
 	defer func() { hooksTriggerKey = orig }()
 	ts := fmt.Sprintf("%d", time.Now().Unix())
-	if verifyInternalEvent("tickets", "ticket.created", "deadbeef", ts) {
+	if verifyInternalEvent("tickets", "ticket.created", "org-1", "alice", "deadbeef", ts) {
 		t.Fatal("expected false for wrong signature")
 	}
 }
@@ -60,8 +60,8 @@ func TestVerifyInternalEvent_Valid(t *testing.T) {
 	hooksTriggerKey = "test-key-123"
 	defer func() { hooksTriggerKey = orig }()
 	ts := fmt.Sprintf("%d", time.Now().Unix())
-	tok := signInternalEvent(hooksTriggerKey, "tickets", "ticket.status_changed", ts)
-	if !verifyInternalEvent("tickets", "ticket.status_changed", tok, ts) {
+	tok := signInternalEvent(hooksTriggerKey, "tickets", "ticket.status_changed", "org-1", "alice", ts)
+	if !verifyInternalEvent("tickets", "ticket.status_changed", "org-1", "alice", tok, ts) {
 		t.Fatal("expected true for valid signature")
 	}
 }
@@ -72,9 +72,22 @@ func TestVerifyInternalEvent_EventBound(t *testing.T) {
 	hooksTriggerKey = "test-key-123"
 	defer func() { hooksTriggerKey = orig }()
 	ts := fmt.Sprintf("%d", time.Now().Unix())
-	tok := signInternalEvent(hooksTriggerKey, "tickets", "ticket.created", ts)
-	if verifyInternalEvent("tickets", "ticket.deleted", tok, ts) {
+	tok := signInternalEvent(hooksTriggerKey, "tickets", "ticket.created", "org-1", "alice", ts)
+	if verifyInternalEvent("tickets", "ticket.deleted", "org-1", "alice", tok, ts) {
 		t.Fatal("expected false when token's event differs from the request event")
+	}
+}
+
+// A token signed for one org must not validate against another — this is the
+// cross-tenant replay the signed org_id/created_by fields prevent.
+func TestVerifyInternalEvent_OrgBound(t *testing.T) {
+	orig := hooksTriggerKey
+	hooksTriggerKey = "test-key-123"
+	defer func() { hooksTriggerKey = orig }()
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	tok := signInternalEvent(hooksTriggerKey, "tickets", "ticket.created", "org-1", "alice", ts)
+	if verifyInternalEvent("tickets", "ticket.created", "org-2", "alice", tok, ts) {
+		t.Fatal("expected false when token's org_id differs from the request org_id")
 	}
 }
 

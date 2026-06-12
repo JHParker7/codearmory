@@ -38,10 +38,12 @@ type ticketEventPayload struct {
 }
 
 // verifyInternalEvent validates the HMAC-SHA256 token an internal emitter signs
-// over "event:{source}:{event}:{timestamp}" with the shared hooks trigger key.
+// over "event:{source}:{event}:{org_id}:{created_by}:{timestamp}" with the shared
+// hooks trigger key. org_id/created_by are part of the signed message so the
+// tenant scope (which rules fire) cannot be swapped on replay within the window.
 // Returns false if the key is unconfigured, the token is malformed, or the
-// 30-second window has elapsed. Mirrors the workflows verifyHooks* checks.
-func verifyInternalEvent(source, event, token, timestamp string) bool {
+// 30-second window has elapsed.
+func verifyInternalEvent(source, event, orgID, createdBy, token, timestamp string) bool {
 	if hooksTriggerKey == "" {
 		return false
 	}
@@ -50,7 +52,7 @@ func verifyInternalEvent(source, event, token, timestamp string) bool {
 		return false
 	}
 	mac := hmac.New(sha256.New, []byte(hooksTriggerKey))
-	fmt.Fprintf(mac, "event:%s:%s:%s", source, event, timestamp)
+	fmt.Fprintf(mac, "event:%s:%s:%s:%s:%s", source, event, orgID, createdBy, timestamp)
 	return hmac.Equal([]byte(token), []byte(hex.EncodeToString(mac.Sum(nil))))
 }
 
@@ -76,7 +78,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !verifyInternalEvent(payload.Source, payload.Event, r.Header.Get("X-Hooks-Token"), r.Header.Get("X-Hooks-Timestamp")) {
+	if !verifyInternalEvent(payload.Source, payload.Event, payload.OrgID, payload.CreatedBy, r.Header.Get("X-Hooks-Token"), r.Header.Get("X-Hooks-Timestamp")) {
 		span.SetStatus(codes.Error, "invalid hooks token")
 		slog.Warn("internal event: invalid hooks token", "source", payload.Source, "event", payload.Event)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)

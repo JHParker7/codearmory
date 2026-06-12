@@ -75,13 +75,13 @@ func TestSignHookEvent(t *testing.T) {
 	hooksEventKey = "shared-secret"
 	defer func() { hooksEventKey = orig }()
 
-	token, ts := signHookEvent(ticketsHookSource, eventTicketStatus)
+	token, ts := signHookEvent(ticketsHookSource, eventTicketStatus, "org-1", "alice")
 	if _, err := strconv.ParseInt(ts, 10, 64); err != nil {
 		t.Fatalf("timestamp %q is not numeric: %v", ts, err)
 	}
 
 	mac := hmac.New(sha256.New, []byte(hooksEventKey))
-	fmt.Fprintf(mac, "event:%s:%s:%s", ticketsHookSource, eventTicketStatus, ts)
+	fmt.Fprintf(mac, "event:%s:%s:%s:%s:%s", ticketsHookSource, eventTicketStatus, "org-1", "alice", ts)
 	want := hex.EncodeToString(mac.Sum(nil))
 	if token != want {
 		t.Fatalf("token = %q, want %q", token, want)

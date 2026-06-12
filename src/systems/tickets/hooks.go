@@ -97,18 +97,18 @@ func notifyHooks(ctx context.Context, event, ref string, t Ticket, extra map[str
 	// Detach from the request context so the emit survives the response, but
 	// carry the trace for correlation.
 	emitCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
-	go sendHookEvent(emitCtx, event, raw, t.TicketID)
+	go sendHookEvent(emitCtx, event, t.OrgID, t.CreatedBy, raw, t.TicketID)
 }
 
 // sendHookEvent signs and POSTs an event body to the hooks internal endpoint.
-func sendHookEvent(ctx context.Context, event string, raw []byte, ticketID string) {
+func sendHookEvent(ctx context.Context, event, orgID, createdBy string, raw []byte, ticketID string) {
 	ctx, span := otel.Tracer("tickets").Start(ctx, "notifyHooks")
 	defer span.End()
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	token, ts := signHookEvent(ticketsHookSource, event)
+	token, ts := signHookEvent(ticketsHookSource, event, orgID, createdBy)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hooksURL+"/internal/events", bytes.NewReader(raw))
 	if err != nil {
 		span.RecordError(err)
@@ -136,10 +136,12 @@ func sendHookEvent(ctx context.Context, event string, raw []byte, ticketID strin
 }
 
 // signHookEvent produces the HMAC-SHA256 token the hooks service verifies over
-// "event:{source}:{event}:{timestamp}".
-func signHookEvent(source, event string) (token, timestamp string) {
+// "event:{source}:{event}:{org_id}:{created_by}:{timestamp}". org_id/created_by
+// are signed so the event's tenant scope is authenticated, not just asserted in
+// the (unsigned) JSON body.
+func signHookEvent(source, event, orgID, createdBy string) (token, timestamp string) {
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	mac := hmac.New(sha256.New, []byte(hooksEventKey))
-	fmt.Fprintf(mac, "event:%s:%s:%s", source, event, ts)
+	fmt.Fprintf(mac, "event:%s:%s:%s:%s:%s", source, event, orgID, createdBy, ts)
 	return hex.EncodeToString(mac.Sum(nil)), ts
 }
