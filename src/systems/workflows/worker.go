@@ -146,8 +146,12 @@ func (p *WorkerPool) tryOne(ctx context.Context) bool {
 	if run.Token != "" {
 		plainToken, err := decryptToken(run.Token)
 		if err != nil {
+			// Dequeue already committed status='running'; fail the run rather than
+			// returning, or it would be stranded forever (Dequeue selects only
+			// 'pending' rows and stuck-run recovery runs only at startup).
 			slog.Error("worker: decrypt run token", "run_id", run.RunID, "error", err)
-			return false
+			p.failRun(run.RunID, run.RunSessionID)
+			return true
 		}
 		run.Token = plainToken
 	}
