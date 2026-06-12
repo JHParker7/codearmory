@@ -62,6 +62,30 @@ func (p *WorkerPool) tryOne(ctx context.Context) {
 	p.run(ctx, exec)
 }
 
+// classifyResult maps a runtime outcome to the stored execution status. It
+// surfaces a genuine runtime failure (image pull, container create, …) into
+// stderr so the user sees a reason instead of an empty "failed" record.
+// Cancellation and timeout are recognised from the error; a non-zero exit code
+// with no error is a normal command failure.
+func classifyResult(result RunResult, runErr error) (string, RunResult) {
+	switch {
+	case runErr == nil:
+		if result.ExitCode != 0 {
+			return StatusFailed, result
+		}
+		return StatusCompleted, result
+	case errors.Is(runErr, context.Canceled):
+		return StatusCancelled, result
+	case errors.Is(runErr, context.DeadlineExceeded):
+		return StatusTimedOut, result
+	default:
+		if result.Stderr == "" {
+			result.Stderr = "forge: " + runErr.Error()
+		}
+		return StatusFailed, result
+	}
+}
+
 func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	runCtx, cancel := context.WithCancel(ctx)
 	p.cancels.Store(exec.ExecutionID, cancel)
@@ -73,18 +97,9 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	slog.Info("worker: starting execution", "execution_id", exec.ExecutionID, "image", exec.Image)
 	result, runErr := p.rt.Run(runCtx, exec)
 
-	status := StatusCompleted
-	if runErr != nil {
-		if errors.Is(runErr, context.Canceled) {
-			status = StatusCancelled
-		} else if errors.Is(runErr, context.DeadlineExceeded) {
-			status = StatusTimedOut
-		} else {
-			slog.Error("worker: runtime error", "execution_id", exec.ExecutionID, "error", runErr)
-			status = StatusFailed
-		}
-	} else if result.ExitCode != 0 {
-		status = StatusFailed
+	status, result := classifyResult(result, runErr)
+	if status == StatusFailed && runErr != nil {
+		slog.Error("worker: runtime error", "execution_id", exec.ExecutionID, "error", runErr)
 	}
 
 	meterComplete.Add(ctx, 1, metric.WithAttributes(attribute.String("status", status)))

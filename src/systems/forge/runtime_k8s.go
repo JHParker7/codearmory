@@ -59,6 +59,12 @@ func newKubernetesRuntime() (*KubernetesRuntime, error) {
 	}, nil
 }
 
+// sandboxUID is the non-root UID/GID that sandboxed containers run as. Pinning
+// it lets images that default to root (alpine, ubuntu, …) satisfy RunAsNonRoot
+// and actually start — without it the kubelet blocks them at admission with
+// "container has runAsNonRoot and image will run as root".
+const sandboxUID int64 = 1000
+
 // Run creates a Kubernetes Job for the execution, polls until it reaches a
 // terminal state, collects logs, then deletes the job. The job is always
 // deleted on return, even if Run returns an error.
@@ -67,6 +73,22 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 	if err != nil {
 		return RunResult{}, fmt.Errorf("runner class: %w", err)
 	}
+	job := r.buildJob(exec, spec)
+
+	if _, err := r.client.BatchV1().Jobs(r.namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+		return RunResult{}, fmt.Errorf("create job: %w", err)
+	}
+
+	result, err := r.waitAndCollect(ctx, exec, job.Name)
+	// Always clean up, even on error or cancellation.
+	r.deleteJob(context.Background(), job.Name)
+	return result, err
+}
+
+// buildJob constructs the sandboxed Kubernetes Job spec for an execution. It is
+// separated from Run so the pod/container security context can be unit-tested
+// without a live cluster.
+func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.Job {
 	memLimit := resource.MustParse(fmt.Sprintf("%dMi", spec.MemoryMB))
 	cpuLimit := resource.MustParse(fmt.Sprintf("%dm", spec.CPUMillicores))
 	tmpSize := resource.MustParse(fmt.Sprintf("%dMi", spec.TmpfsMB))
@@ -78,7 +100,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 	}
 
-	job := &batchv1.Job{
+	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: r.namespace,
@@ -105,6 +127,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 					AutomountServiceAccountToken: ptr(false),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot:   ptr(true),
+						RunAsUser:      ptr(sandboxUID),
+						RunAsGroup:     ptr(sandboxUID),
+						FSGroup:        ptr(sandboxUID), // make the /tmp emptyDir writable by the sandbox group
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 					Containers: []corev1.Container{{
@@ -126,6 +151,8 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 							AllowPrivilegeEscalation: ptr(false),
 							ReadOnlyRootFilesystem:   ptr(true),
 							RunAsNonRoot:             ptr(true),
+							RunAsUser:                ptr(sandboxUID),
+							RunAsGroup:               ptr(sandboxUID),
 							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 						},
 						VolumeMounts: []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}},
@@ -140,15 +167,6 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 			},
 		},
 	}
-
-	if _, err := r.client.BatchV1().Jobs(r.namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
-		return RunResult{}, fmt.Errorf("create job: %w", err)
-	}
-
-	result, err := r.waitAndCollect(ctx, exec, jobName)
-	// Always clean up, even on error or cancellation.
-	r.deleteJob(context.Background(), jobName)
-	return result, err
 }
 
 func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, jobName string) (RunResult, error) {
@@ -215,8 +233,11 @@ func (r *KubernetesRuntime) collectLogs(executionID string) (stdout, stderr stri
 	pods, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "execution-id=" + executionID,
 	})
-	if err != nil || len(pods.Items) == 0 {
-		return "", ""
+	if err != nil {
+		return "", fmt.Sprintf("forge: failed to list pods for log collection: %v", err)
+	}
+	if len(pods.Items) == 0 {
+		return "", "forge: no pod found for execution — logs unavailable (the pod may have been evicted or never scheduled)"
 	}
 	podName := pods.Items[0].Name
 
@@ -226,7 +247,7 @@ func (r *KubernetesRuntime) collectLogs(executionID string) (stdout, stderr stri
 	})
 	stream, err := req.Stream(ctx)
 	if err != nil {
-		return "", ""
+		return "", fmt.Sprintf("forge: failed to stream pod logs: %v", err)
 	}
 	defer stream.Close()
 	var buf bytes.Buffer

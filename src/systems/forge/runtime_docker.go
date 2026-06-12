@@ -146,7 +146,9 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 
 	stdout, stderr, err := r.collectLogs(containerID)
 	if err != nil {
-		return RunResult{ExitCode: exitCode}, nil
+		// Keep the exit code, but surface why output is missing instead of
+		// returning an execution with silently empty stdout/stderr.
+		return RunResult{ExitCode: exitCode, Stderr: fmt.Sprintf("forge: failed to collect container logs: %v", err)}, nil
 	}
 	return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: exitCode}, nil
 }
