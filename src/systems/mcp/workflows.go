@@ -69,7 +69,7 @@ func handleListWorkflows(c *client) server.ToolHandlerFunc {
 		if err := c.cfg.validate(); err != nil {
 			return noAuth(), nil
 		}
-		data, status, err := c.get(ctx, "/pipelines")
+		data, status, err := c.get(ctx, "/workflows/pipelines")
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -86,7 +86,7 @@ func handleGetWorkflow(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "workflow_id")
-		data, status, err := c.get(ctx, "/pipelines/"+id)
+		data, status, err := c.get(ctx, "/workflows/pipelines/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -112,7 +112,7 @@ func handleCreateWorkflow(c *client) server.ToolHandlerFunc {
 			"description": argStr(req, "description"),
 			"steps":       steps,
 		}
-		data, status, err := c.post(ctx, "/pipelines", body)
+		data, status, err := c.post(ctx, "/workflows/pipelines", body)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -139,7 +139,7 @@ func handleUpdateWorkflow(c *client) server.ToolHandlerFunc {
 			"steps":       steps,
 		}
 		id := argStr(req, "workflow_id")
-		data, status, err := c.put(ctx, "/pipelines/"+id, body)
+		data, status, err := c.put(ctx, "/workflows/pipelines/"+id, body)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -156,7 +156,7 @@ func handleDeleteWorkflow(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "workflow_id")
-		data, status, err := c.del(ctx, "/pipelines/"+id)
+		data, status, err := c.del(ctx, "/workflows/pipelines/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -181,7 +181,7 @@ func handleTriggerRun(c *client) server.ToolHandlerFunc {
 			}
 			body["inputs"] = inputs
 		}
-		data, status, err := c.post(ctx, "/pipelines/"+id+"/runs", body)
+		data, status, err := c.post(ctx, "/workflows/pipelines/"+id+"/runs", body)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -197,7 +197,7 @@ func handleListRuns(c *client) server.ToolHandlerFunc {
 		if err := c.cfg.validate(); err != nil {
 			return noAuth(), nil
 		}
-		path := "/runs"
+		path := "/workflows/runs"
 		if wfID := argStr(req, "workflow_id"); wfID != "" {
 			path += "?workflow_id=" + wfID
 		}
@@ -218,7 +218,7 @@ func handleGetRun(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "run_id")
-		data, status, err := c.get(ctx, "/runs/"+id)
+		data, status, err := c.get(ctx, "/workflows/runs/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -235,7 +235,7 @@ func handleCancelRun(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "run_id")
-		data, status, err := c.del(ctx, "/runs/"+id)
+		data, status, err := c.del(ctx, "/workflows/runs/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

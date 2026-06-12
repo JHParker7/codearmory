@@ -19,7 +19,7 @@ import (
 type hookRule struct {
 	RuleID     string    `json:"rule_id"`
 	Name       string    `json:"name"`
-	Repo       string    `json:"repo"`
+	Repo       string    `json:"source"`
 	Events     []string  `json:"events"`
 	RefFilter  string    `json:"ref_filter"`
 	WorkflowID string    `json:"workflow_id"`
@@ -29,7 +29,7 @@ type hookRule struct {
 
 type hookEvent struct {
 	EventID      string        `json:"event_id"`
-	Repo         string        `json:"repo"`
+	Repo         string        `json:"source"`
 	EventType    string        `json:"event_type"`
 	Ref          string        `json:"ref"`
 	RulesMatched int           `json:"rules_matched"`

@@ -85,7 +85,7 @@ func init() {
 
 			payload := map[string]any{
 				"name":          ruleName,
-				"repo":          ruleRepo,
+				"source":        ruleRepo,
 				"events":        ruleEvents,
 				"workflow_id":   ruleWorkflow,
 				"ref_filter":    ruleRefFilter,
@@ -179,7 +179,7 @@ func init() {
 
 			payload := map[string]any{
 				"name":          updateRuleName,
-				"repo":          updateRuleRepo,
+				"source":        updateRuleRepo,
 				"events":        updateRuleEvents,
 				"workflow_id":   updateRuleWorkflow,
 				"ref_filter":    updateRuleRefFilter,
