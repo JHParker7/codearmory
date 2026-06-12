@@ -253,6 +253,21 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Resolve the owner's username and org name so scoped-role permissions are
+	// stored in the same "<username>/..." form that checkPermissions scopes the
+	// request resource to at run time. Storing the raw resource would never match
+	// the scoped resource conductor sends for a run step (e.g. "alice/forge/...").
+	var ownerUsername, ownerOrgName string
+	if userRow, err := (User{UserID: req.UserID}).Get(ctx); err == nil {
+		owner := userRow.(User)
+		ownerUsername = owner.Username
+		if owner.OrgID != nil {
+			if orgRow, err2 := (Org{OrgID: *owner.OrgID}).Get(ctx); err2 == nil {
+				ownerOrgName = orgRow.(Org).OrgName
+			}
+		}
+	}
+
 	var permIDs []string
 	for _, p := range req.Permissions {
 		if p.Service == "" || p.Action == "" || p.Resource == "" {
@@ -275,7 +290,7 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 			Name:          "workflow:" + req.WorkflowID + ":" + name,
 			Service:       p.Service,
 			Actions:       []string{p.Action},
-			Resources:     []string{p.Resource},
+			Resources:     []string{scopeResource(p.Resource, ownerUsername, ownerOrgName)},
 			OwnerID:       req.UserID,
 			OrgID:         &orgID,
 			Active:        true,
