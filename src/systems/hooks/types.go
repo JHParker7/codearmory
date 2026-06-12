@@ -7,13 +7,13 @@ const (
 	maxRetryAttempts = 5
 )
 
-// PipelineRule describes a rule that maps incoming webhook events for a
-// repository to a workflow run. The Secret field is stored in the database
+// PipelineRule describes a rule that maps incoming webhook events from a
+// source to a workflow run. The Secret field is stored in the database
 // but is intentionally omitted from all JSON responses.
 type PipelineRule struct {
 	RuleID       string            `json:"rule_id"        gorm:"column:rule_id;primaryKey"`
 	Name         string            `json:"name"           gorm:"column:name"`
-	Repo         string            `json:"repo"           gorm:"column:repo"`
+	Source       string            `json:"source"         gorm:"column:repo"`
 	Events       []string          `json:"events"         gorm:"column:events;serializer:json"`
 	RefFilter    string            `json:"ref_filter"     gorm:"column:ref_filter"`
 	WorkflowID   string            `json:"workflow_id"    gorm:"column:workflow_id"`
@@ -31,7 +31,7 @@ func (PipelineRule) TableName() string { return "pipeline_rules" }
 // HookEvent is a single webhook delivery received by the service.
 type HookEvent struct {
 	EventID      string            `json:"event_id"       gorm:"column:event_id;primaryKey"`
-	Repo         string            `json:"repo"           gorm:"column:repo"`
+	Source       string            `json:"source"         gorm:"column:repo"`
 	EventType    string            `json:"event_type"     gorm:"column:event_type"`
 	Ref          string            `json:"ref"            gorm:"column:ref;default:''"`
 	Payload      map[string]string `json:"payload"        gorm:"column:payload;serializer:json"`
@@ -52,7 +52,7 @@ type HookTrigger struct {
 	WorkflowID string    `json:"workflow_id"       gorm:"column:workflow_id"`
 	RunID      *string   `json:"run_id,omitempty"  gorm:"column:run_id"`
 	Status     string    `json:"status"            gorm:"column:status;default:'pending'"`
-	Error      *string   `json:"error,omitempty"   gorm:"column:error"`
+	Error      *string   `json:"error"             gorm:"column:error"`
 	CreatedAt  time.Time `json:"created_at"        gorm:"column:created_at"`
 }
 

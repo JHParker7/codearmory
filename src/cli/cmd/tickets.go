@@ -5,25 +5,33 @@ import (
 	"fmt"
 	"net/url"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
 
 var ticketsCmd = &cobra.Command{
 	Use:   "tickets",
 	Short: "Manage tickets and comments",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		p := tea.NewProgram(standaloneWrap{newBoardModel()}, tea.WithAltScreen())
+		_, err := p.Run()
+		return err
+	},
 }
 
 func init() {
 	// ── armory tickets create ─────────────────────────────────────────────────
 
 	var (
-		ticketTitle    string
-		ticketDesc     string
-		ticketPriority string
-		ticketAssignee string
-		ticketWorkflow string
-		ticketRun      string
-		ticketForge    string
+		ticketTitle     string
+		ticketDesc      string
+		ticketPriority  string
+		ticketTimescale string
+		ticketDueDate   string
+		ticketAssignee  string
+		ticketWorkflow  string
+		ticketRun       string
+		ticketForge     string
 	)
 
 	createTicketCmd := &cobra.Command{
@@ -43,6 +51,12 @@ func init() {
 			}
 			if ticketPriority != "" {
 				payload["priority"] = ticketPriority
+			}
+			if ticketTimescale != "" {
+				payload["timescale"] = ticketTimescale
+			}
+			if ticketDueDate != "" {
+				payload["due_date"] = ticketDueDate
 			}
 			if ticketAssignee != "" {
 				payload["assignee_id"] = ticketAssignee
@@ -65,7 +79,9 @@ func init() {
 	}
 	createTicketCmd.Flags().StringVar(&ticketTitle, "title", "", "Ticket title (required)")
 	createTicketCmd.Flags().StringVar(&ticketDesc, "description", "", "Ticket description")
-	createTicketCmd.Flags().StringVar(&ticketPriority, "priority", "", "Priority: low, medium, high, critical (default: medium)")
+	createTicketCmd.Flags().StringVar(&ticketPriority, "priority", "", "Priority value (e.g. low, medium, high, critical)")
+	createTicketCmd.Flags().StringVar(&ticketTimescale, "timescale", "", "Timescale value (e.g. Q1 2026, sprint-3)")
+	createTicketCmd.Flags().StringVar(&ticketDueDate, "due-date", "", "Due date in YYYY-MM-DD format")
 	createTicketCmd.Flags().StringVar(&ticketAssignee, "assignee", "", "Assignee user ID")
 	createTicketCmd.Flags().StringVar(&ticketWorkflow, "workflow", "", "Linked pipeline ID")
 	createTicketCmd.Flags().StringVar(&ticketRun, "run", "", "Linked pipeline run ID")
@@ -74,9 +90,10 @@ func init() {
 	// ── armory tickets list ───────────────────────────────────────────────────
 
 	var (
-		listStatus   string
-		listPriority string
-		listAssignee string
+		listStatus    string
+		listPriority  string
+		listTimescale string
+		listAssignee  string
 	)
 
 	listTicketsCmd := &cobra.Command{
@@ -91,6 +108,9 @@ func init() {
 			if listPriority != "" {
 				q.Set("priority", listPriority)
 			}
+			if listTimescale != "" {
+				q.Set("timescale", listTimescale)
+			}
 			if listAssignee != "" {
 				q.Set("assignee_id", listAssignee)
 			}
@@ -101,8 +121,9 @@ func init() {
 			return apiCall("GET", path, nil)
 		},
 	}
-	listTicketsCmd.Flags().StringVar(&listStatus, "status", "", "Filter: open, in_progress, resolved, closed")
-	listTicketsCmd.Flags().StringVar(&listPriority, "priority", "", "Filter: low, medium, high, critical")
+	listTicketsCmd.Flags().StringVar(&listStatus, "status", "", "Filter by status value")
+	listTicketsCmd.Flags().StringVar(&listPriority, "priority", "", "Filter by priority value")
+	listTicketsCmd.Flags().StringVar(&listTimescale, "timescale", "", "Filter by timescale value")
 	listTicketsCmd.Flags().StringVar(&listAssignee, "assignee", "", "Filter by assignee user ID")
 
 	// ── armory tickets get ────────────────────────────────────────────────────
@@ -119,14 +140,16 @@ func init() {
 	// ── armory tickets update ─────────────────────────────────────────────────
 
 	var (
-		updateTitle    string
-		updateDesc     string
-		updateStatus   string
-		updatePriority string
-		updateAssignee string
-		updateWorkflow string
-		updateRun      string
-		updateForge    string
+		updateTitle     string
+		updateDesc      string
+		updateStatus    string
+		updatePriority  string
+		updateTimescale string
+		updateDueDate   string
+		updateAssignee  string
+		updateWorkflow  string
+		updateRun       string
+		updateForge     string
 	)
 
 	updateTicketCmd := &cobra.Command{
@@ -162,6 +185,12 @@ func init() {
 			if updatePriority != "" {
 				payload["priority"] = updatePriority
 			}
+			if updateTimescale != "" {
+				payload["timescale"] = updateTimescale
+			}
+			if updateDueDate != "" {
+				payload["due_date"] = updateDueDate
+			}
 			if updateAssignee != "" {
 				payload["assignee_id"] = updateAssignee
 			}
@@ -183,8 +212,10 @@ func init() {
 	}
 	updateTicketCmd.Flags().StringVar(&updateTitle, "title", "", "Ticket title (fetched automatically if omitted)")
 	updateTicketCmd.Flags().StringVar(&updateDesc, "description", "", "Ticket description")
-	updateTicketCmd.Flags().StringVar(&updateStatus, "status", "", "Status: open, in_progress, resolved, closed")
-	updateTicketCmd.Flags().StringVar(&updatePriority, "priority", "", "Priority: low, medium, high, critical")
+	updateTicketCmd.Flags().StringVar(&updateStatus, "status", "", "Status value")
+	updateTicketCmd.Flags().StringVar(&updatePriority, "priority", "", "Priority value")
+	updateTicketCmd.Flags().StringVar(&updateTimescale, "timescale", "", "Timescale value")
+	updateTicketCmd.Flags().StringVar(&updateDueDate, "due-date", "", "Due date in YYYY-MM-DD format")
 	updateTicketCmd.Flags().StringVar(&updateAssignee, "assignee", "", "Assignee user ID")
 	updateTicketCmd.Flags().StringVar(&updateWorkflow, "workflow", "", "Linked pipeline ID")
 	updateTicketCmd.Flags().StringVar(&updateRun, "run", "", "Linked pipeline run ID")

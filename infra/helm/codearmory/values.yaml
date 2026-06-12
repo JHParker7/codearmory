@@ -329,6 +329,9 @@ tickets:
     # Must match the tickets entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
+    # Shared HMAC secret for emitting ticket lifecycle events to the hooks service.
+    # Synced from hooks.secret.hooksTriggerKey when hooks is enabled. Leave empty for auto-sync.
+    hooksTriggerKey: ""
   tls:
     certSecret: ""
     clientAuth: ""

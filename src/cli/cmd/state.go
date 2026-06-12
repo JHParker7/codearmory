@@ -35,7 +35,7 @@ func init() {
 			if err != nil {
 				return fmt.Errorf("reading state: %w", err)
 			}
-			return apiCall("POST", "/state/"+args[0]+"/"+args[1], body)
+			return apiCall("POST", "/blueprints/state/"+args[0]+"/"+args[1], body)
 		},
 	}
 	pushCmd.Flags().StringVarP(&pushFile, "file", "f", "-", "state file path (default: stdin)")
@@ -49,7 +49,9 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("LOCK", "/state/"+args[0]+"/"+args[1], body)
+			// LOCK/UNLOCK are custom HTTP methods defined by the Terraform HTTP
+			// backend spec (hashicorp/go-tfe). They are not part of RFC 9110.
+			return apiCall("LOCK", "/blueprints/state/"+args[0]+"/"+args[1], body)
 		},
 	}
 	lockCmd.Flags().StringVar(&lockData, "data", "", "lock info JSON or @file")
@@ -64,7 +66,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("UNLOCK", "/state/"+args[0]+"/"+args[1], body)
+			return apiCall("UNLOCK", "/blueprints/state/"+args[0]+"/"+args[1], body)
 		},
 	}
 	unlockCmd.Flags().StringVar(&unlockData, "data", "", "lock info JSON or @file (must include matching lock ID)")
@@ -74,14 +76,14 @@ func init() {
 			Use:   "get <username> <workspace>",
 			Short: "Download Terraform state",
 			Args:  cobra.ExactArgs(2),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/state/"+args[0]+"/"+args[1], nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/blueprints/state/"+args[0]+"/"+args[1], nil) },
 		},
 		pushCmd,
 		&cobra.Command{
 			Use:   "delete <username> <workspace>",
 			Short: "Delete Terraform state",
 			Args:  cobra.ExactArgs(2),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/state/"+args[0]+"/"+args[1], nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/blueprints/state/"+args[0]+"/"+args[1], nil) },
 		},
 		lockCmd,
 		unlockCmd,

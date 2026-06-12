@@ -360,6 +360,7 @@ class TestUpdateUser:
                 "email": new_user["email"],
                 "username": new_user["username"],
                 "password": new_password,
+                "current_password": new_user["password"],
             },
             headers=bearer(token),
         )

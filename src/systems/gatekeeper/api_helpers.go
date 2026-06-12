@@ -37,6 +37,7 @@ type contextKey string
 
 const userIDKey contextKey = "user_id"
 const scopedRoleKey contextKey = "scoped_role_id"
+const clientIDKey contextKey = "client_id"
 
 // authClaims is the JWT claims type used for all session tokens. Subject holds
 // the user ID; ID (jti) holds the session ID used to look up the stored public key.
@@ -105,6 +106,11 @@ func authMiddleware(next http.Handler) http.Handler {
 		)
 
 		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			if cookie, err := r.Cookie("armory_session"); err == nil && cookie.Value != "" {
+				authHeader = "Bearer " + cookie.Value
+			}
+		}
 		if !strings.HasPrefix(authHeader, "Bearer ") {
 			span.SetStatus(codes.Error, "missing or malformed Authorization header")
 			slog.Warn("auth rejected: missing or malformed Authorization header", "method", r.Method, "path", r.URL.Path)
@@ -196,6 +202,9 @@ func authMiddleware(next http.Handler) http.Handler {
 		meterAuthMiddleware.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "accepted")))
 		slog.Debug("auth accepted", "user_id", claims.Subject, "session_id", session.SessionID, "method", r.Method, "path", r.URL.Path)
 		authCtx := context.WithValue(ctx, userIDKey, claims.Subject)
+		if session.ClientID != nil && *session.ClientID != "" {
+			authCtx = context.WithValue(authCtx, clientIDKey, *session.ClientID)
+		}
 		if session.ScopedRoleID != nil && *session.ScopedRoleID != "" {
 			authCtx = context.WithValue(authCtx, scopedRoleKey, *session.ScopedRoleID)
 		}
@@ -249,6 +258,22 @@ func matchPermission(perm Permissions, service, action, resource string) bool {
 	return false
 }
 
+// scopeResource prepends the username to resource unless the resource is already
+// scoped to that user (starts with "<username>/") or to their org (starts with
+// "org/<orgName>/"). If username is empty the resource is returned unchanged.
+func scopeResource(resource, username, orgName string) string {
+	if username == "" {
+		return resource
+	}
+	if strings.HasPrefix(resource, username+"/") {
+		return resource
+	}
+	if orgName != "" && strings.HasPrefix(resource, "org/"+orgName+"/") {
+		return resource
+	}
+	return username + "/" + resource
+}
+
 // checkPermissions resolves the caller's effective permissions by walking both
 // their direct role and their team's role, then returns true on the first
 // matching (service, action, resource) triple. Resource matching supports exact
@@ -285,6 +310,17 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 	user := row.(User)
 	permissionCheck.TeamID = user.TeamID
 	permissionCheck.OrgID = user.OrgID
+
+	// Scope the resource to the authenticated user. If the resource is already
+	// prefixed with "<username>/" or "org/<orgName>/" it is left unchanged so
+	// that callers who pre-scope (e.g. conductor) are not double-prefixed.
+	orgName := ""
+	if user.OrgID != nil {
+		if orgRow, err2 := (Org{OrgID: *user.OrgID}).Get(ctx); err2 == nil {
+			orgName = orgRow.(Org).OrgName
+		}
+	}
+	resource = scopeResource(resource, user.Username, orgName)
 
 	// When the session carries a scoped role (workflow run token), evaluate only
 	// the permissions in that role — the user's own role and team are bypassed.
@@ -480,6 +516,25 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	slog.Info("check_permissions request", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource)
 
 	w.Header().Set("Content-Type", "application/json")
+
+	clientID, _ := r.Context().Value(clientIDKey).(string)
+	if clientID != "" {
+		isAllowed, orgID, err := checkClientPermissions(r.Context(), clientID, req.Service, req.Action, req.Resource)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "client permission evaluation error")
+			slog.Error("check_permissions: client error", "client_id", clientID, "service", req.Service, "action", req.Action, "resource", req.Resource, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		span.SetAttributes(attribute.Bool("permission.authorized", isAllowed))
+		span.SetStatus(codes.Ok, "")
+		meterPermissionChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", isAllowed)))
+		slog.Info("check_permissions result (client)", "client_id", clientID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
+		json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": clientID, "org_id": orgID}) //nolint:errcheck
+		return
+	}
+
 	isAllowed, err := checkPermissions(r.Context(), userID, req.Service, req.Action, req.Resource)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		span.RecordError(err)
@@ -503,7 +558,99 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	if userRow, err := (User{UserID: userID}).Get(r.Context()); err == nil {
 		orgID = userRow.(User).OrgID
 	}
-	json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": userID, "org_id": orgID})
+	json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": userID, "org_id": orgID}) //nolint:errcheck
+}
+
+// checkClientPermissions evaluates whether the OAuth client with clientID may
+// perform action on resource within service, using the client's assigned role.
+// Returns (false, nil, nil) when the client has no role or the role grants no match.
+func checkClientPermissions(ctx context.Context, clientID, service, action, resource string) (bool, *string, error) {
+	client, err := getOAuthClientByClientID(ctx, clientID)
+	if err != nil {
+		return false, nil, err
+	}
+	var orgID *string
+	if client.OrgID != "" {
+		orgID = &client.OrgID
+	}
+
+	// Scope the resource to the client's org. If the resource is already prefixed
+	// with "org/<orgName>/" it is left unchanged.
+	if orgID != nil {
+		if orgRow, err2 := (Org{OrgID: *orgID}).Get(ctx); err2 == nil {
+			orgName := orgRow.(Org).OrgName
+			if orgName != "" && !strings.HasPrefix(resource, "org/"+orgName+"/") {
+				resource = "org/" + orgName + "/" + resource
+			}
+		}
+	}
+
+	if client.RoleID == nil {
+		return false, orgID, nil
+	}
+	roleRow, err := (Role{RoleID: *client.RoleID}).Get(ctx)
+	if err != nil {
+		return false, orgID, nil
+	}
+	role := roleRow.(Role)
+	if len(role.PermissionsIDs) == 0 {
+		return false, orgID, nil
+	}
+	var perms []Permissions
+	if err := connectRead().WithContext(ctx).
+		Where("permissions_id IN ? AND active = true", role.PermissionsIDs).
+		Find(&perms).Error; err != nil {
+		return false, orgID, nil
+	}
+	for _, p := range perms {
+		if matchPermission(p, service, action, resource) {
+			return true, orgID, nil
+		}
+	}
+	return false, orgID, nil
+}
+
+// handleAuthValidate returns the authenticated subject and its type ("user" or
+// "client"). Conductor calls this instead of GET /users/{id} so that both user
+// Bearer tokens and client_credentials tokens are validated uniformly.
+func handleAuthValidate(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID, _ := ctx.Value(userIDKey).(string)
+	clientID, _ := ctx.Value(clientIDKey).(string)
+
+	subject := userID
+	subjectType := "user"
+	var orgID *string
+	var username, orgName string
+
+	if clientID != "" {
+		subject = clientID
+		subjectType = "client"
+		if client, err := getOAuthClientByClientID(ctx, clientID); err == nil && client.OrgID != "" {
+			orgID = &client.OrgID
+			if orgRow, err2 := (Org{OrgID: client.OrgID}).Get(ctx); err2 == nil {
+				orgName = orgRow.(Org).OrgName
+			}
+		}
+	} else if userRow, err := (User{UserID: userID}).Get(ctx); err == nil {
+		user := userRow.(User)
+		username = user.Username
+		orgID = user.OrgID
+		if orgID != nil {
+			if orgRow, err2 := (Org{OrgID: *orgID}).Get(ctx); err2 == nil {
+				orgName = orgRow.(Org).OrgName
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"subject":      subject,
+		"subject_type": subjectType,
+		"org_id":       orgID,
+		"username":     username,
+		"org_name":     orgName,
+	})
 }
 
 // parseECPublicKey decodes a PEM-encoded PKIX public key and asserts it is ECDSA.
@@ -546,7 +693,9 @@ func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, 
 		if err := db.Save(&user).Error; err != nil {
 			return err
 		}
-		cacheDel(ctx, "gk:user:"+user.UserID)
+		// Use a detached context so cache invalidation is not skipped if the
+		// caller's request context is cancelled after the DB write commits.
+		cacheDel(context.WithoutCancel(ctx), "gk:user:"+user.UserID)
 	} else {
 		if err := db.Where("role_id = ? AND active = ?", *user.RoleID, true).First(&role).Error; err != nil {
 			return err
@@ -574,7 +723,7 @@ func grantServicePermissions(ctx context.Context, db *gorm.DB, service, userID, 
 	if err := db.Save(&role).Error; err != nil {
 		return err
 	}
-	cacheDel(ctx, "gk:role:"+role.RoleID)
+	cacheDel(context.WithoutCancel(ctx), "gk:role:"+role.RoleID)
 	return nil
 }
 
@@ -723,9 +872,7 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 			return ServiceAccount{}, false
 		}
 		slog.Warn("service auth: bootstrap key fallback used; service will re-rotate", "service", name)
-		if err2 := connect().WithContext(r.Context()).Model(&ServiceAccount{}).
-			Where("service_name = ?", name).
-			Update("hashed_key", svc.HashedBootstrapKey).Error; err2 != nil {
+		if err2 := syncServiceAccountBootstrapKey(r.Context(), name, svc.HashedBootstrapKey); err2 != nil {
 			slog.Error("service auth: failed to sync hashed_key from bootstrap", "service", name, "error", err2)
 		}
 	}

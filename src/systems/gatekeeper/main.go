@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/code-armory-app/codearmory_sdk/telemetry"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/bcrypt"
@@ -89,7 +88,7 @@ func envDuration(key string, def time.Duration) time.Duration {
 // rotated at runtime survive Gatekeeper restarts. The bootstrap key fallback in
 // requireServiceAuth lets a service pod re-authenticate after a restart with its
 // original GATEKEEPER_SERVICE_KEY even when HashedKey holds a rotated value.
-func seedServiceAccounts(db *gorm.DB) {
+func seedServiceAccounts(ctx context.Context) {
 	raw := secret("GATEKEEPER_SERVICES")
 	if raw == "" {
 		return
@@ -107,31 +106,7 @@ func seedServiceAccounts(db *gorm.DB) {
 			slog.Error("seedServiceAccounts: bcrypt failed", "name", name, "error", err)
 			continue
 		}
-		var existing ServiceAccount
-		err = db.Where("service_name = ?", name).First(&existing).Error
-		if err == nil {
-			// Preserve rotated HashedKey; refresh HashedBootstrapKey so pod restarts
-			// after rotation can re-authenticate via the bootstrap key fallback.
-			if err2 := db.Model(&ServiceAccount{}).Where("service_name = ?", name).
-				Update("hashed_bootstrap_key", string(hash)).Error; err2 != nil {
-				slog.Error("seedServiceAccounts: update bootstrap key failed", "name", name, "error", err2)
-			} else {
-				slog.Debug("seedServiceAccounts: account exists, bootstrap key refreshed", "name", name)
-			}
-			continue
-		}
-		svc := ServiceAccount{
-			ServiceAccountID:   uuid.New().String(),
-			ServiceName:        name,
-			HashedKey:          string(hash),
-			HashedBootstrapKey: string(hash),
-			Active:             true,
-		}
-		if err := db.Create(&svc).Error; err != nil {
-			slog.Error("seedServiceAccounts: create failed", "name", name, "error", err)
-		} else {
-			slog.Info("seedServiceAccounts: created", "name", name)
-		}
+		upsertServiceAccountDB(ctx, name, string(hash))
 	}
 }
 
@@ -186,10 +161,10 @@ func main() {
 
 	initSecretsEncryption()
 
-	db := connect()
-	db.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{})
-	applyForeignKeys(db)
-	seedServiceAccounts(db)
+	conn := connect()
+	conn.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{})
+	applyForeignKeys(conn)
+	seedServiceAccounts(ctx)
 	initOIDC()
 
 	if registryURL := os.Getenv("REGISTRY_URL"); registryURL != "" {
@@ -205,6 +180,7 @@ func main() {
 	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
 	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, envInt("SIGNUP_RATE_LIMIT", 10), envDuration("SIGNUP_RATE_WINDOW", 10*time.Minute), handleSignup))
 	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleLogin))
+	mux.HandleFunc("POST /logout", handleLogout)
 	mux.HandleFunc("POST /mfa/verify", rateLimitMiddleware("mfa-verify", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleMFAVerify))
 
 	// OIDC provider — used by Forgejo/Gitea and any other OAuth2 client.
@@ -220,6 +196,7 @@ func main() {
 	mux.HandleFunc("GET /internal/oauth/clients", handleListOAuthClients)
 	mux.HandleFunc("DELETE /internal/oauth/clients/{id}", handleDeleteOAuthClient)
 	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
+	mux.Handle("GET /auth/validate", authMiddleware(http.HandlerFunc(handleAuthValidate)))
 
 	mw := func(h http.HandlerFunc) http.Handler { return authMiddleware(http.HandlerFunc(h)) }
 

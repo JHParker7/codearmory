@@ -36,7 +36,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/permissions", body)
+			return apiCall("POST", "/gatekeeper/permissions", body)
 		},
 	}
 	createCmd.Flags().StringArrayVar(&createActions, "action", nil, "Allowed action (repeatable, e.g. read, write)")
@@ -60,7 +60,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/permissions/"+args[0], body)
+			return apiCall("PUT", "/gatekeeper/permissions/"+args[0], body)
 		},
 	}
 	updateCmd.Flags().StringArrayVar(&updateActions, "action", nil, "Allowed action (repeatable)")
@@ -72,14 +72,14 @@ func init() {
 			Use:   "get <id>",
 			Short: "Get a permission by ID",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/permissions/"+args[0], nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gatekeeper/permissions/"+args[0], nil) },
 		},
 		updateCmd,
 		&cobra.Command{
 			Use:   "delete <id>",
 			Short: "Delete a permission",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/permissions/"+args[0], nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/gatekeeper/permissions/"+args[0], nil) },
 		},
 	)
 	rootCmd.AddCommand(permissionsCmd)

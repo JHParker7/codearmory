@@ -13,6 +13,8 @@ import (
 )
 
 // ctxCredsKey is the context key for per-request registry credentials.
+// Using a private struct type (not a string) prevents collisions with any
+// other package storing values in the same context.
 type ctxCredsKey struct{}
 
 type registryCreds struct {

@@ -66,7 +66,7 @@ func handleListRules(c *client) server.ToolHandlerFunc {
 		if err := c.cfg.validate(); err != nil {
 			return noAuth(), nil
 		}
-		data, status, err := c.get(ctx, "/rules")
+		data, status, err := c.get(ctx, "/hooks/rules")
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -83,7 +83,7 @@ func handleGetRule(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "rule_id")
-		data, status, err := c.get(ctx, "/rules/"+id)
+		data, status, err := c.get(ctx, "/hooks/rules/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -109,7 +109,7 @@ func handleCreateRule(c *client) server.ToolHandlerFunc {
 		secret := argStr(req, "secret")
 		body := map[string]any{
 			"name":       argStr(req, "name"),
-			"repo":       argStr(req, "repo"),
+			"source":     argStr(req, "repo"),
 			"events":     events,
 			"workflow_id": argStr(req, "workflow_id"),
 			"secret":     secret,
@@ -124,7 +124,7 @@ func handleCreateRule(c *client) server.ToolHandlerFunc {
 			body["input_mapping"] = mapping
 		}
 
-		data, status, err := c.post(ctx, "/rules", body)
+		data, status, err := c.post(ctx, "/hooks/rules", body)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -149,7 +149,7 @@ func handleUpdateRule(c *client) server.ToolHandlerFunc {
 
 		body := map[string]any{
 			"name":        argStr(req, "name"),
-			"repo":        argStr(req, "repo"),
+			"source":      argStr(req, "repo"),
 			"events":      events,
 			"workflow_id": argStr(req, "workflow_id"),
 			"ref_filter":  argStr(req, "ref_filter"),
@@ -169,7 +169,7 @@ func handleUpdateRule(c *client) server.ToolHandlerFunc {
 		}
 
 		id := argStr(req, "rule_id")
-		data, status, err := c.put(ctx, "/rules/"+id, body)
+		data, status, err := c.put(ctx, "/hooks/rules/"+id, body)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -186,7 +186,7 @@ func handleDeleteRule(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "rule_id")
-		data, status, err := c.del(ctx, "/rules/"+id)
+		data, status, err := c.del(ctx, "/hooks/rules/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -202,7 +202,7 @@ func handleListEvents(c *client) server.ToolHandlerFunc {
 		if err := c.cfg.validate(); err != nil {
 			return noAuth(), nil
 		}
-		path := "/events"
+		path := "/hooks/events"
 		if repo := argStr(req, "repo"); repo != "" {
 			path += "?repo=" + url.QueryEscape(repo)
 		}
@@ -223,7 +223,7 @@ func handleGetEvent(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "event_id")
-		data, status, err := c.get(ctx, "/events/"+id)
+		data, status, err := c.get(ctx, "/hooks/events/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

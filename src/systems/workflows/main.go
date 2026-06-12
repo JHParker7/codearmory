@@ -298,15 +298,8 @@ func limitBody(next http.Handler) http.Handler {
 // crash) as 'failed' so they do not block the worker queue indefinitely.
 // Sessions are nulled out; their JWTs expire naturally within the 1-hour TTL.
 func recoverStuckRuns() {
-	result := connect().Exec(
-		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE status='running'",
-	)
-	if result.Error != nil {
-		slog.Error("startup: failed to recover stuck runs", "error", result.Error)
-		return
-	}
-	if result.RowsAffected > 0 {
-		slog.Warn("startup: recovered stuck runs from previous pod", "count", result.RowsAffected)
+	if n := recoverStuckRunsDB(); n > 0 {
+		slog.Warn("startup: recovered stuck runs from previous pod", "count", n)
 	}
 }
 
@@ -391,16 +384,16 @@ func main() {
 	mux.HandleFunc("PUT /steps/{id}", handleUpdateStep)
 	mux.HandleFunc("DELETE /steps/{id}", handleDeleteStep)
 
-	mux.HandleFunc("POST /workflows", handleCreateWorkflow)
-	mux.HandleFunc("GET /workflows", handleListWorkflows)
-	mux.HandleFunc("GET /workflows/{id}", handleGetWorkflow)
-	mux.HandleFunc("PUT /workflows/{id}", handleUpdateWorkflow)
-	mux.HandleFunc("DELETE /workflows/{id}", handleDeleteWorkflow)
+	mux.HandleFunc("POST /pipelines", handleCreateWorkflow)
+	mux.HandleFunc("GET /pipelines", handleListWorkflows)
+	mux.HandleFunc("GET /pipelines/{id}", handleGetWorkflow)
+	mux.HandleFunc("PUT /pipelines/{id}", handleUpdateWorkflow)
+	mux.HandleFunc("DELETE /pipelines/{id}", handleDeleteWorkflow)
 
-	mux.HandleFunc("POST /workflows/{id}/runs", handleTriggerRun)
+	mux.HandleFunc("POST /pipelines/{id}/runs", handleTriggerRun)
 	mux.HandleFunc("POST /internal/catalog/refresh", handleCatalogRefresh)
-	mux.HandleFunc("POST /internal/workflows/{id}/runs", handleInternalTriggerRun)
-	mux.HandleFunc("GET /internal/workflows/{id}", handleInternalGetWorkflow)
+	mux.HandleFunc("POST /internal/pipelines/{id}/runs", handleInternalTriggerRun)
+	mux.HandleFunc("GET /internal/pipelines/{id}", handleInternalGetWorkflow)
 	mux.HandleFunc("GET /internal/runs/{id}", handleInternalGetRun)
 	mux.HandleFunc("GET /runs", handleListRuns)
 	mux.HandleFunc("GET /runs/{id}", handleGetRun)

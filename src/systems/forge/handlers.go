@@ -193,7 +193,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		attribute.String("runner_class", req.RunnerClass),
 	)
 
-	exec := &Execution{
+	exec := Execution{
 		ExecutionID: executionID,
 		UserID:      userID,
 		Image:       req.Image,
@@ -203,7 +203,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		RunnerClass: req.RunnerClass,
 		Status:      StatusPending,
 	}
-	if err := connect().WithContext(ctx).Create(exec).Error; err != nil {
+	if err := exec.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		slog.Error("submit: insert execution", "error", err)
@@ -239,7 +239,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("permission.granted")
 	slog.Info("get execution request", "user_id", userID, "execution_id", executionID)
 
-	exec, err := getExecution(ctx, executionID, userID)
+	row, err := (Execution{ExecutionID: executionID, UserID: userID}).Get(ctx)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		span.SetStatus(codes.Error, "execution not found")
 		slog.Warn("get execution: not found", "user_id", userID, "execution_id", executionID)
@@ -252,6 +252,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	exec := row.(Execution)
 
 	span.SetStatus(codes.Ok, "")
 	slog.Info("get execution: success", "user_id", userID, "execution_id", executionID, "status", exec.Status)
@@ -274,20 +275,16 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("permission.granted")
 	slog.Info("list executions request", "user_id", userID)
 
-	var executions []Execution
-	if err := connect().WithContext(ctx).
-		Select("execution_id, user_id, image, status, exit_code, created_at, started_at, ended_at, runner_class").
-		Where("user_id = ?", userID).
-		Order("created_at DESC").
-		Limit(100).
-		Find(&executions).Error; err != nil {
+	rows, err := (Execution{UserID: userID}).List(ctx, 100, 0)
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if executions == nil {
-		executions = []Execution{}
+	executions := make([]Execution, len(rows))
+	for i, r := range rows {
+		executions[i] = r.(Execution)
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -316,7 +313,7 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		span.AddEvent("permission.granted")
 		slog.Info("cancel execution request", "user_id", userID, "execution_id", executionID)
 
-		exec, err := getExecution(ctx, executionID, userID)
+		row, err := (Execution{ExecutionID: executionID, UserID: userID}).Get(ctx)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Error, "execution not found")
 			slog.Warn("cancel execution: not found", "user_id", userID, "execution_id", executionID)
@@ -330,6 +327,7 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
+		exec := row.(Execution)
 
 		switch exec.Status {
 		case StatusCompleted, StatusFailed, StatusTimedOut, StatusCancelled:
@@ -338,10 +336,7 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 			http.Error(w, "execution already finished", http.StatusConflict)
 			return
 		case StatusPending:
-			if err := connect().WithContext(ctx).Exec(
-				`UPDATE executions SET status = 'cancelled', ended_at = now() WHERE execution_id = ? AND status = 'pending'`,
-				executionID,
-			).Error; err != nil {
+			if _, err := exec.Cancel(ctx); err != nil {
 				span.RecordError(err)
 				span.SetStatus(codes.Error, "db update failed")
 				slog.Error("cancel execution: db update failed", "user_id", userID, "execution_id", executionID, "error", err)
@@ -359,12 +354,3 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 	}
 }
 
-// ── Shared ────────────────────────────────────────────────────────────────────
-
-func getExecution(ctx context.Context, executionID, userID string) (Execution, error) {
-	var e Execution
-	err := connect().WithContext(ctx).
-		Where("execution_id = ? AND user_id = ?", executionID, userID).
-		First(&e).Error
-	return e, err
-}

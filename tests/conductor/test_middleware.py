@@ -34,7 +34,7 @@ def rand_id():
 class TestPublicRoutes:
     def test_signup_requires_no_auth(self, base_url):
         uid = rand_id()[:8]
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": f"pub_{uid}@example.com",
             "username": f"pub_{uid}",
             "password": "password123",
@@ -42,7 +42,7 @@ class TestPublicRoutes:
         assert resp.status_code == 201
 
     def test_login_requires_no_auth(self, base_url, new_user):
-        resp = requests.post(f"{base_url}/login", json={
+        resp = requests.post(f"{base_url}/gatekeeper/login", json={
             "email": new_user["email"],
             "password": new_user["password"],
         })
@@ -50,7 +50,7 @@ class TestPublicRoutes:
 
     def test_signup_returns_user_id(self, base_url):
         uid = rand_id()[:8]
-        resp = requests.post(f"{base_url}/signup", json={
+        resp = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": f"pub2_{uid}@example.com",
             "username": f"pub2_{uid}",
             "password": "password123",
@@ -58,7 +58,7 @@ class TestPublicRoutes:
         assert "user_id" in resp.json()
 
     def test_login_returns_token(self, base_url, new_user):
-        resp = requests.post(f"{base_url}/login", json={
+        resp = requests.post(f"{base_url}/gatekeeper/login", json={
             "email": new_user["email"],
             "password": new_user["password"],
         })
@@ -79,34 +79,34 @@ class TestMissingAuth:
         assert resp.status_code == 401, f"{method.upper()} {path} → {resp.status_code}"
 
     def test_no_header_on_get_user(self, base_url):
-        self._assert_401(base_url, "get", f"/users/{rand_id()}")
+        self._assert_401(base_url, "get", f"/gatekeeper/users/{rand_id()}")
 
     def test_no_header_on_get_orgs(self, base_url):
-        self._assert_401(base_url, "get", "/orgs")
+        self._assert_401(base_url, "get", "/gatekeeper/orgs")
 
     def test_no_header_on_post_orgs(self, base_url):
-        self._assert_401(base_url, "post", "/orgs")
+        self._assert_401(base_url, "post", "/gatekeeper/orgs")
 
     def test_no_header_on_state_route(self, base_url):
-        self._assert_401(base_url, "get", f"/state/alice/dev")
+        self._assert_401(base_url, "get", f"/blueprints/state/alice/dev")
 
     def test_non_bearer_scheme_returns_401(self, base_url):
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/gatekeeper/users/{rand_id()}",
             headers={"Authorization": "Token abc123"},
         )
         assert resp.status_code == 401
 
     def test_basic_scheme_returns_401(self, base_url):
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/gatekeeper/users/{rand_id()}",
             headers={"Authorization": "Basic dXNlcjpwYXNz"},
         )
         assert resp.status_code == 401
 
     def test_empty_authorization_header_returns_401(self, base_url):
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/gatekeeper/users/{rand_id()}",
             headers={"Authorization": ""},
         )
         assert resp.status_code == 401
@@ -120,28 +120,28 @@ class TestMissingAuth:
 class TestMalformedToken:
     def test_non_jwt_string_returns_401(self, base_url):
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/gatekeeper/users/{rand_id()}",
             headers={"Authorization": "Bearer notajwt"},
         )
         assert resp.status_code == 401
 
     def test_two_segment_jwt_returns_401(self, base_url):
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/gatekeeper/users/{rand_id()}",
             headers={"Authorization": "Bearer header.payload"},
         )
         assert resp.status_code == 401
 
     def test_four_segment_jwt_returns_401(self, base_url):
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/gatekeeper/users/{rand_id()}",
             headers={"Authorization": "Bearer a.b.c.d"},
         )
         assert resp.status_code == 401
 
     def test_invalid_base64_payload_returns_401(self, base_url):
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/gatekeeper/users/{rand_id()}",
             headers={"Authorization": "Bearer header.!!!invalid!!!.signature"},
         )
         assert resp.status_code == 401
@@ -152,7 +152,7 @@ class TestMalformedToken:
         ).rstrip(b"=").decode()
         token = f"eyJhbGciOiJFUzI1NiJ9.{payload}.fakesig"
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/gatekeeper/users/{rand_id()}",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 401
@@ -163,7 +163,7 @@ class TestMalformedToken:
         ).rstrip(b"=").decode()
         token = f"eyJhbGciOiJFUzI1NiJ9.{payload}.fakesig"
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/gatekeeper/users/{rand_id()}",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 401
@@ -175,7 +175,7 @@ class TestMalformedToken:
         ).rstrip(b"=").decode()
         token = f"eyJhbGciOiJFUzI1NiJ9.{payload}.fakesig"
         resp = requests.get(
-            f"{base_url}/users/{rand_id()}",
+            f"{base_url}/gatekeeper/users/{rand_id()}",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 401
@@ -190,7 +190,7 @@ class TestValidToken:
     def test_valid_token_reaches_gatekeeper(self, base_url, token, new_user):
         """A valid token lets the request through; Gatekeeper returns 200 for own user."""
         resp = requests.get(
-            f"{base_url}/users/{new_user['user_id']}",
+            f"{base_url}/gatekeeper/users/{new_user['user_id']}",
             headers=bearer(token),
         )
         assert resp.status_code == 200
@@ -198,7 +198,7 @@ class TestValidToken:
     def test_gatekeeper_response_is_proxied(self, base_url, token, new_user):
         """Conductor forwards the full Gatekeeper response body unchanged."""
         resp = requests.get(
-            f"{base_url}/users/{new_user['user_id']}",
+            f"{base_url}/gatekeeper/users/{new_user['user_id']}",
             headers=bearer(token),
         )
         body = resp.json()
@@ -208,7 +208,7 @@ class TestValidToken:
     def test_gatekeeper_permission_denial_is_proxied(self, base_url, token):
         """Conductor forwards 403 from Gatekeeper without interfering."""
         resp = requests.get(
-            f"{base_url}/users/{uuid.uuid4()}",
+            f"{base_url}/gatekeeper/users/{uuid.uuid4()}",
             headers=bearer(token),
         )
         assert resp.status_code == 403
@@ -224,7 +224,7 @@ class TestDeletedUser:
         uid = rand_id()[:8]
         email = f"del_{uid}@example.com"
 
-        signup = requests.post(f"{base_url}/signup", json={
+        signup = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": email,
             "username": f"del_{uid}",
             "password": "password123",
@@ -233,7 +233,7 @@ class TestDeletedUser:
         user_id = signup.json()["user_id"]
 
         login = requests.post(
-            f"{base_url}/login",
+            f"{base_url}/gatekeeper/login",
             json={"email": email, "password": "password123"},
         )
         assert login.status_code == 200
@@ -241,20 +241,20 @@ class TestDeletedUser:
 
         # Token works before deletion.
         pre = requests.get(
-            f"{base_url}/users/{user_id}",
+            f"{base_url}/gatekeeper/users/{user_id}",
             headers=bearer(token),
         )
         assert pre.status_code == 200
 
         # Delete the user through conductor (proxied to Gatekeeper).
         requests.delete(
-            f"{base_url}/users/{user_id}",
+            f"{base_url}/gatekeeper/users/{user_id}",
             headers=bearer(token),
         )
 
         # Conductor's middleware must now reject the stale token.
         post = requests.get(
-            f"{base_url}/users/{user_id}",
+            f"{base_url}/gatekeeper/users/{user_id}",
             headers=bearer(token),
         )
         assert post.status_code == 401
@@ -264,7 +264,7 @@ class TestDeletedUser:
         uid = rand_id()[:8]
         email = f"del2_{uid}@example.com"
 
-        signup = requests.post(f"{base_url}/signup", json={
+        signup = requests.post(f"{base_url}/gatekeeper/signup", json={
             "email": email,
             "username": f"del2_{uid}",
             "password": "password123",
@@ -273,16 +273,16 @@ class TestDeletedUser:
         user_id = signup.json()["user_id"]
 
         login = requests.post(
-            f"{base_url}/login",
+            f"{base_url}/gatekeeper/login",
             json={"email": email, "password": "password123"},
         )
         token = login.json()["token"]
 
         requests.delete(
-            f"{base_url}/users/{user_id}",
+            f"{base_url}/gatekeeper/users/{user_id}",
             headers=bearer(token),
         )
 
-        for path in ["/orgs", "/teams", f"/state/{uid}/dev"]:
+        for path in ["/gatekeeper/orgs", "/gatekeeper/teams", f"/blueprints/state/{uid}/dev"]:
             resp = requests.get(f"{base_url}{path}", headers=bearer(token))
             assert resp.status_code == 401, f"expected 401 for {path}, got {resp.status_code}"

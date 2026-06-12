@@ -235,9 +235,8 @@ func handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 
 	// Refuse deletion while users or teams still reference this role to prevent
 	// access disruption (those users would lose all permissions on next auth check).
-	var userCount, teamCount int64
-	connect().WithContext(ctx).Model(&User{}).Where("role_id = ? AND active = ?", id, true).Count(&userCount)
-	connect().WithContext(ctx).Model(&Team{}).Where("role_id = ? AND active = ?", id, true).Count(&teamCount)
+	userCount, _ := countUsersByRole(ctx, id)
+	teamCount, _ := countTeamsByRole(ctx, id)
 	if userCount > 0 || teamCount > 0 {
 		span.SetStatus(codes.Error, "role still in use")
 		slog.Warn("delete role: role still referenced", "caller_id", callerID, "role_id", id, "users", userCount, "teams", teamCount)

@@ -16,7 +16,7 @@ def test_webhook_missing_repo(bearer):
     assert res.status_code == 400
 
 def test_webhook_missing_event():
-    res = requests.post(f"{HOOKS_URL}/hooks", json={"repo": "org/repo"})
+    res = requests.post(f"{HOOKS_URL}/hooks", json={"source": "org/repo"})
     assert res.status_code == 400
 
 def test_webhook_invalid_json():
@@ -31,7 +31,7 @@ def test_webhook_invalid_json():
 def test_webhook_no_rules_returns_200():
     """A valid webhook with no matching rules should still return 200."""
     res = requests.post(f"{HOOKS_URL}/hooks", json={
-        "repo": "unknown/repo",
+        "source": "unknown/repo",
         "event": "push",
         "ref": "refs/heads/main",
     })
@@ -52,9 +52,8 @@ _PUSH_SECRET = "push-test-secret"
 def push_rule(bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
         "name": "push-to-main",
-        "repo": "ci/myapp",
+        "source": "ci/myapp",
         "events": ["push"],
-        "ref_filter": "refs/heads/main",
         "workflow_id": workflow["workflow_id"],
         "input_mapping": {"COMMIT_SHA": "commit", "PUSHED_BY": "pusher"},
         "secret": _PUSH_SECRET,
@@ -67,7 +66,7 @@ def push_rule(bearer, workflow):
 
 def test_webhook_matches_rule_and_triggers(push_rule):
     import json as _json
-    payload = {"repo": "ci/myapp", "event": "push", "ref": "refs/heads/main",
+    payload = {"source": "ci/myapp", "event": "push", "ref": "refs/heads/main",
                "commit": "abc123", "pusher": "alice"}
     body = _json.dumps(payload).encode()
     sig = _sign(_PUSH_SECRET, body)
@@ -84,25 +83,41 @@ def test_webhook_matches_rule_and_triggers(push_rule):
     assert trig["run_id"] is not None
 
 
-def test_webhook_ref_filter_mismatch_no_trigger(push_rule):
-    """A push to a feature branch should not trigger the main-only rule."""
-    res = requests.post(f"{HOOKS_URL}/hooks", json={
-        "repo": "ci/myapp",
-        "event": "push",
-        "ref": "refs/heads/feature/my-feature",
-        "commit": "def456",
+def test_webhook_ignores_ref_filter_on_generic_endpoint(bearer, workflow):
+    """The generic /hooks endpoint carries no ref, so a rule with a ref_filter
+    can never match here — ref-based filtering is an adapter-level concern
+    (see adapter_git / github_app, which pass payload.Ref). A correctly-signed
+    push on the filtered branch still matches zero rules via the generic path."""
+    import json as _json
+    res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
+        "name": "ref-filtered",
+        "source": "ci/reffed",
+        "events": ["push"],
+        "ref_filter": "refs/heads/main",
+        "workflow_id": workflow["workflow_id"],
+        "secret": "ref-filter-secret",
     })
+    assert res.status_code == 201, res.text
+    rid = res.json()["rule_id"]
+
+    payload = {"source": "ci/reffed", "event": "push", "ref": "refs/heads/main"}
+    body = _json.dumps(payload).encode()
+    sig = _sign("ref-filter-secret", body)
+    res = requests.post(f"{HOOKS_URL}/hooks", data=body,
+                        headers={"Content-Type": "application/json",
+                                 "X-Hub-Signature-256": sig})
     assert res.status_code == 200
     data = res.json()
-    # The rule exists for this repo+event but its ref_filter should exclude this ref.
     assert data["rules_matched"] == 0
     assert data["status"] == "received"
+
+    requests.delete(f"{HOOKS_URL}/rules/{rid}", headers=bearer)
 
 
 def test_webhook_event_type_mismatch_no_trigger(push_rule):
     """A merge event should not trigger a push-only rule."""
     res = requests.post(f"{HOOKS_URL}/hooks", json={
-        "repo": "ci/myapp",
+        "source": "ci/myapp",
         "event": "merge",
         "ref": "refs/heads/main",
     })
@@ -114,7 +129,7 @@ def test_webhook_event_type_mismatch_no_trigger(push_rule):
 def test_x_hook_event_header_overrides_body(push_rule):
     """X-Hook-Event header should override the event field in the body."""
     import json as _json
-    payload = {"repo": "ci/myapp", "event": "merge",
+    payload = {"source": "ci/myapp", "event": "merge",
                "ref": "refs/heads/main", "commit": "xyz"}
     body = _json.dumps(payload).encode()
     sig = _sign(_PUSH_SECRET, body)
@@ -134,7 +149,7 @@ def test_x_hook_event_header_overrides_body(push_rule):
 def secret_rule(bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
         "name": "secret-push-rule",
-        "repo": "ci/secured",
+        "source": "ci/secured",
         "events": ["push"],
         "workflow_id": workflow["workflow_id"],
         "secret": "test-webhook-secret",
@@ -151,7 +166,7 @@ def _sign(secret: str, body: bytes) -> str:
 
 def test_webhook_hmac_valid_signature(secret_rule):
     import json as _json
-    payload = {"repo": "ci/secured", "event": "push", "ref": "refs/heads/main"}
+    payload = {"source": "ci/secured", "event": "push", "ref": "refs/heads/main"}
     body = _json.dumps(payload).encode()
     sig = _sign("test-webhook-secret", body)
     res = requests.post(f"{HOOKS_URL}/hooks",
@@ -166,7 +181,7 @@ def test_webhook_hmac_valid_signature(secret_rule):
 
 def test_webhook_hmac_invalid_signature_skips_rule(secret_rule):
     import json as _json
-    payload = {"repo": "ci/secured", "event": "push", "ref": "refs/heads/main"}
+    payload = {"source": "ci/secured", "event": "push", "ref": "refs/heads/main"}
     body = _json.dumps(payload).encode()
     res = requests.post(f"{HOOKS_URL}/hooks",
                         data=body,
@@ -191,7 +206,7 @@ def test_get_event_unauthorized():
 def test_list_events_returns_array(bearer, push_rule):
     # Fire a webhook to ensure at least one event exists for this user's rules.
     requests.post(f"{HOOKS_URL}/hooks", json={
-        "repo": "ci/myapp", "event": "push",
+        "source": "ci/myapp", "event": "push",
         "ref": "refs/heads/main", "commit": "list-test",
     })
     time.sleep(0.5)  # give fire-and-forget DB writes a moment to land
@@ -201,16 +216,20 @@ def test_list_events_returns_array(bearer, push_rule):
     assert isinstance(res.json(), list)
 
 def test_list_events_filter_by_repo(bearer, push_rule):
-    res = requests.get(f"{HOOKS_URL}/events?repo=ci/myapp", headers=bearer)
+    res = requests.get(f"{HOOKS_URL}/events?source=ci/myapp", headers=bearer)
     assert res.status_code == 200
     for ev in res.json():
-        assert ev["repo"] == "ci/myapp"
+        assert ev["source"] == "ci/myapp"
 
 def test_get_event_found(bearer, push_rule):
-    res = requests.post(f"{HOOKS_URL}/hooks", json={
-        "repo": "ci/myapp", "event": "push",
-        "ref": "refs/heads/main", "commit": "get-event-test",
-    })
+    import json as _json
+    payload = {"source": "ci/myapp", "event": "push",
+               "ref": "refs/heads/main", "commit": "get-event-test"}
+    body = _json.dumps(payload).encode()
+    sig = _sign(_PUSH_SECRET, body)
+    res = requests.post(f"{HOOKS_URL}/hooks", data=body,
+                        headers={"Content-Type": "application/json",
+                                 "X-Hub-Signature-256": sig})
     event_id = res.json()["event_id"]
     time.sleep(0.5)
 

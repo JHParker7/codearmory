@@ -32,7 +32,7 @@ def test_delete_rule_unauthorized():
 
 def test_create_rule_missing_name(bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
-        "repo": "org/repo", "events": ["push"],
+        "source": "org/repo", "events": ["push"],
         "workflow_id": workflow["workflow_id"],
     })
     assert res.status_code == 400
@@ -46,14 +46,14 @@ def test_create_rule_missing_repo(bearer, workflow):
 
 def test_create_rule_empty_events(bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
-        "name": "my-rule", "repo": "org/repo", "events": [],
+        "name": "my-rule", "source": "org/repo", "events": [],
         "workflow_id": workflow["workflow_id"],
     })
     assert res.status_code == 400
 
 def test_create_rule_missing_workflow_id(bearer):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
-        "name": "my-rule", "repo": "org/repo", "events": ["push"],
+        "name": "my-rule", "source": "org/repo", "events": ["push"],
     })
     assert res.status_code == 400
 
@@ -64,7 +64,7 @@ def test_create_rule_missing_workflow_id(bearer):
 def rule(bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
         "name": "deploy-on-push",
-        "repo": "myorg/myrepo",
+        "source": "myorg/myrepo",
         "events": ["push"],
         "ref_filter": "refs/heads/main",
         "workflow_id": workflow["workflow_id"],
@@ -80,7 +80,7 @@ def rule(bearer, workflow):
 def test_create_rule_returns_201(rule):
     assert rule["rule_id"] != ""
     assert rule["name"] == "deploy-on-push"
-    assert rule["repo"] == "myorg/myrepo"
+    assert rule["source"] == "myorg/myrepo"
     assert "push" in rule["events"]
     assert rule["ref_filter"] == "refs/heads/main"
     assert rule["active"] is True
@@ -88,7 +88,7 @@ def test_create_rule_returns_201(rule):
 def test_create_rule_secret_not_in_response(bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
         "name": "secret-rule",
-        "repo": "org/secretrepo",
+        "source": "org/secretrepo",
         "events": ["push"],
         "workflow_id": workflow["workflow_id"],
         "secret": "my-webhook-secret",
@@ -128,7 +128,7 @@ def test_get_nonexistent_rule(bearer):
 def test_update_rule(bearer, rule, workflow):
     res = requests.put(f"{HOOKS_URL}/rules/{rule['rule_id']}", headers=bearer, json={
         "name": "updated-rule",
-        "repo": "myorg/myrepo",
+        "source": "myorg/myrepo",
         "events": ["push", "merge"],
         "workflow_id": workflow["workflow_id"],
     })
@@ -140,14 +140,14 @@ def test_update_rule(bearer, rule, workflow):
 
 def test_update_other_user_rule_not_found(other_bearer, rule, workflow):
     res = requests.put(f"{HOOKS_URL}/rules/{rule['rule_id']}", headers=other_bearer, json={
-        "name": "hijack", "repo": "x", "events": ["push"],
+        "name": "hijack", "source": "x", "events": ["push"],
         "workflow_id": workflow["workflow_id"],
     })
     assert res.status_code == 404
 
 def test_delete_rule(bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
-        "name": "to-delete", "repo": "x/y",
+        "name": "to-delete", "source": "x/y",
         "events": ["push"], "workflow_id": workflow["workflow_id"],
         "secret": "delete-test-secret",
     })
@@ -161,7 +161,7 @@ def test_delete_rule(bearer, workflow):
 
 def test_delete_other_user_rule_not_found(bearer, other_bearer, workflow):
     res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
-        "name": "protected-rule", "repo": "x/y",
+        "name": "protected-rule", "source": "x/y",
         "events": ["push"], "workflow_id": workflow["workflow_id"],
         "secret": "protected-test-secret",
     })

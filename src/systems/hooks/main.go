@@ -151,12 +151,10 @@ func processRetries(ctx context.Context) {
 	for _, r := range retries {
 		runID, dispatchErr := dispatchWorkflow(ctx, r.WorkflowID, r.TriggeredBy, r.OrgID, r.Inputs)
 		if dispatchErr == nil {
-			if updateErr := connect().WithContext(ctx).Model(&HookTrigger{}).
-				Where("trigger_id = ?", r.TriggerID).
-				Updates(map[string]any{"status": "triggered", "run_id": runID}).Error; updateErr != nil {
+			if updateErr := markTriggerTriggered(ctx, r.TriggerID, runID); updateErr != nil {
 				slog.Error("retry loop: update trigger", "trigger_id", r.TriggerID, "error", updateErr)
 			}
-			connect().WithContext(ctx).Delete(&HookTriggerRetry{RetryID: r.RetryID}) //nolint:errcheck
+			deleteRetry(ctx, r.RetryID) //nolint:errcheck
 			meterRunsTriggered.Add(ctx, 1, metric.WithAttributes(
 				attribute.String("workflow.id", r.WorkflowID),
 			))
@@ -165,22 +163,14 @@ func processRetries(ctx context.Context) {
 		}
 		nextAttempt := r.Attempt + 1
 		if nextAttempt > maxRetryAttempts || errors.Is(dispatchErr, errWorkflowNotFound) {
-			if updateErr := connect().WithContext(ctx).Model(&HookTrigger{}).
-				Where("trigger_id = ?", r.TriggerID).
-				Updates(map[string]any{"status": "failed", "error": dispatchErr.Error()}).Error; updateErr != nil {
+			if updateErr := markTriggerFailed(ctx, r.TriggerID, dispatchErr.Error()); updateErr != nil {
 				slog.Error("retry loop: mark trigger failed", "trigger_id", r.TriggerID, "error", updateErr)
 			}
-			connect().WithContext(ctx).Delete(&HookTriggerRetry{RetryID: r.RetryID}) //nolint:errcheck
+			deleteRetry(ctx, r.RetryID) //nolint:errcheck
 			slog.Warn("retry: permanently failed", "trigger_id", r.TriggerID, "attempts", r.Attempt, "error", dispatchErr)
 		} else {
 			backoff := retryBackoff(nextAttempt)
-			if updateErr := connect().WithContext(ctx).Model(&HookTriggerRetry{}).
-				Where("retry_id = ?", r.RetryID).
-				Updates(map[string]any{
-					"attempt":      nextAttempt,
-					"last_error":   dispatchErr.Error(),
-					"next_retry_at": time.Now().UTC().Add(backoff),
-				}).Error; updateErr != nil {
+			if updateErr := advanceRetry(ctx, r.RetryID, nextAttempt, dispatchErr.Error(), time.Now().UTC().Add(backoff)); updateErr != nil {
 				slog.Error("retry loop: update retry record", "retry_id", r.RetryID, "error", updateErr)
 			}
 			slog.Warn("retry: will retry", "trigger_id", r.TriggerID, "attempt", nextAttempt, "backoff", backoff, "error", dispatchErr)
@@ -268,6 +258,10 @@ func main() {
 	mux.HandleFunc("DELETE /rules/{id}", handleDeleteRule)
 
 	mux.HandleFunc("POST /hooks", handleWebhook)
+	mux.HandleFunc("POST /hooks/git", handleGitWebhook)
+	// Internal: trusted services (e.g. tickets) emit lifecycle events here,
+	// authenticated by the shared HOOKS_TRIGGER_KEY HMAC rather than conductor.
+	mux.HandleFunc("POST /internal/events", handleInternalEvent)
 	if ghApp != nil {
 		mux.HandleFunc("POST /hooks/github", handleGitHubWebhook(ghApp))
 	}

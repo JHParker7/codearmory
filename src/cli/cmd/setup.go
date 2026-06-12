@@ -96,99 +96,8 @@ keychain is unavailable).
 
 			// ── Step 3: sign up or log in ─────────────────────────────────
 
-			signup := flagSetupSignup || flagSetupUsername != ""
-			email := flagSetupEmail
-			username := flagSetupUsername
-			doLogin := true
-
-			// If no credentials were supplied via flags, check for an existing token.
-			if !signup && email == "" {
-				if tok := bearerToken(); tok != "" {
-					src := tokenSource()
-					answer, err := prompt(fmt.Sprintf("Already logged in (%s). Sign in again? [y/N]", src), "n")
-					if err != nil {
-						return fmt.Errorf("reading input: %w", err)
-					}
-					if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
-						doLogin = false
-					}
-				}
-			}
-
-			if doLogin {
-				if !signup && email == "" {
-					answer, err := prompt("Account: (l)og in or (s)ign up? [l/s]", "l")
-					if err != nil {
-						return fmt.Errorf("reading input: %w", err)
-					}
-					switch strings.ToLower(answer) {
-					case "s", "signup", "sign up":
-						signup = true
-					case "n", "skip", "":
-						if answer != "l" && answer != "login" && answer != "log in" {
-							fmt.Fprintln(os.Stderr, "Skipped — run `armory auth login` when ready.")
-							doLogin = false
-						}
-					}
-				}
-			}
-
-			if doLogin && email == "" {
-				var err error
-				email, err = prompt("Email", "")
-				if err != nil {
-					return fmt.Errorf("reading email: %w", err)
-				}
-				if email == "" {
-					return fmt.Errorf("email is required")
-				}
-			}
-
-			if doLogin && signup && username == "" {
-				var err error
-				username, err = prompt("Username", "")
-				if err != nil {
-					return fmt.Errorf("reading username: %w", err)
-				}
-				if username == "" {
-					return fmt.Errorf("username is required for sign up")
-				}
-			}
-
-			if doLogin {
-				password, err := readPassword()
-				if err != nil {
-					return fmt.Errorf("reading password: %w", err)
-				}
-
-				if signup {
-					body, _ := json.Marshal(map[string]string{
-						"email":    email,
-						"username": username,
-						"password": password,
-					})
-					if _, err := doRequest("POST", "/signup", body); err != nil {
-						return fmt.Errorf("signup: %w", err)
-					}
-					fmt.Fprintln(os.Stderr, "Account created.")
-				}
-
-				body, _ := json.Marshal(map[string]string{"email": email, "password": password})
-				data, err := doRequest("POST", "/login", body)
-				if err != nil {
-					return fmt.Errorf("login: %w", err)
-				}
-				var resp struct {
-					Token string `json:"token"`
-				}
-				if err := json.Unmarshal(data, &resp); err != nil || resp.Token == "" {
-					return fmt.Errorf("unexpected login response: %s", data)
-				}
-				where, err := storeToken(resp.Token)
-				if err != nil {
-					return fmt.Errorf("saving token: %w", err)
-				}
-				fmt.Fprintf(os.Stderr, "Logged in — token saved to %s\n", where)
+			if err := setupAuth(flagSetupEmail, flagSetupUsername, flagSetupSignup); err != nil {
+				return err
 			}
 
 			// ── Step 4: shell completions ─────────────────────────────────
@@ -333,6 +242,105 @@ func appendRCBlock(rcFile, marker, line string) error {
 	return werr
 }
 
+
+// setupAuth handles the interactive sign-up or log-in step of `armory setup`.
+// email and username may be pre-set via flags; signup=true forces the sign-up
+// path. When neither is set the function asks the user interactively.
+// Returns nil without prompting if the user already has a token and declines
+// to re-authenticate.
+func setupAuth(email, username string, signup bool) error {
+	signup = signup || username != ""
+	doLogin := true
+
+	if !signup && email == "" {
+		if tok := bearerToken(); tok != "" {
+			answer, err := prompt(fmt.Sprintf("Already logged in (%s). Sign in again? [y/N]", tokenSource()), "n")
+			if err != nil {
+				return fmt.Errorf("reading input: %w", err)
+			}
+			if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
+				doLogin = false
+			}
+		}
+	}
+
+	if doLogin && !signup && email == "" {
+		answer, err := prompt("Account: (l)og in or (s)ign up? [l/s]", "l")
+		if err != nil {
+			return fmt.Errorf("reading input: %w", err)
+		}
+		switch strings.ToLower(answer) {
+		case "s", "signup", "sign up":
+			signup = true
+		case "n", "skip", "":
+			if answer != "l" && answer != "login" && answer != "log in" {
+				fmt.Fprintln(os.Stderr, "Skipped — run `armory auth login` when ready.")
+				doLogin = false
+			}
+		}
+	}
+
+	if !doLogin {
+		return nil
+	}
+
+	if email == "" {
+		var err error
+		email, err = prompt("Email", "")
+		if err != nil {
+			return fmt.Errorf("reading email: %w", err)
+		}
+		if email == "" {
+			return fmt.Errorf("email is required")
+		}
+	}
+
+	if signup && username == "" {
+		var err error
+		username, err = prompt("Username", "")
+		if err != nil {
+			return fmt.Errorf("reading username: %w", err)
+		}
+		if username == "" {
+			return fmt.Errorf("username is required for sign up")
+		}
+	}
+
+	password, err := readPassword()
+	if err != nil {
+		return fmt.Errorf("reading password: %w", err)
+	}
+
+	if signup {
+		body, _ := json.Marshal(map[string]string{
+			"email":    email,
+			"username": username,
+			"password": password,
+		})
+		if _, err := doRequest("POST", "/gatekeeper/signup", body); err != nil {
+			return fmt.Errorf("signup: %w", err)
+		}
+		fmt.Fprintln(os.Stderr, "Account created.")
+	}
+
+	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	data, err := doRequest("POST", "/gatekeeper/login", body)
+	if err != nil {
+		return fmt.Errorf("login: %w", err)
+	}
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil || resp.Token == "" {
+		return fmt.Errorf("unexpected login response: %s", data)
+	}
+	where, err := storeToken(resp.Token)
+	if err != nil {
+		return fmt.Errorf("saving token: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Logged in — token saved to %s\n", where)
+	return nil
+}
 
 const completionMarker = "# armory completions"
 

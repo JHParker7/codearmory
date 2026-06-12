@@ -341,12 +341,12 @@ func (a *githubApp) watchAndCompleteCheckRun(ctx context.Context, runID, ownerRe
 	}
 }
 
-// normalizeGitHubPayload converts a raw GitHub webhook body into a webhookPayload.
+// normalizeGitHubPayload converts a raw GitHub webhook body into a gitPayload.
 // It handles "push" and "pull_request" event types. Returns (payload, installationID, ok).
-func normalizeGitHubPayload(eventType string, rawBody []byte) (webhookPayload, int64, bool) {
+func normalizeGitHubPayload(eventType string, rawBody []byte) (gitPayload, int64, bool) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(rawBody, &raw); err != nil {
-		return webhookPayload{}, 0, false
+		return gitPayload{}, 0, false
 	}
 
 	// Extract installation ID (common to all events).
@@ -376,12 +376,12 @@ func normalizeGitHubPayload(eventType string, rawBody []byte) (webhookPayload, i
 			} `json:"repository"`
 		}
 		if err := json.Unmarshal(rawBody, &push); err != nil {
-			return webhookPayload{}, 0, false
+			return gitPayload{}, 0, false
 		}
 		ref := push.Ref
 		ref = strings.TrimPrefix(ref, "refs/heads/")
 		ref = strings.TrimPrefix(ref, "refs/tags/")
-		return webhookPayload{
+		return gitPayload{
 			Repo:    push.Repository.FullName,
 			Event:   "push",
 			Ref:     ref,
@@ -408,9 +408,9 @@ func normalizeGitHubPayload(eventType string, rawBody []byte) (webhookPayload, i
 			} `json:"repository"`
 		}
 		if err := json.Unmarshal(rawBody, &pr); err != nil {
-			return webhookPayload{}, 0, false
+			return gitPayload{}, 0, false
 		}
-		return webhookPayload{
+		return gitPayload{
 			Repo:    pr.Repository.FullName,
 			Event:   "pull_request." + pr.Action,
 			Ref:     pr.PullRequest.Head.Ref,
@@ -420,7 +420,7 @@ func normalizeGitHubPayload(eventType string, rawBody []byte) (webhookPayload, i
 		}, installationID, true
 
 	default:
-		return webhookPayload{}, 0, false
+		return gitPayload{}, 0, false
 	}
 }
 
@@ -465,7 +465,7 @@ func handleGitHubWebhook(app *githubApp) http.HandlerFunc {
 			return
 		}
 
-		meterHooksReceived.Add(ctx, 1, metric.WithAttributes(attribute.String("repo", payload.Repo)))
+		meterHooksReceived.Add(ctx, 1, metric.WithAttributes(attribute.String("source", payload.Repo)))
 
 		payloadMap := map[string]string{
 			"repo":    payload.Repo,
@@ -479,7 +479,7 @@ func handleGitHubWebhook(app *githubApp) http.HandlerFunc {
 		eventID := uuid.New().String()
 		newEvent := HookEvent{
 			EventID:   eventID,
-			Repo:      payload.Repo,
+			Source:    payload.Repo,
 			EventType: payload.Event,
 			Ref:       payload.Ref,
 			Payload:   payloadMap,
@@ -493,7 +493,7 @@ func handleGitHubWebhook(app *githubApp) http.HandlerFunc {
 		}
 
 		// App-level HMAC already verified above; skip per-rule HMAC checks.
-		trigResults, successCount, failCount := matchAndDispatch(ctx, eventID, payload, payloadMap, rawBody, "", true)
+		trigResults, successCount, failCount := matchAndDispatch(ctx, eventID, payload.Repo, payload.Event, payload.Ref, payloadMap, gitBaseInputs(payload), rawBody, "", true, "", "")
 
 		// For successful dispatches with a run ID, create a GitHub check run and watch it.
 		if installationID != 0 {
@@ -545,7 +545,7 @@ func handleGitHubWebhook(app *githubApp) http.HandlerFunc {
 
 		event := HookEvent{
 			EventID:      eventID,
-			Repo:         payload.Repo,
+			Source:       payload.Repo,
 			EventType:    payload.Event,
 			Ref:          payload.Ref,
 			Payload:      payloadMap,

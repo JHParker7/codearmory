@@ -69,7 +69,7 @@ func handleRunForge(c *client) server.ToolHandlerFunc {
 			body["timeout"] = int(t)
 		}
 
-		data, status, err := c.post(ctx, "/executions", body)
+		data, status, err := c.post(ctx, "/forge/executions", body)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -85,7 +85,7 @@ func handleListExecutions(c *client) server.ToolHandlerFunc {
 		if err := c.cfg.validate(); err != nil {
 			return noAuth(), nil
 		}
-		data, status, err := c.get(ctx, "/executions")
+		data, status, err := c.get(ctx, "/forge/executions")
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -102,7 +102,7 @@ func handleGetExecution(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "execution_id")
-		data, status, err := c.get(ctx, "/executions/"+id)
+		data, status, err := c.get(ctx, "/forge/executions/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -119,7 +119,7 @@ func handleCancelExecution(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "execution_id")
-		data, status, err := c.del(ctx, "/executions/"+id)
+		data, status, err := c.del(ctx, "/forge/executions/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

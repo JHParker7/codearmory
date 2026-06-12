@@ -15,7 +15,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -136,6 +138,7 @@ func handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"ES256"},
 		"scopes_supported":                      []string{"openid", "email", "profile", "groups"},
+		"grant_types_supported":                 []string{"authorization_code", "client_credentials"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_post", "client_secret_basic"},
 		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "email", "name", "preferred_username", "groups"},
 	})
@@ -243,8 +246,8 @@ func parseOAuthParams(w http.ResponseWriter, r *http.Request, fromForm bool) (oa
 		return oauthParams{}, false
 	}
 
-	var client OAuthClient
-	if err := connect().WithContext(r.Context()).Where("client_id = ? AND active = ?", clientID, true).First(&client).Error; err != nil {
+	client, err := getOAuthClientByClientID(r.Context(), clientID)
+	if err != nil {
 		http.Error(w, "unknown client_id", http.StatusBadRequest)
 		return oauthParams{}, false
 	}
@@ -335,8 +338,8 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Constant-time dummy hash prevents user-enumeration via timing differences.
 	const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
-	var user User
-	if err := connect().WithContext(r.Context()).Where("email = ? AND active = ?", email, true).First(&user).Error; err != nil {
+	user, err := getUserByEmail(r.Context(), email)
+	if err != nil {
 		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password)) //nolint:errcheck
 		slog.Warn("oauth authorize: user not found", "email", email)
 		renderError("Invalid email or password.")
@@ -370,7 +373,7 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:   time.Now().Add(10 * time.Minute).UTC(),
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := connect().WithContext(r.Context()).Create(&code).Error; err != nil {
+	if err := code.Add(r.Context()); err != nil {
 		slog.Error("oauth authorize: persist code failed", "error", err)
 		oauthRedirectError(w, r, params.redirectURI, params.state, "server_error", "failed to create authorization code")
 		return
@@ -383,16 +386,23 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 // ── Token endpoint ────────────────────────────────────────────────────────────
 
 func handleToken(w http.ResponseWriter, r *http.Request) {
-	if oidcSigningKey == nil {
-		tokenError(w, "server_error", "OIDC not configured")
-		return
-	}
 	if err := r.ParseForm(); err != nil {
 		tokenError(w, "invalid_request", "cannot parse request body")
 		return
 	}
-	if r.FormValue("grant_type") != "authorization_code" {
-		tokenError(w, "unsupported_grant_type", "only authorization_code is supported")
+	switch r.FormValue("grant_type") {
+	case "client_credentials":
+		handleClientCredentialsGrant(w, r)
+		return
+	case "authorization_code":
+		// handled below
+	default:
+		tokenError(w, "unsupported_grant_type", "supported: authorization_code, client_credentials")
+		return
+	}
+
+	if oidcSigningKey == nil {
+		tokenError(w, "server_error", "OIDC not configured")
 		return
 	}
 
@@ -402,8 +412,8 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var client OAuthClient
-	if err := connect().WithContext(r.Context()).Where("client_id = ? AND active = ?", clientID, true).First(&client).Error; err != nil {
+	client, err := getOAuthClientByClientID(r.Context(), clientID)
+	if err != nil {
 		tokenError(w, "invalid_client", "client not found")
 		return
 	}
@@ -412,10 +422,8 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var authCode OAuthCode
-	if err := connect().WithContext(r.Context()).
-		Where("code = ? AND client_id = ? AND used = ?", r.FormValue("code"), clientID, false).
-		First(&authCode).Error; err != nil {
+	authCode, err := getOAuthCode(r.Context(), r.FormValue("code"), clientID)
+	if err != nil {
 		tokenError(w, "invalid_grant", "authorization code not found or already used")
 		return
 	}
@@ -430,11 +438,8 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 
 	// Atomically mark the code as used. RowsAffected == 0 means a concurrent
 	// request already redeemed it, preventing double-issuance of sessions.
-	result := connect().WithContext(r.Context()).
-		Model(&OAuthCode{}).
-		Where("code = ? AND used = ?", authCode.Code, false).
-		Update("used", true)
-	if result.Error != nil || result.RowsAffected == 0 {
+	n, redeemErr := redeemOAuthCode(r.Context(), authCode.Code)
+	if redeemErr != nil || n == 0 {
 		tokenError(w, "invalid_grant", "authorization code already used")
 		return
 	}
@@ -470,6 +475,92 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 		"id_token":     idToken,
 		"scope":        strings.Join(authCode.Scopes, " "),
 	})
+}
+
+// handleClientCredentialsGrant exchanges a valid client_id + client_secret for a
+// Bearer token. The token's permissions are determined by the client's assigned role.
+func handleClientCredentialsGrant(w http.ResponseWriter, r *http.Request) {
+	clientID, clientSecret, ok := extractClientCredentials(r)
+	if !ok {
+		tokenError(w, "invalid_client", "client credentials missing")
+		return
+	}
+	client, err := getOAuthClientByClientID(r.Context(), clientID)
+	if err != nil {
+		tokenError(w, "invalid_client", "client not found")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(client.SecretHash), []byte(clientSecret)); err != nil {
+		tokenError(w, "invalid_client", "invalid client secret")
+		return
+	}
+
+	accessToken, sessionID, expiresAt, err := issueClientSession(r.Context(), clientID)
+	if err != nil {
+		slog.Error("client_credentials: session creation failed", "client_id", clientID, "error", err)
+		tokenError(w, "server_error", "failed to create session")
+		return
+	}
+
+	slog.Info("oauth: client_credentials token issued", "client_id", clientID, "session_id", sessionID)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"access_token": accessToken,
+		"token_type":   "Bearer",
+		"expires_in":   int(time.Until(expiresAt).Seconds()),
+	})
+}
+
+// issueClientSession creates a session for an OAuth client (not a user) and returns
+// the signed JWT, sessionID, and expiry. The JWT sub is set to the client_id.
+func issueClientSession(ctx context.Context, clientID string) (token, sessionID string, expiresAt time.Time, err error) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	sessionID = uuid.New().String()
+	const maxTTLHours = 720
+	ttlHours := 24
+	if v := os.Getenv("SESSION_TTL_HOURS"); v != "" {
+		if n, err2 := strconv.Atoi(v); err2 == nil && n > 0 {
+			if n > maxTTLHours {
+				n = maxTTLHours
+			}
+			ttlHours = n
+		}
+	}
+	expiresAt = time.Now().Add(time.Duration(ttlHours) * time.Hour).UTC().Truncate(time.Second)
+
+	var tokenString string
+	tokenString, err = jwt.NewWithClaims(jwt.SigningMethodES256, authClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "gatekeeper",
+			Subject:   clientID,
+			ID:        sessionID,
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}).SignedString(privKey)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	session := Session{
+		SessionID: sessionID,
+		UserID:    "",
+		ClientID:  &clientID,
+		ExpiresAt: expiresAt,
+		PubKey:    string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})),
+	}
+	if err := session.Add(ctx); err != nil {
+		return "", "", time.Time{}, err
+	}
+	return tokenString, sessionID, expiresAt, nil
 }
 
 // ── Userinfo endpoint ─────────────────────────────────────────────────────────
@@ -509,10 +600,29 @@ func handleCreateOAuthClient(w http.ResponseWriter, r *http.Request) {
 		Name         string   `json:"name"`
 		RedirectURIs []string `json:"redirect_uris"`
 		OrgID        string   `json:"org_id"`
+		RoleID       string   `json:"role_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || len(req.RedirectURIs) == 0 {
-		http.Error(w, "name and redirect_uris are required", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
 		return
+	}
+	if req.RoleID != "" {
+		roleRow, err := (Role{RoleID: req.RoleID}).Get(r.Context())
+		if err != nil {
+			http.Error(w, "role not found", http.StatusBadRequest)
+			return
+		}
+		role := roleRow.(Role)
+		// Prevent cross-org privilege escalation: the role must belong to the same
+		// org as the client being created.
+		if role.OrgID != nil && *role.OrgID != req.OrgID {
+			http.Error(w, "role does not belong to the specified org", http.StatusForbidden)
+			return
+		}
+		if role.OrgID == nil && req.OrgID != "" {
+			http.Error(w, "global roles cannot be assigned to org-scoped clients", http.StatusForbidden)
+			return
+		}
 	}
 
 	rawSecret := make([]byte, 32)
@@ -538,7 +648,10 @@ func handleCreateOAuthClient(w http.ResponseWriter, r *http.Request) {
 		Active:       true,
 		CreatedAt:    time.Now().UTC(),
 	}
-	if err := connect().WithContext(r.Context()).Create(&client).Error; err != nil {
+	if req.RoleID != "" {
+		client.RoleID = &req.RoleID
+	}
+	if err := client.Add(r.Context()); err != nil {
 		slog.Error("oauth client: create failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -560,8 +673,8 @@ func handleListOAuthClients(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireServiceAuth(w, r); !ok {
 		return
 	}
-	var clients []OAuthClient
-	if err := connect().WithContext(r.Context()).Where("active = ?", true).Find(&clients).Error; err != nil {
+	clients, err := listOAuthClients(r.Context())
+	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -574,12 +687,12 @@ func handleDeleteOAuthClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	result := connect().WithContext(r.Context()).Model(&OAuthClient{}).Where("client_id = ?", id).Update("active", false)
-	if result.Error != nil {
+	n, err := deactivateOAuthClient(r.Context(), id)
+	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if result.RowsAffected == 0 {
+	if n == 0 {
 		http.Error(w, "client not found", http.StatusNotFound)
 		return
 	}
@@ -681,7 +794,7 @@ func handleOAuthMFAPost(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:   time.Now().Add(10 * time.Minute).UTC(),
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := connect().WithContext(ctx).Create(&authCode).Error; err != nil {
+	if err := authCode.Add(ctx); err != nil {
 		slog.Error("oauth mfa: persist auth code failed", "error", err)
 		oauthRedirectError(w, r, pending.OAuthRedirectURI, pending.OAuthState, "server_error", "failed to create authorization code")
 		return

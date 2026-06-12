@@ -176,10 +176,10 @@ func listRules(ctx context.Context, userID, orgID string) ([]PipelineRule, error
 	return rules, nil
 }
 
-// getMatchedRules returns active pipeline rules matching a repo and event type.
+// getMatchedRules returns active pipeline rules matching a source and event type.
 // Only rules with a non-empty secret are returned; rows with NULL or empty
 // secrets are excluded so they can never fire without HMAC verification.
-func getMatchedRules(ctx context.Context, repo, event string) ([]PipelineRule, error) {
+func getMatchedRules(ctx context.Context, source, event string) ([]PipelineRule, error) {
 	var rules []PipelineRule
 	if err := connectRead().WithContext(ctx).Raw(
 		`SELECT rule_id, name, repo, events, ref_filter, workflow_id, secret, input_mapping, created_by, org_id
@@ -187,7 +187,7 @@ func getMatchedRules(ctx context.Context, repo, event string) ([]PipelineRule, e
 		 WHERE repo = ? AND active = true
 		   AND events::jsonb @> jsonb_build_array(?::text)
 		   AND secret IS NOT NULL AND secret != ''`,
-		repo, event,
+		source, event,
 	).Scan(&rules).Error; err != nil {
 		return nil, err
 	}
@@ -269,10 +269,10 @@ func getEvent(ctx context.Context, id string) (HookEvent, error) {
 }
 
 // listEvents returns hook events visible to the caller via their pipeline rules.
-func listEvents(ctx context.Context, userID, orgID, repo string) ([]HookEvent, error) {
+func listEvents(ctx context.Context, userID, orgID, source string) ([]HookEvent, error) {
 	var events []HookEvent
 	var err error
-	if repo != "" {
+	if source != "" {
 		err = connectRead().WithContext(ctx).Raw(
 			`SELECT DISTINCT he.event_id, he.repo, he.event_type, he.ref, he.payload,
 			        he.rules_matched, he.status, he.created_at
@@ -282,7 +282,7 @@ func listEvents(ctx context.Context, userID, orgID, repo string) ([]HookEvent, e
 			 WHERE (pr.created_by = ? OR (pr.org_id != '' AND pr.org_id = ?))
 			   AND he.repo = ?
 			 ORDER BY he.created_at DESC LIMIT 100`,
-			userID, orgID, repo,
+			userID, orgID, source,
 		).Scan(&events).Error
 	} else {
 		err = connectRead().WithContext(ctx).Raw(
@@ -458,4 +458,34 @@ func claimDueRetries(ctx context.Context, n int) ([]HookTriggerRetry, error) {
 // Sequence: 60s, 120s, 240s, 480s, capped at 900s.
 func retryBackoff(attempt int) time.Duration {
 	return time.Duration(min(60*(1<<(attempt-1)), 900)) * time.Second
+}
+
+// markTriggerTriggered sets a trigger's status to "triggered" and records the run ID.
+func markTriggerTriggered(ctx context.Context, triggerID string, runID *string) error {
+	return connect().WithContext(ctx).Model(&HookTrigger{}).
+		Where("trigger_id = ?", triggerID).
+		Updates(map[string]any{"status": "triggered", "run_id": runID}).Error
+}
+
+// markTriggerFailed sets a trigger's status to "failed" with the given error message.
+func markTriggerFailed(ctx context.Context, triggerID, errMsg string) error {
+	return connect().WithContext(ctx).Model(&HookTrigger{}).
+		Where("trigger_id = ?", triggerID).
+		Updates(map[string]any{"status": "failed", "error": errMsg}).Error
+}
+
+// deleteRetry removes a retry record by ID.
+func deleteRetry(ctx context.Context, retryID string) error {
+	return connect().WithContext(ctx).Delete(&HookTriggerRetry{RetryID: retryID}).Error
+}
+
+// advanceRetry schedules a retry record for its next attempt.
+func advanceRetry(ctx context.Context, retryID string, attempt int, lastError string, nextRetryAt time.Time) error {
+	return connect().WithContext(ctx).Model(&HookTriggerRetry{}).
+		Where("retry_id = ?", retryID).
+		Updates(map[string]any{
+			"attempt":       attempt,
+			"last_error":    lastError,
+			"next_retry_at": nextRetryAt,
+		}).Error
 }

@@ -212,6 +212,10 @@ services:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/tickets
       GATEKEEPER_URL: http://gatekeeper:8081
       GATEKEEPER_SERVICE_KEY: tickets-local-secret
+      # Optional hooks integration: emit ticket lifecycle events to the hooks
+      # service. HOOKS_TRIGGER_KEY must match the hooks service's value.
+      HOOKS_URL: http://hooks:8087
+      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
     ports:
       - "8086:8086"
     depends_on:

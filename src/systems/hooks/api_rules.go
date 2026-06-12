@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -33,7 +34,7 @@ func fetchWorkflowOrgID(ctx context.Context, workflowID string) (string, error) 
 	fmt.Fprintf(mac, "hooks-check:%s:%s", workflowID, ts)
 	token := hex.EncodeToString(mac.Sum(nil))
 
-	url := workflowsURL + "/internal/workflows/" + workflowID
+	url := workflowsURL + "/internal/pipelines/" + workflowID
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -67,8 +68,16 @@ func canAccessRule(rule PipelineRule, userID, orgID string) bool {
 }
 
 // matchesRefFilter returns true when the event ref matches the rule's ref filter.
-// An empty filter matches everything. A filter ending in "/*" is a prefix match
-// (after stripping the trailing "*"). Otherwise an exact match is required.
+// An empty filter matches everything.
+//
+// A filter ending in "/*" is a prefix match that spans path segments, because
+// git branch names may contain "/" (e.g. "refs/heads/feature/login"). So
+// "refs/heads/*" matches "refs/heads/main" and "refs/heads/feature/login".
+//
+// All other patterns use path.Match glob semantics: "*" matches any
+// non-separator run, "?" matches one character, "[...]" is a character class.
+// "refs/heads/feat*" matches "refs/heads/feat-login" but not "refs/heads/main".
+// Falls back to exact match when the pattern is malformed.
 func matchesRefFilter(filter, ref string) bool {
 	if filter == "" {
 		return true
@@ -76,13 +85,17 @@ func matchesRefFilter(filter, ref string) bool {
 	if strings.HasSuffix(filter, "/*") {
 		return strings.HasPrefix(ref, filter[:len(filter)-1])
 	}
-	return ref == filter
+	matched, err := path.Match(filter, ref)
+	if err != nil {
+		return ref == filter
+	}
+	return matched
 }
 
 type createRuleRequest struct {
-	Name     string `json:"name"`
-	Repo     string `json:"repo"`
-	Events   []string `json:"events"`
+	Name         string            `json:"name"`
+	Source       string            `json:"source"`
+	Events       []string          `json:"events"`
 	RefFilter    string            `json:"ref_filter"`
 	WorkflowID   string            `json:"workflow_id"`
 	// Secret is write-only (never returned in responses). Required on create; cannot be cleared on update.
@@ -118,8 +131,8 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
-	if req.Repo == "" {
-		http.Error(w, "repo is required", http.StatusBadRequest)
+	if req.Source == "" {
+		http.Error(w, "source is required", http.StatusBadRequest)
 		return
 	}
 	if len(req.Events) == 0 {
@@ -150,7 +163,7 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 	rule := PipelineRule{
 		RuleID:       uuid.New().String(),
 		Name:         req.Name,
-		Repo:         req.Repo,
+		Source:       req.Source,
 		Events:       req.Events,
 		RefFilter:    req.RefFilter,
 		WorkflowID:   req.WorkflowID,
@@ -290,8 +303,8 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
-	if req.Repo == "" {
-		http.Error(w, "repo is required", http.StatusBadRequest)
+	if req.Source == "" {
+		http.Error(w, "source is required", http.StatusBadRequest)
 		return
 	}
 	if len(req.Events) == 0 {
@@ -321,7 +334,7 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 
 	// secret update semantics: nil = leave unchanged, non-empty = replace. Clearing ("") is rejected above.
 	existing.Name = req.Name
-	existing.Repo = req.Repo
+	existing.Source = req.Source
 	existing.Events = req.Events
 	existing.RefFilter = req.RefFilter
 	existing.WorkflowID = req.WorkflowID

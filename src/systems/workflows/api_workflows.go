@@ -171,7 +171,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("workflows").Start(r.Context(), "handleCreateWorkflow")
 	defer span.End()
 
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createWorkflow", "workflows/workflows")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createWorkflow", "workflows/pipelines")
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -266,7 +266,7 @@ func handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("workflows").Start(r.Context(), "handleListWorkflows")
 	defer span.End()
 
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listWorkflow", "workflows/workflows")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listWorkflow", "workflows/pipelines")
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -299,7 +299,7 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getWorkflow", "workflows/workflows/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getWorkflow", "workflows/pipelines/"+id)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -339,7 +339,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateWorkflow", "workflows/workflows/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateWorkflow", "workflows/pipelines/"+id)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -445,7 +445,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteWorkflow", "workflows/workflows/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteWorkflow", "workflows/pipelines/"+id)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return

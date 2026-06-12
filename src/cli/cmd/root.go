@@ -67,15 +67,28 @@ func conductorURL() string {
 
 func bearerToken() string {
 	if flagToken != "" {
+		if exp, ok := jwtExpiry(flagToken); ok && time.Now().After(exp) {
+			return ""
+		}
 		return flagToken
 	}
 	if t := os.Getenv("CODEARMORY_TOKEN"); t != "" {
+		if exp, ok := jwtExpiry(t); ok && time.Now().After(exp) {
+			return ""
+		}
 		return t
 	}
 	if t, err := keyring.Get(keychainService, keychainAccount); err == nil && t != "" {
+		if exp, ok := jwtExpiry(t); ok && time.Now().After(exp) {
+			return ""
+		}
 		return t
 	}
-	return loadConfig().Token
+	t := loadConfig().Token
+	if exp, ok := jwtExpiry(t); ok && time.Now().After(exp) {
+		return ""
+	}
+	return t
 }
 
 // storeToken saves the token to the OS keychain. If the keychain is
@@ -115,6 +128,7 @@ func doRequest(method, path string, body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", "armory-cli")
 	if t := bearerToken(); t != "" {
 		req.Header.Set("Authorization", "Bearer "+t)
 	}
@@ -126,7 +140,10 @@ func doRequest(method, path string, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}

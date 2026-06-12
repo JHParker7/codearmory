@@ -16,7 +16,8 @@ func makeExpiry() time.Time {
 }
 
 // createOwnerWithSession creates a test user, a session owned by that user,
-// and grants the user the given action on their own session.
+// and grants the user the given action on their own session. The resource is
+// stored with the user's username prefix to match checkPermissions' scoping.
 func createOwnerWithSession(t *testing.T, action string) (User, Session) {
 	t.Helper()
 	u := createTestUser(t)
@@ -25,7 +26,7 @@ func createOwnerWithSession(t *testing.T, action string) (User, Session) {
 		PermissionsID: uuid.New().String(),
 		Service:       "gatekeeper",
 		Actions:       []string{action},
-		Resources:     []string{"gatekeeper/sessions/" + session.SessionID},
+		Resources:     []string{u.Username + "/gatekeeper/sessions/" + session.SessionID},
 	}
 	if err := perm.Add(context.Background()); err != nil {
 		t.Fatalf("createOwnerWithSession perm: %v", err)

@@ -27,7 +27,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/teams", body)
+			return apiCall("POST", "/gatekeeper/teams", body)
 		},
 	}
 	createCmd.Flags().StringVar(&createRole, "role", "", "Role ID to assign to the team")
@@ -45,7 +45,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/teams/"+id, body)
+			return apiCall("PUT", "/gatekeeper/teams/"+id, body)
 		},
 	}
 
@@ -62,7 +62,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/teams/"+id+"/invites", body)
+			return apiCall("POST", "/gatekeeper/teams/"+id+"/invites", body)
 		},
 	}
 
@@ -76,13 +76,13 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("GET", "/teams/"+id, nil)
+				return apiCall("GET", "/gatekeeper/teams/"+id, nil)
 			},
 		},
 		&cobra.Command{
 			Use:   "list",
 			Short: "List all teams",
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/teams", nil) },
+			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gatekeeper/teams", nil) },
 		},
 		createCmd,
 		&cobra.Command{
@@ -94,7 +94,7 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("GET", "/teams/"+id, nil)
+				return apiCall("GET", "/gatekeeper/teams/"+id, nil)
 			},
 		},
 		updateCmd,
@@ -107,7 +107,7 @@ func init() {
 				if err != nil {
 					return err
 				}
-				return apiCall("DELETE", "/teams/"+id, nil)
+				return apiCall("DELETE", "/gatekeeper/teams/"+id, nil)
 			},
 		},
 		inviteCmd,

@@ -137,8 +137,12 @@ func main() {
 	initMetrics()
 	httpClient = initHTTPClient()
 
-	if err := connect().AutoMigrate(&Ticket{}, &TicketComment{}); err != nil {
+	if err := connect().AutoMigrate(&Ticket{}, &TicketComment{}, &TicketFieldDef{}); err != nil {
 		slog.Error("failed to migrate tables", "error", err)
+		os.Exit(1)
+	}
+	if err := seedDefaultFieldDefs(ctx); err != nil {
+		slog.Error("failed to seed field defs", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("database initialized")
@@ -146,6 +150,12 @@ func main() {
 	gatekeeperClient = newGatekeeperClient()
 	registry.StartKeyRotation(ctx, gatekeeperURL, "tickets",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
+
+	if hooksEnabled() {
+		slog.Info("hooks integration enabled — ticket lifecycle events will be emitted", "hooks_url", hooksURL)
+	} else {
+		slog.Info("hooks integration disabled — set HOOKS_URL and HOOKS_TRIGGER_KEY to enable")
+	}
 
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -159,6 +169,11 @@ func main() {
 
 	mux.HandleFunc("POST /tickets/{id}/comments", handleAddComment)
 	mux.HandleFunc("DELETE /tickets/{id}/comments/{comment_id}", handleDeleteComment)
+
+	mux.HandleFunc("GET /field-defs", handleListFieldDefs)
+	mux.HandleFunc("POST /field-defs", handleCreateFieldDef)
+	mux.HandleFunc("PUT /field-defs/{id}", handleUpdateFieldDef)
+	mux.HandleFunc("DELETE /field-defs/{id}", handleDeleteFieldDef)
 
 	port := envOrDefault("PORT", "8086")
 	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{mux}), "tickets",

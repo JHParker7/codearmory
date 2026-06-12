@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -148,6 +149,10 @@ func TestHandleHTTP_AllowedHost(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	// httptest binds to loopback; relax the resolved-IP guard so this test can reach it.
+	defer func(f func(net.IP) bool) { allowDialIP = f }(allowDialIP)
+	allowDialIP = func(net.IP) bool { return true }
+
 	// upstream.URL is "http://127.0.0.1:PORT"; net.SplitHostPort extracts "127.0.0.1".
 	p := &proxy{al: allowlist{"127.0.0.1"}}
 	r := httptest.NewRequest(http.MethodGet, upstream.URL+"/ok", nil)
@@ -166,6 +171,10 @@ func TestHandleHTTP_HopByHopHeadersStripped(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	// httptest binds to loopback; relax the resolved-IP guard so this test can reach it.
+	defer func(f func(net.IP) bool) { allowDialIP = f }(allowDialIP)
+	allowDialIP = func(net.IP) bool { return true }
+
 	p := &proxy{al: allowlist{"127.0.0.1"}}
 	r := httptest.NewRequest(http.MethodGet, upstream.URL+"/check", nil)
 	r.Header.Set("Connection", "keep-alive")
@@ -173,5 +182,28 @@ func TestHandleHTTP_HopByHopHeadersStripped(t *testing.T) {
 	p.handleHTTP(w, r)
 	if receivedConnection != "" {
 		t.Fatalf("hop-by-hop header Connection should be stripped, got %q", receivedConnection)
+	}
+}
+
+// ── isDisallowedIP ────────────────────────────────────────────────────────────
+
+func TestIsDisallowedIP(t *testing.T) {
+	cases := []struct {
+		ip   string
+		want bool
+	}{
+		{"169.254.169.254", true}, // cloud metadata (link-local)
+		{"127.0.0.1", true},       // loopback
+		{"10.0.0.5", true},        // private
+		{"192.168.1.1", true},     // private
+		{"::1", true},             // loopback (v6)
+		{"0.0.0.0", true},         // unspecified
+		{"8.8.8.8", false},        // public
+		{"1.1.1.1", false},        // public
+	}
+	for _, tc := range cases {
+		if got := isDisallowedIP(net.ParseIP(tc.ip)); got != tc.want {
+			t.Errorf("isDisallowedIP(%s) = %v, want %v", tc.ip, got, tc.want)
+		}
 	}
 }

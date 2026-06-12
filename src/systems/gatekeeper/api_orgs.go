@@ -156,7 +156,6 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		"user_id":  userID,
 		"username": owner.Username,
 	}
-	db := connect().WithContext(ctx)
 	orgGrants := defaultGrantsFor("org")
 	if len(orgGrants) == 0 {
 		slog.Error("create org: no default grants for 'org' — owner will have no permissions; check that the registry is reachable and has default_grants seeded", "org_id", org.OrgID, "user_id", userID)
@@ -167,7 +166,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		permName := fmt.Sprintf("%s-%s %s permissions", owner.Username, org.OrgName, grant.ServiceName)
 		resources := applyGrantTemplates(grant.Resources, templateVars)
 		for _, resource := range resources {
-			if err := grantServicePermissions(ctx, db, grant.ServiceName, userID, permName, grant.Actions, resource); err != nil {
+			if err := applyGrantsForResource(ctx, grant.ServiceName, userID, permName, grant.Actions, resource); err != nil {
 				span.RecordError(err)
 				span.SetStatus(codes.Error, "failed to grant owner permissions")
 				slog.Error("create org: failed to grant owner permissions", "caller_id", callerID, "org_id", org.OrgID, "service", grant.ServiceName, "error", err)
@@ -328,9 +327,19 @@ func handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("org.id", id)))
 
-	if err := connect().WithContext(ctx).Model(&User{}).Where("org_id = ?", id).Update("org_id", nil).Error; err != nil {
+	// Capture member IDs before clearing org_id so we can invalidate their cached
+	// User entries — otherwise checkPermissions keeps reading the stale OrgID (and
+	// scoping resources/secrets under the deleted org) for up to entityTTL.
+	memberIDs, memberErr := getUserIDsByOrg(ctx, id)
+	if memberErr != nil {
+		slog.Error("delete org: failed to load member IDs for cache invalidation", "caller_id", callerID, "org_id", id, "error", memberErr)
+	}
+	if err := clearOrgMembership(ctx, id); err != nil {
 		slog.Error("delete org: failed to clear org membership", "caller_id", callerID, "org_id", id, "error", err)
 	} else {
+		for _, uid := range memberIDs {
+			cacheDel(ctx, "gk:user:"+uid)
+		}
 		slog.Info("delete org: cleared org membership", "caller_id", callerID, "org_id", id)
 	}
 

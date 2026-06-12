@@ -38,7 +38,13 @@ type dslNode struct {
 	groupIndex int // unique across parallel groups in this DSL
 }
 
-// parseDSL tokenises "a->b->[c,d]->e" into ordered nodes.
+// parseDSL tokenises a pipeline DSL string into ordered nodes.
+// Grammar: steps are separated by "->"; a parallel group is written as
+// "[step1,step2,...]" and results in a single node with multiple names.
+// Examples:
+//
+//	"build->test->deploy"          — three sequential steps
+//	"build->[lint,test]->deploy"   — lint and test run in parallel
 func parseDSL(dsl string) ([]dslNode, error) {
 	segments := strings.Split(dsl, "->")
 	var nodes []dslNode
@@ -403,7 +409,7 @@ JSON file (-f) — uses step IDs directly:
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/workflows/workflows", body)
+			return apiCall("POST", "/workflows/pipelines", body)
 		},
 	}
 	createPipelineCmd.Flags().StringVarP(&pipelineFileFlag, "file", "f", "", "JSON pipeline definition file")
@@ -415,7 +421,7 @@ JSON file (-f) — uses step IDs directly:
 		Use:   "pipelines",
 		Short: "List pipelines",
 		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/workflows/workflows", nil) },
+		RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/workflows/pipelines", nil) },
 	})
 
 	// ── armory ci get pipeline ────────────────────────────────────────────────
@@ -425,7 +431,7 @@ JSON file (-f) — uses step IDs directly:
 		Short: "Get a pipeline with its full step definitions",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return apiCall("GET", "/workflows/workflows/"+args[0], nil)
+			return apiCall("GET", "/workflows/pipelines/"+args[0], nil)
 		},
 	})
 
@@ -436,7 +442,7 @@ JSON file (-f) — uses step IDs directly:
 		Short: "Delete a pipeline",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return apiCall("DELETE", "/workflows/workflows/"+args[0], nil)
+			return apiCall("DELETE", "/workflows/pipelines/"+args[0], nil)
 		},
 	})
 
@@ -460,7 +466,7 @@ JSON file (-f) — uses step IDs directly:
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/workflows/workflows/"+args[0]+"/runs", body)
+			return apiCall("POST", "/workflows/pipelines/"+args[0]+"/runs", body)
 		},
 	}
 	runPipelineCmd.Flags().StringArrayVarP(&runInputs, "input", "i", nil, "Input variable (key=value, repeatable)")
@@ -559,7 +565,7 @@ JSON file (-f) — uses step IDs directly:
 
 			// Name is required by the API — fetch the current one if not provided.
 			if updatePipelineName == "" {
-				data, err := doRequest("GET", "/workflows/workflows/"+id, nil)
+				data, err := doRequest("GET", "/workflows/pipelines/"+id, nil)
 				if err != nil {
 					return fmt.Errorf("fetching current pipeline: %w", err)
 				}
@@ -584,7 +590,7 @@ JSON file (-f) — uses step IDs directly:
 			if err != nil {
 				return err
 			}
-			return apiCall("PUT", "/workflows/workflows/"+id, body)
+			return apiCall("PUT", "/workflows/pipelines/"+id, body)
 		},
 	}
 	updatePipelineCmd.Flags().StringVarP(&updatePipelineFile, "file", "f", "", "JSON pipeline definition file")
@@ -612,7 +618,7 @@ JSON file (-f) — uses step IDs directly:
 		RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/workflows/actions", nil) },
 	})
 
-	ciCmd.AddCommand(ciCreateCmd, ciListCmd, ciGetCmd, ciUpdateCmd, ciDeleteCmd, ciRunCmd, ciCancelCmd)
+	ciCmd.AddCommand(ciCreateCmd, ciListCmd, ciGetCmd, ciUpdateCmd, ciDeleteCmd, ciRunCmd, ciCancelCmd, ciTUICmd)
 	rootCmd.AddCommand(ciCmd)
 }
 

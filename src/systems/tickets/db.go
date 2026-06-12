@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -161,7 +162,7 @@ func getTicket(ctx context.Context, id string) (Ticket, error) {
 }
 
 // listTickets returns active tickets accessible to the caller with optional filters.
-func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilter, assigneeFilter string) ([]Ticket, error) {
+func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilter, assigneeFilter, timescaleFilter string) ([]Ticket, error) {
 	q := connectRead().WithContext(ctx).
 		Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID)
 	if statusFilter != "" {
@@ -172,6 +173,9 @@ func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilte
 	}
 	if assigneeFilter != "" {
 		q = q.Where("assignee_id = ?", assigneeFilter)
+	}
+	if timescaleFilter != "" {
+		q = q.Where("timescale = ?", timescaleFilter)
 	}
 	var tickets []Ticket
 	if err := q.Order("created_at DESC").Limit(100).Find(&tickets).Error; err != nil {
@@ -304,4 +308,185 @@ func refreshComment(ctx context.Context, commentID string) (TicketComment, error
 // isNotFound returns true when err is a GORM record-not-found error.
 func isNotFound(err error) bool {
 	return errors.Is(err, gorm.ErrRecordNotFound)
+}
+
+// ── TicketFieldDef ────────────────────────────────────────────────────────────
+
+func (f TicketFieldDef) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.field_def.add")
+	defer span.End()
+	if err := connect().WithContext(ctx).Create(&f).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (f TicketFieldDef) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.field_def.update")
+	defer span.End()
+	f.UpdatedAt = time.Now().UTC()
+	if err := connect().WithContext(ctx).Save(&f).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (f TicketFieldDef) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.field_def.remove")
+	defer span.End()
+	if err := connect().WithContext(ctx).Model(&TicketFieldDef{}).
+		Where("field_def_id=? AND active=?", f.FieldDefID, true).
+		Update("active", false).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (f TicketFieldDef) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.field_def.get")
+	defer span.End()
+	var result TicketFieldDef
+	if err := connectRead().WithContext(ctx).
+		Where("field_def_id=? AND active=?", f.FieldDefID, true).
+		First(&result).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return result, nil
+}
+
+func (f TicketFieldDef) List(ctx context.Context, limit, offset int) ([]db, error) {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.field_def.list")
+	defer span.End()
+	defs, err := listFieldDefs(ctx, f.OrgID, f.Kind)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	if limit > 0 {
+		if offset >= len(defs) {
+			defs = nil
+		} else {
+			end := offset + limit
+			if end > len(defs) {
+				end = len(defs)
+			}
+			defs = defs[offset:end]
+		}
+	}
+	span.SetStatus(codes.Ok, "")
+	result := make([]db, len(defs))
+	for i, d := range defs {
+		result[i] = d
+	}
+	return result, nil
+}
+
+// listFieldDefs returns active field defs visible to orgID: system defaults
+// (OrgID='') plus org-specific ones, ordered by position. Org-specific defs
+// override global ones with the same Kind+Value.
+func listFieldDefs(ctx context.Context, orgID, kind string) ([]TicketFieldDef, error) {
+	q := connectRead().WithContext(ctx).
+		Where("active = ? AND (org_id = '' OR org_id = ?)", true, orgID)
+	if kind != "" {
+		q = q.Where("kind = ?", kind)
+	}
+	// Org-specific first so dedup keeps them over globals.
+	var defs []TicketFieldDef
+	if err := q.Order("CASE WHEN org_id = '' THEN 1 ELSE 0 END, position, created_at").Find(&defs).Error; err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(defs))
+	deduped := make([]TicketFieldDef, 0, len(defs))
+	for _, d := range defs {
+		key := d.Kind + ":" + d.Value
+		if !seen[key] {
+			seen[key] = true
+			deduped = append(deduped, d)
+		}
+	}
+	return deduped, nil
+}
+
+// getFieldDefValues returns distinct valid values for a kind visible to orgID.
+// Falls back to the provided defaults if the DB pool is uninitialised or returns nothing.
+func getFieldDefValues(ctx context.Context, orgID, kind string, fallback []string) []string {
+	// Skip the DB call entirely when no connection pool has been opened yet
+	// (e.g. unit-test processes that never call connect()).
+	dbInitMu.Lock()
+	uninit := gormDB == nil && gormDBRead == nil
+	dbInitMu.Unlock()
+	if uninit {
+		return fallback
+	}
+
+	defs, err := listFieldDefs(ctx, orgID, kind)
+	if err != nil || len(defs) == 0 {
+		return fallback
+	}
+	seen := map[string]bool{}
+	var values []string
+	for _, d := range defs {
+		if !seen[d.Value] {
+			seen[d.Value] = true
+			values = append(values, d.Value)
+		}
+	}
+	return values
+}
+
+// seedDefaultFieldDefs inserts global system defaults for each kind
+// independently, so adding a new kind doesn't skip seeding existing ones.
+func seedDefaultFieldDefs(ctx context.Context) error {
+	now := time.Now().UTC()
+	type kindEntry struct {
+		kind     string
+		defaults []TicketFieldDef
+	}
+	entries := []kindEntry{
+		{
+			kind: FieldKindStatus,
+			defaults: []TicketFieldDef{
+				{FieldDefID: uuid.New().String(), Kind: FieldKindStatus, Value: StatusOpen, Label: "Open", Position: 0, Active: true, CreatedAt: now, UpdatedAt: now},
+				{FieldDefID: uuid.New().String(), Kind: FieldKindStatus, Value: StatusInProgress, Label: "In Progress", Position: 1, Active: true, CreatedAt: now, UpdatedAt: now},
+				{FieldDefID: uuid.New().String(), Kind: FieldKindStatus, Value: StatusResolved, Label: "Resolved", Position: 2, Active: true, CreatedAt: now, UpdatedAt: now},
+				{FieldDefID: uuid.New().String(), Kind: FieldKindStatus, Value: StatusClosed, Label: "Closed", Position: 3, Active: true, CreatedAt: now, UpdatedAt: now},
+			},
+		},
+		{
+			kind: FieldKindPriority,
+			defaults: []TicketFieldDef{
+				{FieldDefID: uuid.New().String(), Kind: FieldKindPriority, Value: PriorityLow, Label: "Low", Color: "#4a5346", Position: 0, Active: true, CreatedAt: now, UpdatedAt: now},
+				{FieldDefID: uuid.New().String(), Kind: FieldKindPriority, Value: PriorityMedium, Label: "Medium", Color: "#7d8a78", Position: 1, Active: true, CreatedAt: now, UpdatedAt: now},
+				{FieldDefID: uuid.New().String(), Kind: FieldKindPriority, Value: PriorityHigh, Label: "High", Color: "#c9b060", Position: 2, Active: true, CreatedAt: now, UpdatedAt: now},
+				{FieldDefID: uuid.New().String(), Kind: FieldKindPriority, Value: PriorityCritical, Label: "Critical", Color: "#d46b55", Position: 3, Active: true, CreatedAt: now, UpdatedAt: now},
+			},
+		},
+	}
+	for _, e := range entries {
+		var count int64
+		if err := connect().WithContext(ctx).Model(&TicketFieldDef{}).
+			Where("org_id = '' AND kind = ? AND active = ?", e.kind, true).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			continue
+		}
+		if err := connect().WithContext(ctx).Create(&e.defaults).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

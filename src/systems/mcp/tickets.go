@@ -78,7 +78,7 @@ func handleListTickets(c *client) server.ToolHandlerFunc {
 		if v := argStr(req, "assignee_id"); v != "" {
 			params.Set("assignee_id", v)
 		}
-		path := "/tickets"
+		path := "/tickets/tickets"
 		if len(params) > 0 {
 			path += "?" + params.Encode()
 		}
@@ -114,7 +114,7 @@ func handleCreateTicket(c *client) server.ToolHandlerFunc {
 		if v := argStr(req, "run_id"); v != "" {
 			body["run_id"] = v
 		}
-		data, status, err := c.post(ctx, "/tickets", body)
+		data, status, err := c.post(ctx, "/tickets/tickets", body)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -131,7 +131,7 @@ func handleGetTicket(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "ticket_id")
-		data, status, err := c.get(ctx, "/tickets/"+id)
+		data, status, err := c.get(ctx, "/tickets/tickets/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -167,7 +167,7 @@ func handleUpdateTicket(c *client) server.ToolHandlerFunc {
 			}
 		}
 		id := argStr(req, "ticket_id")
-		data, status, err := c.put(ctx, "/tickets/"+id, body)
+		data, status, err := c.put(ctx, "/tickets/tickets/"+id, body)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -184,7 +184,7 @@ func handleDeleteTicket(c *client) server.ToolHandlerFunc {
 			return noAuth(), nil
 		}
 		id := argStr(req, "ticket_id")
-		data, status, err := c.del(ctx, "/tickets/"+id)
+		data, status, err := c.del(ctx, "/tickets/tickets/"+id)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -202,7 +202,7 @@ func handleAddTicketComment(c *client) server.ToolHandlerFunc {
 		}
 		id := argStr(req, "ticket_id")
 		body := map[string]any{"body": argStr(req, "body")}
-		data, status, err := c.post(ctx, "/tickets/"+id+"/comments", body)
+		data, status, err := c.post(ctx, "/tickets/tickets/"+id+"/comments", body)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -220,7 +220,7 @@ func handleDeleteTicketComment(c *client) server.ToolHandlerFunc {
 		}
 		tid := argStr(req, "ticket_id")
 		cid := argStr(req, "comment_id")
-		data, status, err := c.del(ctx, "/tickets/"+tid+"/comments/"+cid)
+		data, status, err := c.del(ctx, "/tickets/tickets/"+tid+"/comments/"+cid)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}

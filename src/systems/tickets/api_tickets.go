@@ -24,7 +24,10 @@ func canAccessTicket(t Ticket, userID, orgID string) bool {
 type createTicketRequest struct {
 	Title            string  `json:"title"`
 	Description      string  `json:"description"`
+	Status           string  `json:"status"`
 	Priority         string  `json:"priority"`
+	Timescale        string  `json:"timescale"`
+	DueDate          *string `json:"due_date"`
 	AssigneeID       *string `json:"assignee_id"`
 	WorkflowID       *string `json:"workflow_id"`
 	RunID            *string `json:"run_id"`
@@ -33,13 +36,32 @@ type createTicketRequest struct {
 
 type updateTicketRequest struct {
 	Title            string  `json:"title"`
-	Description      string  `json:"description"`
+	Description      *string `json:"description"`
 	Status           string  `json:"status"`
 	Priority         string  `json:"priority"`
+	Timescale        string  `json:"timescale"`
+	DueDate          *string `json:"due_date"`
 	AssigneeID       *string `json:"assignee_id"`
 	WorkflowID       *string `json:"workflow_id"`
 	RunID            *string `json:"run_id"`
 	ForgeExecutionID *string `json:"forge_execution_id"`
+}
+
+// parseDueDate parses a due date string in YYYY-MM-DD or RFC3339 format.
+func parseDueDate(s *string) (*time.Time, error) {
+	if s == nil || *s == "" {
+		return nil, nil
+	}
+	if t, err := time.Parse("2006-01-02", *s); err == nil {
+		ut := t.UTC()
+		return &ut, nil
+	}
+	t, err := time.Parse(time.RFC3339, *s)
+	if err != nil {
+		return nil, err
+	}
+	ut := t.UTC()
+	return &ut, nil
 }
 
 func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
@@ -66,12 +88,26 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "title is required", http.StatusBadRequest)
 		return
 	}
+	status := req.Status
+	if status == "" {
+		status = StatusOpen
+	}
+	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindStatus, validStatuses), status) {
+		http.Error(w, "invalid status", http.StatusBadRequest)
+		return
+	}
 	priority := req.Priority
 	if priority == "" {
 		priority = PriorityMedium
 	}
-	if !slices.Contains(validPriorities, priority) {
-		http.Error(w, "priority must be one of: low, medium, high, critical", http.StatusBadRequest)
+	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, validPriorities), priority) {
+		http.Error(w, "invalid priority", http.StatusBadRequest)
+		return
+	}
+
+	dueDate, err := parseDueDate(req.DueDate)
+	if err != nil {
+		http.Error(w, "invalid due_date: use YYYY-MM-DD", http.StatusBadRequest)
 		return
 	}
 
@@ -79,8 +115,10 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		TicketID:         uuid.New().String(),
 		Title:            req.Title,
 		Description:      req.Description,
-		Status:           StatusOpen,
+		Status:           status,
 		Priority:         priority,
+		Timescale:        req.Timescale,
+		DueDate:          dueDate,
 		CreatedBy:        userID,
 		OrgID:            orgID,
 		AssigneeID:       req.AssigneeID,
@@ -102,6 +140,7 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	meterTicketsCreated.Add(ctx, 1, metric.WithAttributes(attribute.String("priority", t.Priority)))
+	notifyHooks(ctx, eventTicketCreated, t.Status, t, nil)
 	span.SetAttributes(attribute.String("ticket.id", t.TicketID))
 	span.SetStatus(codes.Ok, "")
 	slog.Info("ticket created", "ticket_id", t.TicketID, "user_id", userID)
@@ -129,17 +168,18 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 	statusFilter := q.Get("status")
 	priorityFilter := q.Get("priority")
 	assigneeFilter := q.Get("assignee_id")
+	timescaleFilter := q.Get("timescale")
 
-	if statusFilter != "" && !slices.Contains(validStatuses, statusFilter) {
+	if statusFilter != "" && !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindStatus, validStatuses), statusFilter) {
 		http.Error(w, "invalid status filter", http.StatusBadRequest)
 		return
 	}
-	if priorityFilter != "" && !slices.Contains(validPriorities, priorityFilter) {
+	if priorityFilter != "" && !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, validPriorities), priorityFilter) {
 		http.Error(w, "invalid priority filter", http.StatusBadRequest)
 		return
 	}
 
-	tickets, err := listTickets(ctx, userID, orgID, statusFilter, priorityFilter, assigneeFilter)
+	tickets, err := listTickets(ctx, userID, orgID, statusFilter, priorityFilter, assigneeFilter, timescaleFilter)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
@@ -250,28 +290,54 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	if req.Status == "" {
 		req.Status = existing.Status
 	}
-	if !slices.Contains(validStatuses, req.Status) {
-		http.Error(w, "status must be one of: open, in_progress, resolved, closed", http.StatusBadRequest)
+	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindStatus, validStatuses), req.Status) {
+		http.Error(w, "invalid status", http.StatusBadRequest)
 		return
 	}
 	if req.Priority == "" {
 		req.Priority = existing.Priority
 	}
-	if !slices.Contains(validPriorities, req.Priority) {
-		http.Error(w, "priority must be one of: low, medium, high, critical", http.StatusBadRequest)
+	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, validPriorities), req.Priority) {
+		http.Error(w, "invalid priority", http.StatusBadRequest)
 		return
 	}
 
-	wasTerminal := existing.Status == StatusResolved || existing.Status == StatusClosed
+	dueDate, err := parseDueDate(req.DueDate)
+	if err != nil {
+		http.Error(w, "invalid due_date: use YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+
+	wasOpen := existing.Status != StatusResolved && existing.Status != StatusClosed
+	prevStatus := existing.Status
 
 	existing.Title = req.Title
-	existing.Description = req.Description
+	if req.Description != nil {
+		existing.Description = *req.Description
+	}
 	existing.Status = req.Status
 	existing.Priority = req.Priority
-	existing.AssigneeID = req.AssigneeID
-	existing.WorkflowID = req.WorkflowID
-	existing.RunID = req.RunID
-	existing.ForgeExecutionID = req.ForgeExecutionID
+	// Guard Timescale/DueDate like the nullable fields below so a partial PUT that
+	// omits them doesn't silently wipe the stored values. Timescale is a plain
+	// string (empty = omitted); DueDate is a pointer (nil = omitted, "" = clear).
+	if req.Timescale != "" {
+		existing.Timescale = req.Timescale
+	}
+	if req.DueDate != nil {
+		existing.DueDate = dueDate
+	}
+	if req.AssigneeID != nil {
+		existing.AssigneeID = req.AssigneeID
+	}
+	if req.WorkflowID != nil {
+		existing.WorkflowID = req.WorkflowID
+	}
+	if req.RunID != nil {
+		existing.RunID = req.RunID
+	}
+	if req.ForgeExecutionID != nil {
+		existing.ForgeExecutionID = req.ForgeExecutionID
+	}
 
 	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
@@ -281,9 +347,17 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nowTerminal := req.Status == StatusResolved || req.Status == StatusClosed
-	if !wasTerminal && nowTerminal {
+	isNowTerminal := req.Status == StatusResolved || req.Status == StatusClosed
+	if wasOpen && isNowTerminal {
 		meterTicketsResolved.Add(ctx, 1, metric.WithAttributes(attribute.String("status", req.Status)))
+	}
+
+	notifyHooks(ctx, eventTicketUpdated, existing.Status, existing, nil)
+	if existing.Status != prevStatus {
+		notifyHooks(ctx, eventTicketStatus, existing.Status, existing, map[string]string{
+			"old_status": prevStatus,
+			"new_status": existing.Status,
+		})
 	}
 
 	t, err := getTicket(ctx, id)
@@ -352,6 +426,7 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	notifyHooks(ctx, eventTicketDeleted, t.Status, t, nil)
 	span.SetStatus(codes.Ok, "")
 	slog.Info("ticket deleted", "ticket_id", id, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)

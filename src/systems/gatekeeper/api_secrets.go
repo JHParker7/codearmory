@@ -185,7 +185,7 @@ func handleCreateSecret(w http.ResponseWriter, r *http.Request) {
 		Ciphertext: ct,
 		CreatedBy:  callerID,
 	}
-	if err := connect().WithContext(r.Context()).Create(&s).Error; err != nil {
+	if err := s.Add(r.Context()); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			http.Error(w, "secret with that name already exists", http.StatusConflict)
 			return
@@ -245,9 +245,8 @@ func handleUpdateSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var s Secret
-	if err := connect().WithContext(r.Context()).
-		Where("secret_id = ? AND active = true", id).First(&s).Error; err != nil {
+	s, err := getSecretByID(r.Context(), id)
+	if err != nil {
 		http.Error(w, "secret not found", http.StatusNotFound)
 		return
 	}
@@ -279,8 +278,8 @@ func handleUpdateSecret(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ct, err := encryptSecret(req.Value)
-	if err != nil {
+	ct, encErr := encryptSecret(req.Value)
+	if encErr != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -289,7 +288,7 @@ func handleUpdateSecret(w http.ResponseWriter, r *http.Request) {
 	if req.Name != "" {
 		s.Name = req.Name
 	}
-	if err := connect().WithContext(r.Context()).Save(&s).Error; err != nil {
+	if err := s.Update(r.Context()); err != nil {
 		slog.Error("update secret: db", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -311,9 +310,8 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var s Secret
-	if err := connect().WithContext(r.Context()).
-		Where("secret_id = ? AND active = true", id).First(&s).Error; err != nil {
+	s, err := getSecretByID(r.Context(), id)
+	if err != nil {
 		http.Error(w, "secret not found", http.StatusNotFound)
 		return
 	}
@@ -329,7 +327,7 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	connect().WithContext(r.Context()).Model(&s).Update("active", false) //nolint:errcheck
+	s.Remove(r.Context()) //nolint:errcheck
 	slog.Info("secret deleted", "secret_id", id, "caller_id", callerID)
 	writeAudit(r.Context(), callerID, "user", "secret.delete", id, s.Name)
 	w.WriteHeader(http.StatusNoContent)
@@ -460,8 +458,7 @@ func handleSetSecretProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p := OrgSecretProvider{OrgID: orgID, Provider: req.Provider, Config: configCT}
-	if err := connect().WithContext(r.Context()).
-		Save(&p).Error; err != nil {
+	if err := p.Update(r.Context()); err != nil {
 		slog.Error("set secret provider: db", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -485,7 +482,7 @@ func handleDeleteSecretProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	connect().WithContext(r.Context()).Delete(&OrgSecretProvider{}, "org_id = ?", orgID) //nolint:errcheck
+	(OrgSecretProvider{OrgID: orgID}).Remove(r.Context()) //nolint:errcheck
 	slog.Info("secret provider removed", "org_id", orgID, "caller_id", callerID)
 	writeAudit(r.Context(), callerID, "user", "secret_provider.delete", orgID, "")
 	w.WriteHeader(http.StatusNoContent)

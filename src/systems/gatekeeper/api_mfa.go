@@ -73,9 +73,7 @@ func handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Remove any previous unconfirmed enrollment before inserting a fresh one.
-	connect().WithContext(ctx).
-		Where("user_id = ? AND confirmed = ?", userID, false).
-		Delete(&TOTPCredential{})
+	deleteUnconfirmedTOTP(ctx, userID) //nolint:errcheck
 
 	cred := TOTPCredential{
 		CredentialID: uuid.New().String(),
@@ -203,17 +201,16 @@ func handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := connect().WithContext(ctx).
-		Model(&TOTPCredential{}).
-		Where("user_id = ? AND active = ?", userID, true).
-		Update("active", false)
-	if result.Error != nil {
-		span.RecordError(result.Error)
-		slog.Error("totp disable: db error", "user_id", userID, "error", result.Error)
+	n, dbErr := deactivateTOTP(ctx, userID)
+	if dbErr != nil {
+		span.RecordError(dbErr)
+		span.SetStatus(codes.Error, dbErr.Error())
+		slog.Error("totp disable: db error", "user_id", userID, "error", dbErr)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if result.RowsAffected == 0 {
+	if n == 0 {
+		span.SetStatus(codes.Ok, "")
 		http.Error(w, "TOTP not enabled", http.StatusNotFound)
 		return
 	}
@@ -260,7 +257,7 @@ func handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenString, sessionID, err := issueSession(ctx, pending.UserID)
+	tokenString, sessionID, expiresAt, err := issueSession(ctx, pending.UserID)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "session creation failed")
@@ -277,6 +274,7 @@ func handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 		writeAudit(ctx, pending.UserID, "user", "session.create", sessionID, userRow.(User).Username)
 	}
 
+	setSessionCookie(w, tokenString, expiresAt)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": tokenString}) //nolint:errcheck
 }
@@ -284,11 +282,11 @@ func handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 // issueSession creates a new gatekeeper session for userID and returns the signed
-// JWT and sessionID. It respects SESSION_TTL_HOURS (default 24h, max 720h).
-func issueSession(ctx context.Context, userID string) (token, sessionID string, err error) {
+// JWT, sessionID, and expiry time. It respects SESSION_TTL_HOURS (default 24h, max 720h).
+func issueSession(ctx context.Context, userID string) (token, sessionID string, expiresAt time.Time, err error) {
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	sessionID = uuid.New().String()
 	const maxTTLHours = 720
@@ -301,9 +299,10 @@ func issueSession(ctx context.Context, userID string) (token, sessionID string, 
 			ttlHours = n
 		}
 	}
-	expiresAt := time.Now().Add(time.Duration(ttlHours) * time.Hour).UTC().Truncate(time.Second)
+	expiresAt = time.Now().Add(time.Duration(ttlHours) * time.Hour).UTC().Truncate(time.Second)
 
-	tokenString, err := jwt.NewWithClaims(jwt.SigningMethodES256, authClaims{
+	var tokenString string
+	tokenString, err = jwt.NewWithClaims(jwt.SigningMethodES256, authClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "gatekeeper",
 			Subject:   userID,
@@ -313,12 +312,12 @@ func issueSession(ctx context.Context, userID string) (token, sessionID string, 
 		},
 	}).SignedString(privKey)
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 
 	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	session := Session{
 		SessionID: sessionID,
@@ -327,9 +326,9 @@ func issueSession(ctx context.Context, userID string) (token, sessionID string, 
 		PubKey:    string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})),
 	}
 	if err := session.Add(ctx); err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
-	return tokenString, sessionID, nil
+	return tokenString, sessionID, expiresAt, nil
 }
 
 // consumeMFAPending atomically marks a pending MFA token as used and returns it.
@@ -346,11 +345,8 @@ func consumeMFAPending(ctx context.Context, w http.ResponseWriter, token string)
 		http.Error(w, "MFA token expired", http.StatusUnauthorized)
 		return MFAPending{}, false
 	}
-	result := connect().WithContext(ctx).
-		Model(&MFAPending{}).
-		Where("token = ? AND used = ?", token, false).
-		Update("used", true)
-	if result.Error != nil || result.RowsAffected == 0 {
+	n, redeemErr := redeemMFAPending(ctx, token)
+	if redeemErr != nil || n == 0 {
 		http.Error(w, "invalid or expired MFA token", http.StatusUnauthorized)
 		return MFAPending{}, false
 	}
@@ -407,7 +403,7 @@ func newMFAPending(ctx context.Context, userID, oauthClientID, oauthRedirectURI,
 		OAuthState:       oauthState,
 		OAuthScope:       oauthScope,
 	}
-	if err := connect().WithContext(ctx).Create(&pending).Error; err != nil {
+	if err := pending.Add(ctx); err != nil {
 		return MFAPending{}, err
 	}
 	return pending, nil

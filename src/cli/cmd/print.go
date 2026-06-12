@@ -31,19 +31,25 @@ type resolverDef struct{ path, field string }
 // via the API when no companion name field is present in the same response.
 // Also covers org_id/team_id/user_id as fallback when no companion name exists.
 var foreignKeyResolvers = map[string]resolverDef{
-	"org_id":       {"/orgs/%s", "org_name"},
-	"team_id":      {"/teams/%s", "team_name"},
-	"user_id":      {"/users/%s", "username"},
-	"owner_id":     {"/users/%s", "username"},
-	"created_by":   {"/users/%s", "username"},
-	"triggered_by": {"/users/%s", "username"},
-	"inviter_id":   {"/users/%s", "username"},
-	"assignee_id":  {"/users/%s", "username"},
+	"org_id":       {"/gatekeeper/orgs/%s", "org_name"},
+	"team_id":      {"/gatekeeper/teams/%s", "team_name"},
+	"user_id":      {"/gatekeeper/users/%s", "username"},
+	"owner_id":     {"/gatekeeper/users/%s", "username"},
+	"created_by":   {"/gatekeeper/users/%s", "username"},
+	"triggered_by": {"/gatekeeper/users/%s", "username"},
+	"inviter_id":   {"/gatekeeper/users/%s", "username"},
+	"assignee_id":  {"/gatekeeper/users/%s", "username"},
 }
 
 // nameCache is reset at the start of each printResponse call to deduplicate
 // API lookups within a single render without caching across calls.
 var nameCache map[string]string
+
+// isForeignKeyField reports whether col is a foreign-key or user-reference
+// field whose UUID should be resolved to a human-readable name.
+func isForeignKeyField(col string) bool {
+	return strings.HasSuffix(col, "_id") || foreignKeyResolvers[col].path != ""
+}
 
 // resolvedNameForID returns a human-readable name for a UUID field value.
 // It checks the companion name field in obj first; if absent, makes an API call.
@@ -143,7 +149,7 @@ func tableCellValue(col string, row map[string]any) string {
 
 	// Foreign key or user-reference field: resolve to name.
 	if uuid, ok := v.(string); ok && !primaryIDs[col] {
-		if strings.HasSuffix(col, "_id") || foreignKeyResolvers[col].path != "" {
+		if isForeignKeyField(col) {
 			if name := resolvedNameForID(col, uuid, row); name != "" {
 				if flagVerbose {
 					return truncate(name+" ("+uuid+")", 52)
@@ -185,7 +191,7 @@ func printRecord(obj map[string]any) {
 
 		// All *_id fields and user-reference fields (created_by, triggered_by, …).
 		uuid, isStr := val.(string)
-		if isStr && (strings.HasSuffix(k, "_id") || foreignKeyResolvers[k].path != "") {
+		if isStr && isForeignKeyField(k) {
 			// Suppress if a companion name field in this response already handles it.
 			if nameField, ok := pairedNameField[k]; ok {
 				if _, hasName := obj[nameField]; hasName {

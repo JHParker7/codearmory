@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -65,6 +66,58 @@ var fwdClient = &http.Client{
 	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
+	// Dial through safeDialContext so the resolved IP is validated, not just the
+	// allowlisted hostname.
+	Transport: &http.Transport{DialContext: safeDialContext},
+}
+
+// isDisallowedIP reports whether ip is one the proxy must never dial: loopback,
+// private, link-local (covers the 169.254.169.254 cloud-metadata endpoint),
+// multicast, or unspecified. The domain allowlist only matches on hostname, so
+// without this an allowlisted (or attacker-DNS-controlled) name resolving to an
+// internal address would let sandboxed code reach metadata / cluster services.
+func isDisallowedIP(ip net.IP) bool {
+	return ip == nil ||
+		ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified()
+}
+
+// allowDialIP reports whether the proxy may dial ip. Overridable in tests that
+// must reach a loopback httptest server; production always uses the strict check.
+var allowDialIP = func(ip net.IP) bool { return !isDisallowedIP(ip) }
+
+// safeDialContext resolves addr and dials only an IP that passes allowDialIP.
+// Validating at dial time (rather than trusting an earlier lookup) also defeats
+// DNS-rebinding TOCTOU: the address we connect to is the one we checked.
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var d net.Dialer
+	lastErr := fmt.Errorf("no permitted address for %q", host)
+	for _, ip := range ips {
+		if !allowDialIP(ip.IP) {
+			slog.Warn("egress blocked: host resolved to non-public address", "host", host, "resolved_ip", ip.IP.String())
+			lastErr = fmt.Errorf("egress to non-public address %s blocked", ip.IP)
+			continue
+		}
+		conn, derr := d.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		if derr == nil {
+			return conn, nil
+		}
+		lastErr = derr
+	}
+	return nil, lastErr
 }
 
 type proxy struct{ al allowlist }
@@ -101,7 +154,9 @@ func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("allowed", "host", host, "method", "CONNECT")
 
-	target, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
+	dialCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	target, err := safeDialContext(dialCtx, "tcp", r.Host)
 	if err != nil {
 		http.Error(w, "dial failed", http.StatusBadGateway)
 		return
@@ -123,6 +178,8 @@ func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Copy in both directions concurrently. Each goroutine signals done when the
+	// connection half-closes; we wait for both so neither side is closed early.
 	done := make(chan struct{}, 2)
 	go func() { io.Copy(target, clientConn); done <- struct{}{} }()    //nolint:errcheck
 	go func() { io.Copy(clientConn, target); done <- struct{}{} }()    //nolint:errcheck

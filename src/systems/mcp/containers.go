@@ -66,9 +66,9 @@ func handleListTags(c *client) server.ToolHandlerFunc {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		data, status, apiE := c.get(ctx, "/containers/repositories/"+ns+"/"+img+"/tags")
-		if apiE != nil {
-			return mcp.NewToolResultError(apiE.Error()), nil
+		data, status, err := c.get(ctx, "/containers/repositories/"+ns+"/"+img+"/tags")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 		if status != http.StatusOK {
 			return apiErr(status, data), nil
@@ -87,9 +87,9 @@ func handleGetManifest(c *client) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		ref := argStr(req, "reference")
-		data, status, apiE := c.get(ctx, "/containers/repositories/"+ns+"/"+img+"/manifests/"+ref)
-		if apiE != nil {
-			return mcp.NewToolResultError(apiE.Error()), nil
+		data, status, err := c.get(ctx, "/containers/repositories/"+ns+"/"+img+"/manifests/"+ref)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 		if status != http.StatusOK {
 			return apiErr(status, data), nil
@@ -111,9 +111,9 @@ func handleDeleteManifest(c *client) server.ToolHandlerFunc {
 		if !strings.HasPrefix(digest, "sha256:") {
 			return mcp.NewToolResultError("digest must start with sha256:"), nil
 		}
-		data, status, apiE := c.del(ctx, "/containers/repositories/"+ns+"/"+img+"/manifests/"+digest)
-		if apiE != nil {
-			return mcp.NewToolResultError(apiE.Error()), nil
+		data, status, err := c.del(ctx, "/containers/repositories/"+ns+"/"+img+"/manifests/"+digest)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 		if status != http.StatusNoContent {
 			return apiErr(status, data), nil

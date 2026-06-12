@@ -28,10 +28,11 @@ func migrateAndSeedRunnerClasses() error {
 // runnerClassSpec fetches the named class from the database. Returns an error if
 // the class does not exist or is disabled.
 func runnerClassSpec(ctx context.Context, name string) (RunnerClass, error) {
-	var rc RunnerClass
-	if err := connect().WithContext(ctx).Where("name = ?", name).First(&rc).Error; err != nil {
+	row, err := (RunnerClass{Name: name}).Get(ctx)
+	if err != nil {
 		return RunnerClass{}, fmt.Errorf("runner class %q not found", name)
 	}
+	rc := row.(RunnerClass)
 	if !rc.Enabled {
 		return RunnerClass{}, fmt.Errorf("runner class %q is disabled", name)
 	}

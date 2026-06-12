@@ -71,6 +71,52 @@ GitHub App (installed on repo)
 
 **Polling timeout:** background goroutines time out after 2 hours and mark the check run `timed_out`.
 
+## Internal event ingest (trusted services)
+
+`POST /internal/events` lets other platform services emit lifecycle events that users can route to workflows with ordinary pipeline rules. It is **not** exposed through Conductor; callers authenticate with an `X-Hooks-Token` HMAC over `event:{source}:{event}:{timestamp}` using the shared `HOOKS_TRIGGER_KEY` (30-second window), the same key the workflows service uses. Because the caller is already trusted, per-rule `X-Hub-Signature-256` checks are skipped.
+
+Unlike webhook sources (globally-unique repos), internal sources are shared constants, so the request carries `org_id`/`created_by` and rule matching is **confined to the emitting tenant** — one org's events never fire another org's rules.
+
+```json
+{
+  "source": "tickets",
+  "event": "ticket.status_changed",
+  "ref": "closed",
+  "org_id": "org-uuid",
+  "created_by": "user-uuid",
+  "payload": {"ticket_id": "...", "status": "closed", "old_status": "in_progress"}
+}
+```
+
+### Tickets integration
+
+The tickets service emits these events when `HOOKS_URL` and `HOOKS_TRIGGER_KEY` are configured (otherwise it is a silent no-op):
+
+| Event | When | Notable payload fields |
+|-------|------|------------------------|
+| `ticket.created` | A ticket is created | `ticket_id`, `status`, `priority`, … |
+| `ticket.updated` | A ticket is updated (any field) | full ticket fields |
+| `ticket.status_changed` | An update changed `status` | adds `old_status`, `new_status` |
+| `ticket.deleted` | A ticket is deleted | full ticket fields |
+
+To run a workflow on ticket changes, create a rule with `repo` (source) set to `tickets` and the desired `events`. The `ref` carries the ticket status, so `ref_filter` can target a specific value:
+
+```bash
+curl -X POST http://localhost:8087/rules \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{
+    "name": "notify-on-ticket-closed",
+    "repo": "tickets",
+    "events": ["ticket.status_changed"],
+    "ref_filter": "closed",
+    "workflow_id": "wf-uuid",
+    "secret": "any-non-empty-secret",
+    "input_mapping": {"TICKET_ID": "ticket_id", "STATUS": "status"}
+  }'
+```
+
+A `secret` is still required on the rule (all rules must have one), but it is not checked for internally-emitted events since the shared-key HMAC already authenticates the caller.
+
 ## API
 
 ### Webhook receiver (unauthenticated)

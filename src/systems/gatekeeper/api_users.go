@@ -25,6 +25,40 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// setSessionCookie writes an HttpOnly session cookie carrying the JWT. Defaults
+// to Secure=true; set COOKIE_SECURE=false to disable (local HTTP dev only).
+func setSessionCookie(w http.ResponseWriter, token string, expiresAt time.Time) {
+	maxAge := int(time.Until(expiresAt).Seconds())
+	if maxAge <= 0 {
+		return
+	}
+	secure := os.Getenv("COOKIE_SECURE") != "false"
+	http.SetCookie(w, &http.Cookie{
+		Name:     "armory_session",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   secure,
+	})
+}
+
+// handleLogout clears the session cookie. Callers that used JWT-only auth can
+// delete their own session via DELETE /sessions/{id}.
+func handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "armory_session",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   os.Getenv("COOKIE_SECURE") != "false",
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // userResponse is the safe public shape of a User — HashedPassword is deliberately omitted.
 type userResponse struct {
 	UserID    string    `json:"user_id"`
@@ -47,11 +81,12 @@ func toUserResponse(u User) userResponse {
 }
 
 type updateUserRequest struct {
-	Email     string `json:"email"`
-	Username  string `json:"username"`
-	Password  string `json:"password"` // optional; kept unchanged when empty
-	Firstname string `json:"firstname"`
-	Lastname  string `json:"lastname"`
+	Email           string `json:"email"`
+	Username        string `json:"username"`
+	Password        string `json:"password"`         // optional; kept unchanged when empty
+	CurrentPassword string `json:"current_password"` // required to authorize a password change
+	Firstname       string `json:"firstname"`
+	Lastname        string `json:"lastname"`
 }
 
 type signupRequest struct {
@@ -163,6 +198,17 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	u.Firstname = req.Firstname
 	u.Lastname = req.Lastname
 	if req.Password != "" {
+		// Re-authenticate with the current password before allowing a password
+		// change — RBAC alone is not sufficient (mirrors handleTOTPDisable, which
+		// also requires the password). Without this, a stolen session cookie or
+		// still-valid bearer token is enough to reset the password and take over
+		// the account. An empty current_password fails the compare below.
+		if err := bcrypt.CompareHashAndPassword([]byte(u.HashedPassword), []byte(req.CurrentPassword)); err != nil {
+			span.SetStatus(codes.Error, "current password mismatch")
+			slog.Warn("update user: password change rejected — current_password missing or incorrect", "caller_id", callerID, "target_user_id", id)
+			http.Error(w, "current_password is incorrect", http.StatusUnauthorized)
+			return
+		}
 		if len(req.Password) < 8 {
 			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
 			return
@@ -305,7 +351,7 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("user.id", id)))
 
-	if err := connect().WithContext(ctx).Model(&Session{}).Where("user_id = ?", id).Update("active", false).Error; err != nil {
+	if err := deactivateUserSessions(ctx, id); err != nil {
 		slog.Error("delete user: failed to invalidate sessions", "caller_id", callerID, "target_user_id", id, "error", err)
 	} else {
 		cacheDelUserSessions(ctx, id)
@@ -562,8 +608,8 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	// constant whether or not the email exists, preventing user enumeration via timing.
 	const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 
-	var user User
-	if err := connect().WithContext(ctx).Where("email = ? AND active = ?", req.Email, true).First(&user).Error; err != nil {
+	user, userErr := getUserByEmail(ctx, req.Email)
+	if userErr != nil {
 		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(req.Password)) //nolint:errcheck
 		span.SetStatus(codes.Error, "user not found")
 		slog.Warn("login failed: user not found or inactive")
@@ -680,6 +726,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	slog.Info("login successful", "user_id", user.UserID, "session_id", sessionID)
 	writeAudit(ctx, user.UserID, "user", "session.create", sessionID, user.Username)
 
+	setSessionCookie(w, tokenString, expiresAt)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": tokenString})
 }

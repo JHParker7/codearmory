@@ -34,7 +34,7 @@ func init() {
 			if sprStatus != "" {
 				q.Set("status", sprStatus)
 			}
-			path := "/service-permission-requests"
+			path := "/gatekeeper/service-permission-requests"
 			if len(q) > 0 {
 				path += "?" + q.Encode()
 			}
@@ -51,7 +51,7 @@ func init() {
 			Short: "Get a service permission request",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return apiCall("GET", "/service-permission-requests/"+args[0], nil)
+				return apiCall("GET", "/gatekeeper/service-permission-requests/"+args[0], nil)
 			},
 		},
 		&cobra.Command{
@@ -59,7 +59,7 @@ func init() {
 			Short: "Approve a service permission request",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return apiCall("POST", "/service-permission-requests/"+args[0]+"/approve", nil)
+				return apiCall("POST", "/gatekeeper/service-permission-requests/"+args[0]+"/approve", nil)
 			},
 		},
 		&cobra.Command{
@@ -67,7 +67,7 @@ func init() {
 			Short: "Decline a service permission request",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return apiCall("POST", "/service-permission-requests/"+args[0]+"/decline", nil)
+				return apiCall("POST", "/gatekeeper/service-permission-requests/"+args[0]+"/decline", nil)
 			},
 		},
 	)

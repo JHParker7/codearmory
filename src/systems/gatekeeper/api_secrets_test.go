@@ -67,7 +67,8 @@ func createOrgWithUser(t *testing.T) (Org, User) {
 }
 
 // createAuthorizedOrgUser creates an org, a member user of that org, and grants the
-// user the given action on the given resource.
+// user the given action on the given resource. The resource is stored with the
+// user's username prefix to match checkPermissions' scoping behaviour.
 func createAuthorizedOrgUser(t *testing.T, action, resource string) (Org, User) {
 	t.Helper()
 	org, u := createOrgWithUser(t)
@@ -76,7 +77,7 @@ func createAuthorizedOrgUser(t *testing.T, action, resource string) (Org, User) 
 		PermissionsID: uuid.New().String(),
 		Service:       "gatekeeper",
 		Actions:       []string{action},
-		Resources:     []string{resource},
+		Resources:     []string{u.Username + "/" + resource},
 	}
 	if err := perm.Add(context.Background()); err != nil {
 		t.Fatalf("createAuthorizedOrgUser perm: %v", err)
@@ -308,7 +309,7 @@ func TestUpdateSecret_Success(t *testing.T) {
 	id := uuid.New().String()
 
 	perm := Permissions{PermissionsID: uuid.New().String(), Service: "gatekeeper",
-		Actions: []string{"updateSecret"}, Resources: []string{"gatekeeper/secrets/" + id}}
+		Actions: []string{"updateSecret"}, Resources: []string{u.Username + "/gatekeeper/secrets/" + id}}
 	perm.Add(context.Background()) //nolint:errcheck
 	t.Cleanup(func() { perm.Remove(context.Background()) })
 	role := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{perm.PermissionsID}}
@@ -343,7 +344,7 @@ func TestDeleteSecret_Success(t *testing.T) {
 	id := uuid.New().String()
 
 	perm := Permissions{PermissionsID: uuid.New().String(), Service: "gatekeeper",
-		Actions: []string{"deleteSecret"}, Resources: []string{"gatekeeper/secrets/" + id}}
+		Actions: []string{"deleteSecret"}, Resources: []string{u.Username + "/gatekeeper/secrets/" + id}}
 	perm.Add(context.Background()) //nolint:errcheck
 	t.Cleanup(func() { perm.Remove(context.Background()) })
 	role := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{perm.PermissionsID}}
@@ -402,7 +403,7 @@ func TestSetGetDeleteSecretProvider(t *testing.T) {
 
 	// Get provider.
 	perm2 := Permissions{PermissionsID: uuid.New().String(), Service: "gatekeeper",
-		Actions: []string{"getSecretProvider"}, Resources: []string{"gatekeeper/orgs/" + org.OrgID}}
+		Actions: []string{"getSecretProvider"}, Resources: []string{actor.Username + "/gatekeeper/orgs/" + org.OrgID}}
 	perm2.Add(context.Background())     //nolint:errcheck
 	role2 := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{perm2.PermissionsID}}
 	role2.Add(context.Background())     //nolint:errcheck

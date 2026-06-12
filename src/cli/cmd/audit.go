@@ -48,7 +48,7 @@ func init() {
 			if auditOffset != "" {
 				q.Set("offset", auditOffset)
 			}
-			path := "/audit-logs"
+			path := "/gatekeeper/audit-logs"
 			if len(q) > 0 {
 				path += "?" + q.Encode()
 			}

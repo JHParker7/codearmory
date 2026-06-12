@@ -51,6 +51,10 @@ spec:
               value: {{ .Values.tickets.env.logLevel | quote }}
             - name: GATEKEEPER_URL
               value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+            {{- if .Values.hooks.enabled }}
+            - name: HOOKS_URL
+              value: "http://{{ include "codearmory.fullname" . }}-hooks:{{ .Values.hooks.port }}"
+            {{- end }}
             {{- if .Values.tickets.env.otelEndpoint }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.tickets.env.otelEndpoint | quote }}
@@ -61,6 +65,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-tickets
                   key: gatekeeper-service-key
+            {{- if .Values.hooks.enabled }}
+            - name: HOOKS_TRIGGER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-tickets
+                  key: hooks-trigger-key
+            {{- end }}
             {{- include "codearmory.tls.envs" .Values.tickets.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.tickets.tls) }}
           volumeMounts:
