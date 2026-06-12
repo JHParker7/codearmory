@@ -500,9 +500,10 @@ func TestUpdateUser_PasswordChange(t *testing.T) {
 
 	const newPassword = "newpassword"
 	body := updateUserRequest{
-		Email:    target.Email,
-		Username: target.Username,
-		Password: newPassword,
+		Email:           target.Email,
+		Username:        target.Username,
+		Password:        newPassword,
+		CurrentPassword: oldPassword,
 	}
 	b, _ := json.Marshal(body)
 	r := withUserID(httptest.NewRequest(http.MethodPut, "/users/"+target.UserID, bytes.NewReader(b)), actor.UserID)
@@ -528,6 +529,40 @@ func TestUpdateUser_PasswordChange(t *testing.T) {
 	handleLogin(wLogin, rLogin)
 	if wLogin.Code != http.StatusOK {
 		t.Fatalf("login with new password expected 200, got %d", wLogin.Code)
+	}
+	t.Cleanup(func() { connect().Model(&Session{}).Where("user_id = ?", target.UserID).Update("active", false) })
+}
+
+// A password change must be rejected without the correct current password —
+// RBAC alone is not sufficient (prevents takeover via a stolen session/token).
+func TestUpdateUser_PasswordChangeWrongCurrent(t *testing.T) {
+	const oldPassword = "oldpassword"
+	target := createLoginUser(t, uuid.New().String()+"@test.com", oldPassword)
+	actor := createAuthorizedUser(t, "updateUser", "gatekeeper/users/"+target.UserID)
+
+	body := updateUserRequest{
+		Email:           target.Email,
+		Username:        target.Username,
+		Password:        "newpassword",
+		CurrentPassword: "wrongpassword",
+	}
+	b, _ := json.Marshal(body)
+	r := withUserID(httptest.NewRequest(http.MethodPut, "/users/"+target.UserID, bytes.NewReader(b)), actor.UserID)
+	r.SetPathValue("id", target.UserID)
+	w := httptest.NewRecorder()
+	handleUpdateUser(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong current_password, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// The password must be unchanged: the original password should still log in.
+	b2, _ := json.Marshal(loginRequest{Email: target.Email, Password: oldPassword})
+	rLogin := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(b2))
+	wLogin := httptest.NewRecorder()
+	handleLogin(wLogin, rLogin)
+	if wLogin.Code != http.StatusOK {
+		t.Fatalf("login with original password expected 200, got %d", wLogin.Code)
 	}
 	t.Cleanup(func() { connect().Model(&Session{}).Where("user_id = ?", target.UserID).Update("active", false) })
 }

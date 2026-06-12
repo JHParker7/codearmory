@@ -81,11 +81,12 @@ func toUserResponse(u User) userResponse {
 }
 
 type updateUserRequest struct {
-	Email     string `json:"email"`
-	Username  string `json:"username"`
-	Password  string `json:"password"` // optional; kept unchanged when empty
-	Firstname string `json:"firstname"`
-	Lastname  string `json:"lastname"`
+	Email           string `json:"email"`
+	Username        string `json:"username"`
+	Password        string `json:"password"`         // optional; kept unchanged when empty
+	CurrentPassword string `json:"current_password"` // required to authorize a password change
+	Firstname       string `json:"firstname"`
+	Lastname        string `json:"lastname"`
 }
 
 type signupRequest struct {
@@ -197,6 +198,17 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	u.Firstname = req.Firstname
 	u.Lastname = req.Lastname
 	if req.Password != "" {
+		// Re-authenticate with the current password before allowing a password
+		// change — RBAC alone is not sufficient (mirrors handleTOTPDisable, which
+		// also requires the password). Without this, a stolen session cookie or
+		// still-valid bearer token is enough to reset the password and take over
+		// the account. An empty current_password fails the compare below.
+		if err := bcrypt.CompareHashAndPassword([]byte(u.HashedPassword), []byte(req.CurrentPassword)); err != nil {
+			span.SetStatus(codes.Error, "current password mismatch")
+			slog.Warn("update user: password change rejected — current_password missing or incorrect", "caller_id", callerID, "target_user_id", id)
+			http.Error(w, "current_password is incorrect", http.StatusUnauthorized)
+			return
+		}
 		if len(req.Password) < 8 {
 			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
 			return
