@@ -56,10 +56,7 @@ spec:
             - name: OUTPOST_GATEWAY_URL
               value: "http://{{ $full }}-outpost-gateway:{{ .Values.outpostGateway.port }}"
             {{- end }}
-            {{- if .Values.argo.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.argo.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.argo.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "argo" "argo" $full) | nindent 12 }}
             - name: GATEKEEPER_SERVICE_KEY
               valueFrom:

@@ -1,3 +1,8 @@
+# Local OpenTelemetry Collector config. Receives OTLP from every service (the
+# codearmory_sdk telemetry.Setup exports traces, metrics, and logs over OTLP/HTTP
+# to http://otelcol:4318) and forwards traces to Jaeger for a browsable UI.
+# Metrics and logs go to the debug exporter — visible in `docker compose logs
+# otelcol` — to keep the local stack lightweight (no Prometheus/Loki/Grafana).
 receivers:
   otlp:
     protocols:
@@ -10,32 +15,26 @@ processors:
   batch:
 
 exporters:
-  otlp/tempo:
-    endpoint: tempo:4317
+  # Forward traces to Jaeger all-in-one (OTLP receiver on :4317). View at
+  # http://localhost:16686.
+  otlp/jaeger:
+    endpoint: jaeger:4317
     tls:
       insecure: true
-
-  prometheusremotewrite:
-    endpoint: http://prometheus:9090/api/v1/write
-    tls:
-      insecure: true
-
-  otlphttp/loki:
-    endpoint: http://loki:3100/otlp
-    tls:
-      insecure: true
+  debug:
+    verbosity: normal
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp/tempo]
+      exporters: [otlp/jaeger, debug]
     metrics:
       receivers: [otlp]
       processors: [batch]
-      exporters: [prometheusremotewrite]
+      exporters: [debug]
     logs:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlphttp/loki]
+      exporters: [debug]

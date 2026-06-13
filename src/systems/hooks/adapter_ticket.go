@@ -80,7 +80,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 
 	if !verifyInternalEvent(payload.Source, payload.Event, payload.OrgID, payload.CreatedBy, r.Header.Get("X-Hooks-Token"), r.Header.Get("X-Hooks-Timestamp")) {
 		span.SetStatus(codes.Error, "invalid hooks token")
-		slog.Warn("internal event: invalid hooks token", "source", payload.Source, "event", payload.Event)
+		slog.WarnContext(ctx, "internal event: invalid hooks token", "source", payload.Source, "event", payload.Event)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -116,7 +116,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 	if err := newEvent.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert event failed")
-		slog.Error("internal event: insert event", "error", err)
+		slog.ErrorContext(ctx, "internal event: insert event", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}

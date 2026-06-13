@@ -109,9 +109,9 @@ func handleSyncApp(w http.ResponseWriter, r *http.Request) {
 		"app_name": name,
 		"revision": revision,
 	}); err != nil {
-		slog.Error("sync: enqueue command failed", "sync_id", syncID, "error", err)
+		slog.ErrorContext(ctx, "sync: enqueue command failed", "sync_id", syncID, "error", err)
 		if ferr := markSyncFailed(ctx, syncID, "dispatch failed"); ferr != nil {
-			slog.Error("sync: failed to mark sync failed", "sync_id", syncID, "error", ferr)
+			slog.ErrorContext(ctx, "sync: failed to mark sync failed", "sync_id", syncID, "error", ferr)
 		}
 		http.Error(w, "failed to dispatch sync to outpost", http.StatusBadGateway)
 		return
@@ -119,7 +119,7 @@ func handleSyncApp(w http.ResponseWriter, r *http.Request) {
 	meterSyncsTriggered.Add(ctx, 1)
 	span.SetAttributes(attribute.String("sync.id", syncID), attribute.String("app", name))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("sync triggered", "sync_id", syncID, "app", name, "outpost_id", outpostID)
+	slog.InfoContext(ctx, "sync triggered", "sync_id", syncID, "app", name, "outpost_id", outpostID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(s) //nolint:errcheck

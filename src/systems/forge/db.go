@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -40,7 +39,7 @@ func connect() *gorm.DB {
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: connect to database: %v\n", err)
+		slog.Error("forge: connect to database", "error", err)
 		os.Exit(1)
 	}
 	gormDB = conn
@@ -220,7 +219,7 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		tx.Rollback() //nolint:errcheck
 		span.RecordError(result.Error)
 		span.SetStatus(codes.Error, result.Error.Error())
-		slog.Error("worker: query pending row", "error", result.Error)
+		slog.ErrorContext(ctx, "worker: query pending row", "error", result.Error)
 		return Execution{}, false
 	}
 	if result.RowsAffected == 0 {
@@ -240,14 +239,14 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		tx.Rollback() //nolint:errcheck
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("worker: unmarshal command", "execution_id", exec.ExecutionID, "error", err)
+		slog.ErrorContext(ctx, "worker: unmarshal command", "execution_id", exec.ExecutionID, "error", err)
 		return Execution{}, false
 	}
 	if err := json.Unmarshal(raw.Env, &exec.Env); err != nil {
 		tx.Rollback() //nolint:errcheck
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("worker: unmarshal env", "execution_id", exec.ExecutionID, "error", err)
+		slog.ErrorContext(ctx, "worker: unmarshal env", "execution_id", exec.ExecutionID, "error", err)
 		return Execution{}, false
 	}
 
@@ -255,7 +254,7 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		tx.Rollback() //nolint:errcheck
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("worker: mark running", "execution_id", exec.ExecutionID, "error", err)
+		slog.ErrorContext(ctx, "worker: mark running", "execution_id", exec.ExecutionID, "error", err)
 		return Execution{}, false
 	}
 	if err := tx.Commit().Error; err != nil {

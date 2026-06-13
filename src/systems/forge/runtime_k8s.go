@@ -320,6 +320,6 @@ func (r *KubernetesRuntime) deleteJob(ctx context.Context, jobName string) {
 	if err := r.client.BatchV1().Jobs(r.namespace).Delete(ctx, jobName, metav1.DeleteOptions{
 		PropagationPolicy: &policy,
 	}); err != nil {
-		slog.Warn("forge: failed to delete job", "job", jobName, "error", err)
+		slog.WarnContext(ctx, "forge: failed to delete job", "job", jobName, "error", err)
 	}
 }

@@ -66,7 +66,7 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 
 	if !verifyHooksTrigger(workflowID, req.TriggeredBy, token, timestamp) {
 		span.SetStatus(codes.Error, "invalid hooks token")
-		slog.Warn("internal trigger: invalid hooks token", "workflow_id", workflowID)
+		slog.WarnContext(ctx, "internal trigger: invalid hooks token", "workflow_id", workflowID)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -87,14 +87,14 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("internal trigger: get workflow", "workflow_id", workflowID, "error", err)
+		slog.ErrorContext(ctx, "internal trigger: get workflow", "workflow_id", workflowID, "error", err)
 		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
 		return
 	}
 
 	if wf.OrgID != req.OrgID {
 		span.SetStatus(codes.Error, "cross-org trigger denied")
-		slog.Warn("internal trigger: org mismatch", "workflow_id", workflowID, "workflow_org", wf.OrgID, "req_org", req.OrgID)
+		slog.WarnContext(ctx, "internal trigger: org mismatch", "workflow_id", workflowID, "workflow_org", wf.OrgID, "req_org", req.OrgID)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -103,7 +103,7 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "run token creation failed")
-		slog.Error("internal trigger: failed to create run token", "workflow_id", workflowID, "error", err)
+		slog.ErrorContext(ctx, "internal trigger: failed to create run token", "workflow_id", workflowID, "error", err)
 		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
 		return
 	}
@@ -111,7 +111,7 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "run token encryption failed")
-		slog.Error("internal trigger: failed to encrypt run token", "workflow_id", workflowID, "error", err)
+		slog.ErrorContext(ctx, "internal trigger: failed to encrypt run token", "workflow_id", workflowID, "error", err)
 		revokeRunToken(context.Background(), sessionID)
 		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
 		return
@@ -132,7 +132,7 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 	if err := run.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("internal trigger: db error", "workflow_id", workflowID, "error", err)
+		slog.ErrorContext(ctx, "internal trigger: db error", "workflow_id", workflowID, "error", err)
 		revokeRunToken(context.Background(), sessionID)
 		http.Error(w, "failed to trigger run", http.StatusInternalServerError)
 		return
@@ -141,7 +141,7 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 	meterRunsTriggered.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow.id", wf.WorkflowID)))
 	span.SetAttributes(attribute.String("run.id", run.RunID), attribute.String("workflow.id", wf.WorkflowID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("workflow run triggered by hooks", "run_id", run.RunID, "workflow_id", wf.WorkflowID, "triggered_by", req.TriggeredBy)
+	slog.InfoContext(ctx, "workflow run triggered by hooks", "run_id", run.RunID, "workflow_id", wf.WorkflowID, "triggered_by", req.TriggeredBy)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(run) //nolint:errcheck

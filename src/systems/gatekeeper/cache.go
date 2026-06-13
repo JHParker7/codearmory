@@ -45,7 +45,7 @@ func cacheGet[T any](ctx context.Context, key string) (T, bool) {
 	}
 	var v T
 	if err := json.Unmarshal(data, &v); err != nil {
-		slog.Warn("cache: unmarshal failed", "key", key, "error", err)
+		slog.WarnContext(ctx, "cache: unmarshal failed", "key", key, "error", err)
 		return zero, false
 	}
 	return v, true
@@ -57,11 +57,11 @@ func cacheSet(ctx context.Context, key string, val any, ttl time.Duration) {
 	}
 	data, err := json.Marshal(val)
 	if err != nil {
-		slog.Warn("cache: marshal failed", "key", key, "error", err)
+		slog.WarnContext(ctx, "cache: marshal failed", "key", key, "error", err)
 		return
 	}
 	if err := redisClient.Set(ctx, key, data, ttl).Err(); err != nil {
-		slog.Warn("cache: set failed", "key", key, "error", err)
+		slog.WarnContext(ctx, "cache: set failed", "key", key, "error", err)
 	}
 }
 
@@ -70,7 +70,7 @@ func cacheDel(ctx context.Context, keys ...string) {
 		return
 	}
 	if err := redisClient.Del(ctx, keys...).Err(); err != nil {
-		slog.Warn("cache: del failed", "keys", keys, "error", err)
+		slog.WarnContext(ctx, "cache: del failed", "keys", keys, "error", err)
 	}
 }
 

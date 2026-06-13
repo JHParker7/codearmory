@@ -73,7 +73,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("outpost.id", o.OutpostID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("outpost enrolled", "outpost_id", o.OutpostID, "modules", o.Modules)
+	slog.InfoContext(ctx, "outpost enrolled", "outpost_id", o.OutpostID, "modules", o.Modules)
 	meterOutpostsEnrolled.Add(ctx, 1)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

@@ -60,7 +60,7 @@ func handleListPulls(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("list pulls: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
+		slog.ErrorContext(ctx, "list pulls: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
 		http.Error(w, "failed to list pull requests", http.StatusBadGateway)
 		return
 	}
@@ -120,14 +120,14 @@ func handleCreatePull(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("create pull: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
+		slog.ErrorContext(ctx, "create pull: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
 		http.Error(w, "failed to create pull request", http.StatusBadGateway)
 		return
 	}
 
 	span.SetAttributes(attribute.Int64("pr.number", pr.Number))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("pull request created", "user_id", userID, "owner", owner, "name", name, "pr", pr.Number)
+	slog.InfoContext(ctx, "pull request created", "user_id", userID, "owner", owner, "name", name, "pr", pr.Number)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(pr) //nolint:errcheck
@@ -174,7 +174,7 @@ func handleGetPull(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("get pull: gitea error", "user_id", userID, "owner", owner, "name", name, "index", index, "error", err)
+		slog.ErrorContext(ctx, "get pull: gitea error", "user_id", userID, "owner", owner, "name", name, "index", index, "error", err)
 		http.Error(w, "failed to get pull request", http.StatusBadGateway)
 		return
 	}
@@ -233,12 +233,12 @@ func handleMergePull(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("merge pull: gitea error", "user_id", userID, "owner", owner, "name", name, "index", index, "error", err)
+		slog.ErrorContext(ctx, "merge pull: gitea error", "user_id", userID, "owner", owner, "name", name, "index", index, "error", err)
 		http.Error(w, "failed to merge pull request", http.StatusBadGateway)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("pull request merged", "user_id", userID, "owner", owner, "name", name, "index", index)
+	slog.InfoContext(ctx, "pull request merged", "user_id", userID, "owner", owner, "name", name, "index", index)
 	w.WriteHeader(http.StatusNoContent)
 }

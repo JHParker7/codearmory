@@ -218,14 +218,14 @@ func (a *githubApp) completeCheckRun(ctx context.Context, token, ownerRepo strin
 		"completed_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
-		slog.Error("github_app: marshal complete check run body", "check_run_id", checkRunID, "error", err)
+		slog.ErrorContext(ctx, "github_app: marshal complete check run body", "check_run_id", checkRunID, "error", err)
 		return
 	}
 
 	url := fmt.Sprintf("%s/repos/%s/check-runs/%d", a.apiBase, ownerRepo, checkRunID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(body))
 	if err != nil {
-		slog.Error("github_app: build complete check run request", "check_run_id", checkRunID, "error", err)
+		slog.ErrorContext(ctx, "github_app: build complete check run request", "check_run_id", checkRunID, "error", err)
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -235,15 +235,19 @@ func (a *githubApp) completeCheckRun(ctx context.Context, token, ownerRepo strin
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Error("github_app: complete check run request", "check_run_id", checkRunID, "error", err)
+		slog.ErrorContext(ctx, "github_app: complete check run request", "check_run_id", checkRunID, "error", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
-		slog.Error("github_app: complete check run: unexpected status",
-			"check_run_id", checkRunID, "status", resp.StatusCode, "body", strings.TrimSpace(string(respBody)))
+		body := strings.TrimSpace(string(respBody))
+		if len(body) > 512 {
+			body = body[:512]
+		}
+		slog.ErrorContext(ctx, "github_app: complete check run: unexpected status",
+			"check_run_id", checkRunID, "status", resp.StatusCode, "body", body)
 	}
 }
 
@@ -264,7 +268,7 @@ func pollRunStatus(ctx context.Context, runID string) string {
 	url := workflowsURL + "/internal/runs/" + runID
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		slog.Error("github_app: poll run status: build request", "run_id", runID, "error", err)
+		slog.ErrorContext(ctx, "github_app: poll run status: build request", "run_id", runID, "error", err)
 		return ""
 	}
 	req.Header.Set("X-Hooks-Token", token)
@@ -272,7 +276,7 @@ func pollRunStatus(ctx context.Context, runID string) string {
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Error("github_app: poll run status: request", "run_id", runID, "error", err)
+		slog.ErrorContext(ctx, "github_app: poll run status: request", "run_id", runID, "error", err)
 		return ""
 	}
 	defer resp.Body.Close()
@@ -302,10 +306,10 @@ func (a *githubApp) watchAndCompleteCheckRun(ctx context.Context, runID, ownerRe
 		select {
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				slog.Warn("github_app: watch run: timed out", "run_id", runID, "check_run_id", checkRunID)
+				slog.WarnContext(ctx, "github_app: watch run: timed out", "run_id", runID, "check_run_id", checkRunID)
 				tok, err := a.installationToken(bgCtx, installationID)
 				if err != nil {
-					slog.Error("github_app: watch run: get token for timeout", "error", err)
+					slog.ErrorContext(ctx, "github_app: watch run: get token for timeout", "error", err)
 					return
 				}
 				a.completeCheckRun(bgCtx, tok, ownerRepo, checkRunID, "timed_out")
@@ -326,11 +330,11 @@ func (a *githubApp) watchAndCompleteCheckRun(ctx context.Context, runID, ownerRe
 			if conclusion != "" {
 				tok, err := a.installationToken(bgCtx, installationID)
 				if err != nil {
-					slog.Error("github_app: watch run: get token", "run_id", runID, "error", err)
+					slog.ErrorContext(ctx, "github_app: watch run: get token", "run_id", runID, "error", err)
 					return
 				}
 				a.completeCheckRun(bgCtx, tok, ownerRepo, checkRunID, conclusion)
-				slog.Info("github_app: check run completed",
+				slog.InfoContext(ctx, "github_app: check run completed",
 					"run_id", runID, "check_run_id", checkRunID, "conclusion", conclusion)
 				return
 			}
@@ -437,7 +441,7 @@ func handleGitHubWebhook(app *githubApp) http.HandlerFunc {
 
 		// Verify App-level HMAC signature.
 		if !app.verifySignature(rawBody, r.Header.Get("X-Hub-Signature-256")) {
-			slog.Warn("github_app: signature verification failed")
+			slog.WarnContext(ctx, "github_app: signature verification failed")
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
 		}
@@ -452,7 +456,7 @@ func handleGitHubWebhook(app *githubApp) http.HandlerFunc {
 
 		// Log installation events and return.
 		if eventType == "installation" || eventType == "installation_repositories" {
-			slog.Info("github_app: installation event received", "event", eventType)
+			slog.InfoContext(ctx, "github_app: installation event received", "event", eventType)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -487,7 +491,7 @@ func handleGitHubWebhook(app *githubApp) http.HandlerFunc {
 			CreatedAt: time.Now().UTC(),
 		}
 		if err := newEvent.Add(ctx); err != nil {
-			slog.Error("github_app: insert event", "error", err)
+			slog.ErrorContext(ctx, "github_app: insert event", "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}

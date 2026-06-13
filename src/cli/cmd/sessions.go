@@ -22,5 +22,5 @@ func init() {
 			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/gatekeeper/sessions/"+args[0], nil) },
 		},
 	)
-	rootCmd.AddCommand(sessionsCmd)
+	RegisterModule(Module{Name: "sessions", Command: sessionsCmd})
 }

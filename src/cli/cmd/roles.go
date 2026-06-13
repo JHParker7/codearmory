@@ -120,5 +120,5 @@ func init() {
 			},
 		},
 	)
-	rootCmd.AddCommand(rolesCmd)
+	RegisterModule(Module{Name: "roles", Command: rolesCmd})
 }

@@ -10,7 +10,6 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 )
 
@@ -55,6 +54,8 @@ type hookEventsMsg       []hookEvent
 type hookEventDetailMsg  hookEvent
 type hooksErrMsg         struct{ err error }
 type hookDeletedMsg      struct{}
+type hookRuleCreatedMsg  struct{}
+type hooksFormErrMsg     struct{ err error }
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,7 @@ const (
 	hooksViewRules hooksViewID = iota
 	hooksViewEvents
 	hooksViewEventDetail
+	hooksViewCreate
 )
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -84,42 +86,51 @@ type hooksModel struct {
 	rTable table.Model
 	eTable table.Model
 	vp     viewport.Model
+	form   tuiForm
 }
 
-func newHooksModel() hooksModel {
-	rTable := table.New(
-		table.WithColumns([]table.Column{
-			{Title: "NAME",    Width: 20},
-			{Title: "REPO",    Width: 24},
-			{Title: "EVENTS",  Width: 20},
-			{Title: "ACTIVE",  Width: 7},
-			{Title: "CREATED", Width: 14},
-		}),
-		table.WithFocused(true),
-		table.WithHeight(14),
-	)
-	rTable.SetStyles(tuiTableStyles())
+var (
+	hookRuleCols = []tuiColSpec{
+		{"NAME", 16, 1},
+		{"REPO", 18, 2},
+		{"EVENTS", 14, 1},
+		{"ACTIVE", 7, 0},
+		{"CREATED", 14, 0},
+	}
+	hookEventCols = []tuiColSpec{
+		{"ID", 10, 0},
+		{"TYPE", 14, 1},
+		{"REPO", 18, 2},
+		{"REF", 14, 1},
+		{"MATCHED", 8, 0},
+		{"TIME", 14, 0},
+	}
+)
 
-	eTable := table.New(
-		table.WithColumns([]table.Column{
-			{Title: "ID",      Width: 10},
-			{Title: "TYPE",    Width: 16},
-			{Title: "REPO",    Width: 24},
-			{Title: "REF",     Width: 16},
-			{Title: "MATCHED", Width: 8},
-			{Title: "TIME",    Width: 14},
-		}),
-		table.WithFocused(true),
-		table.WithHeight(14),
-	)
+func newHooksModel() hooksModel {
+	rTable := table.New(table.WithFocused(true))
+	rTable.SetStyles(tuiTableStyles())
+	eTable := table.New(table.WithFocused(true))
 	eTable.SetStyles(tuiTableStyles())
 
-	return hooksModel{
+	m := hooksModel{
 		loading: true,
+		width:   tuiDefaultWidth,
+		height:  tuiDefaultHeight,
 		rTable:  rTable,
 		eTable:  eTable,
-		vp:      viewport.New(100, 20),
+		vp:      viewport.New(tuiDefaultWidth-4, tuiDefaultHeight-8),
 	}
+	m.applyTableLayout()
+	return m
+}
+
+// applyTableLayout resizes both hooks tables to the current terminal.
+func (m *hooksModel) applyTableLayout() {
+	m.rTable.SetColumns(tuiFitColumns(hookRuleCols, m.width))
+	m.rTable.SetHeight(tuiTableHeight(m.height, tuiListChrome))
+	m.eTable.SetColumns(tuiFitColumns(hookEventCols, m.width))
+	m.eTable.SetHeight(tuiTableHeight(m.height, tuiListChrome))
 }
 
 // ── Fetch commands ────────────────────────────────────────────────────────────
@@ -190,6 +201,7 @@ func (m hooksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.vp.Width = msg.Width - 4
 		m.vp.Height = msg.Height - 8
+		m.applyTableLayout()
 		return m, nil
 
 	case hooksErrMsg:
@@ -207,9 +219,9 @@ func (m hooksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				active = "○"
 			}
 			rows[i] = table.Row{
-				tuiTrunc(r.Name, 20),
-				tuiTrunc(r.Repo, 24),
-				tuiTrunc(strings.Join(r.Events, ","), 20),
+				r.Name,
+				r.Repo,
+				strings.Join(r.Events, ","),
 				active,
 				r.CreatedAt.Local().Format("Jan 02 15:04"),
 			}
@@ -224,9 +236,9 @@ func (m hooksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, e := range m.events {
 			rows[i] = table.Row{
 				tuiShortID(e.EventID),
-				tuiTrunc(e.EventType, 16),
-				tuiTrunc(e.Repo, 24),
-				tuiTrunc(e.Ref, 16),
+				e.EventType,
+				e.Repo,
+				e.Ref,
 				fmt.Sprintf("%d", e.RulesMatched),
 				e.CreatedAt.Local().Format("Jan 02 15:04"),
 			}
@@ -247,6 +259,15 @@ func (m hooksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.selRule = nil
 		return m, hooksFetchRules
+
+	case hookRuleCreatedMsg:
+		m.view = hooksViewRules
+		m.loading = true
+		return m, hooksFetchRules
+
+	case hooksFormErrMsg:
+		m.form.errMsg = msg.err.Error()
+		return m, nil
 
 	case tea.KeyMsg:
 		if m.err != nil {
@@ -269,6 +290,8 @@ func (m hooksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.hooksKeyEvents(msg)
 		case hooksViewEventDetail:
 			return m.hooksKeyEventDetail(msg)
+		case hooksViewCreate:
+			return m.hooksKeyCreate(msg)
 		}
 	}
 	return m.hooksDelegate(msg)
@@ -283,6 +306,8 @@ func (m hooksModel) hooksDelegate(msg tea.Msg) (hooksModel, tea.Cmd) {
 		m.eTable, cmd = m.eTable.Update(msg)
 	case hooksViewEventDetail:
 		m.vp, cmd = m.vp.Update(msg)
+	case hooksViewCreate:
+		m.form, _, cmd = m.form.update(msg)
 	}
 	return m, cmd
 }
@@ -318,6 +343,11 @@ func (m hooksModel) hooksKeyRules(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
 		m.selRule = nil
 		m.loading = true
 		return m, hooksFetchEvents("")
+	case "n":
+		var cmd tea.Cmd
+		m.form, cmd = newHooksRuleForm()
+		m.view = hooksViewCreate
+		return m, cmd
 	case "D":
 		i := m.rTable.Cursor()
 		if i >= 0 && i < len(m.rules) {
@@ -378,6 +408,89 @@ func (m hooksModel) hooksKeyEventDetail(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
 	return m, cmd
 }
 
+// ── Create form ───────────────────────────────────────────────────────────────
+
+func newHooksRuleForm() (tuiForm, tea.Cmd) {
+	return newTUIForm("New Hook Rule",
+		formInput("name", "Name", "ci-push (required)"),
+		formInput("repo", "Repo", "myorg/myrepo (required)"),
+		formInput("events", "Events", "push pull_request (required)"),
+		formInput("workflow", "Workflow", "pipeline id (required)"),
+		formInput("secret", "Secret", "HMAC secret (required)"),
+		formInput("ref", "Ref filter", "refs/heads/main (optional)"),
+	)
+}
+
+func (m hooksModel) hooksKeyCreate(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+	var (
+		action formAction
+		cmd    tea.Cmd
+	)
+	m.form, action, cmd = m.form.update(msg)
+	switch action {
+	case formCancel:
+		m.view = hooksViewRules
+		return m, nil
+	case formSubmit:
+		return m.hooksSubmitCreate()
+	}
+	return m, cmd
+}
+
+// hooksSubmitCreate validates the form and, if valid, returns the POST cmd.
+func (m hooksModel) hooksSubmitCreate() (hooksModel, tea.Cmd) {
+	name := m.form.value("name")
+	repo := m.form.value("repo")
+	events := splitEvents(m.form.value("events"))
+	workflow := m.form.value("workflow")
+	secret := m.form.value("secret")
+	switch {
+	case name == "":
+		m.form.errMsg = "name is required"
+	case repo == "":
+		m.form.errMsg = "repo is required"
+	case len(events) == 0:
+		m.form.errMsg = "at least one event is required"
+	case workflow == "":
+		m.form.errMsg = "workflow (pipeline id) is required"
+	case secret == "":
+		m.form.errMsg = "secret is required (webhook rules must have an HMAC secret)"
+	default:
+		m.form.errMsg = ""
+		return m, hooksSubmitRule(name, repo, events, workflow, secret, m.form.value("ref"))
+	}
+	return m, nil
+}
+
+func hooksSubmitRule(name, repo string, events []string, workflow, secret, ref string) tea.Cmd {
+	return func() tea.Msg {
+		payload := map[string]any{
+			"name":          name,
+			"source":        repo,
+			"events":        events,
+			"workflow_id":   workflow,
+			"ref_filter":    ref,
+			"secret":        secret,
+			"input_mapping": map[string]string{},
+		}
+		body, _ := json.Marshal(payload)
+		if _, err := doRequest("POST", "/hooks/rules", body); err != nil {
+			return hooksFormErrMsg{err}
+		}
+		return hookRuleCreatedMsg{}
+	}
+}
+
+// splitEvents tokenises an events field on spaces and commas.
+func splitEvents(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return r == ' ' || r == ',' || r == '\t'
+	})
+}
+
 // ── View ──────────────────────────────────────────────────────────────────────
 
 func (m hooksModel) View() string {
@@ -386,6 +499,8 @@ func (m hooksModel) View() string {
 			tuiHelpStyle.Render("[q] home  [r] retry")
 	}
 	switch m.view {
+	case hooksViewCreate:
+		return m.form.view(m.width, m.height)
 	case hooksViewEvents:
 		return m.hooksViewEvents()
 	case hooksViewEventDetail:
@@ -396,7 +511,7 @@ func (m hooksModel) View() string {
 
 func (m hooksModel) hooksViewRules() string {
 	title := tuiTitleStyle.Render("Hooks Rules")
-	help := tuiHelpStyle.Render("[↑↓/jk] navigate  [enter] events by repo  [e] all events  [D] delete  [r] refresh  [q] home")
+	help := tuiHelp("[↑↓/jk] navigate  [enter] events by repo  [e] all events  [n] new  [D] delete  [r] refresh  [q] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -405,7 +520,7 @@ func (m hooksModel) hooksViewRules() string {
 		if m.selRule != nil {
 			name = " '" + m.selRule.Name + "'"
 		}
-		confirm := lipgloss.NewStyle().Foreground(lipgloss.Color("#d46b55")).
+		confirm := tuiErrStyle.
 			Render("Delete rule" + name + "? [y] confirm  [any] cancel")
 		if len(m.rules) == 0 {
 			return title + "\n\n" + tuiMetaStyle.Render("No rules defined.") + "\n\n" + confirm
@@ -424,7 +539,7 @@ func (m hooksModel) hooksViewEvents() string {
 		subtitle += ": " + m.selRule.Repo
 	}
 	title := tuiTitleStyle.Render("Hooks " + subtitle)
-	help := tuiHelpStyle.Render("[↑↓/jk] navigate  [enter] detail  [r] refresh  [b] back  [q] home")
+	help := tuiHelp("[↑↓/jk] navigate  [enter] detail  [r] refresh  [b] back  [q] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -440,7 +555,7 @@ func (m hooksModel) hooksViewEventDetail() string {
 		title = tuiTitleStyle.Render(m.selEvent.EventType) + "  " +
 			tuiMetaStyle.Render(m.selEvent.Repo)
 	}
-	help := tuiHelpStyle.Render("[↑↓/pgup/pgdn] scroll  [b] back  [q] home")
+	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [b] back  [q] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -488,5 +603,15 @@ func init() {
 		Short: "Interactive TUI for browsing webhook rules and events",
 		Args:  cobra.NoArgs,
 		RunE:  func(cmd *cobra.Command, args []string) error { return startHooksTUI() },
+	})
+	RegisterModule(Module{
+		Name:    "hooks",
+		Order:   40,
+		Command: hooksCmd,
+		Screens: []HubScreen{{
+			Title: "Hooks",
+			Desc:  "Webhook rules and event history",
+			New:   func() tea.Model { return newHooksModel() },
+		}},
 	})
 }

@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -16,7 +18,8 @@ var ociProxy *httputil.ReverseProxy
 func initOCIProxy() {
 	target, err := url.Parse(registry.baseURL)
 	if err != nil {
-		panic("invalid REGISTRY_URL: " + err.Error())
+		slog.Error("invalid REGISTRY_URL", "error", err)
+		os.Exit(1)
 	}
 	ociProxy = &httputil.ReverseProxy{
 		Director: func(req *http.Request) {

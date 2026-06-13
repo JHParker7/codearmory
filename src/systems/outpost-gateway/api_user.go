@@ -90,7 +90,7 @@ func handleCreateOutpost(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("outpost.id", o.OutpostID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("outpost registered", "outpost_id", o.OutpostID, "user_id", userID)
+	slog.InfoContext(ctx, "outpost registered", "outpost_id", o.OutpostID, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(createOutpostResponse{Outpost: o, EnrollmentToken: token}) //nolint:errcheck

@@ -123,7 +123,7 @@ keychain is unavailable).
 	setupCmd.Flags().StringVar(&flagSetupUsername, "username", "", "username for sign up (implies --signup)")
 	setupCmd.Flags().BoolVar(&flagSetupSignup, "signup", false, "create a new account instead of logging in to an existing one")
 
-	rootCmd.AddCommand(setupCmd)
+	RegisterModule(Module{Name: "setup", Command: setupCmd})
 }
 
 func isTerminal() bool {

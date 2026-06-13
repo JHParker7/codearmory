@@ -188,7 +188,7 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		// /gatekeeper/signup). Hoisting this to the top of handleServiceProxy would
 		// re-block those public routes and revert fix a261f5a.
 		if ip := sourceIP(r); isBlocked(ip) {
-			slog.Warn("request rejected: IP is blocked", "source_ip", ip, "path", r.URL.Path)
+			slog.WarnContext(r.Context(), "request rejected: IP is blocked", "source_ip", ip, "path", r.URL.Path)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

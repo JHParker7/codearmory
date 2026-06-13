@@ -48,6 +48,7 @@ spec:
               value: {{ .Values.egressProxy.port | quote }}
             - name: PROXY_ALLOWED_DOMAINS
               value: {{ .Values.egressProxy.env.allowedDomains | quote }}
+            {{- include "codearmory.otel.envs" (list . .Values.egressProxy.env) | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /healthz

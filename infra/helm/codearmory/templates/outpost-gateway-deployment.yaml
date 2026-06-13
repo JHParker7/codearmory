@@ -57,10 +57,7 @@ spec:
               value: "http://{{ $full }}-gatekeeper:{{ .Values.gatekeeper.port }}"
             - name: EVENT_CONSUMERS
               value: {{ join "," $consumers | quote }}
-            {{- if .Values.outpostGateway.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.outpostGateway.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.outpostGateway.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "outpost-gateway" "outpost_gateway" $full) | nindent 12 }}
             - name: GATEKEEPER_SERVICE_KEY
               valueFrom:

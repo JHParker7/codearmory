@@ -39,7 +39,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 	if !verifyInternal("event", body,
 		r.Header.Get("X-Internal-Token"), r.Header.Get("X-Internal-Timestamp")) {
 		span.SetStatus(codes.Error, "invalid internal token")
-		slog.Warn("internal event: invalid token")
+		slog.WarnContext(ctx, "internal event: invalid token")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -51,7 +51,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 	// Defense-in-depth: the shared internal key also authenticates other consumers,
 	// so never act on an event routed here for a different integration.
 	if ev.Integration != "" && ev.Integration != "argo" {
-		slog.Warn("internal event: ignoring non-argo integration", "integration", ev.Integration)
+		slog.WarnContext(ctx, "internal event: ignoring non-argo integration", "integration", ev.Integration)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -63,6 +63,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 		if syncID != "" {
 			if err := markSyncRunning(ctx, syncID); err != nil {
 				span.RecordError(err)
+				slog.ErrorContext(ctx, "internal event: mark sync running failed", "sync_id", syncID, "error", err)
 			}
 		}
 	case "app-state":
@@ -83,14 +84,15 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 		}
 		if s, changed, err := updateInFlightSync(ctx, ev.OutpostID, name, syncStatus, healthStatus, opPhase, syncStatusMessage(syncStatus, healthStatus, opPhase)); err != nil {
 			span.RecordError(err)
+			slog.ErrorContext(ctx, "internal event: update in-flight sync failed", "sync_id", s.SyncID, "app", name, "error", err)
 		} else if changed {
-			slog.Info("sync advanced", "sync_id", s.SyncID, "status", s.Status, "app", name)
+			slog.InfoContext(ctx, "sync advanced", "sync_id", s.SyncID, "status", s.Status, "app", name)
 			if s.Status == SyncSynced || s.Status == SyncFailed {
 				meterSyncsResolved.Add(ctx, 1, metric.WithAttributes(attribute.String("status", s.Status)))
 			}
 		}
 	default:
-		slog.Debug("internal event: ignoring unknown type", "type", ev.Type)
+		slog.DebugContext(ctx, "internal event: ignoring unknown type", "type", ev.Type)
 	}
 
 	span.SetStatus(codes.Ok, "")

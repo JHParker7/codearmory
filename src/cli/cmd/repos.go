@@ -267,5 +267,8 @@ func init() {
 		pullsCmd,
 	)
 
-	rootCmd.AddCommand(reposCmd)
+	// "repos" is a capability slot: a deployment backed by GitHub instead of
+	// Gitea can register an alternative provider and select it via the
+	// "providers" config (providers.repos = "github").
+	RegisterModule(Module{Name: "gitea", Slot: "repos", Command: reposCmd})
 }

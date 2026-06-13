@@ -177,7 +177,7 @@ func handleCreateSecret(w http.ResponseWriter, r *http.Request) {
 
 	ct, err := encryptSecret(req.Value)
 	if err != nil {
-		slog.Error("create secret: encrypt", "error", err)
+		slog.ErrorContext(r.Context(), "create secret: encrypt", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -194,12 +194,12 @@ func handleCreateSecret(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "secret with that name already exists", http.StatusConflict)
 			return
 		}
-		slog.Error("create secret: db", "error", err)
+		slog.ErrorContext(r.Context(), "create secret: db", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("secret created", "secret_id", s.SecretID, "org_id", orgID, "caller_id", callerID)
+	slog.InfoContext(r.Context(), "secret created", "secret_id", s.SecretID, "org_id", orgID, "caller_id", callerID)
 	writeAudit(r.Context(), callerID, "user", "secret.create", s.SecretID, req.Name)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -226,7 +226,7 @@ func handleListSecrets(w http.ResponseWriter, r *http.Request) {
 	if err := connectRead().WithContext(r.Context()).
 		Where("org_id = ? AND active = true", callerOrgID).
 		Find(&secrets).Error; err != nil {
-		slog.Error("list secrets: db", "error", err)
+		slog.ErrorContext(r.Context(), "list secrets: db", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -293,12 +293,12 @@ func handleUpdateSecret(w http.ResponseWriter, r *http.Request) {
 		s.Name = req.Name
 	}
 	if err := s.Update(r.Context()); err != nil {
-		slog.Error("update secret: db", "error", err)
+		slog.ErrorContext(r.Context(), "update secret: db", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("secret updated", "secret_id", id, "caller_id", callerID)
+	slog.InfoContext(r.Context(), "secret updated", "secret_id", id, "caller_id", callerID)
 	writeAudit(r.Context(), callerID, "user", "secret.update", id, s.Name)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(toSecretResponse(s)) //nolint:errcheck
@@ -332,7 +332,7 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.Remove(r.Context()) //nolint:errcheck
-	slog.Info("secret deleted", "secret_id", id, "caller_id", callerID)
+	slog.InfoContext(r.Context(), "secret deleted", "secret_id", id, "caller_id", callerID)
 	writeAudit(r.Context(), callerID, "user", "secret.delete", id, s.Name)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -463,12 +463,12 @@ func handleSetSecretProvider(w http.ResponseWriter, r *http.Request) {
 
 	p := OrgSecretProvider{OrgID: orgID, Provider: req.Provider, Config: configCT}
 	if err := p.Update(r.Context()); err != nil {
-		slog.Error("set secret provider: db", "error", err)
+		slog.ErrorContext(r.Context(), "set secret provider: db", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("secret provider configured", "org_id", orgID, "provider", req.Provider, "caller_id", callerID)
+	slog.InfoContext(r.Context(), "secret provider configured", "org_id", orgID, "provider", req.Provider, "caller_id", callerID)
 	writeAudit(r.Context(), callerID, "user", "secret_provider.set", orgID, req.Provider)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(providerResponse{ //nolint:errcheck
@@ -487,7 +487,7 @@ func handleDeleteSecretProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	(OrgSecretProvider{OrgID: orgID}).Remove(r.Context()) //nolint:errcheck
-	slog.Info("secret provider removed", "org_id", orgID, "caller_id", callerID)
+	slog.InfoContext(r.Context(), "secret provider removed", "org_id", orgID, "caller_id", callerID)
 	writeAudit(r.Context(), callerID, "user", "secret_provider.delete", orgID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -530,32 +530,32 @@ func handleResolveSecrets(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	sessionRow, err := (Session{SessionID: req.SessionID}).Get(ctx)
 	if err != nil {
-		slog.Warn("resolve secrets: session not found", "session_id", req.SessionID, "service", svc.ServiceName)
+		slog.WarnContext(ctx, "resolve secrets: session not found", "session_id", req.SessionID, "service", svc.ServiceName)
 		http.Error(w, "invalid session_id", http.StatusForbidden)
 		return
 	}
 	session := sessionRow.(Session)
 	userRow, err := (User{UserID: session.UserID}).Get(ctx)
 	if err != nil {
-		slog.Warn("resolve secrets: user not found", "user_id", session.UserID, "service", svc.ServiceName)
+		slog.WarnContext(ctx, "resolve secrets: user not found", "user_id", session.UserID, "service", svc.ServiceName)
 		http.Error(w, "invalid session_id", http.StatusForbidden)
 		return
 	}
 	user := userRow.(User)
 	if user.OrgID == nil || *user.OrgID != req.OrgID {
-		slog.Warn("resolve secrets: org mismatch", "session_id", req.SessionID, "user_id", session.UserID, "req_org", req.OrgID, "service", svc.ServiceName)
+		slog.WarnContext(ctx, "resolve secrets: org mismatch", "session_id", req.SessionID, "user_id", session.UserID, "req_org", req.OrgID, "service", svc.ServiceName)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
 	values, err := resolveSecrets(ctx, req.OrgID, req.Names)
 	if err != nil {
-		slog.Warn("resolve secrets: failed", "org_id", req.OrgID, "service", svc.ServiceName, "error", err)
+		slog.WarnContext(ctx, "resolve secrets: failed", "org_id", req.OrgID, "service", svc.ServiceName, "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	slog.Info("secrets resolved", "org_id", req.OrgID, "count", len(values), "service", svc.ServiceName)
+	slog.InfoContext(ctx, "secrets resolved", "org_id", req.OrgID, "count", len(values), "service", svc.ServiceName)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(values) //nolint:errcheck
 }
@@ -580,7 +580,7 @@ func handleLookupSecret(w http.ResponseWriter, r *http.Request) {
 	// another org's secrets without an explicit operator grant).
 	allowed := secret("SECRETS_LOOKUP_ALLOWED_CALLERS")
 	if allowed == "" {
-		slog.Warn("lookup secret: SECRETS_LOOKUP_ALLOWED_CALLERS not configured; denying", "service", svc.ServiceName)
+		slog.WarnContext(r.Context(), "lookup secret: SECRETS_LOOKUP_ALLOWED_CALLERS not configured; denying", "service", svc.ServiceName)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -592,7 +592,7 @@ func handleLookupSecret(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !permitted {
-		slog.Warn("lookup secret: caller not in allowed list", "service", svc.ServiceName)
+		slog.WarnContext(r.Context(), "lookup secret: caller not in allowed list", "service", svc.ServiceName)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -618,7 +618,7 @@ func handleLookupSecret(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		slog.Error("lookup secret: resolve failed", "org_id", req.OrgID, "name", req.Name, "service", svc.ServiceName, "error", err)
+		slog.ErrorContext(ctx, "lookup secret: resolve failed", "org_id", req.OrgID, "name", req.Name, "service", svc.ServiceName, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}

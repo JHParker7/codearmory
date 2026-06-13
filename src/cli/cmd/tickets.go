@@ -277,5 +277,14 @@ func init() {
 		deleteTicketCmd,
 		commentCmd,
 	)
-	rootCmd.AddCommand(ticketsCmd)
+	RegisterModule(Module{
+		Name:    "tickets",
+		Order:   20,
+		Command: ticketsCmd,
+		Screens: []HubScreen{{
+			Title: "Tickets Board",
+			Desc:  "Interactive kanban board",
+			New:   func() tea.Model { return newBoardModel() },
+		}},
+	})
 }

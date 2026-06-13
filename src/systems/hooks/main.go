@@ -107,12 +107,25 @@ func (l *requestLogger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
 	l.handler.ServeHTTP(rw, r)
 	sc := trace.SpanFromContext(r.Context()).SpanContext()
-	slog.Info(r.Method+" "+r.URL.Path,
+	msg := r.Method + " " + r.URL.Path
+	attrs := []any{
 		"status", rw.status,
 		"duration", time.Since(start),
 		"trace_id", sc.TraceID().String(),
 		"span_id", sc.SpanID().String(),
-	)
+	}
+	switch r.URL.Path {
+	case "/healthz", "/health", "/system_health", "/readyz", "/livez":
+		// Background liveness/readiness probes are noise at info; log them at
+		// debug, escalating to warn only when the probe itself fails.
+		if rw.status >= 500 {
+			slog.Warn(msg, attrs...)
+		} else {
+			slog.Debug(msg, attrs...)
+		}
+	default:
+		slog.InfoContext(r.Context(), "http request", append([]any{"method", r.Method, "path", r.URL.Path}, attrs...)...)
+	}
 }
 
 func limitBody(next http.Handler) http.Handler {
@@ -145,43 +158,43 @@ func startRetryLoop(ctx context.Context) {
 func processRetries(ctx context.Context) {
 	retries, err := claimDueRetries(ctx, 10)
 	if err != nil {
-		slog.Error("retry loop: query retries", "error", err)
+		slog.ErrorContext(ctx, "retry loop: query retries", "error", err)
 		return
 	}
 	for _, r := range retries {
 		runID, dispatchErr := dispatchWorkflow(ctx, r.WorkflowID, r.TriggeredBy, r.OrgID, r.Inputs)
 		if dispatchErr == nil {
 			if updateErr := markTriggerTriggered(ctx, r.TriggerID, runID); updateErr != nil {
-				slog.Error("retry loop: update trigger", "trigger_id", r.TriggerID, "error", updateErr)
+				slog.ErrorContext(ctx, "retry loop: update trigger", "trigger_id", r.TriggerID, "error", updateErr)
 			}
 			deleteRetry(ctx, r.RetryID) //nolint:errcheck
 			meterRunsTriggered.Add(ctx, 1, metric.WithAttributes(
 				attribute.String("workflow.id", r.WorkflowID),
 			))
-			slog.Info("retry: dispatch succeeded", "trigger_id", r.TriggerID, "attempt", r.Attempt)
+			slog.DebugContext(ctx, "retry: dispatch succeeded", "trigger_id", r.TriggerID, "attempt", r.Attempt)
 			continue
 		}
 		nextAttempt := r.Attempt + 1
 		if nextAttempt > maxRetryAttempts || errors.Is(dispatchErr, errWorkflowNotFound) {
 			if updateErr := markTriggerFailed(ctx, r.TriggerID, dispatchErr.Error()); updateErr != nil {
-				slog.Error("retry loop: mark trigger failed", "trigger_id", r.TriggerID, "error", updateErr)
+				slog.ErrorContext(ctx, "retry loop: mark trigger failed", "trigger_id", r.TriggerID, "error", updateErr)
 			}
 			deleteRetry(ctx, r.RetryID) //nolint:errcheck
-			slog.Warn("retry: permanently failed", "trigger_id", r.TriggerID, "attempts", r.Attempt, "error", dispatchErr)
+			slog.WarnContext(ctx, "retry: permanently failed", "trigger_id", r.TriggerID, "attempts", r.Attempt, "error", dispatchErr)
 		} else {
 			backoff := retryBackoff(nextAttempt)
 			if updateErr := advanceRetry(ctx, r.RetryID, nextAttempt, dispatchErr.Error(), time.Now().UTC().Add(backoff)); updateErr != nil {
-				slog.Error("retry loop: update retry record", "retry_id", r.RetryID, "error", updateErr)
+				slog.ErrorContext(ctx, "retry loop: update retry record", "retry_id", r.RetryID, "error", updateErr)
 			}
-			slog.Warn("retry: will retry", "trigger_id", r.TriggerID, "attempt", nextAttempt, "backoff", backoff, "error", dispatchErr)
+			slog.WarnContext(ctx, "retry: will retry", "trigger_id", r.TriggerID, "attempt", nextAttempt, "backoff", backoff, "error", dispatchErr)
 		}
 	}
 }
 
 func main() {
 	logLevel := slog.LevelInfo
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		logLevel = slog.LevelDebug
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
 	}
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))

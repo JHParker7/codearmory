@@ -73,7 +73,7 @@ func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		gatekeeperURL+"/internal/workflow-roles", bytes.NewReader(payload))
 	if err != nil {
-		slog.Warn("provisionWorkflowRole: build request", "workflow_id", workflowID, "error", err)
+		slog.WarnContext(ctx, "provisionWorkflowRole: build request", "workflow_id", workflowID, "error", err)
 		return ""
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -81,13 +81,13 @@ func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Warn("provisionWorkflowRole: request failed", "workflow_id", workflowID, "error", err)
+		slog.WarnContext(ctx, "provisionWorkflowRole: request failed", "workflow_id", workflowID, "error", err)
 		return ""
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		slog.Warn("provisionWorkflowRole: unexpected status", "workflow_id", workflowID,
+		slog.WarnContext(ctx, "provisionWorkflowRole: unexpected status", "workflow_id", workflowID,
 			"status", resp.StatusCode, "body", strings.TrimSpace(string(raw)))
 		return ""
 	}
@@ -95,7 +95,7 @@ func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string
 		RoleID string `json:"role_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		slog.Warn("provisionWorkflowRole: decode response", "workflow_id", workflowID, "error", err)
+		slog.WarnContext(ctx, "provisionWorkflowRole: decode response", "workflow_id", workflowID, "error", err)
 		return ""
 	}
 	return result.RoleID
@@ -114,13 +114,13 @@ func deleteWorkflowRole(ctx context.Context, roleID string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
 		gatekeeperURL+"/internal/workflow-roles/"+roleID, nil)
 	if err != nil {
-		slog.Warn("deleteWorkflowRole: build request", "role_id", roleID, "error", err)
+		slog.WarnContext(ctx, "deleteWorkflowRole: build request", "role_id", roleID, "error", err)
 		return
 	}
 	req.Header.Set("X-Service-Key", "workflows:"+key)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Warn("deleteWorkflowRole: request failed", "role_id", roleID, "error", err)
+		slog.WarnContext(ctx, "deleteWorkflowRole: request failed", "role_id", roleID, "error", err)
 		return
 	}
 	resp.Body.Close()
@@ -236,7 +236,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "enrich steps failed")
-		slog.Error("create workflow: enrich steps", "error", err)
+		slog.ErrorContext(ctx, "create workflow: enrich steps", "error", err)
 		http.Error(w, "failed to create workflow", http.StatusInternalServerError)
 		return
 	}
@@ -248,7 +248,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err := wf.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create workflow: db error", "error", err)
+		slog.ErrorContext(ctx, "create workflow: db error", "error", err)
 		deleteWorkflowRole(ctx, wf.RoleID)
 		http.Error(w, "failed to create workflow", http.StatusInternalServerError)
 		return
@@ -256,7 +256,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	span.SetAttributes(attribute.String("workflow.id", wf.WorkflowID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("workflow created", "workflow_id", wf.WorkflowID, "user_id", userID)
+	slog.InfoContext(ctx, "workflow created", "workflow_id", wf.WorkflowID, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(wf) //nolint:errcheck
@@ -281,7 +281,7 @@ func handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
-		slog.Error("list workflows: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "list workflows: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list workflows", http.StatusInternalServerError)
 		return
 	}
@@ -319,7 +319,7 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("get workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "get workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
 		return
 	}
@@ -359,7 +359,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("update workflow: fetch error", "workflow_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update workflow: fetch error", "workflow_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
 		return
 	}
@@ -408,7 +408,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "enrich steps failed")
-		slog.Error("update workflow: enrich steps", "workflow_id", id, "error", err)
+		slog.ErrorContext(ctx, "update workflow: enrich steps", "workflow_id", id, "error", err)
 		http.Error(w, "failed to update workflow", http.StatusInternalServerError)
 		return
 	}
@@ -426,7 +426,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
 		deleteWorkflowRole(ctx, existing.RoleID)
 		http.Error(w, "failed to update workflow", http.StatusInternalServerError)
 		return
@@ -435,7 +435,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	deleteWorkflowRole(ctx, oldRoleID)
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("workflow updated", "workflow_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "workflow updated", "workflow_id", id, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(existing) //nolint:errcheck
 }
@@ -465,7 +465,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete workflow: fetch error", "workflow_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete workflow: fetch error", "workflow_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete workflow", http.StatusInternalServerError)
 		return
 	}
@@ -479,13 +479,13 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err := wf.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete workflow", http.StatusInternalServerError)
 		return
 	}
 	deleteWorkflowRole(ctx, roleID)
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("workflow deleted", "workflow_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "workflow deleted", "workflow_id", id, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
 }

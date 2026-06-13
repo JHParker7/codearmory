@@ -29,6 +29,11 @@ var (
 type cliConfig struct {
 	URL   string `json:"url"`
 	Token string `json:"token"`
+	Theme string `json:"theme,omitempty"`
+	// Providers selects which module fills each capability slot, keyed by slot
+	// name (e.g. {"repos": "github"}). Slots with no entry use the first
+	// registered provider. See Module.Slot in module.go.
+	Providers map[string]string `json:"providers,omitempty"`
 }
 
 func configPath() string {
@@ -212,8 +217,11 @@ Token lookup order (highest to lowest precedence):
 The CODEARMORY_URL environment variable and --url flag override the stored URL.`,
 }
 
-// Execute runs the CLI.
+// Execute runs the CLI. It wires the registered modules onto the root command
+// first (init() can't, since per-file init order would miss late registrants),
+// then dispatches.
 func Execute() {
+	wireModules()
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}

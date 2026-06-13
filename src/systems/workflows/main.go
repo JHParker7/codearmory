@@ -179,26 +179,26 @@ func refreshCatalog(ctx context.Context) {
 	registryURL := envOrDefault("REGISTRY_URL", "")
 	registryKey := secret("REGISTRY_SERVICE_KEY")
 	if registryURL == "" || registryKey == "" {
-		slog.Debug("catalog refresh skipped: REGISTRY_URL or REGISTRY_SERVICE_KEY not set")
+		slog.DebugContext(ctx, "catalog refresh skipped: REGISTRY_URL or REGISTRY_SERVICE_KEY not set")
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, registryURL+"/actions", nil)
 	if err != nil {
-		slog.Warn("catalog refresh: build request", "error", err)
+		slog.WarnContext(ctx, "catalog refresh: build request", "error", err)
 		return
 	}
 	req.Header.Set("X-Service-Key", "workflows:"+registryKey)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Warn("catalog refresh: request failed", "error", err)
+		slog.WarnContext(ctx, "catalog refresh: request failed", "error", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("catalog refresh: unexpected status", "status", resp.StatusCode)
+		slog.WarnContext(ctx, "catalog refresh: unexpected status", "status", resp.StatusCode)
 		return
 	}
 
@@ -212,7 +212,7 @@ func refreshCatalog(ctx context.Context) {
 	}
 	var raw []registryAction
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		slog.Warn("catalog refresh: decode failed", "error", err)
+		slog.WarnContext(ctx, "catalog refresh: decode failed", "error", err)
 		return
 	}
 
@@ -257,7 +257,7 @@ func refreshCatalog(ctx context.Context) {
 	}
 	serviceURLsMu.Unlock()
 
-	slog.Info("catalog refreshed", "actions", len(raw))
+	slog.DebugContext(ctx, "catalog refreshed", "actions", len(raw))
 }
 
 type statusResponseWriter struct {
@@ -277,12 +277,25 @@ func (l *requestLogger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
 	l.handler.ServeHTTP(rw, r)
 	sc := trace.SpanFromContext(r.Context()).SpanContext()
-	slog.Info(r.Method+" "+r.URL.Path,
+	msg := r.Method + " " + r.URL.Path
+	attrs := []any{
 		"status", rw.status,
 		"duration", time.Since(start),
 		"trace_id", sc.TraceID().String(),
 		"span_id", sc.SpanID().String(),
-	)
+	}
+	switch r.URL.Path {
+	case "/healthz", "/health", "/system_health", "/readyz", "/livez":
+		// Background liveness/readiness probes are noise at info; log them at
+		// debug, escalating to warn only when the probe itself fails.
+		if rw.status >= 500 {
+			slog.WarnContext(r.Context(), msg, attrs...)
+		} else {
+			slog.DebugContext(r.Context(), msg, attrs...)
+		}
+	default:
+		slog.InfoContext(r.Context(), "http request", append([]any{"method", r.Method, "path", r.URL.Path}, attrs...)...)
+	}
 }
 
 func limitBody(next http.Handler) http.Handler {
@@ -315,8 +328,8 @@ func handleCatalogRefresh(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	logLevel := slog.LevelInfo
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		logLevel = slog.LevelDebug
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
 	}
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))

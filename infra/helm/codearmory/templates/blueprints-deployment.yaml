@@ -51,10 +51,7 @@ spec:
               value: {{ .Values.blueprints.env.logLevel | quote }}
             - name: GATEKEEPER_URL
               value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
-            {{- if .Values.blueprints.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.blueprints.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.blueprints.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "blueprints" "blueprints" (include "codearmory.fullname" .)) | nindent 12 }}
             - name: REDIS_URL
               valueFrom:

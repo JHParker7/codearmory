@@ -43,7 +43,7 @@ func handleInternalRegistryToken(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("registry token: get account", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "registry token: get account", "user_id", userID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -53,7 +53,7 @@ func handleInternalRegistryToken(w http.ResponseWriter, r *http.Request) {
 
 	if err := gitea.cleanRegistryTokens(ctx, username); err != nil {
 		// Non-fatal: old tokens may linger but the new one will still work.
-		slog.Warn("registry token: cleanup failed", "username", username, "error", err)
+		slog.WarnContext(ctx, "registry token: cleanup failed", "username", username, "error", err)
 	}
 
 	tokenName := fmt.Sprintf("codearmory-reg-%s", randHex(8))
@@ -61,13 +61,13 @@ func handleInternalRegistryToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "token creation failed")
-		slog.Error("registry token: create failed", "username", username, "error", err)
+		slog.ErrorContext(ctx, "registry token: create failed", "username", username, "error", err)
 		http.Error(w, "failed to create registry token", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("registry token issued", "user_id", userID, "gitea_username", username)
+	slog.InfoContext(ctx, "registry token issued", "user_id", userID, "gitea_username", username)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(registryTokenResponse{Username: username, Token: token}) //nolint:errcheck
 }

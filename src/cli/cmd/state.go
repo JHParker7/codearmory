@@ -89,5 +89,5 @@ func init() {
 		unlockCmd,
 	)
 
-	rootCmd.AddCommand(stateCmd)
+	RegisterModule(Module{Name: "state", Command: stateCmd})
 }

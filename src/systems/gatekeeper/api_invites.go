@@ -31,19 +31,19 @@ func createInviteBody(w http.ResponseWriter, r *http.Request, callerID, resource
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("create "+logLabel+" invite: invalid request body", "caller_id", callerID, "resource_id", resourceID, "error", err)
+		slog.WarnContext(ctx, "create "+logLabel+" invite: invalid request body", "caller_id", callerID, "resource_id", resourceID, "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if req.Email == "" {
 		span.SetStatus(codes.Error, "missing email")
-		slog.Warn("create "+logLabel+" invite: missing email", "caller_id", callerID, "resource_id", resourceID)
+		slog.WarnContext(ctx, "create "+logLabel+" invite: missing email", "caller_id", callerID, "resource_id", resourceID)
 		http.Error(w, "email is required", http.StatusBadRequest)
 		return
 	}
 	if _, err := mail.ParseAddress(req.Email); err != nil {
 		span.SetStatus(codes.Error, "invalid email")
-		slog.Warn("create "+logLabel+" invite: invalid email format", "caller_id", callerID, "resource_id", resourceID)
+		slog.WarnContext(ctx, "create "+logLabel+" invite: invalid email format", "caller_id", callerID, "resource_id", resourceID)
 		http.Error(w, "invalid email address", http.StatusBadRequest)
 		return
 	}
@@ -61,7 +61,7 @@ func createInviteBody(w http.ResponseWriter, r *http.Request, callerID, resource
 	if err := invite.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create "+logLabel+" invite: db error", "caller_id", callerID, "resource_id", resourceID, "error", err)
+		slog.ErrorContext(ctx, "create "+logLabel+" invite: db error", "caller_id", callerID, "resource_id", resourceID, "error", err)
 		http.Error(w, "failed to create invite", http.StatusInternalServerError)
 		return
 	}
@@ -70,7 +70,7 @@ func createInviteBody(w http.ResponseWriter, r *http.Request, callerID, resource
 		attribute.String("invitee.email", req.Email),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("create "+logLabel+" invite: success", "caller_id", callerID, "resource_id", resourceID, "invite_id", invite.InviteID, "invitee_email", req.Email)
+	slog.InfoContext(ctx, "create "+logLabel+" invite: success", "caller_id", callerID, "resource_id", resourceID, "invite_id", invite.InviteID)
 	writeAudit(ctx, callerID, "user", "invite.create", invite.InviteID, resourceType+":"+resourceID)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -84,8 +84,8 @@ func handleListInvites(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
-	slog.Info("list invites request", "caller_id", callerID)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "list invites request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listInvite", "gatekeeper/invites") {
 		span.SetStatus(codes.Ok, "")
@@ -106,7 +106,7 @@ func handleListInvites(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "caller not found")
-		slog.Warn("list invites: failed to fetch caller", "caller_id", callerID, "error", err)
+		slog.WarnContext(ctx, "list invites: failed to fetch caller", "caller_id", callerID, "error", err)
 		http.Error(w, "failed to list invites", http.StatusInternalServerError)
 		return
 	}
@@ -123,7 +123,7 @@ func handleListInvites(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "list invites failed")
-		slog.Warn("list invites: db error", "caller_id", callerID, "error", err)
+		slog.WarnContext(ctx, "list invites: db error", "caller_id", callerID, "error", err)
 		http.Error(w, "failed to list invites", http.StatusInternalServerError)
 		return
 	}
@@ -133,7 +133,7 @@ func handleListInvites(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("db.read")
 	span.SetStatus(codes.Ok, "")
-	slog.Info("list invites: success", "caller_id", callerID, "count", len(invites))
+	slog.InfoContext(ctx, "list invites: success", "caller_id", callerID, "count", len(invites))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(invites)
 }
@@ -146,10 +146,10 @@ func handleCreateOrgInvite(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("org.id", id),
 	)
-	slog.Info("create org invite request", "caller_id", callerID, "org_id", id)
+	slog.InfoContext(ctx, "create org invite request", "caller_id", callerID, "org_id", id)
 
 	if !requirePermission(w, r, "inviteUser", "gatekeeper/orgs/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -160,7 +160,7 @@ func handleCreateOrgInvite(w http.ResponseWriter, r *http.Request) {
 	if _, err := (Org{OrgID: id}).Get(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "org not found")
-		slog.Warn("create org invite: org not found", "caller_id", callerID, "org_id", id)
+		slog.WarnContext(ctx, "create org invite: org not found", "caller_id", callerID, "org_id", id)
 		http.Error(w, "org not found", http.StatusNotFound)
 		return
 	}
@@ -176,10 +176,10 @@ func handleCreateTeamInvite(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("team.id", id),
 	)
-	slog.Info("create team invite request", "caller_id", callerID, "team_id", id)
+	slog.InfoContext(ctx, "create team invite request", "caller_id", callerID, "team_id", id)
 
 	if !requirePermission(w, r, "inviteUser", "gatekeeper/teams/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -190,7 +190,7 @@ func handleCreateTeamInvite(w http.ResponseWriter, r *http.Request) {
 	if _, err := (Team{TeamID: id}).Get(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "team not found")
-		slog.Warn("create team invite: team not found", "caller_id", callerID, "team_id", id)
+		slog.WarnContext(ctx, "create team invite: team not found", "caller_id", callerID, "team_id", id)
 		http.Error(w, "team not found", http.StatusNotFound)
 		return
 	}
@@ -206,16 +206,16 @@ func handleGetInvite(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("invite.id", id),
 	)
-	slog.Info("get invite request", "caller_id", callerID, "invite_id", id)
+	slog.InfoContext(ctx, "get invite request", "caller_id", callerID, "invite_id", id)
 
 	row, err := (Invite{InviteID: id}).Get(ctx)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invite not found")
-		slog.Warn("get invite: not found", "caller_id", callerID, "invite_id", id)
+		slog.WarnContext(ctx, "get invite: not found", "caller_id", callerID, "invite_id", id)
 		http.Error(w, "invite not found", http.StatusNotFound)
 		return
 	}
@@ -234,18 +234,18 @@ func handleGetInvite(w http.ResponseWriter, r *http.Request) {
 	caller := callerRow.(User)
 	if callerID != invite.InviterID && caller.Email != invite.InviteeEmail {
 		span.SetStatus(codes.Error, "not participant")
-		slog.Warn("get invite: caller is not inviter or invitee", "caller_id", callerID, "invite_id", id)
+		slog.WarnContext(ctx, "get invite: caller is not inviter or invitee", "caller_id", callerID, "invite_id", id)
 		// Return 404 instead of 403 to avoid revealing that the invite exists.
 		http.Error(w, "invite not found", http.StatusNotFound)
 		return
 	}
 	span.AddEvent("participant.verified", trace.WithAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("invite.id", id),
 	))
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("get invite: success", "caller_id", callerID, "invite_id", id)
+	slog.InfoContext(ctx, "get invite: success", "caller_id", callerID, "invite_id", id)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(invite)
 }
@@ -262,16 +262,16 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("invite.id", id),
 	)
-	slog.Info("accept invite request", "caller_id", callerID, "invite_id", id)
+	slog.InfoContext(ctx, "accept invite request", "caller_id", callerID, "invite_id", id)
 
 	row, err := (Invite{InviteID: id}).Get(ctx)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invite not found")
-		slog.Warn("accept invite: not found", "caller_id", callerID, "invite_id", id)
+		slog.WarnContext(ctx, "accept invite: not found", "caller_id", callerID, "invite_id", id)
 		http.Error(w, "invite not found", http.StatusNotFound)
 		return
 	}
@@ -288,19 +288,19 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 	caller := callerRow.(User)
 	if caller.Email != invite.InviteeEmail {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("accept invite: caller is not invitee", "caller_id", callerID, "invite_id", id)
+		slog.WarnContext(ctx, "accept invite: caller is not invitee", "caller_id", callerID, "invite_id", id)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	if invite.Status != "pending" {
 		span.SetStatus(codes.Error, "invite not pending")
-		slog.Warn("accept invite: invite not pending", "caller_id", callerID, "invite_id", id, "status", invite.Status)
+		slog.WarnContext(ctx, "accept invite: invite not pending", "caller_id", callerID, "invite_id", id, "status", invite.Status)
 		http.Error(w, "invite is not pending", http.StatusConflict)
 		return
 	}
 	if time.Now().After(invite.ExpiresAt) {
 		span.SetStatus(codes.Error, "invite expired")
-		slog.Warn("accept invite: invite expired", "caller_id", callerID, "invite_id", id, "expires_at", invite.ExpiresAt)
+		slog.WarnContext(ctx, "accept invite: invite expired", "caller_id", callerID, "invite_id", id, "expires_at", invite.ExpiresAt)
 		http.Error(w, "invite has expired", http.StatusGone)
 		return
 	}
@@ -313,7 +313,7 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 	case "org":
 		if caller.OrgID != nil && *caller.OrgID != invite.ResourceID {
 			span.SetStatus(codes.Error, "already in org")
-			slog.Warn("accept invite: caller already belongs to a different org", "caller_id", callerID, "invite_id", id)
+			slog.WarnContext(ctx, "accept invite: caller already belongs to a different org", "caller_id", callerID, "invite_id", id)
 			http.Error(w, "you already belong to an org; leave it before accepting this invite", http.StatusConflict)
 			return
 		}
@@ -323,7 +323,7 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 	case "team":
 		if caller.TeamID != nil && *caller.TeamID != invite.ResourceID {
 			span.SetStatus(codes.Error, "already in team")
-			slog.Warn("accept invite: caller already belongs to a different team", "caller_id", callerID, "invite_id", id)
+			slog.WarnContext(ctx, "accept invite: caller already belongs to a different team", "caller_id", callerID, "invite_id", id)
 			http.Error(w, "you already belong to a team; leave it before accepting this invite", http.StatusConflict)
 			return
 		}
@@ -332,7 +332,7 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 		permName = fmt.Sprintf("%s-team-member-read", caller.Username)
 	default:
 		span.SetStatus(codes.Error, "unknown resource type")
-		slog.Error("accept invite: unknown resource type", "caller_id", callerID, "invite_id", id, "resource_type", invite.ResourceType)
+		slog.ErrorContext(ctx, "accept invite: unknown resource type", "caller_id", callerID, "invite_id", id, "resource_type", invite.ResourceType)
 		http.Error(w, "invalid invite", http.StatusInternalServerError)
 		return
 	}
@@ -342,16 +342,16 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 		switch err.Error() {
 		case "invite is not pending":
 			span.SetStatus(codes.Error, "invite not pending")
-			slog.Warn("accept invite: concurrent accept detected", "caller_id", callerID, "invite_id", id)
+			slog.WarnContext(ctx, "accept invite: concurrent accept detected", "caller_id", callerID, "invite_id", id)
 			http.Error(w, "invite is not pending", http.StatusConflict)
 		case "already in org", "already in team":
 			span.SetStatus(codes.Error, err.Error())
-			slog.Warn("accept invite: membership conflict inside tx", "caller_id", callerID, "invite_id", id, "detail", err)
+			slog.WarnContext(ctx, "accept invite: membership conflict inside tx", "caller_id", callerID, "invite_id", id, "detail", err)
 			http.Error(w, err.Error(), http.StatusConflict)
 		default:
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "db update failed")
-			slog.Error("accept invite: failed to accept invite atomically", "caller_id", callerID, "invite_id", id, "error", err)
+			slog.ErrorContext(ctx, "accept invite: failed to accept invite atomically", "caller_id", callerID, "invite_id", id, "error", err)
 			http.Error(w, "failed to accept invite", http.StatusInternalServerError)
 		}
 		return
@@ -368,7 +368,7 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 		attribute.String("resource.id", invite.ResourceID),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("accept invite: success", "caller_id", callerID, "invite_id", id, "resource_type", invite.ResourceType, "resource_id", invite.ResourceID)
+	slog.InfoContext(ctx, "accept invite: success", "caller_id", callerID, "invite_id", id, "resource_type", invite.ResourceType, "resource_id", invite.ResourceID)
 	writeAudit(ctx, callerID, "user", "invite.accept", id, invite.ResourceType+":"+invite.ResourceID)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -381,16 +381,16 @@ func handleDeclineInvite(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("invite.id", id),
 	)
-	slog.Info("decline invite request", "caller_id", callerID, "invite_id", id)
+	slog.InfoContext(ctx, "decline invite request", "caller_id", callerID, "invite_id", id)
 
 	row, err := (Invite{InviteID: id}).Get(ctx)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invite not found")
-		slog.Warn("decline invite: not found", "caller_id", callerID, "invite_id", id)
+		slog.WarnContext(ctx, "decline invite: not found", "caller_id", callerID, "invite_id", id)
 		http.Error(w, "invite not found", http.StatusNotFound)
 		return
 	}
@@ -407,13 +407,13 @@ func handleDeclineInvite(w http.ResponseWriter, r *http.Request) {
 	caller := callerRow.(User)
 	if caller.Email != invite.InviteeEmail {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("decline invite: caller is not invitee", "caller_id", callerID, "invite_id", id)
+		slog.WarnContext(ctx, "decline invite: caller is not invitee", "caller_id", callerID, "invite_id", id)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	if invite.Status != "pending" {
 		span.SetStatus(codes.Error, "invite not pending")
-		slog.Warn("decline invite: invite not pending", "caller_id", callerID, "invite_id", id, "status", invite.Status)
+		slog.WarnContext(ctx, "decline invite: invite not pending", "caller_id", callerID, "invite_id", id, "status", invite.Status)
 		http.Error(w, "invite is not pending", http.StatusConflict)
 		return
 	}
@@ -422,13 +422,13 @@ func handleDeclineInvite(w http.ResponseWriter, r *http.Request) {
 	if err := invite.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("decline invite: db error", "caller_id", callerID, "invite_id", id, "error", err)
+		slog.ErrorContext(ctx, "decline invite: db error", "caller_id", callerID, "invite_id", id, "error", err)
 		http.Error(w, "failed to decline invite", http.StatusInternalServerError)
 		return
 	}
 	span.AddEvent("invite.declined", trace.WithAttributes(attribute.String("invite.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("decline invite: success", "caller_id", callerID, "invite_id", id)
+	slog.InfoContext(ctx, "decline invite: success", "caller_id", callerID, "invite_id", id)
 	writeAudit(ctx, callerID, "user", "invite.decline", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -441,16 +441,16 @@ func handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("invite.id", id),
 	)
-	slog.Info("delete invite request", "caller_id", callerID, "invite_id", id)
+	slog.InfoContext(ctx, "delete invite request", "caller_id", callerID, "invite_id", id)
 
 	row, err := (Invite{InviteID: id}).Get(ctx)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invite not found")
-		slog.Warn("delete invite: not found", "caller_id", callerID, "invite_id", id)
+		slog.WarnContext(ctx, "delete invite: not found", "caller_id", callerID, "invite_id", id)
 		http.Error(w, "invite not found", http.StatusNotFound)
 		return
 	}
@@ -458,7 +458,7 @@ func handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
 
 	if callerID != invite.InviterID {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("delete invite: caller is not inviter", "caller_id", callerID, "invite_id", id)
+		slog.WarnContext(ctx, "delete invite: caller is not inviter", "caller_id", callerID, "invite_id", id)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -466,13 +466,13 @@ func handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
 	if err := invite.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
-		slog.Error("delete invite: db error", "caller_id", callerID, "invite_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete invite: db error", "caller_id", callerID, "invite_id", id, "error", err)
 		http.Error(w, "failed to cancel invite", http.StatusInternalServerError)
 		return
 	}
 	span.AddEvent("invite.cancelled", trace.WithAttributes(attribute.String("invite.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("delete invite: success", "caller_id", callerID, "invite_id", id)
+	slog.InfoContext(ctx, "delete invite: success", "caller_id", callerID, "invite_id", id)
 	writeAudit(ctx, callerID, "user", "invite.cancel", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }

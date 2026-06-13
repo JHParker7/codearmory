@@ -56,24 +56,32 @@ type auditModel struct {
 
 const auditPageSize = 50
 
+var auditCols = []tuiColSpec{
+	{"ACTOR", 16, 2},
+	{"TYPE", 8, 0},
+	{"ACTION", 16, 2},
+	{"RESOURCE", 12, 0},
+	{"TIME", 14, 0},
+}
+
 func newAuditModel() auditModel {
-	t := table.New(
-		table.WithColumns([]table.Column{
-			{Title: "ACTOR",    Width: 22},
-			{Title: "TYPE",     Width: 8},
-			{Title: "ACTION",   Width: 22},
-			{Title: "RESOURCE", Width: 12},
-			{Title: "TIME",     Width: 14},
-		}),
-		table.WithFocused(true),
-		table.WithHeight(16),
-	)
+	t := table.New(table.WithFocused(true))
 	t.SetStyles(tuiTableStyles())
-	return auditModel{
+	m := auditModel{
 		loading: true,
+		width:   tuiDefaultWidth,
+		height:  tuiDefaultHeight,
 		aTable:  t,
-		vp:      viewport.New(100, 20),
+		vp:      viewport.New(tuiDefaultWidth-4, tuiDefaultHeight-8),
 	}
+	m.applyTableLayout()
+	return m
+}
+
+// applyTableLayout resizes the audit table to the current terminal.
+func (m *auditModel) applyTableLayout() {
+	m.aTable.SetColumns(tuiFitColumns(auditCols, m.width))
+	m.aTable.SetHeight(tuiTableHeight(m.height, tuiListChrome))
 }
 
 // ── Fetch commands ────────────────────────────────────────────────────────────
@@ -106,6 +114,7 @@ func (m auditModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.vp.Width = msg.Width - 4
 		m.vp.Height = msg.Height - 8
+		m.applyTableLayout()
 		return m, nil
 
 	case auditErrMsg:
@@ -119,9 +128,9 @@ func (m auditModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := make([]table.Row, len(m.entries))
 		for i, e := range m.entries {
 			rows[i] = table.Row{
-				tuiTrunc(e.ActorID, 22),
+				e.ActorID,
 				e.ActorType,
-				tuiTrunc(e.Action, 22),
+				e.Action,
 				tuiShortID(e.ResourceID),
 				e.CreatedAt.Local().Format("Jan 02 15:04"),
 			}
@@ -241,7 +250,7 @@ func (m auditModel) auditViewList() string {
 	if m.page > 0 {
 		pageInfo = tuiMetaStyle.Render(fmt.Sprintf("  page %d", m.page+1))
 	}
-	help := tuiHelpStyle.Render("[↑↓/jk] navigate  [enter] detail  [] next/prev page  [r] refresh  [q] home")
+	help := tuiHelp("[↑↓/jk] navigate  [enter] detail  [] next/prev page  [r] refresh  [q] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -260,7 +269,7 @@ func (m auditModel) auditViewDetail() string {
 		title = tuiTitleStyle.Render(m.selEntry.Action) + "  " +
 			tuiMetaStyle.Render(m.selEntry.ActorID)
 	}
-	help := tuiHelpStyle.Render("[↑↓/pgup/pgdn] scroll  [b] back  [q] home")
+	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [b] back  [q] home", m.width)
 	return title + "\n" + tuiBoxStyle.Render(m.vp.View()) + "\n" + help
 }
 
@@ -281,5 +290,15 @@ func init() {
 		Short: "Interactive TUI for browsing audit logs",
 		Args:  cobra.NoArgs,
 		RunE:  func(cmd *cobra.Command, args []string) error { return startAuditTUI() },
+	})
+	RegisterModule(Module{
+		Name:    "audit",
+		Order:   50,
+		Command: auditCmd,
+		Screens: []HubScreen{{
+			Title: "Audit Log",
+			Desc:  "Browse the platform audit trail",
+			New:   func() tea.Model { return newAuditModel() },
+		}},
 	})
 }

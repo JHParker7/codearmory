@@ -101,20 +101,33 @@ func (l *logger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
 	l.handler.ServeHTTP(rw, r)
 	sc := trace.SpanFromContext(r.Context()).SpanContext()
-	slog.Info(r.Method+" "+r.URL.Path,
+	msg := r.Method + " " + r.URL.Path
+	attrs := []any{
 		"status", rw.status,
 		"duration", time.Since(start),
 		"trace_id", sc.TraceID().String(),
 		"span_id", sc.SpanID().String(),
-	)
+	}
+	switch r.URL.Path {
+	case "/healthz", "/health", "/system_health", "/readyz", "/livez":
+		// Background liveness/readiness probes are noise at info; log them at
+		// debug, escalating to warn only when the probe itself fails.
+		if rw.status >= 500 {
+			slog.WarnContext(r.Context(), msg, attrs...)
+		} else {
+			slog.DebugContext(r.Context(), msg, attrs...)
+		}
+	default:
+		slog.InfoContext(r.Context(), "http request", append([]any{"method", r.Method, "path", r.URL.Path}, attrs...)...)
+	}
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
 	logLevel := slog.LevelInfo
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		logLevel = slog.LevelDebug
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
 	}
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
@@ -173,6 +186,7 @@ func main() {
 	mux.HandleFunc("GET /executions", handleList)
 	mux.HandleFunc("GET /executions/{id}", handleGet)
 	mux.HandleFunc("DELETE /executions/{id}", handleCancel(workers))
+	mux.HandleFunc("GET /images", handleListImages)
 	mux.HandleFunc("GET /runner-classes", handleListRunnerClasses)
 	mux.HandleFunc("POST /runner-classes", handleCreateRunnerClass)
 	mux.HandleFunc("GET /runner-classes/{name}", handleGetRunnerClass)

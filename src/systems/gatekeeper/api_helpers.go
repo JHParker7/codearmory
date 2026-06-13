@@ -79,18 +79,18 @@ func requirePermission(w http.ResponseWriter, r *http.Request, action, resource 
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("permission check error", "user_id", userID, "action", action, "resource", resource, "error", err)
+		slog.ErrorContext(ctx, "permission check error", "user_id", userID, "action", action, "resource", resource, "error", err)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false
 	}
 	if !ok {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("permission denied", "user_id", userID, "action", action, "resource", resource)
+		slog.WarnContext(ctx, "permission denied", "user_id", userID, "action", action, "resource", resource)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false
 	}
 	span.SetStatus(codes.Ok, "")
-	slog.Debug("permission approved", "user_id", userID, "service", "gatekeeper", "action", action, "resource", resource)
+	slog.DebugContext(ctx, "permission approved", "user_id", userID, "service", "gatekeeper", "action", action, "resource", resource)
 	return true
 }
 
@@ -113,7 +113,7 @@ func authMiddleware(next http.Handler) http.Handler {
 		}
 		if !strings.HasPrefix(authHeader, "Bearer ") {
 			span.SetStatus(codes.Error, "missing or malformed Authorization header")
-			slog.Warn("auth rejected: missing or malformed Authorization header", "method", r.Method, "path", r.URL.Path)
+			slog.WarnContext(ctx, "auth rejected: missing or malformed Authorization header", "method", r.Method, "path", r.URL.Path)
 			meterAuthMiddleware.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "rejected")))
 			http.Error(w, "missing or invalid authorization header", http.StatusUnauthorized)
 			return
@@ -125,14 +125,14 @@ func authMiddleware(next http.Handler) http.Handler {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "token parse failed")
-			slog.Warn("auth rejected: could not parse token", "method", r.Method, "path", r.URL.Path, "error", err)
+			slog.WarnContext(ctx, "auth rejected: could not parse token", "method", r.Method, "path", r.URL.Path, "error", err)
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
 		c, ok := unverified.Claims.(*authClaims)
 		if !ok || c.ID == "" {
 			span.SetStatus(codes.Error, "token missing jti claim")
-			slog.Warn("auth rejected: token missing jti claim", "method", r.Method, "path", r.URL.Path)
+			slog.WarnContext(ctx, "auth rejected: token missing jti claim", "method", r.Method, "path", r.URL.Path)
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
@@ -143,7 +143,7 @@ func authMiddleware(next http.Handler) http.Handler {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "session not found")
-			slog.Warn("auth rejected: session not found or inactive", "session_id", c.ID, "method", r.Method, "path", r.URL.Path)
+			slog.WarnContext(ctx, "auth rejected: session not found or inactive", "session_id", c.ID, "method", r.Method, "path", r.URL.Path)
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
@@ -156,7 +156,7 @@ func authMiddleware(next http.Handler) http.Handler {
 
 		if time.Now().After(session.ExpiresAt) {
 			span.SetStatus(codes.Error, "token expired")
-			slog.Warn("auth rejected: token expired", "session_id", session.SessionID, "user_id", session.UserID, "expired_at", session.ExpiresAt)
+			slog.WarnContext(ctx, "auth rejected: token expired", "session_id", session.SessionID, "user_id", session.UserID, "expired_at", session.ExpiresAt)
 			http.Error(w, "token expired", http.StatusUnauthorized)
 			return
 		}
@@ -165,7 +165,7 @@ func authMiddleware(next http.Handler) http.Handler {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "public key parse failed")
-			slog.Error("auth failed: could not parse session public key", "session_id", c.ID, "error", err)
+			slog.ErrorContext(ctx, "auth failed: could not parse session public key", "session_id", c.ID, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -180,7 +180,7 @@ func authMiddleware(next http.Handler) http.Handler {
 		if err != nil || !verified.Valid {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "token signature invalid")
-			slog.Warn("auth rejected: token signature invalid", "session_id", c.ID, "error", err)
+			slog.WarnContext(ctx, "auth rejected: token signature invalid", "session_id", c.ID, "error", err)
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
@@ -188,7 +188,7 @@ func authMiddleware(next http.Handler) http.Handler {
 		claims, ok := verified.Claims.(*authClaims)
 		if !ok || claims.Subject == "" {
 			span.SetStatus(codes.Error, "verified token missing subject")
-			slog.Warn("auth rejected: verified token missing subject", "session_id", c.ID)
+			slog.WarnContext(ctx, "auth rejected: verified token missing subject", "session_id", c.ID)
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
@@ -200,7 +200,7 @@ func authMiddleware(next http.Handler) http.Handler {
 		))
 		span.SetStatus(codes.Ok, "")
 		meterAuthMiddleware.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "accepted")))
-		slog.Debug("auth accepted", "user_id", claims.Subject, "session_id", session.SessionID, "method", r.Method, "path", r.URL.Path)
+		slog.DebugContext(ctx, "auth accepted", "user_id", claims.Subject, "session_id", session.SessionID, "method", r.Method, "path", r.URL.Path)
 		authCtx := context.WithValue(ctx, userIDKey, claims.Subject)
 		if session.ClientID != nil && *session.ClientID != "" {
 			authCtx = context.WithValue(authCtx, clientIDKey, *session.ClientID)
@@ -296,7 +296,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 		attribute.String("permission.resource", resource),
 	)
 
-	slog.Debug("checking permissions", "user_id", userID, "service", service, "action", action, "resource", resource)
+	slog.DebugContext(ctx, "checking permissions", "user_id", userID, "service", service, "action", action, "resource", resource)
 
 	row, err := (User{UserID: userID}).Get(ctx)
 	if err != nil {
@@ -368,7 +368,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 	var permissions []Permissions
 
 	if user.RoleID != nil {
-		slog.Debug("loading direct role permissions", "user_id", userID, "role_id", *user.RoleID)
+		slog.DebugContext(ctx, "loading direct role permissions", "user_id", userID, "role_id", *user.RoleID)
 		span.AddEvent("role.loading", trace.WithAttributes(attribute.String("role.id", *user.RoleID)))
 		roleRow, err := (Role{RoleID: *user.RoleID}).Get(ctx)
 		if err != nil {
@@ -384,7 +384,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 			attribute.String("role.id", role.RoleID),
 			attribute.Int("role.permissions_count", len(role.PermissionsIDs)),
 		))
-		slog.Debug("user role loaded", "user_id", userID, "role_id", role.RoleID, "permissions_count", len(role.PermissionsIDs))
+		slog.DebugContext(ctx, "user role loaded", "user_id", userID, "role_id", role.RoleID, "permissions_count", len(role.PermissionsIDs))
 		for _, pid := range role.PermissionsIDs {
 			pRow, err := (Permissions{PermissionsID: pid}).Get(ctx)
 			if err != nil {
@@ -406,11 +406,11 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 	// (stale reference — team was soft-deleted but user.team_id was not yet cleared).
 	// The second block only runs when the load succeeded, keeping the happy-path readable.
 	if user.TeamID != nil {
-		slog.Debug("loading team role permissions", "user_id", userID, "team_id", *user.TeamID)
+		slog.DebugContext(ctx, "loading team role permissions", "user_id", userID, "team_id", *user.TeamID)
 		span.AddEvent("team.loading", trace.WithAttributes(attribute.String("team.id", *user.TeamID)))
 		row, err = (Team{TeamID: *user.TeamID}).Get(ctx)
 		if err != nil {
-			slog.Debug("checkPermissions: team not found, skipping team permissions", "user_id", userID, "team_id", *user.TeamID)
+			slog.DebugContext(ctx, "checkPermissions: team not found, skipping team permissions", "user_id", userID, "team_id", *user.TeamID)
 			user.TeamID = nil
 		}
 	}
@@ -421,9 +421,9 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 			attribute.Bool("team.has_role", team.RoleID != nil),
 		))
 		if team.RoleID == nil {
-			slog.Debug("team has no role assigned, skipping team permission check", "user_id", userID, "team_id", team.TeamID)
+			slog.DebugContext(ctx, "team has no role assigned, skipping team permission check", "user_id", userID, "team_id", team.TeamID)
 		} else {
-			slog.Debug("loading team role", "user_id", userID, "team_id", team.TeamID, "role_id", *team.RoleID)
+			slog.DebugContext(ctx, "loading team role", "user_id", userID, "team_id", team.TeamID, "role_id", *team.RoleID)
 			span.AddEvent("team_role.loading", trace.WithAttributes(attribute.String("role.id", *team.RoleID)))
 			row, err = (Role{RoleID: *team.RoleID}).Get(ctx)
 			if err != nil {
@@ -439,7 +439,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 				attribute.String("role.id", role.RoleID),
 				attribute.Int("role.permissions_count", len(role.PermissionsIDs)),
 			))
-			slog.Debug("team role loaded", "user_id", userID, "team_id", team.TeamID, "role_id", role.RoleID, "permissions_count", len(role.PermissionsIDs))
+			slog.DebugContext(ctx, "team role loaded", "user_id", userID, "team_id", team.TeamID, "role_id", role.RoleID, "permissions_count", len(role.PermissionsIDs))
 			for _, pid := range role.PermissionsIDs {
 				pRow, err := (Permissions{PermissionsID: pid}).Get(ctx)
 				if err != nil {
@@ -458,7 +458,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 		}
 	}
 
-	slog.Debug("evaluating permissions", "user_id", userID, "total_permissions", len(permissions), "action", action, "resource", resource)
+	slog.DebugContext(ctx, "evaluating permissions", "user_id", userID, "total_permissions", len(permissions), "action", action, "resource", resource)
 	span.AddEvent("evaluation.started", trace.WithAttributes(
 		attribute.Int("permissions.total", len(permissions)),
 	))
@@ -471,7 +471,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 				attribute.String("matched.service", permission.Service),
 			))
 			span.SetStatus(codes.Ok, "")
-			slog.Debug("permission granted", "user_id", userID, "service", service, "action", action, "resource", resource, "matched_permission_id", permission.PermissionsID)
+			slog.DebugContext(ctx, "permission granted", "user_id", userID, "service", service, "action", action, "resource", resource, "matched_permission_id", permission.PermissionsID)
 			permissionCheck.Granted = true
 			savePermissionsCheck(ctx, permissionCheck)
 			return true, nil
@@ -483,7 +483,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 		attribute.Int("permissions.checked", len(permissions)),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Debug("permission denied", "user_id", userID, "service", service, "action", action, "resource", resource, "permissions_checked", len(permissions))
+	slog.DebugContext(ctx, "permission denied", "user_id", userID, "service", service, "action", action, "resource", resource, "permissions_checked", len(permissions))
 	permissionCheck.Granted = false
 	savePermissionsCheck(ctx, permissionCheck)
 	return false, nil
@@ -501,7 +501,7 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("check_permissions: invalid request body", "error", err)
+		slog.WarnContext(ctx, "check_permissions: invalid request body", "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -513,24 +513,28 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 		attribute.String("permission.action", req.Action),
 		attribute.String("permission.resource", req.Resource),
 	)
-	slog.Info("check_permissions request", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource)
+	slog.DebugContext(ctx, "check_permissions request", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource)
 
 	w.Header().Set("Content-Type", "application/json")
 
 	clientID, _ := r.Context().Value(clientIDKey).(string)
 	if clientID != "" {
 		isAllowed, orgID, err := checkClientPermissions(r.Context(), clientID, req.Service, req.Action, req.Resource)
-		if err != nil {
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "client permission evaluation error")
-			slog.Error("check_permissions: client error", "client_id", clientID, "service", req.Service, "action", req.Action, "resource", req.Resource, "error", err)
+			slog.ErrorContext(ctx, "check_permissions: client error", "client_id", clientID, "service", req.Service, "action", req.Action, "resource", req.Resource, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		span.SetAttributes(attribute.Bool("permission.authorized", isAllowed))
 		span.SetStatus(codes.Ok, "")
 		meterPermissionChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", isAllowed)))
-		slog.Info("check_permissions result (client)", "client_id", clientID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
+		slog.DebugContext(ctx, "check_permissions result (client)", "client_id", clientID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
 		json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": clientID, "org_id": orgID}) //nolint:errcheck
 		return
 	}
@@ -539,12 +543,12 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "evaluation error")
-		slog.Error("check_permissions: evaluation error", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "error", err)
+		slog.ErrorContext(ctx, "check_permissions: evaluation error", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		slog.Warn("permission check error", "user_id", userID, "action", req.Action, "error", err)
+		slog.InfoContext(ctx, "permission denied", "user_id", userID, "action", req.Action)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -552,7 +556,7 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.Bool("permission.authorized", isAllowed))
 	span.SetStatus(codes.Ok, "")
 	meterPermissionChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", isAllowed)))
-	slog.Info("check_permissions result", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
+	slog.DebugContext(ctx, "check_permissions result", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
 
 	var orgID *string
 	if userRow, err := (User{UserID: userID}).Get(r.Context()); err == nil {
@@ -766,7 +770,7 @@ func writeAudit(ctx context.Context, actorID, actorType, action, resourceID, det
 		Detail:     detail,
 	}
 	if err := entry.Add(ctx); err != nil {
-		slog.Warn("audit log write failed", "action", action, "resource_id", resourceID, "error", err)
+		slog.WarnContext(ctx, "audit log write failed", "action", action, "resource_id", resourceID, "error", err)
 	}
 }
 
@@ -783,7 +787,7 @@ func savePermissionsCheck(ctx context.Context, pc PermissionsCheck) {
 		return
 	}
 	if err := pc.Add(ctx); err != nil {
-		slog.Debug("permissions check row failed to save", "error", err.Error())
+		slog.DebugContext(ctx, "permissions check row failed to save", "error", err.Error())
 	}
 }
 
@@ -867,13 +871,13 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 		// success, HashedKey is reset to the bootstrap hash so the service can
 		// immediately call /service-accounts/rotate-key to re-establish rotation.
 		if svc.HashedBootstrapKey == "" || bcrypt.CompareHashAndPassword([]byte(svc.HashedBootstrapKey), []byte(key)) != nil {
-			slog.Warn("service auth rejected: key mismatch", "service", name)
+			slog.WarnContext(r.Context(), "service auth rejected: key mismatch", "service", name)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return ServiceAccount{}, false
 		}
-		slog.Warn("service auth: bootstrap key fallback used; service will re-rotate", "service", name)
+		slog.WarnContext(r.Context(), "service auth: bootstrap key fallback used; service will re-rotate", "service", name)
 		if err2 := syncServiceAccountBootstrapKey(r.Context(), name, svc.HashedBootstrapKey); err2 != nil {
-			slog.Error("service auth: failed to sync hashed_key from bootstrap", "service", name, "error", err2)
+			slog.ErrorContext(r.Context(), "service auth: failed to sync hashed_key from bootstrap", "service", name, "error", err2)
 		}
 	}
 
@@ -893,7 +897,7 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 			}
 		}
 		if !allowed {
-			slog.Warn("service auth rejected: source IP not in allowlist", "service", name, "client_ip", clientIP)
+			slog.WarnContext(r.Context(), "service auth rejected: source IP not in allowlist", "service", name, "client_ip", clientIP)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return ServiceAccount{}, false
 		}
@@ -904,7 +908,7 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 	// This requires gatekeeper to be started with mTLS (TLS_CLIENT_AUTH=require).
 	if len(svc.ClientCertFingerprints) > 0 {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			slog.Warn("service auth rejected: client certificate required but not presented", "service", name)
+			slog.WarnContext(r.Context(), "service auth rejected: client certificate required but not presented", "service", name)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return ServiceAccount{}, false
 		}
@@ -918,7 +922,7 @@ func requireServiceAuth(w http.ResponseWriter, r *http.Request) (ServiceAccount,
 			}
 		}
 		if !allowed {
-			slog.Warn("service auth rejected: client certificate fingerprint not recognised", "service", name)
+			slog.WarnContext(r.Context(), "service auth rejected: client certificate fingerprint not recognised", "service", name)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return ServiceAccount{}, false
 		}
@@ -959,7 +963,7 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	if _, err := rand.Read(raw); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "rand failed")
-		slog.Error("rotate service key: rand failed", "service", svc.ServiceName, "error", err)
+		slog.ErrorContext(ctx, "rotate service key: rand failed", "service", svc.ServiceName, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -969,7 +973,7 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "bcrypt failed")
-		slog.Error("rotate service key: bcrypt failed", "service", svc.ServiceName, "error", err)
+		slog.ErrorContext(ctx, "rotate service key: bcrypt failed", "service", svc.ServiceName, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -978,13 +982,13 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	if err := svc.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("rotate service key: db update failed", "service", svc.ServiceName, "error", err)
+		slog.ErrorContext(ctx, "rotate service key: db update failed", "service", svc.ServiceName, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("service key rotated", "service", svc.ServiceName)
+	slog.DebugContext(ctx, "service key rotated", "service", svc.ServiceName)
 	writeAudit(ctx, svc.ServiceName, "service", "service_account.rotate_key", svc.ServiceAccountID, svc.ServiceName)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"key": newKey})

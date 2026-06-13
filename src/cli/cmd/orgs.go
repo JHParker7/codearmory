@@ -105,5 +105,5 @@ func init() {
 		},
 		inviteCmd,
 	)
-	rootCmd.AddCommand(orgsCmd)
+	RegisterModule(Module{Name: "orgs", Command: orgsCmd})
 }

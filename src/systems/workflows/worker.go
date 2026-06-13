@@ -149,7 +149,7 @@ func (p *WorkerPool) tryOne(ctx context.Context) bool {
 			// Dequeue already committed status='running'; fail the run rather than
 			// returning, or it would be stranded forever (Dequeue selects only
 			// 'pending' rows and stuck-run recovery runs only at startup).
-			slog.Error("worker: decrypt run token", "run_id", run.RunID, "error", err)
+			slog.ErrorContext(ctx, "worker: decrypt run token", "run_id", run.RunID, "error", err)
 			p.failRun(run.RunID, run.RunSessionID)
 			return true
 		}
@@ -168,11 +168,11 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		p.cancels.Delete(runID)
 	}()
 
-	slog.Info("worker: starting run", "run_id", runID, "workflow_id", workflowID)
+	slog.InfoContext(ctx, "worker: starting run", "run_id", runID, "workflow_id", workflowID)
 
 	workflow, err := getWorkflow(runCtx, workflowID)
 	if err != nil {
-		slog.Error("worker: fetch workflow", "run_id", runID, "workflow_id", workflowID, "error", err)
+		slog.ErrorContext(ctx, "worker: fetch workflow", "run_id", runID, "workflow_id", workflowID, "error", err)
 		p.failRun(runID, sessionID)
 		return
 	}
@@ -194,7 +194,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			i := group.indices[0]
 			stepRunID := uuid.New().String()
 			if err := p.startStepRun(runID, stepRunID, i, ws.Name); err != nil {
-				slog.Error("worker: start step run", "run_id", runID, "step", i, "error", err)
+				slog.ErrorContext(ctx, "worker: start step run", "run_id", runID, "step", i, "error", err)
 				finalStatus = StatusFailed
 				break
 			}
@@ -214,7 +214,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 				attribute.String("status", StatusCompleted),
 			))
 			p.finishStepRun(stepRunID, StatusCompleted, strPtr(output))
-			slog.Info("worker: step completed", "run_id", runID, "step", i, "action", ws.Action)
+			slog.InfoContext(ctx, "worker: step completed", "run_id", runID, "step", i, "action", ws.Action)
 			continue
 		}
 
@@ -232,7 +232,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			sid := uuid.New().String()
 			stepRunIDs[j] = sid
 			if err := p.startStepRun(runID, sid, group.indices[j], ws.Name); err != nil {
-				slog.Error("worker: start parallel step run", "run_id", runID, "step", group.indices[j], "error", err)
+				slog.ErrorContext(ctx, "worker: start parallel step run", "run_id", runID, "step", group.indices[j], "error", err)
 				finalStatus = StatusFailed
 				break
 			}
@@ -275,7 +275,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 					finalStatus = StatusFailed
 				}
 				p.finishStepRun(r.stepRunID, status, strPtr(r.err.Error()))
-				slog.Info("worker: parallel step failed", "run_id", runID, "step", r.stepIdx, "action", r.action, "error", r.err)
+				slog.WarnContext(ctx, "worker: parallel step failed", "run_id", runID, "step", r.stepIdx, "action", r.action)
 				groupFailed = true
 			} else {
 				meterStepsCompleted.Add(ctx, 1, metric.WithAttributes(
@@ -283,7 +283,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 					attribute.String("status", StatusCompleted),
 				))
 				p.finishStepRun(r.stepRunID, StatusCompleted, strPtr(r.output))
-				slog.Info("worker: parallel step completed", "run_id", runID, "step", r.stepIdx, "action", r.action)
+				slog.InfoContext(ctx, "worker: parallel step completed", "run_id", runID, "step", r.stepIdx, "action", r.action)
 			}
 		}
 		if groupFailed {
@@ -297,7 +297,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	))
 	(WorkflowRun{RunID: runID}).Complete(context.Background(), finalStatus)
 	revokeRunToken(context.Background(), store.getSessionID())
-	slog.Info("worker: run finished", "run_id", runID, "status", finalStatus)
+	slog.InfoContext(ctx, "worker: run finished", "run_id", runID, "status", finalStatus)
 }
 
 // rotateToken runs until ctx is cancelled, rotating the run credential every
@@ -313,22 +313,22 @@ func (p *WorkerPool) rotateToken(ctx context.Context, store *tokenStore, runID, 
 		}
 		newToken, newSID, err := createRunToken(ctx, triggeredBy, roleID)
 		if err != nil {
-			slog.Warn("worker: token rotation failed", "run_id", runID, "error", err)
+			slog.WarnContext(ctx, "worker: token rotation failed", "run_id", runID, "error", err)
 			continue
 		}
 		encNewToken, err := encryptToken(newToken)
 		if err != nil {
-			slog.Warn("worker: token rotation encryption failed, discarding new token", "run_id", runID, "error", err)
+			slog.WarnContext(ctx, "worker: token rotation encryption failed, discarding new token", "run_id", runID, "error", err)
 			revokeRunToken(context.Background(), newSID)
 			continue
 		}
 		if dbErr := (WorkflowRun{RunID: runID}).UpdateToken(ctx, encNewToken, newSID); dbErr != nil {
-			slog.Warn("worker: token rotation DB update failed, discarding new token", "run_id", runID, "error", dbErr)
+			slog.WarnContext(ctx, "worker: token rotation DB update failed, discarding new token", "run_id", runID, "error", dbErr)
 			revokeRunToken(context.Background(), newSID)
 			continue
 		}
 		oldSID := store.swap(newToken, newSID)
-		slog.Info("worker: run token rotated", "run_id", runID)
+		slog.DebugContext(ctx, "worker: run token rotated", "run_id", runID)
 		go func(sid string) {
 			time.Sleep(60 * time.Second)
 			rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -545,7 +545,7 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 				}
 			}
 			if !known {
-				slog.Warn("poll: unrecognised status value, continuing to poll — check action definition",
+				slog.WarnContext(ctx, "poll: unrecognised status value, continuing to poll — check action definition",
 					"action", def.Name, "job_id", jobID, "status", status)
 			}
 		}

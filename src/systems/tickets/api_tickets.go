@@ -134,7 +134,7 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	if err := t.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create ticket: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "create ticket: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to create ticket", http.StatusInternalServerError)
 		return
 	}
@@ -143,7 +143,7 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	notifyHooks(ctx, eventTicketCreated, t.Status, t, nil)
 	span.SetAttributes(attribute.String("ticket.id", t.TicketID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("ticket created", "ticket_id", t.TicketID, "user_id", userID)
+	slog.InfoContext(ctx, "ticket created", "ticket_id", t.TicketID, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(t) //nolint:errcheck
@@ -183,7 +183,7 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
-		slog.Error("list tickets: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "list tickets: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list tickets", http.StatusInternalServerError)
 		return
 	}
@@ -218,7 +218,7 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("get ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "get ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
@@ -232,7 +232,7 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("get ticket: comments error", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "get ticket: comments error", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
@@ -268,7 +268,7 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("update ticket: fetch error", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update ticket: fetch error", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
@@ -342,7 +342,7 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to update ticket", http.StatusInternalServerError)
 		return
 	}
@@ -364,7 +364,7 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db fetch after update failed")
-		slog.Error("update ticket: fetch after update", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update ticket: fetch after update", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get updated ticket", http.StatusInternalServerError)
 		return
 	}
@@ -372,13 +372,13 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db list comments failed")
-		slog.Error("update ticket: list comments", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update ticket: list comments", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get updated ticket", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("ticket updated", "ticket_id", id, "user_id", userID, "status", req.Status)
+	slog.InfoContext(ctx, "ticket updated", "ticket_id", id, "user_id", userID, "status", req.Status)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(t) //nolint:errcheck
 }
@@ -408,7 +408,7 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete ticket: fetch error", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete ticket: fetch error", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete ticket", http.StatusInternalServerError)
 		return
 	}
@@ -421,13 +421,13 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 	if err := t.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete ticket: db error", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete ticket", http.StatusInternalServerError)
 		return
 	}
 
 	notifyHooks(ctx, eventTicketDeleted, t.Status, t, nil)
 	span.SetStatus(codes.Ok, "")
-	slog.Info("ticket deleted", "ticket_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "ticket deleted", "ticket_id", id, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
 }

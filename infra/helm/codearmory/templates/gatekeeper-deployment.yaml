@@ -52,10 +52,7 @@ spec:
             - name: TRUSTED_PROXY_CIDRS
               value: {{ .Values.gatekeeper.env.trustedProxyCIDRs | quote }}
             {{- end }}
-            {{- if .Values.gatekeeper.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.gatekeeper.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.gatekeeper.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "gatekeeper" "gatekeeper" (include "codearmory.fullname" .)) | nindent 12 }}
             - name: REDIS_URL
               valueFrom:

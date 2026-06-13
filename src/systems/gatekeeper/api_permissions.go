@@ -59,8 +59,8 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
-	slog.Info("create permissions request", "caller_id", callerID)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "create permissions request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "createPermissions", "gatekeeper/permissions") {
 		span.SetStatus(codes.Ok, "")
@@ -72,26 +72,26 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("create permissions: invalid request body", "caller_id", callerID, "error", err)
+		slog.WarnContext(ctx, "create permissions: invalid request body", "caller_id", callerID, "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if req.Service == "" {
 		span.SetStatus(codes.Error, "missing service")
-		slog.Warn("create permissions: missing service", "caller_id", callerID)
+		slog.WarnContext(ctx, "create permissions: missing service", "caller_id", callerID)
 		http.Error(w, "service is required", http.StatusBadRequest)
 		return
 	}
 	if !isServicePermitted(ctx, req.Service) {
 		span.SetStatus(codes.Error, "unknown service")
-		slog.Warn("create permissions: service not permitted", "caller_id", callerID, "service", req.Service)
+		slog.WarnContext(ctx, "create permissions: service not permitted", "caller_id", callerID, "service", req.Service)
 		http.Error(w, "service not permitted", http.StatusBadRequest)
 		return
 	}
 	for _, a := range req.Actions {
 		if a == "" {
 			span.SetStatus(codes.Error, "empty action")
-			slog.Warn("create permissions: empty string in actions", "caller_id", callerID)
+			slog.WarnContext(ctx, "create permissions: empty string in actions", "caller_id", callerID)
 			http.Error(w, "actions must not contain empty strings", http.StatusBadRequest)
 			return
 		}
@@ -99,7 +99,7 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 	for _, r := range req.Resources {
 		if r == "" {
 			span.SetStatus(codes.Error, "empty resource")
-			slog.Warn("create permissions: empty string in resources", "caller_id", callerID)
+			slog.WarnContext(ctx, "create permissions: empty string in resources", "caller_id", callerID)
 			http.Error(w, "resources must not contain empty strings", http.StatusBadRequest)
 			return
 		}
@@ -124,7 +124,7 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 	if err := p.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create permissions: db error", "caller_id", callerID, "service", req.Service, "error", err)
+		slog.ErrorContext(ctx, "create permissions: db error", "caller_id", callerID, "service", req.Service, "error", err)
 		http.Error(w, "failed to create permissions", http.StatusInternalServerError)
 		return
 	}
@@ -134,7 +134,7 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 		attribute.String("permissions.service", p.Service),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("create permissions: success", "caller_id", callerID, "permissions_id", p.PermissionsID, "service", p.Service, "actions", p.Actions, "resources", p.Resources)
+	slog.InfoContext(ctx, "create permissions: success", "caller_id", callerID, "permissions_id", p.PermissionsID, "service", p.Service, "actions", p.Actions, "resources", p.Resources)
 	writeAudit(ctx, callerID, "user", "permission.create", p.PermissionsID, p.Service)
 	row, _ := p.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
@@ -150,10 +150,10 @@ func handleGetPermissions(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("permissions.id", id),
 	)
-	slog.Info("get permissions request", "caller_id", callerID, "permissions_id", id)
+	slog.InfoContext(ctx, "get permissions request", "caller_id", callerID, "permissions_id", id)
 
 	if !requirePermission(w, r, "getPermissions", "gatekeeper/permissions/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -165,13 +165,13 @@ func handleGetPermissions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "permissions not found")
-		slog.Warn("get permissions: not found", "caller_id", callerID, "permissions_id", id)
+		slog.WarnContext(ctx, "get permissions: not found", "caller_id", callerID, "permissions_id", id)
 		http.Error(w, "permissions not found", http.StatusNotFound)
 		return
 	}
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("permissions.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("get permissions: success", "caller_id", callerID, "permissions_id", id)
+	slog.InfoContext(ctx, "get permissions: success", "caller_id", callerID, "permissions_id", id)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(row.(Permissions))
 }
@@ -184,10 +184,10 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("permissions.id", id),
 	)
-	slog.Info("update permissions request", "caller_id", callerID, "permissions_id", id)
+	slog.InfoContext(ctx, "update permissions request", "caller_id", callerID, "permissions_id", id)
 
 	if !requirePermission(w, r, "updatePermissions", "gatekeeper/permissions/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -199,26 +199,26 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("update permissions: invalid request body", "caller_id", callerID, "permissions_id", id, "error", err)
+		slog.WarnContext(ctx, "update permissions: invalid request body", "caller_id", callerID, "permissions_id", id, "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if req.Service == "" {
 		span.SetStatus(codes.Error, "missing service")
-		slog.Warn("update permissions: missing service", "caller_id", callerID, "permissions_id", id)
+		slog.WarnContext(ctx, "update permissions: missing service", "caller_id", callerID, "permissions_id", id)
 		http.Error(w, "service is required", http.StatusBadRequest)
 		return
 	}
 	if !isServicePermitted(ctx, req.Service) {
 		span.SetStatus(codes.Error, "unknown service")
-		slog.Warn("update permissions: service not permitted", "caller_id", callerID, "permissions_id", id, "service", req.Service)
+		slog.WarnContext(ctx, "update permissions: service not permitted", "caller_id", callerID, "permissions_id", id, "service", req.Service)
 		http.Error(w, "service not permitted", http.StatusBadRequest)
 		return
 	}
 	for _, a := range req.Actions {
 		if a == "" {
 			span.SetStatus(codes.Error, "empty action")
-			slog.Warn("update permissions: empty string in actions", "caller_id", callerID, "permissions_id", id)
+			slog.WarnContext(ctx, "update permissions: empty string in actions", "caller_id", callerID, "permissions_id", id)
 			http.Error(w, "actions must not contain empty strings", http.StatusBadRequest)
 			return
 		}
@@ -226,7 +226,7 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 	for _, r := range req.Resources {
 		if r == "" {
 			span.SetStatus(codes.Error, "empty resource")
-			slog.Warn("update permissions: empty string in resources", "caller_id", callerID, "permissions_id", id)
+			slog.WarnContext(ctx, "update permissions: empty string in resources", "caller_id", callerID, "permissions_id", id)
 			http.Error(w, "resources must not contain empty strings", http.StatusBadRequest)
 			return
 		}
@@ -241,7 +241,7 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "permissions not found")
-		slog.Warn("update permissions: not found", "caller_id", callerID, "permissions_id", id)
+		slog.WarnContext(ctx, "update permissions: not found", "caller_id", callerID, "permissions_id", id)
 		http.Error(w, "permissions not found", http.StatusNotFound)
 		return
 	}
@@ -255,7 +255,7 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 	}
 	if p.OrgID != nil && (callerOrgID == nil || *p.OrgID != *callerOrgID) {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("update permissions: cross-org attempt", "caller_id", callerID, "permissions_id", id)
+		slog.WarnContext(ctx, "update permissions: cross-org attempt", "caller_id", callerID, "permissions_id", id)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -267,7 +267,7 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 	if err := p.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update permissions: db error", "caller_id", callerID, "permissions_id", id, "error", err)
+		slog.ErrorContext(ctx, "update permissions: db error", "caller_id", callerID, "permissions_id", id, "error", err)
 		http.Error(w, "failed to update permissions", http.StatusInternalServerError)
 		return
 	}
@@ -276,7 +276,7 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 		attribute.String("permissions.service", req.Service),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("update permissions: success", "caller_id", callerID, "permissions_id", id, "new_service", req.Service, "new_actions", req.Actions, "new_resources", req.Resources)
+	slog.InfoContext(ctx, "update permissions: success", "caller_id", callerID, "permissions_id", id, "new_service", req.Service, "new_actions", req.Actions, "new_resources", req.Resources)
 	writeAudit(ctx, callerID, "user", "permission.update", id, req.Service)
 	row, _ = p.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
@@ -291,10 +291,10 @@ func handleDeletePermissions(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("permissions.id", id),
 	)
-	slog.Info("delete permissions request", "caller_id", callerID, "permissions_id", id)
+	slog.InfoContext(ctx, "delete permissions request", "caller_id", callerID, "permissions_id", id)
 
 	if !requirePermission(w, r, "deletePermissions", "gatekeeper/permissions/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -306,7 +306,7 @@ func handleDeletePermissions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "permissions not found")
-		slog.Warn("delete permissions: not found", "caller_id", callerID, "permissions_id", id)
+		slog.WarnContext(ctx, "delete permissions: not found", "caller_id", callerID, "permissions_id", id)
 		http.Error(w, "permissions not found", http.StatusNotFound)
 		return
 	}
@@ -319,7 +319,7 @@ func handleDeletePermissions(w http.ResponseWriter, r *http.Request) {
 	}
 	if p.OrgID != nil && (callerOrgID == nil || *p.OrgID != *callerOrgID) {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("delete permissions: cross-org attempt", "caller_id", callerID, "permissions_id", id)
+		slog.WarnContext(ctx, "delete permissions: cross-org attempt", "caller_id", callerID, "permissions_id", id)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -327,13 +327,13 @@ func handleDeletePermissions(w http.ResponseWriter, r *http.Request) {
 	if err := p.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
-		slog.Error("delete permissions: db error", "caller_id", callerID, "permissions_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete permissions: db error", "caller_id", callerID, "permissions_id", id, "error", err)
 		http.Error(w, "failed to delete permissions", http.StatusInternalServerError)
 		return
 	}
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("permissions.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("delete permissions: success", "caller_id", callerID, "permissions_id", id)
+	slog.InfoContext(ctx, "delete permissions: success", "caller_id", callerID, "permissions_id", id)
 	writeAudit(ctx, callerID, "user", "permission.delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }

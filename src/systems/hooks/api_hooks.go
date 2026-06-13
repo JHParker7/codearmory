@@ -86,7 +86,7 @@ func ruleInScope(rule PipelineRule, orgID, userID string) bool {
 func matchAndDispatch(ctx context.Context, eventID string, source, event, ref string, payloadMap map[string]string, baseInputs map[string]string, rawBody []byte, sigHeader string, skipHMAC bool, scopeOrgID, scopeUserID string) ([]triggerResult, int, int) {
 	matchedRules, err := getMatchedRules(ctx, source, event)
 	if err != nil {
-		slog.Error("matchAndDispatch: query rules", "error", err)
+		slog.ErrorContext(ctx, "matchAndDispatch: query rules", "error", err)
 		return nil, 0, 0
 	}
 
@@ -112,7 +112,7 @@ func matchAndDispatch(ctx context.Context, eventID string, source, event, ref st
 		if !skipHMAC && rws.Secret != nil && *rws.Secret != "" {
 			expected := "sha256=" + computeHMAC(*rws.Secret, rawBody)
 			if !hmac.Equal([]byte(sigHeader), []byte(expected)) {
-				slog.Warn("matchAndDispatch: HMAC mismatch, skipping rule",
+				slog.WarnContext(ctx, "matchAndDispatch: HMAC mismatch, skipping rule",
 					"rule_id", rws.RuleID, "event_id", eventID)
 				continue
 			}
@@ -149,7 +149,7 @@ func matchAndDispatch(ctx context.Context, eventID string, source, event, ref st
 		runID, trigErr := dispatchWorkflow(ctx, rws.WorkflowID, rws.CreatedBy, rws.OrgID, inputs)
 		success := false
 		if trigErr != nil {
-			slog.Error("matchAndDispatch: dispatch workflow failed",
+			slog.ErrorContext(ctx, "matchAndDispatch: dispatch workflow failed",
 				"rule_id", rws.RuleID, "workflow_id", rws.WorkflowID, "error", trigErr)
 			errStr := trigErr.Error()
 			trig.Error = &errStr
@@ -171,7 +171,7 @@ func matchAndDispatch(ctx context.Context, eventID string, source, event, ref st
 		}
 		// Deactivate rules that reference a deleted workflow so they stop firing.
 		if errors.Is(trigErr, errWorkflowNotFound) {
-			slog.Warn("matchAndDispatch: workflow not found — deactivating rule",
+			slog.WarnContext(ctx, "matchAndDispatch: workflow not found — deactivating rule",
 				"rule_id", rws.RuleID, "workflow_id", rws.WorkflowID)
 			go func(ruleID string) {
 				if err := (PipelineRule{RuleID: ruleID}).Remove(context.Background()); err != nil {
@@ -181,12 +181,12 @@ func matchAndDispatch(ctx context.Context, eventID string, source, event, ref st
 		}
 
 		if err := trig.Add(ctx); err != nil {
-			slog.Error("matchAndDispatch: insert trigger", "trigger_id", trig.TriggerID, "error", err)
+			slog.ErrorContext(ctx, "matchAndDispatch: insert trigger", "trigger_id", trig.TriggerID, "error", err)
 		}
 		// Enqueue retry for transient failures so the dispatch is not lost.
 		if trig.Status == "pending_retry" {
 			if retryErr := addRetry(ctx, trig.TriggerID, rws.WorkflowID, rws.CreatedBy, rws.OrgID, inputs, *trig.Error); retryErr != nil {
-				slog.Error("matchAndDispatch: enqueue retry failed", "trigger_id", trig.TriggerID, "error", retryErr)
+				slog.ErrorContext(ctx, "matchAndDispatch: enqueue retry failed", "trigger_id", trig.TriggerID, "error", retryErr)
 			}
 		}
 
@@ -248,7 +248,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := newEvent.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert event failed")
-		slog.Error("webhook: insert event", "error", err)
+		slog.ErrorContext(ctx, "webhook: insert event", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}

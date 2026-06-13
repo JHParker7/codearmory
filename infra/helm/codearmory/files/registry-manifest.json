@@ -121,6 +121,7 @@
       { "method": "GET",    "path": "/executions",               "action": "listExecution",     "resource": "forge/executions" },
       { "method": "GET",    "path": "/executions/{id}",          "action": "getExecution",      "resource": "forge/executions/{id}" },
       { "method": "DELETE", "path": "/executions/{id}",          "action": "deleteExecution",   "resource": "forge/executions/{id}" },
+      { "method": "GET",    "path": "/images",                   "action": "listImage",         "resource": "forge/images" },
       { "method": "GET",    "path": "/runner-classes",           "action": "listRunnerClass",   "resource": "forge/runner-classes" },
       { "method": "POST",   "path": "/runner-classes",           "action": "createRunnerClass", "resource": "forge/runner-classes" },
       { "method": "GET",    "path": "/runner-classes/{name}",    "action": "getRunnerClass",    "resource": "forge/runner-classes/{name}" },
@@ -158,6 +159,11 @@
         "grant_on": "user",
         "actions": ["listRunnerClass", "getRunnerClass"],
         "resources": ["{username}/forge/runner-classes", "{username}/forge/runner-classes/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listImage"],
+        "resources": ["{username}/forge/images"]
       }
     ]
   },

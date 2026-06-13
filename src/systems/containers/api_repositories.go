@@ -27,7 +27,7 @@ func handleListRepositories(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "registry error")
-		slog.Error("list repositories: registry error", "error", err)
+		slog.ErrorContext(ctx, "list repositories: registry error", "error", err)
 		http.Error(w, "failed to list repositories", http.StatusBadGateway)
 		return
 	}
@@ -58,7 +58,7 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 	}
 	if !namespaceAllowed(ctx, r, userID, orgID, namespace) {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("list tags: namespace not owned by caller", "user_id", userID, "namespace", namespace)
+		slog.WarnContext(ctx, "list tags: namespace not owned by caller", "user_id", userID, "namespace", namespace)
 		http.Error(w, "repository not found", http.StatusNotFound)
 		return
 	}
@@ -75,7 +75,7 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "registry error")
-		slog.Error("list tags: registry error", "name", name, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "list tags: registry error", "name", name, "user_id", userID, "error", err)
 		http.Error(w, "failed to list tags", http.StatusBadGateway)
 		return
 	}
@@ -102,7 +102,7 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	if !namespaceAllowed(ctx, r, userID, orgID, namespace) {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("get manifest: namespace not owned by caller", "user_id", userID, "namespace", namespace)
+		slog.WarnContext(ctx, "get manifest: namespace not owned by caller", "user_id", userID, "namespace", namespace)
 		http.Error(w, "manifest not found", http.StatusNotFound)
 		return
 	}
@@ -120,7 +120,7 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "registry error")
-		slog.Error("get manifest: registry error", "name", name, "reference", reference, "error", err)
+		slog.ErrorContext(ctx, "get manifest: registry error", "name", name, "reference", reference, "error", err)
 		http.Error(w, "failed to get manifest", http.StatusBadGateway)
 		return
 	}
@@ -154,7 +154,7 @@ func handleDeleteManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	if !namespaceAllowed(ctx, r, userID, orgID, namespace) {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("delete manifest: namespace not owned by caller", "user_id", userID, "namespace", namespace)
+		slog.WarnContext(ctx, "delete manifest: namespace not owned by caller", "user_id", userID, "namespace", namespace)
 		http.Error(w, "manifest not found", http.StatusNotFound)
 		return
 	}
@@ -171,7 +171,7 @@ func handleDeleteManifest(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "registry error")
-		slog.Error("delete manifest: registry error", "user_id", userID, "name", name, "digest", digest, "error", err)
+		slog.ErrorContext(ctx, "delete manifest: registry error", "user_id", userID, "name", name, "digest", digest, "error", err)
 		http.Error(w, "failed to delete manifest", http.StatusBadGateway)
 		return
 	}
@@ -179,6 +179,6 @@ func handleDeleteManifest(w http.ResponseWriter, r *http.Request) {
 	meterManifestsDeleted.Add(ctx, 1,
 		metric.WithAttributes(attribute.String("repo.namespace", namespace)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("manifest deleted", "user_id", userID, "name", name, "digest", digest)
+	slog.InfoContext(ctx, "manifest deleted", "user_id", userID, "name", name, "digest", digest)
 	w.WriteHeader(http.StatusNoContent)
 }

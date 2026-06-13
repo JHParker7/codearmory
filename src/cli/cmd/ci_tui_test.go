@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -812,6 +813,138 @@ func TestTUIView_RunDetailNoAutoRefreshHint_WhenDone(t *testing.T) {
 	view := m.View()
 	if strings.Contains(view, "auto-refresh") {
 		t.Error("completed run detail should not show auto-refresh hint")
+	}
+}
+
+// ── Create flow ───────────────────────────────────────────────────────────────
+
+func TestTUIModel_Pipelines_N_OpensCreateForm(t *testing.T) {
+	m := applyMsg(newTUIModel(), tuiPipelinesMsg([]tuiPipeline{}))
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m2 := updated.(tuiModel)
+	if m2.view != tuiViewCreate {
+		t.Errorf("view = %v, want tuiViewCreate", m2.view)
+	}
+	if cmd == nil {
+		t.Error("opening the form should return a focus/blink cmd")
+	}
+	if len(m2.form.fields) == 0 {
+		t.Error("create form should have fields")
+	}
+}
+
+func TestTUIModel_Create_Esc_BacksToPipelines(t *testing.T) {
+	m := newTUIModel()
+	m.view = tuiViewCreate
+	m.form, _ = newCIPipelineForm()
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(tuiModel).view != tuiViewPipelines {
+		t.Error("esc in create view should return to the pipelines list")
+	}
+}
+
+func TestTUIModel_Create_Submit_MissingName_StaysWithError(t *testing.T) {
+	m := newTUIModel()
+	m.view = tuiViewCreate
+	m.form, _ = newCIPipelineForm()
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2 := updated.(tuiModel)
+	if m2.view != tuiViewCreate {
+		t.Error("submit with no name should stay in the create view")
+	}
+	if m2.form.errMsg == "" {
+		t.Error("submit with no name should set an inline error")
+	}
+	if cmd != nil {
+		t.Error("invalid submit should not emit a request cmd")
+	}
+}
+
+func TestTUIModel_PipelineCreatedMsg_ReturnsToListAndRefetches(t *testing.T) {
+	m := newTUIModel()
+	m.view = tuiViewCreate
+	updated, cmd := m.Update(tuiPipelineCreatedMsg{})
+	m2 := updated.(tuiModel)
+	if m2.view != tuiViewPipelines {
+		t.Error("tuiPipelineCreatedMsg should return to the pipelines view")
+	}
+	if !m2.loading || cmd == nil {
+		t.Error("tuiPipelineCreatedMsg should set loading and emit a refetch cmd")
+	}
+}
+
+func TestTUIModel_FormErrMsg_ShowsInlineError(t *testing.T) {
+	m := newTUIModel()
+	m.view = tuiViewCreate
+	m.form, _ = newCIPipelineForm()
+	updated, _ := m.Update(tuiFormErrMsg{err: fmt.Errorf("step \"build\" not found")})
+	m2 := updated.(tuiModel)
+	if m2.view != tuiViewCreate {
+		t.Error("form error should stay in the create view")
+	}
+	if !strings.Contains(m2.form.errMsg, "not found") {
+		t.Errorf("form.errMsg = %q, want to mention 'not found'", m2.form.errMsg)
+	}
+}
+
+func TestCISubmitCreatePipeline_ResolvesStepsAndPosts(t *testing.T) {
+	mux := http.NewServeMux()
+	var postBody []byte
+	mux.HandleFunc("/workflows/steps", func(w http.ResponseWriter, r *http.Request) {
+		// resolveStepName looks up each name and expects [{step_id,name}].
+		name := r.URL.Query().Get("name")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `[{"step_id":"id-%s","name":%q}]`, name, name)
+	})
+	mux.HandleFunc("/workflows/pipelines", func(w http.ResponseWriter, r *http.Request) {
+		postBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"workflow_id":"wf1"}`)) //nolint:errcheck
+	})
+	setupCLI(t, routeServer(t, mux))
+
+	msg := ciSubmitCreatePipeline("my-pl", "desc", "build->test")()
+	if _, ok := msg.(tuiPipelineCreatedMsg); !ok {
+		t.Fatalf("msg = %T, want tuiPipelineCreatedMsg", msg)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(postBody, &got); err != nil {
+		t.Fatalf("pipeline body not JSON: %v", err)
+	}
+	if got["name"] != "my-pl" || got["description"] != "desc" {
+		t.Errorf("name/description = %v/%v, want my-pl/desc", got["name"], got["description"])
+	}
+	steps, _ := got["steps"].([]any)
+	if len(steps) != 2 {
+		t.Fatalf("steps = %v, want 2 resolved refs", got["steps"])
+	}
+	first, _ := steps[0].(map[string]any)
+	if first["step_id"] != "id-build" {
+		t.Errorf("first step_id = %v, want id-build", first["step_id"])
+	}
+}
+
+func TestCISubmitCreatePipeline_BadDSL_ReturnsFormErr(t *testing.T) {
+	// An empty parallel-group segment is a DSL parse error; no HTTP needed.
+	if _, ok := ciSubmitCreatePipeline("n", "", "build->[]")().(tuiFormErrMsg); !ok {
+		t.Error("a malformed DSL should return tuiFormErrMsg")
+	}
+}
+
+func TestTUIView_CreateView_RendersForm(t *testing.T) {
+	m := newTUIModel()
+	m.view = tuiViewCreate
+	m.form, _ = newCIPipelineForm()
+	if !strings.Contains(m.View(), "New Pipeline") {
+		t.Error("create view should show the form heading")
+	}
+}
+
+func TestTUIView_PipelinesHelp_MentionsNew(t *testing.T) {
+	m := applyMsg(newTUIModel(), tuiPipelinesMsg([]tuiPipeline{}))
+	if !strings.Contains(m.View(), "new") {
+		t.Error("pipelines help should mention the new-pipeline shortcut")
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -76,14 +77,14 @@ func connect() *gorm.DB {
 	}
 	dsn := secret("DATABASE_URL")
 	if dsn == "" {
-		fmt.Fprintln(os.Stderr, "DATABASE_URL is required")
+		slog.Error("DATABASE_URL is required")
 		os.Exit(1)
 	}
 	conn, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "blueprints: connect to database: %v\n", err)
+		slog.Error("blueprints: connect to database", "error", err)
 		os.Exit(1)
 	}
 	gormDB = conn

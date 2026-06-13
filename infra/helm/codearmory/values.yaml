@@ -21,6 +21,16 @@ imagePullSecrets: []
 # Override to use a private mirror: e.g. "registry.example.com/busybox:1.36"
 waitContainerImage: "public.ecr.aws/docker/library/busybox:1.36"
 
+# OpenTelemetry trace sampling, applied to every service that has an otelEndpoint
+# set (services with no endpoint export nothing, so sampling is moot). Names follow
+# the OTEL_TRACES_SAMPLER spec. The default traces every request; for high-volume
+# production set sampler=parentbased_traceidratio with samplerArg as a fraction
+# (e.g. "0.1" to sample 10% of traces). Leave samplerArg empty for ratio-less
+# samplers like parentbased_always_on.
+otel:
+  sampler: parentbased_always_on
+  samplerArg: ""
+
 # ── Gatekeeper ────────────────────────────────────────────────────────────────
 gatekeeper:
   image:
@@ -531,6 +541,8 @@ egressProxy:
     # Comma-separated list of domains forge execution containers may reach.
     # Exact hostnames or wildcard prefixes (*.github.com).
     allowedDomains: "registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com"
+    # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
+    otelEndpoint: ""
 
 # ── Gitea integration ─────────────────────────────────────────────────────────
 giteaIntegration:

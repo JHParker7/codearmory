@@ -151,6 +151,11 @@ jobs:
             @semantic-release/changelog@6.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Mark release as pre-release
+        if: steps.semantic.outputs.new_release_published == 'true'
+        run: gh release edit "v${{ steps.semantic.outputs.new_release_version }}" --prerelease
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build:
     needs: release

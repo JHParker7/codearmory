@@ -45,12 +45,26 @@ The CLI resolves the Conductor URL and auth token in priority order:
 3. OS keychain (`codearmory` / `token`)
 4. `~/.config/codearmory/config.json` (plaintext fallback)
 
+**Theme** (highest to lowest):
+1. `--theme` flag
+2. `CODEARMORY_THEME` environment variable
+3. `~/.config/codearmory/config.json` (set via `armory theme set`)
+
+Available themes: `cyber` (default), `tokyo-night`, `light-cyber` (a bright,
+high-key variant of cyber), `dracula`, `nord`, `gruvbox`, `catppuccin`,
+`solarized`. Unknown values fall back to `cyber`. Run `armory settings` for an
+interactive picker that previews themes live.
+
 ```bash
 # Point at a non-default conductor
 export CODEARMORY_URL=https://conductor.example.com
 
 # Or pass per-command
 armory --url https://conductor.example.com auth status
+
+# Pick a color theme for the interactive TUIs
+armory theme set tokyo-night          # persist to config
+armory --theme light-cyber ci         # one-off override
 ```
 
 ## Quick Start
@@ -248,3 +262,25 @@ Manage tickets and comments.
 |---------|-------|-------------|
 | `tickets comment add <ticket-id>` | `--body` (required) | Add a comment to a ticket |
 | `tickets comment delete <ticket-id> <comment-id>` | | Delete a comment |
+
+### `theme`
+
+Choose the color theme for the interactive TUIs (`armory` home screen, `ci`,
+`hooks`, `tickets`, forge/audit views). See [Configuration](#configuration) for
+the resolution order.
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `theme list` | | List available themes (active one marked) |
+| `theme show` | | Print the active theme name |
+| `theme set <name>` | | Persist a theme to config (`cyber`, `tokyo-night`, `light-cyber`, `dracula`, `nord`, `gruvbox`, `catppuccin`, `solarized`) |
+
+### `settings`
+
+Interactive screen for client-side configuration — theme (with live preview)
+and conductor URL — saved to `~/.config/codearmory/config.json`. Also reachable
+from the **Settings** entry on the `armory` home screen.
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `settings` | | Open the settings TUI (←/→ cycle theme, enter save, esc cancel) |

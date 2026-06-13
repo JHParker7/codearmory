@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -48,18 +49,53 @@ func validateEnvKeys(env map[string]string) error {
 }
 
 // allowedImages is nil when ALLOWED_IMAGES is not configured → deny all submissions.
-var allowedImages map[string]bool
+// allowedImageList is the same set, deduplicated and sorted, served by GET /images
+// so clients (e.g. the CLI's forge TUI) can offer the permitted images for selection.
+var (
+	allowedImages    map[string]bool
+	allowedImageList []string
+)
 
 func initAllowedImages(raw string) {
 	if raw == "" {
 		allowedImages = nil // deny-all when not configured
+		allowedImageList = nil
 		slog.Warn("ALLOWED_IMAGES is not set — all image submissions will be rejected; set ALLOWED_IMAGES to a comma-separated list of permitted images")
 		return
 	}
 	allowedImages = make(map[string]bool)
+	allowedImageList = nil
 	for _, img := range splitTrim(raw) {
+		if !allowedImages[img] {
+			allowedImageList = append(allowedImageList, img)
+		}
 		allowedImages[img] = true
 	}
+	sort.Strings(allowedImageList)
+}
+
+// handleListImages returns the configured image allowlist (deduplicated, sorted).
+// An unconfigured allowlist (deny-all) returns an empty array rather than null.
+func handleListImages(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("forge").Start(r.Context(), "handleListImages")
+	defer span.End()
+
+	userID, ok := checkGatekeeper(ctx, w, r, "listImage", "forge/images")
+	if !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	span.SetAttributes(attribute.String("user.id", userID))
+	span.AddEvent("permission.granted")
+
+	images := allowedImageList
+	if images == nil {
+		images = []string{}
+	}
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "list images: success", "user_id", userID, "count", len(images))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(images) //nolint:errcheck
 }
 
 func splitTrim(s string) []string {
@@ -91,7 +127,7 @@ func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/check_permissions", bytes.NewReader(body))
 	if err != nil {
-		slog.Error("forge: failed to build gatekeeper request", "error", err)
+		slog.ErrorContext(ctx, "forge: failed to build gatekeeper request", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return "", false
 	}
@@ -100,7 +136,7 @@ func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request
 
 	resp, err := forgeHTTPClient.Do(req)
 	if err != nil {
-		slog.Error("forge: gatekeeper check_permissions failed", "error", err)
+		slog.ErrorContext(ctx, "forge: gatekeeper check_permissions failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return "", false
 	}
@@ -112,7 +148,7 @@ func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request
 	}
 	if resp.StatusCode >= 500 {
 		io.Copy(io.Discard, resp.Body) //nolint:errcheck
-		slog.Error("forge: gatekeeper unavailable", "status", resp.StatusCode)
+		slog.ErrorContext(ctx, "forge: gatekeeper unavailable", "status", resp.StatusCode)
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return "", false
 	}
@@ -142,7 +178,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("user.id", userID))
 	span.AddEvent("permission.granted")
-	slog.Info("submit execution request", "user_id", userID)
+	slog.InfoContext(ctx, "submit execution request", "user_id", userID)
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil || !json.Valid(body) {
@@ -206,14 +242,14 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := exec.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("submit: insert execution", "error", err)
+		slog.ErrorContext(ctx, "submit: insert execution", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	meterSubmit.Add(ctx, 1, metric.WithAttributes(attribute.String("image", req.Image)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("execution submitted", "execution_id", executionID, "user_id", userID, "image", req.Image, "runner_class", req.RunnerClass)
+	slog.InfoContext(ctx, "execution submitted", "execution_id", executionID, "user_id", userID, "image", req.Image, "runner_class", req.RunnerClass)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
@@ -237,12 +273,12 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		attribute.String("execution.id", executionID),
 	)
 	span.AddEvent("permission.granted")
-	slog.Info("get execution request", "user_id", userID, "execution_id", executionID)
+	slog.InfoContext(ctx, "get execution request", "user_id", userID, "execution_id", executionID)
 
 	row, err := (Execution{ExecutionID: executionID, UserID: userID}).Get(ctx)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		span.SetStatus(codes.Error, "execution not found")
-		slog.Warn("get execution: not found", "user_id", userID, "execution_id", executionID)
+		slog.WarnContext(ctx, "get execution: not found", "user_id", userID, "execution_id", executionID)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -255,7 +291,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	exec := row.(Execution)
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("get execution: success", "user_id", userID, "execution_id", executionID, "status", exec.Status)
+	slog.InfoContext(ctx, "get execution: success", "user_id", userID, "execution_id", executionID, "status", exec.Status)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(exec)
 }
@@ -273,7 +309,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("user.id", userID))
 	span.AddEvent("permission.granted")
-	slog.Info("list executions request", "user_id", userID)
+	slog.InfoContext(ctx, "list executions request", "user_id", userID)
 
 	rows, err := (Execution{UserID: userID}).List(ctx, 100, 0)
 	if err != nil {
@@ -288,7 +324,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("list executions: success", "user_id", userID, "count", len(executions))
+	slog.InfoContext(ctx, "list executions: success", "user_id", userID, "count", len(executions))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(executions)
 }
@@ -311,19 +347,19 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 			attribute.String("execution.id", executionID),
 		)
 		span.AddEvent("permission.granted")
-		slog.Info("cancel execution request", "user_id", userID, "execution_id", executionID)
+		slog.InfoContext(ctx, "cancel execution request", "user_id", userID, "execution_id", executionID)
 
 		row, err := (Execution{ExecutionID: executionID, UserID: userID}).Get(ctx)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Error, "execution not found")
-			slog.Warn("cancel execution: not found", "user_id", userID, "execution_id", executionID)
+			slog.WarnContext(ctx, "cancel execution: not found", "user_id", userID, "execution_id", executionID)
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
-			slog.Error("cancel execution: db error", "user_id", userID, "execution_id", executionID, "error", err)
+			slog.ErrorContext(ctx, "cancel execution: db error", "user_id", userID, "execution_id", executionID, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -332,14 +368,14 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		switch exec.Status {
 		case StatusCompleted, StatusFailed, StatusTimedOut, StatusCancelled:
 			span.SetStatus(codes.Ok, "")
-			slog.Warn("cancel execution: already finished", "user_id", userID, "execution_id", executionID, "status", exec.Status)
+			slog.WarnContext(ctx, "cancel execution: already finished", "user_id", userID, "execution_id", executionID, "status", exec.Status)
 			http.Error(w, "execution already finished", http.StatusConflict)
 			return
 		case StatusPending:
 			if _, err := exec.Cancel(ctx); err != nil {
 				span.RecordError(err)
 				span.SetStatus(codes.Error, "db update failed")
-				slog.Error("cancel execution: db update failed", "user_id", userID, "execution_id", executionID, "error", err)
+				slog.ErrorContext(ctx, "cancel execution: db update failed", "user_id", userID, "execution_id", executionID, "error", err)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
@@ -349,7 +385,7 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 
 		meterCancel.Add(ctx, 1)
 		span.SetStatus(codes.Ok, "")
-		slog.Info("execution cancelled", "execution_id", executionID, "user_id", userID)
+		slog.InfoContext(ctx, "execution cancelled", "execution_id", executionID, "user_id", userID)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

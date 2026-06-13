@@ -86,5 +86,8 @@ func init() {
 	})
 
 	containersCmd.AddCommand(containersListCmd, containersGetCmd, containersDeleteCmd)
-	rootCmd.AddCommand(containersCmd)
+	// "containers" is a capability slot so a deployment using a different image
+	// registry can register an alternative provider and select it via the
+	// "providers" config (providers.containers = "...").
+	RegisterModule(Module{Name: "registry", Slot: "containers", Command: containersCmd})
 }

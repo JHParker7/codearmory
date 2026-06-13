@@ -148,11 +148,11 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if wfOrgID, err := fetchWorkflowOrgID(ctx, req.WorkflowID); err != nil {
-		slog.Warn("create rule: workflow not found or unreachable", "workflow_id", req.WorkflowID, "error", err)
+		slog.WarnContext(ctx, "create rule: workflow not found or unreachable", "workflow_id", req.WorkflowID, "error", err)
 		http.Error(w, "workflow_id not found", http.StatusUnprocessableEntity)
 		return
 	} else if wfOrgID != orgID {
-		slog.Warn("create rule: cross-org workflow reference", "user_id", userID, "workflow_id", req.WorkflowID, "workflow_org", wfOrgID, "caller_org", orgID)
+		slog.WarnContext(ctx, "create rule: cross-org workflow reference", "user_id", userID, "workflow_id", req.WorkflowID, "workflow_org", wfOrgID, "caller_org", orgID)
 		http.Error(w, "workflow_id not found", http.StatusUnprocessableEntity)
 		return
 	}
@@ -177,14 +177,14 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 	if err := rule.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create rule: db error", "error", err)
+		slog.ErrorContext(ctx, "create rule: db error", "error", err)
 		http.Error(w, "failed to create rule", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetAttributes(attribute.String("rule.id", rule.RuleID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("pipeline rule created", "rule_id", rule.RuleID, "user_id", userID)
+	slog.InfoContext(ctx, "pipeline rule created", "rule_id", rule.RuleID, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(rule) //nolint:errcheck
@@ -209,7 +209,7 @@ func handleListRules(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
-		slog.Error("list rules: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "list rules: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list rules", http.StatusInternalServerError)
 		return
 	}
@@ -244,7 +244,7 @@ func handleGetRule(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("get rule: db error", "rule_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "get rule: db error", "rule_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get rule", http.StatusInternalServerError)
 		return
 	}
@@ -284,7 +284,7 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("update rule: fetch error", "rule_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update rule: fetch error", "rule_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get rule", http.StatusInternalServerError)
 		return
 	}
@@ -320,11 +320,11 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if wfOrgID, err := fetchWorkflowOrgID(ctx, req.WorkflowID); err != nil {
-		slog.Warn("update rule: workflow not found or unreachable", "rule_id", id, "workflow_id", req.WorkflowID, "error", err)
+		slog.WarnContext(ctx, "update rule: workflow not found or unreachable", "rule_id", id, "workflow_id", req.WorkflowID, "error", err)
 		http.Error(w, "workflow_id not found", http.StatusUnprocessableEntity)
 		return
 	} else if wfOrgID != orgID {
-		slog.Warn("update rule: cross-org workflow reference", "user_id", userID, "rule_id", id, "workflow_id", req.WorkflowID, "workflow_org", wfOrgID, "caller_org", orgID)
+		slog.WarnContext(ctx, "update rule: cross-org workflow reference", "user_id", userID, "rule_id", id, "workflow_id", req.WorkflowID, "workflow_org", wfOrgID, "caller_org", orgID)
 		http.Error(w, "workflow_id not found", http.StatusUnprocessableEntity)
 		return
 	}
@@ -346,7 +346,7 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update rule: db error", "rule_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update rule: db error", "rule_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to update rule", http.StatusInternalServerError)
 		return
 	}
@@ -355,12 +355,12 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db fetch after update failed")
-		slog.Error("update rule: fetch after update", "rule_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update rule: fetch after update", "rule_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get updated rule", http.StatusInternalServerError)
 		return
 	}
 	span.SetStatus(codes.Ok, "")
-	slog.Info("pipeline rule updated", "rule_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "pipeline rule updated", "rule_id", id, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rule) //nolint:errcheck
 }
@@ -390,7 +390,7 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete rule: fetch error", "rule_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete rule: fetch error", "rule_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete rule", http.StatusInternalServerError)
 		return
 	}
@@ -403,12 +403,12 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	if err := rule.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete rule: db error", "rule_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete rule: db error", "rule_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete rule", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("pipeline rule deleted", "rule_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "pipeline rule deleted", "rule_id", id, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
 }

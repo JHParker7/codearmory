@@ -44,7 +44,7 @@ func handleListRepos(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("list repos: gitea error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "list repos: gitea error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list repositories", http.StatusBadGateway)
 		return
 	}
@@ -88,14 +88,14 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("create repo: gitea error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "create repo: gitea error", "user_id", userID, "error", err)
 		http.Error(w, "failed to create repository", http.StatusBadGateway)
 		return
 	}
 
 	span.SetAttributes(attribute.String("repo.full_name", repo.FullName))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("repo created", "user_id", userID, "repo", repo.FullName)
+	slog.InfoContext(ctx, "repo created", "user_id", userID, "repo", repo.FullName)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(repo) //nolint:errcheck
@@ -139,7 +139,7 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("get repo: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
+		slog.ErrorContext(ctx, "get repo: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
 		http.Error(w, "failed to get repository", http.StatusBadGateway)
 		return
 	}
@@ -186,13 +186,13 @@ func handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("delete repo: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
+		slog.ErrorContext(ctx, "delete repo: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
 		http.Error(w, "failed to delete repository", http.StatusBadGateway)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("repo deleted", "user_id", userID, "owner", owner, "name", name)
+	slog.InfoContext(ctx, "repo deleted", "user_id", userID, "owner", owner, "name", name)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -234,7 +234,7 @@ func handleListBranches(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("list branches: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
+		slog.ErrorContext(ctx, "list branches: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
 		http.Error(w, "failed to list branches", http.StatusBadGateway)
 		return
 	}
@@ -282,7 +282,7 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("list tags: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
+		slog.ErrorContext(ctx, "list tags: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
 		http.Error(w, "failed to list tags", http.StatusBadGateway)
 		return
 	}
@@ -330,7 +330,7 @@ func handleListReleases(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("list releases: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
+		slog.ErrorContext(ctx, "list releases: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
 		http.Error(w, "failed to list releases", http.StatusBadGateway)
 		return
 	}
@@ -387,7 +387,7 @@ func handleListCommits(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
-		slog.Error("list commits: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
+		slog.ErrorContext(ctx, "list commits: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
 		http.Error(w, "failed to list commits", http.StatusBadGateway)
 		return
 	}

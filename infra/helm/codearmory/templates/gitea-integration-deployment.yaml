@@ -52,10 +52,7 @@ spec:
               value: {{ .Values.giteaIntegration.env.logLevel | quote }}
             - name: GATEKEEPER_URL
               value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
-            {{- if .Values.giteaIntegration.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.giteaIntegration.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.giteaIntegration.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "gitea-integration" "gitea_integration" $fullname) | nindent 12 }}
             - name: GITEA_URL
               valueFrom:

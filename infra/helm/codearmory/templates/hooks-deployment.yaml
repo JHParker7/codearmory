@@ -54,10 +54,7 @@ spec:
               value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
             - name: WORKFLOWS_URL
               value: "http://{{ $fullname }}-workflows:{{ .Values.workflows.port }}"
-            {{- if .Values.hooks.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.hooks.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.hooks.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "hooks" "hooks" $fullname) | nindent 12 }}
             - name: GATEKEEPER_SERVICE_KEY
               valueFrom:
