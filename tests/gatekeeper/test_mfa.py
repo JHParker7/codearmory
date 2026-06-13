@@ -6,11 +6,29 @@ Also covers the OAuth TOTP flow:
   oauth/authorize (with TOTP user) → oauth/mfa GET → oauth/mfa POST → redirect with code
 """
 import uuid
+from datetime import datetime, timedelta
+
 import pyotp
 import requests
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def wrong_code(secret):
+    """Return a 6-digit code that is deliberately invalid for `secret` right now.
+
+    Using a hardcoded constant like "000000" occasionally collides with a genuinely
+    valid code and flakes. Generating a code for a time step well outside the
+    server's acceptance window guarantees rejection. As a safety net (the skewed
+    code could, with vanishing probability, equal the current one), mutate a digit
+    if it happens to match the live code.
+    """
+    totp = pyotp.TOTP(secret)
+    code = totp.at(datetime.now() - timedelta(seconds=90))
+    if code == totp.now():
+        code = ("1" if code[0] != "1" else "2") + code[1:]
+    return code
 
 
 def signup_and_login(base_url, *, password="password123"):
@@ -141,13 +159,15 @@ class TestTOTPConfirm:
         assert resp.status_code == 204
 
     def test_401_for_wrong_code(self, base_url, token):
-        requests.post(
+        enroll = requests.post(
             f"{base_url}/mfa/totp/enroll",
             headers={"Authorization": f"Bearer {token}"},
         )
+        assert enroll.status_code == 200
+        secret = enroll.json()["secret"]
         resp = requests.post(
             f"{base_url}/mfa/totp/confirm",
-            json={"code": "000000"},
+            json={"code": wrong_code(secret)},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 401
@@ -369,7 +389,7 @@ class TestMFAVerify:
     def test_401_for_invalid_code(self, base_url):
         password = "verifypass123"
         user = signup_and_login(base_url, password=password)
-        enroll_and_confirm_totp(base_url, user["token"])
+        secret = enroll_and_confirm_totp(base_url, user["token"])
 
         challenge = requests.post(
             f"{base_url}/login",
@@ -379,7 +399,7 @@ class TestMFAVerify:
 
         resp = requests.post(
             f"{base_url}/mfa/verify",
-            json={"mfa_token": mfa_token, "code": "000000"},
+            json={"mfa_token": mfa_token, "code": wrong_code(secret)},
         )
         assert resp.status_code == 401
 
@@ -432,20 +452,6 @@ class TestMFAVerify:
 
 class TestOAuthMFAFlow:
     """End-to-end OAuth2 TOTP flow: authorize → mfa form → verify → code."""
-
-    def _oauth_client(self, base_url, admin_token):
-        """Create a test OAuth client via the internal endpoint and return its creds."""
-        uid = uuid.uuid4().hex[:8]
-        resp = requests.post(
-            f"{base_url}/internal/oauth/clients",
-            json={
-                "name": f"mfa-test-{uid}",
-                "redirect_uris": ["https://example.com/callback"],
-            },
-            headers={"X-Service-Name": "conductor", "X-Conductor-Token": "ignored"},
-        )
-        # The internal endpoint requires service auth; skip if stack is not running.
-        return resp
 
     def test_authorize_redirects_to_mfa_form_when_totp_enabled(self, base_url, service_key, admin_token):
         password = "oauthpass123"

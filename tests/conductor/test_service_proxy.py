@@ -8,8 +8,8 @@ Conductor routes /{service}/{path} requests by:
   5. Each backend is responsible for its own permission checks via Gatekeeper.
   6. Returns 404 if the service or endpoint is not registered.
 
-Registry is pre-seeded (infra/local/compose.yml) with:
-  - "blueprints" → http://blueprints:8081
+Registry is pre-seeded (infra/local/registry-manifest.json) with:
+  - "blueprints" → http://blueprints:8093
   - "forge"      → http://forge:8083
 """
 
@@ -51,7 +51,7 @@ class TestUnregisteredService:
 # ---------------------------------------------------------------------------
 # Blueprints proxy
 # ---------------------------------------------------------------------------
-# Conductor routes /blueprints/... to blueprints (http://blueprints:8081),
+# Conductor routes /blueprints/... to blueprints (http://blueprints:8093),
 # stripping the leading /blueprints prefix.  A new user has permission for
 # their own state namespace so /blueprints/state/{username}/dev returns 204.
 
@@ -105,8 +105,10 @@ class TestBlueprintsProxy:
 # Forge proxy
 # ---------------------------------------------------------------------------
 # Conductor routes /forge/... to forge (http://forge:8083), stripping the
-# leading /forge prefix.  A new user has no forge permissions by default so
-# the gatekeeper permission check returns 403 before the request reaches forge.
+# leading /forge prefix.  The forge default_grants in registry-manifest.json
+# grant listExecution (plus create/get/delete) on the user's own
+# {username}/forge/executions namespace to every new user, so the gatekeeper
+# permission check passes and GET /forge/executions reaches forge.
 # These tests verify routing and auth enforcement, not forge execution logic.
 
 
@@ -117,17 +119,17 @@ class TestForgeProxy:
         assert resp.status_code == 401
 
     def test_forge_list_reaches_permission_check(self, base_url, token):
-        """GET /forge/executions with a valid token reaches the permission check.
+        """GET /forge/executions with a valid token reaches forge and returns 200.
 
-        A new user has no forge permissions, so gatekeeper returns 403.
-        If the user somehow has permission, 200 is also acceptable — the
-        important assertion is that conductor did not return 401, 404, or 503.
+        forge's default_grants give every new user listExecution on their own
+        {username}/forge/executions namespace, so the gatekeeper permission
+        check passes and forge returns 200 with the (empty) execution list.
         """
         resp = requests.get(
             f"{base_url}/forge/executions",
             headers=bearer(token),
         )
-        assert resp.status_code in (200, 403)
+        assert resp.status_code == 200, resp.text
 
     def test_forge_post_requires_auth(self, base_url):
         """POST /forge/executions without a token → 401 from conductor."""

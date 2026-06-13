@@ -141,6 +141,9 @@ class TestAuthMiddleware:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
+        # A fresh user has no permission for this unknown service/resource/action
+        # triple, so the decision must be a negative authorization, not just a 200.
+        assert resp.json()["authorized"] is False
 
     def test_response_contains_authorized_field(self, base_url, token):
         resp = requests.post(

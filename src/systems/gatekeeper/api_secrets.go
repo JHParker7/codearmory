@@ -24,6 +24,10 @@ var adapterClient = &http.Client{
 	Timeout:   10 * time.Second,
 }
 
+// dopplerBaseURL is the Doppler API root. It is a package var so tests can
+// point resolveDoppler at a mock server.
+var dopplerBaseURL = "https://api.doppler.com"
+
 // resolveVaultClient is the HTTP client used by resolveVault. Tests can
 // substitute a stub to bypass the SSRF-protected vaultClient.
 var resolveVaultClient *http.Client
@@ -691,7 +695,7 @@ func resolveDoppler(ctx context.Context, encConfig []byte, names []string) (map[
 	}
 
 	// Fetch all secrets in a single request instead of one per name.
-	reqURL := "https://api.doppler.com/v3/configs/config/secrets"
+	reqURL := dopplerBaseURL + "/v3/configs/config/secrets"
 	if cfg.Project != "" {
 		reqURL += "?project=" + url.QueryEscape(cfg.Project)
 		if cfg.Config != "" {

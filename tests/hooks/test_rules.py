@@ -57,6 +57,20 @@ def test_create_rule_missing_workflow_id(bearer):
     })
     assert res.status_code == 400
 
+def test_create_rule_missing_secret(bearer, workflow):
+    """A rule with every required field except `secret` must be rejected with 400.
+
+    Validation order in api_rules.go is name -> source -> events -> workflow_id
+    -> secret, so all earlier fields must be supplied to reach the secret-
+    required branch (api_rules.go:146-149)."""
+    res = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
+        "name": "no-secret-rule",
+        "source": "org/repo",
+        "events": ["push"],
+        "workflow_id": workflow["workflow_id"],
+    })
+    assert res.status_code == 400, res.text
+
 
 # ── CRUD happy path ────────────────────────────────────────────────────────────
 

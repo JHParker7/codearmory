@@ -7,8 +7,15 @@ import os
 import pytest
 import requests
 
-BLUEPRINTS_URL = os.getenv("BLUEPRINTS_URL", "http://localhost:8081")
-GATEKEEPER_URL = os.getenv("GATEKEEPER_URL", "http://localhost:8080")
+# blueprints listens on :8093 and gatekeeper on :8081, but neither service
+# publishes a host port in infra/local/compose.yml — they are only reachable on
+# the compose network. CI runs this suite as the `blueprints-integration-tests`
+# compose service, which sets BLUEPRINTS_URL=http://blueprints:8093 and
+# GATEKEEPER_URL=http://gatekeeper:8081 via env. The defaults below mirror those
+# service ports; running locally outside the compose network requires setting
+# these env vars (or publishing the ports yourself).
+BLUEPRINTS_URL = os.getenv("BLUEPRINTS_URL", "http://localhost:8093")
+GATEKEEPER_URL = os.getenv("GATEKEEPER_URL", "http://localhost:8081")
 
 EMAIL = "tf_backend_test@example.com"
 PASSWORD = "tf_backend_pass"

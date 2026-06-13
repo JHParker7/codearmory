@@ -164,7 +164,8 @@ class TestOrgInvite:
             f"{base_url}/invites/{org_invite['invite_id']}/accept",
             headers=bearer(invitee_token),
         )
-        assert resp.status_code in (400, 409, 422)
+        # handleAcceptInvite rejects a non-pending invite with 409 "invite is not pending".
+        assert resp.status_code == 409
 
     def test_only_invitee_can_accept(
         self, base_url, admin_token, org_invite
@@ -174,7 +175,8 @@ class TestOrgInvite:
             f"{base_url}/invites/{org_invite['invite_id']}/accept",
             headers=bearer(admin_token["token"]),
         )
-        assert resp.status_code in (403, 404)
+        # The inviter's email != the invitee email, so handleAcceptInvite returns 403.
+        assert resp.status_code == 403
 
     def test_inviter_can_delete_invite(
         self, base_url, admin_token, org_invite

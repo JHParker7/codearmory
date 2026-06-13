@@ -88,6 +88,17 @@ def pytest_sessionfinish(session, exitstatus):
         # then commit so this cleanup survives even if later deletes fail.
         conn.execute(sa.text("DELETE FROM sessions WHERE user_id = ANY(:uids)"), {"uids": user_ids})
         conn.execute(sa.text("DELETE FROM permissions_checks WHERE user_id = ANY(:uids)"), {"uids": user_ids})
+
+        # MFA/OAuth rows have no FK to users, so they are never cascade-deleted and
+        # would otherwise leak across test runs. totp_credentials/mfa_pending/oauth_codes
+        # all carry a user_id column; delete by it. oauth_clients has no user_id (it is
+        # only linked by name), so delete the clients the MFA tests create by name.
+        conn.execute(sa.text("DELETE FROM totp_credentials WHERE user_id = ANY(:uids)"), {"uids": user_ids})
+        conn.execute(sa.text("DELETE FROM mfa_pending WHERE user_id = ANY(:uids)"), {"uids": user_ids})
+        conn.execute(sa.text("DELETE FROM oauth_codes WHERE user_id = ANY(:uids)"), {"uids": user_ids})
+        conn.execute(sa.text(
+            "DELETE FROM oauth_clients WHERE name LIKE 'mfatest-%' OR name LIKE 'mfa-test-%'"
+        ))
         if team_ids:
             conn.execute(sa.text("DELETE FROM permissions_checks WHERE team_id = ANY(:tids)"), {"tids": team_ids})
         if org_ids:

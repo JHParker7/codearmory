@@ -100,10 +100,11 @@ class TestCreateService:
         payload = {"name": f"create-test-{unique}", "url": "http://203.0.113.1:9000"}
         resp = requests.post(f"{registry_url}/services", json=payload, headers=admin_headers)
         service_id = resp.json().get("service_id", "")
-        # Teardown
-        if service_id:
-            requests.delete(f"{registry_url}/services/{service_id}", headers=admin_headers)
-        assert resp.status_code == 201
+        try:
+            assert resp.status_code == 201
+        finally:
+            if service_id:
+                requests.delete(f"{registry_url}/services/{service_id}", headers=admin_headers)
 
     def test_response_contains_service_id(self, registry_url, admin_headers):
         unique = uuid.uuid4().hex[:8]
@@ -111,11 +112,13 @@ class TestCreateService:
         resp = requests.post(f"{registry_url}/services", json=payload, headers=admin_headers)
         body = resp.json()
         service_id = body.get("service_id", "")
-        if service_id:
-            requests.delete(f"{registry_url}/services/{service_id}", headers=admin_headers)
-        assert resp.status_code == 201
-        assert "service_id" in body
-        assert body["service_id"] != ""
+        try:
+            assert resp.status_code == 201
+            assert "service_id" in body
+            assert body["service_id"] != ""
+        finally:
+            if service_id:
+                requests.delete(f"{registry_url}/services/{service_id}", headers=admin_headers)
 
     def test_response_reflects_name_and_url(self, registry_url, admin_headers):
         unique = uuid.uuid4().hex[:8]
@@ -125,11 +128,13 @@ class TestCreateService:
         resp = requests.post(f"{registry_url}/services", json=payload, headers=admin_headers)
         body = resp.json()
         service_id = body.get("service_id", "")
-        if service_id:
-            requests.delete(f"{registry_url}/services/{service_id}", headers=admin_headers)
-        assert resp.status_code == 201
-        assert body["name"] == name
-        assert body["url"] == url
+        try:
+            assert resp.status_code == 201
+            assert body["name"] == name
+            assert body["url"] == url
+        finally:
+            if service_id:
+                requests.delete(f"{registry_url}/services/{service_id}", headers=admin_headers)
 
     def test_missing_name_returns_400(self, registry_url, admin_headers):
         resp = requests.post(

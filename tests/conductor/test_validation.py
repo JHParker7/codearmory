@@ -231,12 +231,13 @@ class TestUUIDPathValidation:
 class TestSlugPathValidation:
     """Conductor must reject path segments that fail the slug pattern with 400."""
 
-    def test_username_with_slash_returns_400(self, base_url, token):
+    def test_username_with_slash_returns_404(self, base_url, token):
+        # A slash inside the username produces an extra path segment, so
+        # /blueprints/state/bad/slash/dev has three segments where the
+        # /state/{username}/{workspace} route expects two. No registered route
+        # matches, so conductor returns 404 (routing miss) before any slug check.
         resp = requests.get(f"{base_url}/blueprints/state/bad/slash/dev", headers=bearer(token))
-        # Go's mux normalises the path; the extra segment won't match the pattern.
-        # Any response other than 400 from the slug check is also acceptable here,
-        # but a correctly structured bad slug in the right position must be caught.
-        pass  # covered by explicit slug tests below
+        assert resp.status_code == 404
 
     def test_username_with_special_chars_returns_400(self, base_url, token):
         resp = requests.get(f"{base_url}/blueprints/state/bad!user/dev", headers=bearer(token))

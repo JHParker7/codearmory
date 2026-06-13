@@ -281,9 +281,10 @@ class TestGetUser:
         )
         assert "application/json" in resp.headers["Content-Type"]
 
-    def test_nonexistent_user_returns_404(self, base_url, token, new_user):
-        # Use a fake UUID that the user has no permission for — expect 403, not 404,
-        # because permission is scoped to the user's own ID.
+    def test_other_user_id_returns_403(self, base_url, token, new_user):
+        # getUser permission is scoped to the caller's own user ID, so requesting any
+        # other (here: nonexistent) user ID is denied at the permission check with 403
+        # before the handler ever looks up the row — it never reaches a 404.
         resp = requests.get(
             f"{base_url}/users/{rand_id()}",
             headers=bearer(token),
@@ -393,12 +394,14 @@ class TestDeleteUser:
         )
         assert login_resp.status_code == 401
 
-    def test_double_delete_returns_404(self, base_url, base_url_delete_fixture):
+    def test_double_delete_returns_401(self, base_url, base_url_delete_fixture):
         token, user_id, email = base_url_delete_fixture
         requests.delete(f"{base_url}/users/{user_id}", headers=bearer(token))
         resp = requests.delete(f"{base_url}/users/{user_id}", headers=bearer(token))
-        # User is soft-deleted; session still exists but permission check fails → 403
-        assert resp.status_code in (401, 403, 404)
+        # handleDeleteUser deactivates all of the user's sessions and evicts the
+        # session cache, so the second request fails in authMiddleware (Session.Get
+        # filters on active = true) and returns 401 before any permission check runs.
+        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -1240,11 +1243,17 @@ class TestSession:
 
 
 class TestAuditLogs:
+    """handleListAuditLogs returns the global, unscoped audit log to any caller
+    holding the listAuditLog permission — there is NO per-actor filtering, so a
+    privileged caller sees every actor's entries, not just their own. These tests
+    cover the access gate (401/403) and the response shape the audit TUI depends on."""
+
     def test_no_auth_returns_401(self, base_url):
         resp = requests.get(f"{base_url}/audit-logs")
         assert resp.status_code == 401
 
     def test_unprivileged_user_returns_403(self, base_url, token):
+        # Lacking the listAuditLog permission, a regular user is forbidden outright.
         resp = requests.get(f"{base_url}/audit-logs", headers=bearer(token))
         assert resp.status_code == 403
 
@@ -1254,11 +1263,145 @@ class TestAuditLogs:
         assert isinstance(resp.json(), list)
 
     def test_response_contains_expected_fields(self, base_url, admin_token):
+        # Guarantee at least one entry exists: a fresh login writes a session.create
+        # audit record. Then the field-shape assertions below always run.
+        requests.post(
+            f"{base_url}/login",
+            json={"email": admin_token["email"], "password": admin_token["password"]},
+        )
         resp = requests.get(f"{base_url}/audit-logs", headers=bearer(admin_token["token"]))
         assert resp.status_code == 200
         logs = resp.json()
-        if logs:
-            entry = logs[0]
-            assert "audit_log_id" in entry
-            assert "action" in entry
-            assert "actor_id" in entry
+        assert logs, "expected at least one audit log entry after an auditable action"
+        entry = logs[0]
+        assert "audit_log_id" in entry
+        assert "action" in entry
+        assert "actor_id" in entry
+
+
+# ---------------------------------------------------------------------------
+# Permission-cache invalidation
+# ---------------------------------------------------------------------------
+
+
+class TestRolePermissionCacheInvalidation:
+    """Exercises the documented role.Update -> Redis-invalidation path.
+
+    Gatekeeper caches each role under "gk:role:<role_id>" and consults it on every
+    checkPermissions call. PUT /roles/{id} routes through Role.Update, which busts
+    that cache key (whereas a raw db.Save would not). This test grants a permission
+    by updating the user's role through that endpoint and asserts the change takes
+    effect immediately on the very next request — proving the cache was invalidated.
+    A naive cache (no invalidation on update) would keep returning the pre-grant 403.
+    """
+
+    @pytest.fixture
+    def fresh_user(self, base_url):
+        """Sign up a brand-new user and return its token, id, and username."""
+        uid = rand_id()[:8]
+        email = f"cacheinval_{uid}@example.com"
+        username = f"cacheinval_{uid}"
+        password = "password123"
+        resp = requests.post(
+            f"{base_url}/signup",
+            json={"email": email, "username": username, "password": password},
+        )
+        assert resp.status_code == 201, f"signup failed: {resp.text}"
+        user_id = resp.json()["user_id"]
+
+        login = requests.post(
+            f"{base_url}/login", json={"email": email, "password": password}
+        )
+        assert login.status_code == 200, f"login failed: {login.text}"
+        return {
+            "token": login.json()["token"],
+            "user_id": user_id,
+            "username": username,
+        }
+
+    def test_grant_then_revoke_round_trips_through_cache(
+        self, base_url, admin_token, fresh_user
+    ):
+        atok = admin_token["token"]
+        utok = fresh_user["token"]
+
+        # Admin creates an org the fresh user has no permission to read.
+        org_resp = requests.post(
+            f"{base_url}/orgs",
+            json={"org_name": f"cacheinval-org-{rand_id()}"},
+            headers=bearer(atok),
+        )
+        assert org_resp.status_code == 201
+        org_id = org_resp.json()["org_id"]
+
+        try:
+            # The user reads their own record to discover their role_id. This GET
+            # also primes the role cache for the subsequent denied check.
+            me = requests.get(
+                f"{base_url}/users/{fresh_user['user_id']}", headers=bearer(utok)
+            )
+            assert me.status_code == 200
+            role_id = me.json()["role_id"]
+            assert role_id, "fresh user should have a default role"
+
+            # 1) Before the grant: reading the org is denied (403). This populates
+            #    the role cache with the pre-grant permission set.
+            before = requests.get(f"{base_url}/orgs/{org_id}", headers=bearer(utok))
+            assert before.status_code == 403, before.text
+
+            # 2) Admin creates a getOrg permission scoped to the user's own resource
+            #    namespace. checkPermissions prefixes resources with "<username>/",
+            #    so the stored resource must carry that prefix to match.
+            perm_resp = requests.post(
+                f"{base_url}/permissions",
+                json={
+                    "service": "gatekeeper",
+                    "actions": ["getOrg"],
+                    "resources": [
+                        f"{fresh_user['username']}/gatekeeper/orgs/{org_id}"
+                    ],
+                },
+                headers=bearer(atok),
+            )
+            assert perm_resp.status_code == 201, perm_resp.text
+            perm_id = perm_resp.json()["permissions_id"]
+
+            # Read the role's existing permission IDs so we extend rather than
+            # clobber the user's default self-management permissions.
+            role_resp = requests.get(
+                f"{base_url}/roles/{role_id}", headers=bearer(atok)
+            )
+            assert role_resp.status_code == 200
+            base_perms = role_resp.json().get("permissions_ids") or []
+
+            # 3) Grant via PUT /roles/{id} -> Role.Update -> cacheDel("gk:role:...").
+            grant = requests.put(
+                f"{base_url}/roles/{role_id}",
+                json={"permissions_ids": base_perms + [perm_id]},
+                headers=bearer(atok),
+            )
+            assert grant.status_code == 200, grant.text
+
+            # 4) The SAME request now succeeds — only possible if the role cache was
+            #    invalidated by the update (otherwise the stale entry still denies).
+            after = requests.get(f"{base_url}/orgs/{org_id}", headers=bearer(utok))
+            assert after.status_code == 200, after.text
+
+            # 5) Revoke the permission the same way and confirm access is denied again.
+            revoke = requests.put(
+                f"{base_url}/roles/{role_id}",
+                json={"permissions_ids": base_perms},
+                headers=bearer(atok),
+            )
+            assert revoke.status_code == 200, revoke.text
+
+            after_revoke = requests.get(
+                f"{base_url}/orgs/{org_id}", headers=bearer(utok)
+            )
+            assert after_revoke.status_code == 403, after_revoke.text
+
+            requests.delete(
+                f"{base_url}/permissions/{perm_id}", headers=bearer(atok)
+            )
+        finally:
+            requests.delete(f"{base_url}/orgs/{org_id}", headers=bearer(atok))

@@ -62,7 +62,7 @@ def new_user():
         "username": f"e2e_{uid}",
         "password": "e2e_password_123",
     }
-    resp = requests.post(f"{API_URL}/signup", json=payload)
+    resp = requests.post(f"{API_URL}/gatekeeper/signup", json=payload)
     assert resp.status_code == 201, f"signup failed: {resp.text}"
     payload["user_id"] = resp.json()["user_id"]
     return payload
@@ -72,7 +72,7 @@ def new_user():
 def token(new_user):
     """JWT for the test user, obtained from POST /login."""
     resp = requests.post(
-        f"{API_URL}/login",
+        f"{API_URL}/gatekeeper/login",
         json={"email": new_user["email"], "password": new_user["password"]},
     )
     assert resp.status_code == 200, f"login failed: {resp.text}"

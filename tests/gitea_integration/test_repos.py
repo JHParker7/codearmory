@@ -74,9 +74,18 @@ def test_create_repo_returns_201(linked):
     try:
         assert res.status_code == 201
     finally:
-        # best-effort cleanup
-        requests.delete(f"{GITEA_INTEGRATION_URL}/repos/{res.json().get('full_name', '').replace('/', '/', 1)}",
-                        headers=linked)
+        # best-effort cleanup: the delete route is /repos/{owner}/{name}, and the
+        # created repo's full_name is already "owner/name", so split it to build
+        # the correct path. (The previous .replace('/', '/', 1) was a no-op and
+        # leaked the repo.)
+        body = res.json()
+        full_name = body.get("full_name", "")
+        if "/" in full_name:
+            owner, repo_name = full_name.split("/", 1)
+            requests.delete(
+                f"{GITEA_INTEGRATION_URL}/repos/{owner}/{repo_name}",
+                headers=linked,
+            )
 
 def test_create_repo_missing_name(linked):
     res = requests.post(f"{GITEA_INTEGRATION_URL}/repos", headers=linked, json={})

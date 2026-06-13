@@ -32,8 +32,9 @@ def test_list_audit_logs_item_has_required_fields(base_url, admin_token):
     res = requests.get(f"{base_url}/audit-logs", headers=headers)
     assert res.status_code == 200
     items = res.json()
-    if not items:
-        return  # no entries yet — acceptable in a fresh env
+    # The login above (plus the admin fixture's own login) guarantees a
+    # session.create entry, so the field-shape assertions below always run.
+    assert items, "expected at least one audit log entry after an auditable action"
 
     item = items[0]
     for field in ("audit_log_id", "actor_id", "actor_type", "action", "created_at"):
@@ -84,11 +85,12 @@ def test_list_audit_logs_limit_respected(base_url, admin_token):
     assert len(res.json()) <= 1
 
 
-# ── Visibility: users can only see their own audit entries ────────────────────
+# ── Access control: listing audit logs requires the listAuditLog permission ───
 
 def test_regular_user_forbidden_from_audit_logs(base_url, token):
-    """Audit logs are admin-only: a regular user without the listAuditLog
-    permission is forbidden, so they cannot see any actor's entries."""
+    """handleListAuditLogs does no per-actor scoping — any holder of the
+    listAuditLog permission sees every actor's entries. This test only verifies
+    the access gate: a regular user without that permission is forbidden (403)."""
     headers = {"Authorization": f"Bearer {token}"}
     res = requests.get(f"{base_url}/audit-logs", headers=headers)
     assert res.status_code == 403

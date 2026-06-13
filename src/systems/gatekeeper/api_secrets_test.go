@@ -611,35 +611,57 @@ func TestLookupSecret_ForbiddenWhenEnvUnset(t *testing.T) {
 // ── Doppler adapter ───────────────────────────────────────────────────────────
 
 func TestResolveDoppler_Success(t *testing.T) {
-	// Stand up a mock Doppler API.
+	// Stand up a mock Doppler API matching the real /v3/configs/config/secrets
+	// response shape: {"secrets": {"KEY": {"raw": ..., "computed": ...}}}.
+	var gotAuth, gotPath, gotQuery string
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("name") != "MY_TOKEN" {
-			http.NotFound(w, r)
-			return
-		}
-		fmt.Fprintln(w, `{"secret":{"raw":{"raw":"doppler-value"}}}`)
+		gotAuth, gotPath, gotQuery = r.Header.Get("Authorization"), r.URL.Path, r.URL.RawQuery
+		fmt.Fprintln(w, `{"secrets":{"MY_TOKEN":{"raw":"doppler-value","computed":"doppler-value"}}}`)
 	}))
 	defer mock.Close()
+
+	old := dopplerBaseURL
+	dopplerBaseURL = mock.URL
+	t.Cleanup(func() { dopplerBaseURL = old })
 
 	cfg := dopplerConfig{ServiceToken: "tok", Project: "p", Config: "c"}
 	cfgJSON, _ := json.Marshal(cfg)
 	ct, _ := encryptSecret(string(cfgJSON))
 
-	// Temporarily redirect the adapter HTTP client to the mock.
-	old := adapterClient
-	adapterClient = mock.Client()
-	defer func() { adapterClient = old }()
-
-	// Replace the Doppler URL by patching the request path the adapter builds.
-	// We override by wrapping the resolve call with a server that intercepts.
-	// Simpler: test decodeDopplerConfig separately and trust the HTTP logic.
 	result, err := resolveDoppler(context.Background(), ct, []string{"MY_TOKEN"})
-	_ = result
-	// If the URL is not the mock, it will fail with a network error – just verify
-	// the config decodes and we get a meaningful failure (not a panic).
-	if err != nil && strings.Contains(err.Error(), "doppler") {
-		// Expected: network call failed, but the code didn't panic.
-		return
+	if err != nil {
+		t.Fatalf("resolveDoppler: %v", err)
+	}
+	if result["MY_TOKEN"] != "doppler-value" {
+		t.Errorf("MY_TOKEN = %q, want doppler-value", result["MY_TOKEN"])
+	}
+	if gotAuth != "Bearer tok" {
+		t.Errorf("Authorization = %q, want Bearer tok", gotAuth)
+	}
+	if gotPath != "/v3/configs/config/secrets" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotQuery != "project=p&config=c" {
+		t.Errorf("query = %q, want project=p&config=c", gotQuery)
+	}
+}
+
+func TestResolveDoppler_SecretNotFound(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `{"secrets":{"OTHER":{"raw":"v","computed":"v"}}}`)
+	}))
+	defer mock.Close()
+
+	old := dopplerBaseURL
+	dopplerBaseURL = mock.URL
+	t.Cleanup(func() { dopplerBaseURL = old })
+
+	cfg := dopplerConfig{ServiceToken: "tok"}
+	cfgJSON, _ := json.Marshal(cfg)
+	ct, _ := encryptSecret(string(cfgJSON))
+
+	if _, err := resolveDoppler(context.Background(), ct, []string{"MY_TOKEN"}); err == nil {
+		t.Fatal("expected an error for a missing secret name")
 	}
 }
 
@@ -672,10 +694,7 @@ func TestResolveVault_Success(t *testing.T) {
 	raw, _ := json.Marshal(cfg)
 	ct, _ := encryptSecret(string(raw))
 
-	old := adapterClient
-	adapterClient = mock.Client()
-	defer func() { adapterClient = old }()
-
+	// resolveVault uses resolveVaultClient (not adapterClient); point it at the mock.
 	oldVault := resolveVaultClient
 	resolveVaultClient = mock.Client()
 	defer func() { resolveVaultClient = oldVault }()
@@ -699,9 +718,11 @@ func TestResolveVault_NotFound(t *testing.T) {
 	raw, _ := json.Marshal(cfg)
 	ct, _ := encryptSecret(string(raw))
 
-	old := adapterClient
-	adapterClient = mock.Client()
-	defer func() { adapterClient = old }()
+	// Point resolveVault at the mock so we exercise the real 404→not-found path
+	// rather than relying on an incidental network/SSRF error.
+	oldVault := resolveVaultClient
+	resolveVaultClient = mock.Client()
+	defer func() { resolveVaultClient = oldVault }()
 
 	_, err := resolveVault(context.Background(), ct, []string{"MISSING"})
 	if err == nil {

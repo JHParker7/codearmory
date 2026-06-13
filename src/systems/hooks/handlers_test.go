@@ -208,14 +208,22 @@ func TestSignTrigger_DifferentTimestamps(t *testing.T) {
 	hooksTriggerKey = "test-secret"
 	t.Cleanup(func() { hooksTriggerKey = orig })
 
-	tok1, ts1 := signTrigger("wf-1", "user-1")
-	tok2, ts2 := signTrigger("wf-1", "user-1")
+	tokA, tsA := signTriggerAt("wf-1", "user-1", 1000)
+	tokB, tsB := signTriggerAt("wf-1", "user-1", 1000)
+	tokC, _ := signTriggerAt("wf-1", "user-1", 1001)
+	tokD, _ := signTriggerAt("wf-2", "user-1", 1000)
 
-	// Tokens may differ only if timestamps differ.
-	if ts1 != ts2 {
-		if tok1 == tok2 {
-			t.Fatal("tokens with different timestamps should differ")
-		}
+	if tsA != "1000" {
+		t.Errorf("timestamp = %q, want 1000", tsA)
+	}
+	if tokA != tokB || tsA != tsB {
+		t.Error("same inputs and timestamp must produce an identical token")
+	}
+	if tokA == tokC {
+		t.Error("a different timestamp must produce a different token")
+	}
+	if tokA == tokD {
+		t.Error("a different workflow id must produce a different token")
 	}
 }
 

@@ -34,6 +34,24 @@ func TestHandleGetState_Forbidden(t *testing.T) {
 	}
 }
 
+// TestHandleGetState_DeniedByPolicy exercises the realistic deny path: gatekeeper
+// returns HTTP 200 with {"authorized":false}. This is distinct from _Forbidden
+// (HTTP 403), which short-circuits before the body is decoded — a regression that
+// ignored the authorized flag would still pass that test but fail this one.
+func TestHandleGetState_DeniedByPolicy(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":false}`)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer testtoken")
+
+	handleGetState(w, r, "user/workspace")
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403", w.Code)
+	}
+}
+
 // ── handleUpdateState ─────────────────────────────────────────────────────────
 
 func TestHandleUpdateState_MissingAuth(t *testing.T) {

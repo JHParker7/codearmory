@@ -88,18 +88,21 @@ def test_list_events_returns_array(bearer):
 
 def test_list_events_item_has_required_fields(bearer):
     """The TUI reads event_id, repo, event, status, created_at from each event."""
-    # Fire a webhook to ensure at least one event exists.
+    # Fire a webhook for a unique source so at least one event is guaranteed to
+    # exist, then assert the list is non-empty before the field-shape checks so
+    # they always run.
+    source = f"org/tui-events-shape-{uuid.uuid4().hex[:8]}"
     requests.post(f"{HOOKS_URL}/hooks", json={
-        "source": "org/tui-events-shape",
+        "source": source,
         "event": "push",
         "ref": "refs/heads/main",
     })
 
-    res = requests.get(f"{HOOKS_URL}/events", headers=bearer)
+    res = requests.get(f"{HOOKS_URL}/events", headers=bearer,
+                       params={"source": source})
     assert res.status_code == 200
     items = res.json()
-    if not items:
-        return  # no events yet — acceptable in a clean test env
+    assert items, "expected at least one event after firing a webhook"
     item = items[0]
     for field in ("event_id", "source", "event_type", "status", "created_at"):
         assert field in item, f"missing field: {field}"
@@ -136,17 +139,18 @@ def test_list_events_filter_no_match_returns_empty_array(bearer):
 
 def test_event_detail_has_required_fields(bearer):
     """The TUI reads event_id, repo, event, status, triggers, created_at from detail."""
+    source = f"org/tui-detail-{uuid.uuid4().hex[:8]}"
     requests.post(f"{HOOKS_URL}/hooks", json={
-        "source": "org/tui-detail",
+        "source": source,
         "event": "push",
         "ref": "refs/heads/main",
     })
 
-    events = requests.get(f"{HOOKS_URL}/events", headers=bearer)
+    events = requests.get(f"{HOOKS_URL}/events", headers=bearer,
+                          params={"source": source})
     assert events.status_code == 200
     items = events.json()
-    if not items:
-        return
+    assert items, "expected at least one event after firing a webhook"
     eid = items[0]["event_id"]
 
     res = requests.get(f"{HOOKS_URL}/events/{eid}", headers=bearer)
@@ -196,10 +200,12 @@ def test_trigger_item_has_required_fields(bearer, workflow):
     detail = requests.get(f"{HOOKS_URL}/events/{eid}", headers=bearer)
     assert detail.status_code == 200
     body = detail.json()
-    # There should be at least one trigger for the matched rule.
-    if body.get("triggers"):
-        trigger = body["triggers"][0]
-        for field in ("run_id", "error"):
-            assert field in trigger, f"trigger missing field: {field}"
+    # The signed webhook matched the rule above, so there must be at least one
+    # trigger — assert it is present so the field-shape checks always run.
+    triggers = body.get("triggers")
+    assert triggers, "expected at least one trigger for the matched rule"
+    trigger = triggers[0]
+    for field in ("run_id", "error"):
+        assert field in trigger, f"trigger missing field: {field}"
 
     requests.delete(f"{HOOKS_URL}/rules/{rule_id}", headers=bearer)

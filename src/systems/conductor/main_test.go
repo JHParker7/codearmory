@@ -1,8 +1,12 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -337,6 +341,64 @@ func TestBlockList_ResetClearsCounter(t *testing.T) {
 	suspectMu.Unlock()
 }
 
+// ── signForwardedUserID ───────────────────────────────────────────────────────
+
+// expectedForwardToken recomputes the wire format conductor signs so the test
+// pins "conductor:<userID>:<ts>" HMAC-SHA256 independently of the implementation.
+func expectedForwardToken(key, userID, ts string) string {
+	mac := hmac.New(sha256.New, []byte(key))
+	fmt.Fprintf(mac, "conductor:%s:%s", userID, ts)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func TestSignForwardedUserID_FormatAndDeterminism(t *testing.T) {
+	origKey := conductorForwardKey
+	conductorForwardKey = "test-forward-key"
+	t.Cleanup(func() { conductorForwardKey = origKey })
+
+	tok, ts := signForwardedUserID(testUUID)
+
+	// The token is a hex-encoded HMAC-SHA256: 32 bytes → 64 hex chars.
+	if len(tok) != 64 {
+		t.Fatalf("expected 64-char hex token, got %d chars: %q", len(tok), tok)
+	}
+	if _, err := hex.DecodeString(tok); err != nil {
+		t.Fatalf("token is not valid hex: %v", err)
+	}
+
+	// The token must match the pinned "conductor:<userID>:<ts>" wire format.
+	if want := expectedForwardToken(conductorForwardKey, testUUID, ts); tok != want {
+		t.Fatalf("token %q does not match expected wire format %q", tok, want)
+	}
+
+	// Signing the same (userID, ts) again is deterministic.
+	if got := expectedForwardToken(conductorForwardKey, testUUID, ts); got != tok {
+		t.Fatalf("signing is not deterministic: got %q, want %q", got, tok)
+	}
+}
+
+func TestSignForwardedUserID_KeyAndUserSensitivity(t *testing.T) {
+	origKey := conductorForwardKey
+	t.Cleanup(func() { conductorForwardKey = origKey })
+
+	const ts = "1700000000"
+	const otherUser = "11111111-1111-1111-1111-111111111111"
+
+	conductorForwardKey = "key-A"
+	base := expectedForwardToken(conductorForwardKey, testUUID, ts)
+
+	// A different user id under the same key yields a different token.
+	if other := expectedForwardToken(conductorForwardKey, otherUser, ts); other == base {
+		t.Fatal("different user ids must produce different tokens")
+	}
+
+	// A different signing key for the same user yields a different token.
+	conductorForwardKey = "key-B"
+	if other := expectedForwardToken(conductorForwardKey, testUUID, ts); other == base {
+		t.Fatal("different signing keys must produce different tokens")
+	}
+}
+
 // ── handleServiceProxy ────────────────────────────────────────────────────────
 
 // mockBackend returns a test server that responds 200 OK.
@@ -471,13 +533,21 @@ func TestHandleServiceProxy_PrivateEndpoint_GatekeeperDenies_Returns401(t *testi
 }
 
 func TestHandleServiceProxy_ForwardAuth_PassesToken(t *testing.T) {
+	// The gatekeeper (permission check) and the backend (forward target) must be
+	// distinct servers — otherwise a 200/empty permission response can masquerade
+	// as a successful proxy and the test passes without ever forwarding.
 	var receivedAuth string
+	var backendHit bool
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendHit = true
 		receivedAuth = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer backend.Close()
-	withGatekeeperURL(t, backend.URL)
+
+	gk := mockGatekeeper(t, true)
+	defer gk.Close()
+	withGatekeeperURL(t, gk.URL)
 
 	entry := makeEntry(http.MethodGet, "/profile", "read", "profile")
 	entry.serviceName = "gatekeeper"
@@ -486,23 +556,39 @@ func TestHandleServiceProxy_ForwardAuth_PassesToken(t *testing.T) {
 		"gatekeeper": {url: backend.URL, proxy: proxyTo(t, backend.URL), forwardAuth: true},
 	})
 
+	bearer := "Bearer " + makeTestJWT(testUUID)
 	req := httptest.NewRequest(http.MethodGet, "/gatekeeper/profile", nil)
-	req.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
+	req.Header.Set("Authorization", bearer)
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
-	if receivedAuth == "" {
-		t.Fatal("expected Authorization header to be forwarded to service with forward_auth=true")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 after proxying, got %d", w.Code)
+	}
+	if !backendHit {
+		t.Fatal("backend was never reached — request was not proxied")
+	}
+	if receivedAuth != bearer {
+		t.Fatalf("forward_auth=true must forward the raw bearer; backend saw %q, want %q", receivedAuth, bearer)
 	}
 }
 
 func TestHandleServiceProxy_NoForwardAuth_StripsToken(t *testing.T) {
-	var receivedAuth string
+	var receivedAuth, receivedUserID, receivedToken, receivedTS string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
+		receivedUserID = r.Header.Get("X-User-ID")
+		receivedToken = r.Header.Get("X-Conductor-Token")
+		receivedTS = r.Header.Get("X-Conductor-Timestamp")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer backend.Close()
+
+	// A signing key must be configured for conductor to emit the X-Conductor-*
+	// headers that let the backend confirm X-User-ID came through conductor.
+	origKey := conductorForwardKey
+	conductorForwardKey = "test-forward-key"
+	t.Cleanup(func() { conductorForwardKey = origKey })
 
 	gk := mockGatekeeper(t, true)
 	defer gk.Close()
@@ -520,8 +606,19 @@ func TestHandleServiceProxy_NoForwardAuth_StripsToken(t *testing.T) {
 	w := httptest.NewRecorder()
 	handleServiceProxy(w, req)
 
+	// The raw bearer must be stripped...
 	if receivedAuth != "" {
 		t.Fatalf("expected Authorization header to be stripped for forward_auth=false, got %q", receivedAuth)
+	}
+	// ...and conductor must inject the verified identity in its place.
+	if receivedUserID != testUUID {
+		t.Errorf("expected injected X-User-ID=%q, got %q", testUUID, receivedUserID)
+	}
+	if len(receivedToken) != 64 { // hex-encoded HMAC-SHA256
+		t.Errorf("expected a signed X-Conductor-Token, got %q", receivedToken)
+	}
+	if receivedTS == "" {
+		t.Error("expected X-Conductor-Timestamp to be injected")
 	}
 }
 
@@ -569,6 +666,56 @@ func TestHandleServiceProxy_SpoofHeaders_Stripped(t *testing.T) {
 	// X-Forwarded-For should be overwritten with req.RemoteAddr, not the spoofed value.
 	if got.xFwdFor == "evil-chain" {
 		t.Error("X-Forwarded-For should not pass through spoofed value")
+	}
+}
+
+func TestHandleServiceProxy_AuthenticatedSpoofedUserID_Overwritten(t *testing.T) {
+	// On an authenticated forward_auth=false request, a client-supplied X-User-ID
+	// must be overwritten with the gatekeeper-verified identity, not passed through.
+	var receivedUserID, receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedUserID = r.Header.Get("X-User-ID")
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	// A signing key is required for conductor to emit the X-Conductor-* headers.
+	origKey := conductorForwardKey
+	conductorForwardKey = "test-forward-key"
+	t.Cleanup(func() { conductorForwardKey = origKey })
+
+	// mockGatekeeper(t, true) authorizes and returns user_id == testUUID.
+	gk := mockGatekeeper(t, true)
+	defer gk.Close()
+	withGatekeeperURL(t, gk.URL)
+
+	entry := makeEntry(http.MethodGet, "/data", "read", "data")
+	entry.serviceName = "datasvc"
+	withEndpoints(t, []endpointEntry{entry})
+	withServices(t, map[string]serviceState{
+		"datasvc": {url: backend.URL, proxy: proxyTo(t, backend.URL), forwardAuth: false},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/datasvc/data", nil)
+	req.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
+	req.Header.Set("X-User-ID", "attacker") // spoofed identity the client tries to inject
+	w := httptest.NewRecorder()
+	handleServiceProxy(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 after proxying, got %d", w.Code)
+	}
+	// The spoofed X-User-ID must be replaced by the gatekeeper-verified identity.
+	if receivedUserID != testUUID {
+		t.Fatalf("expected backend X-User-ID=%q (verified identity), got %q", testUUID, receivedUserID)
+	}
+	if receivedUserID == "attacker" {
+		t.Fatal("spoofed X-User-ID passed through to backend")
+	}
+	// The raw bearer must be stripped for forward_auth=false services.
+	if receivedAuth != "" {
+		t.Fatalf("expected Authorization to be stripped for forward_auth=false, got %q", receivedAuth)
 	}
 }
 

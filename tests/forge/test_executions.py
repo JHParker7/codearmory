@@ -220,13 +220,15 @@ def test_cancel_pending_execution(bearer):
     assert res.status_code == 202
     execution_id = res.json()["execution_id"]
 
-    # Cancel before it is picked up (may race, but status will be cancelled or running).
+    # Cancel before it is picked up. This races the worker: a still-cancelable
+    # execution returns 204, but if the worker already finished it the cancel of a
+    # no-longer-cancelable execution returns 409.
     res = requests.delete(f"{FORGE_URL}/executions/{execution_id}", headers=bearer)
-    assert res.status_code in (204, 204)
+    assert res.status_code in (204, 409)
 
-    # After cancellation, the execution should be in a terminal state.
+    # Either way, the execution must end in a terminal state.
     result = poll_until_done(bearer, execution_id, timeout=30)
-    assert result["status"] in ("cancelled", "timed_out", "failed")
+    assert result["status"] in ("cancelled", "completed", "timed_out", "failed")
 
 
 def test_cancel_not_found(bearer):

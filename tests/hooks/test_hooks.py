@@ -6,7 +6,7 @@ import time
 import pytest
 import requests
 
-from conftest import HOOKS_URL
+from conftest import HOOKS_URL, WORKFLOWS_URL
 
 
 # ── Webhook validation ─────────────────────────────────────────────────────────
@@ -64,10 +64,13 @@ def push_rule(bearer, workflow):
     requests.delete(f"{HOOKS_URL}/rules/{r['rule_id']}", headers=bearer)
 
 
-def test_webhook_matches_rule_and_triggers(push_rule):
+def test_webhook_matches_rule_and_triggers(bearer, push_rule):
     import json as _json
+    # The generic /hooks endpoint reads mapped fields from a NESTED "payload"
+    # object (see api_hooks.go genericPayload.Payload), so commit/pusher must be
+    # nested for input_mapping {COMMIT_SHA: commit, PUSHED_BY: pusher} to apply.
     payload = {"source": "ci/myapp", "event": "push", "ref": "refs/heads/main",
-               "commit": "abc123", "pusher": "alice"}
+               "payload": {"commit": "abc123", "pusher": "alice"}}
     body = _json.dumps(payload).encode()
     sig = _sign(_PUSH_SECRET, body)
     res = requests.post(f"{HOOKS_URL}/hooks", data=body,
@@ -81,6 +84,14 @@ def test_webhook_matches_rule_and_triggers(push_rule):
     trig = data["triggers"][0]
     assert trig["status"] == "triggered"
     assert trig["run_id"] is not None
+
+    # End-to-end: fetch the dispatched run and assert the mapped inputs landed
+    # with the expected values.
+    run = requests.get(f"{WORKFLOWS_URL}/runs/{trig['run_id']}", headers=bearer)
+    assert run.status_code == 200, run.text
+    inputs = run.json()["inputs"]
+    assert inputs.get("COMMIT_SHA") == "abc123", f"inputs: {inputs}"
+    assert inputs.get("PUSHED_BY") == "alice", f"inputs: {inputs}"
 
 
 def test_webhook_ignores_ref_filter_on_generic_endpoint(bearer, workflow):

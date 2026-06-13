@@ -277,7 +277,7 @@ func TestOrgUpdate(t *testing.T) {
 	}
 	newOrg = row.(Org)
 	if time.Time.Equal(testOrg.UpdatedAt, newOrg.UpdatedAt) {
-		slog.Info("does match", "testOrg", testOrg.UpdatedAt, "newOrg", newOrg.UpdatedAt)
+		slog.Info("UpdatedAt unchanged after Update (bug)", "testOrg", testOrg.UpdatedAt, "newOrg", newOrg.UpdatedAt)
 		t.Fatal("updated at not changed")
 	}
 	newOrg.UpdatedAt = testOrg.UpdatedAt
@@ -379,7 +379,7 @@ func TestRoleUpdate(t *testing.T) {
 	}
 	newRole = row.(Role)
 	if time.Time.Equal(testRole.UpdatedAt, newRole.UpdatedAt) {
-		slog.Info("does match", "testRole", testRole.UpdatedAt, "newRole", newRole.UpdatedAt)
+		slog.Info("UpdatedAt unchanged after Update (bug)", "testRole", testRole.UpdatedAt, "newRole", newRole.UpdatedAt)
 		t.Fatal("updated at not changed")
 	}
 	newRole.UpdatedAt = testRole.UpdatedAt
@@ -481,7 +481,7 @@ func TestTeamUpdate(t *testing.T) {
 	}
 	newTeam = row.(Team)
 	if time.Time.Equal(testTeam.UpdatedAt, newTeam.UpdatedAt) {
-		slog.Info("does match", "testTeam", testTeam.UpdatedAt, "newTeam", newTeam.UpdatedAt)
+		slog.Info("UpdatedAt unchanged after Update (bug)", "testTeam", testTeam.UpdatedAt, "newTeam", newTeam.UpdatedAt)
 		t.Fatal("updated at not changed")
 	}
 	newTeam.UpdatedAt = testTeam.UpdatedAt
@@ -609,7 +609,7 @@ func TestSessionUpdate(t *testing.T) {
 	}
 	newSession = row.(Session)
 	if time.Time.Equal(testSession.UpdatedAt, newSession.UpdatedAt) {
-		slog.Info("does match", "testSession", testSession.UpdatedAt, "newSession", newSession.UpdatedAt)
+		slog.Info("UpdatedAt unchanged after Update (bug)", "testSession", testSession.UpdatedAt, "newSession", newSession.UpdatedAt)
 		t.Fatal("updated at not changed")
 	}
 	newSession.UpdatedAt = testSession.UpdatedAt
@@ -806,7 +806,7 @@ func TestUserUpdate(t *testing.T) {
 	}
 	newUser = row.(User)
 	if time.Time.Equal(testUser.UpdatedAt, newUser.UpdatedAt) {
-		slog.Info("does match", "testUser", testUser.UpdatedAt, "newUser", newUser.UpdatedAt)
+		slog.Info("UpdatedAt unchanged after Update (bug)", "testUser", testUser.UpdatedAt, "newUser", newUser.UpdatedAt)
 		t.Fatal("updated at not changed")
 	}
 	newUser.UpdatedAt = testUser.UpdatedAt
