@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -62,8 +63,19 @@ func newKubernetesRuntime() (*KubernetesRuntime, error) {
 // sandboxUID is the non-root UID/GID that sandboxed containers run as. Pinning
 // it lets images that default to root (alpine, ubuntu, …) satisfy RunAsNonRoot
 // and actually start — without it the kubelet blocks them at admission with
-// "container has runAsNonRoot and image will run as root".
-const sandboxUID int64 = 1000
+// "container has runAsNonRoot and image will run as root". Override with
+// FORGE_SANDBOX_UID for images whose only usable account is a different fixed UID.
+var sandboxUID = sandboxUIDFromEnv()
+
+func sandboxUIDFromEnv() int64 {
+	if v := os.Getenv("FORGE_SANDBOX_UID"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+		slog.Warn("forge: ignoring invalid FORGE_SANDBOX_UID, using default", "value", v, "default", 1000)
+	}
+	return 1000
+}
 
 // Run creates a Kubernetes Job for the execution, polls until it reaches a
 // terminal state, collects logs, then deletes the job. The job is always
@@ -211,22 +223,46 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 	}
 
 done:
-	stdout, stderr := r.collectLogs(exec.ExecutionID)
+	// Resolve the pod once and derive both logs and the real exit code from the
+	// same snapshot (avoids two separate List calls against the API server).
+	pod, podErr := r.findPod(exec.ExecutionID)
+
+	var stdout string
+	var logErr error
+	switch {
+	case podErr != nil:
+		logErr = podErr
+	case pod == nil:
+		logErr = fmt.Errorf("no pod found for execution — logs unavailable (the pod may have been evicted or never scheduled)")
+	default:
+		stdout, logErr = r.collectLogs(pod.Name)
+	}
 
 	if timedOut {
-		return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: exitCode},
+		return RunResult{Stdout: stdout, ExitCode: ptr(exitCode)},
 			fmt.Errorf("timed out after %ds: %w", exec.TimeoutSecs, context.DeadlineExceeded)
 	}
 
-	// Attempt to get the real exit code from the pod's container status.
-	if code, ok := r.podExitCode(exec.ExecutionID); ok {
-		exitCode = code
+	// Prefer the real container exit code over the job-level guess.
+	if pod != nil {
+		if code, ok := podExitCode(pod); ok {
+			exitCode = code
+		}
 	}
 
-	return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: exitCode}, nil
+	// Only surface a log-collection problem when the command actually failed; on
+	// a successful run an unreadable-logs note would masquerade as the job's own
+	// stderr (and a completed execution is expected to have empty stderr).
+	stderr := ""
+	if logErr != nil && exitCode != 0 {
+		stderr = "forge: " + logErr.Error()
+	}
+	return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: ptr(exitCode)}, nil
 }
 
-func (r *KubernetesRuntime) collectLogs(executionID string) (stdout, stderr string) {
+// findPod returns the single pod for an execution, or (nil, nil) if none exists
+// yet (e.g. evicted or never scheduled).
+func (r *KubernetesRuntime) findPod(executionID string) (*corev1.Pod, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -234,38 +270,37 @@ func (r *KubernetesRuntime) collectLogs(executionID string) (stdout, stderr stri
 		LabelSelector: "execution-id=" + executionID,
 	})
 	if err != nil {
-		return "", fmt.Sprintf("forge: failed to list pods for log collection: %v", err)
+		return nil, fmt.Errorf("list pods: %w", err)
 	}
 	if len(pods.Items) == 0 {
-		return "", "forge: no pod found for execution — logs unavailable (the pod may have been evicted or never scheduled)"
+		return nil, nil
 	}
-	podName := pods.Items[0].Name
+	return &pods.Items[0], nil
+}
 
-	// Kubernetes pod logs combine stdout and stderr into a single stream.
+// collectLogs streams the runner container's combined stdout+stderr (Kubernetes
+// merges the two into a single log stream).
+func (r *KubernetesRuntime) collectLogs(podName string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	req := r.client.CoreV1().Pods(r.namespace).GetLogs(podName, &corev1.PodLogOptions{
 		Container: "runner",
 	})
 	stream, err := req.Stream(ctx)
 	if err != nil {
-		return "", fmt.Sprintf("forge: failed to stream pod logs: %v", err)
+		return "", fmt.Errorf("stream pod logs: %w", err)
 	}
 	defer stream.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, io.LimitReader(stream, maxOutputBytes))
-	return buf.String(), ""
+	io.Copy(&buf, io.LimitReader(stream, maxOutputBytes)) //nolint:errcheck
+	return buf.String(), nil
 }
 
-func (r *KubernetesRuntime) podExitCode(executionID string) (int, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	pods, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "execution-id=" + executionID,
-	})
-	if err != nil || len(pods.Items) == 0 {
-		return 0, false
-	}
-	for _, cs := range pods.Items[0].Status.ContainerStatuses {
+// podExitCode reads the runner container's terminated exit code from a pod
+// snapshot, if it has terminated.
+func podExitCode(pod *corev1.Pod) (int, bool) {
+	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Name == "runner" && cs.State.Terminated != nil {
 			return int(cs.State.Terminated.ExitCode), true
 		}

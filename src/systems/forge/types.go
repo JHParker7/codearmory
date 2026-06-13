@@ -55,9 +55,11 @@ type submitRequest struct {
 	RunnerClass string            `json:"runner_class"`
 }
 
-// RunResult holds the output of a completed container run.
+// RunResult holds the output of a completed container run. ExitCode is a pointer
+// so a runtime failure that never produced an exit code (image pull, container
+// create, cancellation, timeout) is recorded as NULL rather than a misleading 0.
 type RunResult struct {
 	Stdout   string
 	Stderr   string
-	ExitCode int
+	ExitCode *int
 }

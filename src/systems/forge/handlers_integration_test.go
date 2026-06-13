@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -46,6 +47,16 @@ func requireForgeDB(t *testing.T) {
 	}
 }
 
+// authAs points gatekeeper at a fake that authorizes requests as userID, and
+// returns the bearer header the handler requires. Forge handlers derive the
+// caller identity from gatekeeper's response (not X-User-ID), so every
+// DB-backed handler test must go through this rather than spoofing a header.
+func authAs(t *testing.T, userID string) string {
+	t.Helper()
+	fakeGatekeeper(t, http.StatusOK, fmt.Sprintf(`{"authorized":true,"user_id":%q}`, userID))
+	return "Bearer test-token"
+}
+
 // insertExecution inserts a bare execution row and registers cleanup.
 func insertExecution(t *testing.T, execID, userID, status string) {
 	t.Helper()
@@ -68,9 +79,10 @@ func TestHandleSubmit_Success_DB(t *testing.T) {
 	t.Cleanup(func() { initAllowedImages("") })
 
 	userID := "user-" + uuid.New().String()
+	bearer := authAs(t, userID)
 	body := bytes.NewBufferString(`{"image":"alpine:3.19","command":["echo","hi"]}`)
 	r := httptest.NewRequest(http.MethodPost, "/executions", body)
-	r.Header.Set("X-User-ID", userID)
+	r.Header.Set("Authorization", bearer)
 	w := httptest.NewRecorder()
 	handleSubmit(w, r)
 
@@ -104,9 +116,10 @@ func TestHandleGet_NotFound_DB(t *testing.T) {
 	requireForgeDB(t)
 
 	userID := "user-" + uuid.New().String()
+	bearer := authAs(t, userID)
 	r := httptest.NewRequest(http.MethodGet, "/executions/no-such-id", nil)
 	r.SetPathValue("id", "no-such-id")
-	r.Header.Set("X-User-ID", userID)
+	r.Header.Set("Authorization", bearer)
 	w := httptest.NewRecorder()
 	handleGet(w, r)
 
@@ -119,12 +132,13 @@ func TestHandleGet_Found_DB(t *testing.T) {
 	requireForgeDB(t)
 
 	userID := "user-" + uuid.New().String()
+	bearer := authAs(t, userID)
 	execID := uuid.New().String()
 	insertExecution(t, execID, userID, "pending")
 
 	r := httptest.NewRequest(http.MethodGet, "/executions/"+execID, nil)
 	r.SetPathValue("id", execID)
-	r.Header.Set("X-User-ID", userID)
+	r.Header.Set("Authorization", bearer)
 	w := httptest.NewRecorder()
 	handleGet(w, r)
 
@@ -147,8 +161,9 @@ func TestHandleList_Empty_DB(t *testing.T) {
 
 	// Use a user ID that is guaranteed to have no executions.
 	userID := "user-" + uuid.New().String()
+	bearer := authAs(t, userID)
 	r := httptest.NewRequest(http.MethodGet, "/executions", nil)
-	r.Header.Set("X-User-ID", userID)
+	r.Header.Set("Authorization", bearer)
 	w := httptest.NewRecorder()
 	handleList(w, r)
 
@@ -166,11 +181,12 @@ func TestHandleList_Success_DB(t *testing.T) {
 	requireForgeDB(t)
 
 	userID := "user-" + uuid.New().String()
+	bearer := authAs(t, userID)
 	execID := uuid.New().String()
 	insertExecution(t, execID, userID, "pending")
 
 	r := httptest.NewRequest(http.MethodGet, "/executions", nil)
-	r.Header.Set("X-User-ID", userID)
+	r.Header.Set("Authorization", bearer)
 	w := httptest.NewRecorder()
 	handleList(w, r)
 
@@ -193,10 +209,11 @@ func TestHandleCancel_NotFound_DB(t *testing.T) {
 	requireForgeDB(t)
 
 	userID := "user-" + uuid.New().String()
+	bearer := authAs(t, userID)
 	wp := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodDelete, "/executions/no-such-id", nil)
 	r.SetPathValue("id", "no-such-id")
-	r.Header.Set("X-User-ID", userID)
+	r.Header.Set("Authorization", bearer)
 	w := httptest.NewRecorder()
 	handleCancel(wp)(w, r)
 
@@ -209,13 +226,14 @@ func TestHandleCancel_Pending_DB(t *testing.T) {
 	requireForgeDB(t)
 
 	userID := "user-" + uuid.New().String()
+	bearer := authAs(t, userID)
 	execID := uuid.New().String()
 	insertExecution(t, execID, userID, "pending")
 
 	wp := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodDelete, "/executions/"+execID, nil)
 	r.SetPathValue("id", execID)
-	r.Header.Set("X-User-ID", userID)
+	r.Header.Set("Authorization", bearer)
 	w := httptest.NewRecorder()
 	handleCancel(wp)(w, r)
 
@@ -236,13 +254,14 @@ func TestHandleCancel_AlreadyCompleted_DB(t *testing.T) {
 	requireForgeDB(t)
 
 	userID := "user-" + uuid.New().String()
+	bearer := authAs(t, userID)
 	execID := uuid.New().String()
 	insertExecution(t, execID, userID, "completed")
 
 	wp := &WorkerPool{}
 	r := httptest.NewRequest(http.MethodDelete, "/executions/"+execID, nil)
 	r.SetPathValue("id", execID)
-	r.Header.Set("X-User-ID", userID)
+	r.Header.Set("Authorization", bearer)
 	w := httptest.NewRecorder()
 	handleCancel(wp)(w, r)
 

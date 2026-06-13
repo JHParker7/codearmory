@@ -146,11 +146,16 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 
 	stdout, stderr, err := r.collectLogs(containerID)
 	if err != nil {
-		// Keep the exit code, but surface why output is missing instead of
-		// returning an execution with silently empty stdout/stderr.
-		return RunResult{ExitCode: exitCode, Stderr: fmt.Sprintf("forge: failed to collect container logs: %v", err)}, nil
+		// Keep the exit code. Only surface the collection failure as stderr when
+		// the command itself failed; on a successful run a log-collection note
+		// would masquerade as the job's own stderr.
+		res := RunResult{ExitCode: ptr(exitCode)}
+		if exitCode != 0 {
+			res.Stderr = fmt.Sprintf("forge: failed to collect container logs: %v", err)
+		}
+		return res, nil
 	}
-	return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: exitCode}, nil
+	return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: ptr(exitCode)}, nil
 }
 
 func (r *DockerRuntime) collectLogs(containerID string) (stdout, stderr string, err error) {
