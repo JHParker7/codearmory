@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -79,7 +80,7 @@ func (p *codearmoryProvider) Configure(ctx context.Context, req provider.Configu
 
 	if endpoint == "" {
 		resp.Diagnostics.AddAttributeError(
-			pathRoot("endpoint"),
+			path.Root("endpoint"),
 			"Missing Conductor endpoint",
 			"Set the provider `endpoint` argument or the CODEARMORY_URL environment variable.",
 		)

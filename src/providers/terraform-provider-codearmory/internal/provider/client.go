@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 )
 
 // Client is a thin HTTP client for the codearmory API. All routes are
@@ -104,5 +104,44 @@ func apiError(action string, status int, body []byte) error {
 	return fmt.Errorf("%s: unexpected status %d: %s", action, status, strings.TrimSpace(string(body)))
 }
 
-// pathRoot is a tiny helper so provider.go doesn't need to import the path package.
-func pathRoot(name string) path.Path { return path.Root(name) }
+// do2xx runs a request, treats anything but wantStatus as a failure, and decodes
+// the body into out (when non-nil). 404 is reported via notFound (with no
+// diagnostic) so callers can branch — resources remove themselves from state,
+// the data source raises a not-found error. summary prefixes diagnostics so each
+// caller keeps its specific wording; action is used in the unexpected-status text.
+func (c *Client) do2xx(ctx context.Context, summary, action, method, p string, body, out any, wantStatus int) (notFound bool, diags diag.Diagnostics) {
+	status, respBody, err := c.do(ctx, method, p, body)
+	if err != nil {
+		diags.AddError(summary, err.Error())
+		return false, diags
+	}
+	if status == http.StatusNotFound {
+		return true, diags
+	}
+	if status != wantStatus {
+		diags.AddError(summary, apiError(action, status, respBody).Error())
+		return false, diags
+	}
+	if out != nil {
+		if err := json.Unmarshal(respBody, out); err != nil {
+			diags.AddError("Decode response failed", err.Error())
+		}
+	}
+	return false, diags
+}
+
+// clientFromProviderData extracts the configured *Client from a resource or
+// data-source ConfigureRequest. It returns (nil, nil) during early validation,
+// before the provider has been configured.
+func clientFromProviderData(data any) (*Client, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	if data == nil {
+		return nil, diags
+	}
+	client, ok := data.(*Client)
+	if !ok {
+		diags.AddError("Unexpected provider data", fmt.Sprintf("expected *Client, got %T", data))
+		return nil, diags
+	}
+	return client, diags
+}

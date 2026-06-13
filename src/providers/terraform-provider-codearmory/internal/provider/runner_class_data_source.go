@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -43,14 +42,8 @@ func (d *runnerClassDataSource) Schema(_ context.Context, _ datasource.SchemaReq
 }
 
 func (d *runnerClassDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("expected *Client, got %T", req.ProviderData))
-		return
-	}
+	client, diags := clientFromProviderData(req.ProviderData)
+	resp.Diagnostics.Append(diags...)
 	d.client = client
 }
 
@@ -60,22 +53,14 @@ func (d *runnerClassDataSource) Read(ctx context.Context, req datasource.ReadReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	status, body, err := d.client.do(ctx, http.MethodGet, "/forge/runner-classes/"+cfg.Name.ValueString(), nil)
-	if err != nil {
-		resp.Diagnostics.AddError("Read runner class failed", err.Error())
-		return
-	}
-	if status == http.StatusNotFound {
+	var out runnerClassAPI
+	notFound, diags := d.client.do2xx(ctx, "Read runner class failed", "read", http.MethodGet, "/forge/runner-classes/"+cfg.Name.ValueString(), nil, &out, http.StatusOK)
+	if notFound {
 		resp.Diagnostics.AddError("Runner class not found", fmt.Sprintf("no runner class named %q", cfg.Name.ValueString()))
 		return
 	}
-	if status != http.StatusOK {
-		resp.Diagnostics.AddError("Read runner class failed", apiError("read", status, body).Error())
-		return
-	}
-	var out runnerClassAPI
-	if err := json.Unmarshal(body, &out); err != nil {
-		resp.Diagnostics.AddError("Decode response failed", err.Error())
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	cfg.fromAPI(out)

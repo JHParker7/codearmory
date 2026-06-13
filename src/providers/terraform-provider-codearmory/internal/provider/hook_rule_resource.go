@@ -2,8 +2,6 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -147,14 +145,8 @@ func (r *hookRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 }
 
 func (r *hookRuleResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("expected *Client, got %T", req.ProviderData))
-		return
-	}
+	client, diags := clientFromProviderData(req.ProviderData)
+	resp.Diagnostics.Append(diags...)
 	r.client = client
 }
 
@@ -221,18 +213,10 @@ func (r *hookRuleResource) Create(ctx context.Context, req resource.CreateReques
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	status, body, err := r.client.do(ctx, http.MethodPost, "/hooks/rules", apiReq)
-	if err != nil {
-		resp.Diagnostics.AddError("Create hook rule failed", err.Error())
-		return
-	}
-	if status != http.StatusCreated {
-		resp.Diagnostics.AddError("Create hook rule failed", apiError("create", status, body).Error())
-		return
-	}
 	var out hookRuleResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		resp.Diagnostics.AddError("Decode response failed", err.Error())
+	_, d := r.client.do2xx(ctx, "Create hook rule failed", "create", http.MethodPost, "/hooks/rules", apiReq, &out, http.StatusCreated)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	resp.Diagnostics.Append(plan.fromResponse(ctx, out)...)
@@ -245,22 +229,14 @@ func (r *hookRuleResource) Read(ctx context.Context, req resource.ReadRequest, r
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	status, body, err := r.client.do(ctx, http.MethodGet, "/hooks/rules/"+state.ID.ValueString(), nil)
-	if err != nil {
-		resp.Diagnostics.AddError("Read hook rule failed", err.Error())
-		return
-	}
-	if status == http.StatusNotFound {
+	var out hookRuleResponse
+	notFound, d := r.client.do2xx(ctx, "Read hook rule failed", "read", http.MethodGet, "/hooks/rules/"+state.ID.ValueString(), nil, &out, http.StatusOK)
+	if notFound {
 		resp.State.RemoveResource(ctx)
 		return
 	}
-	if status != http.StatusOK {
-		resp.Diagnostics.AddError("Read hook rule failed", apiError("read", status, body).Error())
-		return
-	}
-	var out hookRuleResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		resp.Diagnostics.AddError("Decode response failed", err.Error())
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	// Secret is preserved from prior state (the API never returns it).
@@ -279,18 +255,10 @@ func (r *hookRuleResource) Update(ctx context.Context, req resource.UpdateReques
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	status, body, err := r.client.do(ctx, http.MethodPut, "/hooks/rules/"+plan.ID.ValueString(), apiReq)
-	if err != nil {
-		resp.Diagnostics.AddError("Update hook rule failed", err.Error())
-		return
-	}
-	if status != http.StatusOK {
-		resp.Diagnostics.AddError("Update hook rule failed", apiError("update", status, body).Error())
-		return
-	}
 	var out hookRuleResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		resp.Diagnostics.AddError("Decode response failed", err.Error())
+	_, d := r.client.do2xx(ctx, "Update hook rule failed", "update", http.MethodPut, "/hooks/rules/"+plan.ID.ValueString(), apiReq, &out, http.StatusOK)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	resp.Diagnostics.Append(plan.fromResponse(ctx, out)...)
@@ -303,14 +271,12 @@ func (r *hookRuleResource) Delete(ctx context.Context, req resource.DeleteReques
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	status, body, err := r.client.do(ctx, http.MethodDelete, "/hooks/rules/"+state.ID.ValueString(), nil)
-	if err != nil {
-		resp.Diagnostics.AddError("Delete hook rule failed", err.Error())
+	// 204 and 404 both mean "gone"; do2xx maps 404 to notFound.
+	notFound, d := r.client.do2xx(ctx, "Delete hook rule failed", "delete", http.MethodDelete, "/hooks/rules/"+state.ID.ValueString(), nil, nil, http.StatusNoContent)
+	if notFound {
 		return
 	}
-	if status != http.StatusNoContent && status != http.StatusNotFound {
-		resp.Diagnostics.AddError("Delete hook rule failed", apiError("delete", status, body).Error())
-	}
+	resp.Diagnostics.Append(d...)
 }
 
 func (r *hookRuleResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

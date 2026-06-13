@@ -2,8 +2,6 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -90,14 +88,8 @@ func (r *runnerClassResource) Schema(_ context.Context, _ resource.SchemaRequest
 }
 
 func (r *runnerClassResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	client, ok := req.ProviderData.(*Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected provider data", fmt.Sprintf("expected *Client, got %T", req.ProviderData))
-		return
-	}
+	client, diags := clientFromProviderData(req.ProviderData)
+	resp.Diagnostics.Append(diags...)
 	r.client = client
 }
 
@@ -127,18 +119,10 @@ func (r *runnerClassResource) Create(ctx context.Context, req resource.CreateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	status, body, err := r.client.do(ctx, http.MethodPost, "/forge/runner-classes", plan.toAPI())
-	if err != nil {
-		resp.Diagnostics.AddError("Create runner class failed", err.Error())
-		return
-	}
-	if status != http.StatusCreated {
-		resp.Diagnostics.AddError("Create runner class failed", apiError("create", status, body).Error())
-		return
-	}
 	var out runnerClassAPI
-	if err := json.Unmarshal(body, &out); err != nil {
-		resp.Diagnostics.AddError("Decode response failed", err.Error())
+	_, d := r.client.do2xx(ctx, "Create runner class failed", "create", http.MethodPost, "/forge/runner-classes", plan.toAPI(), &out, http.StatusCreated)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	plan.fromAPI(out)
@@ -151,22 +135,14 @@ func (r *runnerClassResource) Read(ctx context.Context, req resource.ReadRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	status, body, err := r.client.do(ctx, http.MethodGet, "/forge/runner-classes/"+state.Name.ValueString(), nil)
-	if err != nil {
-		resp.Diagnostics.AddError("Read runner class failed", err.Error())
-		return
-	}
-	if status == http.StatusNotFound {
+	var out runnerClassAPI
+	notFound, d := r.client.do2xx(ctx, "Read runner class failed", "read", http.MethodGet, "/forge/runner-classes/"+state.Name.ValueString(), nil, &out, http.StatusOK)
+	if notFound {
 		resp.State.RemoveResource(ctx)
 		return
 	}
-	if status != http.StatusOK {
-		resp.Diagnostics.AddError("Read runner class failed", apiError("read", status, body).Error())
-		return
-	}
-	var out runnerClassAPI
-	if err := json.Unmarshal(body, &out); err != nil {
-		resp.Diagnostics.AddError("Decode response failed", err.Error())
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	state.fromAPI(out)
@@ -179,18 +155,10 @@ func (r *runnerClassResource) Update(ctx context.Context, req resource.UpdateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	status, body, err := r.client.do(ctx, http.MethodPut, "/forge/runner-classes/"+plan.Name.ValueString(), plan.toAPI())
-	if err != nil {
-		resp.Diagnostics.AddError("Update runner class failed", err.Error())
-		return
-	}
-	if status != http.StatusOK {
-		resp.Diagnostics.AddError("Update runner class failed", apiError("update", status, body).Error())
-		return
-	}
 	var out runnerClassAPI
-	if err := json.Unmarshal(body, &out); err != nil {
-		resp.Diagnostics.AddError("Decode response failed", err.Error())
+	_, d := r.client.do2xx(ctx, "Update runner class failed", "update", http.MethodPut, "/forge/runner-classes/"+plan.Name.ValueString(), plan.toAPI(), &out, http.StatusOK)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	plan.fromAPI(out)
@@ -203,14 +171,12 @@ func (r *runnerClassResource) Delete(ctx context.Context, req resource.DeleteReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	status, body, err := r.client.do(ctx, http.MethodDelete, "/forge/runner-classes/"+state.Name.ValueString(), nil)
-	if err != nil {
-		resp.Diagnostics.AddError("Delete runner class failed", err.Error())
+	// 204 and 404 both mean "gone"; do2xx maps 404 to notFound.
+	notFound, d := r.client.do2xx(ctx, "Delete runner class failed", "delete", http.MethodDelete, "/forge/runner-classes/"+state.Name.ValueString(), nil, nil, http.StatusNoContent)
+	if notFound {
 		return
 	}
-	if status != http.StatusNoContent && status != http.StatusNotFound {
-		resp.Diagnostics.AddError("Delete runner class failed", apiError("delete", status, body).Error())
-	}
+	resp.Diagnostics.Append(d...)
 }
 
 func (r *runnerClassResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
