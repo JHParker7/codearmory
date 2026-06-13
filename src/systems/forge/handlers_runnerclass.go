@@ -52,13 +52,13 @@ func handleListRunnerClasses(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("user.id", userID))
 	span.AddEvent("permission.granted")
-	slog.Info("list runner classes request", "user_id", userID)
+	slog.InfoContext(ctx, "list runner classes request", "user_id", userID)
 
 	rows, err := (RunnerClass{}).List(ctx, 0, 0)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
-		slog.Error("list runner classes: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "list runner classes: db error", "user_id", userID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -68,7 +68,7 @@ func handleListRunnerClasses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("list runner classes: success", "user_id", userID, "count", len(classes))
+	slog.InfoContext(ctx, "list runner classes: success", "user_id", userID, "count", len(classes))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(classes)
 }
@@ -90,26 +90,26 @@ func handleGetRunnerClass(w http.ResponseWriter, r *http.Request) {
 		attribute.String("runner_class.name", name),
 	)
 	span.AddEvent("permission.granted")
-	slog.Info("get runner class request", "user_id", userID, "name", name)
+	slog.InfoContext(ctx, "get runner class request", "user_id", userID, "name", name)
 
 	row, err := (RunnerClass{Name: name}).Get(ctx)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		span.SetStatus(codes.Error, "runner class not found")
-		slog.Warn("get runner class: not found", "user_id", userID, "name", name)
+		slog.WarnContext(ctx, "get runner class: not found", "user_id", userID, "name", name)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
-		slog.Error("get runner class: db error", "user_id", userID, "name", name, "error", err)
+		slog.ErrorContext(ctx, "get runner class: db error", "user_id", userID, "name", name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	rc := row.(RunnerClass)
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("get runner class: success", "user_id", userID, "name", name)
+	slog.InfoContext(ctx, "get runner class: success", "user_id", userID, "name", name)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rc)
 }
@@ -127,7 +127,7 @@ func handleCreateRunnerClass(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("user.id", userID))
 	span.AddEvent("permission.granted")
-	slog.Info("create runner class request", "user_id", userID)
+	slog.InfoContext(ctx, "create runner class request", "user_id", userID)
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil || !json.Valid(body) {
@@ -164,19 +164,19 @@ func handleCreateRunnerClass(w http.ResponseWriter, r *http.Request) {
 	if err := rc.Add(ctx); err != nil {
 		if errors.Is(err, gorm.ErrDuplicatedKey) {
 			span.SetStatus(codes.Ok, "")
-			slog.Warn("create runner class: already exists", "user_id", userID, "name", b.Name)
+			slog.WarnContext(ctx, "create runner class: already exists", "user_id", userID, "name", b.Name)
 			http.Error(w, "runner class already exists", http.StatusConflict)
 			return
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create runner class: db error", "user_id", userID, "name", b.Name, "error", err)
+		slog.ErrorContext(ctx, "create runner class: db error", "user_id", userID, "name", b.Name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("create runner class: success", "user_id", userID, "name", rc.Name)
+	slog.InfoContext(ctx, "create runner class: success", "user_id", userID, "name", rc.Name)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(rc)
@@ -199,7 +199,7 @@ func handleUpdateRunnerClass(w http.ResponseWriter, r *http.Request) {
 		attribute.String("runner_class.name", name),
 	)
 	span.AddEvent("permission.granted")
-	slog.Info("update runner class request", "user_id", userID, "name", name)
+	slog.InfoContext(ctx, "update runner class request", "user_id", userID, "name", name)
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil || !json.Valid(body) {
@@ -226,19 +226,19 @@ func handleUpdateRunnerClass(w http.ResponseWriter, r *http.Request) {
 	if err := rc.Update(ctx); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Error, "runner class not found")
-			slog.Warn("update runner class: not found", "user_id", userID, "name", name)
+			slog.WarnContext(ctx, "update runner class: not found", "user_id", userID, "name", name)
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update runner class: db error", "user_id", userID, "name", name, "error", err)
+		slog.ErrorContext(ctx, "update runner class: db error", "user_id", userID, "name", name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("update runner class: success", "user_id", userID, "name", name)
+	slog.InfoContext(ctx, "update runner class: success", "user_id", userID, "name", name)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rc)
 }
@@ -260,23 +260,23 @@ func handleDeleteRunnerClass(w http.ResponseWriter, r *http.Request) {
 		attribute.String("runner_class.name", name),
 	)
 	span.AddEvent("permission.granted")
-	slog.Info("delete runner class request", "user_id", userID, "name", name)
+	slog.InfoContext(ctx, "delete runner class request", "user_id", userID, "name", name)
 
 	if err := (RunnerClass{Name: name}).Remove(ctx); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Error, "runner class not found")
-			slog.Warn("delete runner class: not found", "user_id", userID, "name", name)
+			slog.WarnContext(ctx, "delete runner class: not found", "user_id", userID, "name", name)
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
-		slog.Error("delete runner class: db error", "user_id", userID, "name", name, "error", err)
+		slog.ErrorContext(ctx, "delete runner class: db error", "user_id", userID, "name", name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("delete runner class: success", "user_id", userID, "name", name)
+	slog.InfoContext(ctx, "delete runner class: success", "user_id", userID, "name", name)
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -110,6 +110,66 @@ func TestInitAllowedImages_Multiple(t *testing.T) {
 	}
 }
 
+func TestInitAllowedImages_BuildsSortedDedupedList(t *testing.T) {
+	initAllowedImages("ubuntu:22.04, alpine:3.19, ubuntu:22.04")
+	t.Cleanup(func() { initAllowedImages("") })
+	want := []string{"alpine:3.19", "ubuntu:22.04"}
+	if len(allowedImageList) != len(want) {
+		t.Fatalf("allowedImageList = %v, want %v", allowedImageList, want)
+	}
+	for i := range want {
+		if allowedImageList[i] != want[i] {
+			t.Fatalf("allowedImageList = %v, want %v (sorted, deduped)", allowedImageList, want)
+		}
+	}
+}
+
+// --- handleListImages ---
+
+func TestHandleListImages_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/images", nil)
+	w := httptest.NewRecorder()
+	handleListImages(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestHandleListImages_ReturnsAllowlist(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-1"}`)
+	initAllowedImages("ubuntu:22.04,alpine:3.19")
+	t.Cleanup(func() { initAllowedImages("") })
+
+	r := httptest.NewRequest(http.MethodGet, "/images", nil)
+	r.Header.Set("Authorization", "Bearer t")
+	w := httptest.NewRecorder()
+	handleListImages(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := w.Body.String(); got != "[\"alpine:3.19\",\"ubuntu:22.04\"]\n" {
+		t.Fatalf("body = %q, want sorted allowlist array", got)
+	}
+}
+
+func TestHandleListImages_DenyAll_ReturnsEmptyArray(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-1"}`)
+	initAllowedImages("") // deny-all
+
+	r := httptest.NewRequest(http.MethodGet, "/images", nil)
+	r.Header.Set("Authorization", "Bearer t")
+	w := httptest.NewRecorder()
+	handleListImages(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := w.Body.String(); got != "[]\n" {
+		t.Fatalf("body = %q, want empty array (not null)", got)
+	}
+}
+
 // --- handleSubmit (pre-DB validation paths only) ---
 
 func TestHandleSubmit_Unauthorized(t *testing.T) {
@@ -230,7 +290,7 @@ func TestNewRuntime_UnknownRuntime(t *testing.T) {
 
 func TestK8sTimeoutClassifiedAsTimedOut(t *testing.T) {
 	err := fmt.Errorf("timed out after 30s: %w", context.DeadlineExceeded)
-	status, res := classifyResult(RunResult{ExitCode: ptr(1)}, err)
+	status, res, _ := classifyResult(Execution{}, RunResult{ExitCode: ptr(1)}, err)
 	if status != StatusTimedOut {
 		t.Fatalf("classifyResult(timeout err) = %q, want %q", status, StatusTimedOut)
 	}

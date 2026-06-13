@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const pollInterval = 1 * time.Second
@@ -62,34 +66,79 @@ func (p *WorkerPool) tryOne(ctx context.Context) {
 	p.run(ctx, exec)
 }
 
+// systemExitDiagnostic returns a human-readable reason and true when a non-zero
+// exit code signals that the container runtime could not run the command, rather
+// than the command running and failing on its own. forge execs the command
+// directly with no shell wrapper, so the Docker/OCI-reserved codes 125–128 always
+// mean the platform failed to start or locate the command — a non-user error that
+// otherwise lands as an empty "failed" record with no clue why.
+func systemExitDiagnostic(code int, exec Execution) (string, bool) {
+	cmd := ""
+	if len(exec.Command) > 0 {
+		cmd = exec.Command[0]
+	}
+	switch code {
+	case 125:
+		return fmt.Sprintf("container runtime error (exit 125): the daemon could not run image %q", exec.Image), true
+	case 126:
+		return fmt.Sprintf("command %q is not executable (exit 126): check its permissions in image %q", cmd, exec.Image), true
+	case 127:
+		return fmt.Sprintf("command %q not found in image %q (exit 127)", cmd, exec.Image), true
+	case 128:
+		return fmt.Sprintf("container process could not be started (exit 128): %q may not be an executable in image %q — shell built-ins such as \"cd\" are not valid commands", cmd, exec.Image), true
+	default:
+		return "", false
+	}
+}
+
 // classifyResult maps a runtime outcome to the stored execution status. It
-// surfaces a genuine runtime failure (image pull, container create, …) into
-// stderr so the user sees a reason instead of an empty "failed" record.
-// Cancellation and timeout are recognised from the error; a non-zero exit code
-// with no error is a normal command failure.
-func classifyResult(result RunResult, runErr error) (string, RunResult) {
+// surfaces a non-user failure into stderr so the user sees a reason instead of an
+// empty "failed" record, and returns that failure as the third value so the
+// worker can log and trace it as an error. Two kinds of non-user failure are
+// recognised: a runtime error returned by Run (image pull, container create, …),
+// and a Docker/OCI-reserved exit code (125–128) meaning the command could not be
+// run at all. Cancellation and timeout are recognised from the error; any other
+// non-zero exit code is a normal command failure (sysErr nil).
+func classifyResult(exec Execution, result RunResult, runErr error) (status string, out RunResult, sysErr error) {
 	switch {
 	case runErr == nil:
-		if result.ExitCode != nil && *result.ExitCode != 0 {
-			return StatusFailed, result
+		if result.ExitCode == nil || *result.ExitCode == 0 {
+			return StatusCompleted, result, nil
 		}
-		return StatusCompleted, result
+		if diag, ok := systemExitDiagnostic(*result.ExitCode, exec); ok {
+			if result.Stderr == "" {
+				result.Stderr = "forge: " + diag
+			}
+			return StatusFailed, result, fmt.Errorf("execution %s: %s", exec.ExecutionID, diag)
+		}
+		return StatusFailed, result, nil
 	case errors.Is(runErr, context.Canceled):
 		result.ExitCode = nil // cancelled before the command produced an exit code
-		return StatusCancelled, result
+		return StatusCancelled, result, nil
 	case errors.Is(runErr, context.DeadlineExceeded):
 		result.ExitCode = nil // killed at the deadline; no real exit code
-		return StatusTimedOut, result
+		return StatusTimedOut, result, nil
 	default:
 		result.ExitCode = nil // runtime failure (image pull, create, …) — no exit code
 		if result.Stderr == "" {
 			result.Stderr = "forge: " + runErr.Error()
 		}
-		return StatusFailed, result
+		return StatusFailed, result, runErr
 	}
 }
 
 func (p *WorkerPool) run(ctx context.Context, exec Execution) {
+	// Each execution is its own trace root: the worker poll loop has no inbound
+	// request span, so without this a runtime failure would have nowhere to be
+	// recorded. The span carries the status/exit code and an error status when the
+	// platform — not the user's command — is what failed.
+	ctx, span := otel.Tracer("forge").Start(ctx, "execution.run", trace.WithAttributes(
+		attribute.String("execution.id", exec.ExecutionID),
+		attribute.String("execution.image", exec.Image),
+		attribute.String("execution.runner_class", exec.RunnerClass),
+	))
+	defer span.End()
+
 	runCtx, cancel := context.WithCancel(ctx)
 	p.cancels.Store(exec.ExecutionID, cancel)
 	defer func() {
@@ -97,23 +146,31 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 		p.cancels.Delete(exec.ExecutionID)
 	}()
 
-	slog.Info("worker: starting execution", "execution_id", exec.ExecutionID, "image", exec.Image)
+	slog.InfoContext(ctx, "worker: starting execution", "execution_id", exec.ExecutionID, "image", exec.Image)
 	result, runErr := p.rt.Run(runCtx, exec)
 
-	status, result := classifyResult(result, runErr)
-	if status == StatusFailed && runErr != nil {
-		slog.Error("worker: runtime error", "execution_id", exec.ExecutionID, "error", runErr)
-	}
+	status, result, sysErr := classifyResult(exec, result, runErr)
 
 	meterComplete.Add(ctx, 1, metric.WithAttributes(attribute.String("status", status)))
 	exitCode := -1 // -1 = no exit code (cancelled/timed out/runtime failure)
 	if result.ExitCode != nil {
 		exitCode = *result.ExitCode
 	}
-	slog.Info("worker: execution done", "execution_id", exec.ExecutionID, "status", status, "exit_code", exitCode)
+	span.SetAttributes(attribute.String("execution.status", status), attribute.Int("execution.exit_code", exitCode))
+
+	if sysErr != nil {
+		// A non-user failure: forge could not run the command (image pull, container
+		// create/start, command-not-found, OCI runtime error, …). Log and trace it as
+		// an error so it is debuggable instead of buried in a generic "failed" record.
+		slog.ErrorContext(ctx, "worker: execution failed to run", "execution_id", exec.ExecutionID, "status", status, "exit_code", exitCode, "error", sysErr)
+		span.RecordError(sysErr)
+		span.SetStatus(codes.Error, sysErr.Error())
+	} else {
+		slog.InfoContext(ctx, "worker: execution done", "execution_id", exec.ExecutionID, "status", status, "exit_code", exitCode)
+	}
 
 	if err := exec.Complete(ctx, status, result); err != nil {
-		slog.Error("worker: update execution result", "execution_id", exec.ExecutionID, "error", err)
+		slog.ErrorContext(ctx, "worker: update execution result", "execution_id", exec.ExecutionID, "error", err)
 	}
 }
 
