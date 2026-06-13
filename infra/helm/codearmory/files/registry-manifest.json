@@ -195,6 +195,11 @@
         "grant_on": "user",
         "actions": ["createStep", "listStep", "getStep", "updateStep", "deleteStep", "createWorkflow", "listWorkflow", "getWorkflow", "updateWorkflow", "deleteWorkflow", "triggerRun", "listRun", "getRun", "cancelRun"],
         "resources": ["{username}/workflows/steps", "{username}/workflows/steps/*", "{username}/workflows/pipelines", "{username}/workflows/pipelines/*", "{username}/workflows/runs", "{username}/workflows/runs/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listAction"],
+        "resources": ["{username}/workflows/actions"]
       }
     ]
   },
