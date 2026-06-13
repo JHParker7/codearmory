@@ -197,9 +197,24 @@ def test_multi_step_run_completes(bearer, multi_step_workflow):
 
     result = poll_until_done(bearer, run_id)
     assert result["status"] == "completed"
-    assert len(result["step_runs"]) == 2
-    for step in result["step_runs"]:
+    step_runs = result["step_runs"]
+    assert len(step_runs) == 2
+    for step in step_runs:
         assert step["status"] == "completed"
+
+    # Steps must execute in order. The API returns step_runs ordered by
+    # step_index (see db.go getStepRuns: "ORDER BY step_index"), so assert
+    # the indices are 0,1 and — when timestamps are exposed — that step 0
+    # started no later than step 1.
+    indices = [s["step_index"] for s in step_runs]
+    assert indices == sorted(indices), f"step_runs not ordered by step_index: {indices}"
+    assert indices == [0, 1], f"unexpected step indices: {indices}"
+
+    starts = [s.get("started_at") for s in step_runs]
+    if all(starts):
+        assert starts[0] <= starts[1], (
+            f"step 0 started after step 1: {starts}"
+        )
 
 
 def test_run_fails_on_bad_expected_status(bearer, healthz_step_id):
@@ -307,10 +322,16 @@ def test_cancel_pending_run(bearer, workflow):
     run_id = res.json()["run_id"]
 
     res = requests.delete(f"{WORKFLOWS_URL}/runs/{run_id}", headers=bearer)
-    assert res.status_code == 204
+    # A single fast healthz step can complete before the DELETE lands, in which
+    # case cancelRun affects 0 rows and returns 409 (see api_runs.go cancelRun).
+    assert res.status_code in (204, 409), f"got {res.status_code}: {res.text}"
+
+    if res.status_code == 409:
+        # The run already reached a terminal state — nothing left to cancel.
+        return
 
     result = poll_until_done(bearer, run_id)
-    assert result["status"] in ("cancelled", "completed")
+    assert result["status"] == "cancelled"
 
 
 # ── Internal catalog refresh ───────────────────────────────────────────────────

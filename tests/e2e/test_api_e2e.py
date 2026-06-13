@@ -7,7 +7,7 @@ URL structure through Conductor:
   Auth      POST /signup  POST /login  GET /users/{id}
   Tickets   /tickets/tickets  /tickets/tickets/{id}  /tickets/tickets/{id}/comments
             /tickets/field-defs
-  Workflows /workflows/steps  /workflows/workflows  /workflows/workflows/{id}/runs
+  Workflows /workflows/steps  /workflows/pipelines  /workflows/pipelines/{id}/runs
             /workflows/runs  /workflows/runs/{id}  /workflows/actions
 """
 
@@ -62,7 +62,7 @@ def create_healthz_step(bearer, suffix=None):
 
 
 def create_pipeline(bearer, step_ids, name=None):
-    res = requests.post(f"{API_URL}/workflows/workflows", headers=bearer, json={
+    res = requests.post(f"{API_URL}/workflows/pipelines", headers=bearer, json={
         "name": name or f"e2e-pipeline-{uuid.uuid4().hex[:6]}",
         "steps": [{"step_id": sid} for sid in step_ids],
     })
@@ -72,7 +72,7 @@ def create_pipeline(bearer, step_ids, name=None):
 
 def trigger_run(bearer, workflow_id):
     res = requests.post(
-        f"{API_URL}/workflows/workflows/{workflow_id}/runs",
+        f"{API_URL}/workflows/pipelines/{workflow_id}/runs",
         headers=bearer,
     )
     assert res.status_code == 201, res.text
@@ -85,7 +85,7 @@ def cleanup(bearer, *, ticket_ids=(), run_ids=(), workflow_ids=(), step_ids=()):
     for rid in run_ids:
         requests.delete(f"{API_URL}/workflows/runs/{rid}", headers=bearer)
     for wid in workflow_ids:
-        requests.delete(f"{API_URL}/workflows/workflows/{wid}", headers=bearer)
+        requests.delete(f"{API_URL}/workflows/pipelines/{wid}", headers=bearer)
     for sid in step_ids:
         requests.delete(f"{API_URL}/workflows/steps/{sid}", headers=bearer)
 
@@ -272,7 +272,7 @@ class TestWorkflowJourney:
         pipeline = create_pipeline(bearer, [step["step_id"]])
         wf_id = pipeline["workflow_id"]
 
-        res = requests.get(f"{API_URL}/workflows/workflows", headers=bearer)
+        res = requests.get(f"{API_URL}/workflows/pipelines", headers=bearer)
         assert res.status_code == 200
         ids = [w["workflow_id"] for w in res.json()]
         assert wf_id in ids
@@ -346,7 +346,7 @@ class TestWorkflowJourney:
 
     def test_unauthenticated_trigger_rejected(self):
         res = requests.post(
-            f"{API_URL}/workflows/workflows/{uuid.uuid4()}/runs"
+            f"{API_URL}/workflows/pipelines/{uuid.uuid4()}/runs"
         )
         assert res.status_code == 401
 
@@ -454,7 +454,7 @@ class TestCrossServiceLinkage:
         assert step_res.status_code == 201, step_res.text
         step_id = step_res.json()["step_id"]
 
-        pipeline_res = requests.post(f"{API_URL}/workflows/workflows", headers=auth, json={
+        pipeline_res = requests.post(f"{API_URL}/workflows/pipelines", headers=auth, json={
             "name": f"journey-pipeline-{uid}",
             "steps": [{"step_id": step_id}],
         })
@@ -463,7 +463,7 @@ class TestCrossServiceLinkage:
 
         # 4. Trigger a run
         run_res = requests.post(
-            f"{API_URL}/workflows/workflows/{wf_id}/runs", headers=auth,
+            f"{API_URL}/workflows/pipelines/{wf_id}/runs", headers=auth,
         )
         assert run_res.status_code == 201, run_res.text
         run_id = run_res.json()["run_id"]

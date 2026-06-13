@@ -37,7 +37,13 @@ type genericPayload struct {
 // signTrigger creates an HMAC-SHA256 token that the workflows service can
 // verify to authenticate hook-originated trigger requests.
 func signTrigger(workflowID, triggeredBy string) (token, timestamp string) {
-	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	return signTriggerAt(workflowID, triggeredBy, time.Now().Unix())
+}
+
+// signTriggerAt is signTrigger with an explicit clock, so the signing contract
+// can be tested deterministically.
+func signTriggerAt(workflowID, triggeredBy string, unix int64) (token, timestamp string) {
+	ts := strconv.FormatInt(unix, 10)
 	mac := hmac.New(sha256.New, []byte(hooksTriggerKey))
 	fmt.Fprintf(mac, "hooks:%s:%s:%s", workflowID, triggeredBy, ts)
 	return hex.EncodeToString(mac.Sum(nil)), ts

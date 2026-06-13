@@ -134,9 +134,46 @@ If --email is omitted the command prompts for it interactively.
 var signupCmd = &cobra.Command{
 	Use:   "signup",
 	Short: "Register a new account",
+	Long: `Register a new CodeArmory account.
+
+If --email or --username are omitted they are prompted for interactively
+(the password is always prompted, never taken from a flag).
+
+  # Fully interactive:
+  armory auth signup
+
+  # Non-interactive:
+  armory auth signup --email you@example.com --username you`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		email, _ := cmd.Flags().GetString("email")
 		username, _ := cmd.Flags().GetString("username")
+
+		if email == "" {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return fmt.Errorf("--email is required (pass --email, or run interactively to be prompted)")
+			}
+			var err error
+			if email, err = prompt("Email", ""); err != nil {
+				return fmt.Errorf("reading email: %w", err)
+			}
+		}
+		if email == "" {
+			return fmt.Errorf("email is required")
+		}
+
+		if username == "" {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return fmt.Errorf("--username is required (pass --username, or run interactively to be prompted)")
+			}
+			var err error
+			if username, err = prompt("Username", ""); err != nil {
+				return fmt.Errorf("reading username: %w", err)
+			}
+		}
+		if username == "" {
+			return fmt.Errorf("username is required")
+		}
+
 		password, err := readPassword()
 		if err != nil {
 			return fmt.Errorf("reading password: %w", err)
@@ -199,10 +236,8 @@ var authStatusCmd = &cobra.Command{
 func init() {
 	loginCmd.Flags().String("email", "", "email address (optional — prompted if omitted)")
 
-	signupCmd.Flags().String("email", "", "email address")
-	signupCmd.Flags().String("username", "", "username (alphanumeric, hyphens, underscores; 1–64 chars)")
-	signupCmd.MarkFlagRequired("email")    //nolint:errcheck
-	signupCmd.MarkFlagRequired("username") //nolint:errcheck
+	signupCmd.Flags().String("email", "", "email address (optional — prompted if omitted)")
+	signupCmd.Flags().String("username", "", "username (alphanumeric, hyphens, underscores; 1–64 chars; prompted if omitted)")
 
 	authCmd.AddCommand(loginCmd, signupCmd, logoutCmd, authStatusCmd)
 	rootCmd.AddCommand(authCmd)

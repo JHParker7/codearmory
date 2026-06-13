@@ -1,7 +1,9 @@
 go 1.25.6
 
 use (
+	./argo
 	./blueprints
+	./chaos
 	./conductor
 	./containers
 	./egress-proxy
@@ -10,6 +12,8 @@ use (
 	./gitea_integration
 	./hooks
 	./mcp
+	./outpost
+	./outpost-gateway
 	./registry
 	./tickets
 	./workflows

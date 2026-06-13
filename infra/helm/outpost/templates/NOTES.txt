@@ -1,0 +1,33 @@
+CodeArmory outpost installed: {{ include "outpost.fullname" . }}
+
+Modules enabled: {{ .Values.modules }}
+Control plane:   {{ .Values.controlPlaneURL }}
+
+The outpost connects OUTBOUND to the control-plane outpost-gateway. No inbound
+access to this cluster is required.
+
+Check it connected:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "outpost.fullname" . }} -f
+  # then, in the portal, the outpost's status should move to "connected".
+
+{{- if eq (include "outpost.hasModule" (list . "chaos")) "true" }}
+
+[chaos] The Litmus chaos-operator and litmuschaos.io/v1alpha1 CRDs must be
+present in this cluster. Apply the vendored bundle first if you have not:
+  kubectl apply -f https://litmuschaos.github.io/litmus/litmus-operator-v3.29.0.yaml
+Experiments run as ServiceAccount "{{ .Values.chaos.runnerServiceAccount }}" in:
+{{- range .Values.chaos.targetNamespaces }}
+  - {{ . }}
+{{- end }}
+{{- end }}
+{{- if eq (include "outpost.hasModule" (list . "argo")) "true" }}
+
+[argo] Reads/patches Argo CD Applications in namespace "{{ .Values.argo.namespace }}".
+{{- end }}
+
+{{- if and (not .Values.enrollmentToken) (not .Values.existingSecret) }}
+
+WARNING: no enrollmentToken or existingSecret was set. Set --set enrollmentToken=<token>
+from the portal, or point existingSecret at a Secret containing enrollment-token
+(or outpost-id/outpost-key).
+{{- end }}

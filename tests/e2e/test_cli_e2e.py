@@ -44,7 +44,8 @@ class TestAuthLifecycle:
             "--password", new_user["password"],
         )
         assert rc == 0, f"stderr: {err}"
-        assert "Logged in" in out
+        # The CLI prints "Logged in — ..." to stderr (auth.go), not stdout.
+        assert "Logged in" in err
 
     def test_status_with_token(self, run_cli, token):
         out, _, rc = run_cli("auth", "status", token=token)
@@ -418,7 +419,7 @@ class TestCrossServiceCLI:
         """
         # Get token for subsequent CLI calls
         login_res = requests.post(
-            f"{API_URL}/login",
+            f"{API_URL}/gatekeeper/login",
             json={"email": new_user["email"], "password": new_user["password"]},
         )
         assert login_res.status_code == 200, login_res.text

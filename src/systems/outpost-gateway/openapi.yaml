@@ -1,0 +1,156 @@
+openapi: 3.1.0
+info:
+  title: Outpost Gateway
+  description: |
+    Outpost-facing connection point for the integration framework, distinct from
+    conductor. It enrolls outposts, hands out commands via long-poll, ingests
+    events into a Postgres outbox, and dispatches them to integration consumer
+    services. Self-hosted and SaaS use the identical mechanism.
+
+    ## Auth surfaces
+
+    - User-facing `/outposts*` routes are reached through conductor with a
+      Gatekeeper bearer token.
+    - Outpost-facing `/outpost/*` routes are hit directly by an outpost using its
+      enrollment token (register) then its long-lived outpost key
+      (`X-Outpost-ID` + `Authorization: Bearer <key>`).
+    - `/internal/commands` is authenticated with a shared-key HMAC
+      (`X-Internal-Token`) used by control-plane services.
+  version: 1.0.0
+  contact:
+    email: jhp1403@gmail.com
+
+servers:
+  - url: http://localhost:8092
+    description: Local development server
+
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      operationId: healthz
+      responses:
+        '200': { description: Service is healthy }
+
+  /outposts:
+    get:
+      summary: List outposts
+      operationId: listOutpost
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Outposts visible to the caller
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Outpost' } }
+    post:
+      summary: Register an outpost (mints a single-use enrollment token)
+      operationId: createOutpost
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                modules: { type: array, items: { type: string, enum: [chaos, argo] } }
+      responses:
+        '201':
+          description: Created; enrollment_token is returned once
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Outpost' }
+                  - type: object
+                    properties: { enrollment_token: { type: string } }
+
+  /outposts/{id}:
+    get:
+      summary: Get an outpost
+      operationId: getOutpost
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: The outpost, content: { application/json: { schema: { $ref: '#/components/schemas/Outpost' } } } }
+        '404': { description: Not found }
+    delete:
+      summary: Delete an outpost
+      operationId: deleteOutpost
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '204': { description: Deleted }
+
+  /outpost/register:
+    post:
+      summary: Enroll an outpost (outpost-facing)
+      operationId: outpostRegister
+      responses:
+        '201':
+          description: Enrolled; returns the long-lived outpost key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  outpost_id: { type: string }
+                  outpost_key: { type: string }
+                  modules: { type: string }
+        '401': { description: Invalid or used enrollment token }
+
+  /outpost/commands:
+    get:
+      summary: Long-poll for commands (outpost-facing)
+      operationId: outpostCommands
+      responses:
+        '200': { description: A (possibly empty) batch of commands }
+        '401': { description: Unauthenticated }
+
+  /outpost/commands/{id}/ack:
+    post:
+      summary: Acknowledge a command (outpost-facing)
+      operationId: outpostAckCommand
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '204': { description: Acknowledged }
+
+  /outpost/events:
+    post:
+      summary: Ingest an event (outpost-facing)
+      operationId: outpostEvents
+      responses:
+        '202': { description: Accepted into the outbox }
+
+  /outpost/heartbeat:
+    post:
+      summary: Report liveness (outpost-facing)
+      operationId: outpostHeartbeat
+      responses:
+        '204': { description: Recorded }
+
+  /internal/commands:
+    post:
+      summary: Enqueue a command for an outpost (internal HMAC)
+      operationId: enqueueCommand
+      responses:
+        '202': { description: Enqueued }
+        '401': { description: Invalid internal token }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  schemas:
+    Outpost:
+      type: object
+      properties:
+        outpost_id: { type: string }
+        org_id: { type: string }
+        name: { type: string }
+        modules: { type: string }
+        status: { type: string, enum: [pending, connected, stale] }
+        last_seen_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }

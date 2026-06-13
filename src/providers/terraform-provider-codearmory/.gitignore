@@ -1,0 +1,8 @@
+# Compiled provider binary
+/terraform-provider-codearmory
+
+# Local OpenTofu/Terraform working files (e.g. from running the examples)
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*

@@ -11,7 +11,9 @@ becomes /state/alice/dev when it reaches Blueprints. Conductor enforces RBAC
 by calling Gatekeeper's POST /check_permissions before forwarding each request.
 """
 
+import os
 import uuid
+import pytest
 import requests
 
 
@@ -188,3 +190,20 @@ class TestInternalRefresh:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 401
+
+    def test_correct_key_returns_202(self, base_url):
+        """The registry notify key (X-Service-Key: registry:<CONDUCTOR_NOTIFY_KEY>)
+        is accepted and triggers an async route-table refresh.
+
+        Without this positive case the 401 tests above pass vacuously: when
+        CONDUCTOR_NOTIFY_KEY is unset, conductor rejects every request regardless
+        of the header, so the auth logic is never actually exercised.
+        """
+        notify_key = os.getenv("CONDUCTOR_NOTIFY_KEY")
+        if not notify_key:
+            pytest.skip("CONDUCTOR_NOTIFY_KEY not set; cannot exercise the accept path")
+        resp = requests.post(
+            f"{base_url}/internal/refresh",
+            headers={"X-Service-Key": f"registry:{notify_key}"},
+        )
+        assert resp.status_code == 202

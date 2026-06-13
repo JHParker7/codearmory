@@ -382,7 +382,7 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 		attribute.String("workspace", workspaceKey),
 	))
 
-	blueprintsURL := envOrDefault("BLUEPRINTS_EXTERNAL_URL", "http://blueprints:8084")
+	blueprintsURL := envOrDefault("BLUEPRINTS_EXTERNAL_URL", "http://blueprints:8093")
 	addr := fmt.Sprintf("%s/state/%s", blueprintsURL, workspaceKey)
 
 	resp := backendResponse{

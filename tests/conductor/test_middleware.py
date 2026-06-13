@@ -1,15 +1,22 @@
-"""Integration tests for conductor's user-existence middleware.
+"""Integration tests for conductor's auth middleware.
 
-Conductor forwards POST /signup and POST /login to Gatekeeper without any
-auth check. Every other non-public path goes through checkUserAuth, which:
-  1. Requires an Authorization: Bearer <token> header.
-  2. Decodes the JWT payload to extract the sub (user ID).
-  3. Calls GET /users/{id} on Gatekeeper to verify the token signature and
-     confirm the user is active.
-  4. Returns 401 if any of those steps fail; otherwise forwards the request.
-     On success, resets the source IP's failure counter.
-  5. After 10 consecutive 401s from the same source IP, that IP is blocked
-     for one hour (all requests return 403).
+Conductor forwards public routes (e.g. /gatekeeper/signup, /gatekeeper/login)
+to Gatekeeper without any auth check. Every other non-public path goes through
+checkUserAuth, which:
+  1. Requires an Authorization: Bearer <token> header (or armory_session cookie).
+  2. Decodes the JWT payload locally (no signature check) to validate its
+     structure and extract the sub (user ID). Malformed or expired tokens are
+     rejected here with 401 without calling Gatekeeper.
+  3. For a well-formed, unexpired token, calls POST /check_permissions on
+     Gatekeeper with the (service, action, resource) for the route. Gatekeeper
+     verifies the signature and evaluates RBAC.
+  4. Returns 401 if Gatekeeper reports the token is invalid, 403 if it is valid
+     but unauthorized, and forwards the request on success.
+  5. The suspicious-activity counter only increments when a well-formed,
+     unexpired token reaches Gatekeeper and fails (401 or 403). Requests with no
+     token, a malformed token, or an expired token do not count. On success the
+     source IP's counter is reset. After 10 such failures from one source IP,
+     that IP is blocked for one hour (non-public routes then return 403).
 """
 
 import base64

@@ -368,13 +368,15 @@ func TestTUIModel_Runs_EnterNavigatesToDetail(t *testing.T) {
 }
 
 func TestTUIModel_Runs_CancelKey_NonCancellable_Noop(t *testing.T) {
-	// Pressing c on a completed run should not make an HTTP call.
-	// We set no server — if doRequest is called, it will fail with a connection error.
+	// Pressing c on a completed run is a no-op: the cancel branch is skipped, so
+	// no cancel/fetch cmd is emitted (and thus no HTTP call is made).
 	m := newTUIModel()
 	m.view = tuiViewRuns
 	m = applyMsg(m, tuiRunsMsg([]tuiRun{{RunID: "run-done", Status: "completed"}}))
-	// No error should happen since the cancel check skips completed runs.
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	if cmd != nil {
+		t.Error("c on a completed run should not emit a cmd")
+	}
 }
 
 func TestTUIModel_Runs_CancelKey_PendingRun(t *testing.T) {

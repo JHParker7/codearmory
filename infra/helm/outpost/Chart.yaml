@@ -1,0 +1,16 @@
+apiVersion: v2
+name: outpost
+description: |
+  CodeArmory outpost — the single customer-deployed agent that is the sole
+  in-cluster actuator/collector for cluster integrations (chaos, argo). It dials
+  out to the control-plane outpost-gateway over HTTPS (long-poll commands,
+  outbound POST events); no inbound access to the cluster is required.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - codearmory
+  - chaos-engineering
+  - argo-cd
+  - outpost
+home: https://github.com/code-armory-app/codearmory

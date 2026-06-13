@@ -83,7 +83,7 @@
   },
   {
     "name": "blueprints",
-    "url": "http://blueprints:8084",
+    "url": "http://blueprints:8093",
     "description": "OpenTofu/Terraform remote state storage",
     "forward_auth": true,
     "service_key": "blueprints-registry-local-secret",
@@ -305,6 +305,103 @@
         "grant_on": "user",
         "actions": ["listRepository", "listTag", "getManifest"],
         "resources": ["{username}/containers/repositories", "{username}/containers/repositories/*"]
+      }
+    ]
+  },
+  {
+    "name": "outpost-gateway",
+    "url": "http://outpost-gateway:8092",
+    "description": "Outpost-facing connection point for cluster integrations",
+    "forward_auth": true,
+    "service_key": "outpost-gateway-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/outposts",      "action": "createOutpost", "resource": "outpost-gateway/outposts"      },
+      { "method": "GET",    "path": "/outposts",      "action": "listOutpost",   "resource": "outpost-gateway/outposts"      },
+      { "method": "GET",    "path": "/outposts/{id}", "action": "getOutpost",    "resource": "outpost-gateway/outposts/{id}" },
+      { "method": "DELETE", "path": "/outposts/{id}", "action": "deleteOutpost", "resource": "outpost-gateway/outposts/{id}" }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createOutpost", "listOutpost", "getOutpost", "deleteOutpost"],
+        "resources": ["{username}/outpost-gateway/outposts", "{username}/outpost-gateway/outposts/*"]
+      }
+    ]
+  },
+  {
+    "name": "chaos",
+    "url": "http://chaos:8090",
+    "description": "Chaos engineering experiments via outposts",
+    "forward_auth": true,
+    "service_key": "chaos-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/experiments",      "action": "createExperiment",   "resource": "chaos/experiments"      },
+      { "method": "GET",    "path": "/experiments",      "action": "listExperiment",     "resource": "chaos/experiments"      },
+      { "method": "GET",    "path": "/experiments/{id}", "action": "getExperiment",      "resource": "chaos/experiments/{id}" },
+      { "method": "DELETE", "path": "/experiments/{id}", "action": "deleteExperiment",   "resource": "chaos/experiments/{id}" },
+      { "method": "GET",    "path": "/experiment-types", "action": "listExperimentType", "resource": "chaos/experiment-types" }
+    ],
+    "actions": [
+      {
+        "name": "chaos/run-experiment",
+        "method": "POST",
+        "path": "/experiments",
+        "async": {
+          "id_field": "experiment_id",
+          "poll_path": "/experiments/{id}",
+          "poll_interval_secs": 5,
+          "status_field": "status",
+          "success_states": ["Pass"],
+          "failure_states": ["Fail", "Error"],
+          "cancel_states": ["stopped"],
+          "output_field": "verdict",
+          "error_fields": ["fail_step"]
+        }
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createExperiment", "listExperiment", "getExperiment", "deleteExperiment", "listExperimentType"],
+        "resources": ["{username}/chaos/experiments", "{username}/chaos/experiments/*", "{username}/chaos/experiment-types"]
+      }
+    ]
+  },
+  {
+    "name": "argo",
+    "url": "http://argo:8091",
+    "description": "Argo CD application sync via outposts",
+    "forward_auth": true,
+    "service_key": "argo-registry-local-secret",
+    "endpoints": [
+      { "method": "GET",  "path": "/apps",             "action": "listApp",  "resource": "argo/apps"         },
+      { "method": "GET",  "path": "/apps/{name}",      "action": "getApp",   "resource": "argo/apps/{name}"  },
+      { "method": "POST", "path": "/apps/{name}/sync", "action": "syncApp",  "resource": "argo/apps/{name}"  },
+      { "method": "GET",  "path": "/syncs/{id}",       "action": "getSync",  "resource": "argo/syncs/{id}"   }
+    ],
+    "actions": [
+      {
+        "name": "argo/sync",
+        "method": "POST",
+        "path": "/apps/{name}/sync",
+        "async": {
+          "id_field": "sync_id",
+          "poll_path": "/syncs/{id}",
+          "poll_interval_secs": 5,
+          "status_field": "status",
+          "success_states": ["Synced"],
+          "failure_states": ["Failed"],
+          "cancel_states": [],
+          "output_field": "revision",
+          "error_fields": ["message"]
+        }
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["listApp", "getApp", "syncApp", "getSync"],
+        "resources": ["{username}/argo/apps", "{username}/argo/apps/*", "{username}/argo/syncs", "{username}/argo/syncs/*"]
       }
     ]
   }

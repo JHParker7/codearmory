@@ -231,8 +231,8 @@ func TestHooksModel_Rules_E_LoadsAllEvents(t *testing.T) {
 	}
 	cmd()
 	// No ?repo= query parameter should be in the URL.
-	if strings.Contains(rec.Path+"?"+rec.Path, "repo=") {
-		t.Error("e key should fetch events without a repo filter")
+	if strings.Contains(rec.Query, "repo=") {
+		t.Errorf("e key should fetch events without a repo filter; query = %q", rec.Query)
 	}
 }
 
@@ -366,10 +366,9 @@ func TestHooksModel_Events_Enter_Noop_WhenEmpty(t *testing.T) {
 	m.view = hooksViewEvents
 	m = applyHooksMsg(m, hookEventsMsg([]hookEvent{}))
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if updated.(hooksModel).view != hooksViewEventDetail {
-		// view should NOT have changed since there are no events.
+	if updated.(hooksModel).view == hooksViewEventDetail {
+		t.Error("enter with no events should not switch to the event-detail view")
 	}
-	// Just checking no panic.
 }
 
 func TestHooksModel_Events_R_Refreshes_WithRepoFilter(t *testing.T) {

@@ -17,10 +17,11 @@ This guide explains what each CodeArmory service does, how they fit together, an
 9. [Task Tracking — Tickets](#task-tracking--tickets)
 10. [Forgejo/Gitea Integration — Gitea Integration](#forgejoitea-integration--gitea-integration)
 11. [Container Registry Management — Containers](#container-registry-management--containers)
-12. [Egress Proxy](#egress-proxy)
-13. [CLI — Armory](#cli--armory)
-14. [Observability](#observability)
-15. [Running the stack](#running-the-stack)
+12. [Cluster Integrations — Outposts, Chaos, Argo](#cluster-integrations--outposts-chaos-argo)
+13. [Egress Proxy](#egress-proxy)
+14. [CLI — Armory](#cli--armory)
+15. [Observability](#observability)
+16. [Running the stack](#running-the-stack)
 
 ---
 
@@ -36,7 +37,7 @@ Browser / CLI / Terraform
         │
         ├── POST /signup, POST /login ──► Gatekeeper :8081  (public)
         │
-        ├── /state/...            ──────► Blueprints        :8084  (Terraform state)
+        ├── /state/...            ──────► Blueprints        :8093  (Terraform state)
         ├── /executions/...       ──────► Forge             :8083  (sandboxed runners)
         ├── /workflows/...        ──────► Workflows         :8085  (pipelines)
         ├── /tickets/...          ──────► Tickets           :8086  (task tracker)
@@ -156,7 +157,7 @@ Once registered, Conductor picks up the new service on its next poll (every 30 s
 
 ## Infrastructure State — Blueprints
 
-**Port:** 8084
+**Port:** 8093
 
 Blueprints implements the [Terraform HTTP backend protocol](https://developer.hashicorp.com/terraform/language/settings/backends/http). It stores OpenTofu/Terraform workspace state in PostgreSQL with locking support to prevent concurrent state writes.
 
@@ -459,6 +460,66 @@ curl -X DELETE \
 ```
 
 The management API (`/repositories`, `/tags`, `/manifests`) is gated by Gatekeeper RBAC. The `/v2/...` OCI distribution proxy passes requests to the upstream registry without RBAC interception — Docker clients authenticate directly with their registry credentials.
+
+---
+
+## Cluster Integrations — Outposts, Chaos, Argo
+
+**Ports:** Outpost Gateway 8092, Chaos 8090, Argo 8091. Outpost: no port (dials out).
+
+Some capabilities — running chaos-engineering experiments, driving Argo CD syncs — require acting *inside* a Kubernetes cluster. CodeArmory never reaches into a cluster from the control plane. Instead, a single customer-deployed **outpost** runs in (or against) the target cluster and **dials out** to the control plane. This means no inbound access to your cluster and no control-plane cluster credentials, and the same mechanism serves both self-hosted and SaaS.
+
+```
+your cluster                                     control plane
+┌─ outpost ───────────────┐   HTTPS    ┌─ Outpost Gateway :8092 ─────────────┐
+│ modules: chaos, argo    │  outbound  │ enroll · long-poll commands ·       │
+│ (you choose which)      │ ◄────────► │ ingest events  (Postgres backbone)  │
+└─────────────────────────┘  long-poll └──────────┬──────────────────────────┘
+                              + POST     dispatch by integration
+                                    Chaos :8090   ·   Argo :8091   → Workflows / Hooks / Portal
+```
+
+**How it flows.** A control service (Chaos, Argo) enqueues a *command* for an outpost via the gateway. The outpost long-polls, the right module performs the action in-cluster, and reports *events* back. The gateway delivers each event to the owning service, which updates its records and weaves the result into workflows, hooks, and the portal. Everything is at-least-once and idempotent, backed by Postgres queues — no message broker.
+
+### Deploying an outpost
+
+1. In the portal's **Outposts** page, add an outpost and choose its modules (chaos, argo). Copy the single-use enrollment token.
+2. Install the outpost in your cluster with the dedicated chart:
+
+   ```bash
+   helm install my-outpost infra/helm/outpost \
+     --namespace codearmory-outpost --create-namespace \
+     --set controlPlaneURL=https://gateway.example.com \
+     --set modules="chaos\,argo" \
+     --set enrollmentToken=<token>
+   ```
+
+   The chart grants least-privilege RBAC per module (chaos → `litmuschaos.io` CRDs + a runner ServiceAccount per target namespace; argo → `argoproj.io` Applications). The chaos module also requires the Litmus chaos-operator to be installed in-cluster (see the [chart README](../infra/helm/outpost/README.md)).
+3. The outpost's status moves to `connected` once it enrolls and heartbeats.
+
+### Chaos engineering
+
+Start an experiment against a workload by label selector; the verdict comes back as the experiment moves `pending → running → Pass`/`Fail`/`Error`:
+
+```bash
+curl -X POST http://localhost:8090/experiments \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"outpost_id":"<id>","experiment_type":"pod-delete",
+       "target_app_ns":"demo","target_app_label":"app.kubernetes.io/component=conductor"}'
+```
+
+A pipeline can **gate on a verdict** with the `chaos/run-experiment` action — the step fails unless the experiment passes. See [chaos](chaos/README.md).
+
+### Argo CD sync
+
+Applications appear automatically as the outpost reports them. Trigger a sync and watch it converge to `Synced`/`Failed`, or gate a pipeline on a healthy sync with the `argo/sync` action:
+
+```bash
+curl -X POST http://localhost:8091/apps/guestbook/sync \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" -d '{"revision":"HEAD"}'
+```
+
+See [argo](argo/README.md). Both are the same framework — adding the next integration is a new outpost module + a thin consumer service, nothing in the core. Full detail: [outpost/README.md](outpost/README.md).
 
 ---
 

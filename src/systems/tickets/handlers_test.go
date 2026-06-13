@@ -249,23 +249,6 @@ func TestHandleUpdateTicket_Unauthorized(t *testing.T) {
 	}
 }
 
-func TestHandleUpdateTicket_InvalidStatus(t *testing.T) {
-	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
-
-	// We can't easily test further without a real DB, but we can verify that
-	// an auth-passing request with a bad body returns 400 via the gatekeeper
-	// authorized path → 404 (ticket not found since db is nil).
-	body := `{"title":"T","status":"invalid_status"}`
-	r := httptest.NewRequest(http.MethodPut, "/tickets/some-id", bytes.NewBufferString(body))
-	r.Header.Set("Authorization", "Bearer tok")
-	r.SetPathValue("id", "some-id")
-	w := httptest.NewRecorder()
-	// This will panic if db is nil — skip if db not initialised.
-	// The status validation is exercised in integration tests.
-	_ = w
-	_ = r
-}
-
 // ── envOrDefault / secret ────────────────────────────────────────────────────
 
 func TestEnvOrDefault_Set(t *testing.T) {

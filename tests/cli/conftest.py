@@ -1,7 +1,7 @@
 """Shared fixtures for armory CLI integration tests.
 
 The tests run the actual armory binary against a live conductor service.
-Set CONDUCTOR_URL to target a non-default endpoint (default: http://localhost:8082).
+Set CONDUCTOR_URL to target a non-default endpoint (default: http://localhost:8080).
 Set ARMORY_BIN to use a pre-built binary; otherwise the fixture builds one from
 src/cli/ relative to this file.
 """
@@ -47,7 +47,7 @@ def armory_bin(tmp_path_factory):
 
 @pytest.fixture(scope="session")
 def conductor_url():
-    return os.getenv("CONDUCTOR_URL", "http://localhost:8082")
+    return os.getenv("CONDUCTOR_URL", "http://localhost:8080")
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ def new_user(conductor_url):
         "username": f"cli_{uid}",
         "password": "password123",
     }
-    resp = requests.post(f"{conductor_url}/signup", json=payload)
+    resp = requests.post(f"{conductor_url}/gatekeeper/signup", json=payload)
     assert resp.status_code == 201, f"signup failed: {resp.text}"
     payload["user_id"] = resp.json()["user_id"]
     return payload
@@ -72,7 +72,7 @@ def new_user(conductor_url):
 @pytest.fixture
 def token(conductor_url, new_user):
     resp = requests.post(
-        f"{conductor_url}/login",
+        f"{conductor_url}/gatekeeper/login",
         json={"email": new_user["email"], "password": new_user["password"]},
     )
     assert resp.status_code == 200, f"login failed: {resp.text}"

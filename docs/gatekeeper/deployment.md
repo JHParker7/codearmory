@@ -14,7 +14,7 @@ Services:
 | Service | Port | Description |
 |---------|------|-------------|
 | gatekeeper | 8081 | Auth, RBAC, user management |
-| blueprints | 8084 | OpenTofu/Terraform state backend |
+| blueprints | 8093 | OpenTofu/Terraform state backend |
 | conductor | 8080 | API gateway |
 | forge | 8083 | Sandboxed execution service |
 | registry | 8082 | Service discovery and endpoint registry |

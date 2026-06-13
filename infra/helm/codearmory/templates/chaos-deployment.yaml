@@ -1,0 +1,106 @@
+{{- if .Values.chaos.enabled }}
+{{- $full := include "codearmory.fullname" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-chaos
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: chaos
+spec:
+  replicas: {{ .Values.chaos.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "codearmory.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: chaos
+  template:
+    metadata:
+      labels:
+        {{- include "codearmory.labels" . | nindent 8 }}
+        app.kubernetes.io/component: chaos
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
+      containers:
+        - name: chaos
+          image: "{{ include "codearmory.image" (list . .Values.chaos) }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.chaos.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.chaos.port | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.chaos.env.logLevel | quote }}
+            - name: GATEKEEPER_URL
+              value: "http://{{ $full }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+            {{- if .Values.outpostGateway.enabled }}
+            - name: OUTPOST_GATEWAY_URL
+              value: "http://{{ $full }}-outpost-gateway:{{ .Values.outpostGateway.port }}"
+            {{- end }}
+            {{- if .Values.hooks.enabled }}
+            - name: HOOKS_URL
+              value: "http://{{ $full }}-hooks:{{ .Values.hooks.port }}"
+            {{- end }}
+            {{- if .Values.chaos.env.otelEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.chaos.env.otelEndpoint | quote }}
+            {{- end }}
+            {{- include "codearmory.postgresql.env" (list . "chaos" "chaos" $full) | nindent 12 }}
+            - name: GATEKEEPER_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $full }}-chaos
+                  key: gatekeeper-service-key
+            - name: OUTPOST_INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $full }}-chaos
+                  key: outpost-internal-key
+            {{- if .Values.hooks.enabled }}
+            - name: HOOKS_TRIGGER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $full }}-chaos
+                  key: hooks-trigger-key
+            {{- end }}
+            {{- include "codearmory.tls.envs" .Values.chaos.tls | nindent 12 }}
+          {{- with (include "codearmory.tls.volumeMounts" .Values.chaos.tls) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.chaos.resources | nindent 12 }}
+      {{- with (include "codearmory.tls.volumes" .Values.chaos.tls) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
+{{- end }}

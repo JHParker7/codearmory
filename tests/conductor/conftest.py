@@ -16,7 +16,7 @@ def connect() -> sa.Connection:
 
 @pytest.fixture(scope="session")
 def base_url():
-    return os.getenv("CONDUCTOR_URL", "http://localhost:8082")
+    return os.getenv("CONDUCTOR_URL", "http://localhost:8080")
 
 
 def pytest_sessionfinish(session, exitstatus):

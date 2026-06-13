@@ -635,9 +635,25 @@ func TestGroupSteps_Mixed(t *testing.T) {
 	if len(groups) != 3 {
 		t.Fatalf("want 3 groups (seq, parallel, seq), got %d", len(groups))
 	}
-	if len(groups[1].steps) != 2 {
-		t.Fatalf("parallel group should have 2 steps, got %d", len(groups[1].steps))
+	// Assert membership, not just sizes: a bug that swapped which steps landed
+	// in which group while preserving group sizes must still fail.
+	if len(groups[0].steps) != 1 || groups[0].steps[0].StepID != "seq1" {
+		t.Errorf("group[0] should be [seq1], got %v", stepIDsOf(groups[0]))
 	}
+	if ids := stepIDsOf(groups[1]); len(ids) != 2 || ids[0] != "p1" || ids[1] != "p2" {
+		t.Errorf("group[1] should be [p1 p2], got %v", ids)
+	}
+	if len(groups[2].steps) != 1 || groups[2].steps[0].StepID != "seq2" {
+		t.Errorf("group[2] should be [seq2], got %v", stepIDsOf(groups[2]))
+	}
+}
+
+func stepIDsOf(g stepGroup) []string {
+	ids := make([]string, len(g.steps))
+	for i, s := range g.steps {
+		ids[i] = s.StepID
+	}
+	return ids
 }
 
 // ── substituteWith ────────────────────────────────────────────────────────────

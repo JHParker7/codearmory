@@ -19,6 +19,7 @@
 - **Forgejo/Gitea integration** — link CodeArmory user accounts to Forgejo identities and manage repos, branches, commits, and pull requests through the platform API (Gitea Integration).
 - **Container registry management** — authenticated RBAC-enforced visibility and deletion on top of any OCI registry, plus transparent `docker push`/`pull` proxying (Containers).
 - **Task tracker** — tickets linked directly to pipeline runs and forge executions, so deployment tasks and their outcomes live together (Tickets).
+- **Cluster integrations via outposts** — run chaos-engineering experiments (Litmus) and drive Argo CD syncs in your own clusters through a single customer-deployed **outpost** that dials out to the control plane. No inbound cluster access and no control-plane cluster credentials; one mechanism for self-hosted and SaaS, with pipelines that gate on experiment verdicts and healthy syncs (Outpost Gateway + Chaos + Argo).
 - **CLI-first** — every platform operation is available from `armory`. Create workflows, trigger runs, manage tickets, inspect logs — without opening a browser.
 - **MCP server** — expose the full platform API as MCP tools so AI assistants can trigger pipelines, inspect runs, and manage tickets directly.
 
@@ -55,7 +56,7 @@ Every request enters through Conductor. Backend services delegate auth to Gateke
 
     ┌─────────────┐   ┌─────────────┐   ┌──────────────┐
     │ Gatekeeper  │   │  Blueprints │   │    Forge     │
-    │   :8081     │   │   :8084     │   │    :8083     │
+    │   :8081     │   │   :8093     │   │    :8083     │
     │ auth + RBAC │   │ Tofu state  │   │   runners    │
     │ OIDC/SSO    │   └─────────────┘   └──────┬───────┘
     └─────────────┘                            │ egress
@@ -71,6 +72,18 @@ Every request enters through Conductor. Backend services delegate auth to Gateke
     │   :8086     │   │     :8088       │   │   :8089    │
     │   tasks     │   │ repos + PRs     │   │ OCI proxy  │
     └─────────────┘   └─────────────────┘   └────────────┘
+
+    Cluster integrations — the outpost dials out, no inbound access:
+
+    ┌──────────────────┐   ┌─────────────┐   ┌─────────────┐
+    │ Outpost Gateway  │   │    Chaos    │   │    Argo     │
+    │     :8092        │   │   :8090     │   │   :8091     │
+    │ enroll/commands/ │   │ experiments │   │  app sync   │
+    │ events backbone  │   └─────────────┘   └─────────────┘
+    └────────┬─────────┘   commands ▲ / events ▼ (HTTPS)
+    ┌────────┴─────────┐
+    │     Outpost      │  ← in your cluster: Litmus CRDs / Argo CD
+    └──────────────────┘
 ```
 
 ---
@@ -184,12 +197,16 @@ Binaries for Linux, macOS, and Windows are attached to each [GitHub release](../
 | Gatekeeper | 8081 | [Auth + RBAC + OIDC](docs/gatekeeper/README.md) |
 | Registry | 8082 | [Service discovery](docs/registry/README.md) |
 | Forge | 8083 | [Sandboxed execution](docs/forge/README.md) |
-| Blueprints | 8084 | [Terraform state](docs/blueprints/README.md) |
+| Blueprints | 8093 | [Terraform state](docs/blueprints/README.md) |
 | Workflows | 8085 | [Pipeline orchestration](docs/workflows/README.md) |
 | Tickets | 8086 | [Task tracker](docs/tickets/README.md) |
 | Hooks | 8087 | [Webhook receiver](docs/hooks/README.md) |
 | Gitea Integration | 8088 | [Forgejo/Gitea repos + PRs](docs/gitea_integration/README.md) |
 | Containers | 8089 | [OCI registry management](docs/containers/README.md) |
+| Chaos | 8090 | [Chaos engineering](docs/chaos/README.md) |
+| Argo | 8091 | [Argo CD sync](docs/argo/README.md) |
+| Outpost Gateway | 8092 | [Cluster integration backbone](docs/outpost-gateway/README.md) |
+| Outpost | — | [Customer-deployed cluster agent](docs/outpost/README.md) |
 | Egress Proxy | 3128 | [Allowlist proxy for Forge](docs/egress-proxy/README.md) |
 | Armory CLI | — | [Command reference](docs/cli/README.md) |
 
@@ -212,6 +229,10 @@ ghcr.io/code-armory-app/hooks:alpha-latest
 ghcr.io/code-armory-app/tickets:alpha-latest
 ghcr.io/code-armory-app/gitea_integration:alpha-latest
 ghcr.io/code-armory-app/containers:alpha-latest
+ghcr.io/code-armory-app/chaos:alpha-latest
+ghcr.io/code-armory-app/argo:alpha-latest
+ghcr.io/code-armory-app/outpost-gateway:alpha-latest
+ghcr.io/code-armory-app/outpost:alpha-latest
 ghcr.io/code-armory-app/egress-proxy:alpha-latest
 ghcr.io/code-armory-app/mcp:alpha-latest
 ```
@@ -258,6 +279,9 @@ docker compose --profile test run --rm forge-integration-tests
 docker compose --profile test run --rm workflows-integration-tests
 docker compose --profile test run --rm tickets-integration-tests
 docker compose --profile test run --rm hooks-integration-tests
+docker compose --profile test run --rm outpost-gateway-integration-tests
+docker compose --profile test run --rm chaos-integration-tests
+docker compose --profile test run --rm argo-integration-tests
 ```
 
 Gitea integration tests require a live Forgejo instance and run directly with pytest — see [tests/gitea_integration/](tests/gitea_integration/).

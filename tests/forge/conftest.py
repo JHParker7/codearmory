@@ -6,7 +6,11 @@ import pytest
 import requests
 
 FORGE_URL = os.getenv("FORGE_URL", "http://localhost:8083")
-GATEKEEPER_URL = os.getenv("GATEKEEPER_URL", "http://localhost:8080")
+# The fixtures below hit gatekeeper's unprefixed /signup and /login, which only
+# exist on gatekeeper directly (not through conductor). Gatekeeper is NOT
+# published to localhost by infra/local/compose.yml, so GATEKEEPER_URL must be
+# set explicitly for local runs. CI sets it to http://gatekeeper:8081.
+GATEKEEPER_URL = os.getenv("GATEKEEPER_URL", "http://localhost:8081")
 
 
 @pytest.fixture(scope="module")

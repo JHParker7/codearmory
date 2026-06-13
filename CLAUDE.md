@@ -85,13 +85,16 @@ All GORM-based services (`gatekeeper`, `hooks`, `tickets`, `workflows`, `gitea`,
 All services use the pattern `secret("NAME")` which checks `${NAME}_FILE` first (for k8s volume-mounted secrets), then falls back to the env var `NAME`.
 
 ### Go workspace
-`src/systems/go.work` covers all 12 backend services as a single workspace. The CLI (`src/cli/`) is a separate module. Run `go work sync` from `src/systems/` when adding new dependencies shared across services.
+`src/systems/go.work` covers all backend services as a single workspace (including `chaos`, `argo`, `outpost-gateway`, and the `outpost` agent). The CLI (`src/cli/`) is a separate module. Run `go work sync` from `src/systems/` when adding new dependencies shared across services.
 
 ### Workflows execution model
 The Workflows service (`:8085`) executes pipelines by grouping steps into sequential/parallel batches and making authenticated HTTP calls to the target service for each step. Steps can target any service registered in the registry — forge, blueprints, or custom services. Runs are tracked in Postgres; the worker polls for pending runs and processes them, recovering stuck runs on restart.
 
 ### Forge and egress isolation
 Forge (`:8083`) runs user commands as isolated containers (Docker or Kubernetes Jobs) with dropped capabilities. In Docker mode, execution containers are placed on the `forge-exec` internal network and route all outbound traffic through the Egress Proxy (`:3128`), which enforces a domain allowlist via `PROXY_ALLOWED_DOMAINS`. In Kubernetes mode, use NetworkPolicy for equivalent isolation.
+
+### Outpost integration framework
+Cluster integrations (chaos, argo) never touch a customer cluster from the control plane. A single customer-deployed **outpost** (`src/systems/outpost/`, the only Kubernetes/CRD code) runs in the target cluster and dials out to the **outpost-gateway** (`:8092`) over HTTPS — long-polling a Postgres command queue (`SKIP LOCKED`) and POSTing events into a Postgres outbox that a dispatcher delivers to consumer services (`/internal/events`, shared-key HMAC) with dead-letter retry. Each integration is one outpost **module** + one thin control-plane **consumer service** (`chaos` `:8090`, `argo` `:8091`) that holds no cluster credentials. The internal command/event plane is authenticated by `OUTPOST_INTERNAL_KEY` (shared by the gateway and all consumers); outposts authenticate with per-outpost keys (bcrypt). The outpost ships via a separate chart at `infra/helm/outpost/`. Adding an integration touches neither the outpost core nor the gateway. See `docs/outpost/README.md`.
 
 ### MCP server
 `src/systems/mcp/` is a stdio-based MCP server, not an HTTP service — it is not deployed to Kubernetes. Users run it locally via `./codearmory-mcp` with `CODEARMORY_URL` pointing at a conductor endpoint. It wraps the full platform API (workflows, forge, hooks, tickets, containers) as MCP tools.
@@ -113,11 +116,16 @@ src/
     containers/     OCI registry management proxy
     egress-proxy/   Allowlist-enforcing HTTP CONNECT proxy for forge
     gitea/          Forgejo/Gitea integration — repos, PRs, git proxy
+    outpost-gateway/ Outpost-facing connection point + Postgres event backbone
+    chaos/          Chaos-engineering control plane (outpost integration)
+    argo/           Argo CD sync control plane (outpost integration)
+    outpost/        Customer-deployed in-cluster agent (chaos/argo modules; only K8s code)
     mcp/            stdio MCP server (not a deployed service)
 infra/
   local/            Docker Compose stack for local development
     registry-manifest.json   Service route/action/RBAC definitions
   helm/codearmory/  Production Helm chart
+  helm/outpost/     Customer-installable chart for the outpost agent
 tests/              Python integration tests (pytest) per service
 docs/               Per-service READMEs and platform guide
 ```

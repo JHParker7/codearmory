@@ -163,7 +163,7 @@ func main() {
 	})
 	mux.HandleFunc("/state/{username}/{workspace}", lockUnlock(userKey))
 
-	port := envOrDefault("PORT", "8084")
+	port := envOrDefault("PORT", "8093")
 
 	wrappedMux := otelhttp.NewHandler(newLogger(mux), "blueprints",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),

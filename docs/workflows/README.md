@@ -94,6 +94,27 @@ Named actions loaded from the registry every 5 minutes. The registry publishes e
 
 Use `GET /actions` to list all currently available catalog actions and their definitions.
 
+#### Async actions and gating
+
+Actions with an `async` block submit work and poll a status endpoint until it reaches a terminal state, so a pipeline step can *gate* on a long-running result. Besides `forge/run`, the cluster integrations publish:
+
+- **`chaos/run-experiment`** — runs a chaos experiment via an outpost and succeeds only on verdict `Pass` (fails on `Fail`/`Error`). Use it to fail a deploy that does not survive injected faults.
+- **`argo/sync`** — triggers an Argo CD sync via an outpost and succeeds only when the app is `Synced` + `Healthy` (fails on `Failed`).
+
+```json
+{
+  "action": "chaos/run-experiment",
+  "with": {
+    "outpost_id": "<outpost-id>",
+    "experiment_type": "pod-delete",
+    "target_app_ns": "demo",
+    "target_app_label": "app.kubernetes.io/component=conductor"
+  }
+}
+```
+
+See [chaos](../chaos/README.md) and [argo](../argo/README.md).
+
 ## Input substitution
 
 `${KEY}` placeholders in any string value inside a step's `with` map are replaced with values from the run's `inputs` map at execution time. Substitution applies recursively to nested maps and arrays. Unrecognised keys are left as-is.
@@ -126,7 +147,7 @@ DATABASE_URL=postgresql://postgres:pass@localhost:5432/workflows \
   GATEKEEPER_URL=http://localhost:8080 \
   REGISTRY_URL=http://localhost:8084 \
   REGISTRY_SERVICE_KEY=your-registry-key \
-  SERVICES=forge=http://localhost:8083,blueprints=http://localhost:8084 \
+  SERVICES=forge=http://localhost:8083,blueprints=http://localhost:8093 \
   go run .
 ```
 
@@ -143,7 +164,7 @@ docker run -p 8085:8085 \
   -e HOOKS_TRIGGER_KEY=your-hmac-secret \
   -e REGISTRY_URL=http://registry:8084 \
   -e REGISTRY_SERVICE_KEY=your-registry-key \
-  -e SERVICES=forge=http://forge:8083,blueprints=http://blueprints:8084 \
+  -e SERVICES=forge=http://forge:8083,blueprints=http://blueprints:8093 \
   workflows:latest
 ```
 

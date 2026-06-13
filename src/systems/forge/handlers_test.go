@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -224,14 +223,19 @@ func TestNewRuntime_UnknownRuntime(t *testing.T) {
 	}
 }
 
-// --- K8s runtime timeout wraps context.DeadlineExceeded ---
-// Verifies that errors.Is(err, context.DeadlineExceeded) works for the K8s
-// timeout error, so the worker can classify it without string matching.
+// --- K8s runtime timeout is classified as TimedOut ---
+// The k8s runtime wraps context.DeadlineExceeded (runtime_k8s.go) so the worker
+// can classify a job timeout via errors.Is rather than string matching. This
+// exercises classifyResult with the exact error shape the runtime produces.
 
-func TestK8sTimeoutWrapsDeadlineExceeded(t *testing.T) {
+func TestK8sTimeoutClassifiedAsTimedOut(t *testing.T) {
 	err := fmt.Errorf("timed out after 30s: %w", context.DeadlineExceeded)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal("expected wrapped context.DeadlineExceeded")
+	status, res := classifyResult(RunResult{ExitCode: ptr(1)}, err)
+	if status != StatusTimedOut {
+		t.Fatalf("classifyResult(timeout err) = %q, want %q", status, StatusTimedOut)
+	}
+	if res.ExitCode != nil {
+		t.Errorf("exit code = %v, want nil (a timeout has no real exit code)", *res.ExitCode)
 	}
 }
 

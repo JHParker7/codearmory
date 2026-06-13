@@ -185,6 +185,14 @@ jobs:
             context: src/systems/gitea_integration
           - name: mcp
             context: src/systems/mcp
+          - name: outpost-gateway
+            context: src/systems/outpost-gateway
+          - name: chaos
+            context: src/systems/chaos
+          - name: argo
+            context: src/systems/argo
+          - name: outpost
+            context: src/systems/outpost
           - name: gatekeeper-tests
             context: tests/gatekeeper
           - name: blueprints-tests
@@ -203,6 +211,12 @@ jobs:
             context: tests/hooks
           - name: gitea_integration-tests
             context: tests/gitea_integration
+          - name: outpost-gateway-tests
+            context: tests/outpost-gateway
+          - name: chaos-tests
+            context: tests/chaos
+          - name: argo-tests
+            context: tests/argo
     steps:
       - name: Checkout
         uses: actions/checkout@v5

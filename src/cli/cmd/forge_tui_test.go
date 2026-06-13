@@ -277,11 +277,15 @@ func TestForgeModel_List_X_AlsoCancelsRunning(t *testing.T) {
 }
 
 func TestForgeModel_List_X_Noop_WhenCompleted(t *testing.T) {
-	// Completed execs cannot be cancelled; no server needed since doRequest must not be called.
+	// Completed execs cannot be cancelled; pressing x must not emit a cancel cmd
+	// (so doRequest is never called).
 	m := applyForgeMsg(newForgeModel(), forgeExecsMsg([]forgeExec{
 		{ExecutionID: "exec-done", Status: "completed"},
 	}))
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	if cmd != nil {
+		t.Error("x on a completed exec should not emit a cmd")
+	}
 }
 
 func TestForgeModel_List_R_Refreshes(t *testing.T) {

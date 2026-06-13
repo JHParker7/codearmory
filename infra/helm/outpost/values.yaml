@@ -1,0 +1,99 @@
+# ── Outpost ───────────────────────────────────────────────────────────────────
+# The outpost is the only thing that touches in-cluster systems. It connects
+# OUTBOUND to the control-plane outpost-gateway; nothing connects in.
+
+image:
+  repository: outpost
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicaCount: 1
+
+# Base URL of the control-plane outpost-gateway (reachable from this cluster).
+# Self-hosted: the in-cluster gateway Service. SaaS: the gateway's public
+# ingress/LoadBalancer over a private link (e.g. WireGuard).
+controlPlaneURL: ""
+
+# Comma-separated modules to enable. Each maps to one consumer service in the
+# control plane. RBAC below is scoped per enabled module.
+modules: "chaos"
+
+# The gateway connection carries the outpost key and authorizes destructive
+# in-cluster actions, so the outpost requires https by default. Set true only for
+# a self-hosted gateway reached over an in-cluster Service (http://...).
+allowInsecureHTTP: false
+
+# Optional path (inside the container) to a CA bundle the outpost should trust for
+# the control-plane TLS connection — for pinning a private CA. Mount it yourself
+# (e.g. via a Secret volume) and point this at the mounted file.
+caFile: ""
+
+# Enrollment: paste the single-use enrollment token minted in the portal when
+# you add an outpost. The outpost exchanges it for a long-lived key on first
+# start and persists the key (see persistence). Alternatively pre-provide an
+# already-enrolled outpostId/outpostKey via existingSecret.
+enrollmentToken: ""
+existingSecret: ""   # a Secret with keys: enrollment-token (and/or outpost-id, outpost-key)
+
+logLevel: info
+otelEndpoint: ""
+
+# Persist the outpost identity/key so a restart does not need a fresh (single-
+# use) enrollment token. A small PVC mounted at the state dir.
+persistence:
+  enabled: true
+  size: 16Mi
+  storageClass: ""
+  stateDir: /var/lib/outpost
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# ── chaos module ──────────────────────────────────────────────────────────────
+chaos:
+  # litmuschaos.io ClusterRole granted to the outpost so it can create/delete
+  # ChaosEngines in target namespaces and watch ChaosResults cluster-wide.
+  rbac: true
+  # The chaosServiceAccount referenced by every ChaosEngine the outpost creates.
+  # The litmus operator runs experiment pods as this SA in the TARGET namespace.
+  runnerServiceAccount: litmus-admin
+  # Namespaces where chaos experiments will run. A runner ServiceAccount + Role
+  # is created in each so the operator can execute experiments there.
+  targetNamespaces:
+    - default
+  # The Litmus chaos-operator + v1alpha1 CRDs must be present in-cluster. The
+  # upstream bundle is vendored at codearmory_saas/infra/litmus/operator/. Apply
+  # it before installing this chart (see README); this chart does not embed the
+  # ~200KB upstream manifest.
+  installOperator: false
+
+# ── argo module ───────────────────────────────────────────────────────────────
+argo:
+  # argoproj.io Application read + operation patch (sync) ClusterRole.
+  rbac: true
+  # Argo CD installation namespace (where Application CRs live).
+  namespace: argocd
+
+serviceAccount:
+  # The outpost's own ServiceAccount.
+  name: ""
+  annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

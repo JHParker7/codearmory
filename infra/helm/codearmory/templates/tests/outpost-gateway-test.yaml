@@ -1,0 +1,33 @@
+{{- if and .Values.outpostGateway.enabled .Values.tests.outpostGateway.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "codearmory.fullname" . }}-test-outpost-gateway
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test-outpost-gateway
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "20"
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: test
+      image: "{{ include "codearmory.image" (list . .Values.tests.outpostGateway) }}"
+      imagePullPolicy: {{ .Values.imagePullPolicy }}
+      env:
+        - name: OUTPOST_GATEWAY_URL
+          value: "http://{{ include "codearmory.fullname" . }}-outpost-gateway:{{ .Values.outpostGateway.port }}"
+        - name: GATEKEEPER_URL
+          value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+        - name: OUTPOST_INTERNAL_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "codearmory.fullname" . }}-outpost-gateway
+              key: outpost-internal-key
+{{- end }}

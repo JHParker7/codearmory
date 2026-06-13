@@ -28,18 +28,29 @@ func TestReadStateFile_FromFile(t *testing.T) {
 }
 
 func TestReadStateFile_Empty(t *testing.T) {
-	// Empty string should read from stdin (we just verify no panic here;
-	// stdin is a pipe during `go test` so it returns empty immediately).
-	f, _ := os.Open(os.DevNull)
+	// An empty file argument reads from stdin; feed known bytes and assert they
+	// come back verbatim.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	old := os.Stdin
-	os.Stdin = f
-	t.Cleanup(func() { os.Stdin = old; f.Close() })
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old })
+
+	const want = `{"serial":7}`
+	go func() {
+		w.WriteString(want) //nolint:errcheck
+		w.Close()
+	}()
 
 	got, err := readStateFile("")
 	if err != nil {
 		t.Fatalf("readStateFile empty: %v", err)
 	}
-	_ = got
+	if string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
 }
 
 func TestReadStateFile_Missing(t *testing.T) {

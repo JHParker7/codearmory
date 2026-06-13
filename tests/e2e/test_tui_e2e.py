@@ -34,7 +34,8 @@ from conftest import API_URL, CONDUCTOR_URL
 pexpect = pytest.importorskip("pexpect")
 
 # Matches the ANSI/VT escape sequences bubbletea emits (CSI, OSC, single-char).
-_ANSI_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[\[\]()][0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+_ANSI_PAT = r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[\[\]()][0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]"
+_ANSI_RE = re.compile(_ANSI_PAT)
 
 # A PTY wide enough for four board columns (4 × ~30) and tall enough for a card.
 _DIMENSIONS = (50, 220)
@@ -44,11 +45,29 @@ def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s or "")
 
 
+def _tolerant_pattern(text: str) -> str:
+    """Build a regex for ``text`` that tolerates ANSI/CSI sequences (and the
+    soft line-wraps a PTY inserts) appearing between any two characters.
+
+    lipgloss emits cursor-move/erase CSI sequences mid-line, so a header like
+    "In Progress (1)" can arrive on the raw pexpect stream with escape codes
+    spliced between its characters. Matching the bare ``re.escape(text)`` then
+    flakily fails. Allowing optional ANSI runs (and stray CR/LF from wrapping)
+    between each character makes the match robust while keeping it literal.
+    """
+    sep = f"(?:{_ANSI_PAT}|[\r\n])*"
+    return sep.join(re.escape(ch) for ch in text)
+
+
 def _expect(child, *texts, timeout=20):
-    """Assert each text appears, in order, on the TUI stream."""
+    """Assert each text appears, in order, on the TUI stream.
+
+    Matching is done against an ANSI-tolerant view of the stream so cursor/erase
+    CSI sequences that lipgloss splices into header text do not cause flakes.
+    """
     for text in texts:
         try:
-            child.expect(re.escape(text), timeout=timeout)
+            child.expect(_tolerant_pattern(text), timeout=timeout)
         except (pexpect.TIMEOUT, pexpect.EOF) as exc:
             screen = _strip_ansi(child.before)[-2000:]
             raise AssertionError(

@@ -11,7 +11,7 @@ connection stays healthy. Three conditions measured back-to-back:
                     gives a clean "always DB" baseline on the same host
 
 Run:
-  python3 tests/bench_redis.py [--url http://localhost:8080]
+  python3 bench/bench_redis.py [--url http://localhost:8080]
 """
 
 import argparse

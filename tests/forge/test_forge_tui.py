@@ -1,7 +1,23 @@
 """Integration tests for API shapes that the forge TUI depends on."""
+import time
+
+import pytest
 import requests
 
 from conftest import FORGE_URL
+
+
+def _poll_until_done(bearer, execution_id, timeout=60):
+    """Poll GET /executions/{id} until the execution reaches a terminal state."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        res = requests.get(f"{FORGE_URL}/executions/{execution_id}", headers=bearer)
+        assert res.status_code == 200, f"poll got {res.status_code}: {res.text}"
+        data = res.json()
+        if data["status"] in ("completed", "failed", "timed_out", "cancelled"):
+            return data
+        time.sleep(2)
+    pytest.fail(f"execution {execution_id} did not complete within {timeout}s")
 
 
 # ── List endpoint: JSON shape ─────────────────────────────────────────────────
@@ -33,7 +49,12 @@ def test_list_item_has_required_fields(bearer):
 # ── Detail endpoint: JSON shape ───────────────────────────────────────────────
 
 def test_detail_has_output_fields(bearer):
-    """The TUI detail view reads stdout and stderr from GET /executions/{id}."""
+    """The TUI detail view reads stdout and stderr from GET /executions/{id}.
+
+    stdout/stderr are omitempty pointer fields, so they are absent while the
+    execution is still pending. Poll to a terminal state first; forge always
+    persists both columns when an execution completes, so the keys must appear.
+    """
     submit = requests.post(f"{FORGE_URL}/executions", headers=bearer, json={
         "image": "alpine:3.19",
         "command": ["echo", "hello-from-tui"],
@@ -42,15 +63,11 @@ def test_detail_has_output_fields(bearer):
     assert submit.status_code == 202, submit.text
     eid = submit.json()["execution_id"]
 
-    res = requests.get(f"{FORGE_URL}/executions/{eid}", headers=bearer)
-    assert res.status_code == 200
-    body = res.json()
+    body = _poll_until_done(bearer, eid)
     assert "execution_id" in body
     assert "status" in body
-    # stdout/stderr may be absent on a pending execution but the key should exist
-    # once the execution reaches a terminal state; here we just confirm the schema
-    # allows the TUI struct to unmarshal it.
-    assert "execution_id" in body
+    assert "stdout" in body, body
+    assert "stderr" in body, body
 
 
 def test_detail_not_found_returns_404(bearer):

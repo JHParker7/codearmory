@@ -24,6 +24,7 @@ func TestMain(m *testing.M) {
 type requestRecord struct {
 	Method string
 	Path   string
+	Query  string
 	Auth   string
 	Body   []byte
 }
@@ -37,6 +38,7 @@ func recordingServer(t *testing.T, statusCode int, responseBody string) (*httpte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.Method = r.Method
 		rec.Path = r.URL.Path
+		rec.Query = r.URL.RawQuery
 		rec.Auth = r.Header.Get("Authorization")
 		rec.Body, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")

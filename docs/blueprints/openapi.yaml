@@ -22,7 +22,7 @@ info:
     email: jhp1403@gmail.com
 
 servers:
-  - url: http://localhost:8084
+  - url: http://localhost:8093
     description: Local development server
 
 security:
