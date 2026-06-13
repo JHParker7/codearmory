@@ -105,10 +105,10 @@ func sendDeleteTicket(id string) tea.Cmd {
 func newFormInput(placeholder string) textinput.Model {
 	ti := textinput.New()
 	ti.Placeholder = placeholder
-	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#a8b4a2"))
-	ti.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#d6dcd2"))
-	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#a8b4a2"))
-	ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#39ff14"))
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
+	ti.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Text))
+	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
+	ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Accent))
 	return ti
 }
 
@@ -120,13 +120,13 @@ func newDescInput() textarea.Model {
 	ta.SetHeight(4)
 	// Remove the cursor-line highlight that would paint a background stripe.
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	ta.FocusedStyle.Base = lipgloss.NewStyle().Foreground(lipgloss.Color("#d6dcd2"))
-	ta.FocusedStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("#d6dcd2"))
-	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#a8b4a2"))
-	ta.BlurredStyle.Base = lipgloss.NewStyle().Foreground(lipgloss.Color("#a8b4a2"))
-	ta.BlurredStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("#a8b4a2"))
-	ta.BlurredStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#a8b4a2"))
-	ta.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#39ff14"))
+	ta.FocusedStyle.Base = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Text))
+	ta.FocusedStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Text))
+	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
+	ta.BlurredStyle.Base = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
+	ta.BlurredStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
+	ta.BlurredStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
+	ta.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Accent))
 	return ta
 }
 
@@ -346,31 +346,42 @@ func (m boardModel) updateConfirmDelete(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 var (
+	bsFormBox         lipgloss.Style
+	bsFormHeading     lipgloss.Style
+	bsFormLabel       lipgloss.Style
+	bsFormLabelActive lipgloss.Style
+	bsFormCycle       lipgloss.Style
+	bsFormHint        lipgloss.Style
+)
+
+// buildBoardFormStyles rebuilds the board create/edit form styles from the
+// active theme.
+func buildBoardFormStyles() {
 	bsFormBox = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#39ff14")).
-			Padding(1, 3).
-			Width(54)
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(activeTheme.Accent)).
+		Padding(1, 3).
+		Width(54)
 
 	bsFormHeading = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#39ff14")).
-			MarginBottom(1)
+		Bold(true).
+		Foreground(lipgloss.Color(activeTheme.Accent)).
+		MarginBottom(1)
 
 	bsFormLabel = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#a8b4a2")).
-			Width(11)
+		Foreground(lipgloss.Color(activeTheme.Muted)).
+		Width(11)
 
 	bsFormLabelActive = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#d6dcd2")).
-				Width(11)
+		Foreground(lipgloss.Color(activeTheme.Text)).
+		Width(11)
 
 	bsFormCycle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#d6dcd2"))
+		Foreground(lipgloss.Color(activeTheme.Text))
 
 	bsFormHint = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#a8b4a2"))
-)
+		Foreground(lipgloss.Color(activeTheme.Muted))
+}
 
 const formInputW = 34
 
@@ -449,7 +460,7 @@ func (m boardModel) viewConfirmDelete() string {
 	content := strings.Join([]string{
 		bsFormHeading.Render("Delete Ticket"),
 		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#d6dcd2")).Render("Delete " + what + "?"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Text)).Render("Delete " + what + "?"),
 		"",
 		bsFormHint.Render("y: confirm   esc: cancel"),
 	}, "\n")

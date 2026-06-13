@@ -56,7 +56,7 @@ func init() {
 		secretsProviderCmd(),
 	)
 
-	rootCmd.AddCommand(secretsCmd)
+	RegisterModule(Module{Name: "secrets", Command: secretsCmd})
 }
 
 func secretsUpdateCmd() *cobra.Command {

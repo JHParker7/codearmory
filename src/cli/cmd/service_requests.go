@@ -72,5 +72,5 @@ func init() {
 		},
 	)
 
-	rootCmd.AddCommand(serviceRequestsCmd)
+	RegisterModule(Module{Name: "service-requests", Command: serviceRequestsCmd})
 }

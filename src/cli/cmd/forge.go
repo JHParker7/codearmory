@@ -259,7 +259,8 @@ func init() {
 	)
 
 	forgeCmd.AddCommand(execCmd, rcCmd)
-	rootCmd.AddCommand(forgeCmd)
+	// The forge module (command + home-screen) is registered in forge_tui.go,
+	// alongside the screen it contributes.
 }
 
 // waitForExecution polls a forge execution until it reaches a terminal state,

@@ -44,12 +44,10 @@ var defaultBoardStatuses = []boardFieldDef{
 	{Value: "resolved",    Label: "Resolved",     Position: 2},
 	{Value: "closed",      Label: "Closed",       Position: 3},
 }
-var defaultBoardPriorities = []boardFieldDef{
-	{Value: "low",      Label: "Low",      Color: "#4a5346"},
-	{Value: "medium",   Label: "Medium",   Color: "#7d8a78"},
-	{Value: "high",     Label: "High",     Color: "#c9b060"},
-	{Value: "critical", Label: "Critical", Color: "#d46b55"},
-}
+
+// defaultBoardPriorities is populated by buildBoardStyles so the fallback
+// priority swatches track the active theme.
+var defaultBoardPriorities []boardFieldDef
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 
@@ -92,43 +90,104 @@ func newBoardModel() boardModel { return boardModel{loading: true} }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
-const boardCardW = 26
+const (
+	boardCardWDefault = 26 // used before the first WindowSizeMsg
+	boardCardWMin     = 12
+	boardCardWMax     = 40
+)
+
+// cardW returns the per-card content width, scaled so all status columns fill
+// the terminal width. Each column occupies cardW+7 terminal columns (card
+// border 2, column padding 2, column divider 1, and 2 of header slack).
+func (m boardModel) cardW() int {
+	n := len(m.statuses)
+	if m.width <= 0 || n == 0 {
+		return boardCardWDefault
+	}
+	w := m.width/n - 7
+	if w < boardCardWMin {
+		return boardCardWMin
+	}
+	if w > boardCardWMax {
+		return boardCardWMax
+	}
+	return w
+}
+
+// cardsPerColumn returns how many 6-line cards fit in the terminal height,
+// leaving room for the column header, scroll indicators, and the help line.
+// A non-positive height (before the first WindowSizeMsg) disables windowing.
+func (m boardModel) cardsPerColumn() int {
+	if m.height <= 0 {
+		return 0 // 0 == show every card
+	}
+	// Each card is 6 lines; reserve the header, up/down indicators, and a
+	// help line (which may wrap to two rows on a narrow terminal).
+	if n := (m.height - 5) / 6; n > 0 {
+		return n
+	}
+	return 1
+}
 
 var (
+	bsHeader      lipgloss.Style
+	bsHeaderFocus lipgloss.Style
+	bsCard        lipgloss.Style
+	bsCardFocus   lipgloss.Style
+	bsCol         lipgloss.Style
+	bsColFocus    lipgloss.Style
+	bsHelp        lipgloss.Style
+	// bsCardHidden styles the "↑/↓ N more" indicators shown when a column has
+	// more cards than fit on screen.
+	bsCardHidden lipgloss.Style
+)
+
+// buildBoardStyles rebuilds the board styles and default priority swatches from
+// the active theme.
+func buildBoardStyles() {
 	bsHeader = lipgloss.NewStyle().
 		Bold(true).
-		Width(boardCardW + 4).
 		Padding(0, 1).
-		Foreground(lipgloss.Color("#a8b4a2"))
+		Foreground(lipgloss.Color(activeTheme.Muted))
 
 	bsHeaderFocus = lipgloss.NewStyle().
 		Bold(true).
-		Width(boardCardW + 4).
 		Padding(0, 1).
-		Foreground(lipgloss.Color("#39ff14"))
+		Foreground(lipgloss.Color(activeTheme.Accent))
 
 	bsCard = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#1a2018")).
-		Foreground(lipgloss.Color("#a8b4a2"))
+		BorderForeground(lipgloss.Color(activeTheme.Border)).
+		Foreground(lipgloss.Color(activeTheme.Muted))
 
 	bsCardFocus = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#39ff14")).
-		Foreground(lipgloss.Color("#d6dcd2"))
+		BorderForeground(lipgloss.Color(activeTheme.Accent)).
+		Foreground(lipgloss.Color(activeTheme.Text))
 
 	bsCol = lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder(), false, true, false, false).
-		BorderForeground(lipgloss.Color("#1a2018")).
+		BorderForeground(lipgloss.Color(activeTheme.Border)).
 		Padding(0, 1)
 
 	bsColFocus = lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder(), false, true, false, false).
-		BorderForeground(lipgloss.Color("#39ff14")).
+		BorderForeground(lipgloss.Color(activeTheme.Accent)).
 		Padding(0, 1)
 
-	bsHelp = lipgloss.NewStyle().Foreground(lipgloss.Color("#a8b4a2"))
-)
+	bsHelp = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
+
+	bsCardHidden = lipgloss.NewStyle().
+		Padding(0, 1).
+		Foreground(lipgloss.Color(activeTheme.Subtle))
+
+	defaultBoardPriorities = []boardFieldDef{
+		{Value: "low", Label: "Low", Color: activeTheme.Subtle},
+		{Value: "medium", Label: "Medium", Color: activeTheme.Medium},
+		{Value: "high", Label: "High", Color: activeTheme.Warning},
+		{Value: "critical", Label: "Critical", Color: activeTheme.Danger},
+	}
+}
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
@@ -378,34 +437,58 @@ func (m boardModel) View() string {
 		return "\n  " + tuiMetaStyle.Render("No statuses configured.") + "\n"
 	}
 
+	cw := m.cardW()
+	perCol := m.cardsPerColumn()
 	cols := make([]string, len(m.statuses))
 	for i := range m.statuses {
-		cols[i] = m.renderBoardCol(i)
+		cols[i] = m.renderBoardCol(i, cw, perCol)
 	}
 
 	statusPrefix := ""
 	if m.status != "" {
 		statusPrefix = m.status + "  ·  "
 	}
-	help := bsHelp.Render(statusPrefix + "← → h l: col   ↑ ↓ j k: card   H/L: move   n: new   e: edit   d: delete   r: refresh   q: home")
+	full := "← → h l: col   ↑ ↓ j k: card   H/L: move   n: new   e: edit   d: delete   r: refresh   q: home"
+	compact := "h l: col  j k: card  H/L: move  n: new  e: edit  d: del  r: refresh  q: home"
+	helpText := full
+	helpStyle := bsHelp
+	// Keep the help from overflowing a narrow terminal: switch to the compact
+	// hints and wrap to the available width.
+	if m.width > 0 {
+		if m.width < lipgloss.Width(full) {
+			helpText = compact
+		}
+		helpStyle = helpStyle.Width(m.width)
+	}
+	help := helpStyle.Render(statusPrefix + helpText)
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, cols...) + "\n" + help
 }
 
-func (m boardModel) renderBoardCol(i int) string {
+func (m boardModel) renderBoardCol(i, cw, perCol int) string {
 	focused := i == m.col
-	label := fmt.Sprintf("%s (%d)", m.statuses[i].Label, len(m.cols[i]))
+	cards := m.cols[i]
+	// The header content area is cw+2 wide (cw+4 box minus padding); truncate
+	// so a long status label never wraps and misaligns the column.
+	label := truncate(fmt.Sprintf("%s (%d)", m.statuses[i].Label, len(cards)), cw+2)
 
-	var header string
+	hdrStyle := bsHeader
 	if focused {
-		header = bsHeaderFocus.Render(label)
-	} else {
-		header = bsHeader.Render(label)
+		hdrStyle = bsHeaderFocus
 	}
+	parts := []string{hdrStyle.Width(cw + 4).Render(label)}
 
-	parts := []string{header}
-	for j, t := range m.cols[i] {
-		parts = append(parts, m.renderBoardCard(t, focused && j == m.row))
+	// Window the cards to what fits vertically, keeping the focused card in
+	// view, and flag hidden cards above/below with a subtle indicator.
+	start, end := boardCardWindow(len(cards), m.row, focused, perCol)
+	if start > 0 {
+		parts = append(parts, bsCardHidden.Width(cw+4).Render(fmt.Sprintf("  ↑ %d more", start)))
+	}
+	for j := start; j < end; j++ {
+		parts = append(parts, m.renderBoardCard(cards[j], focused && j == m.row, cw))
+	}
+	if end < len(cards) {
+		parts = append(parts, bsCardHidden.Width(cw+4).Render(fmt.Sprintf("  ↓ %d more", len(cards)-end)))
 	}
 
 	body := strings.Join(parts, "\n")
@@ -415,18 +498,35 @@ func (m boardModel) renderBoardCol(i int) string {
 	return bsCol.Render(body)
 }
 
+// boardCardWindow returns the [start, end) range of cards to render in a
+// column. perCol <= 0 shows every card; otherwise the window holds perCol
+// cards, scrolled so the focused row stays visible in the focused column.
+func boardCardWindow(n, row int, focused bool, perCol int) (int, int) {
+	if perCol <= 0 || n <= perCol {
+		return 0, n
+	}
+	start := 0
+	if focused && row >= perCol {
+		start = row - perCol + 1
+	}
+	if max := n - perCol; start > max {
+		start = max
+	}
+	return start, start + perCol
+}
+
 func (m boardModel) priorityColor(p string) string {
 	for _, def := range m.priorities {
 		if def.Value == p && def.Color != "" {
 			return def.Color
 		}
 	}
-	return "#a8b4a2"
+	return activeTheme.Muted
 }
 
-func (m boardModel) renderBoardCard(t boardTicket, selected bool) string {
-	innerW := boardCardW - 2
-	row := lipgloss.NewStyle().Width(boardCardW).Padding(0, 1)
+func (m boardModel) renderBoardCard(t boardTicket, selected bool, cw int) string {
+	innerW := cw - 2
+	row := lipgloss.NewStyle().Width(cw).Padding(0, 1)
 
 	title := row.Render(truncate(t.Title, innerW))
 	prio := row.Foreground(lipgloss.Color(m.priorityColor(t.Priority))).Render("● " + t.Priority)
@@ -435,13 +535,13 @@ func (m boardModel) renderBoardCard(t boardTicket, selected bool) string {
 	if tsStr == "" {
 		tsStr = "—"
 	}
-	ts := row.Foreground(lipgloss.Color("#a8b4a2")).Render(truncate(tsStr, innerW))
+	ts := row.Foreground(lipgloss.Color(activeTheme.Muted)).Render(truncate(tsStr, innerW))
 
 	dueStr := ""
 	if t.DueDate != nil && len(*t.DueDate) >= 10 {
 		dueStr = "due " + (*t.DueDate)[:10]
 	}
-	due := row.Foreground(lipgloss.Color("#a8b4a2")).Render(dueStr)
+	due := row.Foreground(lipgloss.Color(activeTheme.Muted)).Render(dueStr)
 
 	content := title + "\n" + prio + "\n" + ts + "\n" + due
 

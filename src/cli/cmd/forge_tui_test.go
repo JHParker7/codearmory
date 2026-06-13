@@ -575,6 +575,250 @@ func TestForgeFetchDetail_HTTPError(t *testing.T) {
 	}
 }
 
+// ── Create flow ───────────────────────────────────────────────────────────────
+
+func TestForgeModel_List_N_OpensCreateForm(t *testing.T) {
+	m := applyForgeMsg(newForgeModel(), forgeExecsMsg([]forgeExec{}))
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m2 := updated.(forgeModel)
+	if m2.view != forgeViewCreate {
+		t.Errorf("view = %v, want forgeViewCreate", m2.view)
+	}
+	if cmd == nil {
+		t.Error("opening the form should return a focus/blink cmd")
+	}
+	if len(m2.form.fields) == 0 {
+		t.Error("create form should have fields")
+	}
+}
+
+func TestForgeModel_Create_Esc_BacksToList(t *testing.T) {
+	m := newForgeModel()
+	m.view = forgeViewCreate
+	m.form, _ = newForgeCreateForm(nil, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(forgeModel).view != forgeViewList {
+		t.Error("esc in create view should return to list")
+	}
+}
+
+func TestForgeModel_Create_Submit_MissingImage_StaysWithError(t *testing.T) {
+	m := newForgeModel()
+	m.view = forgeViewCreate
+	m.form, _ = newForgeCreateForm(nil, nil)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2 := updated.(forgeModel)
+	if m2.view != forgeViewCreate {
+		t.Error("submit with no image should stay in the create view")
+	}
+	if m2.form.errMsg == "" {
+		t.Error("submit with no image should set an inline error")
+	}
+	if cmd != nil {
+		t.Error("invalid submit should not emit a request cmd")
+	}
+}
+
+func TestForgeModel_Create_CtrlC_Quits(t *testing.T) {
+	m := newForgeModel()
+	m.view = forgeViewCreate
+	m.form, _ = newForgeCreateForm(nil, nil)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c should return a cmd")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("ctrl+c in create view should quit")
+	}
+}
+
+func TestForgeModel_CreatedMsg_ReturnsToListAndRefetches(t *testing.T) {
+	m := newForgeModel()
+	m.view = forgeViewCreate
+	updated, cmd := m.Update(forgeCreatedMsg{})
+	m2 := updated.(forgeModel)
+	if m2.view != forgeViewList {
+		t.Error("forgeCreatedMsg should return to the list view")
+	}
+	if !m2.loading {
+		t.Error("forgeCreatedMsg should set loading=true")
+	}
+	if cmd == nil {
+		t.Error("forgeCreatedMsg should emit a refetch cmd")
+	}
+}
+
+func TestForgeModel_FormErrMsg_ShowsInlineError(t *testing.T) {
+	m := newForgeModel()
+	m.view = forgeViewCreate
+	m.form, _ = newForgeCreateForm(nil, nil)
+	updated, _ := m.Update(forgeFormErrMsg{err: fmt.Errorf("image not allowed")})
+	m2 := updated.(forgeModel)
+	if m2.view != forgeViewCreate {
+		t.Error("form error should stay in the create view")
+	}
+	if !strings.Contains(m2.form.errMsg, "image not allowed") {
+		t.Errorf("form.errMsg = %q, want to contain 'image not allowed'", m2.form.errMsg)
+	}
+}
+
+func TestForgeSubmitExec_PostsCorrectPayload(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"execution_id":"e1"}`)
+	setupCLI(t, srv)
+
+	msg := forgeSubmitExec("ubuntu:22.04", []string{"sh", "-c", "echo hi"},
+		map[string]string{"FOO": "bar"}, 120, "large")()
+
+	if _, ok := msg.(forgeCreatedMsg); !ok {
+		t.Fatalf("msg = %T, want forgeCreatedMsg", msg)
+	}
+	if rec.Method != "POST" || rec.Path != "/forge/executions" {
+		t.Errorf("request = %s %s, want POST /forge/executions", rec.Method, rec.Path)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body, &got); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if got["image"] != "ubuntu:22.04" {
+		t.Errorf("image = %v, want ubuntu:22.04", got["image"])
+	}
+	cmd, _ := got["command"].([]any)
+	if len(cmd) != 3 || cmd[0] != "sh" || cmd[2] != "echo hi" {
+		t.Errorf("command = %v, want [sh -c echo hi]", got["command"])
+	}
+	if got["runner_class"] != "large" {
+		t.Errorf("runner_class = %v, want large", got["runner_class"])
+	}
+	if got["timeout"].(float64) != 120 {
+		t.Errorf("timeout = %v, want 120", got["timeout"])
+	}
+}
+
+func TestForgeSubmitExec_HTTPError_ReturnsFormErr(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusBadRequest, `{"error":"image not allowed"}`)
+	setupCLI(t, srv)
+	if _, ok := forgeSubmitExec("x", []string{"sh"}, nil, 0, "")().(forgeFormErrMsg); !ok {
+		t.Error("HTTP error should return forgeFormErrMsg")
+	}
+}
+
+func TestForgeView_CreateView_RendersForm(t *testing.T) {
+	m := newForgeModel()
+	m.view = forgeViewCreate
+	m.form, _ = newForgeCreateForm(nil, nil)
+	v := m.View()
+	if !strings.Contains(v, "New Execution") {
+		t.Errorf("create view should show the form heading, got: %q", v)
+	}
+}
+
+func TestForgeView_ListHelp_MentionsNew(t *testing.T) {
+	m := applyForgeMsg(newForgeModel(), forgeExecsMsg([]forgeExec{}))
+	if !strings.Contains(m.View(), "new") {
+		t.Error("list help should mention the new-execution shortcut")
+	}
+}
+
+// ── Create form: image/runner selectors ───────────────────────────────────────
+
+func TestForgeFetchImages_Success(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `["alpine:3.19","ubuntu:22.04"]`)
+	setupCLI(t, srv)
+	msg := forgeFetchImages()
+	if rec.Method != "GET" || rec.Path != "/forge/images" {
+		t.Errorf("request = %s %s, want GET /forge/images", rec.Method, rec.Path)
+	}
+	imgs, ok := msg.(forgeImagesMsg)
+	if !ok || len(imgs) != 2 || imgs[0] != "alpine:3.19" {
+		t.Errorf("msg = %#v, want forgeImagesMsg[alpine,ubuntu]", msg)
+	}
+}
+
+func TestForgeFetchImages_ErrorDegradesToEmpty(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusForbidden, `nope`)
+	setupCLI(t, srv)
+	// A failure must not surface as forgeErrMsg (which would break the list view).
+	msg, ok := forgeFetchImages().(forgeImagesMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want forgeImagesMsg even on error", forgeFetchImages())
+	}
+	if len(msg) != 0 {
+		t.Errorf("images = %v, want empty on error", msg)
+	}
+}
+
+func TestForgeFetchRunners_FiltersEnabled(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusOK,
+		`[{"name":"standard","enabled":true},{"name":"old","enabled":false},{"name":"large","enabled":true}]`)
+	setupCLI(t, srv)
+	msg, ok := forgeFetchRunners().(forgeRunnersMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want forgeRunnersMsg", forgeFetchRunners())
+	}
+	if len(msg) != 2 || msg[0] != "standard" || msg[1] != "large" {
+		t.Errorf("runners = %v, want [standard large] (enabled only)", msg)
+	}
+}
+
+func TestForgeModel_ImagesMsg_Caches(t *testing.T) {
+	m := applyForgeMsg(newForgeModel(), forgeImagesMsg([]string{"alpine:3.19"}))
+	if len(m.images) != 1 || m.images[0] != "alpine:3.19" {
+		t.Errorf("images = %v, want [alpine:3.19]", m.images)
+	}
+}
+
+func TestForgeModel_RunnersMsg_Caches(t *testing.T) {
+	m := applyForgeMsg(newForgeModel(), forgeRunnersMsg([]string{"large"}))
+	if len(m.runners) != 1 || m.runners[0] != "large" {
+		t.Errorf("runners = %v, want [large]", m.runners)
+	}
+}
+
+func TestForgeModel_CreateForm_UsesSelectorsWhenListsKnown(t *testing.T) {
+	m := newForgeModel()
+	m.images = []string{"alpine:3.19", "ubuntu:22.04"}
+	m.runners = []string{"large"}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m2 := updated.(forgeModel)
+	// The image selector starts on the first allowed image; ←/→ cycles it.
+	if got := m2.form.value("image"); got != "alpine:3.19" {
+		t.Errorf("image = %q, want alpine:3.19 (first option)", got)
+	}
+	m3, _, _ := m2.form.update(tea.KeyMsg{Type: tea.KeyRight})
+	if got := m3.value("image"); got != "ubuntu:22.04" {
+		t.Errorf("image after cycle = %q, want ubuntu:22.04", got)
+	}
+	// The runner selector defaults to the "(default)" empty option.
+	if got := m2.form.value("runner"); got != "" {
+		t.Errorf("runner = %q, want empty default", got)
+	}
+}
+
+func TestForgeModel_CreateForm_FallsBackToTextWhenNoLists(t *testing.T) {
+	m := applyForgeMsg(newForgeModel(), forgeExecsMsg([]forgeExec{}))
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m2 := updated.(forgeModel)
+	// With no cached lists the image field is free text — typing populates it.
+	m2.form = typeForm(m2.form, "myimage:latest")
+	if got := m2.form.value("image"); got != "myimage:latest" {
+		t.Errorf("image = %q, want typed text (free-text fallback)", got)
+	}
+}
+
+func TestForgeSubmitExec_SelectedDefaultRunner_OmitsRunnerClass(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"execution_id":"e1"}`)
+	setupCLI(t, srv)
+	// Empty runner (the "(default)" option) must not send runner_class.
+	forgeSubmitExec("alpine:3.19", []string{"sh"}, nil, 0, "")()
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body, &got); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if _, present := got["runner_class"]; present {
+		t.Errorf("runner_class should be omitted when empty, body = %s", rec.Body)
+	}
+}
+
 // ── Command registration ──────────────────────────────────────────────────────
 
 func TestForgeTUICmd_RegisteredUnderForge(t *testing.T) {

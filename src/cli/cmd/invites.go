@@ -39,5 +39,5 @@ func init() {
 			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/gatekeeper/invites/"+args[0], nil) },
 		},
 	)
-	rootCmd.AddCommand(invitesCmd)
+	RegisterModule(Module{Name: "invites", Command: invitesCmd})
 }

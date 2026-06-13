@@ -16,27 +16,40 @@ import (
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
+// These styles are shared by every list/detail TUI (ci, forge, audit, steps,
+// hooks). buildCITUIStyles rebuilds them, plus the status color map, from the
+// active theme.
 var (
+	tuiBoxStyle   lipgloss.Style
+	tuiTitleStyle lipgloss.Style
+	tuiMetaStyle  lipgloss.Style
+	tuiHelpStyle  lipgloss.Style
+	tuiErrStyle   lipgloss.Style
+
+	tuiStatusColors map[string]lipgloss.Color
+)
+
+func buildCITUIStyles() {
 	tuiBoxStyle = lipgloss.NewStyle().
-			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#1a2018"))
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(activeTheme.Border))
 
 	tuiTitleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#39ff14"))
+		Bold(true).
+		Foreground(lipgloss.Color(activeTheme.Accent))
 
-	tuiMetaStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#a8b4a2"))
-	tuiHelpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#a8b4a2"))
-	tuiErrStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#d46b55"))
+	tuiMetaStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
+	tuiHelpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
+	tuiErrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Danger))
 
 	tuiStatusColors = map[string]lipgloss.Color{
-		"completed": "#39ff14",
-		"running":   "#c9b060",
-		"pending":   "#a8b4a2",
-		"failed":    "#d46b55",
-		"cancelled": "#a8b4a2",
+		"completed": lipgloss.Color(activeTheme.Accent),
+		"running":   lipgloss.Color(activeTheme.Warning),
+		"pending":   lipgloss.Color(activeTheme.Muted),
+		"failed":    lipgloss.Color(activeTheme.Danger),
+		"cancelled": lipgloss.Color(activeTheme.Muted),
 	}
-)
+}
 
 func tuiColorStatus(s string) string {
 	if c, ok := tuiStatusColors[s]; ok {
@@ -91,6 +104,7 @@ const (
 	tuiViewRuns
 	tuiViewRunDetail
 	tuiViewOutput
+	tuiViewCreate
 )
 
 // ── Messages ──────────────────────────────────────────────────────────────────
@@ -100,6 +114,8 @@ type tuiRunsMsg []tuiRun
 type tuiRunDetailMsg tuiRunFull
 type tuiErrMsg struct{ err error }
 type tuiTickMsg struct{}
+type tuiPipelineCreatedMsg struct{}
+type tuiFormErrMsg struct{ err error }
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -122,71 +138,75 @@ type tuiModel struct {
 	selPipeline *tuiPipeline
 	selRun      *tuiRun
 	outputTitle string
+
+	form tuiForm
 }
 
 func tuiTableStyles() table.Styles {
 	s := table.DefaultStyles()
 	s.Header = s.Header.
 		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("#1a2018")).
+		BorderForeground(lipgloss.Color(activeTheme.Border)).
 		BorderBottom(true).
 		Bold(true).
-		Foreground(lipgloss.Color("#d6dcd2"))
+		Foreground(lipgloss.Color(activeTheme.Text))
 	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("#39ff14")).
-		Background(lipgloss.Color("#050705")).
+		Foreground(lipgloss.Color(activeTheme.Accent)).
+		Background(lipgloss.Color(activeTheme.SelBg)).
 		Bold(false)
 	return s
 }
 
-func newTUIModel() tuiModel {
-	pTable := table.New(
-		table.WithColumns([]table.Column{
-			{Title: "NAME", Width: 30},
-			{Title: "DESCRIPTION", Width: 36},
-			{Title: "ACTIVE", Width: 6},
-			{Title: "CREATED", Width: 16},
-		}),
-		table.WithFocused(true),
-		table.WithHeight(14),
-	)
-	pTable.SetStyles(tuiTableStyles())
-
-	rTable := table.New(
-		table.WithColumns([]table.Column{
-			{Title: "RUN ID", Width: 10},
-			{Title: "STATUS", Width: 11},
-			{Title: "TRIGGERED BY", Width: 22},
-			{Title: "STARTED", Width: 18},
-			{Title: "DURATION", Width: 10},
-		}),
-		table.WithFocused(true),
-		table.WithHeight(14),
-	)
-	rTable.SetStyles(tuiTableStyles())
-
-	dTable := table.New(
-		table.WithColumns([]table.Column{
-			{Title: "#", Width: 3},
-			{Title: "STEP", Width: 26},
-			{Title: "STATUS", Width: 11},
-			{Title: "STARTED", Width: 18},
-			{Title: "DURATION", Width: 10},
-		}),
-		table.WithFocused(true),
-		table.WithHeight(12),
-	)
-	dTable.SetStyles(tuiTableStyles())
-
-	vp := viewport.New(100, 20)
-
-	return tuiModel{
-		loading: true,
-		pTable:  pTable,
-		rTable:  rTable,
-		dTable:  dTable,
-		vp:      vp,
+// Responsive column specs: flexible columns (description, name, triggered-by,
+// step) expand to fill a wider terminal; the rest stay at their minimum.
+var (
+	ciPipelineCols = []tuiColSpec{
+		{"NAME", 16, 2},
+		{"DESCRIPTION", 20, 3},
+		{"ACTIVE", 6, 0},
+		{"CREATED", 14, 0},
 	}
+	ciRunCols = []tuiColSpec{
+		{"RUN ID", 10, 0},
+		{"STATUS", 11, 0},
+		{"TRIGGERED BY", 16, 1},
+		{"STARTED", 18, 0},
+		{"DURATION", 10, 0},
+	}
+	ciStepCols = []tuiColSpec{
+		{"#", 3, 0},
+		{"STEP", 16, 1},
+		{"STATUS", 11, 0},
+		{"STARTED", 18, 0},
+		{"DURATION", 10, 0},
+	}
+)
+
+func newTUIModel() tuiModel {
+	m := tuiModel{
+		loading: true,
+		width:   tuiDefaultWidth,
+		height:  tuiDefaultHeight,
+	}
+	m.pTable = table.New(table.WithFocused(true))
+	m.pTable.SetStyles(tuiTableStyles())
+	m.rTable = table.New(table.WithFocused(true))
+	m.rTable.SetStyles(tuiTableStyles())
+	m.dTable = table.New(table.WithFocused(true))
+	m.dTable.SetStyles(tuiTableStyles())
+	m.vp = viewport.New(tuiDefaultWidth-4, tuiDefaultHeight-8)
+	m.applyTableLayout()
+	return m
+}
+
+// applyTableLayout resizes every table to the current terminal dimensions.
+func (m *tuiModel) applyTableLayout() {
+	m.pTable.SetColumns(tuiFitColumns(ciPipelineCols, m.width))
+	m.pTable.SetHeight(tuiTableHeight(m.height, tuiListChrome))
+	m.rTable.SetColumns(tuiFitColumns(ciRunCols, m.width))
+	m.rTable.SetHeight(tuiTableHeight(m.height, tuiListChrome))
+	m.dTable.SetColumns(tuiFitColumns(ciStepCols, m.width))
+	m.dTable.SetHeight(tuiTableHeight(m.height, tuiDetailChrome))
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -254,6 +274,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.vp.Width = msg.Width - 4
 		m.vp.Height = msg.Height - 8
+		m.applyTableLayout()
 		return m, nil
 
 	case tuiErrMsg:
@@ -271,8 +292,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				active = "○"
 			}
 			rows[i] = table.Row{
-				tuiTrunc(p.Name, 30),
-				tuiTrunc(p.Description, 36),
+				p.Name,
+				p.Description,
 				active,
 				p.CreatedAt.Local().Format("Jan 02 15:04"),
 			}
@@ -288,7 +309,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			rows[i] = table.Row{
 				tuiShortID(r.RunID),
 				r.Status,
-				tuiTrunc(r.TriggeredBy, 22),
+				r.TriggeredBy,
 				tuiFormatTime(r.StartedAt),
 				tuiFormatDur(r.StartedAt, r.EndedAt),
 			}
@@ -304,7 +325,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, sr := range rf.StepRuns {
 			rows[i] = table.Row{
 				fmt.Sprintf("%d", sr.StepIndex+1),
-				tuiTrunc(sr.StepName, 26),
+				sr.StepName,
 				sr.Status,
 				tuiFormatTime(sr.StartedAt),
 				tuiFormatDur(sr.StartedAt, sr.EndedAt),
@@ -320,6 +341,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.view == tuiViewRunDetail && m.selRun != nil {
 			return m, tuiFetchRunDetail(m.selRun.RunID)
 		}
+		return m, nil
+
+	case tuiPipelineCreatedMsg:
+		m.view = tuiViewPipelines
+		m.loading = true
+		return m, tuiFetchPipelines
+
+	case tuiFormErrMsg:
+		m.form.errMsg = msg.err.Error()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -345,6 +375,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.tuiKeyRunDetail(msg)
 		case tuiViewOutput:
 			return m.tuiKeyOutput(msg)
+		case tuiViewCreate:
+			return m.tuiKeyCreate(msg)
 		}
 	}
 
@@ -362,6 +394,8 @@ func (m tuiModel) tuiDelegate(msg tea.Msg) (tuiModel, tea.Cmd) {
 		m.dTable, cmd = m.dTable.Update(msg)
 	case tuiViewOutput:
 		m.vp, cmd = m.vp.Update(msg)
+	case tuiViewCreate:
+		m.form, _, cmd = m.form.update(msg)
 	}
 	return m, cmd
 }
@@ -380,6 +414,11 @@ func (m tuiModel) tuiKeyPipelines(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 			m.loading = true
 			return m, tuiFetchRuns(m.selPipeline.WorkflowID)
 		}
+	case "n":
+		var cmd tea.Cmd
+		m.form, cmd = newCIPipelineForm()
+		m.view = tuiViewCreate
+		return m, cmd
 	case "r":
 		m.loading = true
 		return m, tuiFetchPipelines
@@ -387,6 +426,75 @@ func (m tuiModel) tuiKeyPipelines(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	var cmd tea.Cmd
 	m.pTable, cmd = m.pTable.Update(msg)
 	return m, cmd
+}
+
+// ── Create form ───────────────────────────────────────────────────────────────
+
+func newCIPipelineForm() (tuiForm, tea.Cmd) {
+	return newTUIForm("New Pipeline",
+		formInput("name", "Name", "my-pipeline (required)"),
+		formInput("steps", "Steps", "build->test->deploy (required)"),
+		formInput("desc", "Desc", "description (optional)"),
+	)
+}
+
+func (m tuiModel) tuiKeyCreate(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+	var (
+		action formAction
+		cmd    tea.Cmd
+	)
+	m.form, action, cmd = m.form.update(msg)
+	switch action {
+	case formCancel:
+		m.view = tuiViewPipelines
+		return m, nil
+	case formSubmit:
+		return m.tuiSubmitCreate()
+	}
+	return m, cmd
+}
+
+// tuiSubmitCreate validates the form and, if valid, returns the create cmd.
+func (m tuiModel) tuiSubmitCreate() (tuiModel, tea.Cmd) {
+	name := m.form.value("name")
+	dsl := m.form.value("steps")
+	if name == "" {
+		m.form.errMsg = "name is required"
+		return m, nil
+	}
+	if dsl == "" {
+		m.form.errMsg = "steps are required (e.g. build->test->deploy)"
+		return m, nil
+	}
+	m.form.errMsg = ""
+	return m, ciSubmitCreatePipeline(name, m.form.value("desc"), dsl)
+}
+
+// ciSubmitCreatePipeline resolves the DSL step names to IDs and POSTs the new
+// pipeline. Name/DSL resolution errors surface as an inline form error.
+func ciSubmitCreatePipeline(name, desc, dsl string) tea.Cmd {
+	return func() tea.Msg {
+		nodes, err := parseDSL(dsl)
+		if err != nil {
+			return tuiFormErrMsg{err}
+		}
+		refs, err := dslToRefs(nodes)
+		if err != nil {
+			return tuiFormErrMsg{err}
+		}
+		payload := map[string]any{"name": name, "steps": refs}
+		if desc != "" {
+			payload["description"] = desc
+		}
+		body, _ := json.Marshal(payload)
+		if _, err := doRequest("POST", "/workflows/pipelines", body); err != nil {
+			return tuiFormErrMsg{err}
+		}
+		return tuiPipelineCreatedMsg{}
+	}
 }
 
 func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
@@ -505,6 +613,8 @@ func (m tuiModel) View() string {
 			content = m.tuiViewRunDetail()
 		case tuiViewOutput:
 			content = m.tuiViewOutput()
+		case tuiViewCreate:
+			content = m.form.view(m.width, m.height)
 		}
 	}
 	return content
@@ -512,7 +622,7 @@ func (m tuiModel) View() string {
 
 func (m tuiModel) tuiViewPipelines() string {
 	title := tuiTitleStyle.Render("Pipelines")
-	help := tuiHelpStyle.Render("[↑↓/jk] navigate  [enter] runs  [r] refresh  [q] home")
+	help := tuiHelp("[↑↓/jk] navigate  [enter] runs  [n] new  [r] refresh  [q] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -528,7 +638,7 @@ func (m tuiModel) tuiViewRuns() string {
 		name = ": " + m.selPipeline.Name
 	}
 	title := tuiTitleStyle.Render("Runs" + name)
-	help := tuiHelpStyle.Render("[↑↓/jk] navigate  [enter] detail  [c] cancel  [r] refresh  [b] back  [q] home")
+	help := tuiHelp("[↑↓/jk] navigate  [enter] detail  [c] cancel  [r] refresh  [b] back  [q] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -540,7 +650,7 @@ func (m tuiModel) tuiViewRuns() string {
 
 func (m tuiModel) tuiViewRunDetail() string {
 	title := tuiTitleStyle.Render("Run Detail")
-	help := tuiHelpStyle.Render("[↑↓/jk] navigate  [enter] output  [r] refresh  [b] back  [q] home")
+	help := tuiHelp("[↑↓/jk] navigate  [enter] output  [r] refresh  [b] back  [q] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -566,7 +676,7 @@ func (m tuiModel) tuiViewRunDetail() string {
 
 func (m tuiModel) tuiViewOutput() string {
 	title := tuiTitleStyle.Render(m.outputTitle)
-	help := tuiHelpStyle.Render("[↑↓/pgup/pgdn] scroll  [b] back  [q] home")
+	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [b] back  [q] home", m.width)
 	return title + "\n" + tuiBoxStyle.Render(m.vp.View()) + "\n" + help
 }
 
@@ -624,4 +734,16 @@ func startCITUI() error {
 	p := tea.NewProgram(standaloneWrap{newTUIModel()}, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
+}
+
+func init() {
+	RegisterModule(Module{
+		Name:    "workflows",
+		Order:   10,
+		Command: ciCmd,
+		Screens: []HubScreen{
+			{Title: "CI / Pipelines", Desc: "Browse workflow pipelines and run history", New: func() tea.Model { return newTUIModel() }},
+			{Title: "Steps", Desc: "Browse and create reusable pipeline steps", New: func() tea.Model { return newStepsModel() }},
+		},
+	})
 }

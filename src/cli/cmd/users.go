@@ -112,7 +112,7 @@ func init() {
 			},
 		},
 	)
-	rootCmd.AddCommand(usersCmd)
+	RegisterModule(Module{Name: "users", Command: usersCmd})
 }
 
 // myProfile fetches the authenticated user's own profile.

@@ -62,5 +62,5 @@ func init() {
 	listCmd.Flags().StringVar(&auditOffset, "offset", "", "Pagination offset")
 
 	auditCmd.AddCommand(listCmd)
-	rootCmd.AddCommand(auditCmd)
+	// The audit module (command + Audit Log screen) is registered in audit_tui.go.
 }

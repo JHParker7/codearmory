@@ -618,8 +618,9 @@ JSON file (-f) — uses step IDs directly:
 		RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/workflows/actions", nil) },
 	})
 
-	ciCmd.AddCommand(ciCreateCmd, ciListCmd, ciGetCmd, ciUpdateCmd, ciDeleteCmd, ciRunCmd, ciCancelCmd, ciTUICmd)
-	rootCmd.AddCommand(ciCmd)
+	ciCmd.AddCommand(ciCreateCmd, ciListCmd, ciGetCmd, ciUpdateCmd, ciDeleteCmd, ciRunCmd, ciCancelCmd, ciTUICmd, stepsTUICmd)
+	// The workflows module (ci command + the CI/Pipelines and Steps home
+	// screens) is registered in ci_tui.go.
 }
 
 // buildWith constructs the step With map from CLI flags.

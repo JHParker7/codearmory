@@ -240,5 +240,5 @@ func init() {
 	signupCmd.Flags().String("username", "", "username (alphanumeric, hyphens, underscores; 1–64 chars; prompted if omitted)")
 
 	authCmd.AddCommand(loginCmd, signupCmd, logoutCmd, authStatusCmd)
-	rootCmd.AddCommand(authCmd)
+	RegisterModule(Module{Name: "auth", Command: authCmd})
 }

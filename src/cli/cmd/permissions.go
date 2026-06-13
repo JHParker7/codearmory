@@ -82,5 +82,5 @@ func init() {
 			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/gatekeeper/permissions/"+args[0], nil) },
 		},
 	)
-	rootCmd.AddCommand(permissionsCmd)
+	RegisterModule(Module{Name: "permissions", Command: permissionsCmd})
 }

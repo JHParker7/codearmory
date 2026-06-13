@@ -253,5 +253,5 @@ func init() {
 	hooksEventsCmd.AddCommand(listEventsCmd, getEventCmd)
 
 	hooksCmd.AddCommand(hooksRulesCmd, hooksEventsCmd)
-	rootCmd.AddCommand(hooksCmd)
+	// The hooks module (command + Hooks screen) is registered in hooks_tui.go.
 }
