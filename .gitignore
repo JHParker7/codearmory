@@ -10,6 +10,10 @@ src/systems/mcp/codearmory-mcp
 src/systems/registry/registry
 src/systems/gitea_integration/gitea_integration
 src/systems/containers/containers
+src/systems/outpost-gateway/outpost-gateway
+src/systems/chaos/chaos
+src/systems/argo/argo
+src/systems/outpost/outpost
 src/cli/armory
 
 # SQLite databases
