@@ -66,6 +66,11 @@
       },
       {
         "grant_on": "user",
+        "actions": ["listTeam", "listOrg", "listUser", "listRole", "listInvite"],
+        "resources": ["{username}/gatekeeper/teams", "{username}/gatekeeper/orgs", "{username}/gatekeeper/users", "{username}/gatekeeper/roles", "{username}/gatekeeper/invites"]
+      },
+      {
+        "grant_on": "user",
         "actions": ["enrollTOTP", "confirmTOTP", "getMFAStatus", "disableTOTP"],
         "resources": ["{username}/gatekeeper/mfa"]
       },
