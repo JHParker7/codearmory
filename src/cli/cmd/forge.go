@@ -83,8 +83,12 @@ func init() {
 				ExecutionID string `json:"execution_id"`
 			}
 			if err := json.Unmarshal(data, &resp); err != nil || resp.ExecutionID == "" {
-				printResponse(data) // unexpected shape — fall back to the standard render
-				return nil
+				printResponse(data) // show whatever came back
+				// A 2xx without an execution_id means the job wasn't created (or the
+				// response is unrecognised); don't report success or silently skip
+				// --wait.
+				cmd.SilenceUsage = true
+				return fmt.Errorf("submission did not return an execution_id")
 			}
 			if execWait {
 				fmt.Fprintf(os.Stderr, "forge job: %s started\n", resp.ExecutionID)
@@ -264,9 +268,20 @@ func init() {
 // when the job failed, timed out, or was cancelled so the CLI exits non-zero.
 func waitForExecution(id string, serverTimeout int) error {
 	const pollInterval = 2 * time.Second
+	// pollGrace covers image-pull, worker pickup, and the server's own timeout-
+	// detection margin (k8s allows ~60s over the job deadline before it records
+	// timed_out), so the CLI doesn't give up while a job is still legitimately
+	// finishing or being marked timed_out.
+	const pollGrace = 2 * time.Minute
 	maxWait := time.Hour
 	if serverTimeout > 0 {
-		maxWait = time.Duration(serverTimeout)*time.Second + 30*time.Second
+		// Clamp before converting to a Duration: serverTimeout is an unbounded
+		// --timeout value and time.Duration(serverTimeout)*time.Second would
+		// overflow int64 nanoseconds for absurd inputs, yielding a deadline in
+		// the past and an immediate give-up. The server caps executions far
+		// below this anyway.
+		capped := min(serverTimeout, 24*3600)
+		maxWait = time.Duration(capped)*time.Second + pollGrace
 	}
 	deadline := time.Now().Add(maxWait)
 	fmt.Fprintln(os.Stderr, "waiting for completion…")
@@ -293,9 +308,11 @@ func waitForExecution(id string, serverTimeout int) error {
 			printStream(os.Stderr, ex.Stderr)
 			return nil
 		case "failed", "timed_out":
-			// Surface whatever the job produced on the matching streams so the real
-			// error (usually on stderr) is visible right above the summary line.
-			printStream(os.Stdout, ex.Stdout)
+			// On failure the captured output is diagnostic, not a result, so route
+			// it all to stderr. (The k8s runtime merges stdout+stderr into the
+			// stdout field, so printing that to os.Stdout would hide the real error
+			// from `2>` redirection.)
+			printStream(os.Stderr, ex.Stdout)
 			printStream(os.Stderr, ex.Stderr)
 
 			ctxStr := ""

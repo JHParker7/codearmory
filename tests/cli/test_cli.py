@@ -97,12 +97,13 @@ class TestLogin:
         assert rc == 0, f"stderr: {err}"
 
     def test_login_prints_logged_in(self, run_cli, new_user):
-        out, _, _ = run_cli(
+        _, err, _ = run_cli(
             "auth", "login",
             "--email", new_user["email"],
             "--password", new_user["password"],
         )
-        assert "Logged in" in out
+        # The CLI prints "Logged in — ..." to stderr (auth.go), not stdout.
+        assert "Logged in" in err
 
     def test_login_wrong_password_exits_nonzero(self, run_cli, new_user):
         _, _, rc = run_cli(
@@ -136,6 +137,11 @@ class TestLogin:
 
 class TestLogout:
     def test_logout_exits_zero(self, run_cli):
+        # Keychain hazard: the CLI stores/clears tokens in the OS Secret Service
+        # (go-keyring), which is NOT scoped by HOME. The run_cli fixture's temp
+        # HOME isolates the config-file fallback but not the keychain, so on a
+        # developer machine with a real `codearmory/token` entry this clears it.
+        # There is no env to force the no-keyring/config-only path in src/cli.
         out, _, rc = run_cli("auth", "logout")
         assert rc == 0
         assert "Logged out" in out
@@ -160,6 +166,12 @@ class TestAuthStatus:
         assert "CODEARMORY_TOKEN" in out
 
     def test_status_no_token_shows_not_set(self, run_cli):
+        # Keychain hazard: with no flag/env token, `auth status` falls back to
+        # the OS keychain (go-keyring Secret Service), which is NOT scoped by
+        # HOME. The run_cli fixture's temp HOME does not isolate it, so a real
+        # `codearmory/token` entry on a developer machine makes this report a
+        # token as set and the assertion fails. There is no env in src/cli to
+        # force the no-keyring/config-only path.
         out, _, rc = run_cli("auth", "status")
         assert rc == 0
         assert "not set" in out
@@ -355,9 +367,13 @@ class TestErrorHandling:
         assert rc != 0
 
     def test_http_error_message_contains_status_code(self, run_cli, token):
+        # Fetching a random user_id the caller does not own is rejected by
+        # conductor's RBAC check (the user's only getUser grant is on its own
+        # id), so the request is forbidden before it reaches gatekeeper.
+        # The CLI surfaces this as "HTTP 403: forbidden".
         _, err, rc = run_cli("users", "get", str(uuid.uuid4()), token=token)
         assert rc != 0
-        assert any(code in err for code in ["404", "403", "401", "HTTP"])
+        assert "403" in err
 
     def test_unreachable_server_exits_nonzero(self, run_cli):
         _, _, rc = run_cli(

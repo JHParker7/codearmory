@@ -149,6 +149,9 @@ If --email or --username are omitted they are prompted for interactively
 		username, _ := cmd.Flags().GetString("username")
 
 		if email == "" {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return fmt.Errorf("--email is required (pass --email, or run interactively to be prompted)")
+			}
 			var err error
 			if email, err = prompt("Email", ""); err != nil {
 				return fmt.Errorf("reading email: %w", err)
@@ -159,6 +162,9 @@ If --email or --username are omitted they are prompted for interactively
 		}
 
 		if username == "" {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return fmt.Errorf("--username is required (pass --username, or run interactively to be prompted)")
+			}
 			var err error
 			if username, err = prompt("Username", ""); err != nil {
 				return fmt.Errorf("reading username: %w", err)
