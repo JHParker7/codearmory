@@ -1,0 +1,162 @@
+openapi: 3.1.0
+info:
+  title: Chaos — Chaos Engineering Control Plane
+  description: |
+    Thin control plane for chaos experiments. The chaos service holds no cluster
+    credentials: it enqueues run/stop commands for a customer-deployed outpost
+    (via the outpost-gateway) and records the verdicts the outpost reports back.
+
+    ## Authentication
+
+    User-facing endpoints require a Gatekeeper-issued Bearer token:
+    `Authorization: Bearer <token>`. Requests from outside the experiment
+    owner's org receive `404 Not Found` rather than `403 Forbidden`.
+
+    The `/internal/events` endpoint is not user-facing; it is authenticated with
+    a shared-key HMAC (`X-Internal-Token`) used by the outpost-gateway dispatcher.
+  version: 1.0.0
+  contact:
+    email: jhp1403@gmail.com
+
+servers:
+  - url: http://localhost:8090
+    description: Local development server
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      operationId: healthz
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+
+  /experiment-types:
+    get:
+      summary: List available experiment types
+      operationId: listExperimentType
+      responses:
+        '200':
+          description: Catalog of supported experiment types
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ExperimentType' }
+
+  /experiments:
+    get:
+      summary: List experiments
+      operationId: listExperiment
+      parameters:
+        - { name: limit, in: query, schema: { type: integer } }
+        - { name: offset, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: Experiments visible to the caller
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Experiment' }
+    post:
+      summary: Start an experiment
+      description: Enqueues a run-experiment command for the target outpost and returns immediately.
+      operationId: createExperiment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateExperimentRequest' }
+      responses:
+        '202':
+          description: Experiment accepted and dispatched
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Experiment' }
+        '400': { description: Invalid request }
+        '502': { description: Outpost-gateway unreachable }
+
+  /experiments/{id}:
+    get:
+      summary: Get an experiment
+      operationId: getExperiment
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The experiment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Experiment' }
+        '404': { description: Not found }
+    delete:
+      summary: Stop and remove an experiment
+      operationId: deleteExperiment
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '404': { description: Not found }
+
+  /internal/events:
+    post:
+      summary: Ingest an outpost event (internal)
+      operationId: internalEvent
+      security: []
+      responses:
+        '200': { description: Accepted }
+        '401': { description: Invalid internal token }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    ExperimentType:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        params:
+          type: object
+          additionalProperties: { type: string }
+    CreateExperimentRequest:
+      type: object
+      required: [outpost_id, experiment_type, target_app_ns, target_app_label]
+      properties:
+        outpost_id: { type: string }
+        experiment_type: { type: string, enum: [pod-delete, pod-network-latency] }
+        target_app_ns: { type: string }
+        target_app_label: { type: string, example: app.kubernetes.io/component=conductor }
+        target_app_kind: { type: string, default: deployment }
+        params:
+          type: object
+          additionalProperties: { type: string }
+    Experiment:
+      type: object
+      properties:
+        experiment_id: { type: string }
+        user_id: { type: string }
+        org_id: { type: string }
+        outpost_id: { type: string }
+        experiment_type: { type: string }
+        target_app_ns: { type: string }
+        target_app_label: { type: string }
+        target_app_kind: { type: string }
+        engine_name: { type: string }
+        params:
+          type: object
+          additionalProperties: { type: string }
+        status: { type: string, enum: [pending, running, Pass, Fail, Error, stopped] }
+        verdict: { type: string }
+        fail_step: { type: string }
+        probe_success: { type: string }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }

@@ -1,0 +1,30 @@
+{{- if and (eq (include "outpost.hasModule" (list . "argo")) "true") .Values.argo.rbac }}
+{{- $full := include "outpost.fullname" . -}}
+# Read Argo CD Applications and patch their operation field to trigger syncs.
+# Scoped to the argoproj.io Application resource only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $full }}-argo
+  labels:
+    {{- include "outpost.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $full }}-argo
+  labels:
+    {{- include "outpost.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $full }}-argo
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "outpost.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

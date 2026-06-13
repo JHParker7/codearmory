@@ -1,0 +1,102 @@
+{{- $full := include "outpost.fullname" . -}}
+{{- $secretName := .Values.existingSecret | default (printf "%s-enrollment" $full) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}
+  labels:
+    {{- include "outpost.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    # The single-use enrollment token + persisted identity means we never want
+    # two outposts racing on the same credentials.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "outpost.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "outpost.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "outpost.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: outpost
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: CONTROL_PLANE_URL
+              value: {{ required "controlPlaneURL is required (the outpost-gateway base URL)" .Values.controlPlaneURL | quote }}
+            - name: OUTPOST_MODULES
+              value: {{ .Values.modules | quote }}
+            {{- if .Values.allowInsecureHTTP }}
+            - name: OUTPOST_ALLOW_INSECURE_HTTP
+              value: "true"
+            {{- end }}
+            {{- if .Values.caFile }}
+            - name: OUTPOST_CA_FILE
+              value: {{ .Values.caFile | quote }}
+            {{- end }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            {{- if .Values.otelEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otelEndpoint | quote }}
+            {{- end }}
+            {{- if .Values.persistence.enabled }}
+            - name: OUTPOST_STATE_FILE
+              value: {{ printf "%s/state.json" .Values.persistence.stateDir | quote }}
+            {{- end }}
+            - name: ENROLLMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: enrollment-token
+                  optional: true
+            - name: OUTPOST_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: outpost-id
+                  optional: true
+            - name: OUTPOST_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: outpost-key
+                  optional: true
+            {{- if eq (include "outpost.hasModule" (list . "chaos")) "true" }}
+            - name: CHAOS_SERVICE_ACCOUNT
+              value: {{ .Values.chaos.runnerServiceAccount | quote }}
+            # Fence chaos to the operator-authorized namespaces; the outpost refuses
+            # commands targeting anything outside this set (matches the RBAC scope).
+            - name: CHAOS_ALLOWED_NAMESPACES
+              value: {{ join "," .Values.chaos.targetNamespaces | quote }}
+            {{- end }}
+            {{- if eq (include "outpost.hasModule" (list . "argo")) "true" }}
+            - name: ARGO_NAMESPACE
+              value: {{ .Values.argo.namespace | quote }}
+            {{- end }}
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - name: state
+              mountPath: {{ .Values.persistence.stateDir }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.persistence.enabled }}
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ $full }}-state
+      {{- end }}

@@ -29,7 +29,7 @@ All configuration is via environment variables.
 | `GATEKEEPER_URL` | `http://localhost:8080` | Base URL of the Gatekeeper service |
 | `REDIS_URL` | — | Redis connection string (`redis://host:6379/1`). Omit to disable caching. |
 | `ENCRYPTION_KEY` | — | **Required.** 64-character hex string (32 bytes) for AES-256-GCM at-rest encryption. Generate with: `openssl rand -hex 32`. Blueprints refuses to start without this key. |
-| `PORT` | `8084` | Port the server listens on |
+| `PORT` | `8093` | Port the server listens on |
 | `OTEL_SERVICE_NAME` | `blueprints` | Service name reported in traces and metrics |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTel Collector HTTP endpoint. Omit to disable telemetry. |
 | `TLS_CERT_FILE` | — | Path to PEM-encoded TLS certificate. Required with `TLS_KEY_FILE` to enable HTTPS. |
@@ -48,7 +48,7 @@ DATABASE_URL=postgresql://postgres:pass@localhost:5432/blueprints \
   go run .
 ```
 
-The server listens on port `8084`.
+The server listens on port `8093`.
 
 ## Docker
 
@@ -56,7 +56,7 @@ The server listens on port `8084`.
 cd src/systems/blueprints
 docker build -t blueprints:latest .
 
-docker run -p 8084:8084 \
+docker run -p 8093:8093 \
   -e DATABASE_URL=postgresql://postgres:pass@db:5432/blueprints \
   -e GATEKEEPER_URL=http://gatekeeper:8081 \
   blueprints:latest
@@ -86,7 +86,7 @@ Short-lived credentials that bind an mTLS client certificate fingerprint to a wo
 **Create a credential:**
 
 ```bash
-curl -X POST http://blueprints:8084/backend-credentials \
+curl -X POST http://blueprints:8093/backend-credentials \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"workspace": "alice/dev", "cert_fingerprint": "<SHA-256 hex of client cert>"}'
@@ -99,9 +99,9 @@ Response includes a `token` and the full backend `address` to pass to OpenTofu. 
 ```hcl
 terraform {
   backend "http" {
-    address        = "http://blueprints:8084/state/alice/dev"
-    lock_address   = "http://blueprints:8084/state/alice/dev"
-    unlock_address = "http://blueprints:8084/state/alice/dev"
+    address        = "http://blueprints:8093/state/alice/dev"
+    lock_address   = "http://blueprints:8093/state/alice/dev"
+    unlock_address = "http://blueprints:8093/state/alice/dev"
     username       = "alice@example.com"
     password       = "your-password"
   }
@@ -137,6 +137,6 @@ go test ./...
 
 # Integration tests (requires running Blueprints, Gatekeeper, and PostgreSQL)
 pip install -r tests/blueprints/requirements.txt
-API_URL=http://localhost:8084 GATEKEEPER_URL=http://localhost:8081 \
+API_URL=http://localhost:8093 GATEKEEPER_URL=http://localhost:8081 \
   pytest tests/blueprints/ -v
 ```

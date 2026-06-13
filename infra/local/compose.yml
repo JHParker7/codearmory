@@ -39,7 +39,7 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,hooks=hooks-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
+      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,hooks=hooks-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,outpost-gateway=outpost-gateway-local-secret,chaos=chaos-local-secret,argo=argo-local-secret,test-service=test-service-local-secret
       SECRETS_LOOKUP_ALLOWED_CALLERS: "containers"
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
@@ -70,7 +70,9 @@ services:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/registry
       REGISTRY_SERVICE_ACCOUNTS: conductor=registry-read-local-secret,workflows=workflows-registry-local-secret,gatekeeper=gatekeeper-registry-read-local-secret,registry-test-reader=registry-test-reader-local-secret
       REGISTRY_ADMIN_ACCOUNTS: registry-admin=registry-admin-local-secret
-      SERVICES: blueprints=http://blueprints:8084,forge=http://forge:8083,gatekeeper=http://gatekeeper:8081
+      SERVICES: blueprints=http://blueprints:8093,forge=http://forge:8083,gatekeeper=http://gatekeeper:8081
+      CONDUCTOR_URL: http://conductor:8080
+      CONDUCTOR_NOTIFY_KEY: conductor-notify-local-secret
       MANIFEST_FILE: /etc/registry/manifest.json
     volumes:
       - ./registry-manifest.json:/etc/registry/manifest.json:ro
@@ -171,6 +173,8 @@ services:
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: registry-read-local-secret
       CONDUCTOR_FORWARD_KEY: forge-conductor-shared-local-secret
+      # Shared with registry (CONDUCTOR_NOTIFY_KEY) so registry can push route refreshes.
+      CONDUCTOR_NOTIFY_KEY: conductor-notify-local-secret
     ports:
       - "8080:8080"
     depends_on:
@@ -186,7 +190,7 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/workflows
       GATEKEEPER_URL: http://gatekeeper:8081
-      SERVICES: blueprints=http://blueprints:8084,registry=http://registry:8084,conductor=http://conductor:8080,hooks=http://hooks:8087
+      SERVICES: blueprints=http://blueprints:8093,registry=http://registry:8084,conductor=http://conductor:8080,hooks=http://hooks:8087
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: workflows-registry-local-secret
       GATEKEEPER_SERVICE_KEY: workflows-local-secret
@@ -223,6 +227,74 @@ services:
         condition: service_healthy
       gatekeeper:
         condition: service_healthy
+    restart: on-failure
+
+  # ── Outpost integration framework ──────────────────────────────────────────
+  # The outpost-gateway is the outpost-facing connection point (enroll,
+  # long-poll commands, ingest events) and the Postgres event backbone. The
+  # outpost itself runs in (or against) a target cluster with a KUBECONFIG and
+  # is not part of the compose stack; run it separately for end-to-end tests.
+  outpost-gateway:
+    build:
+      context: ../../src/systems/outpost-gateway
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/outpost_gateway
+      GATEKEEPER_URL: http://gatekeeper:8081
+      GATEKEEPER_SERVICE_KEY: outpost-gateway-local-secret
+      # Shared HMAC secret for the internal command/event plane. Must match the
+      # chaos and argo services' OUTPOST_INTERNAL_KEY.
+      OUTPOST_INTERNAL_KEY: outpost-internal-local-secret
+      # Maps each integration to its consumer service for event dispatch.
+      EVENT_CONSUMERS: chaos=http://chaos:8090,argo=http://argo:8091
+    ports:
+      - "8092:8092"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+    restart: on-failure
+
+  chaos:
+    build:
+      context: ../../src/systems/chaos
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/chaos
+      GATEKEEPER_URL: http://gatekeeper:8081
+      GATEKEEPER_SERVICE_KEY: chaos-local-secret
+      OUTPOST_GATEWAY_URL: http://outpost-gateway:8092
+      OUTPOST_INTERNAL_KEY: outpost-internal-local-secret
+      HOOKS_URL: http://hooks:8087
+      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
+    ports:
+      - "8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+      outpost-gateway:
+        condition: service_started
+    restart: on-failure
+
+  argo:
+    build:
+      context: ../../src/systems/argo
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/argo
+      GATEKEEPER_URL: http://gatekeeper:8081
+      GATEKEEPER_SERVICE_KEY: argo-local-secret
+      OUTPOST_GATEWAY_URL: http://outpost-gateway:8092
+      OUTPOST_INTERNAL_KEY: outpost-internal-local-secret
+    ports:
+      - "8091:8091"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+      outpost-gateway:
+        condition: service_started
     restart: on-failure
 
   forgejo:
@@ -337,7 +409,7 @@ services:
     build:
       context: ../../tests/blueprints
     environment:
-      BLUEPRINTS_URL: http://blueprints:8084
+      BLUEPRINTS_URL: http://blueprints:8093
       GATEKEEPER_URL: http://gatekeeper:8081
     depends_on:
       blueprints:
@@ -365,6 +437,7 @@ services:
       context: ../../tests/conductor
     environment:
       CONDUCTOR_URL: http://conductor:8080
+      CONDUCTOR_NOTIFY_KEY: conductor-notify-local-secret
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
     depends_on:
       conductor:
@@ -476,6 +549,55 @@ services:
         condition: service_healthy
       forgejo-setup:
         condition: service_completed_successfully
+    profiles: [test]
+    restart: no
+
+  outpost-gateway-integration-tests:
+    build:
+      context: ../../tests/outpost-gateway
+    environment:
+      OUTPOST_GATEWAY_URL: http://outpost-gateway:8092
+      GATEKEEPER_URL: http://gatekeeper:8081
+      OUTPOST_INTERNAL_KEY: outpost-internal-local-secret
+    depends_on:
+      outpost-gateway:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  chaos-integration-tests:
+    build:
+      context: ../../tests/chaos
+    environment:
+      CHAOS_URL: http://chaos:8090
+      OUTPOST_GATEWAY_URL: http://outpost-gateway:8092
+      GATEKEEPER_URL: http://gatekeeper:8081
+    depends_on:
+      chaos:
+        condition: service_started
+      outpost-gateway:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  argo-integration-tests:
+    build:
+      context: ../../tests/argo
+    environment:
+      ARGO_URL: http://argo:8091
+      OUTPOST_GATEWAY_URL: http://outpost-gateway:8092
+      GATEKEEPER_URL: http://gatekeeper:8081
+    depends_on:
+      argo:
+        condition: service_started
+      outpost-gateway:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
     profiles: [test]
     restart: no
 

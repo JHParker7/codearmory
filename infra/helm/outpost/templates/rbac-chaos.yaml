@@ -1,0 +1,115 @@
+{{- if and (eq (include "outpost.hasModule" (list . "chaos")) "true") .Values.chaos.rbac }}
+{{- $full := include "outpost.fullname" . -}}
+# Cluster-wide READ on ChaosResults only: the outpost runs one informer across
+# target namespaces to surface verdicts. It holds NO cluster-wide write — engine
+# create/delete/patch is namespace-scoped below, so the blast radius is bounded
+# to the operator-authorized target namespaces even if the control plane asks for
+# a namespace outside that set.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $full }}-chaos-results
+  labels:
+    {{- include "outpost.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["litmuschaos.io"]
+    resources: ["chaosresults"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $full }}-chaos-results
+  labels:
+    {{- include "outpost.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $full }}-chaos-results
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "outpost.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- range .Values.chaos.targetNamespaces }}
+---
+# The outpost may create/manage ChaosEngines ONLY in the namespaces the operator
+# explicitly authorized here — a namespaced Role, not a cluster-wide grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $full }}-chaos-engines
+  namespace: {{ . }}
+  labels:
+    {{- include "outpost.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: ["litmuschaos.io"]
+    resources: ["chaosengines", "chaosexperiments", "chaosresults"]
+    verbs: ["create", "delete", "get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $full }}-chaos-engines
+  namespace: {{ . }}
+  labels:
+    {{- include "outpost.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $full }}-chaos-engines
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "outpost.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- /* Per-target-namespace runner RBAC: the chaosServiceAccount the operator
+       runs experiment pods as. Mirrors the vendored litmus 00-rbac.yaml. */ -}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $.Values.chaos.runnerServiceAccount }}
+  namespace: {{ . }}
+  labels:
+    {{- include "outpost.labels" $ | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $.Values.chaos.runnerServiceAccount }}
+  namespace: {{ . }}
+  labels:
+    {{- include "outpost.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "get", "list", "patch", "update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "deletecollection"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["litmuschaos.io"]
+    resources: ["chaosengines", "chaosexperiments", "chaosresults"]
+    verbs: ["create", "delete", "get", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $.Values.chaos.runnerServiceAccount }}
+  namespace: {{ . }}
+  labels:
+    {{- include "outpost.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $.Values.chaos.runnerServiceAccount }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $.Values.chaos.runnerServiceAccount }}
+    namespace: {{ . }}
+{{- end }}
+{{- end }}

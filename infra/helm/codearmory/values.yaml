@@ -38,7 +38,7 @@ gatekeeper:
   env:
     logLevel: info
     # Comma-separated list of service names permitted to register.
-    permittedServices: "gatekeeper,blueprints,forge,workflows,tickets,hooks"
+    permittedServices: "gatekeeper,blueprints,forge,workflows,tickets,hooks,outpost-gateway,chaos,argo"
     # Comma-separated CIDRs of trusted reverse proxies (optional).
     trustedProxyCIDRs: ""
     # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
@@ -98,7 +98,7 @@ registry:
       memory: 128Mi
   env:
     logLevel: info
-    # Auto-populated as "blueprints=http://<fullname>-blueprints:8084,forge=http://<fullname>-forge:8083,
+    # Auto-populated as "blueprints=http://<fullname>-blueprints:8093,forge=http://<fullname>-forge:8083,
     # workflows=http://<fullname>-workflows:8085,tickets=http://<fullname>-tickets:8086,
     # hooks=http://<fullname>-hooks:8087" when left empty. Override to use custom service URLs.
     services: ""
@@ -129,7 +129,7 @@ blueprints:
     repository: blueprints
     tag: ""
   replicaCount: 1
-  port: 8084
+  port: 8093
   resources:
     requests:
       cpu: 100m
@@ -282,7 +282,7 @@ workflows:
   env:
     logLevel: info
     # Comma-separated "name=url" pairs of services that workflow steps may call.
-    # Auto-populated as "forge=http://<fullname>-forge:8083,blueprints=http://<fullname>-blueprints:8084"
+    # Auto-populated as "forge=http://<fullname>-forge:8083,blueprints=http://<fullname>-blueprints:8093"
     # when left empty. Override to add custom services or change URLs.
     services: ""
     otelEndpoint: ""
@@ -332,6 +332,110 @@ tickets:
     # Shared HMAC secret for emitting ticket lifecycle events to the hooks service.
     # Synced from hooks.secret.hooksTriggerKey when hooks is enabled. Leave empty for auto-sync.
     hooksTriggerKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Outpost Gateway ───────────────────────────────────────────────────────────
+# Outpost-facing connection point + Postgres event backbone for cluster
+# integrations (chaos, argo). Distinct from conductor.
+outpostGateway:
+  enabled: true
+  image:
+    repository: outpost-gateway
+    tag: ""
+  replicaCount: 1
+  port: 8092
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  service:
+    # Set to LoadBalancer/NodePort (or front with an Ingress) to expose the
+    # gateway to outposts running outside the control-plane cluster (SaaS).
+    type: ClusterIP
+  secret:
+    databaseUrl: ""
+    # Must match the outpost-gateway entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades.
+    gatekeeperServiceKey: ""
+    # Shared HMAC secret across the gateway and every integration consumer
+    # (chaos, argo). Auto-generated and synced on first install.
+    outpostInternalKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Chaos ─────────────────────────────────────────────────────────────────────
+# Thin control plane for chaos experiments. Holds no cluster credentials; drives
+# an outpost via the outpost-gateway.
+chaos:
+  enabled: true
+  image:
+    repository: chaos
+    tag: ""
+  replicaCount: 1
+  port: 8090
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    databaseUrl: ""
+    gatekeeperServiceKey: ""
+    # Shared with the outpost-gateway. Leave empty for auto-sync.
+    outpostInternalKey: ""
+    # Shared HMAC secret for emitting experiment events to the hooks service.
+    hooksTriggerKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Argo ──────────────────────────────────────────────────────────────────────
+# Second integration (Argo CD app sync) proving the framework generalises.
+argo:
+  enabled: true
+  image:
+    repository: argo
+    tag: ""
+  replicaCount: 1
+  port: 8091
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    databaseUrl: ""
+    gatekeeperServiceKey: ""
+    # Shared with the outpost-gateway. Leave empty for auto-sync.
+    outpostInternalKey: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -520,6 +624,24 @@ tests:
     image:
       repository: test-hooks
       tag: ""
+  outpostGateway:
+    # Also requires outpostGateway.enabled to be true.
+    enabled: true
+    image:
+      repository: test-outpost-gateway
+      tag: ""
+  chaos:
+    # Also requires chaos.enabled and outpostGateway.enabled to be true.
+    enabled: true
+    image:
+      repository: test-chaos
+      tag: ""
+  argo:
+    # Also requires argo.enabled and outpostGateway.enabled to be true.
+    enabled: true
+    image:
+      repository: test-argo
+      tag: ""
 
 # ── PostgreSQL (Bitnami subchart) ─────────────────────────────────────────────
 postgresql:
@@ -545,3 +667,6 @@ postgresql:
           CREATE DATABASE tickets;
           CREATE DATABASE hooks;
           CREATE DATABASE gitea_integration;
+          CREATE DATABASE outpost_gateway;
+          CREATE DATABASE chaos;
+          CREATE DATABASE argo;
