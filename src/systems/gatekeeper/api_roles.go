@@ -25,8 +25,8 @@ func handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
-	slog.Info("create role request", "caller_id", callerID)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "create role request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "createRole", "gatekeeper/roles") {
 		span.SetStatus(codes.Ok, "")
@@ -38,7 +38,7 @@ func handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("create role: invalid request body", "caller_id", callerID, "error", err)
+		slog.WarnContext(ctx, "create role: invalid request body", "caller_id", callerID, "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -57,7 +57,7 @@ func handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	// Validate that every supplied permission ID exists and belongs to the caller's org.
 	if err := validatePermissionIDs(ctx, req.PermissionsIDs, callerOrgID); err != nil {
 		span.SetStatus(codes.Error, "invalid permission id")
-		slog.Warn("create role: "+err.Error(), "caller_id", callerID)
+		slog.WarnContext(ctx, "create role: "+err.Error(), "caller_id", callerID)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -66,7 +66,7 @@ func handleCreateRole(w http.ResponseWriter, r *http.Request) {
 	if err := role.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create role: db error", "caller_id", callerID, "error", err)
+		slog.ErrorContext(ctx, "create role: db error", "caller_id", callerID, "error", err)
 		http.Error(w, "failed to create role", http.StatusInternalServerError)
 		return
 	}
@@ -76,7 +76,7 @@ func handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		attribute.Int("role.permissions_count", len(req.PermissionsIDs)),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("create role: success", "caller_id", callerID, "role_id", role.RoleID, "permissions_count", len(req.PermissionsIDs))
+	slog.InfoContext(ctx, "create role: success", "caller_id", callerID, "role_id", role.RoleID, "permissions_count", len(req.PermissionsIDs))
 	writeAudit(ctx, callerID, "user", "role.create", role.RoleID, fmt.Sprintf("permissions_count=%d", len(req.PermissionsIDs)))
 	row, _ := role.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
@@ -92,10 +92,10 @@ func handleGetRole(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("role.id", id),
 	)
-	slog.Info("get role request", "caller_id", callerID, "role_id", id)
+	slog.InfoContext(ctx, "get role request", "caller_id", callerID, "role_id", id)
 
 	if !requirePermission(w, r, "getRole", "gatekeeper/roles/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -107,13 +107,13 @@ func handleGetRole(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "role not found")
-		slog.Warn("get role: not found", "caller_id", callerID, "role_id", id)
+		slog.WarnContext(ctx, "get role: not found", "caller_id", callerID, "role_id", id)
 		http.Error(w, "role not found", http.StatusNotFound)
 		return
 	}
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("role.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("get role: success", "caller_id", callerID, "role_id", id)
+	slog.InfoContext(ctx, "get role: success", "caller_id", callerID, "role_id", id)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(row.(Role))
 }
@@ -126,10 +126,10 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("role.id", id),
 	)
-	slog.Info("update role request", "caller_id", callerID, "role_id", id)
+	slog.InfoContext(ctx, "update role request", "caller_id", callerID, "role_id", id)
 
 	if !requirePermission(w, r, "updateRole", "gatekeeper/roles/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -141,7 +141,7 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("update role: invalid request body", "caller_id", callerID, "role_id", id, "error", err)
+		slog.WarnContext(ctx, "update role: invalid request body", "caller_id", callerID, "role_id", id, "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -151,7 +151,7 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "role not found")
-		slog.Warn("update role: not found", "caller_id", callerID, "role_id", id)
+		slog.WarnContext(ctx, "update role: not found", "caller_id", callerID, "role_id", id)
 		http.Error(w, "role not found", http.StatusNotFound)
 		return
 	}
@@ -167,7 +167,7 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validatePermissionIDs(ctx, req.PermissionsIDs, callerOrgID); err != nil {
 		span.SetStatus(codes.Error, "invalid permission id")
-		slog.Warn("update role: "+err.Error(), "caller_id", callerID, "role_id", id)
+		slog.WarnContext(ctx, "update role: "+err.Error(), "caller_id", callerID, "role_id", id)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -179,7 +179,7 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	if req.OrgID != nil {
 		if callerOrgID == nil || *req.OrgID != *callerOrgID {
 			span.SetStatus(codes.Ok, "")
-			slog.Warn("update role: org_id does not match caller's org", "caller_id", callerID, "role_id", id)
+			slog.WarnContext(ctx, "update role: org_id does not match caller's org", "caller_id", callerID, "role_id", id)
 			http.Error(w, "org_id must match caller's org", http.StatusForbidden)
 			return
 		}
@@ -188,7 +188,7 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 	if err := role.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update role: db error", "caller_id", callerID, "role_id", id, "error", err)
+		slog.ErrorContext(ctx, "update role: db error", "caller_id", callerID, "role_id", id, "error", err)
 		http.Error(w, "failed to update role", http.StatusInternalServerError)
 		return
 	}
@@ -197,7 +197,7 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 		attribute.Int("role.permissions_count", len(req.PermissionsIDs)),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("update role: success", "caller_id", callerID, "role_id", id, "permissions_count", len(req.PermissionsIDs))
+	slog.InfoContext(ctx, "update role: success", "caller_id", callerID, "role_id", id, "permissions_count", len(req.PermissionsIDs))
 	writeAudit(ctx, callerID, "user", "role.update", id, fmt.Sprintf("permissions_count=%d", len(req.PermissionsIDs)))
 	row, _ = role.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
@@ -212,10 +212,10 @@ func handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("role.id", id),
 	)
-	slog.Info("delete role request", "caller_id", callerID, "role_id", id)
+	slog.InfoContext(ctx, "delete role request", "caller_id", callerID, "role_id", id)
 
 	if !requirePermission(w, r, "deleteRole", "gatekeeper/roles/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -227,7 +227,7 @@ func handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "role not found")
-		slog.Warn("delete role: not found", "caller_id", callerID, "role_id", id)
+		slog.WarnContext(ctx, "delete role: not found", "caller_id", callerID, "role_id", id)
 		http.Error(w, "role not found", http.StatusNotFound)
 		return
 	}
@@ -239,7 +239,7 @@ func handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	teamCount, _ := countTeamsByRole(ctx, id)
 	if userCount > 0 || teamCount > 0 {
 		span.SetStatus(codes.Error, "role still in use")
-		slog.Warn("delete role: role still referenced", "caller_id", callerID, "role_id", id, "users", userCount, "teams", teamCount)
+		slog.WarnContext(ctx, "delete role: role still referenced", "caller_id", callerID, "role_id", id, "users", userCount, "teams", teamCount)
 		http.Error(w, "role is still assigned to users or teams", http.StatusConflict)
 		return
 	}
@@ -247,13 +247,13 @@ func handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	if err := row.(Role).Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
-		slog.Error("delete role: db error", "caller_id", callerID, "role_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete role: db error", "caller_id", callerID, "role_id", id, "error", err)
 		http.Error(w, "failed to delete role", http.StatusInternalServerError)
 		return
 	}
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("role.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("delete role: success", "caller_id", callerID, "role_id", id)
+	slog.InfoContext(ctx, "delete role: success", "caller_id", callerID, "role_id", id)
 	writeAudit(ctx, callerID, "user", "role.delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -264,8 +264,8 @@ func handleListRoles(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
-	slog.Info("list roles request", "caller_id", callerID)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "list roles request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listRole", "gatekeeper/roles") {
 		span.SetStatus(codes.Ok, "")
@@ -302,7 +302,7 @@ func handleListRoles(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "list roles failed")
-		slog.Warn("list roles: db error", "caller_id", callerID, "error", err)
+		slog.WarnContext(ctx, "list roles: db error", "caller_id", callerID, "error", err)
 		http.Error(w, "failed to list roles", http.StatusInternalServerError)
 		return
 	}
@@ -311,7 +311,7 @@ func handleListRoles(w http.ResponseWriter, r *http.Request) {
 		roles[i] = row.(Role)
 	}
 	span.SetStatus(codes.Ok, "")
-	slog.Info("list roles: success", "caller_id", callerID, "count", len(roles))
+	slog.InfoContext(ctx, "list roles: success", "caller_id", callerID, "count", len(roles))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(roles) //nolint:errcheck
 }

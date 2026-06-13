@@ -8,7 +8,11 @@ import (
 )
 
 func main() {
-	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})
+	logLevel := slog.LevelWarn
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
+	}
+	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
 
 	cfg := loadConfig()

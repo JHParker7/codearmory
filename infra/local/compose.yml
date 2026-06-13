@@ -1,4 +1,12 @@
 # config not for production use. set up to test integration tests on PRs
+# Shared OpenTelemetry env for application services. Each one sends OTLP to the
+# otelcol service, which forwards traces to Jaeger (UI at http://localhost:16686).
+# OTEL_TRACES_SAMPLER=always_on captures every trace locally; production tunes
+# sampling via the Helm chart's `otel.sampler` value.
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+  OTEL_TRACES_SAMPLER: always_on
+
 services:
   # ── Database ──────────────────────────────────────────────────────────────────
 
@@ -33,10 +41,33 @@ services:
 
   # ── Application services ──────────────────────────────────────────────────────
 
+  # ── Observability ─────────────────────────────────────────────────────────────
+  # The collector receives OTLP from every service and forwards traces to Jaeger
+  # (UI on :16686); metrics and logs go to the collector's debug exporter and are
+  # visible via `docker compose logs otelcol`. See otelcol.yml.
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI
+    restart: unless-stopped
+
+  otelcol:
+    image: otel/opentelemetry-collector:0.115.1
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./otelcol.yml:/etc/otelcol/config.yml:ro
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
   gatekeeper:
     build:
       context: ../../src/systems/gatekeeper
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
       GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,hooks=hooks-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,outpost-gateway=outpost-gateway-local-secret,chaos=chaos-local-secret,argo=argo-local-secret,test-service=test-service-local-secret
@@ -67,6 +98,7 @@ services:
     build:
       context: ../../src/systems/registry
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/registry
       REGISTRY_SERVICE_ACCOUNTS: conductor=registry-read-local-secret,workflows=workflows-registry-local-secret,gatekeeper=gatekeeper-registry-read-local-secret,registry-test-reader=registry-test-reader-local-secret
       REGISTRY_ADMIN_ACCOUNTS: registry-admin=registry-admin-local-secret
@@ -90,6 +122,7 @@ services:
     build:
       context: ../../src/systems/blueprints
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/blueprints
       GATEKEEPER_URL: http://gatekeeper:8081
       REDIS_URL: redis://redis:6379/1
@@ -118,6 +151,7 @@ services:
     build:
       context: ../../src/systems/egress-proxy
     environment:
+      <<: *otel-env
       PROXY_ALLOWED_DOMAINS: ${FORGE_PROXY_ALLOWED_DOMAINS:-registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com}
     networks:
       - default
@@ -133,6 +167,7 @@ services:
     build:
       context: ../../src/systems/forge
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/forge
       RUNTIME: docker
       GATEKEEPER_URL: http://gatekeeper:8081
@@ -169,6 +204,7 @@ services:
     build:
       context: ../../src/systems/conductor
     environment:
+      <<: *otel-env
       GATEKEEPER_URL: http://gatekeeper:8081
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: registry-read-local-secret
@@ -188,6 +224,7 @@ services:
     build:
       context: ../../src/systems/workflows
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/workflows
       GATEKEEPER_URL: http://gatekeeper:8081
       SERVICES: blueprints=http://blueprints:8093,registry=http://registry:8084,conductor=http://conductor:8080,hooks=http://hooks:8087
@@ -213,6 +250,7 @@ services:
     build:
       context: ../../src/systems/tickets
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/tickets
       GATEKEEPER_URL: http://gatekeeper:8081
       GATEKEEPER_SERVICE_KEY: tickets-local-secret
@@ -238,6 +276,7 @@ services:
     build:
       context: ../../src/systems/outpost-gateway
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/outpost_gateway
       GATEKEEPER_URL: http://gatekeeper:8081
       GATEKEEPER_SERVICE_KEY: outpost-gateway-local-secret
@@ -259,6 +298,7 @@ services:
     build:
       context: ../../src/systems/chaos
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/chaos
       GATEKEEPER_URL: http://gatekeeper:8081
       GATEKEEPER_SERVICE_KEY: chaos-local-secret
@@ -281,6 +321,7 @@ services:
     build:
       context: ../../src/systems/argo
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/argo
       GATEKEEPER_URL: http://gatekeeper:8081
       GATEKEEPER_SERVICE_KEY: argo-local-secret
@@ -357,6 +398,7 @@ services:
     command:
       - "export GITEA_ADMIN_TOKEN=$(cat /token/token.txt) && exec ./gitea_integration"
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gitea_integration
       GATEKEEPER_URL: http://gatekeeper:8081
       GATEKEEPER_SERVICE_KEY: gitea-integration-local-secret
@@ -378,6 +420,7 @@ services:
     build:
       context: ../../src/systems/containers
     environment:
+      <<: *otel-env
       GATEKEEPER_URL: http://gatekeeper:8081
       GATEKEEPER_SERVICE_KEY: containers-local-secret
       REGISTRY_URL: ${CONTAINER_REGISTRY_URL:?CONTAINER_REGISTRY_URL must be set to your OCI/Docker registry base URL}
@@ -479,6 +522,7 @@ services:
     build:
       context: ../../src/systems/hooks
     environment:
+      <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/hooks
       GATEKEEPER_URL: http://gatekeeper:8081
       WORKFLOWS_URL: http://workflows:8085

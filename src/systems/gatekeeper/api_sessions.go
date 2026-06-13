@@ -50,10 +50,10 @@ func handleGetSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("session.id", id),
 	)
-	slog.Info("get session request", "caller_id", callerID, "session_id", id)
+	slog.InfoContext(ctx, "get session request", "caller_id", callerID, "session_id", id)
 
 	if !requirePermission(w, r, "getSession", "gatekeeper/sessions/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -65,14 +65,14 @@ func handleGetSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "session not found")
-		slog.Warn("get session: not found", "caller_id", callerID, "session_id", id)
+		slog.WarnContext(ctx, "get session: not found", "caller_id", callerID, "session_id", id)
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
 	s := row.(Session)
 	if s.UserID != callerID {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("get session: cross-user attempt", "caller_id", callerID, "session_id", id, "session_user_id", s.UserID)
+		slog.WarnContext(ctx, "get session: cross-user attempt", "caller_id", callerID, "session_id", id, "session_user_id", s.UserID)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -82,7 +82,7 @@ func handleGetSession(w http.ResponseWriter, r *http.Request) {
 		attribute.String("session.expires_at", s.ExpiresAt.String()),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("get session: success", "caller_id", callerID, "session_id", id)
+	slog.InfoContext(ctx, "get session: success", "caller_id", callerID, "session_id", id)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(toSessionResponse(s))
 }
@@ -133,7 +133,7 @@ func handleCreateRunToken(w http.ResponseWriter, r *http.Request) {
 
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		slog.Error("run token: key generation failed", "user_id", req.UserID, "error", err)
+		slog.ErrorContext(r.Context(), "run token: key generation failed", "user_id", req.UserID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -153,14 +153,14 @@ func handleCreateRunToken(w http.ResponseWriter, r *http.Request) {
 		},
 	}).SignedString(privKey)
 	if err != nil {
-		slog.Error("run token: JWT signing failed", "user_id", req.UserID, "error", err)
+		slog.ErrorContext(r.Context(), "run token: JWT signing failed", "user_id", req.UserID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
 	if err != nil {
-		slog.Error("run token: public key marshal failed", "user_id", req.UserID, "error", err)
+		slog.ErrorContext(r.Context(), "run token: public key marshal failed", "user_id", req.UserID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -173,12 +173,12 @@ func handleCreateRunToken(w http.ResponseWriter, r *http.Request) {
 		ScopedRoleID: req.RoleID,
 	}
 	if err := session.Add(r.Context()); err != nil {
-		slog.Error("run token: session persist failed", "user_id", req.UserID, "error", err)
+		slog.ErrorContext(r.Context(), "run token: session persist failed", "user_id", req.UserID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("run token created", "user_id", req.UserID, "session_id", sessionID)
+	slog.InfoContext(r.Context(), "run token created", "user_id", req.UserID, "session_id", sessionID)
 	writeAudit(r.Context(), svc.ServiceName, "service", "run_token.create", sessionID, req.UserID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -202,12 +202,12 @@ func handleRevokeRunToken(w http.ResponseWriter, r *http.Request) {
 
 	sessionID := r.PathValue("session_id")
 	if err := (Session{SessionID: sessionID}).Remove(r.Context()); err != nil {
-		slog.Error("run token: revoke failed", "session_id", sessionID, "error", err)
+		slog.ErrorContext(r.Context(), "run token: revoke failed", "session_id", sessionID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("run token revoked", "session_id", sessionID)
+	slog.InfoContext(r.Context(), "run token revoked", "session_id", sessionID)
 	writeAudit(r.Context(), svc.ServiceName, "service", "run_token.revoke", sessionID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -276,7 +276,7 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 		// Only include permissions the owner actually holds (no privilege escalation).
 		granted, err := checkPermissions(ctx, req.UserID, p.Service, p.Action, p.Resource)
 		if err != nil || !granted {
-			slog.Debug("workflow role: owner lacks permission, skipping",
+			slog.DebugContext(ctx, "workflow role: owner lacks permission, skipping",
 				"workflow_id", req.WorkflowID, "service", p.Service, "action", p.Action)
 			continue
 		}
@@ -296,7 +296,7 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 			Active:        true,
 		}
 		if err := perm.Add(ctx); err != nil {
-			slog.Error("workflow role: create permission", "workflow_id", req.WorkflowID, "error", err)
+			slog.ErrorContext(ctx, "workflow role: create permission", "workflow_id", req.WorkflowID, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -316,7 +316,7 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 		role.PermissionsIDs = []string{}
 	}
 	if err := role.Add(ctx); err != nil {
-		slog.Error("workflow role: create role", "workflow_id", req.WorkflowID, "error", err)
+		slog.ErrorContext(ctx, "workflow role: create role", "workflow_id", req.WorkflowID, "error", err)
 		for _, pid := range permIDs {
 			(Permissions{PermissionsID: pid}).Remove(ctx) //nolint:errcheck
 		}
@@ -324,7 +324,7 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("workflow role created", "workflow_id", req.WorkflowID, "role_id", role.RoleID, "permissions", len(permIDs))
+	slog.InfoContext(ctx, "workflow role created", "workflow_id", req.WorkflowID, "role_id", role.RoleID, "permissions", len(permIDs))
 	writeAudit(ctx, svc.ServiceName, "service", "workflow_role.create", role.RoleID, req.WorkflowID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -353,7 +353,7 @@ func handleDeleteWorkflowRole(w http.ResponseWriter, r *http.Request) {
 	}
 	role := roleRow.(Role)
 	if !strings.HasPrefix(role.Name, "workflow:") {
-		slog.Warn("workflow role: delete rejected — role not workflow-provisioned", "role_id", roleID, "role_name", role.Name)
+		slog.WarnContext(ctx, "workflow role: delete rejected — role not workflow-provisioned", "role_id", roleID, "role_name", role.Name)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -361,12 +361,12 @@ func handleDeleteWorkflowRole(w http.ResponseWriter, r *http.Request) {
 		(Permissions{PermissionsID: pid}).Remove(ctx) //nolint:errcheck
 	}
 	if err := role.Remove(ctx); err != nil {
-		slog.Error("workflow role: delete role", "role_id", roleID, "error", err)
+		slog.ErrorContext(ctx, "workflow role: delete role", "role_id", roleID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("workflow role deleted", "role_id", roleID)
+	slog.InfoContext(ctx, "workflow role deleted", "role_id", roleID)
 	writeAudit(ctx, svc.ServiceName, "service", "workflow_role.delete", roleID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -379,10 +379,10 @@ func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("session.id", id),
 	)
-	slog.Info("delete session request", "caller_id", callerID, "session_id", id)
+	slog.InfoContext(ctx, "delete session request", "caller_id", callerID, "session_id", id)
 
 	if !requirePermission(w, r, "deleteSession", "gatekeeper/sessions/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -394,14 +394,14 @@ func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "session not found")
-		slog.Warn("delete session: not found", "caller_id", callerID, "session_id", id)
+		slog.WarnContext(ctx, "delete session: not found", "caller_id", callerID, "session_id", id)
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
 	s := row.(Session)
 	if s.UserID != callerID {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("delete session: cross-user attempt", "caller_id", callerID, "session_id", id, "session_user_id", s.UserID)
+		slog.WarnContext(ctx, "delete session: cross-user attempt", "caller_id", callerID, "session_id", id, "session_user_id", s.UserID)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -410,12 +410,12 @@ func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if err := s.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
-		slog.Error("delete session: db error", "caller_id", callerID, "session_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete session: db error", "caller_id", callerID, "session_id", id, "error", err)
 		http.Error(w, "failed to delete session", http.StatusInternalServerError)
 		return
 	}
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("session.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("delete session: success", "caller_id", callerID, "session_id", id)
+	slog.InfoContext(ctx, "delete session: success", "caller_id", callerID, "session_id", id)
 	w.WriteHeader(http.StatusNoContent)
 }

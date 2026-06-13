@@ -39,7 +39,7 @@ func (c *giteaClient) do(req *http.Request, out interface{}) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		return &giteaError{Status: resp.StatusCode, Body: string(b)}
+		return newGiteaError(resp.StatusCode, b)
 	}
 	if out != nil && resp.StatusCode != http.StatusNoContent {
 		return json.NewDecoder(resp.Body).Decode(out)
@@ -50,6 +50,17 @@ func (c *giteaClient) do(req *http.Request, out interface{}) error {
 type giteaError struct {
 	Status int
 	Body   string
+}
+
+// maxGiteaErrorBody bounds the upstream response body stored on a giteaError.
+// The body is embedded in Error() and logged at many call sites, so cap it to
+// keep logs from dumping large or sensitive upstream content.
+const maxGiteaErrorBody = 512
+
+// newGiteaError constructs a giteaError, truncating the upstream body to
+// maxGiteaErrorBody bytes so it can't bloat or leak through logs.
+func newGiteaError(status int, body []byte) *giteaError {
+	return &giteaError{Status: status, Body: string(body[:min(len(body), maxGiteaErrorBody)])}
 }
 
 func (e *giteaError) Error() string {
@@ -79,7 +90,7 @@ func (c *giteaClient) verifyUserToken(ctx context.Context, token string) (string
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		return "", &giteaError{Status: resp.StatusCode, Body: string(b)}
+		return "", newGiteaError(resp.StatusCode, b)
 	}
 	var u struct {
 		Login string `json:"login"`
@@ -291,7 +302,7 @@ func (c *giteaClient) cleanRegistryTokens(ctx context.Context, username string) 
 		}
 		path := fmt.Sprintf("/users/%s/tokens/%d", url.PathEscape(username), t.ID)
 		if err := c.delete(ctx, path, username); err != nil {
-			slog.Warn("clean registry tokens: delete failed", "username", username, "token_id", t.ID, "error", err)
+			slog.WarnContext(ctx, "clean registry tokens: delete failed", "username", username, "token_id", t.ID, "error", err)
 		}
 	}
 	return nil

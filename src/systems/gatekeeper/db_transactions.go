@@ -26,7 +26,7 @@ func approveServicePermissionRequestAtomic(ctx context.Context, requestID, calle
 	defer span.End()
 	span.SetAttributes(
 		attribute.String("request.id", requestID),
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 	)
 
 	var spr ServicePermissionRequest
@@ -100,7 +100,7 @@ func approveServicePermissionRequestAtomic(ctx context.Context, requestID, calle
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("approve permission request failed", "request_id", requestID, "caller_id", callerID, "error", err)
+		slog.ErrorContext(ctx, "approve permission request failed", "request_id", requestID, "caller_id", callerID, "error", err)
 		return spr, err
 	}
 	span.SetAttributes(
@@ -108,7 +108,7 @@ func approveServicePermissionRequestAtomic(ctx context.Context, requestID, calle
 		attribute.String("permission.name", spr.Name),
 	)
 	span.SetStatus(codes.Ok, "")
-	slog.Info("permission request approved", "request_id", requestID, "service", spr.ServiceName, "caller_id", callerID)
+	slog.InfoContext(ctx, "permission request approved", "request_id", requestID, "service", spr.ServiceName, "caller_id", callerID)
 	return spr, nil
 }
 
@@ -122,7 +122,7 @@ func acceptInviteAtomic(ctx context.Context, inviteID, callerID string, invite I
 	defer span.End()
 	span.SetAttributes(
 		attribute.String("invite.id", inviteID),
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("resource.type", invite.ResourceType),
 		attribute.String("resource.id", invite.ResourceID),
 	)
@@ -175,6 +175,6 @@ func acceptInviteAtomic(ctx context.Context, inviteID, callerID string, invite I
 		return err
 	}
 	span.SetStatus(codes.Ok, "")
-	slog.Info("invite accepted", "invite_id", inviteID, "caller_id", callerID, "resource_type", invite.ResourceType, "resource_id", invite.ResourceID)
+	slog.InfoContext(ctx, "invite accepted", "invite_id", inviteID, "caller_id", callerID, "resource_type", invite.ResourceType, "resource_id", invite.ResourceID)
 	return nil
 }

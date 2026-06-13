@@ -83,7 +83,7 @@ func handleCreateStep(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("create step: name check error", "error", err)
+		slog.ErrorContext(ctx, "create step: name check error", "error", err)
 		http.Error(w, "failed to create step", http.StatusInternalServerError)
 		return
 	}
@@ -115,14 +115,14 @@ func handleCreateStep(w http.ResponseWriter, r *http.Request) {
 	if err := s.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create step: db error", "error", err)
+		slog.ErrorContext(ctx, "create step: db error", "error", err)
 		http.Error(w, "failed to create step", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetAttributes(attribute.String("step.id", s.StepID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("step created", "step_id", s.StepID, "name", s.Name, "action", s.Action, "user_id", userID)
+	slog.InfoContext(ctx, "step created", "step_id", s.StepID, "name", s.Name, "action", s.Action, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(s) //nolint:errcheck
@@ -147,7 +147,7 @@ func handleListSteps(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
-		slog.Error("list steps: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "list steps: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list steps", http.StatusInternalServerError)
 		return
 	}
@@ -221,7 +221,7 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("update step: fetch error", "step_id", id, "error", err)
+		slog.ErrorContext(ctx, "update step: fetch error", "step_id", id, "error", err)
 		http.Error(w, "failed to get step", http.StatusInternalServerError)
 		return
 	}
@@ -255,7 +255,7 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update step: db error", "step_id", id, "error", err)
+		slog.ErrorContext(ctx, "update step: db error", "step_id", id, "error", err)
 		http.Error(w, "failed to update step", http.StatusInternalServerError)
 		return
 	}
@@ -269,7 +269,7 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("step updated", "step_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "step updated", "step_id", id, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s) //nolint:errcheck
 }
@@ -311,13 +311,13 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 	if err := s.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete step: db error", "step_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete step: db error", "step_id", id, "error", err)
 		http.Error(w, "failed to delete step", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("step deleted", "step_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "step deleted", "step_id", id, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

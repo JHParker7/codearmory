@@ -52,10 +52,7 @@ spec:
               value: {{ .Values.containers.env.logLevel | quote }}
             - name: GATEKEEPER_URL
               value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
-            {{- if .Values.containers.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.containers.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.containers.env) | nindent 12 }}
             - name: REGISTRY_URL
               valueFrom:
                 secretKeyRef:

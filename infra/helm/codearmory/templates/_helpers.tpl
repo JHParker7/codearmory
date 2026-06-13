@@ -130,6 +130,35 @@ Usage: {{- include "codearmory.postgresql.env" (list . "gatekeeper" "gatekeeper"
 {{- end }}
 
 {{/*
+OpenTelemetry environment variables for a service: the per-service OTLP endpoint
+plus the chart-global trace sampler. The sampler vars are emitted only when an
+endpoint is set (a service with no endpoint exports nothing, so the sampler is
+moot). Sampler names follow the OTEL_TRACES_SAMPLER spec — set
+otel.sampler=parentbased_traceidratio with otel.samplerArg (e.g. "0.1") to sample
+down high-volume deployments instead of tracing every request.
+Usage: {{- include "codearmory.otel.envs" (list . .Values.conductor.env) | nindent 12 }}
+  args: root, service-env-map
+*/}}
+{{- define "codearmory.otel.envs" -}}
+{{- $root := index . 0 -}}
+{{- $env := index . 1 -}}
+{{- if $env.otelEndpoint }}
+- name: OTEL_EXPORTER_OTLP_ENDPOINT
+  value: {{ $env.otelEndpoint | quote }}
+{{- with $root.Values.otel }}
+{{- if .sampler }}
+- name: OTEL_TRACES_SAMPLER
+  value: {{ .sampler | quote }}
+{{- end }}
+{{- if .samplerArg }}
+- name: OTEL_TRACES_SAMPLER_ARG
+  value: {{ .samplerArg | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 TLS environment variables for a service.
 Usage: {{ include "codearmory.tls.envs" .Values.someservice.tls }}
 */}}

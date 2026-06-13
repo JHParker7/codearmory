@@ -41,7 +41,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 	if !verifyInternal("event", body,
 		r.Header.Get("X-Internal-Token"), r.Header.Get("X-Internal-Timestamp")) {
 		span.SetStatus(codes.Error, "invalid internal token")
-		slog.Warn("internal event: invalid token")
+		slog.WarnContext(ctx, "internal event: invalid token")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -54,7 +54,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 	// shared internal key also authenticates other consumers — never act on an
 	// event for a different integration.
 	if ev.Integration != "" && ev.Integration != "chaos" {
-		slog.Warn("internal event: ignoring non-chaos integration", "integration", ev.Integration)
+		slog.WarnContext(ctx, "internal event: ignoring non-chaos integration", "integration", ev.Integration)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -81,7 +81,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to update experiment", http.StatusInternalServerError)
 			return
 		} else if changed {
-			slog.Info("experiment running", "experiment_id", exp.ExperimentID)
+			slog.InfoContext(ctx, "experiment running", "experiment_id", exp.ExperimentID)
 		}
 	case "verdict":
 		verdict, _ := ev.Payload["verdict"].(string)
@@ -99,7 +99,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if changed {
-			slog.Info("experiment verdict applied", "experiment_id", exp.ExperimentID, "status", exp.Status, "verdict", exp.Verdict)
+			slog.InfoContext(ctx, "experiment verdict applied", "experiment_id", exp.ExperimentID, "status", exp.Status, "verdict", exp.Verdict)
 			// Only count and notify on a real terminal transition — a verdict event
 			// can also land while the run is still in flight (status stays running).
 			if isTerminal(exp.Status) && exp.Status != StatusStopped {
@@ -112,7 +112,7 @@ func handleInternalEvent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	default:
-		slog.Debug("internal event: ignoring unknown type", "type", ev.Type)
+		slog.DebugContext(ctx, "internal event: ignoring unknown type", "type", ev.Type)
 	}
 
 	span.SetStatus(codes.Ok, "")

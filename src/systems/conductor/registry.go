@@ -73,14 +73,14 @@ func refreshServiceCache(ctx context.Context) {
 
 	resp, err := registryClient.Do(req)
 	if err != nil {
-		slog.Warn("service registry refresh failed", "error", err)
+		slog.WarnContext(ctx, "service registry refresh failed", "error", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		slog.Warn("service registry refresh: unexpected status", "status", resp.StatusCode)
+		slog.WarnContext(ctx, "service registry refresh: unexpected status", "status", resp.StatusCode)
 		return
 	}
 
@@ -113,7 +113,7 @@ func refreshServiceCache(ctx context.Context) {
 
 	for _, s := range svcs {
 		if _, err := url.Parse(s.URL); err != nil {
-			slog.Warn("invalid service URL", "name", s.Name, "url", s.URL)
+			slog.WarnContext(ctx, "invalid service URL", "name", s.Name, "url", s.URL)
 			continue
 		}
 
@@ -122,7 +122,7 @@ func refreshServiceCache(ctx context.Context) {
 			proxy = old.proxy
 		} else {
 			proxy = newProxy(s.URL, s.Name)
-			slog.Info("service cache updated", "name", s.Name)
+			slog.DebugContext(ctx, "service cache updated", "name", s.Name)
 		}
 
 		newServices[s.Name] = serviceState{
@@ -148,7 +148,7 @@ func refreshServiceCache(ctx context.Context) {
 
 	for name := range oldServices {
 		if _, ok := newServices[name]; !ok {
-			slog.Info("service removed from cache", "name", name)
+			slog.DebugContext(ctx, "service removed from cache", "name", name)
 		}
 	}
 

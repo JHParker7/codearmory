@@ -55,10 +55,7 @@ spec:
             - name: HOOKS_URL
               value: "http://{{ include "codearmory.fullname" . }}-hooks:{{ .Values.hooks.port }}"
             {{- end }}
-            {{- if .Values.tickets.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.tickets.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.tickets.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "tickets" "tickets" (include "codearmory.fullname" .)) | nindent 12 }}
             - name: GATEKEEPER_SERVICE_KEY
               valueFrom:

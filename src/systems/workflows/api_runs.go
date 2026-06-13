@@ -72,18 +72,18 @@ func revokeRunToken(ctx context.Context, sessionID string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
 		gatekeeperURL+"/internal/run-tokens/"+sessionID, nil)
 	if err != nil {
-		slog.Warn("revokeRunToken: build request failed", "session_id", sessionID, "error", err)
+		slog.WarnContext(ctx, "revokeRunToken: build request failed", "session_id", sessionID, "error", err)
 		return
 	}
 	req.Header.Set("X-Service-Key", "workflows:"+key)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Warn("revokeRunToken: request failed", "session_id", sessionID, "error", err)
+		slog.WarnContext(ctx, "revokeRunToken: request failed", "session_id", sessionID, "error", err)
 		return
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		slog.Warn("revokeRunToken: unexpected status", "session_id", sessionID, "status", resp.StatusCode)
+		slog.WarnContext(ctx, "revokeRunToken: unexpected status", "session_id", sessionID, "status", resp.StatusCode)
 	}
 }
 
@@ -123,7 +123,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("trigger run: get workflow", "workflow_id", workflowID, "error", err)
+		slog.ErrorContext(ctx, "trigger run: get workflow", "workflow_id", workflowID, "error", err)
 		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
 		return
 	}
@@ -154,7 +154,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "run token creation failed")
-		slog.Error("trigger run: failed to create run token", "workflow_id", workflowID, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "trigger run: failed to create run token", "workflow_id", workflowID, "user_id", userID, "error", err)
 		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
 		return
 	}
@@ -162,7 +162,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "run token encryption failed")
-		slog.Error("trigger run: failed to encrypt run token", "workflow_id", workflowID, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "trigger run: failed to encrypt run token", "workflow_id", workflowID, "user_id", userID, "error", err)
 		revokeRunToken(context.Background(), sessionID)
 		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
 		return
@@ -184,7 +184,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	if err := run.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("trigger run: db error", "workflow_id", workflowID, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "trigger run: db error", "workflow_id", workflowID, "user_id", userID, "error", err)
 		revokeRunToken(context.Background(), sessionID)
 		http.Error(w, "failed to trigger run", http.StatusInternalServerError)
 		return
@@ -193,7 +193,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	meterRunsTriggered.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow.id", wf.WorkflowID)))
 	span.SetAttributes(attribute.String("run.id", run.RunID), attribute.String("workflow.id", wf.WorkflowID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("workflow run triggered", "run_id", run.RunID, "workflow_id", wf.WorkflowID, "user_id", userID)
+	slog.InfoContext(ctx, "workflow run triggered", "run_id", run.RunID, "workflow_id", wf.WorkflowID, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(run) //nolint:errcheck
@@ -218,7 +218,7 @@ func handleListRuns(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
-		slog.Error("list runs: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "list runs: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list runs", http.StatusInternalServerError)
 		return
 	}
@@ -256,7 +256,7 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("get run: db error", "run_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "get run: db error", "run_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get run", http.StatusInternalServerError)
 		return
 	}
@@ -270,7 +270,7 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query step runs failed")
-		slog.Error("get run: step runs query", "run_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "get run: step runs query", "run_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get run steps", http.StatusInternalServerError)
 		return
 	}
@@ -307,7 +307,7 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 			}
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "db error")
-			slog.Error("cancel run: get run", "run_id", id, "user_id", userID, "error", err)
+			slog.ErrorContext(ctx, "cancel run: get run", "run_id", id, "user_id", userID, "error", err)
 			http.Error(w, "failed to get run", http.StatusInternalServerError)
 			return
 		}
@@ -321,7 +321,7 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "db update failed")
-			slog.Error("cancel run: db update", "run_id", id, "user_id", userID, "error", err)
+			slog.ErrorContext(ctx, "cancel run: db update", "run_id", id, "user_id", userID, "error", err)
 			http.Error(w, "failed to cancel run", http.StatusInternalServerError)
 			return
 		}
@@ -336,7 +336,7 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 		pool.Cancel(id)
 
 		span.SetStatus(codes.Ok, "")
-		slog.Info("workflow run cancelled", "run_id", id, "user_id", userID)
+		slog.InfoContext(ctx, "workflow run cancelled", "run_id", id, "user_id", userID)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

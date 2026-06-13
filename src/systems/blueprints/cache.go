@@ -48,7 +48,7 @@ func stateCacheSet(ctx context.Context, key string, data []byte) {
 		return
 	}
 	if err := redisClient.Set(ctx, "bp:state:"+key, data, stateTTL).Err(); err != nil {
-		slog.Warn("cache: set failed", "key", key, "error", err)
+		slog.WarnContext(ctx, "cache: set failed", "key", key, "error", err)
 	}
 }
 
@@ -57,6 +57,6 @@ func stateCacheDel(ctx context.Context, key string) {
 		return
 	}
 	if err := redisClient.Del(ctx, "bp:state:"+key).Err(); err != nil {
-		slog.Warn("cache: del failed", "key", key, "error", err)
+		slog.WarnContext(ctx, "cache: del failed", "key", key, "error", err)
 	}
 }

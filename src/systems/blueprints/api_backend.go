@@ -319,12 +319,12 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "resolve caller context failed")
-		slog.Error("backend: resolve caller context", "error", err)
+		slog.ErrorContext(ctx, "backend: resolve caller context", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	span.SetAttributes(attribute.String("caller.id", cc.UserID))
-	slog.Info("create backend request", "caller_id", cc.UserID)
+	slog.InfoContext(ctx, "create backend request", "user_id", cc.UserID)
 
 	var req backendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -352,7 +352,7 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "cert generation failed")
-		slog.Error("backend: generate client cert", "caller_id", cc.UserID, "error", err)
+		slog.ErrorContext(ctx, "backend: generate client cert", "user_id", cc.UserID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -373,7 +373,7 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 	if err := cred.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("backend: insert credential", "caller_id", cc.UserID, "workspace", workspaceKey, "error", err)
+		slog.ErrorContext(ctx, "backend: insert credential", "user_id", cc.UserID, "workspace", workspaceKey, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -401,7 +401,7 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 
 	span.SetAttributes(attribute.String("credential.id", credID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("backend credential created", "caller_id", cc.UserID, "credential_id", credID, "workspace", workspaceKey, "ttl_secs", int(ttl.Seconds()))
+	slog.InfoContext(ctx, "backend credential created", "user_id", cc.UserID, "credential_id", credID, "workspace", workspaceKey, "ttl_secs", int(ttl.Seconds()))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck

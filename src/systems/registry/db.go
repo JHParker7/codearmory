@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -120,7 +119,7 @@ func connect() *gorm.DB {
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "registry: connect to database: %v\n", err)
+		slog.Error("connect to database", "error", err)
 		os.Exit(1)
 	}
 	gormDB = conn
@@ -426,7 +425,7 @@ func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, err
 	for svcRows.Next() {
 		var s Service
 		if err := svcRows.Scan(&s.ServiceID, &s.Name, &s.URL, &s.Description, &s.ForwardAuth, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
-			slog.Error("listServicesWithEndpoints: scan", "error", err)
+			slog.ErrorContext(ctx, "listServicesWithEndpoints: scan", "error", err)
 			continue
 		}
 		svcs = append(svcs, s)
@@ -450,12 +449,12 @@ func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, err
 			 FROM service_roles WHERE service_id IN (?) ORDER BY service_id, name`,
 			svcIDs).Rows()
 		if err != nil {
-			slog.Error("listServicesWithEndpoints: query roles", "error", err)
+			slog.ErrorContext(ctx, "listServicesWithEndpoints: query roles", "error", err)
 		} else {
 			for roleRows.Next() {
 				var sr ServiceRole
 				if err := roleRows.Scan(&sr.RoleID, &sr.ServiceID, &sr.Name, &sr.Description, &sr.CreatedAt); err != nil {
-					slog.Error("listServicesWithEndpoints: scan role", "error", err)
+					slog.ErrorContext(ctx, "listServicesWithEndpoints: scan role", "error", err)
 					continue
 				}
 				if i, ok := svcIndex[sr.ServiceID]; ok {
@@ -470,13 +469,13 @@ func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, err
 			 FROM service_endpoints WHERE service_id IN (?) AND active = true ORDER BY service_id`,
 			svcIDs).Rows()
 		if err != nil {
-			slog.Error("listServicesWithEndpoints: query endpoints", "error", err)
+			slog.ErrorContext(ctx, "listServicesWithEndpoints: query endpoints", "error", err)
 		} else {
 			for epRows.Next() {
 				var ep ServiceEndpoint
 				if err := epRows.Scan(&ep.EndpointID, &ep.ServiceID, &ep.Method, &ep.Path,
 					&ep.Action, &ep.Resource, &ep.Public, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
-					slog.Error("listServicesWithEndpoints: scan endpoint", "error", err)
+					slog.ErrorContext(ctx, "listServicesWithEndpoints: scan endpoint", "error", err)
 					continue
 				}
 				if i, ok := svcIndex[ep.ServiceID]; ok {
@@ -524,7 +523,7 @@ func listAllActions(ctx context.Context) ([]ServiceAction, error) {
 			&a.Active, &a.CreatedAt, &a.UpdatedAt,
 			&a.GkAction, &a.GkResource,
 		); err != nil {
-			slog.Error("listAllActions: scan", "error", err)
+			slog.ErrorContext(ctx, "listAllActions: scan", "error", err)
 			continue
 		}
 		a.BodyTransforms = json.RawMessage(bodyTransforms)
@@ -686,7 +685,7 @@ func replaceServiceManifest(ctx context.Context, id, url, description string,
 func loadManifestEntry(ctx context.Context, e manifestEntry) {
 	hashedKey, err := hashServiceKey(e.ServiceKey)
 	if err != nil {
-		slog.Error("manifest: failed to hash service key", "name", e.Name, "error", err)
+		slog.ErrorContext(ctx, "manifest: failed to hash service key", "service", e.Name, "error", err)
 		return
 	}
 
@@ -703,19 +702,19 @@ func loadManifestEntry(ctx context.Context, e manifestEntry) {
 			ServiceKey:  hashedKey,
 		}
 		if err := conn.Create(&svcModel).Error; err != nil {
-			slog.Error("manifest: failed to insert service", "name", e.Name, "error", err)
+			slog.ErrorContext(ctx, "manifest: failed to insert service", "service", e.Name, "error", err)
 			return
 		}
-		slog.Info("manifest: service created", "name", e.Name)
+		slog.InfoContext(ctx, "manifest: service created", "service", e.Name)
 	} else {
 		if err := conn.Exec(
 			`UPDATE services SET description = ?, forward_auth = ?, service_key = ?, active = true, updated_at = now() WHERE service_id = ?`,
 			e.Description, e.ForwardAuth, hashedKey, svcModel.ServiceID,
 		).Error; err != nil {
-			slog.Error("manifest: failed to update service", "name", e.Name, "error", err)
+			slog.ErrorContext(ctx, "manifest: failed to update service", "service", e.Name, "error", err)
 			return
 		}
-		slog.Info("manifest: service updated", "name", e.Name)
+		slog.InfoContext(ctx, "manifest: service updated", "service", e.Name)
 	}
 
 	serviceID := svcModel.ServiceID
@@ -735,10 +734,10 @@ func loadManifestEntry(ctx context.Context, e manifestEntry) {
 			Public:     ep.Public,
 		}
 		if err := conn.Create(&m).Error; err != nil {
-			slog.Error("manifest: failed to insert endpoint", "service", e.Name, "path", ep.Path, "error", err)
+			slog.ErrorContext(ctx, "manifest: failed to insert endpoint", "service", e.Name, "path", ep.Path, "error", err)
 		}
 	}
-	slog.Info("manifest: endpoints registered", "name", e.Name, "count", len(e.Endpoints))
+	slog.InfoContext(ctx, "manifest: endpoints registered", "service", e.Name, "count", len(e.Endpoints))
 
 	for _, a := range e.Actions {
 		if a.Name == "" || a.Method == "" || a.Path == "" {
@@ -754,11 +753,11 @@ func loadManifestEntry(ctx context.Context, e manifestEntry) {
 			AsyncConfig:    jsonbBytes(a.Async),
 		}
 		if err := conn.Create(&m).Error; err != nil {
-			slog.Error("manifest: failed to insert action", "service", e.Name, "action", a.Name, "error", err)
+			slog.ErrorContext(ctx, "manifest: failed to insert action", "service", e.Name, "action", a.Name, "error", err)
 		}
 	}
 	if len(e.Actions) > 0 {
-		slog.Info("manifest: actions registered", "name", e.Name, "count", len(e.Actions))
+		slog.InfoContext(ctx, "manifest: actions registered", "service", e.Name, "count", len(e.Actions))
 	}
 
 	for _, g := range e.DefaultGrants {
@@ -775,11 +774,11 @@ func loadManifestEntry(ctx context.Context, e manifestEntry) {
 			Resources: resourcesJSON,
 		}
 		if err := conn.Create(&m).Error; err != nil {
-			slog.Error("manifest: failed to insert default grant", "service", e.Name, "grant_on", g.GrantOn, "error", err)
+			slog.ErrorContext(ctx, "manifest: failed to insert default grant", "service", e.Name, "grant_on", g.GrantOn, "error", err)
 		}
 	}
 	if len(e.DefaultGrants) > 0 {
-		slog.Info("manifest: default grants registered", "name", e.Name, "count", len(e.DefaultGrants))
+		slog.InfoContext(ctx, "manifest: default grants registered", "service", e.Name, "count", len(e.DefaultGrants))
 	}
 }
 

@@ -9,6 +9,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/code-armory-app/codearmory_sdk/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func envOrDefault(key, def string) string {
@@ -44,10 +48,24 @@ func splitCSV(s string) []string {
 
 func main() {
 	logLevel := slog.LevelInfo
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		logLevel = slog.LevelDebug
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+	slog.SetDefault(slog.New(jsonHandler))
+
+	// Tracing/log-forwarding is opt-in: telemetry.Setup is a no-op unless
+	// OTEL_EXPORTER_OTLP_ENDPOINT is set. On a customer cluster the endpoint is
+	// normally unset, so the outpost stays stderr-only and never ships telemetry
+	// off the cluster — point it at a collector only when running it yourself for
+	// development. A missing endpoint is the expected case, hence Debug not Warn.
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "outpost")
+	if err != nil {
+		slog.Debug("outpost: OpenTelemetry disabled, logging to stderr only", "reason", err)
+	} else {
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
+		defer shutdown(context.Background())
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -172,6 +190,7 @@ func commandLoop(ctx context.Context, client *gatewayClient, modules []Module) {
 			sleep(ctx, emptyPollFloor)
 			continue
 		}
+		slog.Debug("outpost: commands received", "count", len(cmds))
 		for _, c := range cmds {
 			handleCommand(ctx, client, byName, c)
 		}
@@ -183,6 +202,18 @@ func commandLoop(ctx context.Context, client *gatewayClient, modules []Module) {
 const emptyPollFloor = 2 * time.Second
 
 func handleCommand(ctx context.Context, client *gatewayClient, byName map[string]Module, c Command) {
+	// One span per command roots the in-cluster work and the downstream event/ack
+	// client spans under it, so a command is traceable end-to-end and links to the
+	// gateway via propagated context. Inert when OpenTelemetry is not configured.
+	ctx, span := otel.Tracer("outpost").Start(ctx, "handle_command")
+	span.SetAttributes(
+		attribute.String("integration", c.Integration),
+		attribute.String("command.type", c.Type),
+		attribute.String("command.id", c.ID),
+	)
+	defer span.End()
+
+	slog.Debug("outpost: handling command", "integration", c.Integration, "type", c.Type, "command_id", c.ID)
 	m, ok := byName[c.Integration]
 	if !ok {
 		slog.Warn("outpost: no module for command", "integration", c.Integration, "command_id", c.ID)
@@ -191,6 +222,7 @@ func handleCommand(ctx context.Context, client *gatewayClient, byName map[string
 	}
 	events, err := m.HandleCommand(ctx, c)
 	if err != nil {
+		span.RecordError(err)
 		slog.Error("outpost: command failed", "integration", c.Integration, "type", c.Type, "command_id", c.ID, "error", err)
 		// Surface the failure as an event so the control plane can react. Only ack
 		// once the failure is reported; if we can't even report it, leave the
@@ -219,7 +251,9 @@ func handleCommand(ctx context.Context, client *gatewayClient, byName map[string
 	}
 	if err := client.ackCommand(ctx, c.ID); err != nil {
 		slog.Warn("outpost: ack failed", "command_id", c.ID, "error", err)
+		return
 	}
+	slog.Debug("outpost: command acked", "command_id", c.ID, "events", len(events))
 }
 
 func heartbeatLoop(ctx context.Context, client *gatewayClient) {
@@ -231,8 +265,12 @@ func heartbeatLoop(ctx context.Context, client *gatewayClient) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := client.heartbeat(ctx); err != nil && ctx.Err() == nil {
-				slog.Debug("outpost: heartbeat failed", "error", err)
+			if err := client.heartbeat(ctx); err != nil {
+				if ctx.Err() == nil {
+					slog.Debug("outpost: heartbeat failed", "error", err)
+				}
+			} else {
+				slog.Debug("outpost: heartbeat ok")
 			}
 		}
 	}

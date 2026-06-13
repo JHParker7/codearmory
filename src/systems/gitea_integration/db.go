@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -39,7 +39,7 @@ func connect() *gorm.DB {
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "unable to connect to database: %v\n", err)
+		slog.Error("unable to connect to database", "error", err)
 		os.Exit(1)
 	}
 	gormDB = conn
@@ -63,7 +63,7 @@ func connectRead() *gorm.DB {
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "unable to connect to read database: %v\n", err)
+		slog.Error("unable to connect to read database", "error", err)
 		os.Exit(1)
 	}
 	gormDBRead = conn

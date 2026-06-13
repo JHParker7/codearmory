@@ -118,10 +118,10 @@ func handleGetUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("target.user_id", id),
 	)
-	slog.Info("get user request", "caller_id", callerID, "target_user_id", id)
+	slog.InfoContext(ctx, "get user request", "caller_id", callerID, "target_user_id", id)
 
 	if !requirePermission(w, r, "getUser", "gatekeeper/users/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -133,13 +133,13 @@ func handleGetUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "user not found")
-		slog.Warn("get user: not found", "caller_id", callerID, "target_user_id", id)
+		slog.WarnContext(ctx, "get user: not found", "caller_id", callerID, "target_user_id", id)
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("user.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("get user: success", "caller_id", callerID, "target_user_id", id)
+	slog.InfoContext(ctx, "get user: success", "caller_id", callerID, "target_user_id", id)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(toUserResponse(row.(User)))
 }
@@ -152,10 +152,10 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("target.user_id", id),
 	)
-	slog.Info("update user request", "caller_id", callerID, "target_user_id", id)
+	slog.InfoContext(ctx, "update user request", "caller_id", callerID, "target_user_id", id)
 
 	if !requirePermission(w, r, "updateUser", "gatekeeper/users/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -167,13 +167,13 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("update user: invalid request body", "caller_id", callerID, "target_user_id", id, "error", err)
+		slog.WarnContext(ctx, "update user: invalid request body", "caller_id", callerID, "target_user_id", id, "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if req.Email == "" || req.Username == "" {
 		span.SetStatus(codes.Error, "missing required fields")
-		slog.Warn("update user: missing required fields", "caller_id", callerID, "target_user_id", id, "email_provided", req.Email != "", "username_provided", req.Username != "")
+		slog.WarnContext(ctx, "update user: missing required fields", "caller_id", callerID, "target_user_id", id, "email_provided", req.Email != "", "username_provided", req.Username != "")
 		http.Error(w, "email and username are required", http.StatusBadRequest)
 		return
 	}
@@ -186,7 +186,7 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "user not found")
-		slog.Warn("update user: not found", "caller_id", callerID, "target_user_id", id)
+		slog.WarnContext(ctx, "update user: not found", "caller_id", callerID, "target_user_id", id)
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
@@ -205,7 +205,7 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		// the account. An empty current_password fails the compare below.
 		if err := bcrypt.CompareHashAndPassword([]byte(u.HashedPassword), []byte(req.CurrentPassword)); err != nil {
 			span.SetStatus(codes.Error, "current password mismatch")
-			slog.Warn("update user: password change rejected — current_password missing or incorrect", "caller_id", callerID, "target_user_id", id)
+			slog.WarnContext(ctx, "update user: password change rejected — current_password missing or incorrect", "caller_id", callerID, "target_user_id", id)
 			http.Error(w, "current_password is incorrect", http.StatusUnauthorized)
 			return
 		}
@@ -217,12 +217,12 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "password must not exceed 128 characters", http.StatusBadRequest)
 			return
 		}
-		slog.Info("update user: changing password", "caller_id", callerID, "target_user_id", id)
+		slog.InfoContext(ctx, "update user: changing password", "caller_id", callerID, "target_user_id", id)
 		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "bcrypt failure")
-			slog.Error("update user: bcrypt error", "caller_id", callerID, "target_user_id", id, "error", err)
+			slog.ErrorContext(ctx, "update user: bcrypt error", "caller_id", callerID, "target_user_id", id, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -232,13 +232,13 @@ func handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if err := u.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update user: db error", "caller_id", callerID, "target_user_id", id, "error", err)
+		slog.ErrorContext(ctx, "update user: db error", "caller_id", callerID, "target_user_id", id, "error", err)
 		http.Error(w, "failed to update user", http.StatusInternalServerError)
 		return
 	}
 	span.AddEvent("db.write", trace.WithAttributes(attribute.String("user.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("update user: success", "caller_id", callerID, "target_user_id", id, "new_email", req.Email, "new_username", req.Username)
+	slog.InfoContext(ctx, "update user: success", "caller_id", callerID, "target_user_id", id, "new_username", req.Username)
 	writeAudit(ctx, callerID, "user", "user.update", id, req.Username)
 	row, _ = u.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
@@ -251,8 +251,8 @@ func handleListUsers(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
-	slog.Info("list users request", "caller_id", callerID)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "list users request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listUser", "gatekeeper/users") {
 		span.SetStatus(codes.Ok, "")
@@ -297,7 +297,7 @@ func handleListUsers(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "list users failed")
-		slog.Warn("list users: db error", "caller_id", callerID, "error", err)
+		slog.WarnContext(ctx, "list users: db error", "caller_id", callerID, "error", err)
 		http.Error(w, "failed to list users", http.StatusInternalServerError)
 		return
 	}
@@ -307,7 +307,7 @@ func handleListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("db.read")
 	span.SetStatus(codes.Ok, "")
-	slog.Info("list users: success", "caller_id", callerID, "count", len(responses))
+	slog.InfoContext(ctx, "list users: success", "caller_id", callerID, "count", len(responses))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(responses)
 }
@@ -321,10 +321,10 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("target.user_id", id),
 	)
-	slog.Info("delete user request", "caller_id", callerID, "target_user_id", id)
+	slog.InfoContext(ctx, "delete user request", "caller_id", callerID, "target_user_id", id)
 
 	if !requirePermission(w, r, "deleteUser", "gatekeeper/users/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -336,7 +336,7 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "user not found")
-		slog.Warn("delete user: not found", "caller_id", callerID, "target_user_id", id)
+		slog.WarnContext(ctx, "delete user: not found", "caller_id", callerID, "target_user_id", id)
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
@@ -345,22 +345,22 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err := row.(User).Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
-		slog.Error("delete user: db error", "caller_id", callerID, "target_user_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete user: db error", "caller_id", callerID, "target_user_id", id, "error", err)
 		http.Error(w, "failed to delete user", http.StatusInternalServerError)
 		return
 	}
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("user.id", id)))
 
 	if err := deactivateUserSessions(ctx, id); err != nil {
-		slog.Error("delete user: failed to invalidate sessions", "caller_id", callerID, "target_user_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete user: failed to invalidate sessions", "caller_id", callerID, "target_user_id", id, "error", err)
 	} else {
 		cacheDelUserSessions(ctx, id)
 		span.AddEvent("sessions.invalidated", trace.WithAttributes(attribute.String("user.id", id)))
-		slog.Info("delete user: sessions invalidated", "caller_id", callerID, "target_user_id", id)
+		slog.InfoContext(ctx, "delete user: sessions invalidated", "caller_id", callerID, "target_user_id", id)
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("delete user: success", "caller_id", callerID, "target_user_id", id)
+	slog.InfoContext(ctx, "delete user: success", "caller_id", callerID, "target_user_id", id)
 	writeAudit(ctx, callerID, "user", "user.delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -374,20 +374,20 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 	r = r.WithContext(ctx)
 
-	slog.Info("signup request received")
+	slog.InfoContext(ctx, "signup request received")
 
 	var req signupRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("signup failed: invalid request body", "error", err)
+		slog.WarnContext(ctx, "signup failed: invalid request body", "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
 	if req.Email == "" || req.Username == "" || req.Password == "" {
 		span.SetStatus(codes.Error, "missing required fields")
-		slog.Warn("signup failed: missing required fields", "email_provided", req.Email != "", "username_provided", req.Username != "")
+		slog.WarnContext(ctx, "signup failed: missing required fields", "email_provided", req.Email != "", "username_provided", req.Username != "")
 		http.Error(w, "email, username, and password are required", http.StatusBadRequest)
 		return
 	}
@@ -403,13 +403,13 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetAttributes(attribute.String("user.username", req.Username))
-	slog.Info("creating new user", "username", req.Username)
+	slog.InfoContext(ctx, "creating new user", "username", req.Username)
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "bcrypt failure")
-		slog.Error("signup failed: bcrypt error", "email", req.Email, "error", err)
+		slog.ErrorContext(ctx, "signup failed: bcrypt error", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -424,7 +424,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	userGrants := defaultGrantsFor("user")
 	if len(userGrants) == 0 {
-		slog.Error("signup: no default grants for 'user' — new user will have no permissions; check that the registry is reachable and has default_grants seeded", "user_id", userID)
+		slog.ErrorContext(ctx, "signup: no default grants for 'user' — new user will have no permissions; check that the registry is reachable and has default_grants seeded", "user_id", userID)
 		http.Error(w, "service configuration error: permissions not available", http.StatusServiceUnavailable)
 		return
 	}
@@ -440,7 +440,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		if err = perm.Add(ctx); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "failed to create default permission")
-			slog.Error("signup failed: could not create default permission", "user_id", userID, "service", grant.ServiceName, "error", err)
+			slog.ErrorContext(ctx, "signup failed: could not create default permission", "user_id", userID, "service", grant.ServiceName, "error", err)
 			for _, p := range createdPerms {
 				p.Remove(ctx) //nolint:errcheck
 			}
@@ -451,7 +451,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 			attribute.String("permissions.id", perm.PermissionsID),
 			attribute.String("permissions.service", perm.Service),
 		))
-		slog.Info("default permission created", "user_id", userID, "service", grant.ServiceName, "permissions_id", perm.PermissionsID)
+		slog.InfoContext(ctx, "default permission created", "user_id", userID, "service", grant.ServiceName, "permissions_id", perm.PermissionsID)
 		createdPerms = append(createdPerms, perm)
 	}
 
@@ -483,7 +483,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	if err = selfReadPerm.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to create self-read permission")
-		slog.Error("signup failed: could not create self-read permission", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "signup failed: could not create self-read permission", "user_id", userID, "error", err)
 		for _, p := range createdPerms {
 			p.Remove(ctx) //nolint:errcheck
 		}
@@ -494,7 +494,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		attribute.String("permissions.id", selfReadPermID),
 		attribute.String("permissions.service", "gatekeeper"),
 	))
-	slog.Info("self-read permission created", "user_id", userID, "permissions_id", selfReadPermID)
+	slog.InfoContext(ctx, "self-read permission created", "user_id", userID, "permissions_id", selfReadPermID)
 
 	role := Role{
 		RoleID:         roleID,
@@ -503,7 +503,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	if err = role.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to create default role")
-		slog.Error("signup failed: could not create default role", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "signup failed: could not create default role", "user_id", userID, "error", err)
 		for _, p := range createdPerms {
 			p.Remove(ctx) //nolint:errcheck
 		}
@@ -514,7 +514,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("role.created", trace.WithAttributes(
 		attribute.String("role.id", role.RoleID),
 	))
-	slog.Info("default role created", "user_id", userID, "role_id", role.RoleID)
+	slog.InfoContext(ctx, "default role created", "user_id", userID, "role_id", role.RoleID)
 
 	user := User{
 		UserID:         userID,
@@ -530,28 +530,28 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		// Clean up permissions and role that were already committed.
 		for _, p := range createdPerms {
 			if cleanErr := p.Remove(ctx); cleanErr != nil {
-				slog.Error("signup: failed to clean up orphaned permission", "permissions_id", p.PermissionsID, "error", cleanErr)
+				slog.ErrorContext(ctx, "signup: failed to clean up orphaned permission", "permissions_id", p.PermissionsID, "error", cleanErr)
 			}
 		}
 		if cleanErr := selfReadPerm.Remove(ctx); cleanErr != nil {
-			slog.Error("signup: failed to clean up orphaned self-read permission", "permissions_id", selfReadPermID, "error", cleanErr)
+			slog.ErrorContext(ctx, "signup: failed to clean up orphaned self-read permission", "permissions_id", selfReadPermID, "error", cleanErr)
 		}
 		if cleanErr := role.Remove(ctx); cleanErr != nil {
-			slog.Error("signup: failed to clean up orphaned role", "role_id", role.RoleID, "error", cleanErr)
+			slog.ErrorContext(ctx, "signup: failed to clean up orphaned role", "role_id", role.RoleID, "error", cleanErr)
 		}
 		// GORM surfaces the raw DB error string; string-matching "unique" is the
 		// portable way to detect unique constraint violations without importing a
 		// postgres-specific driver package.
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			span.SetStatus(codes.Error, "email or username conflict")
-			slog.Warn("signup failed: email or username already in use", "email", req.Email, "username", req.Username)
+			slog.WarnContext(ctx, "signup failed: email or username already in use", "username", req.Username)
 			meterSignups.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "conflict")))
 			http.Error(w, "email or username already in use", http.StatusConflict)
 			return
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to insert user")
-		slog.Error("signup failed: could not insert user", "email", req.Email, "username", req.Username, "error", err)
+		slog.ErrorContext(ctx, "signup failed: could not insert user", "username", req.Username, "error", err)
 		http.Error(w, "failed to create user", http.StatusInternalServerError)
 		return
 	}
@@ -562,7 +562,7 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	))
 	span.SetStatus(codes.Ok, "")
 	meterSignups.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "success")))
-	slog.Info("user created successfully", "user_id", userID, "email", req.Email, "username", req.Username)
+	slog.InfoContext(ctx, "user created successfully", "user_id", userID, "username", req.Username)
 	writeAudit(ctx, userID, "user", "user.signup", userID, req.Username)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -585,24 +585,24 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 	r = r.WithContext(ctx)
 
-	slog.Info("login request received")
+	slog.InfoContext(ctx, "login request received")
 
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("login failed: invalid request body", "error", err)
+		slog.WarnContext(ctx, "login failed: invalid request body", "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if req.Email == "" || req.Password == "" {
 		span.SetStatus(codes.Error, "missing email or password")
-		slog.Warn("login failed: missing email or password")
+		slog.WarnContext(ctx, "login failed: missing email or password")
 		http.Error(w, "email and password are required", http.StatusBadRequest)
 		return
 	}
 
-	slog.Debug("attempting login")
+	slog.DebugContext(ctx, "attempting login")
 
 	// dummyHash is a pre-computed bcrypt hash used to keep the response time
 	// constant whether or not the email exists, preventing user enumeration via timing.
@@ -612,7 +612,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if userErr != nil {
 		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(req.Password)) //nolint:errcheck
 		span.SetStatus(codes.Error, "user not found")
-		slog.Warn("login failed: user not found or inactive")
+		slog.WarnContext(ctx, "login failed: user not found or inactive")
 		meterLogins.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "failure")))
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
@@ -621,7 +621,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(req.Password)); err != nil {
 		span.SetStatus(codes.Error, "password mismatch")
-		slog.Warn("login failed: password mismatch", "email", req.Email, "user_id", user.UserID)
+		slog.WarnContext(ctx, "login failed: password mismatch", "user_id", user.UserID)
 		meterLogins.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "failure")))
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
@@ -633,12 +633,12 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "mfa pending creation failed")
-			slog.Error("login: failed to create MFA pending", "user_id", user.UserID, "error", err)
+			slog.ErrorContext(ctx, "login: failed to create MFA pending", "user_id", user.UserID, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 		span.SetStatus(codes.Ok, "")
-		slog.Info("login: MFA required", "user_id", user.UserID)
+		slog.InfoContext(ctx, "login: MFA required", "user_id", user.UserID)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"mfa_required": true,
@@ -651,7 +651,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "key generation failed")
-		slog.Error("login failed: could not generate ECDSA key", "user_id", user.UserID, "error", err)
+		slog.ErrorContext(ctx, "login failed: could not generate ECDSA key", "user_id", user.UserID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -675,7 +675,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		attribute.String("session.id", sessionID),
 		attribute.String("session.expires_at", expiresAt.String()),
 	)
-	slog.Info("creating session", "user_id", user.UserID, "session_id", sessionID, "expires_at", expiresAt)
+	slog.InfoContext(ctx, "creating session", "user_id", user.UserID, "session_id", sessionID, "expires_at", expiresAt)
 
 	tokenString, err := jwt.NewWithClaims(jwt.SigningMethodES256, authClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -689,7 +689,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "JWT signing failed")
-		slog.Error("login failed: could not sign JWT", "user_id", user.UserID, "session_id", sessionID, "error", err)
+		slog.ErrorContext(ctx, "login failed: could not sign JWT", "user_id", user.UserID, "session_id", sessionID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -699,7 +699,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "public key marshal failed")
-		slog.Error("login failed: could not marshal public key", "user_id", user.UserID, "error", err)
+		slog.ErrorContext(ctx, "login failed: could not marshal public key", "user_id", user.UserID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -714,7 +714,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err := session.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "session persist failed")
-		slog.Error("login failed: could not persist session", "user_id", user.UserID, "session_id", sessionID, "error", err)
+		slog.ErrorContext(ctx, "login failed: could not persist session", "user_id", user.UserID, "session_id", sessionID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -723,7 +723,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	))
 	span.SetStatus(codes.Ok, "")
 	meterLogins.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "success")))
-	slog.Info("login successful", "user_id", user.UserID, "session_id", sessionID)
+	slog.InfoContext(ctx, "login successful", "user_id", user.UserID, "session_id", sessionID)
 	writeAudit(ctx, user.UserID, "user", "session.create", sessionID, user.Username)
 
 	setSessionCookie(w, tokenString, expiresAt)

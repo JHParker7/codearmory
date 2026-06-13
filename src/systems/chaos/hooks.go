@@ -60,7 +60,7 @@ func notifyHooks(ctx context.Context, event string, e Experiment) {
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
-		slog.Warn("notify hooks: marshal failed", "experiment_id", e.ExperimentID, "event", event, "error", err)
+		slog.WarnContext(ctx, "notify hooks: marshal failed", "experiment_id", e.ExperimentID, "event", event, "error", err)
 		return
 	}
 	emitCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
@@ -78,7 +78,7 @@ func sendHookEvent(ctx context.Context, event, orgID, createdBy string, raw []by
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hooksURL+"/internal/events", bytes.NewReader(raw))
 	if err != nil {
 		span.RecordError(err)
-		slog.Warn("notify hooks: build request failed", "experiment_id", experimentID, "event", event, "error", err)
+		slog.WarnContext(ctx, "notify hooks: build request failed", "experiment_id", experimentID, "event", event, "error", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -87,12 +87,12 @@ func sendHookEvent(ctx context.Context, event, orgID, createdBy string, raw []by
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Warn("notify hooks: request failed", "experiment_id", experimentID, "event", event, "error", err)
+		slog.WarnContext(ctx, "notify hooks: request failed", "experiment_id", experimentID, "event", event, "error", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slog.Warn("notify hooks: non-2xx", "experiment_id", experimentID, "event", event, "status", resp.StatusCode)
+		slog.WarnContext(ctx, "notify hooks: non-2xx", "experiment_id", experimentID, "event", event, "status", resp.StatusCode)
 	}
 }
 

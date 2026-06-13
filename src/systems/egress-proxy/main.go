@@ -13,6 +13,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/code-armory-app/codearmory_sdk/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // allowlist holds domain patterns permitted for outbound connections.
@@ -107,7 +112,7 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 	lastErr := fmt.Errorf("no permitted address for %q", host)
 	for _, ip := range ips {
 		if !allowDialIP(ip.IP) {
-			slog.Warn("egress blocked: host resolved to non-public address", "host", host, "resolved_ip", ip.IP.String())
+			slog.WarnContext(ctx, "egress blocked: host resolved to non-public address", "host", host, "resolved_ip", ip.IP.String())
 			lastErr = fmt.Errorf("egress to non-public address %s blocked", ip.IP)
 			continue
 		}
@@ -143,21 +148,33 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("egress-proxy").Start(r.Context(), "egress.connect")
+	defer span.End()
+
 	host, _, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		host = r.Host
 	}
+	span.SetAttributes(
+		attribute.String("egress.method", "CONNECT"),
+		attribute.String("server.address", host),
+	)
 	if !p.al.permits(host) {
-		slog.Info("blocked", "host", host, "method", "CONNECT")
+		span.SetAttributes(attribute.Bool("egress.allowed", false))
+		span.SetStatus(codes.Error, "host not in allowlist")
+		slog.WarnContext(ctx, "blocked", "host", host, "method", "CONNECT")
 		http.Error(w, "forbidden: "+host, http.StatusForbidden)
 		return
 	}
-	slog.Info("allowed", "host", host, "method", "CONNECT")
+	span.SetAttributes(attribute.Bool("egress.allowed", true))
+	slog.DebugContext(ctx, "allowed", "host", host, "method", "CONNECT")
 
-	dialCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	target, err := safeDialContext(dialCtx, "tcp", r.Host)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "dial failed")
 		http.Error(w, "dial failed", http.StatusBadGateway)
 		return
 	}
@@ -177,6 +194,7 @@ func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		return
 	}
+	span.SetStatus(codes.Ok, "")
 
 	// Copy in both directions concurrently. Each goroutine signals done when the
 	// connection half-closes; we wait for both so neither side is closed early.
@@ -188,19 +206,31 @@ func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("egress-proxy").Start(r.Context(), "egress.http")
+	defer span.End()
+
 	host, _, err := net.SplitHostPort(r.URL.Host)
 	if err != nil {
 		host = r.URL.Host
 	}
+	span.SetAttributes(
+		attribute.String("egress.method", r.Method),
+		attribute.String("server.address", host),
+	)
 	if !p.al.permits(host) {
-		slog.Info("blocked", "host", host, "method", r.Method)
+		span.SetAttributes(attribute.Bool("egress.allowed", false))
+		span.SetStatus(codes.Error, "host not in allowlist")
+		slog.WarnContext(ctx, "blocked", "host", host, "method", r.Method)
 		http.Error(w, "forbidden: "+host, http.StatusForbidden)
 		return
 	}
-	slog.Info("allowed", "host", host, "method", r.Method)
+	span.SetAttributes(attribute.Bool("egress.allowed", true))
+	slog.DebugContext(ctx, "allowed", "host", host, "method", r.Method)
 
-	out, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+	out, err := http.NewRequestWithContext(ctx, r.Method, r.URL.String(), r.Body)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "bad request")
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -212,10 +242,14 @@ func (p *proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := fwdClient.Do(out)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "upstream error")
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
+	span.SetStatus(codes.Ok, "")
 
 	for k, vv := range resp.Header {
 		for _, v := range vv {
@@ -227,7 +261,20 @@ func (p *proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	logLevel := slog.LevelInfo
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
+	}
+	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+	slog.SetDefault(slog.New(jsonHandler))
+
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "egress-proxy")
+	if err != nil {
+		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
+	} else {
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
+		defer shutdown(context.Background())
+	}
 
 	al := parseAllowlist(os.Getenv("PROXY_ALLOWED_DOMAINS"))
 	if len(al) == 0 {

@@ -42,7 +42,7 @@ func handleGetAccount(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("get account: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "get account: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to get account", http.StatusInternalServerError)
 		return
 	}
@@ -89,13 +89,13 @@ func handleLinkAccount(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea token verification failed")
-		slog.Warn("link account: gitea token invalid", "user_id", userID, "claimed_username", req.GiteaUsername, "error", err)
+		slog.WarnContext(ctx, "link account: gitea token invalid", "user_id", userID, "claimed_username", req.GiteaUsername, "error", err)
 		http.Error(w, "gitea_token is invalid or the Gitea instance is unreachable", http.StatusUnprocessableEntity)
 		return
 	}
 	if verifiedLogin != req.GiteaUsername {
 		span.SetStatus(codes.Ok, "")
-		slog.Warn("link account: username mismatch", "user_id", userID, "claimed", req.GiteaUsername, "actual", verifiedLogin)
+		slog.WarnContext(ctx, "link account: username mismatch", "user_id", userID, "claimed", req.GiteaUsername, "actual", verifiedLogin)
 		http.Error(w, "gitea_token does not belong to the claimed gitea_username", http.StatusUnprocessableEntity)
 		return
 	}
@@ -112,13 +112,13 @@ func handleLinkAccount(w http.ResponseWriter, r *http.Request) {
 		if err := newAccount.Add(ctx); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "db insert failed")
-			slog.Error("link account: db error", "user_id", userID, "error", err)
+			slog.ErrorContext(ctx, "link account: db error", "user_id", userID, "error", err)
 			http.Error(w, "failed to link account", http.StatusInternalServerError)
 			return
 		}
 		span.SetAttributes(attribute.String("account.gitea_username", req.GiteaUsername))
 		span.SetStatus(codes.Ok, "")
-		slog.Info("gitea account linked", "user_id", userID, "gitea_username", req.GiteaUsername)
+		slog.InfoContext(ctx, "gitea account linked", "user_id", userID, "gitea_username", req.GiteaUsername)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(newAccount) //nolint:errcheck
@@ -127,7 +127,7 @@ func handleLinkAccount(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("link account: fetch error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "link account: fetch error", "user_id", userID, "error", err)
 		http.Error(w, "failed to link account", http.StatusInternalServerError)
 		return
 	}
@@ -138,14 +138,14 @@ func handleLinkAccount(w http.ResponseWriter, r *http.Request) {
 	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("link account: update error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "link account: update error", "user_id", userID, "error", err)
 		http.Error(w, "failed to update account link", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetAttributes(attribute.String("account.gitea_username", req.GiteaUsername))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("gitea account updated", "user_id", userID, "gitea_username", req.GiteaUsername)
+	slog.InfoContext(ctx, "gitea account updated", "user_id", userID, "gitea_username", req.GiteaUsername)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(existing) //nolint:errcheck
 }
@@ -174,7 +174,7 @@ func handleUnlinkAccount(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("unlink account: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "unlink account: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to unlink account", http.StatusInternalServerError)
 		return
 	}
@@ -183,13 +183,13 @@ func handleUnlinkAccount(w http.ResponseWriter, r *http.Request) {
 	if err := account.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
-		slog.Error("unlink account: remove error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "unlink account: remove error", "user_id", userID, "error", err)
 		http.Error(w, "failed to unlink account", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("gitea account unlinked", "user_id", userID)
+	slog.InfoContext(ctx, "gitea account unlinked", "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

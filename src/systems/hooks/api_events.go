@@ -31,7 +31,7 @@ func handleListEvents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
-		slog.Error("list events: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "list events: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to list events", http.StatusInternalServerError)
 		return
 	}
@@ -66,7 +66,7 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("get event: db error", "event_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "get event: db error", "event_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get event", http.StatusInternalServerError)
 		return
 	}
@@ -75,7 +75,7 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query triggers failed")
-		slog.Error("get event: query triggers", "event_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "get event: query triggers", "event_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get event triggers", http.StatusInternalServerError)
 		return
 	}
@@ -86,7 +86,7 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db access check failed")
-		slog.Error("get event: access check", "event_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "get event: access check", "event_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get event", http.StatusInternalServerError)
 		return
 	}
@@ -95,7 +95,7 @@ func handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	if accessCount == 0 {
 		accessCount, err = countRulesForRepo(ctx, event.Source, userID, orgID)
 		if err != nil {
-			slog.Warn("get event: repo fallback check failed", "event_id", id, "error", err)
+			slog.WarnContext(ctx, "get event: repo fallback check failed", "event_id", id, "error", err)
 		}
 	}
 	if accessCount == 0 {

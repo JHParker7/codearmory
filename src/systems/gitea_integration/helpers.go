@@ -55,7 +55,7 @@ func resolveOrgName(ctx context.Context, r *http.Request, orgID string) string {
 	req.Header.Set("Authorization", r.Header.Get("Authorization"))
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Debug("resolveOrgName: gatekeeper request failed", "org_id", orgID, "error", err)
+		slog.DebugContext(ctx, "resolveOrgName: gatekeeper request failed", "org_id", orgID, "error", err)
 		return ""
 	}
 	defer resp.Body.Close()

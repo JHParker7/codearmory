@@ -90,7 +90,7 @@ func notifyHooks(ctx context.Context, event, ref string, t Ticket, extra map[str
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
-		slog.Warn("notify hooks: marshal failed", "ticket_id", t.TicketID, "event", event, "error", err)
+		slog.WarnContext(ctx, "notify hooks: marshal failed", "ticket_id", t.TicketID, "event", event, "error", err)
 		return
 	}
 
@@ -112,7 +112,7 @@ func sendHookEvent(ctx context.Context, event, orgID, createdBy string, raw []by
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hooksURL+"/internal/events", bytes.NewReader(raw))
 	if err != nil {
 		span.RecordError(err)
-		slog.Warn("notify hooks: build request failed", "ticket_id", ticketID, "event", event, "error", err)
+		slog.WarnContext(ctx, "notify hooks: build request failed", "ticket_id", ticketID, "event", event, "error", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -123,13 +123,13 @@ func sendHookEvent(ctx context.Context, event, orgID, createdBy string, raw []by
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "dispatch failed")
-		slog.Warn("notify hooks: request failed", "ticket_id", ticketID, "event", event, "error", err)
+		slog.WarnContext(ctx, "notify hooks: request failed", "ticket_id", ticketID, "event", event, "error", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		span.SetStatus(codes.Error, "non-2xx from hooks")
-		slog.Warn("notify hooks: unexpected status", "ticket_id", ticketID, "event", event, "status", resp.StatusCode)
+		slog.WarnContext(ctx, "notify hooks: unexpected status", "ticket_id", ticketID, "event", event, "status", resp.StatusCode)
 		return
 	}
 	span.SetStatus(codes.Ok, "")

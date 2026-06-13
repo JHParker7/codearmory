@@ -81,7 +81,7 @@ func handleCreateExperiment(w http.ResponseWriter, r *http.Request) {
 	if err := exp.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create experiment: db error", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "create experiment: db error", "user_id", userID, "error", err)
 		http.Error(w, "failed to create experiment", http.StatusInternalServerError)
 		return
 	}
@@ -98,7 +98,7 @@ func handleCreateExperiment(w http.ResponseWriter, r *http.Request) {
 		"params":           exp.Params,
 	}
 	if err := enqueueCommand(ctx, exp.OutpostID, "chaos", "run-experiment", orgID, userID, cmdPayload); err != nil {
-		slog.Error("create experiment: enqueue command failed", "experiment_id", exp.ExperimentID, "error", err)
+		slog.ErrorContext(ctx, "create experiment: enqueue command failed", "experiment_id", exp.ExperimentID, "error", err)
 		exp.Status = StatusError
 		exp.Verdict = "dispatch failed"
 		now := time.Now().UTC()
@@ -112,7 +112,7 @@ func handleCreateExperiment(w http.ResponseWriter, r *http.Request) {
 	notifyHooks(ctx, eventExperimentStarted, exp)
 	span.SetAttributes(attribute.String("experiment.id", exp.ExperimentID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("experiment created", "experiment_id", exp.ExperimentID, "user_id", userID, "outpost_id", exp.OutpostID)
+	slog.InfoContext(ctx, "experiment created", "experiment_id", exp.ExperimentID, "user_id", userID, "outpost_id", exp.OutpostID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(exp) //nolint:errcheck
@@ -138,7 +138,7 @@ func handleListExperiments(w http.ResponseWriter, r *http.Request) {
 	items, err := filter.List(ctx, limit, offset)
 	if err != nil {
 		span.RecordError(err)
-		slog.Error("list experiments: db error", "error", err)
+		slog.ErrorContext(ctx, "list experiments: db error", "error", err)
 		http.Error(w, "failed to list experiments", http.StatusInternalServerError)
 		return
 	}
@@ -216,13 +216,13 @@ func handleDeleteExperiment(w http.ResponseWriter, r *http.Request) {
 			"engine_name":   exp.EngineName,
 			"target_app_ns": exp.TargetAppNS,
 		}); err != nil {
-			slog.Warn("delete experiment: stop command failed", "experiment_id", exp.ExperimentID, "error", err)
+			slog.WarnContext(ctx, "delete experiment: stop command failed", "experiment_id", exp.ExperimentID, "error", err)
 		}
 		now := time.Now().UTC()
 		exp.Status = StatusStopped
 		exp.EndedAt = &now
 		if err := exp.Update(ctx); err != nil {
-			slog.Warn("delete experiment: failed to mark stopped", "experiment_id", exp.ExperimentID, "error", err)
+			slog.WarnContext(ctx, "delete experiment: failed to mark stopped", "experiment_id", exp.ExperimentID, "error", err)
 		}
 	}
 	if err := exp.Remove(ctx); err != nil {

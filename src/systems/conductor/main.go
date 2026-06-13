@@ -146,6 +146,13 @@ func handleServicesHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	logLevel := slog.LevelInfo
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
+	}
+	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+	slog.SetDefault(slog.New(jsonHandler))
+
 	initialRegistryKey := secret("REGISTRY_SERVICE_KEY")
 	if initialRegistryKey == "" {
 		slog.Error("REGISTRY_SERVICE_KEY is not set; refusing to start")
@@ -154,13 +161,6 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-
-	logLevel := slog.LevelInfo
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		logLevel = slog.LevelDebug
-	}
-	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
-	slog.SetDefault(slog.New(jsonHandler))
 
 	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "conductor")
 	if err != nil {

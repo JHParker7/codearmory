@@ -28,8 +28,8 @@ func handleListTeams(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
-	slog.Info("list teams request", "caller_id", callerID)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "list teams request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listTeam", "gatekeeper/teams") {
 		span.SetStatus(codes.Ok, "")
@@ -70,7 +70,7 @@ func handleListTeams(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "list teams failed")
-		slog.Warn("list teams: db error", "caller_id", callerID, "error", err)
+		slog.WarnContext(ctx, "list teams: db error", "caller_id", callerID, "error", err)
 		http.Error(w, "failed to list teams", http.StatusInternalServerError)
 		return
 	}
@@ -80,7 +80,7 @@ func handleListTeams(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("db.read")
 	span.SetStatus(codes.Ok, "")
-	slog.Info("list teams: success", "caller_id", callerID, "count", len(teams))
+	slog.InfoContext(ctx, "list teams: success", "caller_id", callerID, "count", len(teams))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(teams)
 }
@@ -91,8 +91,8 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
-	slog.Info("create team request", "caller_id", callerID)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "create team request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "createTeam", "gatekeeper/teams") {
 		span.SetStatus(codes.Ok, "")
@@ -104,13 +104,13 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("create team: invalid request body", "caller_id", callerID, "error", err)
+		slog.WarnContext(ctx, "create team: invalid request body", "caller_id", callerID, "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if req.TeamName == "" {
 		span.SetStatus(codes.Error, "missing team_name")
-		slog.Warn("create team: missing team_name", "caller_id", callerID)
+		slog.WarnContext(ctx, "create team: missing team_name", "caller_id", callerID)
 		http.Error(w, "team_name is required", http.StatusBadRequest)
 		return
 	}
@@ -131,14 +131,14 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "role not found")
-			slog.Warn("create team: supplied role_id not found", "caller_id", callerID, "role_id", *roleID)
+			slog.WarnContext(ctx, "create team: supplied role_id not found", "caller_id", callerID, "role_id", *roleID)
 			http.Error(w, "role not found", http.StatusNotFound)
 			return
 		}
 		existingRole := roleRow.(Role)
 		if existingRole.OwnerID != callerID {
 			span.SetStatus(codes.Error, "role not owned by caller")
-			slog.Warn("create team: caller does not own the supplied role", "caller_id", callerID, "role_id", *roleID, "role_owner_id", existingRole.OwnerID)
+			slog.WarnContext(ctx, "create team: caller does not own the supplied role", "caller_id", callerID, "role_id", *roleID, "role_owner_id", existingRole.OwnerID)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -149,7 +149,7 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 		if err := teamRole.Add(ctx); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "db insert failed")
-			slog.Error("create team role: db error", "caller_id", callerID, "team_name", req.TeamName, "error", err)
+			slog.ErrorContext(ctx, "create team role: db error", "caller_id", callerID, "team_name", req.TeamName, "error", err)
 			http.Error(w, "failed to create team role", http.StatusInternalServerError)
 			return
 		}
@@ -160,7 +160,7 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	if err := team.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create team: db error", "caller_id", callerID, "team_name", req.TeamName, "error", err)
+		slog.ErrorContext(ctx, "create team: db error", "caller_id", callerID, "team_name", req.TeamName, "error", err)
 		http.Error(w, "failed to create team", http.StatusInternalServerError)
 		return
 	}
@@ -175,12 +175,12 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	))
 
 	// Get the full user before updating so Save() doesn't blank out other fields.
-	slog.Info("team created, assigning owner to team", "caller_id", callerID, "team_id", team.TeamID, "owner_id", callerID)
+	slog.InfoContext(ctx, "team created, assigning owner to team", "caller_id", callerID, "team_id", team.TeamID, "owner_id", callerID)
 	ownerRow, err := (User{UserID: callerID}).Get(ctx)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to load owner")
-		slog.Error("create team: failed to load owner user", "caller_id", callerID, "team_id", team.TeamID, "error", err)
+		slog.ErrorContext(ctx, "create team: failed to load owner user", "caller_id", callerID, "team_id", team.TeamID, "error", err)
 		http.Error(w, "failed to put user in team", http.StatusInternalServerError)
 		return
 	}
@@ -189,7 +189,7 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	if err := owner.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to assign owner to team")
-		slog.Error("create team: failed to assign owner to team", "caller_id", callerID, "team_id", team.TeamID, "error", err)
+		slog.ErrorContext(ctx, "create team: failed to assign owner to team", "caller_id", callerID, "team_id", team.TeamID, "error", err)
 		http.Error(w, "failed to put user in team", http.StatusInternalServerError)
 		return
 	}
@@ -206,7 +206,7 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	}
 	teamGrants := defaultGrantsFor("team")
 	if len(teamGrants) == 0 {
-		slog.Error("create team: no default grants for 'team' — owner will have no permissions; check that the registry is reachable and has default_grants seeded", "team_id", team.TeamID, "caller_id", callerID)
+		slog.ErrorContext(ctx, "create team: no default grants for 'team' — owner will have no permissions; check that the registry is reachable and has default_grants seeded", "team_id", team.TeamID, "caller_id", callerID)
 		http.Error(w, "service configuration error: permissions not available", http.StatusServiceUnavailable)
 		return
 	}
@@ -217,7 +217,7 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 			if err := applyGrantsForResource(ctx, grant.ServiceName, callerID, permName, grant.Actions, resource); err != nil {
 				span.RecordError(err)
 				span.SetStatus(codes.Error, "failed to grant owner permissions")
-				slog.Error("create team: failed to grant owner permissions", "caller_id", callerID, "team_id", team.TeamID, "service", grant.ServiceName, "error", err)
+				slog.ErrorContext(ctx, "create team: failed to grant owner permissions", "caller_id", callerID, "team_id", team.TeamID, "service", grant.ServiceName, "error", err)
 				http.Error(w, "failed to give owner permissions", http.StatusInternalServerError)
 				return
 			}
@@ -225,7 +225,7 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("create team: success", "caller_id", callerID, "team_id", team.TeamID, "team_name", team.TeamName, "owner_id", callerID)
+	slog.InfoContext(ctx, "create team: success", "caller_id", callerID, "team_id", team.TeamID, "team_name", team.TeamName, "owner_id", callerID)
 	row, _ := team.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -240,10 +240,10 @@ func handleGetTeam(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("team.id", id),
 	)
-	slog.Info("get team request", "caller_id", callerID, "team_id", id)
+	slog.InfoContext(ctx, "get team request", "caller_id", callerID, "team_id", id)
 
 	if !requirePermission(w, r, "getTeam", "gatekeeper/teams/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -255,13 +255,13 @@ func handleGetTeam(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "team not found")
-		slog.Warn("get team: not found", "caller_id", callerID, "team_id", id)
+		slog.WarnContext(ctx, "get team: not found", "caller_id", callerID, "team_id", id)
 		http.Error(w, "team not found", http.StatusNotFound)
 		return
 	}
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("team.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("get team: success", "caller_id", callerID, "team_id", id)
+	slog.InfoContext(ctx, "get team: success", "caller_id", callerID, "team_id", id)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(row.(Team))
 }
@@ -274,10 +274,10 @@ func handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("team.id", id),
 	)
-	slog.Info("update team request", "caller_id", callerID, "team_id", id)
+	slog.InfoContext(ctx, "update team request", "caller_id", callerID, "team_id", id)
 
 	if !requirePermission(w, r, "updateTeam", "gatekeeper/teams/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -289,13 +289,13 @@ func handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("update team: invalid request body", "caller_id", callerID, "team_id", id, "error", err)
+		slog.WarnContext(ctx, "update team: invalid request body", "caller_id", callerID, "team_id", id, "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if req.TeamName == "" {
 		span.SetStatus(codes.Error, "missing team_name")
-		slog.Warn("update team: missing team_name", "caller_id", callerID, "team_id", id)
+		slog.WarnContext(ctx, "update team: missing team_name", "caller_id", callerID, "team_id", id)
 		http.Error(w, "team_name is required", http.StatusBadRequest)
 		return
 	}
@@ -305,7 +305,7 @@ func handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "team not found")
-		slog.Warn("update team: not found", "caller_id", callerID, "team_id", id)
+		slog.WarnContext(ctx, "update team: not found", "caller_id", callerID, "team_id", id)
 		http.Error(w, "team not found", http.StatusNotFound)
 		return
 	}
@@ -316,7 +316,7 @@ func handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	if err := team.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update team: db error", "caller_id", callerID, "team_id", id, "error", err)
+		slog.ErrorContext(ctx, "update team: db error", "caller_id", callerID, "team_id", id, "error", err)
 		http.Error(w, "failed to update team", http.StatusInternalServerError)
 		return
 	}
@@ -325,7 +325,7 @@ func handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 		attribute.String("team.name", req.TeamName),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("update team: success", "caller_id", callerID, "team_id", id, "new_name", req.TeamName)
+	slog.InfoContext(ctx, "update team: success", "caller_id", callerID, "team_id", id, "new_name", req.TeamName)
 	row, _ = team.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(row.(Team))
@@ -339,10 +339,10 @@ func handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("team.id", id),
 	)
-	slog.Info("delete team request", "caller_id", callerID, "team_id", id)
+	slog.InfoContext(ctx, "delete team request", "caller_id", callerID, "team_id", id)
 
 	if !requirePermission(w, r, "deleteTeam", "gatekeeper/teams/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -354,7 +354,7 @@ func handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "team not found")
-		slog.Warn("delete team: not found", "caller_id", callerID, "team_id", id)
+		slog.WarnContext(ctx, "delete team: not found", "caller_id", callerID, "team_id", id)
 		http.Error(w, "team not found", http.StatusNotFound)
 		return
 	}
@@ -363,7 +363,7 @@ func handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
 	if err := row.(Team).Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
-		slog.Error("delete team: db error", "caller_id", callerID, "team_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete team: db error", "caller_id", callerID, "team_id", id, "error", err)
 		http.Error(w, "failed to delete team", http.StatusInternalServerError)
 		return
 	}
@@ -373,18 +373,18 @@ func handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
 	// doesn't attempt to load the now-inactive team and deny access.
 	memberIDs, memberErr := getUserIDsByTeam(ctx, id)
 	if memberErr != nil {
-		slog.Error("delete team: failed to load member IDs for cache invalidation", "caller_id", callerID, "team_id", id, "error", memberErr)
+		slog.ErrorContext(ctx, "delete team: failed to load member IDs for cache invalidation", "caller_id", callerID, "team_id", id, "error", memberErr)
 	}
 	if err := clearTeamMembership(ctx, id); err != nil {
-		slog.Error("delete team: failed to clear team membership", "caller_id", callerID, "team_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete team: failed to clear team membership", "caller_id", callerID, "team_id", id, "error", err)
 	} else {
 		for _, uid := range memberIDs {
 			cacheDel(ctx, "gk:user:"+uid)
 		}
-		slog.Info("delete team: cleared team membership", "caller_id", callerID, "team_id", id)
+		slog.InfoContext(ctx, "delete team: cleared team membership", "caller_id", callerID, "team_id", id)
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("delete team: success", "caller_id", callerID, "team_id", id)
+	slog.InfoContext(ctx, "delete team: success", "caller_id", callerID, "team_id", id)
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 )
 
@@ -25,7 +26,7 @@ func initTokenEncryption() {
 	}
 	key, err := hex.DecodeString(raw)
 	if err != nil || len(key) != 32 {
-		fmt.Fprintf(os.Stderr, "WORKFLOWS_TOKEN_KEY must be a hex-encoded 32-byte (64-character) key, got %d bytes\n", len(key))
+		slog.Error("WORKFLOWS_TOKEN_KEY must be a hex-encoded 32-byte (64-character) key", "bytes", len(key))
 		os.Exit(1)
 	}
 	tokenEncKey = key

@@ -69,10 +69,7 @@ spec:
             - name: CONTAINER_CPU_LIMIT
               value: {{ .Values.forge.env.containerCpuLimit | quote }}
             {{- end }}
-            {{- if .Values.forge.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.forge.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.forge.env) | nindent 12 }}
             {{- if and (eq .Values.forge.env.runtime "docker") .Values.egressProxy.enabled }}
             - name: FORGE_EGRESS_PROXY
               value: "http://{{ include "codearmory.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"

@@ -23,8 +23,8 @@ func handleListOrgs(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
-	slog.Info("list orgs request", "caller_id", callerID)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "list orgs request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listOrg", "gatekeeper/orgs") {
 		span.SetStatus(codes.Ok, "")
@@ -70,7 +70,7 @@ func handleListOrgs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "list orgs failed")
-		slog.Warn("list orgs: db error", "caller_id", callerID, "error", err)
+		slog.WarnContext(ctx, "list orgs: db error", "caller_id", callerID, "error", err)
 		http.Error(w, "failed to list orgs", http.StatusInternalServerError)
 		return
 	}
@@ -80,7 +80,7 @@ func handleListOrgs(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("db.read")
 	span.SetStatus(codes.Ok, "")
-	slog.Info("list orgs: success", "caller_id", callerID, "count", len(orgs))
+	slog.InfoContext(ctx, "list orgs: success", "caller_id", callerID, "count", len(orgs))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(orgs)
 }
@@ -93,8 +93,8 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
-	slog.Info("create org request", "caller_id", callerID)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "create org request", "caller_id", callerID)
 
 	if !requirePermission(w, r, "createOrg", "gatekeeper/orgs") {
 		span.SetStatus(codes.Ok, "")
@@ -106,13 +106,13 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("create org: invalid request body", "caller_id", callerID, "error", err)
+		slog.WarnContext(ctx, "create org: invalid request body", "caller_id", callerID, "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if req.OrgName == "" {
 		span.SetStatus(codes.Error, "missing org_name")
-		slog.Warn("create org: missing org_name", "caller_id", callerID)
+		slog.WarnContext(ctx, "create org: missing org_name", "caller_id", callerID)
 		http.Error(w, "org_name is required", http.StatusBadRequest)
 		return
 	}
@@ -122,17 +122,17 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	if err := org.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create org: db error", "caller_id", callerID, "org_name", req.OrgName, "error", err)
+		slog.ErrorContext(ctx, "create org: db error", "caller_id", callerID, "org_name", req.OrgName, "error", err)
 		http.Error(w, "failed to create org", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("org created, assigning owner to org", "caller_id", callerID, "org_id", org.OrgID, "owner_id", userID)
+	slog.InfoContext(ctx, "org created, assigning owner to org", "caller_id", callerID, "org_id", org.OrgID, "owner_id", userID)
 	ownerRow, err := (User{UserID: userID}).Get(ctx)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to load owner")
-		slog.Error("create org: failed to load owner user", "caller_id", callerID, "org_id", org.OrgID, "owner_id", userID, "error", err)
+		slog.ErrorContext(ctx, "create org: failed to load owner user", "caller_id", callerID, "org_id", org.OrgID, "owner_id", userID, "error", err)
 		http.Error(w, "failed to put user in org", http.StatusInternalServerError)
 		return
 	}
@@ -141,7 +141,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	if err := owner.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to assign owner to org")
-		slog.Error("create org: failed to assign owner to org", "caller_id", callerID, "org_id", org.OrgID, "owner_id", userID, "error", err)
+		slog.ErrorContext(ctx, "create org: failed to assign owner to org", "caller_id", callerID, "org_id", org.OrgID, "owner_id", userID, "error", err)
 		http.Error(w, "failed to put user in org", http.StatusInternalServerError)
 		return
 	}
@@ -158,7 +158,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	}
 	orgGrants := defaultGrantsFor("org")
 	if len(orgGrants) == 0 {
-		slog.Error("create org: no default grants for 'org' — owner will have no permissions; check that the registry is reachable and has default_grants seeded", "org_id", org.OrgID, "user_id", userID)
+		slog.ErrorContext(ctx, "create org: no default grants for 'org' — owner will have no permissions; check that the registry is reachable and has default_grants seeded", "org_id", org.OrgID, "user_id", userID)
 		http.Error(w, "service configuration error: permissions not available", http.StatusServiceUnavailable)
 		return
 	}
@@ -169,7 +169,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 			if err := applyGrantsForResource(ctx, grant.ServiceName, userID, permName, grant.Actions, resource); err != nil {
 				span.RecordError(err)
 				span.SetStatus(codes.Error, "failed to grant owner permissions")
-				slog.Error("create org: failed to grant owner permissions", "caller_id", callerID, "org_id", org.OrgID, "service", grant.ServiceName, "error", err)
+				slog.ErrorContext(ctx, "create org: failed to grant owner permissions", "caller_id", callerID, "org_id", org.OrgID, "service", grant.ServiceName, "error", err)
 				http.Error(w, "failed to give owner permissions", http.StatusInternalServerError)
 				return
 			}
@@ -182,7 +182,7 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.name", org.OrgName),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("create org: success", "caller_id", callerID, "org_id", org.OrgID, "org_name", org.OrgName)
+	slog.InfoContext(ctx, "create org: success", "caller_id", callerID, "org_id", org.OrgID, "org_name", org.OrgName)
 	row, _ := org.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -197,10 +197,10 @@ func handleGetOrg(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("org.id", id),
 	)
-	slog.Info("get org request", "caller_id", callerID, "org_id", id)
+	slog.InfoContext(ctx, "get org request", "caller_id", callerID, "org_id", id)
 
 	if !requirePermission(w, r, "getOrg", "gatekeeper/orgs/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -212,13 +212,13 @@ func handleGetOrg(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "org not found")
-		slog.Warn("get org: not found", "caller_id", callerID, "org_id", id)
+		slog.WarnContext(ctx, "get org: not found", "caller_id", callerID, "org_id", id)
 		http.Error(w, "org not found", http.StatusNotFound)
 		return
 	}
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("org.id", id)))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("get org: success", "caller_id", callerID, "org_id", id)
+	slog.InfoContext(ctx, "get org: success", "caller_id", callerID, "org_id", id)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(row.(Org))
 }
@@ -231,10 +231,10 @@ func handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("org.id", id),
 	)
-	slog.Info("update org request", "caller_id", callerID, "org_id", id)
+	slog.InfoContext(ctx, "update org request", "caller_id", callerID, "org_id", id)
 
 	if !requirePermission(w, r, "updateOrg", "gatekeeper/orgs/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -246,13 +246,13 @@ func handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid request body")
-		slog.Warn("update org: invalid request body", "caller_id", callerID, "org_id", id, "error", err)
+		slog.WarnContext(ctx, "update org: invalid request body", "caller_id", callerID, "org_id", id, "error", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 	if req.OrgName == "" {
 		span.SetStatus(codes.Error, "missing org_name")
-		slog.Warn("update org: missing org_name", "caller_id", callerID, "org_id", id)
+		slog.WarnContext(ctx, "update org: missing org_name", "caller_id", callerID, "org_id", id)
 		http.Error(w, "org_name is required", http.StatusBadRequest)
 		return
 	}
@@ -262,7 +262,7 @@ func handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "org not found")
-		slog.Warn("update org: not found", "caller_id", callerID, "org_id", id)
+		slog.WarnContext(ctx, "update org: not found", "caller_id", callerID, "org_id", id)
 		http.Error(w, "org not found", http.StatusNotFound)
 		return
 	}
@@ -273,7 +273,7 @@ func handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
 	if err := org.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("update org: db error", "caller_id", callerID, "org_id", id, "error", err)
+		slog.ErrorContext(ctx, "update org: db error", "caller_id", callerID, "org_id", id, "error", err)
 		http.Error(w, "failed to update org", http.StatusInternalServerError)
 		return
 	}
@@ -282,7 +282,7 @@ func handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.name", req.OrgName),
 	))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("update org: success", "caller_id", callerID, "org_id", id, "new_name", req.OrgName)
+	slog.InfoContext(ctx, "update org: success", "caller_id", callerID, "org_id", id, "new_name", req.OrgName)
 	row, _ = org.Get(ctx)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(row.(Org))
@@ -297,10 +297,10 @@ func handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
 	span.SetAttributes(
-		attribute.String("caller.id", callerID),
+		attribute.String("user.id", callerID),
 		attribute.String("org.id", id),
 	)
-	slog.Info("delete org request", "caller_id", callerID, "org_id", id)
+	slog.InfoContext(ctx, "delete org request", "caller_id", callerID, "org_id", id)
 
 	if !requirePermission(w, r, "deleteOrg", "gatekeeper/orgs/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -312,7 +312,7 @@ func handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "org not found")
-		slog.Warn("delete org: not found", "caller_id", callerID, "org_id", id)
+		slog.WarnContext(ctx, "delete org: not found", "caller_id", callerID, "org_id", id)
 		http.Error(w, "org not found", http.StatusNotFound)
 		return
 	}
@@ -321,7 +321,7 @@ func handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 	if err := row.(Org).Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db delete failed")
-		slog.Error("delete org: db error", "caller_id", callerID, "org_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete org: db error", "caller_id", callerID, "org_id", id, "error", err)
 		http.Error(w, "failed to delete org", http.StatusInternalServerError)
 		return
 	}
@@ -332,19 +332,19 @@ func handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 	// scoping resources/secrets under the deleted org) for up to entityTTL.
 	memberIDs, memberErr := getUserIDsByOrg(ctx, id)
 	if memberErr != nil {
-		slog.Error("delete org: failed to load member IDs for cache invalidation", "caller_id", callerID, "org_id", id, "error", memberErr)
+		slog.ErrorContext(ctx, "delete org: failed to load member IDs for cache invalidation", "caller_id", callerID, "org_id", id, "error", memberErr)
 	}
 	if err := clearOrgMembership(ctx, id); err != nil {
-		slog.Error("delete org: failed to clear org membership", "caller_id", callerID, "org_id", id, "error", err)
+		slog.ErrorContext(ctx, "delete org: failed to clear org membership", "caller_id", callerID, "org_id", id, "error", err)
 	} else {
 		for _, uid := range memberIDs {
 			cacheDel(ctx, "gk:user:"+uid)
 		}
-		slog.Info("delete org: cleared org membership", "caller_id", callerID, "org_id", id)
+		slog.InfoContext(ctx, "delete org: cleared org membership", "caller_id", callerID, "org_id", id)
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("delete org: success", "caller_id", callerID, "org_id", id)
+	slog.InfoContext(ctx, "delete org: success", "caller_id", callerID, "org_id", id)
 	writeAudit(ctx, callerID, "user", "org.delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }

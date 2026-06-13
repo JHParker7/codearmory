@@ -61,7 +61,7 @@ func (c *registryClient) do(req *http.Request, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		return &registryError{Status: resp.StatusCode, Body: string(b)}
+		return &registryError{Status: resp.StatusCode, Body: string(b[:min(len(b), 512)])}
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)

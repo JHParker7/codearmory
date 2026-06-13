@@ -70,10 +70,7 @@ spec:
               value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
             - name: SERVICES
               value: {{ $services | quote }}
-            {{- if .Values.registry.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.registry.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.registry.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "registry" "registry" (include "codearmory.fullname" .)) | nindent 12 }}
             - name: GATEKEEPER_SERVICE_KEY
               valueFrom:

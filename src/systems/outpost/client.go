@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // gatewayClient is the outpost's only outbound dependency: it dials the
@@ -61,9 +63,13 @@ func buildHTTPClient() *http.Client {
 		}
 		tlsCfg.RootCAs = pool
 	}
+	// Wrap the transport so every gateway call becomes a client span and carries
+	// W3C trace context to the gateway (linking the two sides of the connection).
+	// otelhttp uses the global no-op provider until telemetry.Setup runs, so this
+	// is free when OpenTelemetry is disabled.
 	return &http.Client{
 		Timeout:   60 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Transport: otelhttp.NewTransport(&http.Transport{TLSClientConfig: tlsCfg}),
 	}
 }
 
@@ -98,6 +104,7 @@ func (g *gatewayClient) enroll(ctx context.Context, enrollmentToken string) erro
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	slog.Debug("outpost: enroll response", "status", resp.StatusCode)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("enroll failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
@@ -137,6 +144,7 @@ func (g *gatewayClient) pollCommands(ctx context.Context) ([]Command, error) {
 	if err := json.Unmarshal(raw, &cmds); err != nil {
 		return nil, fmt.Errorf("poll commands: parse: %w", err)
 	}
+	slog.Debug("outpost: poll commands response", "status", resp.StatusCode, "count", len(cmds))
 	return cmds, nil
 }
 
@@ -158,6 +166,7 @@ func (g *gatewayClient) ackCommand(ctx context.Context, id string) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("ack command (%d): %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
+	slog.Debug("outpost: ack response", "command_id", id, "status", resp.StatusCode)
 	return nil
 }
 
@@ -181,6 +190,9 @@ func (g *gatewayClient) postEvent(ctx context.Context, ev Event) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("post event (%d): %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
+	// Log only safe metadata — never ev.Payload, which can carry cluster
+	// resource/namespace names that land in the customer's logging stack.
+	slog.Debug("outpost: post event response", "type", ev.Type, "integration", ev.Integration, "status", resp.StatusCode)
 	return nil
 }
 

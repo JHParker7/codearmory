@@ -53,10 +53,7 @@ spec:
               value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
             - name: REGISTRY_URL
               value: "http://{{ include "codearmory.fullname" . }}-registry:{{ .Values.registry.port }}"
-            {{- if .Values.conductor.env.otelEndpoint }}
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: {{ .Values.conductor.env.otelEndpoint | quote }}
-            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.conductor.env) | nindent 12 }}
             - name: REGISTRY_SERVICE_KEY
               valueFrom:
                 secretKeyRef:

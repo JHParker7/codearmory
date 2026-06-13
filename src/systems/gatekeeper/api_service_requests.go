@@ -23,7 +23,7 @@ func handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
+	span.SetAttributes(attribute.String("user.id", callerID))
 
 	if !requirePermission(w, r, "listAuditLog", "gatekeeper/audit-logs") {
 		span.SetStatus(codes.Ok, "")
@@ -52,7 +52,7 @@ func handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "list failed")
-		slog.Error("list audit logs: db error", "caller_id", callerID, "error", err)
+		slog.ErrorContext(ctx, "list audit logs: db error", "caller_id", callerID, "error", err)
 		http.Error(w, "failed to list audit logs", http.StatusInternalServerError)
 		return
 	}
@@ -87,7 +87,7 @@ func handleCreateServicePermissionRequest(w http.ResponseWriter, r *http.Request
 		return
 	}
 	span.SetAttributes(attribute.String("service.name", svc.ServiceName))
-	slog.Info("create service permission request", "service_name", svc.ServiceName)
+	slog.InfoContext(ctx, "create service permission request", "service_name", svc.ServiceName)
 
 	var body servicePermissionRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -117,7 +117,7 @@ func handleCreateServicePermissionRequest(w http.ResponseWriter, r *http.Request
 		First(&existing).Error
 	if err == nil {
 		span.SetStatus(codes.Error, "duplicate request")
-		slog.Info("create service permission request: already exists", "service_name", svc.ServiceName, "name", body.Name, "status", existing.Status)
+		slog.InfoContext(ctx, "create service permission request: already exists", "service_name", svc.ServiceName, "name", body.Name, "status", existing.Status)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		json.NewEncoder(w).Encode(existing)
@@ -126,7 +126,7 @@ func handleCreateServicePermissionRequest(w http.ResponseWriter, r *http.Request
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("create service permission request: db check failed", "error", err)
+		slog.ErrorContext(ctx, "create service permission request: db check failed", "error", err)
 		http.Error(w, "failed to create request", http.StatusInternalServerError)
 		return
 	}
@@ -143,13 +143,13 @@ func handleCreateServicePermissionRequest(w http.ResponseWriter, r *http.Request
 	if err := req.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create service permission request: insert failed", "service_name", svc.ServiceName, "error", err)
+		slog.ErrorContext(ctx, "create service permission request: insert failed", "service_name", svc.ServiceName, "error", err)
 		http.Error(w, "failed to create request", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("create service permission request: success", "service_name", svc.ServiceName, "request_id", req.RequestID)
+	slog.InfoContext(ctx, "create service permission request: success", "service_name", svc.ServiceName, "request_id", req.RequestID)
 	writeAudit(ctx, svc.ServiceName, "service", "service_permission_request.create", req.RequestID, req.Name)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -164,8 +164,8 @@ func handleListServicePermissionRequests(w http.ResponseWriter, r *http.Request)
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID))
-	slog.Info("list service permission requests", "caller_id", callerID)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "list service permission requests", "caller_id", callerID)
 
 	if !requirePermission(w, r, "listServicePermissionRequest", "gatekeeper/service-permission-requests") {
 		span.SetStatus(codes.Ok, "")
@@ -191,7 +191,7 @@ func handleListServicePermissionRequests(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "list failed")
-		slog.Error("list service permission requests: db error", "caller_id", callerID, "error", err)
+		slog.ErrorContext(ctx, "list service permission requests: db error", "caller_id", callerID, "error", err)
 		http.Error(w, "failed to list requests", http.StatusInternalServerError)
 		return
 	}
@@ -202,7 +202,7 @@ func handleListServicePermissionRequests(w http.ResponseWriter, r *http.Request)
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("list service permission requests: success", "caller_id", callerID, "count", len(result))
+	slog.InfoContext(ctx, "list service permission requests: success", "caller_id", callerID, "count", len(result))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
@@ -215,8 +215,8 @@ func handleGetServicePermissionRequest(w http.ResponseWriter, r *http.Request) {
 
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID), attribute.String("request.id", id))
-	slog.Info("get service permission request", "caller_id", callerID, "request_id", id)
+	span.SetAttributes(attribute.String("user.id", callerID), attribute.String("request.id", id))
+	slog.InfoContext(ctx, "get service permission request", "caller_id", callerID, "request_id", id)
 
 	if !requirePermission(w, r, "getServicePermissionRequest", "gatekeeper/service-permission-requests/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -227,7 +227,7 @@ func handleGetServicePermissionRequest(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "not found")
-		slog.Warn("get service permission request: not found", "caller_id", callerID, "request_id", id)
+		slog.WarnContext(ctx, "get service permission request: not found", "caller_id", callerID, "request_id", id)
 		http.Error(w, "request not found", http.StatusNotFound)
 		return
 	}
@@ -247,8 +247,8 @@ func handleApproveServicePermissionRequest(w http.ResponseWriter, r *http.Reques
 
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID), attribute.String("request.id", id))
-	slog.Info("approve service permission request", "caller_id", callerID, "request_id", id)
+	span.SetAttributes(attribute.String("user.id", callerID), attribute.String("request.id", id))
+	slog.InfoContext(ctx, "approve service permission request", "caller_id", callerID, "request_id", id)
 
 	if !requirePermission(w, r, "approveServicePermissionRequest", "gatekeeper/service-permission-requests/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -259,7 +259,7 @@ func handleApproveServicePermissionRequest(w http.ResponseWriter, r *http.Reques
 	if _, err := (ServicePermissionRequest{RequestID: id}).Get(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "not found")
-		slog.Warn("approve service permission request: not found", "caller_id", callerID, "request_id", id)
+		slog.WarnContext(ctx, "approve service permission request: not found", "caller_id", callerID, "request_id", id)
 		http.Error(w, "request not found", http.StatusNotFound)
 		return
 	}
@@ -268,19 +268,19 @@ func handleApproveServicePermissionRequest(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if err.Error() == "request is not pending" {
 			span.SetStatus(codes.Error, "not pending")
-			slog.Warn("approve service permission request: not pending", "caller_id", callerID, "request_id", id)
+			slog.WarnContext(ctx, "approve service permission request: not pending", "caller_id", callerID, "request_id", id)
 			http.Error(w, "request is not pending", http.StatusConflict)
 			return
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "transaction failed")
-		slog.Error("approve service permission request: transaction failed", "caller_id", callerID, "request_id", id, "error", err)
+		slog.ErrorContext(ctx, "approve service permission request: transaction failed", "caller_id", callerID, "request_id", id, "error", err)
 		http.Error(w, "failed to approve request", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("approve service permission request: success", "caller_id", callerID, "request_id", id, "service_name", spr.ServiceName)
+	slog.InfoContext(ctx, "approve service permission request: success", "caller_id", callerID, "request_id", id, "service_name", spr.ServiceName)
 	writeAudit(ctx, callerID, "user", "service_permission_request.approve", id, spr.ServiceName+":"+spr.Name)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -293,8 +293,8 @@ func handleDeclineServicePermissionRequest(w http.ResponseWriter, r *http.Reques
 
 	id := r.PathValue("id")
 	callerID, _ := ctx.Value(userIDKey).(string)
-	span.SetAttributes(attribute.String("caller.id", callerID), attribute.String("request.id", id))
-	slog.Info("decline service permission request", "caller_id", callerID, "request_id", id)
+	span.SetAttributes(attribute.String("user.id", callerID), attribute.String("request.id", id))
+	slog.InfoContext(ctx, "decline service permission request", "caller_id", callerID, "request_id", id)
 
 	if !requirePermission(w, r, "declineServicePermissionRequest", "gatekeeper/service-permission-requests/"+id) {
 		span.SetStatus(codes.Ok, "")
@@ -305,7 +305,7 @@ func handleDeclineServicePermissionRequest(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "not found")
-		slog.Warn("decline service permission request: not found", "caller_id", callerID, "request_id", id)
+		slog.WarnContext(ctx, "decline service permission request: not found", "caller_id", callerID, "request_id", id)
 		http.Error(w, "request not found", http.StatusNotFound)
 		return
 	}
@@ -313,7 +313,7 @@ func handleDeclineServicePermissionRequest(w http.ResponseWriter, r *http.Reques
 
 	if spr.Status != "pending" {
 		span.SetStatus(codes.Error, "not pending")
-		slog.Warn("decline service permission request: not pending", "caller_id", callerID, "request_id", id, "status", spr.Status)
+		slog.WarnContext(ctx, "decline service permission request: not pending", "caller_id", callerID, "request_id", id, "status", spr.Status)
 		http.Error(w, "request is not pending", http.StatusConflict)
 		return
 	}
@@ -325,13 +325,13 @@ func handleDeclineServicePermissionRequest(w http.ResponseWriter, r *http.Reques
 	if err := spr.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("decline service permission request: db error", "caller_id", callerID, "request_id", id, "error", err)
+		slog.ErrorContext(ctx, "decline service permission request: db error", "caller_id", callerID, "request_id", id, "error", err)
 		http.Error(w, "failed to decline request", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("decline service permission request: success", "caller_id", callerID, "request_id", id, "service_name", spr.ServiceName)
+	slog.InfoContext(ctx, "decline service permission request: success", "caller_id", callerID, "request_id", id, "service_name", spr.ServiceName)
 	writeAudit(ctx, callerID, "user", "service_permission_request.decline", id, spr.ServiceName+":"+spr.Name)
 	w.WriteHeader(http.StatusNoContent)
 }

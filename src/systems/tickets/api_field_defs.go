@@ -51,7 +51,7 @@ func handleListFieldDefs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("list field defs: db error", "org_id", orgID, "error", err)
+		slog.ErrorContext(ctx, "list field defs: db error", "org_id", orgID, "error", err)
 		http.Error(w, "failed to list field defs", http.StatusInternalServerError)
 		return
 	}
@@ -107,13 +107,13 @@ func handleCreateFieldDef(w http.ResponseWriter, r *http.Request) {
 	if err := f.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("create field def: db error", "org_id", orgID, "error", err)
+		slog.ErrorContext(ctx, "create field def: db error", "org_id", orgID, "error", err)
 		http.Error(w, "failed to create field def", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("field def created", "field_def_id", f.FieldDefID, "org_id", orgID, "kind", f.Kind, "value", f.Value)
+	slog.InfoContext(ctx, "field def created", "field_def_id", f.FieldDefID, "org_id", orgID, "kind", f.Kind)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(f) //nolint:errcheck
@@ -216,6 +216,6 @@ func handleDeleteFieldDef(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("field def deleted", "field_def_id", id, "org_id", orgID)
+	slog.InfoContext(ctx, "field def deleted", "field_def_id", id, "org_id", orgID)
 	w.WriteHeader(http.StatusNoContent)
 }

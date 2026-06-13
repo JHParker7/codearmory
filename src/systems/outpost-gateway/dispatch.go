@@ -73,7 +73,7 @@ func dispatchDue(ctx context.Context) {
 	lease := dispatchBatchSize*perEventTimeout + 30*time.Second
 	events, err := claimDueEvents(ctx, dispatchBatchSize, lease)
 	if err != nil {
-		slog.Error("dispatcher: claim due events", "error", err)
+		slog.ErrorContext(ctx, "dispatcher: claim due events", "error", err)
 		return
 	}
 	for _, e := range events {
@@ -94,7 +94,7 @@ func deliverEvent(ctx context.Context, e OutpostEvent) {
 	if !ok {
 		// No consumer configured for this integration — dead-letter so the loop
 		// doesn't spin, and make the misconfiguration visible.
-		slog.Error("dispatcher: no consumer configured", "integration", e.Integration, "event_id", e.ID)
+		slog.ErrorContext(ctx, "dispatcher: no consumer configured", "integration", e.Integration, "event_id", e.ID)
 		_ = scheduleEventRetry(ctx, OutpostEvent{ID: e.ID, Attempt: maxDeliveryAttempts}, "no consumer for integration "+e.Integration)
 		return
 	}
@@ -127,7 +127,7 @@ func deliverEvent(ctx context.Context, e OutpostEvent) {
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Warn("dispatcher: delivery failed", "event_id", e.ID, "integration", e.Integration, "error", err)
+		slog.WarnContext(ctx, "dispatcher: delivery failed", "event_id", e.ID, "integration", e.Integration, "error", err)
 		_ = scheduleEventRetry(ctx, e, err.Error())
 		return
 	}
@@ -135,14 +135,14 @@ func deliverEvent(ctx context.Context, e OutpostEvent) {
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := "consumer returned " + resp.Status + ": " + strings.TrimSpace(string(respBody))
-		slog.Warn("dispatcher: consumer non-2xx", "event_id", e.ID, "integration", e.Integration, "status", resp.StatusCode)
+		slog.WarnContext(ctx, "dispatcher: consumer non-2xx", "event_id", e.ID, "integration", e.Integration, "status", resp.StatusCode)
 		_ = scheduleEventRetry(ctx, e, msg)
 		return
 	}
 	if err := markEventDelivered(ctx, e.ID); err != nil {
-		slog.Error("dispatcher: mark delivered", "event_id", e.ID, "error", err)
+		slog.ErrorContext(ctx, "dispatcher: mark delivered", "event_id", e.ID, "error", err)
 		return
 	}
 	meterEventsDelivered.Add(ctx, 1)
-	slog.Info("event delivered", "event_id", e.ID, "integration", e.Integration, "type", e.Type)
+	slog.DebugContext(ctx, "event delivered", "event_id", e.ID, "integration", e.Integration, "type", e.Type)
 }

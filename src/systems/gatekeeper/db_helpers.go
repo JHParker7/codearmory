@@ -95,9 +95,9 @@ func upsertServiceAccountDB(ctx context.Context, name, hash string) {
 	if err == nil {
 		if err2 := connect().WithContext(ctx).Model(&ServiceAccount{}).Where("service_name = ?", name).
 			Update("hashed_bootstrap_key", hash).Error; err2 != nil {
-			slog.Error("seedServiceAccounts: update bootstrap key failed", "name", name, "error", err2)
+			slog.ErrorContext(ctx, "seedServiceAccounts: update bootstrap key failed", "name", name, "error", err2)
 		} else {
-			slog.Debug("seedServiceAccounts: account exists, bootstrap key refreshed", "name", name)
+			slog.DebugContext(ctx, "seedServiceAccounts: account exists, bootstrap key refreshed", "name", name)
 		}
 		return
 	}
@@ -109,8 +109,8 @@ func upsertServiceAccountDB(ctx context.Context, name, hash string) {
 		Active:             true,
 	}
 	if err := connect().WithContext(ctx).Create(&svc).Error; err != nil {
-		slog.Error("seedServiceAccounts: create failed", "name", name, "error", err)
+		slog.ErrorContext(ctx, "seedServiceAccounts: create failed", "name", name, "error", err)
 	} else {
-		slog.Info("seedServiceAccounts: created", "name", name)
+		slog.InfoContext(ctx, "seedServiceAccounts: created", "name", name)
 	}
 }

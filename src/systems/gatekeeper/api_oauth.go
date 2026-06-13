@@ -341,12 +341,12 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	user, err := getUserByEmail(r.Context(), email)
 	if err != nil {
 		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password)) //nolint:errcheck
-		slog.Warn("oauth authorize: user not found", "email", email)
+		slog.WarnContext(r.Context(), "oauth authorize: user not found")
 		renderError("Invalid email or password.")
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(password)); err != nil {
-		slog.Warn("oauth authorize: bad password", "user_id", user.UserID)
+		slog.WarnContext(r.Context(), "oauth authorize: bad password", "user_id", user.UserID)
 		renderError("Invalid email or password.")
 		return
 	}
@@ -355,11 +355,11 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		pending, err := newMFAPending(r.Context(), user.UserID,
 			params.client.ClientID, params.redirectURI, params.state, params.scope)
 		if err != nil {
-			slog.Error("oauth authorize: failed to create MFA pending", "user_id", user.UserID, "error", err)
+			slog.ErrorContext(r.Context(), "oauth authorize: failed to create MFA pending", "user_id", user.UserID, "error", err)
 			renderError("Internal server error.")
 			return
 		}
-		slog.Info("oauth authorize: MFA required", "user_id", user.UserID)
+		slog.InfoContext(r.Context(), "oauth authorize: MFA required", "user_id", user.UserID)
 		http.Redirect(w, r, "/oauth/mfa?token="+url.QueryEscape(pending.Token), http.StatusFound)
 		return
 	}
@@ -374,12 +374,12 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   time.Now().UTC(),
 	}
 	if err := code.Add(r.Context()); err != nil {
-		slog.Error("oauth authorize: persist code failed", "error", err)
+		slog.ErrorContext(r.Context(), "oauth authorize: persist code failed", "error", err)
 		oauthRedirectError(w, r, params.redirectURI, params.state, "server_error", "failed to create authorization code")
 		return
 	}
 
-	slog.Info("oauth: authorization code issued", "client_id", params.client.ClientID, "user_id", user.UserID)
+	slog.InfoContext(r.Context(), "oauth: authorization code issued", "client_id", params.client.ClientID, "user_id", user.UserID)
 	oauthRedirectCode(w, r, params.redirectURI, code.Code, params.state)
 }
 
@@ -453,19 +453,19 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 
 	accessToken, sessionID, expiresAt, err := createOAuthSession(r.Context(), user.UserID)
 	if err != nil {
-		slog.Error("oauth token: session creation failed", "user_id", user.UserID, "error", err)
+		slog.ErrorContext(r.Context(), "oauth token: session creation failed", "user_id", user.UserID, "error", err)
 		tokenError(w, "server_error", "failed to create session")
 		return
 	}
 
 	idToken, err := mintIDToken(user, sessionID, client.ClientID, expiresAt, buildGroups(r.Context(), user))
 	if err != nil {
-		slog.Error("oauth token: id_token signing failed", "user_id", user.UserID, "error", err)
+		slog.ErrorContext(r.Context(), "oauth token: id_token signing failed", "user_id", user.UserID, "error", err)
 		tokenError(w, "server_error", "failed to sign id_token")
 		return
 	}
 
-	slog.Info("oauth: tokens issued", "client_id", clientID, "user_id", user.UserID, "session_id", sessionID)
+	slog.InfoContext(r.Context(), "oauth: tokens issued", "client_id", clientID, "user_id", user.UserID, "session_id", sessionID)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -497,12 +497,12 @@ func handleClientCredentialsGrant(w http.ResponseWriter, r *http.Request) {
 
 	accessToken, sessionID, expiresAt, err := issueClientSession(r.Context(), clientID)
 	if err != nil {
-		slog.Error("client_credentials: session creation failed", "client_id", clientID, "error", err)
+		slog.ErrorContext(r.Context(), "client_credentials: session creation failed", "client_id", clientID, "error", err)
 		tokenError(w, "server_error", "failed to create session")
 		return
 	}
 
-	slog.Info("oauth: client_credentials token issued", "client_id", clientID, "session_id", sessionID)
+	slog.InfoContext(r.Context(), "oauth: client_credentials token issued", "client_id", clientID, "session_id", sessionID)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -627,14 +627,14 @@ func handleCreateOAuthClient(w http.ResponseWriter, r *http.Request) {
 
 	rawSecret := make([]byte, 32)
 	if _, err := rand.Read(rawSecret); err != nil {
-		slog.Error("oauth client: secret generation failed", "error", err)
+		slog.ErrorContext(r.Context(), "oauth client: secret generation failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	clientSecret := base64.RawURLEncoding.EncodeToString(rawSecret)
 	secretHash, err := bcrypt.GenerateFromPassword([]byte(clientSecret), 12)
 	if err != nil {
-		slog.Error("oauth client: bcrypt failed", "error", err)
+		slog.ErrorContext(r.Context(), "oauth client: bcrypt failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -652,12 +652,12 @@ func handleCreateOAuthClient(w http.ResponseWriter, r *http.Request) {
 		client.RoleID = &req.RoleID
 	}
 	if err := client.Add(r.Context()); err != nil {
-		slog.Error("oauth client: create failed", "error", err)
+		slog.ErrorContext(r.Context(), "oauth client: create failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("oauth client registered", "client_id", client.ClientID, "name", client.Name)
+	slog.InfoContext(r.Context(), "oauth client registered", "client_id", client.ClientID, "name", client.Name)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -696,7 +696,7 @@ func handleDeleteOAuthClient(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "client not found", http.StatusNotFound)
 		return
 	}
-	slog.Info("oauth client deleted", "client_id", id)
+	slog.InfoContext(r.Context(), "oauth client deleted", "client_id", id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -765,7 +765,7 @@ func handleOAuthMFAPost(w http.ResponseWriter, r *http.Request) {
 		newPending, err := newMFAPending(ctx, pending.UserID,
 			pending.OAuthClientID, pending.OAuthRedirectURI, pending.OAuthState, pending.OAuthScope)
 		if err != nil {
-			slog.Error("oauth mfa: re-issue pending failed", "user_id", pending.UserID, "error", err)
+			slog.ErrorContext(ctx, "oauth mfa: re-issue pending failed", "user_id", pending.UserID, "error", err)
 			oauthRedirectError(w, r, pending.OAuthRedirectURI, pending.OAuthState, "server_error", "internal error")
 			return
 		}
@@ -780,7 +780,7 @@ func handleOAuthMFAPost(w http.ResponseWriter, r *http.Request) {
 
 	valid, _, msg := totpValidateForUser(ctx, pending.UserID, code)
 	if !valid {
-		slog.Warn("oauth mfa: invalid code", "user_id", pending.UserID)
+		slog.WarnContext(ctx, "oauth mfa: invalid code", "user_id", pending.UserID)
 		renderTOTPError(msg)
 		return
 	}
@@ -795,12 +795,12 @@ func handleOAuthMFAPost(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   time.Now().UTC(),
 	}
 	if err := authCode.Add(ctx); err != nil {
-		slog.Error("oauth mfa: persist auth code failed", "error", err)
+		slog.ErrorContext(ctx, "oauth mfa: persist auth code failed", "error", err)
 		oauthRedirectError(w, r, pending.OAuthRedirectURI, pending.OAuthState, "server_error", "failed to create authorization code")
 		return
 	}
 
-	slog.Info("oauth mfa: authorization code issued", "client_id", pending.OAuthClientID, "user_id", pending.UserID)
+	slog.InfoContext(ctx, "oauth mfa: authorization code issued", "client_id", pending.OAuthClientID, "user_id", pending.UserID)
 	oauthRedirectCode(w, r, pending.OAuthRedirectURI, authCode.Code, pending.OAuthState)
 }
 

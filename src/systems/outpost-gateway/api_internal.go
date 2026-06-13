@@ -94,7 +94,7 @@ func handleEnqueueCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	meterCommandsEnqueued.Add(ctx, 1)
 	span.SetStatus(codes.Ok, "")
-	slog.Info("command enqueued", "command_id", cmd.ID, "outpost_id", cmd.OutpostID, "integration", cmd.Integration, "type", cmd.Type)
+	slog.InfoContext(ctx, "command enqueued", "command_id", cmd.ID, "outpost_id", cmd.OutpostID, "integration", cmd.Integration, "type", cmd.Type)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"command_id": cmd.ID}) //nolint:errcheck

@@ -43,7 +43,7 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("add comment: get ticket", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "add comment: get ticket", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
@@ -73,7 +73,7 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 	if err := c.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("add comment: db error", "ticket_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "add comment: db error", "ticket_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to add comment", http.StatusInternalServerError)
 		return
 	}
@@ -82,13 +82,13 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 	if refreshed, err := refreshComment(ctx, c.CommentID); err == nil {
 		c = refreshed
 	} else {
-		slog.Warn("add comment: refresh failed", "comment_id", c.CommentID, "error", err)
+		slog.WarnContext(ctx, "add comment: refresh failed", "comment_id", c.CommentID, "error", err)
 	}
 
 	meterCommentsAdded.Add(ctx, 1, metric.WithAttributes(attribute.String("ticket.id", id)))
 	span.SetAttributes(attribute.String("comment.id", c.CommentID))
 	span.SetStatus(codes.Ok, "")
-	slog.Info("comment added", "comment_id", c.CommentID, "ticket_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "comment added", "comment_id", c.CommentID, "ticket_id", id, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(c) //nolint:errcheck
@@ -120,7 +120,7 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete comment: get ticket", "ticket_id", ticketID, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete comment: get ticket", "ticket_id", ticketID, "user_id", userID, "error", err)
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
@@ -140,7 +140,7 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete comment: lookup", "comment_id", commentID, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete comment: lookup", "comment_id", commentID, "user_id", userID, "error", err)
 		http.Error(w, "failed to get comment", http.StatusInternalServerError)
 		return
 	}
@@ -154,12 +154,12 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 	if err := existing.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.Error("delete comment: db error", "comment_id", commentID, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete comment: db error", "comment_id", commentID, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete comment", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("comment deleted", "comment_id", commentID, "ticket_id", ticketID, "user_id", userID)
+	slog.InfoContext(ctx, "comment deleted", "comment_id", commentID, "ticket_id", ticketID, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
 }

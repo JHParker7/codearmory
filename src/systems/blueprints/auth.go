@@ -26,7 +26,7 @@ func loginToGatekeeper(ctx context.Context, email, password string) (string, boo
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("failed to build gatekeeper login request", "error", err)
+		slog.ErrorContext(ctx, "failed to build gatekeeper login request", "error", err)
 		return "", false
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -35,14 +35,14 @@ func loginToGatekeeper(ctx context.Context, email, password string) (string, boo
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("gatekeeper login request failed", "error", err)
+		slog.ErrorContext(ctx, "gatekeeper login request failed", "error", err)
 		return "", false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		span.SetStatus(codes.Error, "login rejected")
-		slog.Warn("gatekeeper login rejected", "status", resp.StatusCode)
+		slog.WarnContext(ctx, "gatekeeper login rejected", "status", resp.StatusCode)
 		return "", false
 	}
 
@@ -95,7 +95,7 @@ func checkPermissions(ctx context.Context, token, resource, action string) bool 
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("failed to build gatekeeper check_permissions request", "error", err)
+		slog.ErrorContext(ctx, "failed to build gatekeeper check_permissions request", "error", err)
 		meterPermChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", false)))
 		return false
 	}
@@ -106,7 +106,7 @@ func checkPermissions(ctx context.Context, token, resource, action string) bool 
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("gatekeeper check_permissions failed", "error", err)
+		slog.ErrorContext(ctx, "gatekeeper check_permissions failed", "error", err)
 		meterPermChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", false)))
 		return false
 	}
@@ -114,7 +114,7 @@ func checkPermissions(ctx context.Context, token, resource, action string) bool 
 
 	if resp.StatusCode != http.StatusOK {
 		span.SetStatus(codes.Error, "denied")
-		slog.Warn("permission denied", "resource", resource, "action", action, "status", resp.StatusCode)
+		slog.WarnContext(ctx, "permission denied", "resource", resource, "action", action, "status", resp.StatusCode)
 		meterPermChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", false)))
 		return false
 	}
@@ -132,7 +132,7 @@ func checkPermissions(ctx context.Context, token, resource, action string) bool 
 	span.SetStatus(codes.Ok, "")
 	meterPermChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", result.Authorized)))
 	if !result.Authorized {
-		slog.Warn("permission denied", "resource", resource, "action", action)
+		slog.WarnContext(ctx, "permission denied", "resource", resource, "action", action)
 	}
 	return result.Authorized
 }

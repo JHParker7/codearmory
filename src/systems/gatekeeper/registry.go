@@ -92,13 +92,13 @@ func startDefaultGrantPoller(ctx context.Context, registryURL, serviceKey string
 	refresh := func() {
 		grants, err := fetchDefaultGrants(ctx, registryURL, serviceKey)
 		if err != nil {
-			slog.Warn("default grants: registry unavailable", "error", err)
+			slog.WarnContext(ctx, "default grants: registry unavailable", "error", err)
 			return
 		}
 		defaultGrantsMu.Lock()
 		cachedGrants = grants
 		defaultGrantsMu.Unlock()
-		slog.Info("default grants refreshed", "count", len(grants))
+		slog.DebugContext(ctx, "default grants refreshed", "count", len(grants))
 	}
 
 	refresh()

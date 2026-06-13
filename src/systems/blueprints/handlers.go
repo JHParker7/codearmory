@@ -26,7 +26,7 @@ func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey string)
 	}
 
 	if cached, ok := stateCacheGet(ctx, workspaceKey); ok {
-		slog.Info("state cache hit", "workspace", workspaceKey)
+		slog.InfoContext(ctx, "state cache hit", "workspace", workspaceKey)
 		// The cache stores ciphertext so Redis never holds plaintext state.
 		if plaintext, err := decrypt(cached); err == nil {
 			span.SetStatus(codes.Ok, "")
@@ -37,12 +37,12 @@ func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey string)
 		}
 		// Decrypt failure means a stale or corrupt cache entry; evict and re-read.
 		stateCacheDel(ctx, workspaceKey)
-		slog.Warn("state cache: decrypt failed, evicting", "workspace", workspaceKey)
+		slog.WarnContext(ctx, "state cache: decrypt failed, evicting", "workspace", workspaceKey)
 	}
 
 	row, err := (State{Workspace: workspaceKey}).Get(ctx)
 	if isDbNotFound(err) {
-		slog.Info("state not found", "workspace", workspaceKey)
+		slog.InfoContext(ctx, "state not found", "workspace", workspaceKey)
 		span.SetStatus(codes.Ok, "")
 		meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "not_found")))
 		w.WriteHeader(http.StatusNoContent)
@@ -51,7 +51,7 @@ func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey string)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("state read failed", "workspace", workspaceKey, "error", err)
+		slog.ErrorContext(ctx, "state read failed", "workspace", workspaceKey, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -61,13 +61,13 @@ func handleGetState(w http.ResponseWriter, r *http.Request, workspaceKey string)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("state decrypt failed", "workspace", workspaceKey, "error", err)
+		slog.ErrorContext(ctx, "state decrypt failed", "workspace", workspaceKey, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	stateCacheSet(ctx, workspaceKey, data)
-	slog.Info("state retrieved", "workspace", workspaceKey)
+	slog.InfoContext(ctx, "state retrieved", "workspace", workspaceKey)
 	span.SetStatus(codes.Ok, "")
 	meterGetState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "found")))
 	w.Header().Set("Content-Type", "application/json")
@@ -95,7 +95,7 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("state encrypt failed", "workspace", workspaceKey, "error", err)
+		slog.ErrorContext(ctx, "state encrypt failed", "workspace", workspaceKey, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -105,7 +105,7 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 	existingLock, upsertErr := (State{Workspace: workspaceKey}).UpsertAtomic(ctx, body, lockID)
 	if upsertErr != nil {
 		if errors.Is(upsertErr, ErrWorkspaceLocked) || errors.Is(upsertErr, ErrLockIDMismatch) {
-			slog.Warn("state update rejected: lock conflict", "workspace", workspaceKey)
+			slog.WarnContext(ctx, "state update rejected: lock conflict", "workspace", workspaceKey)
 			span.SetStatus(codes.Error, "locked")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
@@ -114,13 +114,13 @@ func handleUpdateState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 		}
 		span.RecordError(upsertErr)
 		span.SetStatus(codes.Error, upsertErr.Error())
-		slog.Error("state update failed", "workspace", workspaceKey, "error", upsertErr)
+		slog.ErrorContext(ctx, "state update failed", "workspace", workspaceKey, "error", upsertErr)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	stateCacheDel(ctx, workspaceKey)
-	slog.Info("state updated", "workspace", workspaceKey)
+	slog.InfoContext(ctx, "state updated", "workspace", workspaceKey)
 	span.SetStatus(codes.Ok, "")
 	meterUpdateState.Add(ctx, 1)
 	w.WriteHeader(http.StatusOK)
@@ -139,13 +139,13 @@ func handleDeleteState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 	if err := (State{Workspace: workspaceKey}).Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		slog.Error("state delete failed", "workspace", workspaceKey, "error", err)
+		slog.ErrorContext(ctx, "state delete failed", "workspace", workspaceKey, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	stateCacheDel(ctx, workspaceKey)
-	slog.Info("state deleted", "workspace", workspaceKey)
+	slog.InfoContext(ctx, "state deleted", "workspace", workspaceKey)
 	span.SetStatus(codes.Ok, "")
 	meterDeleteState.Add(ctx, 1)
 	w.WriteHeader(http.StatusOK)
@@ -177,7 +177,7 @@ func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey string
 	existingLock, lockErr := (StateLock{Workspace: workspaceKey}).LockAtomic(ctx, string(body))
 	if lockErr != nil {
 		if errors.Is(lockErr, ErrAlreadyLocked) {
-			slog.Warn("lock conflict", "workspace", workspaceKey)
+			slog.WarnContext(ctx, "lock conflict", "workspace", workspaceKey)
 			span.SetStatus(codes.Error, "lock conflict")
 			meterLockState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "conflict")))
 			w.Header().Set("Content-Type", "application/json")
@@ -187,12 +187,12 @@ func handleLockState(w http.ResponseWriter, r *http.Request, workspaceKey string
 		}
 		span.RecordError(lockErr)
 		span.SetStatus(codes.Error, lockErr.Error())
-		slog.Error("lock insert failed", "workspace", workspaceKey, "error", lockErr)
+		slog.ErrorContext(ctx, "lock insert failed", "workspace", workspaceKey, "error", lockErr)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("state locked", "workspace", workspaceKey)
+	slog.InfoContext(ctx, "state locked", "workspace", workspaceKey)
 	span.SetStatus(codes.Ok, "")
 	meterLockState.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "ok")))
 	w.WriteHeader(http.StatusOK)
@@ -226,7 +226,7 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 
 	if err := (StateLock{Workspace: workspaceKey}).UnlockAtomic(ctx, reqID); err != nil {
 		if errors.Is(err, ErrLockIDMismatch) {
-			slog.Warn("unlock rejected: lock id mismatch", "workspace", workspaceKey)
+			slog.WarnContext(ctx, "unlock rejected: lock id mismatch", "workspace", workspaceKey)
 			span.SetStatus(codes.Error, "lock id mismatch")
 			http.Error(w, "lock ID mismatch", http.StatusConflict)
 			return
@@ -237,7 +237,7 @@ func handleUnlockState(w http.ResponseWriter, r *http.Request, workspaceKey stri
 		return
 	}
 
-	slog.Info("state unlocked", "workspace", workspaceKey)
+	slog.InfoContext(ctx, "state unlocked", "workspace", workspaceKey)
 	span.SetStatus(codes.Ok, "")
 	meterUnlockState.Add(ctx, 1)
 	w.WriteHeader(http.StatusOK)

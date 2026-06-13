@@ -79,12 +79,25 @@ func (l *Logger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
 	l.handler.ServeHTTP(rw, r)
 	sc := trace.SpanFromContext(r.Context()).SpanContext()
-	slog.Info(r.Method+" "+r.URL.Path,
+	msg := r.Method + " " + r.URL.Path
+	attrs := []any{
 		"status", rw.status,
 		"duration", time.Since(start),
 		"trace_id", sc.TraceID().String(),
 		"span_id", sc.SpanID().String(),
-	)
+	}
+	switch r.URL.Path {
+	case "/healthz", "/health", "/system_health", "/readyz", "/livez":
+		// Background liveness/readiness probes are noise at info; log them at
+		// debug, escalating to warn only when the probe itself fails.
+		if rw.status >= 500 {
+			slog.Warn(msg, attrs...)
+		} else {
+			slog.Debug(msg, attrs...)
+		}
+	default:
+		slog.InfoContext(r.Context(), "http request", append([]any{"method", r.Method, "path", r.URL.Path}, attrs...)...)
+	}
 }
 
 func newLogger(h http.Handler) *Logger { return &Logger{h} }
@@ -92,15 +105,15 @@ func newLogger(h http.Handler) *Logger { return &Logger{h} }
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
-	defer stop()
-
 	logLevel := slog.LevelInfo
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		logLevel = slog.LevelDebug
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
 	}
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
 
 	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "blueprints")
 	if err != nil {

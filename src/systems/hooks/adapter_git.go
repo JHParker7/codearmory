@@ -91,7 +91,7 @@ func handleGitWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := newEvent.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert event failed")
-		slog.Error("git webhook: insert event", "error", err)
+		slog.ErrorContext(ctx, "git webhook: insert event", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}

@@ -68,12 +68,26 @@ func (l *logger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
 	l.handler.ServeHTTP(rw, r)
 	sc := trace.SpanFromContext(r.Context()).SpanContext()
-	slog.Info(r.Method+" "+r.URL.Path,
+	attrs := []any{
+		"method", r.Method,
+		"path", r.URL.Path,
 		"status", rw.status,
 		"duration", time.Since(start),
 		"trace_id", sc.TraceID().String(),
 		"span_id", sc.SpanID().String(),
-	)
+	}
+	switch r.URL.Path {
+	case "/healthz", "/health", "/system_health", "/readyz", "/livez":
+		// Background liveness/readiness probes are noise at info; log them at
+		// debug, escalating to warn only when the probe itself fails.
+		if rw.status >= 500 {
+			slog.WarnContext(r.Context(), "http request", attrs...)
+		} else {
+			slog.DebugContext(r.Context(), "http request", attrs...)
+		}
+	default:
+		slog.InfoContext(r.Context(), "http request", attrs...)
+	}
 }
 
 // seedServiceAccounts upserts service accounts from a "name=key" comma-separated
@@ -84,25 +98,25 @@ func seedServiceAccounts(ctx context.Context, raw, role string) {
 	if raw == "" {
 		return
 	}
-	for _, entry := range strings.Split(raw, ",") {
+	for i, entry := range strings.Split(raw, ",") {
 		entry = strings.TrimSpace(entry)
 		idx := strings.Index(entry, "=")
 		if idx < 1 || idx == len(entry)-1 {
-			slog.Warn("seedServiceAccounts: invalid entry, expected name=key", "entry", entry, "role", role)
+			slog.WarnContext(ctx, "seedServiceAccounts: invalid entry, expected name=key", "index", i, "role", role)
 			continue
 		}
 		name, key := entry[:idx], entry[idx+1:]
 		hash, err := bcrypt.GenerateFromPassword([]byte(key), 12)
 		if err != nil {
-			slog.Error("seedServiceAccounts: bcrypt failed", "name", name, "error", err)
+			slog.ErrorContext(ctx, "seedServiceAccounts: bcrypt failed", "service", name, "error", err)
 			continue
 		}
 
 		acct := ServiceAccountModel{AccountID: uuid.New().String(), Name: name, HashedKey: string(hash), Role: role}
 		if err := upsertServiceAccount(ctx, acct); err != nil {
-			slog.Error("seedServiceAccounts: upsert failed", "name", name, "error", err)
+			slog.ErrorContext(ctx, "seedServiceAccounts: upsert failed", "service", name, "error", err)
 		} else {
-			slog.Info("seedServiceAccounts: upserted", "name", name, "role", role)
+			slog.InfoContext(ctx, "seedServiceAccounts: upserted", "service", name, "role", role)
 		}
 	}
 }
@@ -132,7 +146,7 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	}
 	name, key := header[:idx], header[idx+1:]
 	span.SetAttributes(attribute.String("service.name", name))
-	slog.Info("rotate service key request", "service", name)
+	slog.DebugContext(ctx, "rotate service key request", "service", name)
 
 	acct, err := lookupServiceAccount(ctx, name)
 	if err != nil {
@@ -156,7 +170,7 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	if _, err := rand.Read(raw); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "rand failed")
-		slog.Error("rotate service key: rand failed", "service", name, "error", err)
+		slog.ErrorContext(ctx, "rotate service key: rand failed", "service", name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -165,7 +179,7 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "bcrypt failed")
-		slog.Error("rotate service key: bcrypt failed", "service", name, "error", err)
+		slog.ErrorContext(ctx, "rotate service key: bcrypt failed", "service", name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -173,14 +187,14 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	if err := rotateServiceKeyDB(ctx, name, string(newHash)); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.Error("rotate service key: db update failed", "service", name, "error", err)
+		slog.ErrorContext(ctx, "rotate service key: db update failed", "service", name, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	span.AddEvent("db.write", trace.WithAttributes(attribute.String("service.name", name)))
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("registry service key rotated", "service", name)
+	slog.DebugContext(ctx, "registry service key rotated", "service", name)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"key": newKey}) //nolint:errcheck
 }
@@ -219,12 +233,12 @@ type manifestEntry struct {
 func loadManifest(ctx context.Context, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		slog.Error("manifest: failed to read file", "path", path, "error", err)
+		slog.ErrorContext(ctx, "manifest: failed to read file", "path", path, "error", err)
 		return
 	}
 	var entries []manifestEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		slog.Error("manifest: failed to parse JSON", "path", path, "error", err)
+		slog.ErrorContext(ctx, "manifest: failed to parse JSON", "path", path, "error", err)
 		return
 	}
 	for _, e := range entries {
@@ -242,17 +256,17 @@ func notifyService(ctx context.Context, name, target, key string) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(nctx, http.MethodPost, target, nil)
 	if err != nil {
-		slog.Warn(name+" notify: failed to create request", "error", err)
+		slog.WarnContext(nctx, "notify: failed to create request", "service", name, "error", err)
 		return
 	}
 	req.Header.Set("X-Service-Key", "registry:"+key)
 	resp, err := registryHTTPClient.Do(req)
 	if err != nil {
-		slog.Warn(name+" notify: request failed", "error", err)
+		slog.WarnContext(nctx, "notify: request failed", "service", name, "error", err)
 		return
 	}
 	resp.Body.Close()
-	slog.Info(name+" notified", "status", resp.StatusCode)
+	slog.DebugContext(nctx, "service notified", "service", name, "status", resp.StatusCode)
 }
 
 func notifyConductor(ctx context.Context) {
@@ -288,8 +302,8 @@ func main() {
 	defer stop()
 
 	logLevel := slog.LevelInfo
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		logLevel = slog.LevelDebug
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
 	}
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
@@ -342,9 +356,9 @@ func main() {
 			name, svcURL := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 			svcModel := ServiceModel{ServiceID: uuid.New().String(), Name: name, URL: svcURL}
 			if err := upsertServiceModelByName(ctx, svcModel); err != nil {
-				slog.Error("service seed failed", "name", name, "error", err)
+				slog.Error("service seed failed", "service", name, "error", err)
 			} else {
-				slog.Info("service seeded", "name", name)
+				slog.Info("service seeded", "service", name)
 			}
 		}
 	}

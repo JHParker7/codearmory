@@ -58,7 +58,7 @@ func handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "key generation failed")
-		slog.Error("totp enroll: key generation failed", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "totp enroll: key generation failed", "user_id", userID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -67,7 +67,7 @@ func handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "secret encryption failed")
-		slog.Error("totp enroll: secret encryption failed", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "totp enroll: secret encryption failed", "user_id", userID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -85,13 +85,13 @@ func handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	if err := cred.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
-		slog.Error("totp enroll: db insert failed", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "totp enroll: db insert failed", "user_id", userID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("totp enroll: secret generated", "user_id", userID)
+	slog.InfoContext(ctx, "totp enroll: secret generated", "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
 		"uri":    key.URL(),
@@ -131,7 +131,7 @@ func handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "decrypt failed")
-		slog.Error("totp confirm: decrypt failed", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "totp confirm: decrypt failed", "user_id", userID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -144,13 +144,13 @@ func handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	cred.Confirmed = true
 	if err := cred.Update(ctx); err != nil {
 		span.RecordError(err)
-		slog.Error("totp confirm: db update failed", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "totp confirm: db update failed", "user_id", userID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("totp confirm: TOTP enabled", "user_id", userID)
+	slog.InfoContext(ctx, "totp confirm: TOTP enabled", "user_id", userID)
 	writeAudit(ctx, userID, "user", "mfa.totp.enable", userID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -196,7 +196,7 @@ func handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(req.Password)); err != nil {
 		span.SetStatus(codes.Error, "password mismatch")
-		slog.Warn("totp disable: bad password", "user_id", userID)
+		slog.WarnContext(ctx, "totp disable: bad password", "user_id", userID)
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
@@ -205,7 +205,7 @@ func handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 	if dbErr != nil {
 		span.RecordError(dbErr)
 		span.SetStatus(codes.Error, dbErr.Error())
-		slog.Error("totp disable: db error", "user_id", userID, "error", dbErr)
+		slog.ErrorContext(ctx, "totp disable: db error", "user_id", userID, "error", dbErr)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -216,7 +216,7 @@ func handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.Info("totp disable: TOTP disabled", "user_id", userID)
+	slog.InfoContext(ctx, "totp disable: TOTP disabled", "user_id", userID)
 	writeAudit(ctx, userID, "user", "mfa.totp.disable", userID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -252,7 +252,7 @@ func handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 	if !valid {
 		span.SetStatus(codes.Error, msg)
 		meterLogins.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "mfa_failure")))
-		slog.Warn("mfa verify: invalid code", "user_id", pending.UserID)
+		slog.WarnContext(ctx, "mfa verify: invalid code", "user_id", pending.UserID)
 		http.Error(w, msg, status)
 		return
 	}
@@ -261,14 +261,14 @@ func handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "session creation failed")
-		slog.Error("mfa verify: session creation failed", "user_id", pending.UserID, "error", err)
+		slog.ErrorContext(ctx, "mfa verify: session creation failed", "user_id", pending.UserID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	span.SetStatus(codes.Ok, "")
 	meterLogins.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "mfa_success")))
-	slog.Info("mfa verify: login complete", "user_id", pending.UserID, "session_id", sessionID)
+	slog.InfoContext(ctx, "mfa verify: login complete", "user_id", pending.UserID, "session_id", sessionID)
 
 	if userRow, err := (User{UserID: pending.UserID}).Get(ctx); err == nil {
 		writeAudit(ctx, pending.UserID, "user", "session.create", sessionID, userRow.(User).Username)
@@ -371,7 +371,7 @@ func totpValidateForUser(ctx context.Context, userID, code string) (bool, int, s
 func totpValidate(ctx context.Context, userID, code string, cred *TOTPCredential) (bool, int, string) {
 	secret, err := decryptSecret(cred.EncSecret)
 	if err != nil {
-		slog.Error("totp validate: decrypt failed", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "totp validate: decrypt failed", "user_id", userID, "error", err)
 		return false, http.StatusInternalServerError, "internal server error"
 	}
 	if !totp.Validate(code, secret) {
@@ -385,7 +385,7 @@ func totpValidate(ctx context.Context, userID, code string, cred *TOTPCredential
 	cred.LastUsedCode = code
 	cred.LastUsedAt = time.Now().UTC()
 	if err := cred.Update(ctx); err != nil {
-		slog.Error("totp validate: failed to record used code", "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "totp validate: failed to record used code", "user_id", userID, "error", err)
 	}
 	return true, http.StatusOK, ""
 }

@@ -241,7 +241,7 @@ func handleListActions(w http.ResponseWriter, r *http.Request) {
 
 	actions, err := listAllActions(ctx)
 	if err != nil {
-		slog.Error("list actions: query", "error", err)
+		slog.ErrorContext(ctx, "list actions: query", "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -271,7 +271,7 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 
 	result, err := listServicesWithEndpoints(ctx)
 	if err != nil {
-		slog.Error("list services: query", "error", err)
+		slog.ErrorContext(ctx, "list services: query", "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -318,7 +318,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 
 	hashedKey, err := hashServiceKey(req.ServiceKey)
 	if err != nil {
-		slog.Error("create service: hash key", "error", err)
+		slog.ErrorContext(ctx, "create service: hash key", "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "hash key failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -340,7 +340,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "service already registered", http.StatusConflict)
 			return
 		}
-		slog.Error("create service: db", "error", err, "service_name", req.Name)
+		slog.ErrorContext(ctx, "create service: db", "error", err, "service", req.Name)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -350,7 +350,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 
 	fetchedRow, err := (ServiceModel{ServiceID: id}).Get(ctx)
 	if err != nil {
-		slog.Error("create service: fetch after insert", "error", err, "service_id", id)
+		slog.ErrorContext(ctx, "create service: fetch after insert", "error", err, "service_id", id)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "fetch after insert failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -368,7 +368,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:   fetchedModel.UpdatedAt,
 	}
 
-	slog.Info("service registered", "name", svc.Name)
+	slog.InfoContext(ctx, "service registered", "service", svc.Name)
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -396,7 +396,7 @@ func handleDeleteService(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		slog.Error("delete service: db", "error", err, "service_id", id)
+		slog.ErrorContext(ctx, "delete service: db", "error", err, "service_id", id)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -450,7 +450,7 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		slog.Error("update endpoints: db", "error", err, "service_id", id)
+		slog.ErrorContext(ctx, "update endpoints: db", "error", err, "service_id", id)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -476,7 +476,7 @@ func handleListDefaultGrants(w http.ResponseWriter, r *http.Request) {
 
 	grants, err := listAllDefaultGrants(ctx)
 	if err != nil {
-		slog.Error("list default grants: db", "error", err)
+		slog.ErrorContext(ctx, "list default grants: db", "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -517,7 +517,7 @@ func startHealthCollector(ctx context.Context) {
 
 		rawSvcs, err := queryActiveServiceURLs(cctx)
 		if err != nil {
-			slog.Warn("health collector: db query failed", "error", err)
+			slog.WarnContext(cctx, "health collector: db query failed", "error", err)
 			return
 		}
 		type svc struct{ name, url string }

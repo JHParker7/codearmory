@@ -99,12 +99,26 @@ func (l *requestLogger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
 	l.handler.ServeHTTP(rw, r)
 	sc := trace.SpanFromContext(r.Context()).SpanContext()
-	slog.Info(r.Method+" "+r.URL.Path,
+	attrs := []any{
+		"method", r.Method,
+		"path", r.URL.Path,
 		"status", rw.status,
 		"duration", time.Since(start),
 		"trace_id", sc.TraceID().String(),
 		"span_id", sc.SpanID().String(),
-	)
+	}
+	switch r.URL.Path {
+	case "/healthz", "/health", "/system_health", "/readyz", "/livez":
+		// Background liveness/readiness probes are noise at info; log them at
+		// debug, escalating to warn only when the probe itself fails.
+		if rw.status >= 500 {
+			slog.WarnContext(r.Context(), "http request", attrs...)
+		} else {
+			slog.DebugContext(r.Context(), "http request", attrs...)
+		}
+	default:
+		slog.InfoContext(r.Context(), "http request", attrs...)
+	}
 }
 
 func limitBody(next http.Handler) http.Handler {
@@ -118,8 +132,8 @@ func limitBody(next http.Handler) http.Handler {
 
 func main() {
 	logLevel := slog.LevelInfo
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		logLevel = slog.LevelDebug
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
 	}
 	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(jsonHandler))
@@ -144,7 +158,7 @@ func main() {
 	slog.Info("database initialized")
 
 	if outpostInternalKey == "" {
-		slog.Warn("OUTPOST_INTERNAL_KEY not set — internal command/event auth is disabled and will reject all internal traffic")
+		slog.Error("OUTPOST_INTERNAL_KEY not set — internal command/event auth is disabled and will reject all internal traffic")
 	}
 	if len(eventConsumers) == 0 {
 		slog.Warn("EVENT_CONSUMERS not set — no integration consumers configured; events cannot be delivered")
