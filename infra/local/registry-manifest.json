@@ -147,7 +147,7 @@
         "method": "POST",
         "path": "/executions",
         "body_transforms": [
-          { "from_key": "run", "to_key": "command", "wrap": ["bash", "-c"] }
+          { "from_key": "run", "to_key": "command", "wrap": ["sh", "-c"] }
         ],
         "async": {
           "id_field": "execution_id",
