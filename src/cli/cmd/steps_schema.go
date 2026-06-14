@@ -100,10 +100,10 @@ var stepActionSchema = map[string][]stepField{
 	"forge/run": {
 		{key: "image", label: "Image", placeholder: "ubuntu:22.04 (required)", required: true, catalog: catImage},
 		{key: "run", label: "Run", placeholder: "go test ./...\n(multi-line ok)", required: true, multiline: true},
-		{key: "env", label: "Env", placeholder: "KEY=VALUE KEY2=VAL (optional)", kind: stepFieldEnv},
+		{key: "env", label: "Env", placeholder: "KEY=VALUE  KEY2=${steps.build.output}", kind: stepFieldEnv},
 	},
 	"tickets/create": {
-		{key: "title", label: "Title", placeholder: "ticket title (required)", required: true},
+		{key: "title", label: "Title", placeholder: "Build failed: ${steps.build.output}", required: true},
 		{key: "description", label: "Desc", placeholder: "ticket body (optional)"},
 		{key: "priority", label: "Priority", placeholder: "low|medium|high|critical (optional)"},
 		{key: "status", label: "Status", placeholder: "open|in_progress|resolved|closed (optional)"},

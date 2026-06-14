@@ -19,14 +19,17 @@ import (
 
 // ── API type ──────────────────────────────────────────────────────────────────
 
-// tuiStep mirrors a reusable step definition from /workflows/steps.
+// tuiStep mirrors a reusable step definition from /workflows/steps. With is kept
+// so the test runner can scan a step's ${...} references and bake test values in
+// without a second fetch.
 type tuiStep struct {
-	StepID      string    `json:"step_id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Action      string    `json:"action"`
-	Timeout     int64     `json:"timeout"`
-	CreatedAt   time.Time `json:"created_at"`
+	StepID      string         `json:"step_id"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Action      string         `json:"action"`
+	With        map[string]any `json:"with"`
+	Timeout     int64          `json:"timeout"`
+	CreatedAt   time.Time      `json:"created_at"`
 }
 
 // ── Messages ──────────────────────────────────────────────────────────────────
@@ -38,6 +41,13 @@ type tuiTicketsMsg kvCatalog
 type tuiOutpostsMsg kvCatalog
 type tuiStepCreatedMsg struct{}
 
+// stepTestDoneMsg carries the result of a standalone step test (run via a
+// throwaway pipeline). err is set when the test could not be run at all.
+type stepTestDoneMsg struct {
+	outcome stepTestOutcome
+	err     error
+}
+
 // ── View states ───────────────────────────────────────────────────────────────
 
 type stepsViewID int
@@ -45,6 +55,9 @@ type stepsViewID int
 const (
 	stepsViewList stepsViewID = iota
 	stepsViewCreate
+	stepsViewTest       // form: fill in the step's ${...} references
+	stepsViewTesting    // throwaway pipeline running
+	stepsViewTestResult // run outcome + output
 )
 
 // Responsive column spec for the step-definition table.
@@ -79,6 +92,11 @@ type stepsModel struct {
 	outposts kvCatalog
 
 	form tuiForm
+
+	// Standalone step test (run via a throwaway pipeline).
+	testStep   tuiStep
+	testResult stepTestOutcome
+	testErr    error
 }
 
 // catalogs bundles the model's option sources for the create-step form.
@@ -291,6 +309,17 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		return m, tuiFetchSteps
 
+	case stepTestDoneMsg:
+		// A late result after the user navigated away is ignored (the throwaway
+		// pipeline was still cleaned up inside the command).
+		if m.view != stepsViewTesting {
+			return m, nil
+		}
+		m.testErr = msg.err
+		m.testResult = msg.outcome
+		m.view = stepsViewTestResult
+		return m, nil
+
 	case tuiFormErrMsg:
 		m.form.errMsg = msg.err.Error()
 		return m, nil
@@ -322,6 +351,12 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.keyList(msg)
 		case stepsViewCreate:
 			return m.keyCreate(msg)
+		case stepsViewTest:
+			return m.keyTest(msg)
+		case stepsViewTesting:
+			return m.keyTesting(msg)
+		case stepsViewTestResult:
+			return m.keyTestResult(msg)
 		}
 	}
 
@@ -333,7 +368,7 @@ func (m stepsModel) delegate(msg tea.Msg) (stepsModel, tea.Cmd) {
 	switch m.view {
 	case stepsViewList:
 		m.sTable, cmd = m.sTable.Update(msg)
-	case stepsViewCreate:
+	case stepsViewCreate, stepsViewTest:
 		m.form, _, cmd = m.form.update(msg)
 	}
 	return m, cmd
@@ -366,6 +401,8 @@ func (m stepsModel) keyList(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 			cmds = append(cmds, tuiFetchOutposts)
 		}
 		return m, tea.Batch(cmds...)
+	case "t":
+		return m.startStepTest()
 	case "r":
 		m.loading = true
 		return m, tea.Batch(tuiFetchSteps, tuiFetchActions)
@@ -388,8 +425,15 @@ func (m stepsModel) keyList(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 // against the catalog so the rendered fields always match the action the form
 // will actually report.
 func newCIStepForm(action string, actions []string, cats stepCatalogs) (tuiForm, tea.Cmd) {
-	return newTUIForm("New Step", stepFormFields(action, actions, cats)...)
+	form, cmd := newTUIForm("New Step", stepFormFields(action, actions, cats)...)
+	form.help = stepTemplateHelp
+	return form, cmd
 }
+
+// stepTemplateHelp documents the run-time templating any text field accepts, so a
+// step's inputs can be wired from run inputs and earlier steps' outputs when the
+// step is used in a pipeline.
+const stepTemplateHelp = "refs: ${inputs.NAME} · ${steps.STEP.output} · ${steps.STEP.output.field}"
 
 // stepFormFields assembles the full field list: the fixed Name/Action header, the
 // action-specific schema fields, then the fixed Timeout/Desc footer.
@@ -572,6 +616,100 @@ func ciPostStep(name, action, desc string, with map[string]any, timeout int64) t
 	}
 }
 
+// ── Test step (throwaway pipeline) ──────────────────────────────────────────────
+
+// startStepTest begins testing the highlighted step. If the step uses any ${...}
+// references it opens a form to collect a value for each; otherwise it runs the
+// test immediately.
+func (m stepsModel) startStepTest() (stepsModel, tea.Cmd) {
+	cur := m.sTable.Cursor()
+	if cur < 0 || cur >= len(m.steps) {
+		return m, nil
+	}
+	m.testStep = m.steps[cur]
+	m.testErr = nil
+	m.testResult = stepTestOutcome{}
+
+	refs := stepWithRefs(m.testStep.With)
+	if len(refs) == 0 {
+		m.view = stepsViewTesting
+		return m, testStepRun(m.testStep, nil)
+	}
+	var cmd tea.Cmd
+	m.form, cmd = newStepTestForm(m.testStep.Name, refs)
+	m.view = stepsViewTest
+	return m, cmd
+}
+
+// newStepTestForm builds a form with one field per ${...} reference the step uses,
+// so the user can supply a test value for each before the step runs.
+func newStepTestForm(stepName string, refs []string) (tuiForm, tea.Cmd) {
+	fields := make([]formField, len(refs))
+	for i, ref := range refs {
+		fields[i] = formInput(ref, ref, "value for ${"+ref+"}")
+	}
+	form, cmd := newTUIForm("Test "+stepName, fields...)
+	form.help = "values are baked into a throwaway run of this step — nothing is saved"
+	return form, cmd
+}
+
+func (m stepsModel) keyTest(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+	var (
+		action formAction
+		cmd    tea.Cmd
+	)
+	m.form, action, cmd = m.form.update(msg)
+	switch action {
+	case formCancel:
+		m.view = stepsViewList
+		return m, nil
+	case formSubmit:
+		vals := map[string]string{}
+		for _, ref := range stepWithRefs(m.testStep.With) {
+			vals[ref] = m.form.value(ref)
+		}
+		m.view = stepsViewTesting
+		return m, testStepRun(m.testStep, vals)
+	}
+	return m, cmd
+}
+
+func (m stepsModel) keyTesting(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		// Stop watching; the throwaway pipeline is still cleaned up by the command.
+		m.view = stepsViewList
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m stepsModel) keyTestResult(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc", "enter":
+		m.view = stepsViewList
+		return m, nil
+	}
+	return m, nil
+}
+
+// testStepRun runs the step in isolation: bake the test values into a throwaway
+// copy of its With map and execute it through a one-off pipeline.
+func testStepRun(step tuiStep, vals map[string]string) tea.Cmd {
+	return func() tea.Msg {
+		with := resolveStepWith(step.With, vals)
+		outcome, err := runStepTest(step.Name, step.Action, with, step.Timeout)
+		return stepTestDoneMsg{outcome: outcome, err: err}
+	}
+}
+
 // ── View ──────────────────────────────────────────────────────────────────────
 
 func (m stepsModel) View() string {
@@ -583,15 +721,20 @@ func (m stepsModel) View() string {
 		}
 		return tuiErrStyle.Render(msg) + "\n\n" + tuiHelpStyle.Render(hint)
 	}
-	if m.view == stepsViewCreate {
+	switch m.view {
+	case stepsViewCreate, stepsViewTest:
 		return m.form.view(m.width, m.height)
+	case stepsViewTesting:
+		return m.viewTesting()
+	case stepsViewTestResult:
+		return m.viewTestResult()
 	}
 	return m.viewList()
 }
 
 func (m stepsModel) viewList() string {
 	title := tuiTitleStyle.Render("Steps")
-	help := tuiHelp("[↑↓/jk] navigate  [n] new  [r] refresh  [esc] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [n] new  [t] test  [r] refresh  [esc] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -599,6 +742,37 @@ func (m stepsModel) viewList() string {
 		return title + "\n\n" + tuiMetaStyle.Render("No steps found.") + "\n\n" + help
 	}
 	return title + "\n" + tuiBoxStyle.Render(m.sTable.View()) + "\n" + help
+}
+
+// viewTesting renders the placeholder shown while the throwaway pipeline runs.
+func (m stepsModel) viewTesting() string {
+	title := tuiTitleStyle.Render("Testing " + m.testStep.Name)
+	body := tuiMetaStyle.Render("Running the step in a throwaway pipeline… (this can take a few seconds)")
+	help := tuiHelp("[esc] stop watching", m.width)
+	return title + "\n\n" + body + "\n\n" + help
+}
+
+// viewTestResult renders the outcome (status + output) of a standalone step test.
+func (m stepsModel) viewTestResult() string {
+	title := tuiTitleStyle.Render("Test result: " + m.testStep.Name)
+	help := tuiHelp("[esc] back to steps", m.width)
+
+	if m.testErr != nil {
+		return title + "\n\n" + tuiErrStyle.Render("could not run test: "+m.testErr.Error()) + "\n\n" + help
+	}
+
+	statusLine := tuiMetaStyle.Render("status: ") + tuiColorStatus(m.testResult.status)
+	var body string
+	if out := strings.TrimSpace(m.testResult.output); out != "" {
+		label := "output"
+		if m.testResult.status != "completed" {
+			label = "error"
+		}
+		body = "\n\n" + tuiMetaStyle.Render(label+":") + "\n" + tuiBoxStyle.Render(truncate(out, 4000))
+	} else {
+		body = "\n\n" + tuiMetaStyle.Render("(no output)")
+	}
+	return title + "\n\n" + statusLine + body + "\n\n" + help
 }
 
 // ── Command ───────────────────────────────────────────────────────────────────

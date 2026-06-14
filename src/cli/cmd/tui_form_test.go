@@ -167,6 +167,14 @@ func TestTUIForm_ViewShowsError(t *testing.T) {
 	}
 }
 
+func TestTUIForm_ViewShowsHelp(t *testing.T) {
+	f, _ := newTUIForm("T", formInput("a", "A", ""))
+	f.help = "refs: ${steps.STEP.output}"
+	if !strings.Contains(f.view(80, 24), "${steps.STEP.output}") {
+		t.Error("view should render the form help text when set")
+	}
+}
+
 // ── tuiForm: select / cycle fields ────────────────────────────────────────────
 
 func TestTUIForm_SelectDefault_SelectsValue(t *testing.T) {

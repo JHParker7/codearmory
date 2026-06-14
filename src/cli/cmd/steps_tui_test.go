@@ -316,6 +316,17 @@ func TestStepsView_Create_RendersForm(t *testing.T) {
 	}
 }
 
+// The create form documents the run-time templating so users know step fields can
+// reference run inputs and earlier steps' outputs.
+func TestStepsView_Create_ShowsTemplatingHelp(t *testing.T) {
+	m := newStepsModel()
+	m.view = stepsViewCreate
+	m.form, _ = newCIStepForm("", nil, stepCatalogs{})
+	if !strings.Contains(m.View(), "${steps.STEP.output}") {
+		t.Errorf("create-step view should document step-output references; got: %q", m.View())
+	}
+}
+
 func TestStepsView_ErrorState_401_ShowsAuthHint(t *testing.T) {
 	m := newStepsModel()
 	m.err = fmt.Errorf("HTTP 401: unauthorized")
@@ -485,6 +496,95 @@ func TestStepsModel_TicketPicker_FallsBackToTextWhenCatalogEmpty(t *testing.T) {
 	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t9")})
 	if got := f.value("with.id"); got != "t9" {
 		t.Errorf("with.id = %q, want t9 (free-text fallback)", got)
+	}
+}
+
+// ── Standalone step test (throwaway pipeline) ───────────────────────────────────
+
+func TestStepsModel_T_WithRefs_OpensTestForm(t *testing.T) {
+	m := applyStepsMsg(newStepsModel(), tuiStepsMsg([]tuiStep{
+		{StepID: "s1", Name: "open_ticket", Action: "tickets/create",
+			With: map[string]any{"title": "Build failed: ${steps.build.output}"}},
+	}))
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m2 := updated.(stepsModel)
+	if m2.view != stepsViewTest {
+		t.Fatalf("view = %v, want stepsViewTest", m2.view)
+	}
+	if cmd == nil {
+		t.Error("opening the test form should return a focus cmd")
+	}
+	// A field exists for the reference, keyed by the reference expression.
+	if !hasFieldKey(m2.form, "steps.build.output") {
+		t.Error("test form should have a field for the ${steps.build.output} reference")
+	}
+}
+
+func TestStepsModel_T_NoRefs_RunsImmediately(t *testing.T) {
+	m := applyStepsMsg(newStepsModel(), tuiStepsMsg([]tuiStep{
+		{StepID: "s1", Name: "unit_tests", Action: "forge/run",
+			With: map[string]any{"image": "ubuntu:22.04", "run": "go test ./..."}},
+	}))
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m2 := updated.(stepsModel)
+	if m2.view != stepsViewTesting {
+		t.Fatalf("view = %v, want stepsViewTesting (no refs → run immediately)", m2.view)
+	}
+	if cmd == nil {
+		t.Error("starting a no-input test should emit the run cmd")
+	}
+}
+
+func TestStepsModel_TestDoneMsg_ShowsResult(t *testing.T) {
+	m := newStepsModel()
+	m.view = stepsViewTesting
+	m.testStep = tuiStep{Name: "unit_tests"}
+	updated, _ := m.Update(stepTestDoneMsg{outcome: stepTestOutcome{status: "completed", output: "PASS"}})
+	m2 := updated.(stepsModel)
+	if m2.view != stepsViewTestResult {
+		t.Fatalf("view = %v, want stepsViewTestResult", m2.view)
+	}
+	v := m2.View()
+	if !strings.Contains(v, "completed") || !strings.Contains(v, "PASS") {
+		t.Errorf("result view should show status and output; got: %q", v)
+	}
+}
+
+func TestStepsModel_TestDoneMsg_IgnoredAfterNavigateAway(t *testing.T) {
+	m := newStepsModel()
+	m.view = stepsViewList // user already left the testing view
+	updated, _ := m.Update(stepTestDoneMsg{outcome: stepTestOutcome{status: "completed"}})
+	if updated.(stepsModel).view != stepsViewList {
+		t.Error("a late test result should be ignored once the user navigated away")
+	}
+}
+
+func TestStepsModel_TestResult_EscReturnsToList(t *testing.T) {
+	m := newStepsModel()
+	m.view = stepsViewTestResult
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(stepsModel).view != stepsViewList {
+		t.Error("esc on the test result should return to the steps list")
+	}
+}
+
+func TestStepsModel_TestForm_EscBacksToList(t *testing.T) {
+	m := applyStepsMsg(newStepsModel(), tuiStepsMsg([]tuiStep{
+		{StepID: "s1", Name: "open_ticket", Action: "tickets/create",
+			With: map[string]any{"title": "${inputs.MSG}"}},
+	}))
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m2 := updated.(stepsModel)
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(stepsModel).view != stepsViewList {
+		t.Error("esc in the test form should return to the steps list")
+	}
+}
+
+func TestStepsView_List_HelpMentionsTest(t *testing.T) {
+	m := applyStepsMsg(newStepsModel(), tuiStepsMsg([]tuiStep{}))
+	if !strings.Contains(m.View(), "test") {
+		t.Error("steps help should mention the test shortcut")
 	}
 }
 

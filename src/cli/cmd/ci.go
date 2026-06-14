@@ -618,7 +618,69 @@ JSON file (-f) — uses step IDs directly:
 		RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/workflows/actions", nil) },
 	})
 
-	ciCmd.AddCommand(ciCreateCmd, ciListCmd, ciGetCmd, ciUpdateCmd, ciDeleteCmd, ciRunCmd, ciCancelCmd, ciTUICmd, stepsTUICmd)
+	// ── armory pipelines test step ───────────────────────────────────────────────────
+
+	ciTestCmd := &cobra.Command{Use: "test", Short: "Test workflow building blocks in isolation"}
+	var testStepInputs []string
+	testStepCmd := &cobra.Command{
+		Use:   "step <id>",
+		Short: "Run a single step in isolation (throwaway pipeline) to test it before composing",
+		Long: `Run one step by itself to test it before adding it to a pipeline.
+
+The step runs through a throwaway single-step pipeline that is deleted afterward.
+Supply a value for each ${...} reference the step uses with --input:
+
+  armory pipelines test step <id> \
+    --input inputs.ENV=staging \
+    --input steps.build.output='build ok'`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			data, err := doRequest("GET", "/workflows/steps/"+args[0], nil)
+			if err != nil {
+				return fmt.Errorf("fetching step: %w", err)
+			}
+			var step struct {
+				Name    string         `json:"name"`
+				Action  string         `json:"action"`
+				With    map[string]any `json:"with"`
+				Timeout int64          `json:"timeout"`
+			}
+			if err := json.Unmarshal(data, &step); err != nil {
+				return fmt.Errorf("parsing step: %w", err)
+			}
+
+			vals := map[string]string{}
+			for _, kv := range testStepInputs {
+				k, v, ok := strings.Cut(kv, "=")
+				if !ok {
+					return fmt.Errorf("invalid --input %q: expected ref=value", kv)
+				}
+				vals[k] = v
+			}
+			for _, ref := range stepWithRefs(step.With) {
+				if _, ok := vals[ref]; !ok {
+					fmt.Printf("note: no value supplied for ${%s}; leaving it unresolved\n", ref)
+				}
+			}
+
+			outcome, err := runStepTest(step.Name, step.Action, resolveStepWith(step.With, vals), step.Timeout)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("status: %s\n", outcome.status)
+			if out := strings.TrimSpace(outcome.output); out != "" {
+				fmt.Printf("\noutput:\n%s\n", out)
+			}
+			if outcome.status != "completed" {
+				return fmt.Errorf("step test did not complete (status: %s)", outcome.status)
+			}
+			return nil
+		},
+	}
+	testStepCmd.Flags().StringArrayVar(&testStepInputs, "input", nil, "Test value for a ${ref}, as ref=value (repeatable)")
+	ciTestCmd.AddCommand(testStepCmd)
+
+	ciCmd.AddCommand(ciCreateCmd, ciListCmd, ciGetCmd, ciUpdateCmd, ciDeleteCmd, ciRunCmd, ciCancelCmd, ciTestCmd, ciTUICmd, stepsTUICmd)
 	// The workflows module (ci command + the CI/Pipelines and Steps home
 	// screens) is registered in ci_tui.go.
 }

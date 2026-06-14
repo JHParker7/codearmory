@@ -122,6 +122,7 @@ type tuiForm struct {
 	fields []formField
 	focus  int
 	errMsg string // inline validation / submission error
+	help   string // optional guidance rendered above the key hint (e.g. templating syntax)
 }
 
 // newTUIForm builds a form and focuses its first field. A submit button is always
@@ -422,6 +423,9 @@ func (f tuiForm) view(width, height int) string {
 	}
 	if f.errMsg != "" {
 		rows = append(rows, "", tuiErrStyle.Render(f.errMsg))
+	}
+	if f.help != "" {
+		rows = append(rows, "", tuiFormHint.Render(f.help))
 	}
 
 	parts := []string{"tab: move"}
