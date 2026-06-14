@@ -404,9 +404,9 @@ func TestSetGetDeleteSecretProvider(t *testing.T) {
 	// Get provider.
 	perm2 := Permissions{PermissionsID: uuid.New().String(), Service: "gatekeeper",
 		Actions: []string{"getSecretProvider"}, Resources: []string{actor.Username + "/gatekeeper/orgs/" + org.OrgID}}
-	perm2.Add(context.Background())     //nolint:errcheck
+	perm2.Add(context.Background()) //nolint:errcheck
 	role2 := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{perm2.PermissionsID}}
-	role2.Add(context.Background())     //nolint:errcheck
+	role2.Add(context.Background()) //nolint:errcheck
 	t.Cleanup(func() { perm2.Remove(context.Background()); role2.Remove(context.Background()) })
 	connect().WithContext(context.Background()).Model(&User{}).
 		Where("user_id = ?", actor.UserID).Update("role_id", role2.RoleID) //nolint:errcheck

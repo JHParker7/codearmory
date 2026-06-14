@@ -528,7 +528,10 @@ func TestHandleMFAVerify_TokenUsedOnce(t *testing.T) {
 	t.Cleanup(func() { connect().Where("token = ?", pending.Token).Delete(&MFAPending{}) }) //nolint:errcheck
 
 	code := validTOTPCode(t, secret)
-	marshal := func() []byte { b, _ := json.Marshal(map[string]string{"mfa_token": pending.Token, "code": code}); return b }
+	marshal := func() []byte {
+		b, _ := json.Marshal(map[string]string{"mfa_token": pending.Token, "code": code})
+		return b
+	}
 
 	// First use should succeed.
 	r1 := httptest.NewRequest(http.MethodPost, "/mfa/verify", bytes.NewReader(marshal()))

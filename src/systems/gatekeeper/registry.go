@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,6 +46,26 @@ func defaultGrantsFor(grantOn string) []DefaultGrant {
 		}
 	}
 	return out
+}
+
+// grantsVersion returns a stable hash of the currently cached default grants.
+// A user's default role is rebuilt on login whenever its stored version differs
+// from this value. It returns "" when no grants are loaded so that a transient
+// empty fetch never triggers a rebuild that would wipe an existing default role.
+// The hash is computed on the fly so it always reflects whatever populated
+// cachedGrants (the registry poller in production, direct assignment in tests).
+func grantsVersion() string {
+	defaultGrantsMu.RLock()
+	defer defaultGrantsMu.RUnlock()
+	if len(cachedGrants) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(cachedGrants)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // applyGrantTemplates substitutes placeholder variables in a resource slice.

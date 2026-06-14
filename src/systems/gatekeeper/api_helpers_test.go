@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -687,16 +688,17 @@ func TestHandleCheckPermissions_NotAuthorized(t *testing.T) {
 	}
 	t.Cleanup(func() { perm.Remove(context.Background()) })
 
-	role := Role{RoleID: uuid.New().String(), PermissionsIDs: []string{perm.PermissionsID}}
+	role := Role{RoleID: uuid.New().String(), Name: "denied-role", PermissionsIDs: []string{perm.PermissionsID}}
 	if err := role.Add(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { role.Remove(context.Background()) })
 
+	username := "user-" + uuid.New().String()
 	u := User{
 		UserID:         uuid.New().String(),
 		Email:          uuid.New().String() + "@test.com",
-		Username:       "user-" + uuid.New().String(),
+		Username:       username,
 		HashedPassword: "hash",
 		RoleID:         &role.RoleID,
 	}
@@ -719,6 +721,21 @@ func TestHandleCheckPermissions_NotAuthorized(t *testing.T) {
 	}
 	if resp["authorized"].(bool) {
 		t.Fatalf("expected authorized:false, got %v", resp)
+	}
+	// The denial response must carry the role, scoped resource, service, action,
+	// and a human-readable reason so every interface can explain the 403.
+	if got := resp["role"]; got != "denied-role" {
+		t.Fatalf("expected role %q, got %v", "denied-role", got)
+	}
+	if got := resp["resource"]; got != username+"/my-resource" {
+		t.Fatalf("expected scoped resource %q, got %v", username+"/my-resource", got)
+	}
+	if resp["service"] != "my-service" || resp["action"] != "read" {
+		t.Fatalf("expected service/action my-service/read, got %v/%v", resp["service"], resp["action"])
+	}
+	reason, _ := resp["reason"].(string)
+	if !strings.Contains(reason, "denied-role") || !strings.Contains(reason, "my-service") {
+		t.Fatalf("expected reason to name the role and service, got %q", reason)
 	}
 }
 
@@ -1183,4 +1200,3 @@ func TestRateLimitMiddleware_RespectsTrustedProxy(t *testing.T) {
 		t.Fatalf("A req3: want 429, got %d", c)
 	}
 }
-

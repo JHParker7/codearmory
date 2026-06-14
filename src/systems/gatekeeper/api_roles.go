@@ -159,6 +159,15 @@ func handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 
 	role := row.(Role)
 
+	// The per-user default role is managed by gatekeeper (rebuilt on login) and
+	// must not be edited through the API, or a rebuild would silently revert it.
+	if isSystemRole(role) {
+		span.SetStatus(codes.Ok, "")
+		slog.WarnContext(ctx, "update role: refusing to modify system-managed default role", "caller_id", callerID, "role_id", id)
+		http.Error(w, "system-managed role cannot be modified", http.StatusForbidden)
+		return
+	}
+
 	// Validate permission IDs before updating — prevent cross-tenant role poisoning.
 	callerRow, cerr := (User{UserID: callerID}).Get(ctx)
 	var callerOrgID *string
@@ -232,6 +241,13 @@ func handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("role.id", id)))
+
+	if isSystemRole(row.(Role)) {
+		span.SetStatus(codes.Ok, "")
+		slog.WarnContext(ctx, "delete role: refusing to delete system-managed default role", "caller_id", callerID, "role_id", id)
+		http.Error(w, "system-managed role cannot be deleted", http.StatusForbidden)
+		return
+	}
 
 	// Refuse deletion while users or teams still reference this role to prevent
 	// access disruption (those users would lose all permissions on next auth check).

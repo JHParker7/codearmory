@@ -249,6 +249,15 @@ func handleUpdatePermissions(w http.ResponseWriter, r *http.Request) {
 
 	p := row.(Permissions)
 
+	// Permissions owned by the system belong to a user's managed default role and
+	// are rebuilt on login; editing them through the API would be silently reverted.
+	if p.OwnerID == systemRoleOwner {
+		span.SetStatus(codes.Ok, "")
+		slog.WarnContext(ctx, "update permissions: refusing to modify system-managed permission", "caller_id", callerID, "permissions_id", id)
+		http.Error(w, "system-managed permission cannot be modified", http.StatusForbidden)
+		return
+	}
+
 	var callerOrgID *string
 	if callerRow, err := (User{UserID: callerID}).Get(ctx); err == nil {
 		callerOrgID = callerRow.(User).OrgID

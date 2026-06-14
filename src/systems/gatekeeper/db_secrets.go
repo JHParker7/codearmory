@@ -131,7 +131,7 @@ func (p OrgSecretProvider) Remove(ctx context.Context) error {
 	return nil
 }
 
-func (p OrgSecretProvider) Get(ctx context.Context) (db, error)                      { return nil, nil }
+func (p OrgSecretProvider) Get(ctx context.Context) (db, error) { return nil, nil }
 func (p OrgSecretProvider) List(ctx context.Context, limit, offset int) ([]db, error) {
 	return nil, nil
 }

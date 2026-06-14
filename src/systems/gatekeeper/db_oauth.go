@@ -115,8 +115,8 @@ func (c OAuthCode) Add(ctx context.Context) error {
 	return nil
 }
 
-func (c OAuthCode) Update(ctx context.Context) error  { return nil }
-func (c OAuthCode) Remove(ctx context.Context) error  { return nil }
+func (c OAuthCode) Update(ctx context.Context) error { return nil }
+func (c OAuthCode) Remove(ctx context.Context) error { return nil }
 func (c OAuthCode) Get(ctx context.Context) (db, error) {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.oauth_code.get")
 	defer span.End()

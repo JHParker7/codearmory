@@ -43,19 +43,28 @@ type Team struct {
 
 // User represents an authenticated account belonging to an Org, Team, and Role.
 // OrgID, TeamID, and RoleID are NULL when not explicitly assigned.
+//
+// DefaultRoleID points at the system-managed "default" role that holds the
+// user-scoped default grants. It is kept separate from RoleID (which holds
+// org/team-ownership and custom grants) so the default role can be rebuilt
+// wholesale on login without disturbing the user's other permissions.
+// DefaultGrantsVersion records the grants hash the default role was last built
+// from; when it diverges from grantsVersion() the role is rebuilt.
 type User struct {
-	UserID         string    `gorm:"column:user_id;primaryKey"`
-	HashedPassword string    `gorm:"column:hashed_password"`
-	CreatedAt      time.Time `gorm:"column:created_at"`
-	UpdatedAt      time.Time `gorm:"column:updated_at"`
-	Firstname      string    `gorm:"column:firstname"`
-	Lastname       string    `gorm:"column:lastname"`
-	Email          string    `gorm:"column:email;uniqueIndex"`
-	OrgID          *string   `gorm:"column:org_id"`
-	RoleID         *string   `gorm:"column:role_id"`
-	TeamID         *string   `gorm:"column:team_id"`
-	Username       string    `gorm:"column:username;uniqueIndex"`
-	Active         bool      `gorm:"column:active;default:true"`
+	UserID               string    `gorm:"column:user_id;primaryKey"`
+	HashedPassword       string    `gorm:"column:hashed_password"`
+	CreatedAt            time.Time `gorm:"column:created_at"`
+	UpdatedAt            time.Time `gorm:"column:updated_at"`
+	Firstname            string    `gorm:"column:firstname"`
+	Lastname             string    `gorm:"column:lastname"`
+	Email                string    `gorm:"column:email;uniqueIndex"`
+	OrgID                *string   `gorm:"column:org_id"`
+	RoleID               *string   `gorm:"column:role_id"`
+	TeamID               *string   `gorm:"column:team_id"`
+	DefaultRoleID        *string   `gorm:"column:default_role_id"`
+	DefaultGrantsVersion string    `gorm:"column:default_grants_version"`
+	Username             string    `gorm:"column:username;uniqueIndex"`
+	Active               bool      `gorm:"column:active;default:true"`
 }
 
 // Session holds the per-session ECDSA public key used to verify the JWT signature.
@@ -254,11 +263,11 @@ func (OAuthCode) TableName() string { return "oauth_codes" }
 // Confirmed is false until the user verifies the first code after enrollment.
 // Only one active confirmed credential per user is permitted.
 type TOTPCredential struct {
-	CredentialID string    `gorm:"column:credential_id;primaryKey"`
-	UserID       string    `gorm:"column:user_id"`
-	EncSecret    []byte    `gorm:"column:enc_secret"`
-	Confirmed    bool      `gorm:"column:confirmed;default:false"`
-	Active       bool      `gorm:"column:active;default:true"`
+	CredentialID string `gorm:"column:credential_id;primaryKey"`
+	UserID       string `gorm:"column:user_id"`
+	EncSecret    []byte `gorm:"column:enc_secret"`
+	Confirmed    bool   `gorm:"column:confirmed;default:false"`
+	Active       bool   `gorm:"column:active;default:true"`
 	// LastUsedCode and LastUsedAt track the most recently accepted TOTP code so
 	// the same code cannot be replayed within the same 30-second time step.
 	LastUsedCode string    `gorm:"column:last_used_code"`
