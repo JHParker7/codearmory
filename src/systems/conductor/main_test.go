@@ -228,7 +228,7 @@ func TestCheckUserAuth_Allowed(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 
-	got, id, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things")
+	got, id, _, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things")
 	if got != authAllowed {
 		t.Fatalf("expected authAllowed, got %d", got)
 	}
@@ -239,7 +239,7 @@ func TestCheckUserAuth_Allowed(t *testing.T) {
 
 func TestCheckUserAuth_Unauthorized_NoToken(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
-	if got, _, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things"); got != authUnauthorized {
+	if got, _, _, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things"); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized, got %d", got)
 	}
 }
@@ -247,7 +247,7 @@ func TestCheckUserAuth_Unauthorized_NoToken(t *testing.T) {
 func TestCheckUserAuth_Unauthorized_MalformedToken(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer notajwt")
-	if got, _, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things"); got != authUnauthorized {
+	if got, _, _, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things"); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized for malformed JWT, got %d", got)
 	}
 }
@@ -260,8 +260,32 @@ func TestCheckUserAuth_Unauthorized_GatekeeperRejects(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
 	r.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
 
-	if got, _, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things"); got != authUnauthorized {
+	if got, _, _, _ := checkUserAuth(r, "testsvc", "read", "testsvc/things"); got != authUnauthorized {
 		t.Fatalf("expected authUnauthorized when gatekeeper rejects, got %d", got)
+	}
+}
+
+func TestCheckUserAuth_Forbidden_ReturnsReason(t *testing.T) {
+	const reason = `permission denied: role "developer" is not allowed to "write" on testsvc resource "alice/things"`
+	gk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"authorized": false, "user_id": testUUID, "reason": reason})
+	}))
+	defer gk.Close()
+	withGatekeeperURL(t, gk.URL)
+
+	r := httptest.NewRequest(http.MethodGet, "/foo", nil)
+	r.Header.Set("Authorization", "Bearer "+makeTestJWT(testUUID))
+
+	got, id, _, denyReason := checkUserAuth(r, "testsvc", "write", "testsvc/things")
+	if got != authForbidden {
+		t.Fatalf("expected authForbidden, got %d", got)
+	}
+	if id != testUUID {
+		t.Fatalf("expected suspect id %q, got %q", testUUID, id)
+	}
+	if denyReason != reason {
+		t.Fatalf("expected denyReason %q, got %q", reason, denyReason)
 	}
 }
 
