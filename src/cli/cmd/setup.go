@@ -242,7 +242,6 @@ func appendRCBlock(rcFile, marker, line string) error {
 	return werr
 }
 
-
 // setupAuth handles the interactive sign-up or log-in step of `armory setup`.
 // email and username may be pre-set via flags; signup=true forces the sign-up
 // path. When neither is set the function asks the user interactively.

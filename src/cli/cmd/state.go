@@ -76,14 +76,18 @@ func init() {
 			Use:   "get <username> <workspace>",
 			Short: "Download Terraform state",
 			Args:  cobra.ExactArgs(2),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/blueprints/state/"+args[0]+"/"+args[1], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("GET", "/blueprints/state/"+args[0]+"/"+args[1], nil)
+			},
 		},
 		pushCmd,
 		&cobra.Command{
 			Use:   "delete <username> <workspace>",
 			Short: "Delete Terraform state",
 			Args:  cobra.ExactArgs(2),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/blueprints/state/"+args[0]+"/"+args[1], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("DELETE", "/blueprints/state/"+args[0]+"/"+args[1], nil)
+			},
 		},
 		lockCmd,
 		unlockCmd,

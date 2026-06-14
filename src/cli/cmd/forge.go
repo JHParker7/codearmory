@@ -145,7 +145,9 @@ func init() {
 			Use:   "cancel <id>",
 			Short: "Cancel a running or pending execution",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/forge/executions/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("DELETE", "/forge/executions/"+args[0], nil)
+			},
 		},
 	)
 
@@ -247,14 +249,18 @@ func init() {
 			Use:   "get <name>",
 			Short: "Get a runner class",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/forge/runner-classes/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("GET", "/forge/runner-classes/"+args[0], nil)
+			},
 		},
 		updateRCCmd,
 		&cobra.Command{
 			Use:   "delete <name>",
 			Short: "Delete a runner class",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/forge/runner-classes/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("DELETE", "/forge/runner-classes/"+args[0], nil)
+			},
 		},
 	)
 

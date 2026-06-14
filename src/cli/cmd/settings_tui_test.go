@@ -80,7 +80,7 @@ func TestSettingsModel_SavePersists(t *testing.T) {
 	m, _ = driveSettings(t, m, tea.KeyMsg{Type: tea.KeyRight}) // cyber -> tokyo-night
 	want := activeThemeName
 
-	_, cmd := driveSettings(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := driveSettings(t, m, tea.KeyMsg{Type: tea.KeyCtrlS})
 	if !emitsGoHome(cmd) {
 		t.Error("enter should save and return to home")
 	}
@@ -102,7 +102,7 @@ func TestSettingsModel_SaveRejectsEmptyURL(t *testing.T) {
 	m := newSettingsModel()
 	m.form.fields[1].input.SetValue("") // clear the URL field
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if cmd != nil {
 		t.Error("submitting an empty URL should not navigate away")
 	}

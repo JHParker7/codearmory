@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,8 @@ type tuiStep struct {
 type tuiStepsMsg []tuiStep
 type tuiActionsMsg []string
 type tuiImagesMsg []string
+type tuiTicketsMsg kvCatalog
+type tuiOutpostsMsg kvCatalog
 type tuiStepCreatedMsg struct{}
 
 // ── View states ───────────────────────────────────────────────────────────────
@@ -69,8 +72,18 @@ type stepsModel struct {
 	actions []string
 	// images feeds the step form's ←/→ image selector (forge/run steps).
 	images []string
+	// tickets and outposts back the form's name→id pickers, so ids are never
+	// typed by hand (tickets/update|delete reference a ticket; argo/chaos an
+	// outpost). Each degrades to a free-text id input when unavailable.
+	tickets  kvCatalog
+	outposts kvCatalog
 
 	form tuiForm
+}
+
+// catalogs bundles the model's option sources for the create-step form.
+func (m stepsModel) catalogs() stepCatalogs {
+	return stepCatalogs{images: m.images, tickets: m.tickets, outposts: m.outposts}
 }
 
 func newStepsModel() stepsModel {
@@ -93,10 +106,11 @@ func (m *stepsModel) applyLayout() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-// Init loads steps and batches the action catalog and forge image allowlist so
-// the create-step form's action and image selectors are ready the moment it opens.
+// Init loads steps and batches the form's option catalogs (actions, forge images,
+// tickets, outposts) so every selector — including the name→id pickers — is ready
+// the moment the create-step form opens.
 func (m stepsModel) Init() tea.Cmd {
-	return tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages)
+	return tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages, tuiFetchTickets, tuiFetchOutposts)
 }
 
 // ── Fetch commands ────────────────────────────────────────────────────────────
@@ -150,6 +164,66 @@ func tuiFetchImages() tea.Msg {
 	return tuiImagesMsg(imgs)
 }
 
+// tuiFetchTickets loads the ticket list so the tickets/update|delete forms can show
+// ticket titles and submit the ticket_id, degrading to an empty catalog (free-text
+// id fallback) on failure.
+func tuiFetchTickets() tea.Msg {
+	data, err := doRequest("GET", "/tickets/tickets", nil)
+	if err != nil {
+		return tuiTicketsMsg{}
+	}
+	var ts []struct {
+		ID    string `json:"ticket_id"`
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(data, &ts); err != nil {
+		return tuiTicketsMsg{}
+	}
+	var cat kvCatalog
+	for _, t := range ts {
+		if t.ID == "" {
+			continue
+		}
+		label := t.Title
+		if label == "" {
+			label = t.ID
+		}
+		cat.labels = append(cat.labels, label)
+		cat.values = append(cat.values, t.ID)
+	}
+	return tuiTicketsMsg(cat)
+}
+
+// tuiFetchOutposts loads the outpost list so the argo/chaos forms can show outpost
+// names and submit the outpost_id, degrading to an empty catalog (free-text id
+// fallback) on failure.
+func tuiFetchOutposts() tea.Msg {
+	data, err := doRequest("GET", "/outpost-gateway/outposts", nil)
+	if err != nil {
+		return tuiOutpostsMsg{}
+	}
+	var os []struct {
+		ID   string `json:"outpost_id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &os); err != nil {
+		return tuiOutpostsMsg{}
+	}
+	var cat kvCatalog
+	for _, o := range os {
+		if o.ID == "" {
+			continue
+		}
+		label := o.Name
+		if label == "" {
+			label = o.ID
+		}
+		cat.labels = append(cat.labels, label)
+		cat.values = append(cat.values, o.ID)
+	}
+	return tuiOutpostsMsg(cat)
+}
+
 // ── Update ────────────────────────────────────────────────────────────────────
 
 func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -183,10 +257,33 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiActionsMsg:
 		m.actions = []string(msg)
+		// If the form was opened before the catalog landed, its Action field
+		// fell back to free-text; rebuild so it upgrades to the ←/→ selector.
+		if m.view == stepsViewCreate {
+			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
+		}
 		return m, nil
 
 	case tuiImagesMsg:
 		m.images = []string(msg)
+		if m.view == stepsViewCreate {
+			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
+		}
+		return m, nil
+
+	case tuiTicketsMsg:
+		m.tickets = kvCatalog(msg)
+		// Upgrade an open ticket-reference field from free-text to a name picker.
+		if m.view == stepsViewCreate {
+			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
+		}
+		return m, nil
+
+	case tuiOutpostsMsg:
+		m.outposts = kvCatalog(msg)
+		if m.view == stepsViewCreate {
+			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
+		}
 		return m, nil
 
 	case tuiStepCreatedMsg:
@@ -198,17 +295,25 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.form.errMsg = msg.err.Error()
 		return m, nil
 
+	case tuiAutoRefreshMsg:
+		// Silently re-fetch the step list so new definitions appear without a
+		// loading flash or losing the cursor. The create form is left untouched.
+		if m.view == stepsViewList {
+			return m, tuiFetchSteps
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.err != nil {
 			switch msg.String() {
-			case "q":
+			case "esc":
 				return m, func() tea.Msg { return goHomeMsg{} }
 			case "ctrl+c":
 				return m, tea.Quit
 			case "r":
 				m.err = nil
 				m.loading = true
-				return m, tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages)
+				return m, tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages, tuiFetchTickets, tuiFetchOutposts)
 			}
 			return m, nil
 		}
@@ -236,15 +341,31 @@ func (m stepsModel) delegate(msg tea.Msg) (stepsModel, tea.Cmd) {
 
 func (m stepsModel) keyList(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
+	case "esc":
 		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
 	case "n":
 		var cmd tea.Cmd
-		m.form, cmd = newCIStepForm(m.actions, m.images)
+		m.form, cmd = newCIStepForm("", m.actions, m.catalogs())
 		m.view = stepsViewCreate
-		return m, cmd
+		// If the Init prefetch hasn't landed (or failed), the action/image/ticket/
+		// outpost fields fell back to free-text; fetch now so they upgrade to
+		// pickers the moment each catalog arrives (handled in the *Msg cases).
+		cmds := []tea.Cmd{cmd}
+		if len(m.actions) == 0 {
+			cmds = append(cmds, tuiFetchActions)
+		}
+		if len(m.images) == 0 {
+			cmds = append(cmds, tuiFetchImages)
+		}
+		if len(m.tickets.values) == 0 {
+			cmds = append(cmds, tuiFetchTickets)
+		}
+		if len(m.outposts.values) == 0 {
+			cmds = append(cmds, tuiFetchOutposts)
+		}
+		return m, tea.Batch(cmds...)
 	case "r":
 		m.loading = true
 		return m, tea.Batch(tuiFetchSteps, tuiFetchActions)
@@ -256,41 +377,128 @@ func (m stepsModel) keyList(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 
 // ── Create step form ──────────────────────────────────────────────────────────
 
-// newCIStepForm builds the step form. When the action catalog is available the
-// Action field becomes a ←/→ selector (defaulting to forge/run); likewise the
-// Image field becomes a selector when the forge image allowlist is available.
-// Either falls back to a free-text input when its option list is empty.
-func newCIStepForm(actions, images []string) (tuiForm, tea.Cmd) {
-	var actionField formField
-	if len(actions) > 0 {
-		actionField = formSelectDefault("action", "Action", actions, "forge/run")
-	} else {
-		actionField = formInputDefault("action", "Action", "forge/run (required)", "forge/run")
-	}
-	var imageField formField
-	if len(images) > 0 {
-		// Image is only required for forge/run; the leading "" lets other
-		// actions leave it unset (renders as "(default)").
-		imageField = formSelect("image", "Image", append([]string{""}, images...))
-	} else {
-		imageField = formInput("image", "Image", "ubuntu:22.04 (forge/run)")
-	}
-	return newTUIForm("New Step",
+// newCIStepForm builds the step form for the given action. The fields between the
+// Action selector and Timeout are tailored to the action (schemaForAction): e.g.
+// forge/run shows Image/Run/Env, tickets/create shows Title/Priority/…, and an
+// unknown action shows a single With JSON field. The Action field becomes a ←/→
+// selector when the catalog is available (else free text); the forge Image field
+// becomes a selector when the allowlist is available (else free text).
+//
+// action is the desired selection ("" defaults to forge/run); it is resolved
+// against the catalog so the rendered fields always match the action the form
+// will actually report.
+func newCIStepForm(action string, actions []string, cats stepCatalogs) (tuiForm, tea.Cmd) {
+	return newTUIForm("New Step", stepFormFields(action, actions, cats)...)
+}
+
+// stepFormFields assembles the full field list: the fixed Name/Action header, the
+// action-specific schema fields, then the fixed Timeout/Desc footer.
+func stepFormFields(action string, actions []string, cats stepCatalogs) []formField {
+	eff := effectiveAction(action, actions)
+
+	fields := []formField{
 		formInput("name", "Name", "unit_tests (required)"),
-		actionField,
-		imageField,
-		formInput("run", "Run", "go test ./... (forge/run)"),
-		formInput("env", "Env", "KEY=VALUE (forge/run, optional)"),
-		formInput("with", "With", `{"k":"v"} JSON (other actions)`),
+		stepActionField(eff, actions),
+	}
+	for _, sf := range schemaForAction(eff) {
+		fields = append(fields, stepSchemaField(sf, cats))
+	}
+	return append(fields,
 		formInput("timeout", "Timeout", "seconds (default 30)"),
-		formInput("desc", "Desc", "description (optional)"),
+		formTextarea("desc", "Desc", "description (optional)"),
 	)
+}
+
+// effectiveAction resolves the action the form will report: defaulting to
+// forge/run, and (when a catalog is present) snapping to the first catalog entry
+// if the requested action isn't offered — so the rendered schema fields can't
+// drift from the Action selector's actual value.
+func effectiveAction(action string, actions []string) string {
+	if action == "" {
+		action = "forge/run"
+	}
+	if len(actions) == 0 {
+		return action
+	}
+	if slices.Contains(actions, action) {
+		return action
+	}
+	return actions[0]
+}
+
+// stepActionField builds the Action control: a ←/→ catalog selector when actions
+// are known, otherwise a free-text input. eff is pre-resolved to be in the catalog.
+func stepActionField(eff string, actions []string) formField {
+	if len(actions) > 0 {
+		return formSelectDefault("action", "Action", actions, eff)
+	}
+	return formInputDefault("action", "Action", "forge/run (required)", eff)
+}
+
+// stepSchemaField converts a schema field into a form field. A catalog-backed
+// field renders as a picker when its catalog is loaded — image as a plain ←/→
+// selector, ticket/outpost as a name→id selector (shows the name, submits the id)
+// — and degrades to a free-text input otherwise. Non-catalog fields are always
+// free text (parsed at submit time by buildStepWith).
+func stepSchemaField(sf stepField, cats stepCatalogs) formField {
+	key := withKeyPrefix + sf.key
+	switch sf.catalog {
+	case catImage:
+		if len(cats.images) > 0 {
+			return formSelect(key, sf.label, cats.images)
+		}
+	case catTicket, catOutpost:
+		if c := cats.forCatalog(sf.catalog); len(c.values) > 0 {
+			return idPickerField(key, sf.label, sf.required, c)
+		}
+	}
+	// Commands and JSON are naturally multi-line.
+	if sf.multiline || sf.kind == stepFieldJSON {
+		return formTextarea(key, sf.label, sf.placeholder)
+	}
+	return formInput(key, sf.label, sf.placeholder)
+}
+
+// idPickerField builds a name→id selector (formSelectKV) over a kvCatalog. Optional
+// references gain a leading "(none)" choice that submits ""; required ones must
+// resolve to a real id.
+func idPickerField(key, label string, required bool, c kvCatalog) formField {
+	labels, values := c.labels, c.values
+	if !required {
+		labels = append([]string{""}, labels...)
+		values = append([]string{""}, values...)
+	}
+	return formSelectKV(key, label, labels, values)
+}
+
+// rebuildStepForm rebuilds the create-step form against the current action
+// selection and the latest catalogs. It is used both when a late catalog prefetch
+// upgrades free-text fields to pickers, and when the user changes the action so the
+// tailored fields must swap. Entered values (matched by key, which for id pickers
+// means the submitted id), focus, and any inline error are carried over; the focus
+// index is clamped because the field count changes between actions.
+func rebuildStepForm(old tuiForm, actions []string, cats stepCatalogs) tuiForm {
+	form, _ := newCIStepForm(old.value("action"), actions, cats)
+	form.focus = old.focus
+	if form.focus >= len(form.fields) {
+		form.focus = len(form.fields) - 1
+	}
+	if form.focus < 0 {
+		form.focus = 0
+	}
+	form.errMsg = old.errMsg
+	for i := range form.fields {
+		form.fields[i].setValue(old.value(form.fields[i].key))
+	}
+	form.focusActive()
+	return form
 }
 
 func (m stepsModel) keyCreate(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
 	}
+	prevAction := m.form.value("action")
 	var (
 		action formAction
 		cmd    tea.Cmd
@@ -303,13 +511,20 @@ func (m stepsModel) keyCreate(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 	case formSubmit:
 		return m.submitCreate()
 	}
+	// Swap the action-specific fields when the selection moves to a different
+	// schema bucket (e.g. forge/run → tickets/create, or a known action → a
+	// custom one). schemaKey buckets all unknown actions together so typing a
+	// custom action name doesn't churn the fields on every keystroke.
+	if now := m.form.value("action"); now != prevAction && schemaKey(now) != schemaKey(prevAction) {
+		m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
+	}
 	return m, cmd
 }
 
-// submitCreate validates the step form and, if valid, returns the create cmd.
-// The `with` config is assembled by buildWith (shared with the CLI), which
-// enforces forge/run's image+run requirement and the --with JSON requirement
-// for other actions.
+// submitCreate validates the step form and, if valid, returns the create cmd. The
+// `with` map is assembled from the action's tailored fields by buildStepWith,
+// which validates required fields and parses typed inputs (env tokens, ints, the
+// advanced With JSON). All validation happens here so errors surface inline.
 func (m stepsModel) submitCreate() (stepsModel, tea.Cmd) {
 	name := m.form.value("name")
 	action := m.form.value("action")
@@ -330,26 +545,18 @@ func (m stepsModel) submitCreate() (stepsModel, tea.Cmd) {
 		}
 		timeout = t
 	}
+	with, err := buildStepWith(action, m.form.value)
+	if err != nil {
+		m.form.errMsg = err.Error()
+		return m, nil
+	}
 	m.form.errMsg = ""
-	return m, ciSubmitCreateStep(name, action, m.form.value("image"),
-		m.form.value("run"), m.form.value("with"), m.form.value("env"),
-		m.form.value("desc"), timeout)
+	return m, ciPostStep(name, action, m.form.value("desc"), with, timeout)
 }
 
-func ciSubmitCreateStep(name, action, image, run, withJSON, envStr, desc string, timeout int64) tea.Cmd {
+// ciPostStep POSTs an assembled step definition to the workflows service.
+func ciPostStep(name, action, desc string, with map[string]any, timeout int64) tea.Cmd {
 	return func() tea.Msg {
-		var envs []string
-		if strings.TrimSpace(envStr) != "" {
-			toks, err := parseCommandLine(envStr)
-			if err != nil {
-				return tuiFormErrMsg{err}
-			}
-			envs = toks
-		}
-		with, err := buildWith(action, withJSON, image, run, envs)
-		if err != nil {
-			return tuiFormErrMsg{err}
-		}
 		payload := map[string]any{
 			"name":        name,
 			"description": desc,
@@ -370,7 +577,7 @@ func ciSubmitCreateStep(name, action, image, run, withJSON, envStr, desc string,
 func (m stepsModel) View() string {
 	if m.err != nil {
 		msg := "error: " + m.err.Error()
-		hint := "[q] quit"
+		hint := "[esc] quit"
 		if strings.Contains(m.err.Error(), "401") || strings.Contains(m.err.Error(), "unauthorized") {
 			hint += "  [r] retry after login\n\n  Not authenticated — run `armory auth login` first"
 		}
@@ -384,7 +591,7 @@ func (m stepsModel) View() string {
 
 func (m stepsModel) viewList() string {
 	title := tuiTitleStyle.Render("Steps")
-	help := tuiHelp("[↑↓/jk] navigate  [n] new  [r] refresh  [q] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [n] new  [r] refresh  [esc] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}

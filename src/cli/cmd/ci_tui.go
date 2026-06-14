@@ -105,6 +105,7 @@ const (
 	tuiViewRunDetail
 	tuiViewOutput
 	tuiViewCreate
+	tuiViewRun
 )
 
 // ── Messages ──────────────────────────────────────────────────────────────────
@@ -113,8 +114,8 @@ type tuiPipelinesMsg []tuiPipeline
 type tuiRunsMsg []tuiRun
 type tuiRunDetailMsg tuiRunFull
 type tuiErrMsg struct{ err error }
-type tuiTickMsg struct{}
 type tuiPipelineCreatedMsg struct{}
+type tuiRunTriggeredMsg struct{}
 type tuiFormErrMsg struct{ err error }
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -139,7 +140,8 @@ type tuiModel struct {
 	selRun      *tuiRun
 	outputTitle string
 
-	form tuiForm
+	form      tuiForm
+	runReturn tuiViewID // view to restore when the run form is cancelled
 }
 
 func tuiTableStyles() table.Styles {
@@ -261,8 +263,26 @@ func tuiFetchRunDetail(runID string) tea.Cmd {
 	}
 }
 
-func tuiTickCmd() tea.Cmd {
-	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return tuiTickMsg{} })
+// tuiAutoRefresh returns the fetch cmd for the current view so an auto-refresh
+// tick updates whatever the user is looking at, silently (no loading flash, so
+// the table cursor and scroll position are preserved). Forms and the static
+// step-output snapshot are left untouched.
+func (m tuiModel) tuiAutoRefresh() tea.Cmd {
+	switch m.view {
+	case tuiViewPipelines:
+		return tuiFetchPipelines
+	case tuiViewRuns:
+		wid := ""
+		if m.selPipeline != nil {
+			wid = m.selPipeline.WorkflowID
+		}
+		return tuiFetchRuns(wid)
+	case tuiViewRunDetail:
+		if m.selRun != nil {
+			return tuiFetchRunDetail(m.selRun.RunID)
+		}
+	}
+	return nil
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
@@ -332,21 +352,25 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.dTable.SetRows(rows)
-		if rf.Status == "running" || rf.Status == "pending" {
-			return m, tuiTickCmd()
-		}
 		return m, nil
 
-	case tuiTickMsg:
-		if m.view == tuiViewRunDetail && m.selRun != nil {
-			return m, tuiFetchRunDetail(m.selRun.RunID)
-		}
-		return m, nil
+	case tuiAutoRefreshMsg:
+		return m, m.tuiAutoRefresh()
 
 	case tuiPipelineCreatedMsg:
 		m.view = tuiViewPipelines
 		m.loading = true
 		return m, tuiFetchPipelines
+
+	case tuiRunTriggeredMsg:
+		// Show the freshly-triggered run in the pipeline's run history.
+		m.view = tuiViewRuns
+		m.loading = true
+		wid := ""
+		if m.selPipeline != nil {
+			wid = m.selPipeline.WorkflowID
+		}
+		return m, tuiFetchRuns(wid)
 
 	case tuiFormErrMsg:
 		m.form.errMsg = msg.err.Error()
@@ -355,7 +379,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.err != nil {
 			switch msg.String() {
-			case "q":
+			case "esc":
 				return m, func() tea.Msg { return goHomeMsg{} }
 			case "ctrl+c":
 				return m, tea.Quit
@@ -377,6 +401,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.tuiKeyOutput(msg)
 		case tuiViewCreate:
 			return m.tuiKeyCreate(msg)
+		case tuiViewRun:
+			return m.tuiKeyRun(msg)
 		}
 	}
 
@@ -394,7 +420,7 @@ func (m tuiModel) tuiDelegate(msg tea.Msg) (tuiModel, tea.Cmd) {
 		m.dTable, cmd = m.dTable.Update(msg)
 	case tuiViewOutput:
 		m.vp, cmd = m.vp.Update(msg)
-	case tuiViewCreate:
+	case tuiViewCreate, tuiViewRun:
 		m.form, _, cmd = m.form.update(msg)
 	}
 	return m, cmd
@@ -402,7 +428,7 @@ func (m tuiModel) tuiDelegate(msg tea.Msg) (tuiModel, tea.Cmd) {
 
 func (m tuiModel) tuiKeyPipelines(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
+	case "esc":
 		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
@@ -419,6 +445,12 @@ func (m tuiModel) tuiKeyPipelines(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		m.form, cmd = newCIPipelineForm()
 		m.view = tuiViewCreate
 		return m, cmd
+	case "R":
+		i := m.pTable.Cursor()
+		if i < len(m.pipelines) {
+			m.selPipeline = &m.pipelines[i]
+			return m.openRunForm()
+		}
 	case "r":
 		m.loading = true
 		return m, tuiFetchPipelines
@@ -497,13 +529,89 @@ func ciSubmitCreatePipeline(name, desc, dsl string) tea.Cmd {
 	}
 }
 
+// ── Run form ──────────────────────────────────────────────────────────────────
+
+// openRunForm opens the manual-run dialog for m.selPipeline, remembering the
+// current view so a cancel returns the user to where they triggered it from.
+func (m tuiModel) openRunForm() (tuiModel, tea.Cmd) {
+	m.runReturn = m.view
+	var cmd tea.Cmd
+	m.form, cmd = newCIRunForm(m.selPipeline.Name)
+	m.view = tuiViewRun
+	return m, cmd
+}
+
+func newCIRunForm(name string) (tuiForm, tea.Cmd) {
+	return newTUIForm("Run Pipeline: "+name,
+		formInput("inputs", "Inputs", "KEY=VALUE KEY=VALUE (optional)"),
+	)
+}
+
+func (m tuiModel) tuiKeyRun(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+	var (
+		action formAction
+		cmd    tea.Cmd
+	)
+	m.form, action, cmd = m.form.update(msg)
+	switch action {
+	case formCancel:
+		m.view = m.runReturn
+		return m, nil
+	case formSubmit:
+		return m.tuiSubmitRun()
+	}
+	return m, cmd
+}
+
+// tuiSubmitRun validates the inputs field and, if valid, returns the trigger cmd.
+func (m tuiModel) tuiSubmitRun() (tuiModel, tea.Cmd) {
+	if m.selPipeline == nil {
+		m.form.errMsg = "no pipeline selected"
+		return m, nil
+	}
+	inputs, err := parseRunInputs(m.form.value("inputs"))
+	if err != nil {
+		m.form.errMsg = err.Error()
+		return m, nil
+	}
+	m.form.errMsg = ""
+	return m, ciSubmitRunPipeline(m.selPipeline.WorkflowID, inputs)
+}
+
+// parseRunInputs parses a whitespace-separated list of KEY=VALUE pairs. An empty
+// string yields an empty map, i.e. a run with no inputs. Values may contain '='.
+func parseRunInputs(s string) (map[string]string, error) {
+	inputs := map[string]string{}
+	for tok := range strings.FieldsSeq(s) {
+		k, v, ok := strings.Cut(tok, "=")
+		if !ok || k == "" {
+			return nil, fmt.Errorf("invalid input %q: expected KEY=VALUE", tok)
+		}
+		inputs[k] = v
+	}
+	return inputs, nil
+}
+
+// ciSubmitRunPipeline triggers a manual run of the pipeline. HTTP failures
+// surface as an inline form error.
+func ciSubmitRunPipeline(workflowID string, inputs map[string]string) tea.Cmd {
+	return func() tea.Msg {
+		body, _ := json.Marshal(map[string]any{"inputs": inputs})
+		if _, err := doRequest("POST", "/workflows/pipelines/"+workflowID+"/runs", body); err != nil {
+			return tuiFormErrMsg{err}
+		}
+		return tuiRunTriggeredMsg{}
+	}
+}
+
 func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
-		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
-	case "b", "esc":
+	case "esc":
 		m.view = tuiViewPipelines
 		return m, nil
 	case "enter":
@@ -528,6 +636,10 @@ func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 				return m, tuiFetchRuns(wid)
 			}
 		}
+	case "R":
+		if m.selPipeline != nil {
+			return m.openRunForm()
+		}
 	case "r":
 		m.loading = true
 		wid := ""
@@ -543,11 +655,9 @@ func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 
 func (m tuiModel) tuiKeyRunDetail(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
-		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
-	case "b", "esc":
+	case "esc":
 		m.view = tuiViewRuns
 		return m, nil
 	case "enter":
@@ -579,11 +689,9 @@ func (m tuiModel) tuiKeyRunDetail(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 
 func (m tuiModel) tuiKeyOutput(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
-		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
-	case "b", "esc":
+	case "esc":
 		m.view = tuiViewRunDetail
 		return m, nil
 	}
@@ -598,7 +706,7 @@ func (m tuiModel) View() string {
 	var content string
 	if m.err != nil {
 		msg := "error: " + m.err.Error()
-		hint := "[q] quit"
+		hint := "[esc] quit"
 		if strings.Contains(m.err.Error(), "401") || strings.Contains(m.err.Error(), "unauthorized") {
 			hint += "  [r] retry after login\n\n  Not authenticated — run `armory auth login` first"
 		}
@@ -613,7 +721,7 @@ func (m tuiModel) View() string {
 			content = m.tuiViewRunDetail()
 		case tuiViewOutput:
 			content = m.tuiViewOutput()
-		case tuiViewCreate:
+		case tuiViewCreate, tuiViewRun:
 			content = m.form.view(m.width, m.height)
 		}
 	}
@@ -622,7 +730,7 @@ func (m tuiModel) View() string {
 
 func (m tuiModel) tuiViewPipelines() string {
 	title := tuiTitleStyle.Render("Pipelines")
-	help := tuiHelp("[↑↓/jk] navigate  [enter] runs  [n] new  [r] refresh  [q] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [enter] runs  [R] run  [n] new  [r] refresh  [esc] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -638,7 +746,7 @@ func (m tuiModel) tuiViewRuns() string {
 		name = ": " + m.selPipeline.Name
 	}
 	title := tuiTitleStyle.Render("Runs" + name)
-	help := tuiHelp("[↑↓/jk] navigate  [enter] detail  [c] cancel  [r] refresh  [b] back  [q] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [enter] detail  [R] run  [c] cancel  [r] refresh  [esc] back", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -650,7 +758,7 @@ func (m tuiModel) tuiViewRuns() string {
 
 func (m tuiModel) tuiViewRunDetail() string {
 	title := tuiTitleStyle.Render("Run Detail")
-	help := tuiHelp("[↑↓/jk] navigate  [enter] output  [r] refresh  [b] back  [q] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [enter] output  [r] refresh  [esc] back", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -676,7 +784,7 @@ func (m tuiModel) tuiViewRunDetail() string {
 
 func (m tuiModel) tuiViewOutput() string {
 	title := tuiTitleStyle.Render(m.outputTitle)
-	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [b] back  [q] home", m.width)
+	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [esc] back", m.width)
 	return title + "\n" + tuiBoxStyle.Render(m.vp.View()) + "\n" + help
 }
 
@@ -742,7 +850,7 @@ func init() {
 		Order:   10,
 		Command: ciCmd,
 		Screens: []HubScreen{
-			{Title: "CI / Pipelines", Desc: "Browse workflow pipelines and run history", New: func() tea.Model { return newTUIModel() }},
+			{Title: "Pipelines", Desc: "Browse workflow pipelines and run history", New: func() tea.Model { return newTUIModel() }},
 			{Title: "Steps", Desc: "Browse and create reusable pipeline steps", New: func() tea.Model { return newStepsModel() }},
 		},
 	})

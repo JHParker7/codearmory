@@ -18,25 +18,33 @@ func init() {
 			Use:   "get <id>",
 			Short: "Get an invite by ID",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gatekeeper/invites/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("GET", "/gatekeeper/invites/"+args[0], nil)
+			},
 		},
 		&cobra.Command{
 			Use:   "accept <id>",
 			Short: "Accept an invite",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("POST", "/gatekeeper/invites/"+args[0]+"/accept", nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("POST", "/gatekeeper/invites/"+args[0]+"/accept", nil)
+			},
 		},
 		&cobra.Command{
 			Use:   "decline <id>",
 			Short: "Decline an invite",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("POST", "/gatekeeper/invites/"+args[0]+"/decline", nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("POST", "/gatekeeper/invites/"+args[0]+"/decline", nil)
+			},
 		},
 		&cobra.Command{
 			Use:   "delete <id>",
 			Short: "Delete an invite",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/gatekeeper/invites/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("DELETE", "/gatekeeper/invites/"+args[0], nil)
+			},
 		},
 	)
 	RegisterModule(Module{Name: "invites", Command: invitesCmd})

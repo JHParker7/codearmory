@@ -54,14 +54,18 @@ func init() {
 			Use:   "get",
 			Short: "Get your linked Gitea account",
 			Args:  cobra.NoArgs,
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gitea_integration/account", nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("GET", "/gitea_integration/account", nil)
+			},
 		},
 		linkCmd,
 		&cobra.Command{
 			Use:   "unlink",
 			Short: "Unlink your Gitea account",
 			Args:  cobra.NoArgs,
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/gitea_integration/account", nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("DELETE", "/gitea_integration/account", nil)
+			},
 		},
 	)
 
@@ -147,10 +151,10 @@ func init() {
 	}
 
 	var (
-		prTitle  string
-		prBody   string
-		prHead   string
-		prBase   string
+		prTitle string
+		prBody  string
+		prHead  string
+		prBase  string
 	)
 
 	createPRCmd := &cobra.Command{

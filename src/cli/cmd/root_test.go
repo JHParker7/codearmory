@@ -250,9 +250,9 @@ func TestPrintJSON_ValidJSON(t *testing.T) {
 	// Redirect stdout so the output doesn't flood the test log; we just verify
 	// no panic occurs and the function handles valid and invalid input.
 	silenceStdout(t)
-	printJSON([]byte(`{"a":1}`))         // valid — should pretty-print
-	printJSON([]byte(`not json`))        // invalid — should print raw
-	printJSON([]byte{})                  // empty — should be a no-op
+	printJSON([]byte(`{"a":1}`))  // valid — should pretty-print
+	printJSON([]byte(`not json`)) // invalid — should print raw
+	printJSON([]byte{})           // empty — should be a no-op
 }
 
 // ── parseData stdin branch ────────────────────────────────────────────────────

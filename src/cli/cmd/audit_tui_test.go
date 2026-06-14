@@ -106,14 +106,14 @@ func TestAuditModel_WindowResize(t *testing.T) {
 
 // ── Keys: list view ───────────────────────────────────────────────────────────
 
-func TestAuditModel_List_Q_GoesHome(t *testing.T) {
+func TestAuditModel_List_Esc_GoesHome(t *testing.T) {
 	m := applyAuditMsg(newAuditModel(), auditEntriesMsg([]auditEntry{}))
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd == nil {
-		t.Fatal("q key should return a cmd")
+		t.Fatal("esc key should return a cmd")
 	}
 	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Errorf("q returned %T, want goHomeMsg", cmd())
+		t.Errorf("esc returned %T, want goHomeMsg", cmd())
 	}
 }
 
@@ -230,50 +230,29 @@ func TestAuditModel_List_R_Refreshes(t *testing.T) {
 
 // ── Keys: detail view ─────────────────────────────────────────────────────────
 
-func TestAuditModel_Detail_Q_GoesHome(t *testing.T) {
-	m := newAuditModel()
-	m.view = auditViewDetail
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if cmd == nil {
-		t.Fatal("q should return a cmd")
-	}
-	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Error("q in detail view should return goHomeMsg")
-	}
-}
-
-func TestAuditModel_Detail_B_Back(t *testing.T) {
-	m := newAuditModel()
-	m.view = auditViewDetail
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
-	m2 := updated.(auditModel)
-	if m2.view != auditViewList {
-		t.Errorf("b: view = %v, want auditViewList", m2.view)
-	}
-	if cmd != nil {
-		t.Error("b should not emit a cmd")
-	}
-}
-
 func TestAuditModel_Detail_Esc_Back(t *testing.T) {
 	m := newAuditModel()
 	m.view = auditViewDetail
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if updated.(auditModel).view != auditViewList {
-		t.Error("esc in detail view should return to list")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m2 := updated.(auditModel)
+	if m2.view != auditViewList {
+		t.Errorf("esc: view = %v, want auditViewList", m2.view)
+	}
+	if cmd != nil {
+		t.Error("esc should not emit a cmd")
 	}
 }
 
 // ── Keys: error state ─────────────────────────────────────────────────────────
 
-func TestAuditModel_Error_Q_GoesHome(t *testing.T) {
+func TestAuditModel_Error_Esc_GoesHome(t *testing.T) {
 	m := applyAuditMsg(newAuditModel(), auditErrMsg{err: fmt.Errorf("boom")})
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd == nil {
-		t.Fatal("q in error state should return a cmd")
+		t.Fatal("esc in error state should return a cmd")
 	}
 	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Error("q in error state should return goHomeMsg")
+		t.Error("esc in error state should return goHomeMsg")
 	}
 }
 
@@ -476,5 +455,25 @@ func TestAuditTUICmd_RegisteredUnderAudit(t *testing.T) {
 func TestAuditCmd_HasRunE(t *testing.T) {
 	if auditCmd.RunE == nil {
 		t.Error("auditCmd.RunE should be set so 'armory audit' launches the TUI")
+	}
+}
+
+// ── Auto-refresh ──────────────────────────────────────────────────────────────
+
+func TestAuditModel_AutoRefresh_ListEmitsFetch(t *testing.T) {
+	m := newAuditModel()
+	m.loading = false
+	_, cmd := m.Update(tuiAutoRefreshMsg{})
+	if cmd == nil {
+		t.Error("auto-refresh in the list view should emit a fetch cmd")
+	}
+}
+
+func TestAuditModel_AutoRefresh_DetailNoop(t *testing.T) {
+	m := newAuditModel()
+	m.view = auditViewDetail
+	_, cmd := m.Update(tuiAutoRefreshMsg{})
+	if cmd != nil {
+		t.Error("auto-refresh in the detail view (immutable entry) should be a noop")
 	}
 }

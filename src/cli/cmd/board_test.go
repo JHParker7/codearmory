@@ -330,19 +330,6 @@ func TestUpdate_WindowSizeMsg(t *testing.T) {
 
 // ── quit ──────────────────────────────────────────────────────────────────────
 
-func TestUpdate_QuitKeys(t *testing.T) {
-	for _, key := range []string{"q"} {
-		m := boardModel{}
-		_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
-		if cmd == nil {
-			t.Errorf("key %q: expected home command, got nil", key)
-		}
-		if _, ok := cmd().(goHomeMsg); !ok {
-			t.Errorf("key %q: cmd() did not return goHomeMsg", key)
-		}
-	}
-}
-
 func TestUpdate_EscKey_GoesHome(t *testing.T) {
 	m := boardModel{}
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
