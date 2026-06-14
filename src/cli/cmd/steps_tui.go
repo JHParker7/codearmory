@@ -32,6 +32,7 @@ type tuiStep struct {
 
 type tuiStepsMsg []tuiStep
 type tuiActionsMsg []string
+type tuiImagesMsg []string
 type tuiStepCreatedMsg struct{}
 
 // ── View states ───────────────────────────────────────────────────────────────
@@ -66,6 +67,8 @@ type stepsModel struct {
 	steps []tuiStep
 	// actions feeds the step form's ←/→ action-type selector.
 	actions []string
+	// images feeds the step form's ←/→ image selector (forge/run steps).
+	images []string
 
 	form tuiForm
 }
@@ -90,10 +93,10 @@ func (m *stepsModel) applyLayout() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-// Init loads steps and batches the action catalog so the create-step form's
-// action selector is ready the moment it opens.
+// Init loads steps and batches the action catalog and forge image allowlist so
+// the create-step form's action and image selectors are ready the moment it opens.
 func (m stepsModel) Init() tea.Cmd {
-	return tea.Batch(tuiFetchSteps, tuiFetchActions)
+	return tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages)
 }
 
 // ── Fetch commands ────────────────────────────────────────────────────────────
@@ -132,6 +135,21 @@ func tuiFetchActions() tea.Msg {
 	return tuiActionsMsg(names)
 }
 
+// tuiFetchImages loads the forge image allowlist for the step form's image
+// selector (used by forge/run steps), degrading to an empty list on failure so
+// the field falls back to a free-text input.
+func tuiFetchImages() tea.Msg {
+	data, err := doRequest("GET", "/forge/images", nil)
+	if err != nil {
+		return tuiImagesMsg(nil)
+	}
+	var imgs []string
+	if err := json.Unmarshal(data, &imgs); err != nil {
+		return tuiImagesMsg(nil)
+	}
+	return tuiImagesMsg(imgs)
+}
+
 // ── Update ────────────────────────────────────────────────────────────────────
 
 func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -167,6 +185,10 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.actions = []string(msg)
 		return m, nil
 
+	case tuiImagesMsg:
+		m.images = []string(msg)
+		return m, nil
+
 	case tuiStepCreatedMsg:
 		m.view = stepsViewList
 		m.loading = true
@@ -186,7 +208,7 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "r":
 				m.err = nil
 				m.loading = true
-				return m, tea.Batch(tuiFetchSteps, tuiFetchActions)
+				return m, tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages)
 			}
 			return m, nil
 		}
@@ -220,7 +242,7 @@ func (m stepsModel) keyList(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 		return m, tea.Quit
 	case "n":
 		var cmd tea.Cmd
-		m.form, cmd = newCIStepForm(m.actions)
+		m.form, cmd = newCIStepForm(m.actions, m.images)
 		m.view = stepsViewCreate
 		return m, cmd
 	case "r":
@@ -235,19 +257,28 @@ func (m stepsModel) keyList(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 // ── Create step form ──────────────────────────────────────────────────────────
 
 // newCIStepForm builds the step form. When the action catalog is available the
-// Action field becomes a ←/→ selector (defaulting to forge/run); otherwise it
-// falls back to a free-text input.
-func newCIStepForm(actions []string) (tuiForm, tea.Cmd) {
+// Action field becomes a ←/→ selector (defaulting to forge/run); likewise the
+// Image field becomes a selector when the forge image allowlist is available.
+// Either falls back to a free-text input when its option list is empty.
+func newCIStepForm(actions, images []string) (tuiForm, tea.Cmd) {
 	var actionField formField
 	if len(actions) > 0 {
 		actionField = formSelectDefault("action", "Action", actions, "forge/run")
 	} else {
 		actionField = formInputDefault("action", "Action", "forge/run (required)", "forge/run")
 	}
+	var imageField formField
+	if len(images) > 0 {
+		// Image is only required for forge/run; the leading "" lets other
+		// actions leave it unset (renders as "(default)").
+		imageField = formSelect("image", "Image", append([]string{""}, images...))
+	} else {
+		imageField = formInput("image", "Image", "ubuntu:22.04 (forge/run)")
+	}
 	return newTUIForm("New Step",
 		formInput("name", "Name", "unit_tests (required)"),
 		actionField,
-		formInput("image", "Image", "ubuntu:22.04 (forge/run)"),
+		imageField,
 		formInput("run", "Run", "go test ./... (forge/run)"),
 		formInput("env", "Env", "KEY=VALUE (forge/run, optional)"),
 		formInput("with", "With", `{"k":"v"} JSON (other actions)`),

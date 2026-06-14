@@ -132,7 +132,7 @@ func TestStepsModel_N_OpensCreateStepForm(t *testing.T) {
 func TestStepsModel_CreateStep_Esc_BacksToList(t *testing.T) {
 	m := newStepsModel()
 	m.view = stepsViewCreate
-	m.form, _ = newCIStepForm(nil)
+	m.form, _ = newCIStepForm(nil, nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if updated.(stepsModel).view != stepsViewList {
 		t.Error("esc in create-step view should return to the steps list")
@@ -142,7 +142,7 @@ func TestStepsModel_CreateStep_Esc_BacksToList(t *testing.T) {
 func TestStepsModel_CreateStep_Submit_MissingName_StaysWithError(t *testing.T) {
 	m := newStepsModel()
 	m.view = stepsViewCreate
-	m.form, _ = newCIStepForm(nil)
+	m.form, _ = newCIStepForm(nil, nil)
 	// Clear the defaulted action so name is the first failure.
 	m.form.fields[0].input.SetValue("")
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -174,7 +174,7 @@ func TestStepsModel_StepCreatedMsg_ReturnsToListAndRefetches(t *testing.T) {
 func TestStepsModel_FormErrMsg_ShowsInlineError(t *testing.T) {
 	m := newStepsModel()
 	m.view = stepsViewCreate
-	m.form, _ = newCIStepForm(nil)
+	m.form, _ = newCIStepForm(nil, nil)
 	updated, _ := m.Update(tuiFormErrMsg{err: fmt.Errorf("boom")})
 	if !strings.Contains(updated.(stepsModel).form.errMsg, "boom") {
 		t.Error("form error should surface in the create-step view")
@@ -206,6 +206,43 @@ func TestStepsModel_CreateStepForm_FallsBackToTextDefault(t *testing.T) {
 	m2 := updated.(stepsModel)
 	if got := m2.form.value("action"); got != "forge/run" {
 		t.Errorf("action = %q, want forge/run text default when catalog unavailable", got)
+	}
+}
+
+// ── Step form: image selector ──────────────────────────────────────────────────
+
+func TestStepsModel_CreateStepForm_UsesImageSelector(t *testing.T) {
+	m := newStepsModel()
+	m.images = []string{"alpine:3.19", "ubuntu:22.04"}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m2 := updated.(stepsModel)
+	// Image is optional for non-forge/run actions, so it defaults to empty.
+	if got := m2.form.value("image"); got != "" {
+		t.Errorf("image default = %q, want empty (optional)", got)
+	}
+	// ←/→ cycles through the allowlist. Tab order: name(0), action(1), image(2).
+	f, _, _ := m2.form.update(tea.KeyMsg{Type: tea.KeyTab}) // focus action
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyTab})        // focus image
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyRight})      // cycle to alpine:3.19
+	if got := f.value("image"); got != "alpine:3.19" {
+		t.Errorf("image after cycle = %q, want alpine:3.19", got)
+	}
+}
+
+func TestStepsModel_CreateStepForm_ImageFallsBackToText(t *testing.T) {
+	m := newStepsModel() // m.images is nil
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m2 := updated.(stepsModel)
+	// With no allowlist the image field is a free-text input (empty by default).
+	if got := m2.form.value("image"); got != "" {
+		t.Errorf("image = %q, want empty text input when allowlist unavailable", got)
+	}
+	// A text field accepts typed input; a selector would ignore runes.
+	f, _, _ := m2.form.update(tea.KeyMsg{Type: tea.KeyTab}) // focus action
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyTab})        // focus image
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	if got := f.value("image"); got != "x" {
+		t.Errorf("image after typing = %q, want x (free-text fallback)", got)
 	}
 }
 
@@ -245,7 +282,7 @@ func TestStepsView_List_HelpMentionsNew(t *testing.T) {
 func TestStepsView_Create_RendersForm(t *testing.T) {
 	m := newStepsModel()
 	m.view = stepsViewCreate
-	m.form, _ = newCIStepForm(nil)
+	m.form, _ = newCIStepForm(nil, nil)
 	if !strings.Contains(m.View(), "New Step") {
 		t.Error("create-step view should show the form heading")
 	}
@@ -310,6 +347,30 @@ func TestTUIFetchActions_ErrorDegradesToEmpty(t *testing.T) {
 	msg, ok := tuiFetchActions().(tuiActionsMsg)
 	if !ok || len(msg) != 0 {
 		t.Errorf("actions = %#v, want empty tuiActionsMsg on error", msg)
+	}
+}
+
+// ── Fetch: tuiFetchImages ──────────────────────────────────────────────────────
+
+func TestTUIFetchImages_Success(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `["alpine:3.19","ubuntu:22.04"]`)
+	setupCLI(t, srv)
+	msg := tuiFetchImages()
+	if rec.Method != "GET" || rec.Path != "/forge/images" {
+		t.Errorf("request = %s %s, want GET /forge/images", rec.Method, rec.Path)
+	}
+	imgs, ok := msg.(tuiImagesMsg)
+	if !ok || len(imgs) != 2 || imgs[0] != "alpine:3.19" {
+		t.Errorf("msg = %#v, want tuiImagesMsg with 2 images", msg)
+	}
+}
+
+func TestTUIFetchImages_ErrorDegradesToEmpty(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusForbidden, `nope`)
+	setupCLI(t, srv)
+	msg, ok := tuiFetchImages().(tuiImagesMsg)
+	if !ok || len(msg) != 0 {
+		t.Errorf("images = %#v, want empty tuiImagesMsg on error", msg)
 	}
 }
 

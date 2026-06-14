@@ -29,6 +29,7 @@
       { "method": "PUT",    "path": "/teams/{id}",                           "action": "updateTeam",        "resource": "gatekeeper/teams/{id}"        },
       { "method": "DELETE", "path": "/teams/{id}",                           "action": "deleteTeam",        "resource": "gatekeeper/teams/{id}"        },
       { "method": "POST",   "path": "/roles",                                "action": "createRole",        "resource": "gatekeeper/roles"             },
+      { "method": "GET",    "path": "/roles",                                "action": "listRole",          "resource": "gatekeeper/roles"             },
       { "method": "GET",    "path": "/roles/{id}",                           "action": "getRole",           "resource": "gatekeeper/roles/{id}"        },
       { "method": "PUT",    "path": "/roles/{id}",                           "action": "updateRole",        "resource": "gatekeeper/roles/{id}"        },
       { "method": "DELETE", "path": "/roles/{id}",                           "action": "deleteRole",        "resource": "gatekeeper/roles/{id}"        },
@@ -45,6 +46,13 @@
       { "method": "POST",   "path": "/teams/{id}/invites",                   "action": "inviteUser",        "resource": "gatekeeper/teams/{id}"        },
       { "method": "POST",   "path": "/invites/{id}/accept",                  "action": "acceptInvite",      "resource": "gatekeeper/invites/{id}"      },
       { "method": "POST",   "path": "/invites/{id}/decline",                 "action": "declineInvite",     "resource": "gatekeeper/invites/{id}"      },
+      { "method": "POST",   "path": "/secrets",                              "action": "createSecret",          "resource": "gatekeeper/secrets"                        },
+      { "method": "GET",    "path": "/secrets",                              "action": "listSecrets",           "resource": "gatekeeper/secrets"                        },
+      { "method": "PUT",    "path": "/secrets/{id}",                         "action": "updateSecret",          "resource": "gatekeeper/secrets/{id}"                   },
+      { "method": "DELETE", "path": "/secrets/{id}",                         "action": "deleteSecret",          "resource": "gatekeeper/secrets/{id}"                   },
+      { "method": "GET",    "path": "/orgs/{id}/secret-provider",            "action": "getSecretProvider",     "resource": "gatekeeper/orgs/{id}"                      },
+      { "method": "PUT",    "path": "/orgs/{id}/secret-provider",            "action": "updateSecretProvider",  "resource": "gatekeeper/orgs/{id}"                      },
+      { "method": "DELETE", "path": "/orgs/{id}/secret-provider",            "action": "deleteSecretProvider",  "resource": "gatekeeper/orgs/{id}"                      },
       { "method": "GET",    "path": "/audit-logs",                           "action": "listAuditLog",      "resource": "gatekeeper/audit-logs"        },
       { "method": "GET",    "path": "/service-permission-requests",          "action": "listSPR",           "resource": "gatekeeper/service-permission-requests" },
       { "method": "GET",    "path": "/service-permission-requests/{id}",     "action": "getSPR",            "resource": "gatekeeper/service-permission-requests/{id}" },
@@ -63,6 +71,11 @@
         "grant_on": "user",
         "actions": ["getUser", "updateUser", "deleteUser", "createOrg", "createTeam"],
         "resources": ["{username}/gatekeeper/users/{user_id}", "{username}/gatekeeper/orgs", "{username}/gatekeeper/teams"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listTeam", "listOrg", "listUser", "listRole", "listInvite"],
+        "resources": ["{username}/gatekeeper/teams", "{username}/gatekeeper/orgs", "{username}/gatekeeper/users", "{username}/gatekeeper/roles", "{username}/gatekeeper/invites"]
       },
       {
         "grant_on": "user",
@@ -195,6 +208,11 @@
         "grant_on": "user",
         "actions": ["createStep", "listStep", "getStep", "updateStep", "deleteStep", "createWorkflow", "listWorkflow", "getWorkflow", "updateWorkflow", "deleteWorkflow", "triggerRun", "listRun", "getRun", "cancelRun"],
         "resources": ["{username}/workflows/steps", "{username}/workflows/steps/*", "{username}/workflows/pipelines", "{username}/workflows/pipelines/*", "{username}/workflows/runs", "{username}/workflows/runs/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listAction"],
+        "resources": ["{username}/workflows/actions"]
       }
     ]
   },
@@ -211,20 +229,34 @@
       { "method": "PUT",    "path": "/tickets/{id}",                       "action": "updateTicket",  "resource": "tickets/tickets/{id}"                      },
       { "method": "DELETE", "path": "/tickets/{id}",                       "action": "deleteTicket",  "resource": "tickets/tickets/{id}"                      },
       { "method": "POST",   "path": "/tickets/{id}/comments",              "action": "createComment", "resource": "tickets/tickets/{id}"                      },
-      { "method": "DELETE", "path": "/tickets/{id}/comments/{comment_id}", "action": "deleteComment", "resource": "tickets/tickets/{id}/comments/{comment_id}" }
+      { "method": "DELETE", "path": "/tickets/{id}/comments/{comment_id}", "action": "deleteComment", "resource": "tickets/tickets/{id}/comments/{comment_id}" },
+      { "method": "GET",    "path": "/field-defs",                         "action": "listFieldDef",   "resource": "tickets/field-defs"                         },
+      { "method": "POST",   "path": "/field-defs",                         "action": "createFieldDef", "resource": "tickets/field-defs"                         },
+      { "method": "PUT",    "path": "/field-defs/{id}",                    "action": "updateFieldDef", "resource": "tickets/field-defs/{id}"                    },
+      { "method": "DELETE", "path": "/field-defs/{id}",                    "action": "deleteFieldDef", "resource": "tickets/field-defs/{id}"                    }
     ],
     "actions": [
       {
         "name": "tickets/create",
         "method": "POST",
         "path": "/tickets"
+      },
+      {
+        "name": "tickets/update",
+        "method": "PUT",
+        "path": "/tickets/{id}"
+      },
+      {
+        "name": "tickets/delete",
+        "method": "DELETE",
+        "path": "/tickets/{id}"
       }
     ],
     "default_grants": [
       {
         "grant_on": "user",
-        "actions": ["createTicket", "listTicket", "getTicket", "updateTicket", "deleteTicket", "createComment", "deleteComment"],
-        "resources": ["{username}/tickets/tickets", "{username}/tickets/tickets/*"]
+        "actions": ["createTicket", "listTicket", "getTicket", "updateTicket", "deleteTicket", "createComment", "deleteComment", "listFieldDef", "createFieldDef", "updateFieldDef", "deleteFieldDef"],
+        "resources": ["{username}/tickets/tickets", "{username}/tickets/tickets/*", "{username}/tickets/field-defs", "{username}/tickets/field-defs/*"]
       }
     ]
   },
