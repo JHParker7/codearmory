@@ -118,11 +118,12 @@ const (
 )
 
 type tuiForm struct {
-	title  string
-	fields []formField
-	focus  int
-	errMsg string // inline validation / submission error
-	help   string // optional guidance rendered above the key hint (e.g. templating syntax)
+	title     string
+	fields    []formField
+	focus     int
+	errMsg    string // inline validation / submission error
+	help      string // optional guidance rendered above the key hint (e.g. templating syntax)
+	extraHint string // appended to the bottom hint line for screen-specific shortcuts
 }
 
 // newTUIForm builds a form and focuses its first field. A submit button is always
@@ -436,6 +437,9 @@ func (f tuiForm) view(width, height int) string {
 		parts = append(parts, "enter: newline")
 	}
 	parts = append(parts, "Submit / ctrl+s: submit", "esc: cancel")
+	if f.extraHint != "" {
+		parts = append(parts, f.extraHint)
+	}
 	rows = append(rows, "", tuiFormHint.Render(strings.Join(parts, "   ")))
 
 	box := tuiFormBox.Render(strings.Join(rows, "\n"))
