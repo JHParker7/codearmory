@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 )
 
-// Runtime is the interface for running sandboxed container commands.
-// Select via RUNTIME env var: "kubernetes" (default) or "docker".
+// Runtime is the interface for running sandboxed container commands. Concrete
+// runtimes are built lazily by the runtimeRegistry from a RuntimeBackend; see
+// registry.go.
 type Runtime interface {
 	// Run executes the command described by exec. It blocks until the command
 	// completes, the context is cancelled, or the execution times out.
@@ -20,26 +20,28 @@ type Runtime interface {
 	Cancel(ctx context.Context, executionID string) error
 }
 
-func newRuntime() (Runtime, error) {
-	rt := os.Getenv("RUNTIME")
-	if rt == "" {
-		rt = "docker"
+// defaultRuntimeType returns the Type seeded onto the "default" runtime backend
+// from the legacy RUNTIME env var, preserving the single-runtime deployment
+// contract: RUNTIME unset means docker. An unrecognised value is passed through
+// and fails when the registry tries to build it, mirroring the old behaviour.
+func defaultRuntimeType() string {
+	if rt := os.Getenv("RUNTIME"); rt != "" {
+		return rt
 	}
-	switch rt {
-	case "kubernetes":
-		r, err := newKubernetesRuntime()
-		if err != nil {
-			return nil, fmt.Errorf("kubernetes runtime: %w", err)
-		}
-		return r, nil
-	case "docker":
-		r, err := newDockerRuntime()
-		if err != nil {
-			return nil, fmt.Errorf("docker runtime: %w", err)
-		}
-		return r, nil
-	default:
-		return nil, fmt.Errorf("unknown RUNTIME %q: expected kubernetes or docker", rt)
+	return "docker"
+}
+
+// proxyEnvPairs is the set of egress-proxy environment variables forge injects
+// into a sandboxed job (upper- and lower-case forms, plus NO_PROXY for loopback).
+// Shared by the docker and proxmox runtimes so the two sandboxes can't diverge.
+func proxyEnvPairs(proxy string) [][2]string {
+	return [][2]string{
+		{"HTTP_PROXY", proxy},
+		{"HTTPS_PROXY", proxy},
+		{"NO_PROXY", "localhost,127.0.0.1"},
+		{"http_proxy", proxy},
+		{"https_proxy", proxy},
+		{"no_proxy", "localhost,127.0.0.1"},
 	}
 }
 

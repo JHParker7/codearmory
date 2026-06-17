@@ -259,6 +259,10 @@ forge:
     # Must match the forge entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
+    # Proxmox VE API token for the proxmox runtime backend, in the form
+    # "USER@REALM!TOKENID=SECRET". Only used when forge.proxmox.enabled is true;
+    # referenced by a runtime backend via secret_refs {token: "PROXMOX_TOKEN"}.
+    proxmoxToken: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -273,6 +277,13 @@ forge:
   dockerSocket:
     enabled: false
     path: /var/run/docker.sock
+  # Proxmox VM-per-job runtime backend. When enabled, the PROXMOX_TOKEN secret is
+  # mounted into forge so an admin can create a runtime backend of type "proxmox"
+  # (via POST /runtime-backends) that clones a throwaway VM per job. The backend's
+  # url/node/template_vmid/storage/bridge live in its API config, not here — this
+  # flag only gates whether the token secret is wired into the pod.
+  proxmox:
+    enabled: false
 
 # ── Workflows ─────────────────────────────────────────────────────────────────
 workflows:

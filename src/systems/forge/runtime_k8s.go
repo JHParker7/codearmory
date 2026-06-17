@@ -132,8 +132,8 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 					Labels: map[string]string{"app": "forge", "execution-id": exec.ExecutionID},
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy:                corev1.RestartPolicyNever,
-					RuntimeClassName:             r.runtimeClass,
+					RestartPolicy:    corev1.RestartPolicyNever,
+					RuntimeClassName: r.runtimeClass,
 					// Prevent the pod from inheriting cluster credentials via
 					// the default service account token.
 					AutomountServiceAccountToken: ptr(false),

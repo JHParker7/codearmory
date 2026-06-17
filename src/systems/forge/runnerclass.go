@@ -8,9 +8,9 @@ import (
 // defaultRunnerClasses are seeded on startup if absent. Operators can edit them
 // at runtime via the API — changes take effect immediately without a restart.
 var defaultRunnerClasses = []RunnerClass{
-	{Name: "standard", MemoryMB: 256, CPUMillicores: 500, PidsLimit: 64, TmpfsMB: 64, Enabled: true},
-	{Name: "large", MemoryMB: 2048, CPUMillicores: 2000, PidsLimit: 256, TmpfsMB: 512, Enabled: true},
-	{Name: "xlarge", MemoryMB: 8192, CPUMillicores: 4000, PidsLimit: 512, TmpfsMB: 2048, Enabled: true},
+	{Name: "standard", MemoryMB: 256, CPUMillicores: 500, PidsLimit: 64, TmpfsMB: 64, DiskGB: 10, Backend: "default", Enabled: true},
+	{Name: "large", MemoryMB: 2048, CPUMillicores: 2000, PidsLimit: 256, TmpfsMB: 512, DiskGB: 20, Backend: "default", Enabled: true},
+	{Name: "xlarge", MemoryMB: 8192, CPUMillicores: 4000, PidsLimit: 512, TmpfsMB: 2048, DiskGB: 40, Backend: "default", Enabled: true},
 }
 
 func migrateAndSeedRunnerClasses() error {

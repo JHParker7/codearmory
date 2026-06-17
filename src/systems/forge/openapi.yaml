@@ -297,6 +297,147 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /runtime-backends:
+    get:
+      summary: List runtime backends
+      operationId: listRuntimeBackends
+      description: |
+        Returns all runtime backends ordered by name. Read access is granted to
+        users so a client can show which backend a runner class targets; create,
+        update, and delete are admin-only.
+
+        Permission: `listRuntimeBackend` on `forge/runtime-backends`.
+      responses:
+        '200':
+          description: List of runtime backends
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RuntimeBackend'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      summary: Create runtime backend
+      operationId: createRuntimeBackend
+      description: |
+        Creates a runtime backend (admin only). Returns `409` if one with the same
+        name already exists. A `proxmox` backend validates its required config keys
+        and the `token` secret_ref.
+
+        Permission: `createRuntimeBackend` on `forge/runtime-backends`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeBackendBody'
+      responses:
+        '201':
+          description: Runtime backend created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeBackend'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Runtime backend already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /runtime-backends/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Runtime backend name
+
+    get:
+      summary: Get runtime backend
+      operationId: getRuntimeBackend
+      description: |
+        Permission: `getRuntimeBackend` on `forge/runtime-backends/{name}`.
+      responses:
+        '200':
+          description: Runtime backend
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeBackend'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      summary: Update runtime backend
+      operationId: updateRuntimeBackend
+      description: |
+        Replaces the backend's mutable fields (admin only). The registry evicts its
+        cached runtime so the change applies to new jobs without a restart.
+
+        Permission: `updateRuntimeBackend` on `forge/runtime-backends/{name}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeBackendBody'
+      responses:
+        '200':
+          description: Updated runtime backend
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeBackend'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete runtime backend
+      operationId: deleteRuntimeBackend
+      description: |
+        Deletes the named backend (admin only). The `default` backend cannot be
+        deleted and returns `409`.
+
+        Permission: `deleteRuntimeBackend` on `forge/runtime-backends/{name}`.
+      responses:
+        '204':
+          description: Runtime backend deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Cannot delete the default runtime backend
+          content:
+            text/plain:
+              schema:
+                type: string
+
 components:
   securitySchemes:
     bearerAuth:
@@ -441,6 +582,18 @@ components:
           type: integer
           description: Size of the writable /tmp tmpfs in megabytes.
           example: 64
+        disk_gb:
+          type: integer
+          description: |
+            Disk size in gigabytes. Used only by the proxmox backend (VM disk
+            size); ignored by the docker and kubernetes backends.
+          example: 10
+        backend:
+          type: string
+          description: |
+            Name of the runtime backend this class runs on. Defaults to
+            `default` (the backend seeded from the legacy RUNTIME env).
+          example: default
         enabled:
           type: boolean
           description: Whether this class can be selected for new submissions.
@@ -480,10 +633,97 @@ components:
           description: /tmp size in megabytes. Minimum 16.
           minimum: 16
           example: 64
+        disk_gb:
+          type: integer
+          description: |
+            VM disk size in gigabytes for the proxmox backend; ignored by docker
+            and kubernetes. Minimum 0 (0 = use the template disk unchanged).
+          minimum: 0
+          example: 20
+        backend:
+          type: string
+          description: |
+            Runtime backend name. Empty defaults to `default`. Must reference a
+            backend created via `/runtime-backends`.
+          example: default
         enabled:
           type: boolean
           description: Whether the class can be selected for new submissions.
           example: true
+
+    RuntimeBackend:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Unique backend name. Runner classes reference it by name.
+          example: proxmox-prod
+        type:
+          type: string
+          enum: [docker, kubernetes, proxmox]
+          description: Runtime implementation this backend selects.
+          example: proxmox
+        enabled:
+          type: boolean
+          description: Whether the backend may be used by new jobs.
+          example: true
+        config:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Non-secret backend settings. For proxmox:
+            `url`, `node`, `template_vmid`, `storage`, `bridge`, and optionally
+            `boot_disk` (disk id to resize, default `scsi0`), `vlan`,
+            `clone_mode` (`linked`|`full`), `egress_proxy`, `tls_insecure`,
+            `ca_file`. docker/kubernetes read their settings from env instead.
+          example:
+            url: https://pve:8006/api2/json
+            node: pve
+            template_vmid: "9000"
+            storage: local-lvm
+            bridge: vmbr1
+        secret_refs:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Maps a logical key to the NAME of an environment variable read via the
+            secret() convention — only env var names are stored and returned, never
+            secret values. Proxmox requires `token` → the var holding the PVE API
+            token.
+          example:
+            token: PROXMOX_TOKEN
+        created_at:
+          type: string
+          format: date-time
+
+    RuntimeBackendBody:
+      type: object
+      required:
+        - name
+        - type
+        - enabled
+      properties:
+        name:
+          type: string
+          description: Unique backend name. Ignored on PUT (name comes from path).
+          example: proxmox-prod
+        type:
+          type: string
+          enum: [docker, kubernetes, proxmox]
+          example: proxmox
+        enabled:
+          type: boolean
+          example: true
+        config:
+          type: object
+          additionalProperties:
+            type: string
+        secret_refs:
+          type: object
+          additionalProperties:
+            type: string
 
   responses:
     BadRequest:

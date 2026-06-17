@@ -19,12 +19,20 @@ const pollInterval = 1 * time.Second
 
 // WorkerPool runs executions pulled from the pending queue in PostgreSQL.
 type WorkerPool struct {
-	rt      Runtime
-	cancels sync.Map // executionID -> context.CancelFunc
+	registry *runtimeRegistry
+	cancels  sync.Map // executionID -> runningExec
 }
 
-func newWorkerPool(rt Runtime) *WorkerPool {
-	return &WorkerPool{rt: rt}
+// runningExec tracks an in-flight execution so Cancel can both unblock Run (via
+// the context) and ask the runtime to tear down its work explicitly (stop+destroy
+// a VM, delete a job). rt is the runtime resolved for this execution's backend.
+type runningExec struct {
+	cancel context.CancelFunc
+	rt     Runtime
+}
+
+func newWorkerPool(registry *runtimeRegistry) *WorkerPool {
+	return &WorkerPool{registry: registry}
 }
 
 // Start launches n worker goroutines. Call with a context that lives for the
@@ -35,14 +43,24 @@ func (p *WorkerPool) Start(ctx context.Context, n int) {
 	}
 }
 
-// Cancel terminates a running execution. Returns false if the execution is not
-// currently tracked (already finished or not yet started).
+// Cancel terminates a running execution. It cancels the execution's context
+// (unblocking Run) and then asks the resolved runtime to tear down its work
+// explicitly — a no-op for docker, a job delete for kubernetes, a VM stop+destroy
+// for proxmox. Returns false if the execution is not currently tracked (already
+// finished or not yet started).
 func (p *WorkerPool) Cancel(executionID string) bool {
-	if fn, ok := p.cancels.Load(executionID); ok {
-		fn.(context.CancelFunc)()
-		return true
+	v, ok := p.cancels.Load(executionID)
+	if !ok {
+		return false
 	}
-	return false
+	re := v.(runningExec)
+	re.cancel()
+	if re.rt != nil {
+		if err := re.rt.Cancel(context.Background(), executionID); err != nil {
+			slog.Warn("worker: runtime cancel failed", "execution_id", executionID, "error", err)
+		}
+	}
+	return true
 }
 
 func (p *WorkerPool) loop(ctx context.Context) {
@@ -136,18 +154,28 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 		attribute.String("execution.id", exec.ExecutionID),
 		attribute.String("execution.image", exec.Image),
 		attribute.String("execution.runner_class", exec.RunnerClass),
+		attribute.String("execution.backend", exec.Backend),
 	))
 	defer span.End()
 
 	runCtx, cancel := context.WithCancel(ctx)
-	p.cancels.Store(exec.ExecutionID, cancel)
-	defer func() {
-		cancel()
-		p.cancels.Delete(exec.ExecutionID)
-	}()
+	defer cancel()
 
-	slog.InfoContext(ctx, "worker: starting execution", "execution_id", exec.ExecutionID, "image", exec.Image)
-	result, runErr := p.rt.Run(runCtx, exec)
+	slog.InfoContext(ctx, "worker: starting execution", "execution_id", exec.ExecutionID, "image", exec.Image, "backend", exec.Backend)
+
+	// Resolve the execution's backend. A missing/disabled/misconfigured backend
+	// fails only this execution (classifyResult's runtime-error path) rather than
+	// crashing the worker — see R5 in the design.
+	var result RunResult
+	var runErr error
+	rt, gerr := p.registry.Get(ctx, exec.Backend)
+	if gerr != nil {
+		runErr = fmt.Errorf("runtime backend %q: %w", exec.Backend, gerr)
+	} else {
+		p.cancels.Store(exec.ExecutionID, runningExec{cancel: cancel, rt: rt})
+		defer p.cancels.Delete(exec.ExecutionID)
+		result, runErr = rt.Run(runCtx, exec)
+	}
 
 	status, result, sysErr := classifyResult(exec, result, runErr)
 
@@ -173,4 +201,3 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 		slog.ErrorContext(ctx, "worker: update execution result", "execution_id", exec.ExecutionID, "error", err)
 	}
 }
-

@@ -206,13 +206,14 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		Env         []byte `gorm:"column:env"`
 		TimeoutSecs int64  `gorm:"column:timeout_secs"`
 		RunnerClass string `gorm:"column:runner_class"`
+		Backend     string `gorm:"column:backend"`
 	}
 	var raw pendingRow
 
 	// FOR UPDATE SKIP LOCKED lets multiple workers run in parallel: each goroutine
 	// locks exactly one pending row and skips any already locked by a sibling.
 	result := tx.Raw(`
-		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class
+		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class, backend
 		FROM executions WHERE status = 'pending' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
 	`).Scan(&raw)
 	if result.Error != nil {
@@ -234,6 +235,7 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 	exec.Image = raw.Image
 	exec.TimeoutSecs = raw.TimeoutSecs
 	exec.RunnerClass = raw.RunnerClass
+	exec.Backend = raw.Backend
 
 	if err := json.Unmarshal(raw.Command, &exec.Command); err != nil {
 		tx.Rollback() //nolint:errcheck
@@ -292,6 +294,8 @@ func (rc RunnerClass) Update(ctx context.Context) error {
 		"cpu_millicores": rc.CPUMillicores,
 		"pids_limit":     rc.PidsLimit,
 		"tmpfs_mb":       rc.TmpfsMB,
+		"disk_gb":        rc.DiskGB,
+		"backend":        rc.Backend,
 		"enabled":        rc.Enabled,
 	})
 	if result.Error != nil {
@@ -350,6 +354,91 @@ func (rc RunnerClass) List(ctx context.Context, _ int, _ int) ([]db, error) {
 	rows := make([]db, len(classes))
 	for i, c := range classes {
 		rows[i] = c
+	}
+	return rows, nil
+}
+
+// ── RuntimeBackend ────────────────────────────────────────────────────────────
+
+func (b RuntimeBackend) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.runtimebackend.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("runtime_backend.name", b.Name))
+	if err := connect().WithContext(ctx).Create(&b).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (b RuntimeBackend) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.runtimebackend.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("runtime_backend.name", b.Name))
+	result := connect().WithContext(ctx).Model(&RuntimeBackend{}).Where("name = ?", b.Name).Updates(map[string]any{
+		"type":        b.Type,
+		"enabled":     b.Enabled,
+		"config":      b.Config,
+		"secret_refs": b.SecretRefs,
+	})
+	if result.Error != nil {
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (b RuntimeBackend) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.runtimebackend.remove")
+	defer span.End()
+	span.SetAttributes(attribute.String("runtime_backend.name", b.Name))
+	result := connect().WithContext(ctx).Where("name = ?", b.Name).Delete(&RuntimeBackend{})
+	if result.Error != nil {
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (b RuntimeBackend) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.runtimebackend.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("runtime_backend.name", b.Name))
+	var out RuntimeBackend
+	if err := connect().WithContext(ctx).Where("name = ?", b.Name).First(&out).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return out, nil
+}
+
+func (b RuntimeBackend) List(ctx context.Context, _ int, _ int) ([]db, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.runtimebackend.list")
+	defer span.End()
+	var backends []RuntimeBackend
+	if err := connect().WithContext(ctx).Order("name").Find(&backends).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	rows := make([]db, len(backends))
+	for i, be := range backends {
+		rows[i] = be
 	}
 	return rows, nil
 }

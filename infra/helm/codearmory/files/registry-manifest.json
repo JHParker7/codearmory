@@ -139,7 +139,12 @@
       { "method": "POST",   "path": "/runner-classes",           "action": "createRunnerClass", "resource": "forge/runner-classes" },
       { "method": "GET",    "path": "/runner-classes/{name}",    "action": "getRunnerClass",    "resource": "forge/runner-classes/{name}" },
       { "method": "PUT",    "path": "/runner-classes/{name}",    "action": "updateRunnerClass", "resource": "forge/runner-classes/{name}" },
-      { "method": "DELETE", "path": "/runner-classes/{name}",    "action": "deleteRunnerClass", "resource": "forge/runner-classes/{name}" }
+      { "method": "DELETE", "path": "/runner-classes/{name}",    "action": "deleteRunnerClass", "resource": "forge/runner-classes/{name}" },
+      { "method": "GET",    "path": "/runtime-backends",         "action": "listRuntimeBackend",   "resource": "forge/runtime-backends" },
+      { "method": "POST",   "path": "/runtime-backends",         "action": "createRuntimeBackend", "resource": "forge/runtime-backends" },
+      { "method": "GET",    "path": "/runtime-backends/{name}",  "action": "getRuntimeBackend",    "resource": "forge/runtime-backends/{name}" },
+      { "method": "PUT",    "path": "/runtime-backends/{name}",  "action": "updateRuntimeBackend", "resource": "forge/runtime-backends/{name}" },
+      { "method": "DELETE", "path": "/runtime-backends/{name}",  "action": "deleteRuntimeBackend", "resource": "forge/runtime-backends/{name}" }
     ],
     "actions": [
       {
@@ -172,6 +177,11 @@
         "grant_on": "user",
         "actions": ["listRunnerClass", "getRunnerClass"],
         "resources": ["{username}/forge/runner-classes", "{username}/forge/runner-classes/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listRuntimeBackend", "getRuntimeBackend"],
+        "resources": ["{username}/forge/runtime-backends", "{username}/forge/runtime-backends/*"]
       },
       {
         "grant_on": "user",

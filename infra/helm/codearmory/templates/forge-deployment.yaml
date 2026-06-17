@@ -85,6 +85,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-forge
                   key: gatekeeper-service-key
+            {{- if .Values.forge.proxmox.enabled }}
+            # Proxmox VE API token consumed by a runtime backend of type "proxmox"
+            # via secret_refs {token: "PROXMOX_TOKEN"}. Optional so a missing key
+            # degrades to that backend's executions failing, not the whole pod.
+            - name: PROXMOX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-forge
+                  key: proxmox-token
+                  optional: true
+            {{- end }}
             {{- include "codearmory.tls.envs" .Values.forge.tls | nindent 12 }}
           {{- $tlsMounts := include "codearmory.tls.volumeMounts" .Values.forge.tls }}
           {{- if or (and (eq .Values.forge.env.runtime "docker") .Values.forge.dockerSocket.enabled) $tlsMounts }}

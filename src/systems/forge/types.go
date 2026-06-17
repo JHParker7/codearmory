@@ -28,23 +28,52 @@ type Execution struct {
 	Env         map[string]string `gorm:"column:env;type:jsonb;not null;default:'{}';serializer:json" json:"env"`
 	TimeoutSecs int64             `gorm:"column:timeout_secs;not null;default:30"                 json:"timeout"`
 	RunnerClass string            `gorm:"column:runner_class;not null;default:standard"           json:"runner_class"`
-	Status      string            `gorm:"column:status;not null;default:pending"                  json:"status"`
-	ExitCode    *int              `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
-	Stdout      *string           `gorm:"column:stdout"                                           json:"stdout,omitempty"`
-	Stderr      *string           `gorm:"column:stderr"                                           json:"stderr,omitempty"`
-	CreatedAt   time.Time         `gorm:"column:created_at;not null;default:now()"                json:"created_at"`
-	StartedAt   *time.Time        `gorm:"column:started_at"                                       json:"started_at,omitempty"`
-	EndedAt     *time.Time        `gorm:"column:ended_at"                                         json:"ended_at,omitempty"`
+	// Backend is the runtime backend this execution runs on, snapshotted from the
+	// runner class at submit time so re-pointing the class mid-flight cannot move
+	// an already-queued job to a different runtime.
+	Backend   string     `gorm:"column:backend;not null;default:default"                 json:"backend"`
+	Status    string     `gorm:"column:status;not null;default:pending"                  json:"status"`
+	ExitCode  *int       `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
+	Stdout    *string    `gorm:"column:stdout"                                           json:"stdout,omitempty"`
+	Stderr    *string    `gorm:"column:stderr"                                           json:"stderr,omitempty"`
+	CreatedAt time.Time  `gorm:"column:created_at;not null;default:now()"                json:"created_at"`
+	StartedAt *time.Time `gorm:"column:started_at"                                       json:"started_at,omitempty"`
+	EndedAt   *time.Time `gorm:"column:ended_at"                                         json:"ended_at,omitempty"`
 }
 
-// RunnerClass defines the resource limits for a named execution tier.
+// RunnerClass defines the resource limits for a named execution tier. The same
+// resource fields are reinterpreted per backend: docker/k8s read MemoryMB/
+// CPUMillicores/PidsLimit/TmpfsMB; the proxmox backend maps MemoryMB→VM RAM,
+// CPUMillicores→ceil(/1000) vCPU and adds DiskGB (which docker/k8s ignore).
 type RunnerClass struct {
-	Name          string `gorm:"primaryKey"            json:"name"`
-	MemoryMB      int64  `gorm:"not null"              json:"memory_mb"`
-	CPUMillicores int64  `gorm:"not null"              json:"cpu_millicores"`
-	PidsLimit     int64  `gorm:"not null;default:64"   json:"pids_limit"`
-	TmpfsMB       int64  `gorm:"not null;default:64"   json:"tmpfs_mb"`
-	Enabled       bool   `gorm:"not null;default:true" json:"enabled"`
+	Name          string `gorm:"primaryKey"                 json:"name"`
+	MemoryMB      int64  `gorm:"not null"                   json:"memory_mb"`
+	CPUMillicores int64  `gorm:"not null"                   json:"cpu_millicores"`
+	PidsLimit     int64  `gorm:"not null;default:64"        json:"pids_limit"`
+	TmpfsMB       int64  `gorm:"not null;default:64"        json:"tmpfs_mb"`
+	DiskGB        int64  `gorm:"not null;default:10"        json:"disk_gb"`
+	// Backend names the RuntimeBackend this class runs on. Defaults to "default",
+	// the backend seeded from the legacy RUNTIME env, so existing classes keep
+	// working unchanged.
+	Backend string `gorm:"not null;default:default"   json:"backend"`
+	Enabled bool   `gorm:"not null;default:true"      json:"enabled"`
+}
+
+// RuntimeBackend is an admin-managed runtime target. Type selects the runtime
+// implementation (docker|kubernetes|proxmox); Config holds non-secret settings
+// (jsonb) and SecretRefs maps a logical key to the NAME of an env var read via
+// secret() — credentials never live in the database, so returning a backend is
+// always safe.
+type RuntimeBackend struct {
+	Name string `gorm:"column:name;primaryKey" json:"name"`
+	Type string `gorm:"column:type;not null"   json:"type"`
+	// Enabled has no DB-level default on purpose: a `default:true` tag makes GORM
+	// omit the false zero-value on insert, so a backend created disabled would come
+	// back enabled. Create/Update always set this explicitly from the request body.
+	Enabled    bool              `gorm:"column:enabled;not null"                                    json:"enabled"`
+	Config     map[string]string `gorm:"column:config;type:jsonb;not null;default:'{}';serializer:json"      json:"config"`
+	SecretRefs map[string]string `gorm:"column:secret_refs;type:jsonb;not null;default:'{}';serializer:json" json:"secret_refs"`
+	CreatedAt  time.Time         `gorm:"column:created_at;not null;default:now()"                   json:"created_at"`
 }
 
 type submitRequest struct {

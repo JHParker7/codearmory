@@ -34,7 +34,7 @@ func setupForgeTestDB() {
 	gormDB = conn
 	gormDBMu.Unlock()
 
-	if err := conn.AutoMigrate(&Execution{}, &RunnerClass{}); err != nil {
+	if err := conn.AutoMigrate(&Execution{}, &RunnerClass{}, &RuntimeBackend{}); err != nil {
 		return
 	}
 	forgeTestDBReady = true

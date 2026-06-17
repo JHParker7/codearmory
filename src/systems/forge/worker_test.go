@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestClassifyResult(t *testing.T) {
@@ -125,4 +127,41 @@ func TestClassifyResult(t *testing.T) {
 			t.Errorf("stderr = %q, want the captured output kept over the diagnostic", res.Stderr)
 		}
 	})
+}
+
+// TestWorkerRun_BackendResolutionFailure exercises R5: an execution naming a
+// backend the registry cannot resolve must fail only itself — the worker records
+// StatusFailed with the reason in stderr and does not panic.
+func TestWorkerRun_BackendResolutionFailure(t *testing.T) {
+	requireForgeDB(t)
+
+	execID := uuid.New().String()
+	if err := connect().Exec(
+		`INSERT INTO executions (execution_id, user_id, image, command, env, timeout_secs, runner_class, backend, status)
+		 VALUES (?, 'user-x', 'alpine:3.19', '["echo","hi"]'::jsonb, '{}'::jsonb, 30, 'standard', 'ghost-backend', 'running')`,
+		execID).Error; err != nil {
+		t.Fatalf("insert execution: %v", err)
+	}
+	t.Cleanup(func() {
+		connect().Exec(`DELETE FROM executions WHERE execution_id = ?`, execID) //nolint:errcheck
+	})
+
+	pool := newWorkerPool(newRuntimeRegistry())
+	exec := Execution{
+		ExecutionID: execID, UserID: "user-x", Image: "alpine:3.19",
+		Command: []string{"echo", "hi"}, TimeoutSecs: 30, RunnerClass: "standard", Backend: "ghost-backend",
+	}
+	pool.run(context.Background(), exec) // must not panic
+
+	var row struct {
+		Status string  `gorm:"column:status"`
+		Stderr *string `gorm:"column:stderr"`
+	}
+	connect().Raw(`SELECT status, stderr FROM executions WHERE execution_id = ?`, execID).Scan(&row)
+	if row.Status != StatusFailed {
+		t.Fatalf("status = %q, want %q", row.Status, StatusFailed)
+	}
+	if row.Stderr == nil || !strings.Contains(*row.Stderr, "runtime backend") {
+		t.Fatalf("stderr = %v, want it to surface the unresolved runtime backend", row.Stderr)
+	}
 }
