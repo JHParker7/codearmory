@@ -26,6 +26,7 @@ func newSettingsModel() settingsModel {
 		formSelectDefault("theme", "Theme", themeOrder, activeThemeName),
 		formInputDefault("url", "Conductor", "http://localhost:8082", loadConfig().URL),
 	)
+	form.extraHint = "F2: setup wizard"
 	return settingsModel{form: form, origTheme: activeThemeName, initCmd: cmd}
 }
 
@@ -40,6 +41,13 @@ func (m settingsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// ctrl+c quits before the key can land in the URL text field.
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+		// F2 jumps to the full setup wizard. Intercepted before the form gets
+		// the key so it works while the URL input has focus. The textinput
+		// component does not consume function keys, so this is safe.
+		if msg.String() == "f2" {
+			setActiveTheme(m.origTheme) // discard the live preview before leaving
+			return m, launchSetup
 		}
 	}
 

@@ -54,7 +54,14 @@ type appModel struct {
 
 func newAppModel() appModel {
 	screens := hubScreens()
-	return appModel{home: newHomeModel(screens), screens: screens}
+	m := appModel{home: newHomeModel(screens), screens: screens}
+	if isFirstUse() {
+		// Show the welcome prompt before the home menu so a fresh install lands
+		// in a discoverable spot rather than a list of services the user has no
+		// credentials for. Pressing 'n' falls through to the home menu.
+		m.active = newFirstUseModel()
+	}
+	return m
 }
 
 // Init starts the single auto-refresh ticker. It runs for the whole session and
@@ -81,6 +88,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.active = nil
 		m.home = m.sized(newHomeModel(m.screens)).(homeModel)
 		return m, nil
+	}
+	if _, ok := msg.(launchSetupMsg); ok {
+		m.active = m.sized(newSetupTUIModel())
+		return m, m.active.Init()
 	}
 	if lm, ok := msg.(launchMsg); ok {
 		if lm.idx < 0 || lm.idx >= len(m.screens) {
@@ -224,6 +235,13 @@ func (w standaloneWrap) Init() tea.Cmd { return tea.Batch(w.inner.Init(), tuiAut
 func (w standaloneWrap) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, ok := msg.(goHomeMsg); ok {
 		return w, tea.Quit
+	}
+	if _, ok := msg.(launchSetupMsg); ok {
+		// No home to fall back to in standalone mode; replace the inner model
+		// with the wizard so launching setup from `armory settings` works.
+		next := newSetupTUIModel()
+		w.inner = next
+		return w, next.Init()
 	}
 	// standaloneWrap owns the auto-refresh ticker for a screen run directly (e.g.
 	// `armory forge tui`): reschedule it and forward the tick to the inner model.

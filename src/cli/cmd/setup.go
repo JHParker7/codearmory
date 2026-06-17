@@ -35,18 +35,19 @@ func prompt(label, defaultVal string) (string, error) {
 	return line, nil
 }
 
-func init() {
-	var (
-		flagSetupURL      string
-		flagSetupEmail    string
-		flagSetupUsername string
-		flagSetupSignup   bool
-	)
+var (
+	flagSetupURL      string
+	flagSetupEmail    string
+	flagSetupUsername string
+	flagSetupSignup   bool
+)
 
-	setupCmd := &cobra.Command{
-		Use:   "setup",
-		Short: "Configure conductor URL and authenticate",
-		Long: `Interactive wizard to configure the CodeArmory CLI.
+// setupCmd is the line-based setup wizard. The TUI variant (`armory setup tui`)
+// and its hub-menu screen are wired in setup_tui.go.
+var setupCmd = &cobra.Command{
+	Use:   "setup",
+	Short: "Configure conductor URL and authenticate",
+	Long: `Interactive wizard to configure the CodeArmory CLI.
 
 Saves the conductor URL to ~/.config/codearmory/config.json and stores
 the session token in the OS keychain (falls back to config file when the
@@ -55,75 +56,77 @@ keychain is unavailable).
   # Fully interactive:
   armory setup
 
+  # TUI form variant:
+  armory setup tui
+
   # Set URL only (skips login prompt):
   armory setup --url http://conductor:8080
 
   # Set URL and log in non-interactively:
   armory setup --url http://conductor:8080 --email admin@example.com`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// ── Step 1: conductor URL ─────────────────────────────────────
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// ── Step 1: conductor URL ─────────────────────────────────────
 
-			urlVal := flagSetupURL
-			if urlVal == "" {
-				var err error
-				urlVal, err = prompt("Conductor URL", loadConfig().URL)
-				if err != nil {
-					return fmt.Errorf("reading URL: %w", err)
+		urlVal := flagSetupURL
+		if urlVal == "" {
+			var err error
+			urlVal, err = prompt("Conductor URL", loadConfig().URL)
+			if err != nil {
+				return fmt.Errorf("reading URL: %w", err)
+			}
+		}
+		urlVal = strings.TrimRight(urlVal, "/")
+		if urlVal == "" {
+			return fmt.Errorf("conductor URL is required")
+		}
+
+		cfg := loadConfig()
+		cfg.URL = urlVal
+		if err := saveConfig(cfg); err != nil {
+			return fmt.Errorf("saving config: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "URL saved: %s\n", urlVal)
+
+		// ── Step 2: connectivity check ────────────────────────────────
+
+		fmt.Fprint(os.Stderr, "Testing connection... ")
+		if _, err := doRequest("GET", "/healthz", nil); err != nil {
+			fmt.Fprintln(os.Stderr, "✗")
+			fmt.Fprintf(os.Stderr, "warning: %s/healthz unreachable: %v\n", urlVal, err)
+			fmt.Fprintln(os.Stderr, "         Verify the URL and ensure conductor is running.")
+		} else {
+			fmt.Fprintln(os.Stderr, "✓")
+		}
+
+		// ── Step 3: sign up or log in ─────────────────────────────────
+
+		if err := setupAuth(flagSetupEmail, flagSetupUsername, flagSetupSignup); err != nil {
+			return err
+		}
+
+		// ── Step 4: shell completions ─────────────────────────────────
+
+		if shell := detectedShell(); shell != "" && isTerminal() {
+			answer, err := prompt(fmt.Sprintf("Install shell completions for %s? [Y/n]", shell), "y")
+			if err == nil && strings.ToLower(answer) != "n" && strings.ToLower(answer) != "no" {
+				if msg, err := installCompletions(cmd.Root(), shell); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: completions not installed: %v\n", err)
+				} else {
+					fmt.Fprintln(os.Stderr, msg)
 				}
 			}
-			urlVal = strings.TrimRight(urlVal, "/")
-			if urlVal == "" {
-				return fmt.Errorf("conductor URL is required")
-			}
+		}
 
-			cfg := loadConfig()
-			cfg.URL = urlVal
-			if err := saveConfig(cfg); err != nil {
-				return fmt.Errorf("saving config: %w", err)
-			}
-			fmt.Fprintf(os.Stderr, "URL saved: %s\n", urlVal)
+		fmt.Fprintln(os.Stderr, "\nSetup complete. Run `armory auth status` to verify.")
+		return nil
+	},
+}
 
-			// ── Step 2: connectivity check ────────────────────────────────
-
-			fmt.Fprint(os.Stderr, "Testing connection... ")
-			if _, err := doRequest("GET", "/healthz", nil); err != nil {
-				fmt.Fprintln(os.Stderr, "✗")
-				fmt.Fprintf(os.Stderr, "warning: %s/healthz unreachable: %v\n", urlVal, err)
-				fmt.Fprintln(os.Stderr, "         Verify the URL and ensure conductor is running.")
-			} else {
-				fmt.Fprintln(os.Stderr, "✓")
-			}
-
-			// ── Step 3: sign up or log in ─────────────────────────────────
-
-			if err := setupAuth(flagSetupEmail, flagSetupUsername, flagSetupSignup); err != nil {
-				return err
-			}
-
-			// ── Step 4: shell completions ─────────────────────────────────
-
-			if shell := detectedShell(); shell != "" && isTerminal() {
-				answer, err := prompt(fmt.Sprintf("Install shell completions for %s? [Y/n]", shell), "y")
-				if err == nil && strings.ToLower(answer) != "n" && strings.ToLower(answer) != "no" {
-					if msg, err := installCompletions(cmd.Root(), shell); err != nil {
-						fmt.Fprintf(os.Stderr, "warning: completions not installed: %v\n", err)
-					} else {
-						fmt.Fprintln(os.Stderr, msg)
-					}
-				}
-			}
-
-			fmt.Fprintln(os.Stderr, "\nSetup complete. Run `armory auth status` to verify.")
-			return nil
-		},
-	}
-
+func init() {
 	setupCmd.Flags().StringVar(&flagSetupURL, "url", "", "conductor base URL (skips URL prompt)")
 	setupCmd.Flags().StringVar(&flagSetupEmail, "email", "", "email address (skips login prompt, still asks for password)")
 	setupCmd.Flags().StringVar(&flagSetupUsername, "username", "", "username for sign up (implies --signup)")
 	setupCmd.Flags().BoolVar(&flagSetupSignup, "signup", false, "create a new account instead of logging in to an existing one")
-
-	RegisterModule(Module{Name: "setup", Command: setupCmd})
 }
 
 func isTerminal() bool {
