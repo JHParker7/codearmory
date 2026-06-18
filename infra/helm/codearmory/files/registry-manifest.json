@@ -271,6 +271,44 @@
     ]
   },
   {
+    "name": "notifications",
+    "url": "http://notifications:8094",
+    "description": "Notification delivery via pluggable integrations (Slack, email, webhook)",
+    "forward_auth": true,
+    "service_key": "notifications-registry-local-secret",
+    "endpoints": [
+      { "method": "GET",    "path": "/providers",            "action": "listProvider",       "resource": "notifications/providers"        },
+      { "method": "GET",    "path": "/channels",             "action": "listChannel",        "resource": "notifications/channels"         },
+      { "method": "POST",   "path": "/channels",             "action": "createChannel",      "resource": "notifications/channels"         },
+      { "method": "GET",    "path": "/channels/{id}",        "action": "getChannel",         "resource": "notifications/channels/{id}"    },
+      { "method": "PUT",    "path": "/channels/{id}",        "action": "updateChannel",      "resource": "notifications/channels/{id}"    },
+      { "method": "DELETE", "path": "/channels/{id}",        "action": "deleteChannel",      "resource": "notifications/channels/{id}"    },
+      { "method": "POST",   "path": "/channels/{id}/test",   "action": "testChannel",        "resource": "notifications/channels/{id}"    },
+      { "method": "POST",   "path": "/notify",               "action": "createNotification", "resource": "notifications/notifications"    },
+      { "method": "GET",    "path": "/notifications",        "action": "listNotification",   "resource": "notifications/notifications"    },
+      { "method": "GET",    "path": "/notifications/{id}",   "action": "getNotification",    "resource": "notifications/notifications/{id}" }
+    ],
+    "actions": [
+      {
+        "name": "notifications/notify",
+        "method": "POST",
+        "path": "/notify"
+      },
+      {
+        "name": "notifications/test",
+        "method": "POST",
+        "path": "/channels/{id}/test"
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["listProvider", "listChannel", "createChannel", "getChannel", "updateChannel", "deleteChannel", "testChannel", "createNotification", "listNotification", "getNotification"],
+        "resources": ["{username}/notifications/providers", "{username}/notifications/channels", "{username}/notifications/channels/*", "{username}/notifications/notifications", "{username}/notifications/notifications/*"]
+      }
+    ]
+  },
+  {
     "name": "hooks",
     "url": "http://hooks:8087",
     "description": "Webhook ingestion and pipeline rule management",

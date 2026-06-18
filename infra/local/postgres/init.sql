@@ -4,6 +4,7 @@ CREATE DATABASE forge;
 CREATE DATABASE registry;
 CREATE DATABASE workflows;
 CREATE DATABASE tickets;
+CREATE DATABASE notifications;
 CREATE DATABASE hooks;
 CREATE DATABASE gitea_integration;
 CREATE DATABASE outpost_gateway;
