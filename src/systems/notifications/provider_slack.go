@@ -62,7 +62,8 @@ func (slackNotifier) Send(ctx context.Context, config map[string]string, msg Mes
 
 	resp, err := webhookClient.Do(req)
 	if err != nil {
-		return err
+		// Scrub the URL: a *url.Error embeds the secret webhook_url/token.
+		return scrubURLError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

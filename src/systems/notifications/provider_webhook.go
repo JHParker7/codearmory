@@ -56,7 +56,8 @@ func (webhookNotifier) Send(ctx context.Context, config map[string]string, msg M
 
 	resp, err := webhookClient.Do(req)
 	if err != nil {
-		return err
+		// Scrub the URL: a *url.Error embeds the (potentially secret) target URL.
+		return scrubURLError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

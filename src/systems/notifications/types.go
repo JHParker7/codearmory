@@ -36,12 +36,15 @@ type Channel struct {
 	Name      string            `json:"name"       gorm:"column:name"`
 	Type      string            `json:"type"       gorm:"column:type"`
 	Config    map[string]string `json:"config"     gorm:"column:config;serializer:json"`
-	Enabled   bool              `json:"enabled"    gorm:"column:enabled;default:true"`
-	CreatedBy string            `json:"created_by" gorm:"column:created_by"`
-	OrgID     string            `json:"org_id"     gorm:"column:org_id;default:''"`
-	Active    bool              `json:"-"          gorm:"column:active;default:true"`
-	CreatedAt time.Time         `json:"created_at" gorm:"column:created_at"`
-	UpdatedAt time.Time         `json:"updated_at" gorm:"column:updated_at"`
+	// No `default:` tag: GORM omits a field's zero value on Create when it carries
+	// a default, which would silently flip an explicit enabled:false back to true.
+	// handleCreateChannel always sets this field, so the column needs no DB default.
+	Enabled   bool      `json:"enabled"    gorm:"column:enabled"`
+	CreatedBy string    `json:"created_by" gorm:"column:created_by"`
+	OrgID     string    `json:"org_id"     gorm:"column:org_id;default:''"`
+	Active    bool      `json:"-"          gorm:"column:active;default:true"`
+	CreatedAt time.Time `json:"created_at" gorm:"column:created_at"`
+	UpdatedAt time.Time `json:"updated_at" gorm:"column:updated_at"`
 }
 
 // TableName sets the GORM table name for Channel.
@@ -52,19 +55,23 @@ func (Channel) TableName() string { return "channels" }
 // StatusFailed with Attempts < maxAttempts are re-sent until they succeed or are
 // exhausted.
 type Notification struct {
-	NotificationID string     `json:"notification_id" gorm:"column:notification_id;primaryKey"`
-	ChannelID      string     `json:"channel_id"      gorm:"column:channel_id"`
-	ChannelType    string     `json:"channel_type"    gorm:"column:channel_type"`
-	Subject        string     `json:"subject"         gorm:"column:subject;default:''"`
-	Body           string     `json:"body"            gorm:"column:body"`
-	Status         string     `json:"status"          gorm:"column:status;default:'pending'"`
-	Attempts       int        `json:"attempts"        gorm:"column:attempts;default:0"`
-	LastError      string     `json:"last_error"      gorm:"column:last_error;default:''"`
-	CreatedBy      string     `json:"created_by"      gorm:"column:created_by"`
-	OrgID          string     `json:"org_id"          gorm:"column:org_id;default:''"`
-	SentAt         *time.Time `json:"sent_at,omitempty" gorm:"column:sent_at"`
-	CreatedAt      time.Time  `json:"created_at"      gorm:"column:created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"      gorm:"column:updated_at"`
+	NotificationID string `json:"notification_id" gorm:"column:notification_id;primaryKey"`
+	ChannelID      string `json:"channel_id"      gorm:"column:channel_id"`
+	ChannelType    string `json:"channel_type"    gorm:"column:channel_type"`
+	Subject        string `json:"subject"         gorm:"column:subject;default:''"`
+	Body           string `json:"body"            gorm:"column:body"`
+	Status         string `json:"status"          gorm:"column:status;default:'pending';index:idx_notif_retry,priority:1"`
+	Attempts       int    `json:"attempts"        gorm:"column:attempts;default:0"`
+	LastError      string `json:"last_error"      gorm:"column:last_error;default:''"`
+	// NextAttemptAt gates re-claiming by the retry worker: a failed row is only
+	// re-delivered once this time has passed, giving exponential backoff between
+	// attempts instead of re-sending on every tick. Zero time means "due now".
+	NextAttemptAt time.Time  `json:"next_attempt_at" gorm:"column:next_attempt_at;index:idx_notif_retry,priority:2"`
+	CreatedBy     string     `json:"created_by"      gorm:"column:created_by"`
+	OrgID         string     `json:"org_id"          gorm:"column:org_id;default:''"`
+	SentAt        *time.Time `json:"sent_at,omitempty" gorm:"column:sent_at"`
+	CreatedAt     time.Time  `json:"created_at"      gorm:"column:created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"      gorm:"column:updated_at"`
 }
 
 // TableName sets the GORM table name for Notification.

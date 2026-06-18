@@ -123,7 +123,8 @@ func handleListChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("permission.granted")
 
-	channels, err := listChannels(ctx, userID, orgID, r.URL.Query().Get("enabled") == "true")
+	limit, offset := pagination(r)
+	channels, err := listChannels(ctx, userID, orgID, r.URL.Query().Get("enabled") == "true", limit, offset)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
@@ -329,11 +330,14 @@ func handleTestChannel(w http.ResponseWriter, r *http.Request) {
 		ChannelType:    c.Type,
 		Subject:        msg.Subject,
 		Body:           msg.Body,
-		Attempts:       1,
-		CreatedBy:      userID,
-		OrgID:          c.OrgID,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		// A test is a synchronous one-shot: pin attempts at the cap so a failed test
+		// row is terminal and the retry worker never re-delivers the test message to
+		// the live endpoint (claimRetryable requires attempts < maxAttempts).
+		Attempts:  maxAttempts,
+		CreatedBy: userID,
+		OrgID:     c.OrgID,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	sendErr := deliverNow(ctx, c, msg)

@@ -92,8 +92,18 @@ func drain(ctx context.Context) {
 func processNotification(ctx context.Context, n Notification) {
 	ch, err := getChannel(ctx, n.ChannelID)
 	if err != nil {
-		// Channel gone — there's no point retrying. Burn the remaining attempts.
-		markFailed(ctx, n, "channel not found", true)
+		if isNotFound(err) {
+			// Channel genuinely gone — there's no point retrying. Burn the attempts.
+			markFailed(ctx, n, "channel not found", true)
+			return
+		}
+		// Transient lookup failure (DB blip / read-replica failover): no real delivery
+		// was attempted, so reschedule WITHOUT consuming the retry budget. Otherwise a
+		// blip on the final attempt — claimRetryable having just incremented attempts
+		// to maxAttempts — would permanently drop a deliverable notification.
+		slog.WarnContext(ctx, "worker: channel lookup failed, will retry",
+			"notification_id", n.NotificationID, "channel_id", n.ChannelID, "error", err)
+		markRetryable(ctx, n, "channel lookup failed")
 		return
 	}
 	if !ch.Enabled {
@@ -121,6 +131,24 @@ func processNotification(ctx context.Context, n Notification) {
 	meterSent.Add(ctx, 1, metric.WithAttributes(attribute.String("type", n.ChannelType)))
 }
 
+// markRetryable reschedules a notification after a failure that did NOT consume a
+// real delivery attempt (e.g. a transient channel-lookup error). It rolls back the
+// attempt claimRetryable incremented so transient faults can never exhaust the
+// budget, and applies backoff so a persistent transient fault doesn't hot-loop.
+func markRetryable(ctx context.Context, n Notification, reason string) {
+	n.Status = StatusFailed
+	n.LastError = reason
+	// Back off based on the current (pre-rollback) attempt count so repeated
+	// transient faults space out, then roll the attempt back to keep the budget intact.
+	n.NextAttemptAt = time.Now().UTC().Add(retryDelay(n.Attempts))
+	if n.Attempts > 0 {
+		n.Attempts--
+	}
+	if err := n.Update(ctx); err != nil {
+		slog.ErrorContext(ctx, "worker: mark retryable failed", "notification_id", n.NotificationID, "error", err)
+	}
+}
+
 // markFailed records a delivery failure. When exhausted, attempts is pinned at
 // maxAttempts so the worker stops retrying.
 func markFailed(ctx context.Context, n Notification, reason string, exhausted bool) {
@@ -128,6 +156,10 @@ func markFailed(ctx context.Context, n Notification, reason string, exhausted bo
 	n.LastError = reason
 	if exhausted {
 		n.Attempts = maxAttempts
+	} else {
+		// Space the next retry out with exponential backoff so a failing endpoint
+		// isn't re-hit on every worker tick.
+		n.NextAttemptAt = time.Now().UTC().Add(retryDelay(n.Attempts))
 	}
 	if err := n.Update(ctx); err != nil {
 		slog.ErrorContext(ctx, "worker: mark failed", "notification_id", n.NotificationID, "error", err)

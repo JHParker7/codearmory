@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"syscall"
 	"time"
 
@@ -46,6 +48,19 @@ func ssrfGuardControl(_, address string, _ syscall.RawConn) error {
 		return fmt.Errorf("refusing to connect to non-public address %s", ip)
 	}
 	return nil
+}
+
+// scrubURLError strips the request URL from a *url.Error so a secret embedded in
+// a channel's webhook_url (e.g. a Slack incoming-webhook token) never reaches a
+// stored last_error or an API response. http.Client.Do wraps every transport
+// failure as `&url.Error{Op, URL, Err}` whose Error() prints the full URL; we keep
+// the operation and the underlying cause but drop the URL itself.
+func scrubURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s request failed: %w", ue.Op, ue.Err)
+	}
+	return err
 }
 
 // isBlockedIP reports whether ip is in a range a user-supplied webhook URL must

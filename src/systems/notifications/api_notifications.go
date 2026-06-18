@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,29 @@ import (
 // generic 500 so handler error paths stay terse.
 func writeServerError(w http.ResponseWriter, msg string) {
 	http.Error(w, msg, http.StatusInternalServerError)
+}
+
+const (
+	listDefaultLimit = 100
+	listMaxLimit     = 500
+)
+
+// pagination parses ?limit= and ?offset= with sane defaults and clamping, so list
+// endpoints never silently truncate the result with no way to reach the rest.
+func pagination(r *http.Request) (limit, offset int) {
+	limit = listDefaultLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	limit = min(limit, listMaxLimit)
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	return limit, offset
 }
 
 type notifyRequest struct {
@@ -78,6 +102,7 @@ func handleNotify(w http.ResponseWriter, r *http.Request) {
 			Subject:        req.Subject,
 			Body:           req.Body,
 			Status:         StatusPending,
+			NextAttemptAt:  now, // due immediately
 			CreatedBy:      userID,
 			OrgID:          c.OrgID,
 			CreatedAt:      now,
@@ -109,7 +134,9 @@ func handleNotify(w http.ResponseWriter, r *http.Request) {
 // explicit channel_ids the caller may access, or all of their enabled channels
 // when none are given. Unknown or inaccessible IDs are silently skipped.
 func resolveTargets(ctx context.Context, userID, orgID string, ids []string) ([]Channel, error) {
-	all, err := listChannels(ctx, userID, orgID, true)
+	// Fan-out targets every enabled channel the caller can see, capped at the list
+	// maximum so an unbounded query can't be triggered by a single notify.
+	all, err := listChannels(ctx, userID, orgID, true, listMaxLimit, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +173,8 @@ func handleListNotifications(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	notifications, err := listNotifications(ctx, userID, orgID, statusFilter)
+	limit, offset := pagination(r)
+	notifications, err := listNotifications(ctx, userID, orgID, statusFilter, limit, offset)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")

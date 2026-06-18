@@ -20,6 +20,9 @@ func TestMain(m *testing.M) {
 	// covered by TestWebhookClientBlocksLoopback / TestIsBlockedIP.
 	httpClient = &http.Client{}
 	webhookClient = &http.Client{}
+	// Initialise the OTEL counters so worker paths that record metrics
+	// (markFailed/processNotification) don't nil-panic under test.
+	initMetrics()
 	os.Exit(m.Run())
 }
 

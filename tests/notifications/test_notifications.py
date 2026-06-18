@@ -8,7 +8,7 @@ successful external send.
 """
 import requests
 
-from conftest import NOTIFICATIONS_URL
+from conftest import NOTIFICATIONS_URL, _signup_login
 
 
 def _make_webhook_channel(bearer, name="Test webhook", enabled=True):
@@ -151,3 +151,80 @@ def test_list_notifications(bearer):
 def test_list_notifications_invalid_status_filter(bearer):
     res = requests.get(f"{NOTIFICATIONS_URL}/notifications?status=bogus", headers=bearer)
     assert res.status_code == 400
+
+
+# ── Pagination ──────────────────────────────────────────────────────────────────
+
+def _fresh_headers(prefix):
+    return {"Authorization": f"Bearer {_signup_login(prefix)}"}
+
+
+def test_list_channels_pagination():
+    # Fresh user so the channel set is deterministic regardless of other tests.
+    h = _fresh_headers("notif_page")
+    for i in range(3):
+        r = requests.post(f"{NOTIFICATIONS_URL}/channels", headers=h, json={
+            "name": f"page-{i}", "type": "webhook",
+            "config": {"url": "https://example.invalid/hook"},
+        })
+        assert r.status_code == 201, r.text
+
+    page = requests.get(f"{NOTIFICATIONS_URL}/channels?limit=2", headers=h)
+    assert page.status_code == 200
+    assert len(page.json()) == 2, page.text
+
+    rest = requests.get(f"{NOTIFICATIONS_URL}/channels?limit=2&offset=2", headers=h)
+    assert rest.status_code == 200
+    assert len(rest.json()) == 1, rest.text
+
+    allc = requests.get(f"{NOTIFICATIONS_URL}/channels", headers=h)
+    assert len(allc.json()) == 3, allc.text
+
+
+def test_list_notifications_pagination():
+    h = _fresh_headers("notif_page2")
+    cid = requests.post(f"{NOTIFICATIONS_URL}/channels", headers=h, json={
+        "name": "pager", "type": "webhook", "config": {"url": "https://example.invalid/hook"},
+    }).json()["channel_id"]
+    for i in range(3):
+        requests.post(f"{NOTIFICATIONS_URL}/notify", headers=h,
+                      json={"body": f"msg {i}", "channel_ids": [cid]})
+    page = requests.get(f"{NOTIFICATIONS_URL}/notifications?limit=2", headers=h)
+    assert page.status_code == 200
+    assert len(page.json()) == 2, page.text
+
+
+# ── SSRF guard: delivery to user-supplied targets ───────────────────────────────
+
+def test_webhook_to_internal_host_is_refused(bearer):
+    cid = requests.post(f"{NOTIFICATIONS_URL}/channels", headers=bearer, json={
+        "name": "ssrf-webhook", "type": "webhook",
+        "config": {"url": "http://169.254.169.254/latest/meta-data"},
+    }).json()["channel_id"]
+    res = requests.post(f"{NOTIFICATIONS_URL}/channels/{cid}/test", headers=bearer, json={})
+    assert res.status_code == 502, res.text  # refused by the SSRF dial guard
+
+
+def test_email_to_internal_host_is_refused(bearer):
+    cid = requests.post(f"{NOTIFICATIONS_URL}/channels", headers=bearer, json={
+        "name": "ssrf-email", "type": "email",
+        "config": {"host": "169.254.169.254", "from": "a@x.com", "to": "b@x.com"},
+    }).json()["channel_id"]
+    res = requests.post(f"{NOTIFICATIONS_URL}/channels/{cid}/test", headers=bearer, json={})
+    assert res.status_code == 502, res.text  # SMTP dial refused by the same guard
+
+
+# ── Secrets never leak through a delivery error ─────────────────────────────────
+
+def test_test_channel_error_does_not_leak_secret(bearer):
+    # Slack token lives in the URL path; the host is unresolvable so delivery fails
+    # with a transport (*url.Error) that embeds the full URL. The response must not
+    # echo the secret token back (it is stripped from the error).
+    secret = "S3CRETTOKEN_ABC123"
+    cid = requests.post(f"{NOTIFICATIONS_URL}/channels", headers=bearer, json={
+        "name": "leak-probe", "type": "slack",
+        "config": {"webhook_url": f"https://leak-probe-host.example.invalid/services/{secret}"},
+    }).json()["channel_id"]
+    res = requests.post(f"{NOTIFICATIONS_URL}/channels/{cid}/test", headers=bearer, json={})
+    assert res.status_code == 502, res.text
+    assert secret not in res.text, "delivery error leaked the secret webhook token"

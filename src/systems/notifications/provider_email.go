@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"mime"
 	"net"
 	"net/smtp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func init() { RegisterNotifier(emailNotifier{}) }
@@ -76,18 +78,74 @@ func (emailNotifier) Send(ctx context.Context, config map[string]string, msg Mes
 		auth = smtp.PlainAuth("", config["username"], config["password"], config["host"])
 	}
 
-	// smtp.SendMail is blocking with no context support; enforce the caller's
-	// deadline by running it on a goroutine and selecting on ctx.
-	done := make(chan error, 1)
-	go func() {
-		done <- smtp.SendMail(addr, auth, from, recipients, []byte(body))
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-done:
+	return sendMailGuarded(ctx, addr, config["host"], auth, from, recipients, []byte(body))
+}
+
+// sendMailGuarded reimplements smtp.SendMail over an SSRF-guarded, context-aware
+// dialer so the email provider gets the same protection as the webhook/Slack
+// clients. The dialer's Control hook (ssrfGuardControl) rejects any connection to
+// a non-public IP — loopback, private, link-local, or the cloud metadata endpoint
+// — against the *resolved* address, so a user-supplied SMTP host can no longer be
+// used to reach internal services (SSRF). DialContext is bound to ctx and the
+// connection inherits the caller's deadline, so a hung relay can neither block
+// past the timeout nor leak a goroutine the way the old smtp.SendMail call did.
+func sendMailGuarded(ctx context.Context, addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, Control: ssrfGuardControl}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
 		return err
 	}
+	// Bound the whole SMTP conversation by ctx: apply the deadline and tear the
+	// connection down if ctx is cancelled mid-exchange.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+	defer c.Close()
+
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		if err := c.StartTLS(&tls.Config{ServerName: host}); err != nil {
+			return err
+		}
+	}
+	if auth != nil {
+		if ok, _ := c.Extension("AUTH"); ok {
+			if err := c.Auth(auth); err != nil {
+				return err
+			}
+		} else {
+			// Credentials were configured but the relay doesn't offer AUTH — fail
+			// loudly rather than silently sending unauthenticated (matches stdlib
+			// smtp.SendMail, which errors instead of downgrading).
+			return fmt.Errorf("smtp: server %q does not support AUTH but credentials were provided", host)
+		}
+	}
+	if err := c.Mail(from); err != nil {
+		return err
+	}
+	for _, rcpt := range to {
+		if err := c.Rcpt(rcpt); err != nil {
+			return err
+		}
+	}
+	wc, err := c.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := wc.Write(msg); err != nil {
+		return err
+	}
+	if err := wc.Close(); err != nil {
+		return err
+	}
+	return c.Quit()
 }
 
 // buildEmailMessage assembles the RFC 5322 message and guards against email

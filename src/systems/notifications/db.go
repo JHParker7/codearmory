@@ -21,13 +21,15 @@ import (
 // another worker, so concurrent replicas never claim the same notification.
 var clauseSkipLocked = clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}
 
-// db is the common interface implemented by all persistent entities.
+// db is the common interface implemented by all persistent entities. Listing is
+// done by the purpose-built listChannels/listNotifications helpers (which apply
+// caller scoping and pagination), so it is intentionally not part of this
+// interface.
 type db interface {
 	Add(ctx context.Context) error
 	Update(ctx context.Context) error
 	Remove(ctx context.Context) error
 	Get(ctx context.Context) (db, error)
-	List(ctx context.Context, limit, offset int) ([]db, error)
 }
 
 var gormDB *gorm.DB
@@ -80,6 +82,19 @@ func isNotFound(err error) bool {
 	return errors.Is(err, gorm.ErrRecordNotFound)
 }
 
+// retryDelay returns the backoff before the next attempt after the given number
+// of failed attempts: 30s, 1m, 2m, 4m, 8m, capped at 15m. This spaces retries out
+// so a failing endpoint is not hammered on every worker tick.
+func retryDelay(attempts int) time.Duration {
+	const base = 30 * time.Second
+	const maxDelay = 15 * time.Minute
+	shift := min(max(attempts-1, 0), 5)
+	if d := base << shift; d < maxDelay {
+		return d
+	}
+	return maxDelay
+}
+
 // ── Channel ─────────────────────────────────────────────────────────────────
 
 func (c Channel) Add(ctx context.Context) error {
@@ -100,9 +115,8 @@ func (c Channel) Update(ctx context.Context) error {
 	defer span.End()
 	span.SetAttributes(attribute.String("channel.id", c.ChannelID))
 	c.UpdatedAt = time.Now().UTC()
-	// Save issues a full-row update by primary key, so an explicit Enabled=false
-	// is persisted (unlike Create, which would drop the zero value for a column
-	// carrying a default).
+	// Save issues a full-row update by primary key, so all fields — including an
+	// explicit Enabled=false — are written.
 	if err := connect().WithContext(ctx).Save(&c).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -141,28 +155,6 @@ func (c Channel) Get(ctx context.Context) (db, error) {
 	return result, nil
 }
 
-func (c Channel) List(ctx context.Context, limit, offset int) ([]db, error) {
-	ctx, span := otel.Tracer("notifications").Start(ctx, "db.channel.list")
-	defer span.End()
-	var channels []Channel
-	c.Active = true
-	q := connectRead().WithContext(ctx).Where(c).Order("created_at DESC")
-	if limit > 0 {
-		q = q.Limit(limit).Offset(offset)
-	}
-	if err := q.Find(&channels).Error; err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return nil, err
-	}
-	span.SetStatus(codes.Ok, "")
-	result := make([]db, len(channels))
-	for i, ch := range channels {
-		result[i] = ch
-	}
-	return result, nil
-}
-
 // getChannel returns a single active channel by ID.
 func getChannel(ctx context.Context, id string) (Channel, error) {
 	row, err := (Channel{ChannelID: id}).Get(ctx)
@@ -174,14 +166,14 @@ func getChannel(ctx context.Context, id string) (Channel, error) {
 
 // listChannels returns active channels visible to the caller: their own plus any
 // in their org. An optional enabledOnly filter restricts to enabled channels.
-func listChannels(ctx context.Context, userID, orgID string, enabledOnly bool) ([]Channel, error) {
+func listChannels(ctx context.Context, userID, orgID string, enabledOnly bool, limit, offset int) ([]Channel, error) {
 	q := connectRead().WithContext(ctx).
 		Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID)
 	if enabledOnly {
 		q = q.Where("enabled = ?", true)
 	}
 	var channels []Channel
-	if err := q.Order("created_at DESC").Limit(200).Find(&channels).Error; err != nil {
+	if err := q.Order("created_at DESC").Limit(limit).Offset(offset).Find(&channels).Error; err != nil {
 		return nil, err
 	}
 	if channels == nil {
@@ -247,27 +239,6 @@ func (n Notification) Get(ctx context.Context) (db, error) {
 	return result, nil
 }
 
-func (n Notification) List(ctx context.Context, limit, offset int) ([]db, error) {
-	ctx, span := otel.Tracer("notifications").Start(ctx, "db.notification.list")
-	defer span.End()
-	var notifications []Notification
-	q := connectRead().WithContext(ctx).Where(n).Order("created_at DESC")
-	if limit > 0 {
-		q = q.Limit(limit).Offset(offset)
-	}
-	if err := q.Find(&notifications).Error; err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return nil, err
-	}
-	span.SetStatus(codes.Ok, "")
-	result := make([]db, len(notifications))
-	for i, nt := range notifications {
-		result[i] = nt
-	}
-	return result, nil
-}
-
 // getNotification returns a single notification by ID.
 func getNotification(ctx context.Context, id string) (Notification, error) {
 	row, err := (Notification{NotificationID: id}).Get(ctx)
@@ -279,14 +250,14 @@ func getNotification(ctx context.Context, id string) (Notification, error) {
 
 // listNotifications returns delivery records visible to the caller, newest first,
 // optionally filtered by status.
-func listNotifications(ctx context.Context, userID, orgID, statusFilter string) ([]Notification, error) {
+func listNotifications(ctx context.Context, userID, orgID, statusFilter string, limit, offset int) ([]Notification, error) {
 	q := connectRead().WithContext(ctx).
 		Where("created_by = ? OR (org_id != '' AND org_id = ?)", userID, orgID)
 	if statusFilter != "" {
 		q = q.Where("status = ?", statusFilter)
 	}
 	var notifications []Notification
-	if err := q.Order("created_at DESC").Limit(200).Find(&notifications).Error; err != nil {
+	if err := q.Order("created_at DESC").Limit(limit).Offset(offset).Find(&notifications).Error; err != nil {
 		return nil, err
 	}
 	if notifications == nil {
@@ -303,9 +274,16 @@ func listNotifications(ctx context.Context, userID, orgID, statusFilter string) 
 // returned structs carry the incremented attempt count.
 func claimRetryable(ctx context.Context, limit int) ([]Notification, error) {
 	var out []Notification
+	now := time.Now().UTC()
 	err := connect().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// next_attempt_at gates re-claiming so a failed row waits out its backoff
+		// instead of being re-sent on every tick. Rows predating the column are NULL
+		// (Postgres ADD COLUMN on a populated table) or carry the zero time (new
+		// inserts); both must count as immediately eligible, so the IS NULL branch is
+		// required — a bare `next_attempt_at <= now` would strand existing pending rows
+		// across the schema upgrade (NULL <= now is NULL, i.e. not selected).
 		if err := tx.Clauses(clauseSkipLocked).
-			Where("status IN ? AND attempts < ?", []string{StatusPending, StatusFailed}, maxAttempts).
+			Where("status IN ? AND attempts < ? AND (next_attempt_at <= ? OR next_attempt_at IS NULL)", []string{StatusPending, StatusFailed}, maxAttempts, now).
 			Order("created_at").Limit(limit).Find(&out).Error; err != nil {
 			return err
 		}
@@ -316,7 +294,6 @@ func claimRetryable(ctx context.Context, limit int) ([]Notification, error) {
 		for i := range out {
 			ids[i] = out[i].NotificationID
 		}
-		now := time.Now().UTC()
 		if err := tx.Model(&Notification{}).Where("notification_id IN ?", ids).
 			Updates(map[string]any{"attempts": gorm.Expr("attempts + 1"), "updated_at": now}).Error; err != nil {
 			return err
