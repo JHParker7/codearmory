@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -279,6 +280,20 @@ func TestBuildRuntime_UnknownType(t *testing.T) {
 	_, err := buildRuntime(RuntimeBackend{Name: "x", Type: "bogus"})
 	if err == nil {
 		t.Fatal("expected error for unknown runtime type")
+	}
+}
+
+// TestBuildRuntime_KataRequiresRuntimeClass guards the isolation boundary at the
+// point of use: a kata backend with no RuntimeClass (and no K8S_RUNTIME_CLASS)
+// must be rejected rather than silently built as a plain (runc) Kubernetes runtime.
+func TestBuildRuntime_KataRequiresRuntimeClass(t *testing.T) {
+	t.Setenv("K8S_RUNTIME_CLASS", "")
+	_, err := buildRuntime(RuntimeBackend{Name: "default", Type: "kata", Config: map[string]string{}})
+	if err == nil {
+		t.Fatal("expected kata without a RuntimeClass to be rejected (would run unsandboxed)")
+	}
+	if !strings.Contains(err.Error(), "RuntimeClass") {
+		t.Fatalf("error should explain the missing RuntimeClass, got: %v", err)
 	}
 }
 

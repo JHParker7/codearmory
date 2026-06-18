@@ -77,7 +77,16 @@ func buildRuntime(b RuntimeBackend) (Runtime, error) {
 		// Optional per-backend RuntimeClass; empty falls back to K8S_RUNTIME_CLASS.
 		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass])
 	case "kata":
-		// Same runtime, but the RuntimeClass is required (a Kata sandbox VM).
+		// Kata is the Kubernetes runtime pinned to a VM-isolating RuntimeClass. The
+		// RuntimeClass is mandatory: without one the pod silently falls back to the
+		// cluster default (runc) with no VM isolation. Enforce it here, at the point
+		// of use — not only in create/update validation — so a kata backend that
+		// reaches this code by any other path (the RUNTIME=kata startup seed with no
+		// K8S_RUNTIME_CLASS, a direct DB insert, an older replica) fails loudly
+		// instead of running unsandboxed.
+		if resolveRuntimeClass(b.Config[k8sKeyRuntimeClass]) == nil {
+			return nil, fmt.Errorf("kata runtime requires a RuntimeClass: set the backend %q config key or the K8S_RUNTIME_CLASS env var", k8sKeyRuntimeClass)
+		}
 		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass])
 	case "docker":
 		return newDockerRuntime()

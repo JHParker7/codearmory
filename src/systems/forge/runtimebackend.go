@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -59,11 +60,21 @@ func migrateAndSeedRuntimeBackends() error {
 	if err := g.AutoMigrate(&RuntimeBackend{}); err != nil {
 		return fmt.Errorf("migrate runtime_backends: %w", err)
 	}
+	rtype := defaultRuntimeType()
+	cfg := map[string]string{}
+	// A seeded kata backend must carry a RuntimeClass or buildRuntime rejects it as
+	// unsandboxed. Seed it from the legacy K8S_RUNTIME_CLASS env so a RUNTIME=kata +
+	// K8S_RUNTIME_CLASS deployment comes up with a valid, self-describing backend.
+	if rtype == "kata" {
+		if rc := os.Getenv("K8S_RUNTIME_CLASS"); rc != "" {
+			cfg[k8sKeyRuntimeClass] = rc
+		}
+	}
 	def := RuntimeBackend{
 		Name:       "default",
-		Type:       defaultRuntimeType(),
+		Type:       rtype,
 		Enabled:    true,
-		Config:     map[string]string{},
+		Config:     cfg,
 		SecretRefs: map[string]string{},
 	}
 	g.Where(RuntimeBackend{Name: def.Name}).FirstOrCreate(&def)
