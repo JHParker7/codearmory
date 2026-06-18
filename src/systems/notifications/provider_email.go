@@ -148,6 +148,17 @@ func sendMailGuarded(ctx context.Context, addr, host string, auth smtp.Auth, fro
 	return c.Quit()
 }
 
+// sanitizeEmailBody normalizes body content before it is embedded into an email.
+// This reduces injection risk from untrusted input by removing NUL bytes and
+// canonicalizing line endings to CRLF for RFC 5322 message bodies.
+func sanitizeEmailBody(body string) string {
+	body = strings.ReplaceAll(body, "\x00", "")
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", "\n")
+	body = strings.ReplaceAll(body, "\n", "\r\n")
+	return body
+}
+
 // buildEmailMessage assembles the RFC 5322 message and guards against email
 // header injection. The subject is RFC 2047-encoded, which hex-escapes any CR/LF
 // inside an encoded-word so it can never terminate the Subject line; the from and
@@ -167,6 +178,7 @@ func buildEmailMessage(from string, recipients []string, msg Message) (string, e
 	if subject == "" {
 		subject = "Notification"
 	}
+	body := sanitizeEmailBody(msg.Body)
 	return strings.Join([]string{
 		"From: " + from,
 		"To: " + strings.Join(recipients, ", "),
@@ -174,6 +186,6 @@ func buildEmailMessage(from string, recipients []string, msg Message) (string, e
 		"MIME-Version: 1.0",
 		"Content-Type: text/plain; charset=UTF-8",
 		"",
-		msg.Body,
+		body,
 	}, "\r\n"), nil
 }
