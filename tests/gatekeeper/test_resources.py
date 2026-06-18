@@ -141,9 +141,27 @@ class TestUnauthenticated:
 # ---------------------------------------------------------------------------
 
 
+class TestDefaultListGrants:
+    """The default user grants include listOrg/listTeam, scoped to the caller via
+    {username}/gatekeeper/..., so a freshly signed-up user CAN list orgs and teams —
+    they just see only their own (empty until they create any). Added when registry
+    RBAC change e70d890 granted these list permissions by default."""
+
+    def test_list_orgs_allowed(self, base_url, token):
+        resp = requests.get(f"{base_url}/orgs", headers=bearer(token))
+        assert resp.status_code == 200, resp.text
+        assert isinstance(resp.json(), list)
+
+    def test_list_teams_allowed(self, base_url, token):
+        resp = requests.get(f"{base_url}/teams", headers=bearer(token))
+        assert resp.status_code == 200, resp.text
+        assert isinstance(resp.json(), list)
+
+
 class TestForbidden:
     """A freshly signed-up user lacks permission for any resource except their own
-    user record; all other endpoints must return 403."""
+    user record and the default-granted scoped list endpoints (see
+    TestDefaultListGrants); everything checked here must return 403."""
 
     def _check(self, base_url, token, method, path, body=None):
         url = f"{base_url}{path}"
@@ -165,9 +183,6 @@ class TestForbidden:
     def test_delete_other_user(self, base_url, token):
         self._check(base_url, token, "delete", f"/users/{rand_id()}")
 
-    def test_get_orgs(self, base_url, token):
-        self._check(base_url, token, "get", "/orgs", {})
-
     def test_get_org(self, base_url, token):
         self._check(base_url, token, "get", f"/orgs/{rand_id()}")
 
@@ -176,9 +191,6 @@ class TestForbidden:
 
     def test_delete_org(self, base_url, token):
         self._check(base_url, token, "delete", f"/orgs/{rand_id()}")
-
-    def test_get_teams(self, base_url, token):
-        self._check(base_url, token, "get", "/teams", {})
 
     def test_get_team(self, base_url, token):
         self._check(base_url, token, "get", f"/teams/{rand_id()}")

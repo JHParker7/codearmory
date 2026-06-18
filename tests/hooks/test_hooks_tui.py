@@ -86,26 +86,41 @@ def test_list_events_returns_array(bearer):
     assert isinstance(res.json(), list)
 
 
-def test_list_events_item_has_required_fields(bearer):
-    """The TUI reads event_id, repo, event, status, created_at from each event."""
-    # Fire a webhook for a unique source so at least one event is guaranteed to
-    # exist, then assert the list is non-empty before the field-shape checks so
-    # they always run.
-    source = f"org/tui-events-shape-{uuid.uuid4().hex[:8]}"
-    requests.post(f"{HOOKS_URL}/hooks", json={
-        "source": source,
-        "event": "push",
-        "ref": "refs/heads/main",
+def test_list_events_item_has_required_fields(bearer, workflow):
+    """The TUI reads event_id, repo, event, status, created_at from each event.
+
+    An event is only visible to a caller who owns a rule it matched (listEvents
+    JOINs hook_events → hook_triggers → pipeline_rules), so create a rule and fire a
+    signed, matching webhook to guarantee a visible event before the field checks.
+    """
+    repo = f"org/tui-events-shape-{uuid.uuid4().hex[:8]}"
+    secret = "tui-events-shape-secret"
+    rule = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
+        "name": f"tui-events-shape-{uuid.uuid4().hex[:6]}",
+        "source": repo,
+        "events": ["push"],
+        "workflow_id": workflow["workflow_id"],
+        "secret": secret,
     })
+    assert rule.status_code == 201, rule.text
+    rule_id = rule.json()["rule_id"]
+
+    _body = _json.dumps({"source": repo, "event": "push", "ref": "refs/heads/main"}).encode()
+    webhook = requests.post(f"{HOOKS_URL}/hooks", data=_body,
+                            headers={"Content-Type": "application/json",
+                                     "X-Hub-Signature-256": _sign(secret, _body)})
+    assert webhook.status_code == 200, webhook.text
 
     res = requests.get(f"{HOOKS_URL}/events", headers=bearer,
-                       params={"source": source})
+                       params={"source": repo})
     assert res.status_code == 200
     items = res.json()
-    assert items, "expected at least one event after firing a webhook"
+    assert items, "expected at least one event after firing a matching webhook"
     item = items[0]
     for field in ("event_id", "source", "event_type", "status", "created_at"):
         assert field in item, f"missing field: {field}"
+
+    requests.delete(f"{HOOKS_URL}/rules/{rule_id}", headers=bearer)
 
 
 def test_list_events_filter_by_repo(bearer):
@@ -137,20 +152,35 @@ def test_list_events_filter_no_match_returns_empty_array(bearer):
 
 # ── Event detail: JSON shape ──────────────────────────────────────────────────
 
-def test_event_detail_has_required_fields(bearer):
-    """The TUI reads event_id, repo, event, status, triggers, created_at from detail."""
-    source = f"org/tui-detail-{uuid.uuid4().hex[:8]}"
-    requests.post(f"{HOOKS_URL}/hooks", json={
-        "source": source,
-        "event": "push",
-        "ref": "refs/heads/main",
+def test_event_detail_has_required_fields(bearer, workflow):
+    """The TUI reads event_id, repo, event, status, triggers, created_at from detail.
+
+    Create a rule and fire a signed, matching webhook so the resulting event is
+    visible to the caller (events with no matching owned rule are not listed).
+    """
+    repo = f"org/tui-detail-{uuid.uuid4().hex[:8]}"
+    secret = "tui-detail-secret"
+    rule = requests.post(f"{HOOKS_URL}/rules", headers=bearer, json={
+        "name": f"tui-detail-{uuid.uuid4().hex[:6]}",
+        "source": repo,
+        "events": ["push"],
+        "workflow_id": workflow["workflow_id"],
+        "secret": secret,
     })
+    assert rule.status_code == 201, rule.text
+    rule_id = rule.json()["rule_id"]
+
+    _body = _json.dumps({"source": repo, "event": "push", "ref": "refs/heads/main"}).encode()
+    webhook = requests.post(f"{HOOKS_URL}/hooks", data=_body,
+                            headers={"Content-Type": "application/json",
+                                     "X-Hub-Signature-256": _sign(secret, _body)})
+    assert webhook.status_code == 200, webhook.text
 
     events = requests.get(f"{HOOKS_URL}/events", headers=bearer,
-                          params={"source": source})
+                          params={"source": repo})
     assert events.status_code == 200
     items = events.json()
-    assert items, "expected at least one event after firing a webhook"
+    assert items, "expected at least one event after firing a matching webhook"
     eid = items[0]["event_id"]
 
     res = requests.get(f"{HOOKS_URL}/events/{eid}", headers=bearer)
@@ -160,6 +190,8 @@ def test_event_detail_has_required_fields(bearer):
         assert field in body, f"missing field: {field}"
     assert "triggers" in body, "missing triggers field — TUI renders trigger run_ids"
     assert isinstance(body["triggers"], list)
+
+    requests.delete(f"{HOOKS_URL}/rules/{rule_id}", headers=bearer)
 
 
 def test_event_detail_not_found(bearer):
