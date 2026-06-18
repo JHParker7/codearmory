@@ -78,6 +78,12 @@ func TestValidateRuntimeBackendBody(t *testing.T) {
 	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "proxmox"}); err == nil {
 		t.Error("proxmox should be rejected until the runtime is wired in")
 	}
+	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "kata"}); err == nil {
+		t.Error("kata without a runtime_class should be rejected (it would silently run as runc, no VM isolation)")
+	}
+	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "kata", Config: map[string]string{"runtime_class": "kata-qemu"}}); err != nil {
+		t.Errorf("kata with a runtime_class should be valid: %v", err)
+	}
 	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: ""}); err == nil {
 		t.Error("empty type should be rejected")
 	}

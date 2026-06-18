@@ -93,3 +93,38 @@ func TestBuildJob_PlumbsExecutionFields(t *testing.T) {
 		t.Error("AutomountServiceAccountToken should be false (no cluster credentials in the sandbox)")
 	}
 }
+
+// TestResolveRuntimeClass checks the precedence a kata/kubernetes backend uses to
+// pick its RuntimeClass: explicit per-backend config wins, then the legacy
+// process-wide env var, then nil (the cluster's default runtime).
+func TestResolveRuntimeClass(t *testing.T) {
+	t.Setenv("K8S_RUNTIME_CLASS", "from-env")
+	if got := resolveRuntimeClass("kata-qemu"); got == nil || *got != "kata-qemu" {
+		t.Errorf("per-backend config should win, got %v", got)
+	}
+	if got := resolveRuntimeClass(""); got == nil || *got != "from-env" {
+		t.Errorf("empty config should fall back to K8S_RUNTIME_CLASS, got %v", got)
+	}
+	t.Setenv("K8S_RUNTIME_CLASS", "")
+	if got := resolveRuntimeClass(""); got != nil {
+		t.Errorf("no config and no env should be nil (cluster default), got %q", *got)
+	}
+}
+
+// TestBuildJob_RuntimeClassName guards that a kata/gvisor backend pins the pod's
+// RuntimeClassName so the kubelet runs it under the sandboxed runtime, while a
+// plain kubernetes backend leaves it nil (the default runc runtime).
+func TestBuildJob_RuntimeClassName(t *testing.T) {
+	exec := Execution{ExecutionID: "exec-1", Image: "alpine:3.19", Command: []string{"true"}, TimeoutSecs: 30}
+
+	rc := "kata-qemu"
+	kata := &KubernetesRuntime{namespace: "forge", runtimeClass: &rc}
+	if got := kata.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec.RuntimeClassName; got == nil || *got != "kata-qemu" {
+		t.Errorf("RuntimeClassName = %v, want kata-qemu", got)
+	}
+
+	plain := &KubernetesRuntime{namespace: "forge"}
+	if got := plain.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec.RuntimeClassName; got != nil {
+		t.Errorf("RuntimeClassName = %q, want nil for a plain k8s backend", *got)
+	}
+}

@@ -60,7 +60,7 @@ type RunnerClass struct {
 }
 
 // RuntimeBackend is an admin-managed runtime target. Type selects the runtime
-// implementation (docker|kubernetes|proxmox); Config holds non-secret settings
+// implementation (docker|kubernetes|proxmox|kata); Config holds non-secret settings
 // (jsonb) and SecretRefs maps a logical key to the NAME of an env var read via
 // secret() — credentials never live in the database, so returning a backend is
 // always safe.

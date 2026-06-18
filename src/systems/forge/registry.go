@@ -68,16 +68,22 @@ func (r *runtimeRegistry) Evict(name string) {
 // buildRuntime constructs the concrete Runtime for a backend. docker and
 // kubernetes keep reading their existing env vars (FORGE_NETWORK_MODE,
 // K8S_NAMESPACE, …) so an existing single-runtime deployment is unchanged; the
-// proxmox case (added in a later phase) reads backend.Config / SecretRefs.
+// proxmox case reads backend.Config / SecretRefs. kata is the kubernetes runtime
+// pinned to a VM-isolating RuntimeClass from config (validateKataBackend
+// guarantees it is set).
 func buildRuntime(b RuntimeBackend) (Runtime, error) {
 	switch b.Type {
 	case "kubernetes":
-		return newKubernetesRuntime()
+		// Optional per-backend RuntimeClass; empty falls back to K8S_RUNTIME_CLASS.
+		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass])
+	case "kata":
+		// Same runtime, but the RuntimeClass is required (a Kata sandbox VM).
+		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass])
 	case "docker":
 		return newDockerRuntime()
 	case "proxmox":
 		return newProxmoxRuntime(b)
 	default:
-		return nil, fmt.Errorf("unknown runtime type %q: expected docker, kubernetes or proxmox", b.Type)
+		return nil, fmt.Errorf("unknown runtime type %q: expected docker, kubernetes, proxmox or kata", b.Type)
 	}
 }

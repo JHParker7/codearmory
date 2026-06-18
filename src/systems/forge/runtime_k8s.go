@@ -21,8 +21,11 @@ import (
 
 // KubernetesRuntime runs executions as single-container Kubernetes Jobs.
 // Jobs are created in K8S_NAMESPACE (default: forge) and deleted immediately
-// after the result is collected. An optional RuntimeClass (K8S_RUNTIME_CLASS)
-// enables gVisor or other sandboxed runtimes. Resource limits are determined
+// after the result is collected. An optional RuntimeClass — set per-backend via
+// the "runtime_class" config key, or process-wide via K8S_RUNTIME_CLASS — runs
+// jobs under a sandboxed runtime such as gVisor or Kata Containers. The "kata"
+// backend type wires this same runtime with a required RuntimeClass, moving the
+// isolation boundary to a lightweight VM. Resource limits are determined
 // per-execution by the runner class stored in the database.
 type KubernetesRuntime struct {
 	client       kubernetes.Interface
@@ -30,7 +33,16 @@ type KubernetesRuntime struct {
 	runtimeClass *string
 }
 
-func newKubernetesRuntime() (*KubernetesRuntime, error) {
+// k8sKeyRuntimeClass is the backend config key naming the Kubernetes RuntimeClass
+// to run jobs under. Optional for the "kubernetes" type (falls back to the
+// K8S_RUNTIME_CLASS env var, then the cluster's default runtime); required for the
+// "kata" type, which exists precisely to pin a VM-isolating RuntimeClass.
+const k8sKeyRuntimeClass = "runtime_class"
+
+// newKubernetesRuntime builds a Kubernetes runtime. configRuntimeClass is the
+// backend's per-backend RuntimeClass (the "runtime_class" config key); see
+// resolveRuntimeClass for how it combines with the legacy K8S_RUNTIME_CLASS env.
+func newKubernetesRuntime(configRuntimeClass string) (*KubernetesRuntime, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		kubeconfig := os.Getenv("KUBECONFIG")
@@ -48,16 +60,25 @@ func newKubernetesRuntime() (*KubernetesRuntime, error) {
 		return nil, err
 	}
 
-	var rc *string
-	if v := os.Getenv("K8S_RUNTIME_CLASS"); v != "" {
-		rc = &v
-	}
-
 	return &KubernetesRuntime{
 		client:       client,
 		namespace:    envOrDefault("K8S_NAMESPACE", "forge"),
-		runtimeClass: rc,
+		runtimeClass: resolveRuntimeClass(configRuntimeClass),
 	}, nil
+}
+
+// resolveRuntimeClass picks the RuntimeClass pointer for a kubernetes/kata
+// backend: an explicit per-backend config value wins; otherwise the process-wide
+// K8S_RUNTIME_CLASS env var (legacy single-runtime deployments) is used; a nil
+// result means the cluster's default runtime (typically runc).
+func resolveRuntimeClass(configRuntimeClass string) *string {
+	if configRuntimeClass != "" {
+		return &configRuntimeClass
+	}
+	if v := os.Getenv("K8S_RUNTIME_CLASS"); v != "" {
+		return &v
+	}
+	return nil
 }
 
 // sandboxUID is the non-root UID/GID that sandboxed containers run as. Pinning

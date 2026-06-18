@@ -13,6 +13,7 @@ var validRuntimeTypes = map[string]bool{
 	"docker":     true,
 	"kubernetes": true,
 	"proxmox":    true,
+	"kata":       true,
 }
 
 // requiredProxmoxConfigKeys must be present (non-empty) in a proxmox backend's
@@ -33,6 +34,18 @@ func validateProxmoxBackend(b runtimeBackendBody) error {
 	}
 	if strings.TrimSpace(b.SecretRefs[pmSecretToken]) == "" {
 		return fmt.Errorf("proxmox secret_ref %q is required", pmSecretToken)
+	}
+	return nil
+}
+
+// validateKataBackend checks a kata backend names a RuntimeClass. Kata is the
+// kubernetes runtime pinned to a VM-isolating RuntimeClass (e.g. kata-qemu,
+// kata-fc); without one the pod would silently fall back to the cluster's default
+// runtime (runc) and run with no VM isolation at all, so an empty runtime_class is
+// a configuration error rather than a permissive default.
+func validateKataBackend(b runtimeBackendBody) error {
+	if strings.TrimSpace(b.Config[k8sKeyRuntimeClass]) == "" {
+		return fmt.Errorf("kata config key %q is required (the Kubernetes RuntimeClass, e.g. kata-qemu)", k8sKeyRuntimeClass)
 	}
 	return nil
 }
