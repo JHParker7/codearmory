@@ -88,6 +88,21 @@ spec:
                   name: {{ include "codearmory.fullname" . }}-gatekeeper
                   key: oidc-signing-key
             {{- end }}
+            {{- if .Values.gatekeeper.env.adminEmail }}
+            - name: GATEKEEPER_ADMIN_EMAIL
+              value: {{ .Values.gatekeeper.env.adminEmail | quote }}
+            {{- end }}
+            {{- if .Values.gatekeeper.env.adminUsername }}
+            - name: GATEKEEPER_ADMIN_USERNAME
+              value: {{ .Values.gatekeeper.env.adminUsername | quote }}
+            {{- end }}
+            {{- if .Values.gatekeeper.secret.adminPassword }}
+            - name: GATEKEEPER_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-gatekeeper
+                  key: admin-password
+            {{- end }}
           livenessProbe:
             tcpSocket:
               port: http

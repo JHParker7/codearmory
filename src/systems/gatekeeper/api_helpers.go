@@ -213,10 +213,11 @@ func authMiddleware(next http.Handler) http.Handler {
 }
 
 // matchPermission reports whether perm grants (service, action, resource).
+// A Service of "*" matches every service — used by the bootstrap admin grant.
 // Resource matching supports exact strings, wildcard "*", prefix "foo/*", and
 // per-segment wildcards like "foo/*/bar".
 func matchPermission(perm Permissions, service, action, resource string) bool {
-	if perm.Service != service {
+	if perm.Service != "*" && perm.Service != service {
 		return false
 	}
 	allowedAction := slices.Contains(perm.Actions, "*") || slices.Contains(perm.Actions, action)

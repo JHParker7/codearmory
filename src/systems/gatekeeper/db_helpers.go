@@ -74,6 +74,16 @@ func countTeamsByRole(ctx context.Context, roleID string) (int64, error) {
 	return count, nil
 }
 
+// countActiveUsers returns the total number of active user accounts. Used at
+// signup to detect the very first user, who is bootstrapped as the platform admin.
+func countActiveUsers(ctx context.Context) (int64, error) {
+	var count int64
+	if err := connectRead().WithContext(ctx).Model(&User{}).Where("active = ?", true).Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // deactivateUserSessions sets active=false on all sessions for a user.
 func deactivateUserSessions(ctx context.Context, userID string) error {
 	return connect().WithContext(ctx).Model(&Session{}).Where("user_id = ?", userID).Update("active", false).Error

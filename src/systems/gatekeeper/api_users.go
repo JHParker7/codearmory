@@ -416,9 +416,30 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 
 	userID := uuid.New().String()
 
+	// The very first account bootstraps the platform: it is granted full
+	// administrative access so there is always an operator who can manage every
+	// other user, org, and role. Determine this before creating anything so the
+	// personal role can be seeded with the admin grant. A count failure is fatal —
+	// we must not silently create a non-admin first user.
+	//
+	// When a dedicated admin is provisioned via GATEKEEPER_ADMIN_EMAIL/PASSWORD
+	// (seedAdminUser at startup), that env-var admin takes precedence and this
+	// first-user fallback is disabled — the operator has named the admin explicitly.
+	userCount, err := countActiveUsers(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to count users")
+		slog.ErrorContext(ctx, "signup failed: could not determine whether this is the first user", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	isFirstUser := userCount == 0 && !adminSeedConfigured()
+
 	// New users must receive default grants; refuse signup if none are available
-	// rather than create a permission-less account.
-	if len(defaultGrantsFor("user")) == 0 {
+	// rather than create a permission-less account. The bootstrap admin is exempt:
+	// its wildcard grant does not depend on the registry-provided default grants, so
+	// the platform owner can always be created even before the registry is seeded.
+	if !isFirstUser && len(defaultGrantsFor("user")) == 0 {
 		slog.ErrorContext(ctx, "signup: no default grants for 'user' — refusing to create a permission-less account; check that the registry is reachable and has default_grants seeded", "user_id", userID)
 		http.Error(w, "service configuration error: permissions not available", http.StatusServiceUnavailable)
 		return
@@ -427,9 +448,28 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	// The personal role holds org/team-ownership and custom grants. It starts
 	// empty; the user-scoped default grants live in a separately-managed default
 	// role (see rebuildDefaultRole) so they can be refreshed on login without
-	// disturbing anything granted here later.
+	// disturbing anything granted here later. The first user is the exception: its
+	// personal role carries the wildcard admin permission and is named "admin".
 	personalRole := Role{RoleID: uuid.New().String(), OwnerID: userID, PermissionsIDs: []string{}}
+	var adminPerm *Permissions
+	if isFirstUser {
+		p := newAdminPermission(userID, req.Username)
+		if err := p.Add(ctx); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to create admin permission")
+			slog.ErrorContext(ctx, "signup failed: could not create bootstrap admin permission", "user_id", userID, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		adminPerm = &p
+		personalRole.Name = adminRoleName
+		personalRole.PermissionsIDs = []string{p.PermissionsID}
+		slog.InfoContext(ctx, "signup: first user detected — bootstrapping as admin", "user_id", userID, "username", req.Username)
+	}
 	if err := personalRole.Add(ctx); err != nil {
+		if adminPerm != nil {
+			adminPerm.Remove(ctx) //nolint:errcheck
+		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to create personal role")
 		slog.ErrorContext(ctx, "signup failed: could not create personal role", "user_id", userID, "error", err)
@@ -450,6 +490,11 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 	if err := user.Add(ctx); err != nil {
 		if cleanErr := personalRole.Remove(ctx); cleanErr != nil {
 			slog.ErrorContext(ctx, "signup: failed to clean up orphaned personal role", "role_id", personalRole.RoleID, "error", cleanErr)
+		}
+		if adminPerm != nil {
+			if cleanErr := adminPerm.Remove(ctx); cleanErr != nil {
+				slog.ErrorContext(ctx, "signup: failed to clean up orphaned admin permission", "permissions_id", adminPerm.PermissionsID, "error", cleanErr)
+			}
 		}
 		// GORM surfaces the raw DB error string; string-matching "unique" is the
 		// portable way to detect unique constraint violations without importing a
@@ -478,6 +523,11 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		}
 		if cleanErr := personalRole.Remove(ctx); cleanErr != nil {
 			slog.ErrorContext(ctx, "signup: failed to clean up personal role after default role failure", "role_id", personalRole.RoleID, "error", cleanErr)
+		}
+		if adminPerm != nil {
+			if cleanErr := adminPerm.Remove(ctx); cleanErr != nil {
+				slog.ErrorContext(ctx, "signup: failed to clean up admin permission after default role failure", "permissions_id", adminPerm.PermissionsID, "error", cleanErr)
+			}
 		}
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
