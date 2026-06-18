@@ -114,12 +114,11 @@ func newProxmoxRuntime(b RuntimeBackend) (*ProxmoxRuntime, error) {
 }
 
 // proxmoxHTTPClient builds the HTTPS client for the PVE API. PVE hosts commonly
-// present a self-signed cert; an operator opts into trusting it via a CA file or,
-// for a homelab box, tls_insecure=true.
+// present a self-signed cert; trust it by providing a CA file.
 func proxmoxHTTPClient(cfg map[string]string) (*http.Client, error) {
 	tlsCfg := &tls.Config{}
 	if cfg[pmKeyTLSInsecure] == "true" {
-		tlsCfg.InsecureSkipVerify = true
+		return nil, fmt.Errorf("%s=true is not supported; configure %s to trust the Proxmox CA certificate", pmKeyTLSInsecure, pmKeyCAFile)
 	}
 	if caFile := cfg[pmKeyCAFile]; caFile != "" {
 		pem, err := os.ReadFile(caFile)
