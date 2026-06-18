@@ -375,14 +375,20 @@ func lookupServiceAccount(ctx context.Context, name string) (ServiceAccountModel
 	return acct, nil
 }
 
-// upsertServiceAccount creates or refreshes a service account by name, updating
-// the hashed key and role on conflict. Called from seedServiceAccounts.
+// upsertServiceAccount creates a service account by name, or refreshes its role on
+// conflict. Called from seedServiceAccounts.
+//
+// hashed_key is deliberately NOT overwritten on conflict: it holds the client's
+// current rotated key, and clobbering it back to the bootstrap hash on every
+// Registry restart would lock out a client that has already rotated past it.
+// Recovery for a client that restarted back to its bootstrap key is instead
+// handled by the seed-key fallback in authenticateServiceKey, so the rotated key
+// is preserved across Registry restarts.
 func upsertServiceAccount(ctx context.Context, acct ServiceAccountModel) error {
 	return connect().WithContext(ctx).
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "name"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"hashed_key": acct.HashedKey,
 				"role":       acct.Role,
 				"updated_at": gorm.Expr("now()"),
 			}),

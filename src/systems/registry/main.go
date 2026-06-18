@@ -90,10 +90,12 @@ func (l *logger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// seedServiceAccounts upserts service accounts from a "name=key" comma-separated
-// string with the given role. On every startup the hash is refreshed from the
-// env var so that a restarted Registry re-synchronises with clients that are
-// about to rotate using their initial key.
+// seedServiceAccounts registers service accounts from a "name=key" comma-separated
+// string with the given role. On first sight an account row is created with the
+// bootstrap key's hash; on later startups the stored hashed_key (which may be a
+// rotated key) is left untouched so a restart does not lock out clients. The
+// bootstrap key from the env is always remembered in seedServiceKeys as a
+// permanent recovery credential — see authenticateServiceKey.
 func seedServiceAccounts(ctx context.Context, raw, role string) {
 	if raw == "" {
 		return
@@ -111,6 +113,11 @@ func seedServiceAccounts(ctx context.Context, raw, role string) {
 			slog.ErrorContext(ctx, "seedServiceAccounts: bcrypt failed", "service", name, "error", err)
 			continue
 		}
+
+		// Record the bootstrap key as a permanent fallback credential so a client (or
+		// Registry) that restarts mid-rotation can always re-authenticate. See
+		// authenticateServiceKey.
+		seedServiceKeys[name] = seedAccount{key: key, role: role}
 
 		acct := ServiceAccountModel{AccountID: uuid.New().String(), Name: name, HashedKey: string(hash), Role: role}
 		if err := upsertServiceAccount(ctx, acct); err != nil {
@@ -148,13 +155,10 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("service.name", name))
 	slog.DebugContext(ctx, "rotate service key request", "service", name)
 
-	acct, err := lookupServiceAccount(ctx, name)
-	if err != nil {
-		span.SetStatus(codes.Ok, "")
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if bcrypt.CompareHashAndPassword([]byte(acct.HashedKey), []byte(key)) != nil {
+	// Accept the current rotated key or the bootstrap key. The bootstrap fallback
+	// lets a client that restarted back to its initial key re-authenticate and roll
+	// the key forward, instead of deadlocking on a rotated key it no longer holds.
+	if _, ok := authenticateServiceKey(ctx, name, key); !ok {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

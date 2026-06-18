@@ -20,6 +20,17 @@ def read_key():
     return os.getenv("REGISTRY_READ_KEY", "conductor:registry-read-local-secret")
 
 
+@pytest.fixture(scope="session")
+def test_reader_account():
+    """A throwaway read-role account seeded only for tests, so rotation tests can
+    mutate its key without disrupting the conductor account the live stack uses."""
+    name = os.getenv("REGISTRY_TEST_READER_NAME", "registry-test-reader")
+    bootstrap = os.getenv(
+        "REGISTRY_TEST_READER_KEY", "registry-test-reader-local-secret"
+    )
+    return name, bootstrap
+
+
 @pytest.fixture
 def admin_headers(admin_key):
     return {"X-Service-Key": admin_key}
