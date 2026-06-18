@@ -230,6 +230,7 @@ type gkFormDoneMsg struct {
 	section gkSection
 	status  string
 }
+type gkRolesMsg []gkRecord
 
 // ── Model ───────────────────────────────────────────────────────────────────
 
@@ -249,6 +250,8 @@ type gatekeeperModel struct {
 
 	sections []gkSectionState
 	vp       viewport.Model
+
+	roles []gkRecord // role catalog for the team form's role selector
 
 	form            tuiForm
 	formKind        gkFormKind
@@ -331,6 +334,21 @@ func gkFetch(section gkSection, srFilter string) tea.Cmd {
 	}
 }
 
+// gkFetchRoles loads the role catalog for the team form's role selector,
+// degrading to an empty list on failure so the field falls back to a free-text
+// input (and a roles permission error never blanks the whole TUI).
+func gkFetchRoles() tea.Msg {
+	data, err := doRequest("GET", "/gatekeeper/roles", nil)
+	if err != nil {
+		return gkRolesMsg(nil)
+	}
+	var recs []gkRecord
+	if err := json.Unmarshal(data, &recs); err != nil {
+		return gkRolesMsg(nil)
+	}
+	return gkRolesMsg(recs)
+}
+
 func gkRunAction(section gkSection, method, path, label string) tea.Cmd {
 	return func() tea.Msg {
 		if _, err := doRequest(method, path, nil); err != nil {
@@ -376,7 +394,11 @@ func gkSendInvite(section gkSection, path, email string) tea.Cmd {
 
 // ── Init / Update ───────────────────────────────────────────────────────────
 
-func (m gatekeeperModel) Init() tea.Cmd { return gkFetch(m.section, m.srFilter) }
+// Init fetches the active section and batches a roles prefetch so the team
+// form's role selector is ready the moment it opens.
+func (m gatekeeperModel) Init() tea.Cmd {
+	return tea.Batch(gkFetch(m.section, m.srFilter), gkFetchRoles)
+}
 
 func (m gatekeeperModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -405,6 +427,10 @@ func (m gatekeeperModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		st.table.SetRows(rows)
 		return m, nil
 
+	case gkRolesMsg:
+		m.roles = []gkRecord(msg)
+		return m, nil
+
 	case gkActionMsg:
 		if msg.err != nil {
 			m.status = "✗ " + msg.label + ": " + msg.err.Error()
@@ -428,10 +454,20 @@ func (m gatekeeperModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.form.errMsg = msg.err.Error()
 		return m, nil
 
+	case tuiAutoRefreshMsg:
+		// Silently re-fetch the current section's list so changes appear without
+		// a loading flash or losing the cursor. The detail view renders an
+		// immutable record snapshot and the form must not be disturbed, so both
+		// are skipped.
+		if m.view == gkViewList {
+			return m, gkFetch(m.section, m.srFilter)
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.err != nil {
 			switch msg.String() {
-			case "q":
+			case "esc":
 				return m, goHome
 			case "ctrl+c":
 				return m, tea.Quit
@@ -494,7 +530,7 @@ func (m gatekeeperModel) keyList(msg tea.KeyMsg) (gatekeeperModel, tea.Cmd) {
 
 	n := gkSection(len(gkDefs))
 	switch msg.String() {
-	case "q":
+	case "esc":
 		return m, goHome
 	case "ctrl+c":
 		return m, tea.Quit
@@ -578,11 +614,9 @@ func (m gatekeeperModel) keyList(msg tea.KeyMsg) (gatekeeperModel, tea.Cmd) {
 
 func (m gatekeeperModel) keyDetail(msg tea.KeyMsg) (gatekeeperModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
-		return m, goHome
 	case "ctrl+c":
 		return m, tea.Quit
-	case "b", "esc":
+	case "esc":
 		m.view = gkViewList
 		return m, nil
 	}
@@ -608,6 +642,27 @@ func gkNextFilter(cur string) string {
 
 // ── Forms ─────────────────────────────────────────────────────────────────
 
+// gkRoleField builds the team form's role picker: a selector of role names
+// (submitting the role_id) when the catalog is available, or a free-text
+// fallback. The leading "(none)" option leaves the team's role unset.
+func gkRoleField(roles []gkRecord) formField {
+	labels := []string{"(none)"}
+	ids := []string{""}
+	for _, r := range roles {
+		name := gkStr(r, "name")
+		id := gkStr(r, "role_id")
+		if name == "" || id == "" {
+			continue
+		}
+		labels = append(labels, name)
+		ids = append(ids, id)
+	}
+	if len(labels) == 1 { // only the "(none)" sentinel — no roles loaded
+		return formInput("role", "Role", "role name or id (optional)")
+	}
+	return formSelectKV("role", "Role", labels, ids)
+}
+
 func (m gatekeeperModel) openForm(kind gkFormKind) (gatekeeperModel, tea.Cmd) {
 	var (
 		f   tuiForm
@@ -617,7 +672,7 @@ func (m gatekeeperModel) openForm(kind gkFormKind) (gatekeeperModel, tea.Cmd) {
 	case gkFormCreateTeam:
 		f, cmd = newTUIForm("New Team",
 			formInput("name", "Name", "team name (required)"),
-			formInput("role", "Role", "role id (optional)"))
+			gkRoleField(m.roles))
 	case gkFormCreateOrg:
 		f, cmd = newTUIForm("New Organization",
 			formInput("name", "Name", "org name (required)"))
@@ -697,7 +752,7 @@ func (m gatekeeperModel) submitForm() (gatekeeperModel, tea.Cmd) {
 func (m gatekeeperModel) View() string {
 	if m.err != nil {
 		return tuiErrStyle.Render("error: "+m.err.Error()) + "\n\n" +
-			tuiHelpStyle.Render("[q] home  [r] retry")
+			tuiHelpStyle.Render("[esc] home  [r] retry")
 	}
 	switch m.view {
 	case gkViewForm:
@@ -737,7 +792,7 @@ func (m gatekeeperModel) listHelp() string {
 	if m.section == gkServiceRequests {
 		parts = append(parts, "[f] filter")
 	}
-	parts = append(parts, "[r] refresh", "[q] home")
+	parts = append(parts, "[r] refresh", "[esc] home")
 	return strings.Join(parts, "  ")
 }
 
@@ -781,7 +836,7 @@ func (m gatekeeperModel) viewDetail() string {
 	if m.selLabel != "" {
 		title = tuiTitleStyle.Render(m.selLabel) + "  " + tuiMetaStyle.Render(m.def().label)
 	}
-	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [b] back  [q] home", m.width)
+	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [esc] back", m.width)
 	return title + "\n" + tuiBoxStyle.Render(m.vp.View()) + "\n" + help
 }
 

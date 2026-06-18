@@ -24,6 +24,14 @@ Client (Bearer JWT)
 
 Forge calls Gatekeeper directly to verify the Bearer token on every request. It does not trust the `X-User-ID` header injected by Conductor, which prevents privilege escalation via a compromised gateway.
 
+## Runtime backends
+
+The runtime that runs a job is selected per-execution. Admins define **runtime backends** (`/runtime-backends`, admin-only CRUD; users get read-only list/get) of type `docker`, `kubernetes`, `proxmox`, or `kata`, and point a runner class at one via its `backend` field. The execution snapshots the class's backend at submit time. A `default` backend is seeded from the legacy `RUNTIME` env, so a single-runtime deployment needs no change.
+
+- **docker / kubernetes** — container-level sandbox (read-only rootfs, dropped caps, egress proxy). Best for untrusted code.
+- **kata** — the kubernetes runtime pinned to a Kata Containers `RuntimeClass`, so each job runs in a lightweight VM (a real kernel, hardware-virtualization boundary) while keeping the same Job lifecycle and container hardening. Stronger isolation than a plain container with no new runtime to operate. See [kata.md](kata.md).
+- **proxmox** — a throwaway VM per job with full root and a real Docker daemon, for CI work that needs `apt`/`docker build`. See [proxmox.md](proxmox.md).
+
 ## Requirements
 
 - Go 1.25+

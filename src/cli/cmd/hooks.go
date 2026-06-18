@@ -133,14 +133,14 @@ func init() {
 	// ── armory hooks rules update ─────────────────────────────────────────────
 
 	var (
-		updateRuleName      string
-		updateRuleRepo      string
-		updateRuleEvents    []string
-		updateRuleWorkflow  string
-		updateRuleRefFilter string
-		updateRuleSecret    string
+		updateRuleName        string
+		updateRuleRepo        string
+		updateRuleEvents      []string
+		updateRuleWorkflow    string
+		updateRuleRefFilter   string
+		updateRuleSecret      string
 		updateRuleClearSecret bool
-		updateRuleInputs    []string
+		updateRuleInputs      []string
 	)
 
 	updateRuleCmd := &cobra.Command{

@@ -180,6 +180,12 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	store := newTokenStore(token, sessionID)
 	go p.rotateToken(runCtx, store, runID, triggeredBy, workflow.RoleID)
 
+	// stepOutputs accumulates each completed step's output by name so later steps
+	// can interpolate ${steps.NAME.output...} into their With values. Only outputs
+	// from prior groups are visible to a group, so each group is handed a snapshot
+	// taken before it starts — never the live map (which the result loop mutates).
+	stepOutputs := map[string]string{}
+
 	finalStatus := StatusCompleted
 	for _, group := range groupSteps(workflow.Steps) {
 		if runCtx.Err() != nil {
@@ -188,6 +194,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		}
 
 		(WorkflowRun{RunID: runID}).SetCurrentStep(runCtx, group.indices[0])
+		visible := snapshotOutputs(stepOutputs)
 
 		if len(group.steps) == 1 {
 			ws := group.steps[0]
@@ -198,7 +205,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 				finalStatus = StatusFailed
 				break
 			}
-			output, stepErr := p.executeStep(runCtx, store, ws.Step, inputs)
+			output, stepErr := p.executeStep(runCtx, store, ws.Step, substContext{inputs: inputs, outputs: visible})
 			if stepErr != nil {
 				if errors.Is(stepErr, context.Canceled) {
 					p.finishStepRun(stepRunID, StatusCancelled, strPtr(stepErr.Error()))
@@ -214,6 +221,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 				attribute.String("status", StatusCompleted),
 			))
 			p.finishStepRun(stepRunID, StatusCompleted, strPtr(output))
+			stepOutputs[ws.Name] = output
 			slog.InfoContext(ctx, "worker: step completed", "run_id", runID, "step", i, "action", ws.Action)
 			continue
 		}
@@ -221,6 +229,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		// Parallel group.
 		type parallelResult struct {
 			stepRunID string
+			name      string
 			action    string
 			stepIdx   int
 			output    string
@@ -251,16 +260,17 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 				select {
 				case sem <- struct{}{}: // acquire
 				case <-runCtx.Done():
-					results <- parallelResult{stepRunIDs[j], ws.Action, group.indices[j], "", context.Canceled}
+					results <- parallelResult{stepRunIDs[j], ws.Name, ws.Action, group.indices[j], "", context.Canceled}
 					return
 				}
 				defer func() { <-sem }() // release
-				out, err := p.executeStep(runCtx, store, ws.Step, inputs)
-				results <- parallelResult{stepRunIDs[j], ws.Action, group.indices[j], out, err}
+				out, err := p.executeStep(runCtx, store, ws.Step, substContext{inputs: inputs, outputs: visible})
+				results <- parallelResult{stepRunIDs[j], ws.Name, ws.Action, group.indices[j], out, err}
 			}(j, ws)
 		}
 
 		groupFailed := false
+		groupOutputs := make(map[string]string, len(group.steps))
 		for range group.steps {
 			r := <-results
 			if r.err != nil {
@@ -283,11 +293,17 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 					attribute.String("status", StatusCompleted),
 				))
 				p.finishStepRun(r.stepRunID, StatusCompleted, strPtr(r.output))
+				groupOutputs[r.name] = r.output
 				slog.InfoContext(ctx, "worker: parallel step completed", "run_id", runID, "step", r.stepIdx, "action", r.action)
 			}
 		}
 		if groupFailed {
 			break
+		}
+		// Publish the group's outputs only after it fully succeeds, so the next
+		// group can reference them (the live map is never read concurrently).
+		for name, out := range groupOutputs {
+			stepOutputs[name] = out
 		}
 	}
 
@@ -340,9 +356,10 @@ func (p *WorkerPool) rotateToken(ctx context.Context, store *tokenStore, runID, 
 
 // executeStep dispatches a step to either the http escape-hatch or the registry
 // action catalog. Returns the step output and a non-nil error on failure.
-// context.Canceled means the run was cancelled.
-func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step Step, inputs map[string]string) (string, error) {
-	with := substituteWith(step.With, inputs)
+// context.Canceled means the run was cancelled. sc carries the run inputs and
+// prior step outputs interpolated into the step's With values.
+func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step Step, sc substContext) (string, error) {
+	with := substituteWith(step.With, sc)
 	// Clamp to [defaultTimeout, maxTimeout]. Zero means "use default"; negative
 	// is treated the same way since a non-positive duration would fire immediately.
 	timeout := step.Timeout
@@ -623,13 +640,18 @@ func (p *WorkerPool) executeHTTP(ctx context.Context, store *tokenStore, with ma
 	return string(raw), nil
 }
 
-// substitute replaces all ${KEY} occurrences in s with the corresponding value
-// from inputs. Unrecognised keys are left as-is.
-func substitute(s string, inputs map[string]string) string {
-	for k, v := range inputs {
-		s = strings.ReplaceAll(s, "${"+k+"}", v)
+// snapshotOutputs copies the accumulated step-output map so a group of steps can
+// read a stable view while the run loop continues to mutate the live map. Returns
+// nil for an empty map so substContext stays "empty" and substitution is skipped.
+func snapshotOutputs(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
 	}
-	return s
+	c := make(map[string]string, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
 }
 
 func (p *WorkerPool) startStepRun(runID, stepRunID string, index int, name string) error {

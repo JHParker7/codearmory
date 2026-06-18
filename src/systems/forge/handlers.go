@@ -217,9 +217,16 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if req.RunnerClass == "" {
 		req.RunnerClass = "standard"
 	}
-	if _, err := runnerClassSpec(ctx, req.RunnerClass); err != nil {
+	rc, err := runnerClassSpec(ctx, req.RunnerClass)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	// Snapshot the class's backend onto the execution so an admin re-pointing the
+	// class after submit cannot move this already-queued job to another runtime.
+	backend := rc.Backend
+	if backend == "" {
+		backend = "default"
 	}
 
 	executionID := uuid.New().String()
@@ -227,6 +234,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		attribute.String("execution.id", executionID),
 		attribute.String("image", req.Image),
 		attribute.String("runner_class", req.RunnerClass),
+		attribute.String("backend", backend),
 	)
 
 	exec := Execution{
@@ -237,6 +245,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		Env:         req.Env,
 		TimeoutSecs: req.Timeout,
 		RunnerClass: req.RunnerClass,
+		Backend:     backend,
 		Status:      StatusPending,
 	}
 	if err := exec.Add(ctx); err != nil {
@@ -389,4 +398,3 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
-

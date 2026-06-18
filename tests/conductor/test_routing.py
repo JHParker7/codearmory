@@ -51,9 +51,12 @@ class TestGatekeeperRouting:
         assert resp.status_code == 404
 
     def test_orgs_collection_route_reaches_gatekeeper(self, base_url, token):
-        """GET /gatekeeper/orgs is a Gatekeeper route; a user without listOrg permission gets 403."""
+        """GET /gatekeeper/orgs is a Gatekeeper route reachable through Conductor.
+        listOrg is a default-granted, caller-scoped permission (registry RBAC change
+        e70d890), so a signed-up user gets 200 with their own (empty) org list — which
+        still proves the route reaches Gatekeeper and is permission-checked there."""
         resp = requests.get(f"{base_url}/gatekeeper/orgs", headers=bearer(token))
-        assert resp.status_code == 403
+        assert resp.status_code == 200
 
     def test_post_signup_forwarded_without_auth(self, base_url):
         uid = rand_id()[:8]

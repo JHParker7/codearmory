@@ -194,7 +194,8 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 		}
 		resource := resolveResource(entry.resource, entry.paramNames, paramValues)
 		var outcome authOutcome
-		outcome, userID, normalizedAuth = checkUserAuth(r, entry.serviceName, entry.action, resource)
+		var denyReason string
+		outcome, userID, normalizedAuth, denyReason = checkUserAuth(r, entry.serviceName, entry.action, resource)
 		switch outcome {
 		case authUnauthorized:
 			if userID != "" {
@@ -206,7 +207,10 @@ func routeAndProxy(w http.ResponseWriter, r *http.Request, entry endpointEntry, 
 			if userID != "" {
 				recordSuspect(sourceIP(r), userID, r.Method, r.URL.Path)
 			}
-			http.Error(w, "forbidden", http.StatusForbidden)
+			if denyReason == "" {
+				denyReason = "forbidden"
+			}
+			http.Error(w, denyReason, http.StatusForbidden)
 			return
 		case authError:
 			http.Error(w, "service unavailable", http.StatusBadGateway)

@@ -437,32 +437,5 @@ func withInt64(with map[string]any, key string) int64 {
 	return 0
 }
 
-// substituteWith applies ${KEY} substitution to all string values in a With map,
-// recursing into nested maps and slices.
-func substituteWith(with map[string]any, inputs map[string]string) map[string]any {
-	if len(inputs) == 0 {
-		return with
-	}
-	result := make(map[string]any, len(with))
-	for k, v := range with {
-		result[k] = substituteValue(v, inputs)
-	}
-	return result
-}
-
-func substituteValue(v any, inputs map[string]string) any {
-	switch sv := v.(type) {
-	case string:
-		return substitute(sv, inputs)
-	case map[string]any:
-		return substituteWith(sv, inputs)
-	case []any:
-		result := make([]any, len(sv))
-		for i, item := range sv {
-			result[i] = substituteValue(item, inputs)
-		}
-		return result
-	default:
-		return v
-	}
-}
+// substituteWith / substituteValue live in substitution.go alongside the step
+// inputs/outputs templating engine.

@@ -80,7 +80,15 @@ func refreshServiceCache(ctx context.Context) {
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		slog.WarnContext(ctx, "service registry refresh: unexpected status", "status", resp.StatusCode)
+		if resp.StatusCode == http.StatusUnauthorized {
+			// A 401 means the registry rejected conductor's service key. This is a
+			// persistent auth failure (e.g. the key fell out of sync after a restart
+			// or chaos test) that retrying with the same key cannot resolve, and it
+			// keeps conductor from routing any traffic — so it is an error, not a warning.
+			slog.ErrorContext(ctx, "service registry refresh: registry rejected conductor service key", "status", resp.StatusCode)
+		} else {
+			slog.WarnContext(ctx, "service registry refresh: unexpected status", "status", resp.StatusCode)
+		}
 		return
 	}
 

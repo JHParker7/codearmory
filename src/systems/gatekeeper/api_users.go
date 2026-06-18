@@ -7,7 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
-	"fmt"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -417,105 +417,22 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 
 	userID := uuid.New().String()
 
-	// Build default permissions from registry-sourced grants.
-	templateVars := map[string]string{
-		"user_id":  userID,
-		"username": req.Username,
-	}
-	userGrants := defaultGrantsFor("user")
-	if len(userGrants) == 0 {
-		slog.ErrorContext(ctx, "signup: no default grants for 'user' — new user will have no permissions; check that the registry is reachable and has default_grants seeded", "user_id", userID)
-		http.Error(w, "service configuration error: permissions not available", http.StatusServiceUnavailable)
-		return
-	}
-	var createdPerms []Permissions
-	for _, grant := range userGrants {
-		perm := Permissions{
-			Name:          fmt.Sprintf("%s default permissions for %s", grant.ServiceName, req.Username),
-			PermissionsID: uuid.New().String(),
-			Service:       grant.ServiceName,
-			Actions:       grant.Actions,
-			Resources:     applyGrantTemplates(grant.Resources, templateVars),
-		}
-		if err = perm.Add(ctx); err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to create default permission")
-			slog.ErrorContext(ctx, "signup failed: could not create default permission", "user_id", userID, "service", grant.ServiceName, "error", err)
-			for _, p := range createdPerms {
-				p.Remove(ctx) //nolint:errcheck
-			}
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-		span.AddEvent("permission.created", trace.WithAttributes(
-			attribute.String("permissions.id", perm.PermissionsID),
-			attribute.String("permissions.service", perm.Service),
-		))
-		slog.InfoContext(ctx, "default permission created", "user_id", userID, "service", grant.ServiceName, "permissions_id", perm.PermissionsID)
-		createdPerms = append(createdPerms, perm)
-	}
+	// Whether this signup is eligible to become the bootstrap admin. When a
+	// dedicated admin is provisioned via GATEKEEPER_ADMIN_EMAIL/PASSWORD
+	// (seedAdminUser at startup), that env-var admin takes precedence and the
+	// first-user fallback is disabled — the operator has named the admin explicitly.
+	adminCandidate := !adminSeedConfigured()
+	// A non-admin account needs default grants or it would be permission-less; the
+	// bootstrap admin is exempt (its wildcard grant does not depend on the registry).
+	// createUserWithBootstrapAdmin enforces this transactionally (errNoDefaultGrants),
+	// which is the single source of truth — handled in the error switch below.
+	grantsAvailable := len(defaultGrantsFor("user")) > 0
 
-	// Pre-generate the role ID so the self-read permission can reference it.
-	roleID := uuid.New().String()
-
-	permIDs := make([]string, len(createdPerms))
-	for i, p := range createdPerms {
-		permIDs[i] = p.PermissionsID
-	}
-
-	// Grant the user read access on their own role and each of their permissions records.
-	// Resources list the role and every permissions ID explicitly (including the self-read
-	// record itself, whose ID we pre-generate here to avoid a circular dependency).
-	selfReadPermID := uuid.New().String()
-	selfResources := make([]string, 0, 2+len(permIDs))
-	selfResources = append(selfResources, "gatekeeper/roles/"+roleID)
-	for _, id := range permIDs {
-		selfResources = append(selfResources, "gatekeeper/permissions/"+id)
-	}
-	selfResources = append(selfResources, "gatekeeper/permissions/"+selfReadPermID)
-	selfReadPerm := Permissions{
-		Name:          fmt.Sprintf("gatekeeper self-read permissions for %s", req.Username),
-		PermissionsID: selfReadPermID,
-		Service:       "gatekeeper",
-		Actions:       []string{"getRole", "getPermissions"},
-		Resources:     selfResources,
-	}
-	if err = selfReadPerm.Add(ctx); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to create self-read permission")
-		slog.ErrorContext(ctx, "signup failed: could not create self-read permission", "user_id", userID, "error", err)
-		for _, p := range createdPerms {
-			p.Remove(ctx) //nolint:errcheck
-		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	span.AddEvent("permission.created", trace.WithAttributes(
-		attribute.String("permissions.id", selfReadPermID),
-		attribute.String("permissions.service", "gatekeeper"),
-	))
-	slog.InfoContext(ctx, "self-read permission created", "user_id", userID, "permissions_id", selfReadPermID)
-
-	role := Role{
-		RoleID:         roleID,
-		PermissionsIDs: append(permIDs, selfReadPermID),
-	}
-	if err = role.Add(ctx); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to create default role")
-		slog.ErrorContext(ctx, "signup failed: could not create default role", "user_id", userID, "error", err)
-		for _, p := range createdPerms {
-			p.Remove(ctx) //nolint:errcheck
-		}
-		selfReadPerm.Remove(ctx) //nolint:errcheck
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	span.AddEvent("role.created", trace.WithAttributes(
-		attribute.String("role.id", role.RoleID),
-	))
-	slog.InfoContext(ctx, "default role created", "user_id", userID, "role_id", role.RoleID)
-
+	// The personal role holds org/team-ownership and custom grants. It starts empty;
+	// the user-scoped default grants live in a separately-managed default role (see
+	// rebuildDefaultRole). The bootstrap admin is the exception — its personal role
+	// is named "admin" and carries the wildcard permission, set by the atomic create.
+	personalRole := Role{RoleID: uuid.New().String(), OwnerID: userID, PermissionsIDs: []string{}}
 	user := User{
 		UserID:         userID,
 		HashedPassword: string(hash),
@@ -523,25 +440,20 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		Username:       req.Username,
 		Firstname:      req.Firstname,
 		Lastname:       req.Lastname,
-		RoleID:         &role.RoleID,
+		RoleID:         &personalRole.RoleID,
 	}
 
-	if err := user.Add(ctx); err != nil {
-		// Clean up permissions and role that were already committed.
-		for _, p := range createdPerms {
-			if cleanErr := p.Remove(ctx); cleanErr != nil {
-				slog.ErrorContext(ctx, "signup: failed to clean up orphaned permission", "permissions_id", p.PermissionsID, "error", cleanErr)
-			}
-		}
-		if cleanErr := selfReadPerm.Remove(ctx); cleanErr != nil {
-			slog.ErrorContext(ctx, "signup: failed to clean up orphaned self-read permission", "permissions_id", selfReadPermID, "error", cleanErr)
-		}
-		if cleanErr := role.Remove(ctx); cleanErr != nil {
-			slog.ErrorContext(ctx, "signup: failed to clean up orphaned role", "role_id", role.RoleID, "error", cleanErr)
+	// Insert the personal role and user atomically, deciding first-user-admin inside
+	// the transaction so two concurrent signups on an empty DB cannot both win admin.
+	isFirstUser, err := createUserWithBootstrapAdmin(ctx, &user, &personalRole, adminCandidate, grantsAvailable)
+	if err != nil {
+		if errors.Is(err, errNoDefaultGrants) {
+			slog.ErrorContext(ctx, "signup: no default grants for 'user' — refusing to create a permission-less account; check that the registry is reachable and has default_grants seeded", "user_id", userID)
+			http.Error(w, "service configuration error: permissions not available", http.StatusServiceUnavailable)
+			return
 		}
 		// GORM surfaces the raw DB error string; string-matching "unique" is the
-		// portable way to detect unique constraint violations without importing a
-		// postgres-specific driver package.
+		// portable way to detect unique constraint violations.
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			span.SetStatus(codes.Error, "email or username conflict")
 			slog.WarnContext(ctx, "signup failed: email or username already in use", "username", req.Username)
@@ -550,10 +462,36 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to insert user")
-		slog.ErrorContext(ctx, "signup failed: could not insert user", "username", req.Username, "error", err)
+		span.SetStatus(codes.Error, "failed to create user")
+		slog.ErrorContext(ctx, "signup failed: could not create user", "username", req.Username, "error", err)
 		http.Error(w, "failed to create user", http.StatusInternalServerError)
 		return
+	}
+	if isFirstUser {
+		slog.InfoContext(ctx, "signup: first user detected — bootstrapped as admin", "user_id", userID, "username", req.Username)
+	}
+
+	// Materialise the user-scoped default grants into the user's default role. For
+	// the bootstrap admin this is non-fatal — it already has full access via its
+	// wildcard grant, so a missing default role is retried on next login rather than
+	// rolling back the platform owner. A normal user with no default role would be
+	// permission-less, so there we roll back.
+	if err := rebuildDefaultRole(ctx, userID); err != nil {
+		if isFirstUser {
+			slog.WarnContext(ctx, "signup: default role build failed for bootstrap admin (admin still has full access)", "user_id", userID, "error", err)
+		} else {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "failed to build default role")
+			slog.ErrorContext(ctx, "signup failed: could not build default role", "user_id", userID, "error", err)
+			if cleanErr := user.Remove(ctx); cleanErr != nil {
+				slog.ErrorContext(ctx, "signup: failed to clean up user after default role failure", "user_id", userID, "error", cleanErr)
+			}
+			if cleanErr := personalRole.Remove(ctx); cleanErr != nil {
+				slog.ErrorContext(ctx, "signup: failed to clean up personal role after default role failure", "role_id", personalRole.RoleID, "error", cleanErr)
+			}
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	span.SetAttributes(attribute.String("user.id", userID))
@@ -627,6 +565,19 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.AddEvent("credentials.verified")
+
+	// Refresh the user's default role if the default grant definitions have
+	// changed since it was last built. The version compare makes this a no-op on
+	// the overwhelming majority of logins; it runs before the MFA branch so it
+	// covers both MFA and non-MFA logins. A rebuild failure is non-fatal — the
+	// user keeps their existing (stale) default role and we retry next login.
+	if v := grantsVersion(); v != "" && user.DefaultGrantsVersion != v {
+		if err := rebuildDefaultRole(ctx, user.UserID); err != nil {
+			slog.WarnContext(ctx, "login: default role rebuild failed", "user_id", user.UserID, "error", err)
+		} else {
+			span.AddEvent("default_role.rebuilt")
+		}
+	}
 
 	if userHasTOTP(ctx, user.UserID) {
 		pending, err := newMFAPending(ctx, user.UserID, "", "", "", "")

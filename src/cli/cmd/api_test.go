@@ -9,7 +9,7 @@ import (
 // apiRouteTest describes one expected HTTP interaction for an apiCall invocation.
 type apiRouteTest struct {
 	name       string
-	callFn     func() error    // the function under test
+	callFn     func() error // the function under test
 	wantMethod string
 	wantPath   string
 	wantBody   string // substring that must appear in the request body (empty = skip)

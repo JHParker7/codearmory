@@ -61,14 +61,7 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 		envList = append(envList, k+"="+v)
 	}
 	if r.egressProxy != "" {
-		for _, pair := range [][2]string{
-			{"HTTP_PROXY", r.egressProxy},
-			{"HTTPS_PROXY", r.egressProxy},
-			{"NO_PROXY", "localhost,127.0.0.1"},
-			{"http_proxy", r.egressProxy},
-			{"https_proxy", r.egressProxy},
-			{"no_proxy", "localhost,127.0.0.1"},
-		} {
+		for _, pair := range proxyEnvPairs(r.egressProxy) {
 			if _, exists := exec.Env[pair[0]]; !exists {
 				envList = append(envList, pair[0]+"="+pair[1])
 			}
@@ -106,7 +99,7 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 				CPUQuota:  cpuQuota,
 				PidsLimit: &pidsLimit,
 			},
-			CapDrop:    []string{"ALL"},
+			CapDrop:     []string{"ALL"},
 			SecurityOpt: []string{"no-new-privileges"},
 		},
 		nil, nil, "",

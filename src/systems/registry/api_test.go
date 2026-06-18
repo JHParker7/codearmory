@@ -48,6 +48,51 @@ func TestRequireAuthWithRole_MalformedHeader_EmptyName(t *testing.T) {
 // DB-dependent auth success/failure is covered by the integration test suite.
 
 // ---------------------------------------------------------------------------
+// matchesSeedKey — bootstrap-key recovery fallback (no DB required)
+// ---------------------------------------------------------------------------
+
+func TestMatchesSeedKey_Match(t *testing.T) {
+	seedServiceKeys = map[string]seedAccount{"conductor": {key: "boot-secret", role: "read"}}
+	t.Cleanup(func() { seedServiceKeys = map[string]seedAccount{} })
+
+	role, ok := matchesSeedKey("conductor", "boot-secret")
+	if !ok {
+		t.Fatal("expected bootstrap key to match seeded key")
+	}
+	if role != "read" {
+		t.Fatalf("expected role %q, got %q", "read", role)
+	}
+}
+
+func TestMatchesSeedKey_WrongKey(t *testing.T) {
+	seedServiceKeys = map[string]seedAccount{"conductor": {key: "boot-secret", role: "read"}}
+	t.Cleanup(func() { seedServiceKeys = map[string]seedAccount{} })
+
+	if _, ok := matchesSeedKey("conductor", "rotated-or-bad-key"); ok {
+		t.Fatal("expected non-matching key to be rejected")
+	}
+}
+
+func TestMatchesSeedKey_UnknownAccount(t *testing.T) {
+	seedServiceKeys = map[string]seedAccount{"conductor": {key: "boot-secret", role: "read"}}
+	t.Cleanup(func() { seedServiceKeys = map[string]seedAccount{} })
+
+	if _, ok := matchesSeedKey("ghost", "boot-secret"); ok {
+		t.Fatal("expected unknown account to be rejected")
+	}
+}
+
+func TestMatchesSeedKey_EmptySeedKeyNeverMatches(t *testing.T) {
+	// A blank seeded key must never authenticate, even against a blank presented key.
+	seedServiceKeys = map[string]seedAccount{"conductor": {key: "", role: "read"}}
+	t.Cleanup(func() { seedServiceKeys = map[string]seedAccount{} })
+
+	if _, ok := matchesSeedKey("conductor", ""); ok {
+		t.Fatal("expected empty seeded key to never match")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Pre-auth handler paths — pool is nil; only the auth rejection path runs
 // ---------------------------------------------------------------------------
 

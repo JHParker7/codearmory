@@ -12,6 +12,7 @@ use (
 	./gitea_integration
 	./hooks
 	./mcp
+	./notifications
 	./outpost
 	./outpost-gateway
 	./registry

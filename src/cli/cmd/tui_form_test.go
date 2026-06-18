@@ -41,20 +41,25 @@ func TestTUIForm_TabAdvancesFocus(t *testing.T) {
 	}
 }
 
+// Two fields plus the auto-appended Submit button make three focusable controls,
+// so three tabs wrap back to the first field.
 func TestTUIForm_TabWrapsAround(t *testing.T) {
 	f, _ := newTUIForm("T", formInput("a", "A", ""), formInput("b", "B", ""))
-	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyTab})
-	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyTab})
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyTab}) // → b
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyTab}) // → Submit button
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyTab}) // → wraps to a
 	if f.focus != 0 {
 		t.Errorf("focus after wrapping = %d, want 0", f.focus)
 	}
 }
 
+// shift+tab from the first field wraps to the last control — the Submit button
+// (index 2 with two fields).
 func TestTUIForm_ShiftTabRetreats(t *testing.T) {
 	f, _ := newTUIForm("T", formInput("a", "A", ""), formInput("b", "B", ""))
 	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyShiftTab})
-	if f.focus != 1 {
-		t.Errorf("focus after shift+tab from 0 = %d, want 1 (wrap)", f.focus)
+	if f.focus != 2 {
+		t.Errorf("focus after shift+tab from 0 = %d, want 2 (wrap to Submit button)", f.focus)
 	}
 }
 
@@ -66,11 +71,40 @@ func TestTUIForm_EscReturnsCancel(t *testing.T) {
 	}
 }
 
-func TestTUIForm_EnterReturnsSubmit(t *testing.T) {
+// Enter no longer submits from a text field — it advances toward the Submit
+// button (so multi-line fields can use Enter for newlines). ctrl+s still submits.
+func TestTUIForm_EnterAdvancesFromTextField(t *testing.T) {
+	f, _ := newTUIForm("T", formInput("a", "A", ""), formInput("b", "B", ""))
+	f, action, _ := f.update(tea.KeyMsg{Type: tea.KeyEnter})
+	if action != formNone {
+		t.Errorf("enter on a text field action = %v, want formNone", action)
+	}
+	if f.focus != 1 {
+		t.Errorf("enter should advance focus 0→1, got %d", f.focus)
+	}
+}
+
+func TestTUIForm_CtrlSSubmits(t *testing.T) {
 	f, _ := newTUIForm("T", formInput("a", "A", ""))
+	_, action, _ := f.update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if action != formSubmit {
+		t.Errorf("ctrl+s action = %v, want formSubmit", action)
+	}
+}
+
+// The Submit button submits on Enter (and Space) when focused.
+func TestTUIForm_ButtonSubmitsOnEnter(t *testing.T) {
+	f, _ := newTUIForm("T", formInput("a", "A", ""))
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyTab}) // a → Submit button
 	_, action, _ := f.update(tea.KeyMsg{Type: tea.KeyEnter})
 	if action != formSubmit {
-		t.Errorf("enter action = %v, want formSubmit", action)
+		t.Errorf("enter on the Submit button action = %v, want formSubmit", action)
+	}
+	f2, _ := newTUIForm("T", formInput("a", "A", ""))
+	f2, _, _ = f2.update(tea.KeyMsg{Type: tea.KeyTab}) // a → Submit button
+	_, action2, _ := f2.update(tea.KeyMsg{Type: tea.KeySpace})
+	if action2 != formSubmit {
+		t.Errorf("space on the Submit button action = %v, want formSubmit", action2)
 	}
 }
 
@@ -133,6 +167,14 @@ func TestTUIForm_ViewShowsError(t *testing.T) {
 	}
 }
 
+func TestTUIForm_ViewShowsHelp(t *testing.T) {
+	f, _ := newTUIForm("T", formInput("a", "A", ""))
+	f.help = "refs: ${steps.STEP.output}"
+	if !strings.Contains(f.view(80, 24), "${steps.STEP.output}") {
+		t.Error("view should render the form help text when set")
+	}
+}
+
 // ── tuiForm: select / cycle fields ────────────────────────────────────────────
 
 func TestTUIForm_SelectDefault_SelectsValue(t *testing.T) {
@@ -180,6 +222,44 @@ func TestTUIForm_EmptyOptionReadsAsEmptyString(t *testing.T) {
 	}
 }
 
+func TestTUIForm_SelectKV_ReadsBackValueNotLabel(t *testing.T) {
+	// The form shows the name but submits the id at the chosen index.
+	f, _ := newTUIForm("T", formSelectKV("workflow", "Workflow",
+		[]string{"build-ci", "deploy"}, []string{"wf-1", "wf-2"}))
+	if got := f.value("workflow"); got != "wf-1" {
+		t.Errorf("value = %q, want wf-1 (the id, not the label)", got)
+	}
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyRight})
+	if got := f.value("workflow"); got != "wf-2" {
+		t.Errorf("value after cycle = %q, want wf-2", got)
+	}
+}
+
+func TestTUIForm_SelectKV_RendersLabel(t *testing.T) {
+	f, _ := newTUIForm("T", formSelectKV("workflow", "Workflow",
+		[]string{"build-ci"}, []string{"wf-1"}))
+	v := f.view(80, 24)
+	if !strings.Contains(v, "build-ci") {
+		t.Errorf("select should display the label, got: %q", v)
+	}
+	if strings.Contains(v, "wf-1") {
+		t.Errorf("select should not display the underlying id, got: %q", v)
+	}
+}
+
+func TestTUIForm_SelectKV_EmptyValueOption(t *testing.T) {
+	// A leading "(none)" label mapped to "" reads back as empty (optional field).
+	f, _ := newTUIForm("T", formSelectKV("role", "Role",
+		[]string{"(none)", "admin"}, []string{"", "role-1"}))
+	if got := f.value("role"); got != "" {
+		t.Errorf("value = %q, want empty for the (none) option", got)
+	}
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyRight})
+	if got := f.value("role"); got != "role-1" {
+		t.Errorf("value after cycle = %q, want role-1", got)
+	}
+}
+
 func TestTUIForm_SelectIgnoresTextRunes(t *testing.T) {
 	f, _ := newTUIForm("T", formSelect("a", "A", []string{"x", "y"}))
 	f = typeForm(f, "abc") // runes should not change a select
@@ -207,8 +287,8 @@ func TestTUIForm_ViewRendersSelectAndCycleHint(t *testing.T) {
 	if !strings.Contains(v, "one") || !strings.Contains(v, "‹") {
 		t.Errorf("select field should render the chosen value in cycle chrome, got: %q", v)
 	}
-	if !strings.Contains(v, "cycle") {
-		t.Error("a form with a select should show the ←/→ cycle hint")
+	if !strings.Contains(v, "←/→") {
+		t.Error("a form with a select should show the ←/→ options hint")
 	}
 }
 
@@ -216,6 +296,29 @@ func TestTUIForm_ViewEmptyOptionShowsDefaultLabel(t *testing.T) {
 	f, _ := newTUIForm("T", formSelect("a", "A", []string{""}))
 	if !strings.Contains(f.view(80, 24), "(default)") {
 		t.Error("an empty select option should render as (default)")
+	}
+}
+
+// ── tuiForm: textarea (multi-line) fields ──────────────────────────────────────
+
+func TestTUIForm_TextareaAcceptsNewline(t *testing.T) {
+	f, _ := newTUIForm("T", formTextarea("cmd", "Command", ""))
+	// focus starts on the textarea (field 0); enter inserts a newline, not submit.
+	f, action, _ := f.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyEnter})
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	if action != formNone {
+		t.Errorf("typing in a textarea returned action %v, want formNone", action)
+	}
+	if got := f.value("cmd"); got != "a\nb" {
+		t.Errorf("textarea value = %q, want \"a\\nb\" (enter inserts a newline)", got)
+	}
+}
+
+func TestTUIForm_TextareaHintMentionsNewline(t *testing.T) {
+	f, _ := newTUIForm("T", formTextarea("cmd", "Command", ""))
+	if !strings.Contains(f.view(80, 24), "newline") {
+		t.Error("a form with a textarea should hint that enter inserts a newline")
 	}
 }
 

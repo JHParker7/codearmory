@@ -37,12 +37,14 @@ info:
     Internal endpoints (`/internal/*`) use HMAC-SHA256 authentication via
     `X-Hooks-Token` and `X-Hooks-Timestamp` headers (hooks service only).
 
-    ## Input substitution
+    ## Input & output substitution
 
-    `${KEY}` placeholders in any string value inside a step's `with` map are
-    replaced with values from the run's `inputs` map at execution time.
-    Substitution applies recursively to nested maps and arrays. Unrecognised
-    keys are left as-is.
+    `${...}` references in any string value inside a step's `with` map are
+    resolved at execution time (recursively, into nested maps and arrays):
+    `${inputs.NAME}` (or bare `${NAME}`) for run inputs, `${steps.STEP.output}`
+    for an earlier step's output, and `${steps.STEP.output.field}` for a JSON
+    field of it. Only outputs of steps from a prior group are visible.
+    Unrecognised references are left as-is.
   version: 2.0.0
   contact:
     email: jhp1403@gmail.com

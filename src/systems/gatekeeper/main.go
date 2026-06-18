@@ -186,6 +186,7 @@ func main() {
 	conn.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{})
 	applyForeignKeys(conn)
 	seedServiceAccounts(ctx)
+	seedAdminUser(ctx)
 	initOIDC()
 
 	if registryURL := os.Getenv("REGISTRY_URL"); registryURL != "" {

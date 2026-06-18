@@ -80,12 +80,32 @@ func TestGKModel_InitialState(t *testing.T) {
 	}
 }
 
-func TestGKModel_Init_FetchesTeams(t *testing.T) {
-	srv, rec := recordingServer(t, http.StatusOK, "[]")
+func TestGKModel_Init_FetchesTeamsAndPrefetchesRoles(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusOK, "[]")
 	setupCLI(t, srv)
-	newGatekeeperModel().Init()()
-	if rec.Path != "/gatekeeper/teams" {
-		t.Errorf("Init fetched %s, want /gatekeeper/teams", rec.Path)
+
+	// Init batches the active-section fetch with a roles prefetch (for the team
+	// form's role selector); run every batched cmd and confirm both happen.
+	batch, ok := newGatekeeperModel().Init()().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("Init should batch its fetches, got %T", newGatekeeperModel().Init()())
+	}
+	var gotTeams, gotRoles bool
+	for _, c := range batch {
+		switch msg := c().(type) {
+		case gkRecordsMsg:
+			if msg.section == gkTeams {
+				gotTeams = true
+			}
+		case gkRolesMsg:
+			gotRoles = true
+		}
+	}
+	if !gotTeams {
+		t.Error("Init should fetch the teams section")
+	}
+	if !gotRoles {
+		t.Error("Init should prefetch roles for the team form selector")
 	}
 }
 
@@ -197,20 +217,20 @@ func TestGKModel_Enter_NoopWhenEmpty(t *testing.T) {
 func TestGKModel_Detail_Back(t *testing.T) {
 	m := applyGK(newGatekeeperModel(), gkRecordsMsg{section: gkTeams, records: gkTeamRecords(1)})
 	m = applyGK(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m = applyGK(m, keyRunes("b"))
+	m = applyGK(m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.view != gkViewList {
-		t.Error("b should return to list from detail")
+		t.Error("esc should return to list from detail")
 	}
 }
 
-func TestGKModel_List_Q_GoesHome(t *testing.T) {
+func TestGKModel_List_Esc_GoesHome(t *testing.T) {
 	m := applyGK(newGatekeeperModel(), gkRecordsMsg{section: gkTeams, records: []gkRecord{}})
-	_, cmd := m.Update(keyRunes("q"))
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd == nil {
-		t.Fatal("q should return a cmd")
+		t.Fatal("esc should return a cmd")
 	}
 	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Errorf("q returned %T, want goHomeMsg", cmd())
+		t.Errorf("esc returned %T, want goHomeMsg", cmd())
 	}
 }
 
@@ -383,6 +403,84 @@ func TestGKListPath_SRFilter(t *testing.T) {
 }
 
 // ── Forms ─────────────────────────────────────────────────────────────────────
+
+func gkRoleRecords(n int) []gkRecord {
+	out := make([]gkRecord, n)
+	for i := range out {
+		out[i] = gkRecord{
+			"role_id": fmt.Sprintf("role-%04d", i),
+			"name":    fmt.Sprintf("role-%d", i),
+		}
+	}
+	return out
+}
+
+func TestGKRoleField_SelectorWhenRolesKnown(t *testing.T) {
+	f := gkRoleField(gkRoleRecords(2))
+	if f.kind != fieldSelect {
+		t.Fatalf("role field kind = %v, want fieldSelect", f.kind)
+	}
+	// Leading "(none)" sentinel reads back as empty, then role names map to ids.
+	if f.options[0] != "(none)" || f.values[0] != "" {
+		t.Errorf("first option = %q/%q, want (none)/empty", f.options[0], f.values[0])
+	}
+	if f.options[1] != "role-0" || f.values[1] != "role-0000" {
+		t.Errorf("second option = %q/%q, want role-0/role-0000", f.options[1], f.values[1])
+	}
+}
+
+func TestGKRoleField_TextFallbackWhenEmpty(t *testing.T) {
+	if f := gkRoleField(nil); f.kind != fieldText {
+		t.Errorf("role field with no roles should fall back to text, got kind %v", f.kind)
+	}
+}
+
+func TestGKModel_RolesMsg_Populates(t *testing.T) {
+	m := applyGK(newGatekeeperModel(), gkRolesMsg(gkRoleRecords(2)))
+	if len(m.roles) != 2 {
+		t.Fatalf("roles = %d, want 2", len(m.roles))
+	}
+	// A roles msg must not blank the view or touch a section.
+	if m.err != nil {
+		t.Error("rolesMsg should not set an error")
+	}
+}
+
+func TestGKFetchRoles_GracefulOnError(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusForbidden, `{"error":"no"}`)
+	setupCLI(t, srv)
+	// A roles permission error must degrade to an empty list, never gkErrMsg
+	// (which would blank the whole TUI).
+	if _, ok := gkFetchRoles().(gkRolesMsg); !ok {
+		t.Errorf("gkFetchRoles on HTTP error = %T, want gkRolesMsg(nil)", gkFetchRoles())
+	}
+}
+
+func gkFormFieldKind(f tuiForm, key string) (fieldKind, bool) {
+	for _, fld := range f.fields {
+		if fld.key == key {
+			return fld.kind, true
+		}
+	}
+	return 0, false
+}
+
+func TestGKModel_CreateTeamForm_UsesRoleSelector(t *testing.T) {
+	m := newGatekeeperModel()
+	m = applyGK(m, gkRolesMsg(gkRoleRecords(2)))
+	m = applyGK(m, gkRecordsMsg{section: gkTeams, records: gkTeamRecords(1)})
+	m2 := applyGK(m, keyRunes("n"))
+	kind, ok := gkFormFieldKind(m2.form, "role")
+	if !ok || kind != fieldSelect {
+		t.Fatalf("team form role field should be a selector, got kind=%v ok=%v", kind, ok)
+	}
+	// Cycling to the first real role submits its id, not its name.
+	m2.form, _, _ = m2.form.update(tea.KeyMsg{Type: tea.KeyTab})   // focus role field
+	m2.form, _, _ = m2.form.update(tea.KeyMsg{Type: tea.KeyRight}) // (none) → role-0
+	if got := m2.form.value("role"); got != "role-0000" {
+		t.Errorf("role value = %q, want role-0000 (the id)", got)
+	}
+}
 
 func TestGKModel_N_OpensCreateTeamForm(t *testing.T) {
 	m := applyGK(newGatekeeperModel(), gkRecordsMsg{section: gkTeams, records: gkTeamRecords(1)})
@@ -667,5 +765,26 @@ func TestGKHome_LaunchOpensModel(t *testing.T) {
 	updated, _ := newAppModel().Update(launchMsg{idx: idx})
 	if _, ok := updated.(appModel).active.(gatekeeperModel); !ok {
 		t.Error("launching the Gatekeeper screen should make a gatekeeperModel active")
+	}
+}
+
+// ── Auto-refresh ──────────────────────────────────────────────────────────────
+
+func TestGatekeeperModel_AutoRefresh_ListEmitsFetch(t *testing.T) {
+	m := newGatekeeperModel()
+	_, cmd := m.Update(tuiAutoRefreshMsg{})
+	if cmd == nil {
+		t.Error("auto-refresh in the list view should emit a fetch cmd")
+	}
+}
+
+func TestGatekeeperModel_AutoRefresh_DetailAndFormNoop(t *testing.T) {
+	for _, v := range []gkViewID{gkViewDetail, gkViewForm} {
+		m := newGatekeeperModel()
+		m.view = v
+		_, cmd := m.Update(tuiAutoRefreshMsg{})
+		if cmd != nil {
+			t.Errorf("view %d: auto-refresh should be a noop", v)
+		}
 	}
 }

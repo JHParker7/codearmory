@@ -63,7 +63,10 @@ type ActionDef struct {
 
 // Step is a reusable, named action definition that can be composed into workflows.
 // Action determines what the step does; With holds action-specific configuration.
-// String values inside With support ${KEY} substitution from run-level Inputs.
+// String values inside With support ${...} substitution resolved at run time:
+// ${inputs.NAME} (or bare ${NAME}) for run inputs, ${steps.STEP.output} for an
+// earlier step's output, and ${steps.STEP.output.field} for a JSON field of it.
+// See substitution.go.
 type Step struct {
 	StepID      string         `json:"step_id"      gorm:"column:step_id;primaryKey"`
 	Name        string         `json:"name"         gorm:"column:name"`

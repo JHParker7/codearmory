@@ -63,31 +63,16 @@ func TestForgeModel_ExecsMsg_Empty(t *testing.T) {
 	}
 }
 
-func TestForgeModel_ExecsMsg_RunningExec_EmitsTick(t *testing.T) {
-	_, cmd := newForgeModel().Update(forgeExecsMsg([]forgeExec{
-		{ExecutionID: "e1", Status: "running"},
-	}))
-	if cmd == nil {
-		t.Error("running exec should schedule an auto-refresh tick")
-	}
-}
-
-func TestForgeModel_ExecsMsg_PendingExec_EmitsTick(t *testing.T) {
-	_, cmd := newForgeModel().Update(forgeExecsMsg([]forgeExec{
-		{ExecutionID: "e1", Status: "pending"},
-	}))
-	if cmd == nil {
-		t.Error("pending exec should schedule an auto-refresh tick")
-	}
-}
-
-func TestForgeModel_ExecsMsg_CompletedOnly_NoTick(t *testing.T) {
-	_, cmd := newForgeModel().Update(forgeExecsMsg([]forgeExec{
-		{ExecutionID: "e1", Status: "completed"},
-		{ExecutionID: "e2", Status: "failed"},
-	}))
-	if cmd != nil {
-		t.Error("completed/failed-only execs should not schedule a tick")
+func TestForgeModel_ExecsMsg_NoSelfTick(t *testing.T) {
+	// Auto-refresh is host-driven (one shared 5s ticker), so loading the exec
+	// list must not schedule a per-model tick — regardless of exec status.
+	for _, status := range []string{"running", "pending", "completed", "failed"} {
+		_, cmd := newForgeModel().Update(forgeExecsMsg([]forgeExec{
+			{ExecutionID: "e1", Status: status},
+		}))
+		if cmd != nil {
+			t.Errorf("status %q: execsMsg should not schedule its own tick", status)
+		}
 	}
 }
 
@@ -124,6 +109,28 @@ func TestForgeModel_ExecDetailMsg_PopulatesViewport(t *testing.T) {
 	}
 }
 
+func TestForgeModel_ExecDetailMsg_NoSelfTick(t *testing.T) {
+	// Receiving exec detail must never schedule a per-model tick — auto-refresh
+	// is host-driven — whatever the status or view.
+	cases := []struct {
+		view   forgeViewID
+		status string
+	}{
+		{forgeViewOutput, "running"},
+		{forgeViewOutput, "pending"},
+		{forgeViewOutput, "completed"},
+		{forgeViewList, "running"},
+	}
+	for _, c := range cases {
+		m := newForgeModel()
+		m.view = c.view
+		_, cmd := m.Update(forgeExecDetailMsg(forgeExec{ExecutionID: "e1", Status: c.status}))
+		if cmd != nil {
+			t.Errorf("view %d status %q: execDetailMsg should not schedule its own tick", c.view, c.status)
+		}
+	}
+}
+
 // ── Messages: forgeErrMsg ─────────────────────────────────────────────────────
 
 func TestForgeModel_ErrMsg_SetsError(t *testing.T) {
@@ -148,23 +155,58 @@ func TestForgeModel_CancelledMsg_SetsLoading(t *testing.T) {
 	}
 }
 
-// ── Messages: forgeTickMsg ────────────────────────────────────────────────────
+// ── Messages: tuiAutoRefreshMsg ───────────────────────────────────────────────
 
-func TestForgeModel_TickMsg_InListView_EmitsFetch(t *testing.T) {
+func TestForgeModel_AutoRefresh_InListView_EmitsFetch(t *testing.T) {
 	m := newForgeModel()
 	m.loading = false
-	_, cmd := m.Update(forgeTickMsg{})
+	_, cmd := m.Update(tuiAutoRefreshMsg{})
 	if cmd == nil {
-		t.Error("tick in list view should emit a fetch cmd")
+		t.Error("auto-refresh in list view should emit a fetch cmd")
 	}
 }
 
-func TestForgeModel_TickMsg_InOutputView_Noop(t *testing.T) {
+func TestForgeModel_AutoRefresh_InOutputView_FetchesDetail(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"execution_id":"exec-abc","status":"running"}`)
+	setupCLI(t, srv)
+
 	m := newForgeModel()
 	m.view = forgeViewOutput
-	_, cmd := m.Update(forgeTickMsg{})
+	m.loading = false // detail already shown; an auto-refresh must stay silent
+	m.selExec = &forgeExec{ExecutionID: "exec-abc"}
+	updated, cmd := m.Update(tuiAutoRefreshMsg{})
+	if cmd == nil {
+		t.Fatal("auto-refresh should emit a detail-fetch cmd")
+	}
+	// The auto-refresh must be silent — no "Loading…" flash mid-stream.
+	if updated.(forgeModel).loading {
+		t.Error("auto-refresh should not set loading=true (silent refresh)")
+	}
+	if _, ok := cmd().(forgeExecDetailMsg); !ok {
+		t.Errorf("auto-refresh cmd returned %T, want forgeExecDetailMsg", cmd())
+	}
+	if rec.Method != "GET" || rec.Path != "/forge/executions/exec-abc" {
+		t.Errorf("request = %s %s, want GET /forge/executions/exec-abc", rec.Method, rec.Path)
+	}
+}
+
+func TestForgeModel_AutoRefresh_OutputViewNoSelExec_Noop(t *testing.T) {
+	m := newForgeModel()
+	m.view = forgeViewOutput
+	m.selExec = nil
+	_, cmd := m.Update(tuiAutoRefreshMsg{})
 	if cmd != nil {
-		t.Error("tick in output view should be a noop")
+		t.Error("auto-refresh in output view with no selection should be a noop")
+	}
+}
+
+func TestForgeModel_AutoRefresh_InCreateView_Noop(t *testing.T) {
+	// The create form must not be disturbed by an auto-refresh.
+	m := newForgeModel()
+	m.view = forgeViewCreate
+	_, cmd := m.Update(tuiAutoRefreshMsg{})
+	if cmd != nil {
+		t.Error("auto-refresh in the create form should be a noop")
 	}
 }
 
@@ -182,14 +224,14 @@ func TestForgeModel_WindowResize(t *testing.T) {
 
 // ── Keys: list view ───────────────────────────────────────────────────────────
 
-func TestForgeModel_List_Q_GoesHome(t *testing.T) {
+func TestForgeModel_List_Esc_GoesHome(t *testing.T) {
 	m := applyForgeMsg(newForgeModel(), forgeExecsMsg([]forgeExec{}))
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd == nil {
-		t.Fatal("q key should return a cmd")
+		t.Fatal("esc key should return a cmd")
 	}
 	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Errorf("q key returned %T, want goHomeMsg", cmd())
+		t.Errorf("esc key returned %T, want goHomeMsg", cmd())
 	}
 }
 
@@ -298,40 +340,19 @@ func TestForgeModel_List_R_Refreshes(t *testing.T) {
 
 // ── Keys: output view ─────────────────────────────────────────────────────────
 
-func TestForgeModel_Output_Q_GoesHome(t *testing.T) {
-	m := newForgeModel()
-	m.view = forgeViewOutput
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if cmd == nil {
-		t.Fatal("q should return a cmd")
-	}
-	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Error("q in output view should return goHomeMsg")
-	}
-}
-
-func TestForgeModel_Output_B_Back(t *testing.T) {
-	m := newForgeModel()
-	m.view = forgeViewOutput
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
-	m2 := updated.(forgeModel)
-	if m2.view != forgeViewList {
-		t.Error("b in output view should return to list")
-	}
-	if cmd != nil {
-		t.Error("b should not emit a cmd")
-	}
-	if m2.detail != nil {
-		t.Error("detail should be cleared on back")
-	}
-}
-
 func TestForgeModel_Output_Esc_Back(t *testing.T) {
 	m := newForgeModel()
 	m.view = forgeViewOutput
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if updated.(forgeModel).view != forgeViewList {
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m2 := updated.(forgeModel)
+	if m2.view != forgeViewList {
 		t.Error("esc in output view should return to list")
+	}
+	if cmd != nil {
+		t.Error("esc should not emit a cmd")
+	}
+	if m2.detail != nil {
+		t.Error("detail should be cleared on back")
 	}
 }
 
@@ -361,14 +382,14 @@ func TestForgeModel_Output_R_Noop_WhenNoSelection(t *testing.T) {
 
 // ── Keys: error state ─────────────────────────────────────────────────────────
 
-func TestForgeModel_Error_Q_GoesHome(t *testing.T) {
+func TestForgeModel_Error_Esc_GoesHome(t *testing.T) {
 	m := applyForgeMsg(newForgeModel(), forgeErrMsg{err: fmt.Errorf("boom")})
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd == nil {
-		t.Fatal("q in error state should return a cmd")
+		t.Fatal("esc in error state should return a cmd")
 	}
 	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Error("q in error state should return goHomeMsg")
+		t.Error("esc in error state should return goHomeMsg")
 	}
 }
 
@@ -606,7 +627,7 @@ func TestForgeModel_Create_Submit_MissingImage_StaysWithError(t *testing.T) {
 	m := newForgeModel()
 	m.view = forgeViewCreate
 	m.form, _ = newForgeCreateForm(nil, nil)
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	m2 := updated.(forgeModel)
 	if m2.view != forgeViewCreate {
 		t.Error("submit with no image should stay in the create view")
@@ -699,6 +720,37 @@ func TestForgeSubmitExec_HTTPError_ReturnsFormErr(t *testing.T) {
 	setupCLI(t, srv)
 	if _, ok := forgeSubmitExec("x", []string{"sh"}, nil, 0, "")().(forgeFormErrMsg); !ok {
 		t.Error("HTTP error should return forgeFormErrMsg")
+	}
+}
+
+// ── buildForgeCommand ──────────────────────────────────────────────────────────
+
+// A single line is tokenised into argv (forge runs argv with no shell).
+func TestBuildForgeCommand_SingleLineIsArgv(t *testing.T) {
+	got, err := buildForgeCommand(`sh -c "echo hi"`)
+	if err != nil {
+		t.Fatalf("buildForgeCommand error: %v", err)
+	}
+	want := []string{"sh", "-c", "echo hi"}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Errorf("command = %v, want %v", got, want)
+	}
+}
+
+// Regression: a multi-line entry is a script — it must run through a shell, not be
+// flattened into argv (which made `echo "hello world"` swallow the later lines as
+// its arguments and print them all on one line).
+func TestBuildForgeCommand_MultiLineWrapsInShell(t *testing.T) {
+	script := "echo \"hello world\"\nls -la\ncd /\nls -la"
+	got, err := buildForgeCommand(script)
+	if err != nil {
+		t.Fatalf("buildForgeCommand error: %v", err)
+	}
+	if len(got) != 3 || got[0] != "sh" || got[1] != "-c" {
+		t.Fatalf("command = %v, want [sh -c <script>]", got)
+	}
+	if got[2] != script {
+		t.Errorf("script arg = %q, want the verbatim multi-line script %q", got[2], script)
 	}
 }
 

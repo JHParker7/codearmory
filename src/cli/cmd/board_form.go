@@ -337,7 +337,7 @@ func (m boardModel) updateConfirmDelete(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, sendDeleteTicket(t.ID)
-	case "esc", "q", "n", "N":
+	case "esc", "n", "N":
 		m.mode = boardModeNav
 	}
 	return m, nil

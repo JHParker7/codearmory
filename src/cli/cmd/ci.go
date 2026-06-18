@@ -93,7 +93,7 @@ func resolveStepName(name string) (string, error) {
 		return "", fmt.Errorf("parsing step response for %q: %w", name, err)
 	}
 	if len(steps) == 0 {
-		return "", fmt.Errorf("step %q not found — create it first:\n  armory ci create step %s --service <svc> --path <path>", name, name)
+		return "", fmt.Errorf("step %q not found — create it first:\n  armory pipelines create step %s --service <svc> --path <path>", name, name)
 	}
 	return steps[0].StepID, nil
 }
@@ -121,20 +121,20 @@ func dslToRefs(nodes []dslNode) ([]workflowStepRef, error) {
 // ── Command tree ──────────────────────────────────────────────────────────────
 
 var ciCmd = &cobra.Command{
-	Use:   "ci",
-	Short: "Manage CI/CD steps, pipelines and runs",
+	Use:   "pipelines",
+	Short: "Manage pipelines, steps and runs",
 }
 
-var ciCreateCmd = &cobra.Command{Use: "create", Short: "Create a CI/CD resource"}
-var ciListCmd = &cobra.Command{Use: "list", Short: "List CI/CD resources"}
-var ciGetCmd = &cobra.Command{Use: "get", Short: "Get a CI/CD resource"}
-var ciUpdateCmd = &cobra.Command{Use: "update", Short: "Update a CI/CD resource"}
-var ciDeleteCmd = &cobra.Command{Use: "delete", Short: "Delete a CI/CD resource"}
+var ciCreateCmd = &cobra.Command{Use: "create", Short: "Create a pipeline resource"}
+var ciListCmd = &cobra.Command{Use: "list", Short: "List pipeline resources"}
+var ciGetCmd = &cobra.Command{Use: "get", Short: "Get a pipeline resource"}
+var ciUpdateCmd = &cobra.Command{Use: "update", Short: "Update a pipeline resource"}
+var ciDeleteCmd = &cobra.Command{Use: "delete", Short: "Delete a pipeline resource"}
 var ciRunCmd = &cobra.Command{Use: "run", Short: "Trigger a pipeline run"}
 var ciCancelCmd = &cobra.Command{Use: "cancel", Short: "Cancel a pipeline run"}
 
 func init() {
-	// ── armory ci create step ─────────────────────────────────────────────────
+	// ── armory pipelines create step ─────────────────────────────────────────────────
 
 	var (
 		stepFile        string
@@ -152,27 +152,27 @@ func init() {
 		Short: "Create a reusable pipeline step",
 		Long: `Create a reusable step definition that can be composed into pipelines.
 
-Use "armory ci list actions" to see all registered catalog actions.
+Use "armory pipelines list actions" to see all registered catalog actions.
 
   # Run a shell command inside a container via forge (convenience flags):
-  armory ci create step unit_tests \
+  armory pipelines create step unit_tests \
     --action forge/run \
     --image ubuntu:22.04 \
     --run "go test ./..." \
     --timeout 300
 
   # Catalog action with explicit --with JSON:
-  armory ci create step open_ticket \
+  armory pipelines create step open_ticket \
     --action tickets/create \
     --with '{"title":"Build failed: ${HOOK_REPO}","priority":"high"}'
 
   # Raw HTTP call (escape hatch — calls any registered service):
-  armory ci create step notify \
+  armory pipelines create step notify \
     --action http \
     --with '{"service":"conductor","path":"/webhook","method":"POST"}'
 
   # From a JSON file (-f):
-  armory ci create step my_step -f step.json`,
+  armory pipelines create step my_step -f step.json`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
@@ -191,7 +191,7 @@ Use "armory ci list actions" to see all registered catalog actions.
 				}
 			} else {
 				if stepAction == "" {
-					return fmt.Errorf("--action is required (run \"armory ci list actions\" to see available actions)")
+					return fmt.Errorf("--action is required (run \"armory pipelines list actions\" to see available actions)")
 				}
 				with, err := buildWith(stepAction, stepWith, stepImage, stepRun, stepEnvs)
 				if err != nil {
@@ -214,7 +214,7 @@ Use "armory ci list actions" to see all registered catalog actions.
 		},
 	}
 	createStepCmd.Flags().StringVarP(&stepFile, "file", "f", "", "JSON step definition file")
-	createStepCmd.Flags().StringVar(&stepAction, "action", "", "Action name (run \"armory ci list actions\" to see available actions)")
+	createStepCmd.Flags().StringVar(&stepAction, "action", "", "Action name (run \"armory pipelines list actions\" to see available actions)")
 	createStepCmd.Flags().StringVar(&stepWith, "with", "", "Step configuration as a JSON object")
 	createStepCmd.Flags().StringVar(&stepImage, "image", "", "Container image (forge/run convenience flag, e.g. ubuntu:22.04)")
 	createStepCmd.Flags().StringVar(&stepRun, "run", "", "Shell command to run (forge/run convenience flag)")
@@ -223,7 +223,7 @@ Use "armory ci list actions" to see all registered catalog actions.
 	createStepCmd.Flags().Int64Var(&stepTimeout, "timeout", 30, "Step timeout in seconds")
 	ciCreateCmd.AddCommand(createStepCmd)
 
-	// ── armory ci list steps ──────────────────────────────────────────────────
+	// ── armory pipelines list steps ──────────────────────────────────────────────────
 
 	ciListCmd.AddCommand(&cobra.Command{
 		Use:   "steps",
@@ -232,7 +232,7 @@ Use "armory ci list actions" to see all registered catalog actions.
 		RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/workflows/steps", nil) },
 	})
 
-	// ── armory ci get step ────────────────────────────────────────────────────
+	// ── armory pipelines get step ────────────────────────────────────────────────────
 
 	ciGetCmd.AddCommand(&cobra.Command{
 		Use:   "step <id>",
@@ -243,7 +243,7 @@ Use "armory ci list actions" to see all registered catalog actions.
 		},
 	})
 
-	// ── armory ci update step ─────────────────────────────────────────────────
+	// ── armory pipelines update step ─────────────────────────────────────────────────
 
 	var (
 		updateStepFile        string
@@ -310,7 +310,7 @@ Use "armory ci list actions" to see all registered catalog actions.
 		},
 	}
 	updateStepCmd.Flags().StringVarP(&updateStepFile, "file", "f", "", "JSON step definition file")
-	updateStepCmd.Flags().StringVar(&updateStepAction, "action", "", "Action name (run \"armory ci list actions\" to see available actions)")
+	updateStepCmd.Flags().StringVar(&updateStepAction, "action", "", "Action name (run \"armory pipelines list actions\" to see available actions)")
 	updateStepCmd.Flags().StringVar(&updateStepWith, "with", "", "Step configuration as a JSON object")
 	updateStepCmd.Flags().StringVar(&updateStepImage, "image", "", "Container image (forge/run convenience flag)")
 	updateStepCmd.Flags().StringVar(&updateStepRun, "run", "", "Shell command to run (forge/run convenience flag)")
@@ -319,7 +319,7 @@ Use "armory ci list actions" to see all registered catalog actions.
 	updateStepCmd.Flags().Int64Var(&updateStepTimeout, "timeout", 30, "Step timeout in seconds")
 	ciUpdateCmd.AddCommand(updateStepCmd)
 
-	// ── armory ci delete step ─────────────────────────────────────────────────
+	// ── armory pipelines delete step ─────────────────────────────────────────────────
 
 	ciDeleteCmd.AddCommand(&cobra.Command{
 		Use:   "step <id>",
@@ -330,7 +330,7 @@ Use "armory ci list actions" to see all registered catalog actions.
 		},
 	})
 
-	// ── armory ci create pipeline ─────────────────────────────────────────────
+	// ── armory pipelines create pipeline ─────────────────────────────────────────────
 
 	var pipelineFileFlag string
 
@@ -340,8 +340,8 @@ Use "armory ci list actions" to see all registered catalog actions.
 		Long: `Create a pipeline by composing existing steps.
 
 DSL syntax — step names must match previously-created steps:
-  armory ci create pipeline myrepo main push->unit_tests->deploy
-  armory ci create pipeline myrepo main "push->[unit_tests,security_scan]->deploy"
+  armory pipelines create pipeline myrepo main push->unit_tests->deploy
+  armory pipelines create pipeline myrepo main "push->[unit_tests,security_scan]->deploy"
 
 JSON file (-f) — uses step IDs directly:
   {
@@ -415,7 +415,7 @@ JSON file (-f) — uses step IDs directly:
 	createPipelineCmd.Flags().StringVarP(&pipelineFileFlag, "file", "f", "", "JSON pipeline definition file")
 	ciCreateCmd.AddCommand(createPipelineCmd)
 
-	// ── armory ci list pipelines ──────────────────────────────────────────────
+	// ── armory pipelines list pipelines ──────────────────────────────────────────────
 
 	ciListCmd.AddCommand(&cobra.Command{
 		Use:   "pipelines",
@@ -424,7 +424,7 @@ JSON file (-f) — uses step IDs directly:
 		RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/workflows/pipelines", nil) },
 	})
 
-	// ── armory ci get pipeline ────────────────────────────────────────────────
+	// ── armory pipelines get pipeline ────────────────────────────────────────────────
 
 	ciGetCmd.AddCommand(&cobra.Command{
 		Use:   "pipeline <id>",
@@ -435,7 +435,7 @@ JSON file (-f) — uses step IDs directly:
 		},
 	})
 
-	// ── armory ci delete pipeline ─────────────────────────────────────────────
+	// ── armory pipelines delete pipeline ─────────────────────────────────────────────
 
 	ciDeleteCmd.AddCommand(&cobra.Command{
 		Use:   "pipeline <id>",
@@ -446,7 +446,7 @@ JSON file (-f) — uses step IDs directly:
 		},
 	})
 
-	// ── armory ci run pipeline ────────────────────────────────────────────────
+	// ── armory pipelines run pipeline ────────────────────────────────────────────────
 
 	var runInputs []string
 	runPipelineCmd := &cobra.Command{
@@ -472,7 +472,7 @@ JSON file (-f) — uses step IDs directly:
 	runPipelineCmd.Flags().StringArrayVarP(&runInputs, "input", "i", nil, "Input variable (key=value, repeatable)")
 	ciRunCmd.AddCommand(runPipelineCmd)
 
-	// ── armory ci list runs ───────────────────────────────────────────────────
+	// ── armory pipelines list runs ───────────────────────────────────────────────────
 
 	var listRunsPipeline string
 	listRunsCmd := &cobra.Command{
@@ -490,7 +490,7 @@ JSON file (-f) — uses step IDs directly:
 	listRunsCmd.Flags().StringVar(&listRunsPipeline, "pipeline", "", "Filter by pipeline ID")
 	ciListCmd.AddCommand(listRunsCmd)
 
-	// ── armory ci get run ─────────────────────────────────────────────────────
+	// ── armory pipelines get run ─────────────────────────────────────────────────────
 
 	ciGetCmd.AddCommand(&cobra.Command{
 		Use:   "run <id>",
@@ -501,7 +501,7 @@ JSON file (-f) — uses step IDs directly:
 		},
 	})
 
-	// ── armory ci update pipeline ────────────────────────────────────────────
+	// ── armory pipelines update pipeline ────────────────────────────────────────────
 
 	var (
 		updatePipelineFile string
@@ -514,12 +514,12 @@ JSON file (-f) — uses step IDs directly:
 		Short: "Update a pipeline's steps",
 		Long: `Replace a pipeline's step list using a DSL string or JSON file.
 
-  armory ci update pipeline <id> push->unit_tests->deploy
-  armory ci update pipeline <id> "push->[unit_tests,security_scan]->deploy"
-  armory ci update pipeline <id> -f pipeline.json
+  armory pipelines update pipeline <id> push->unit_tests->deploy
+  armory pipelines update pipeline <id> "push->[unit_tests,security_scan]->deploy"
+  armory pipelines update pipeline <id> -f pipeline.json
 
   # Override the name or description at the same time:
-  armory ci update pipeline <id> push->deploy --name "slim pipeline"`,
+  armory pipelines update pipeline <id> push->deploy --name "slim pipeline"`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) < 1 {
 				return fmt.Errorf("requires <id>")
@@ -598,7 +598,7 @@ JSON file (-f) — uses step IDs directly:
 	updatePipelineCmd.Flags().StringVar(&updatePipelineDesc, "description", "", "Pipeline description")
 	ciUpdateCmd.AddCommand(updatePipelineCmd)
 
-	// ── armory ci cancel run ──────────────────────────────────────────────────
+	// ── armory pipelines cancel run ──────────────────────────────────────────────────
 
 	ciCancelCmd.AddCommand(&cobra.Command{
 		Use:   "run <id>",
@@ -609,7 +609,7 @@ JSON file (-f) — uses step IDs directly:
 		},
 	})
 
-	// ── armory ci list actions ────────────────────────────────────────────────
+	// ── armory pipelines list actions ────────────────────────────────────────────────
 
 	ciListCmd.AddCommand(&cobra.Command{
 		Use:   "actions",
@@ -618,7 +618,69 @@ JSON file (-f) — uses step IDs directly:
 		RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/workflows/actions", nil) },
 	})
 
-	ciCmd.AddCommand(ciCreateCmd, ciListCmd, ciGetCmd, ciUpdateCmd, ciDeleteCmd, ciRunCmd, ciCancelCmd, ciTUICmd, stepsTUICmd)
+	// ── armory pipelines test step ───────────────────────────────────────────────────
+
+	ciTestCmd := &cobra.Command{Use: "test", Short: "Test workflow building blocks in isolation"}
+	var testStepInputs []string
+	testStepCmd := &cobra.Command{
+		Use:   "step <id>",
+		Short: "Run a single step in isolation (throwaway pipeline) to test it before composing",
+		Long: `Run one step by itself to test it before adding it to a pipeline.
+
+The step runs through a throwaway single-step pipeline that is deleted afterward.
+Supply a value for each ${...} reference the step uses with --input:
+
+  armory pipelines test step <id> \
+    --input inputs.ENV=staging \
+    --input steps.build.output='build ok'`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			data, err := doRequest("GET", "/workflows/steps/"+args[0], nil)
+			if err != nil {
+				return fmt.Errorf("fetching step: %w", err)
+			}
+			var step struct {
+				Name    string         `json:"name"`
+				Action  string         `json:"action"`
+				With    map[string]any `json:"with"`
+				Timeout int64          `json:"timeout"`
+			}
+			if err := json.Unmarshal(data, &step); err != nil {
+				return fmt.Errorf("parsing step: %w", err)
+			}
+
+			vals := map[string]string{}
+			for _, kv := range testStepInputs {
+				k, v, ok := strings.Cut(kv, "=")
+				if !ok {
+					return fmt.Errorf("invalid --input %q: expected ref=value", kv)
+				}
+				vals[k] = v
+			}
+			for _, ref := range stepWithRefs(step.With) {
+				if _, ok := vals[ref]; !ok {
+					fmt.Printf("note: no value supplied for ${%s}; leaving it unresolved\n", ref)
+				}
+			}
+
+			outcome, err := runStepTest(step.Name, step.Action, resolveStepWith(step.With, vals), step.Timeout)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("status: %s\n", outcome.status)
+			if out := strings.TrimSpace(outcome.output); out != "" {
+				fmt.Printf("\noutput:\n%s\n", out)
+			}
+			if outcome.status != "completed" {
+				return fmt.Errorf("step test did not complete (status: %s)", outcome.status)
+			}
+			return nil
+		},
+	}
+	testStepCmd.Flags().StringArrayVar(&testStepInputs, "input", nil, "Test value for a ${ref}, as ref=value (repeatable)")
+	ciTestCmd.AddCommand(testStepCmd)
+
+	ciCmd.AddCommand(ciCreateCmd, ciListCmd, ciGetCmd, ciUpdateCmd, ciDeleteCmd, ciRunCmd, ciCancelCmd, ciTestCmd, ciTUICmd, stepsTUICmd)
 	// The workflows module (ci command + the CI/Pipelines and Steps home
 	// screens) is registered in ci_tui.go.
 }

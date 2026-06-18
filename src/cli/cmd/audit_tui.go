@@ -26,7 +26,7 @@ type auditEntry struct {
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 type auditEntriesMsg []auditEntry
-type auditErrMsg     struct{ err error }
+type auditErrMsg struct{ err error }
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 
@@ -138,10 +138,19 @@ func (m auditModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.aTable.SetRows(rows)
 		return m, nil
 
+	case tuiAutoRefreshMsg:
+		// Silently re-fetch the current page of the list so new entries appear
+		// without a loading flash or losing the cursor. The detail view shows an
+		// immutable past entry, so it needs no refresh.
+		if m.view == auditViewList {
+			return m, auditFetch(m.page)
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.err != nil {
 			switch msg.String() {
-			case "q":
+			case "esc":
 				return m, func() tea.Msg { return goHomeMsg{} }
 			case "ctrl+c":
 				return m, tea.Quit
@@ -175,7 +184,7 @@ func (m auditModel) auditDelegate(msg tea.Msg) (auditModel, tea.Cmd) {
 
 func (m auditModel) auditKeyList(msg tea.KeyMsg) (auditModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
+	case "esc":
 		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
@@ -218,11 +227,9 @@ func (m auditModel) auditKeyList(msg tea.KeyMsg) (auditModel, tea.Cmd) {
 
 func (m auditModel) auditKeyDetail(msg tea.KeyMsg) (auditModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
-		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
-	case "b", "esc":
+	case "esc":
 		m.view = auditViewList
 		return m, nil
 	}
@@ -236,7 +243,7 @@ func (m auditModel) auditKeyDetail(msg tea.KeyMsg) (auditModel, tea.Cmd) {
 func (m auditModel) View() string {
 	if m.err != nil {
 		return tuiErrStyle.Render("error: "+m.err.Error()) + "\n\n" +
-			tuiHelpStyle.Render("[q] home  [r] retry")
+			tuiHelpStyle.Render("[esc] home  [r] retry")
 	}
 	if m.view == auditViewDetail {
 		return m.auditViewDetail()
@@ -250,7 +257,7 @@ func (m auditModel) auditViewList() string {
 	if m.page > 0 {
 		pageInfo = tuiMetaStyle.Render(fmt.Sprintf("  page %d", m.page+1))
 	}
-	help := tuiHelp("[↑↓/jk] navigate  [enter] detail  [] next/prev page  [r] refresh  [q] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [enter] detail  [] next/prev page  [r] refresh  [esc] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -269,7 +276,7 @@ func (m auditModel) auditViewDetail() string {
 		title = tuiTitleStyle.Render(m.selEntry.Action) + "  " +
 			tuiMetaStyle.Render(m.selEntry.ActorID)
 	}
-	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [b] back  [q] home", m.width)
+	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [esc] back", m.width)
 	return title + "\n" + tuiBoxStyle.Render(m.vp.View()) + "\n" + help
 }
 

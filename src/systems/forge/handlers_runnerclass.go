@@ -20,6 +20,8 @@ type runnerClassBody struct {
 	CPUMillicores int64  `json:"cpu_millicores"`
 	PidsLimit     int64  `json:"pids_limit"`
 	TmpfsMB       int64  `json:"tmpfs_mb"`
+	DiskGB        int64  `json:"disk_gb"`
+	Backend       string `json:"backend"`
 	Enabled       bool   `json:"enabled"`
 }
 
@@ -36,7 +38,19 @@ func validateRunnerClassBody(b runnerClassBody) error {
 	if b.TmpfsMB < 16 {
 		return fmt.Errorf("tmpfs_mb must be at least 16")
 	}
+	if b.DiskGB < 0 {
+		return fmt.Errorf("disk_gb must not be negative")
+	}
 	return nil
+}
+
+// backendOrDefault resolves an empty backend name to "default", the legacy
+// single-runtime backend, so classes that omit it keep their previous behaviour.
+func backendOrDefault(backend string) string {
+	if backend == "" {
+		return "default"
+	}
+	return backend
 }
 
 // ── List ─────────────────────────────────────────────────────────────────────
@@ -159,6 +173,8 @@ func handleCreateRunnerClass(w http.ResponseWriter, r *http.Request) {
 		CPUMillicores: b.CPUMillicores,
 		PidsLimit:     b.PidsLimit,
 		TmpfsMB:       b.TmpfsMB,
+		DiskGB:        b.DiskGB,
+		Backend:       backendOrDefault(b.Backend),
 		Enabled:       b.Enabled,
 	}
 	if err := rc.Add(ctx); err != nil {
@@ -221,7 +237,8 @@ func handleUpdateRunnerClass(w http.ResponseWriter, r *http.Request) {
 
 	rc := RunnerClass{
 		Name: name, MemoryMB: b.MemoryMB, CPUMillicores: b.CPUMillicores,
-		PidsLimit: b.PidsLimit, TmpfsMB: b.TmpfsMB, Enabled: b.Enabled,
+		PidsLimit: b.PidsLimit, TmpfsMB: b.TmpfsMB, DiskGB: b.DiskGB,
+		Backend: backendOrDefault(b.Backend), Enabled: b.Enabled,
 	}
 	if err := rc.Update(ctx); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {

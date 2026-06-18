@@ -139,7 +139,12 @@
       { "method": "POST",   "path": "/runner-classes",           "action": "createRunnerClass", "resource": "forge/runner-classes" },
       { "method": "GET",    "path": "/runner-classes/{name}",    "action": "getRunnerClass",    "resource": "forge/runner-classes/{name}" },
       { "method": "PUT",    "path": "/runner-classes/{name}",    "action": "updateRunnerClass", "resource": "forge/runner-classes/{name}" },
-      { "method": "DELETE", "path": "/runner-classes/{name}",    "action": "deleteRunnerClass", "resource": "forge/runner-classes/{name}" }
+      { "method": "DELETE", "path": "/runner-classes/{name}",    "action": "deleteRunnerClass", "resource": "forge/runner-classes/{name}" },
+      { "method": "GET",    "path": "/runtime-backends",         "action": "listRuntimeBackend",   "resource": "forge/runtime-backends" },
+      { "method": "POST",   "path": "/runtime-backends",         "action": "createRuntimeBackend", "resource": "forge/runtime-backends" },
+      { "method": "GET",    "path": "/runtime-backends/{name}",  "action": "getRuntimeBackend",    "resource": "forge/runtime-backends/{name}" },
+      { "method": "PUT",    "path": "/runtime-backends/{name}",  "action": "updateRuntimeBackend", "resource": "forge/runtime-backends/{name}" },
+      { "method": "DELETE", "path": "/runtime-backends/{name}",  "action": "deleteRuntimeBackend", "resource": "forge/runtime-backends/{name}" }
     ],
     "actions": [
       {
@@ -147,7 +152,7 @@
         "method": "POST",
         "path": "/executions",
         "body_transforms": [
-          { "from_key": "run", "to_key": "command", "wrap": ["bash", "-c"] }
+          { "from_key": "run", "to_key": "command", "wrap": ["sh", "-c"] }
         ],
         "async": {
           "id_field": "execution_id",
@@ -172,6 +177,11 @@
         "grant_on": "user",
         "actions": ["listRunnerClass", "getRunnerClass"],
         "resources": ["{username}/forge/runner-classes", "{username}/forge/runner-classes/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listRuntimeBackend", "getRuntimeBackend"],
+        "resources": ["{username}/forge/runtime-backends", "{username}/forge/runtime-backends/*"]
       },
       {
         "grant_on": "user",
@@ -257,6 +267,44 @@
         "grant_on": "user",
         "actions": ["createTicket", "listTicket", "getTicket", "updateTicket", "deleteTicket", "createComment", "deleteComment", "listFieldDef", "createFieldDef", "updateFieldDef", "deleteFieldDef"],
         "resources": ["{username}/tickets/tickets", "{username}/tickets/tickets/*", "{username}/tickets/field-defs", "{username}/tickets/field-defs/*"]
+      }
+    ]
+  },
+  {
+    "name": "notifications",
+    "url": "http://notifications:8094",
+    "description": "Notification delivery via pluggable integrations (Slack, email, webhook)",
+    "forward_auth": true,
+    "service_key": "notifications-registry-local-secret",
+    "endpoints": [
+      { "method": "GET",    "path": "/providers",            "action": "listProvider",       "resource": "notifications/providers"        },
+      { "method": "GET",    "path": "/channels",             "action": "listChannel",        "resource": "notifications/channels"         },
+      { "method": "POST",   "path": "/channels",             "action": "createChannel",      "resource": "notifications/channels"         },
+      { "method": "GET",    "path": "/channels/{id}",        "action": "getChannel",         "resource": "notifications/channels/{id}"    },
+      { "method": "PUT",    "path": "/channels/{id}",        "action": "updateChannel",      "resource": "notifications/channels/{id}"    },
+      { "method": "DELETE", "path": "/channels/{id}",        "action": "deleteChannel",      "resource": "notifications/channels/{id}"    },
+      { "method": "POST",   "path": "/channels/{id}/test",   "action": "testChannel",        "resource": "notifications/channels/{id}"    },
+      { "method": "POST",   "path": "/notify",               "action": "createNotification", "resource": "notifications/notifications"    },
+      { "method": "GET",    "path": "/notifications",        "action": "listNotification",   "resource": "notifications/notifications"    },
+      { "method": "GET",    "path": "/notifications/{id}",   "action": "getNotification",    "resource": "notifications/notifications/{id}" }
+    ],
+    "actions": [
+      {
+        "name": "notifications/notify",
+        "method": "POST",
+        "path": "/notify"
+      },
+      {
+        "name": "notifications/test",
+        "method": "POST",
+        "path": "/channels/{id}/test"
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["listProvider", "listChannel", "createChannel", "getChannel", "updateChannel", "deleteChannel", "testChannel", "createNotification", "listNotification", "getNotification"],
+        "resources": ["{username}/notifications/providers", "{username}/notifications/channels", "{username}/notifications/channels/*", "{username}/notifications/notifications", "{username}/notifications/notifications/*"]
       }
     ]
   },

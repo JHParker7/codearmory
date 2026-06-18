@@ -1,0 +1,237 @@
+openapi: 3.0.3
+info:
+  title: Notifications Service
+  description: >
+    Sends notifications through pluggable provider integrations (Slack, email,
+    generic webhook, …). Channels are configured provider instances; messages
+    are enqueued against channels and delivered by a background worker with
+    retries. Reached through the conductor gateway under the /notifications
+    prefix.
+  version: 1.0.0
+servers:
+  - url: /notifications
+paths:
+  /providers:
+    get:
+      summary: List available provider plugins and their config schema
+      operationId: listProviders
+      responses:
+        "200":
+          description: Registered providers
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ProviderInfo" }
+  /channels:
+    get:
+      summary: List channels visible to the caller
+      operationId: listChannels
+      parameters:
+        - in: query
+          name: enabled
+          schema: { type: string, enum: ["true"] }
+          description: When "true", only enabled channels are returned.
+      responses:
+        "200":
+          description: Channels (secret config values are redacted)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Channel" }
+    post:
+      summary: Create a channel
+      operationId: createChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChannelRequest" }
+      responses:
+        "201":
+          description: Created channel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "400": { description: Invalid request }
+  /channels/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get a channel
+      operationId: getChannel
+      responses:
+        "200":
+          description: Channel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "404": { description: Not found }
+    put:
+      summary: Update a channel (type is immutable; redacted secrets are preserved)
+      operationId: updateChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChannelRequest" }
+      responses:
+        "200":
+          description: Updated channel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "404": { description: Not found }
+    delete:
+      summary: Delete a channel
+      operationId: deleteChannel
+      responses:
+        "204": { description: Deleted }
+        "404": { description: Not found }
+  /channels/{id}/test:
+    post:
+      summary: Send a synchronous test message through a channel
+      operationId: testChannel
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                subject: { type: string }
+                body: { type: string }
+      responses:
+        "200":
+          description: Delivered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notification" }
+        "404": { description: Not found }
+        "502": { description: Delivery failed }
+  /notify:
+    post:
+      summary: Enqueue a message to one or more channels
+      operationId: createNotification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                channel_ids:
+                  type: array
+                  items: { type: string }
+                  description: Targets. When omitted, all enabled channels are used.
+                subject: { type: string }
+                body: { type: string }
+      responses:
+        "202":
+          description: Enqueued notifications
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Notification" }
+        "400": { description: Invalid request or no matching channels }
+  /notifications:
+    get:
+      summary: List delivery records
+      operationId: listNotifications
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [pending, sent, failed] }
+      responses:
+        "200":
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Notification" }
+  /notifications/{id}:
+    get:
+      summary: Get a delivery record
+      operationId: getNotification
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Notification
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notification" }
+        "404": { description: Not found }
+components:
+  schemas:
+    ProviderInfo:
+      type: object
+      properties:
+        type: { type: string, example: slack }
+        label: { type: string, example: Slack }
+        fields:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              label: { type: string }
+              required: { type: boolean }
+              secret: { type: boolean }
+              help: { type: string }
+    ChannelRequest:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [slack, email, webhook] }
+        config:
+          type: object
+          additionalProperties: { type: string }
+        enabled: { type: boolean }
+    Channel:
+      type: object
+      properties:
+        channel_id: { type: string }
+        name: { type: string }
+        type: { type: string }
+        config:
+          type: object
+          additionalProperties: { type: string }
+          description: Provider settings. Secret values are returned as "***".
+        enabled: { type: boolean }
+        created_by: { type: string }
+        org_id: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Notification:
+      type: object
+      properties:
+        notification_id: { type: string }
+        channel_id: { type: string }
+        channel_type: { type: string }
+        subject: { type: string }
+        body: { type: string }
+        status: { type: string, enum: [pending, sent, failed] }
+        attempts: { type: integer }
+        last_error: { type: string }
+        created_by: { type: string }
+        org_id: { type: string }
+        sent_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }

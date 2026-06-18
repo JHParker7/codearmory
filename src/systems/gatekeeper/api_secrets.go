@@ -873,4 +873,3 @@ func resolveAWSSM(ctx context.Context, encConfig []byte, names []string) (map[st
 	}
 	return result, nil
 }
-

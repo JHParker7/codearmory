@@ -39,10 +39,10 @@ type boardFieldDef struct {
 
 // fallback field defs used when the API is unavailable or returns empty.
 var defaultBoardStatuses = []boardFieldDef{
-	{Value: "open",        Label: "Open",        Position: 0},
-	{Value: "in_progress", Label: "In Progress",  Position: 1},
-	{Value: "resolved",    Label: "Resolved",     Position: 2},
-	{Value: "closed",      Label: "Closed",       Position: 3},
+	{Value: "open", Label: "Open", Position: 0},
+	{Value: "in_progress", Label: "In Progress", Position: 1},
+	{Value: "resolved", Label: "Resolved", Position: 2},
+	{Value: "closed", Label: "Closed", Position: 3},
 }
 
 // defaultBoardPriorities is populated by buildBoardStyles so the fallback
@@ -56,8 +56,8 @@ type boardDataMsg struct {
 	priorities []boardFieldDef
 	cols       [][]boardTicket
 }
-type boardMovedMsg  struct{}
-type boardErrMsg    struct{ err error }
+type boardMovedMsg struct{}
+type boardErrMsg struct{ err error }
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -333,7 +333,7 @@ func (m boardModel) updateNav(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch key.String() {
-	case "q", "esc":
+	case "esc":
 		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
@@ -419,7 +419,7 @@ func (m boardModel) View() string {
 		return "\n  " + tuiMetaStyle.Render("Loading…") + "\n"
 	}
 	if m.err != nil {
-		hint := "r: retry  q: quit"
+		hint := "r: retry  esc: quit"
 		if strings.Contains(m.err.Error(), "401") || strings.Contains(m.err.Error(), "unauthorized") {
 			hint += "\n\n  Not authenticated — run `armory auth login`, then press r"
 		}
@@ -448,8 +448,8 @@ func (m boardModel) View() string {
 	if m.status != "" {
 		statusPrefix = m.status + "  ·  "
 	}
-	full := "← → h l: col   ↑ ↓ j k: card   H/L: move   n: new   e: edit   d: delete   r: refresh   q: home"
-	compact := "h l: col  j k: card  H/L: move  n: new  e: edit  d: del  r: refresh  q: home"
+	full := "← → h l: col   ↑ ↓ j k: card   H/L: move   n: new   e: edit   d: delete   r: refresh   esc: home"
+	compact := "h l: col  j k: card  H/L: move  n: new  e: edit  d: del  r: refresh  esc: home"
 	helpText := full
 	helpStyle := bsHelp
 	// Keep the help from overflowing a narrow terminal: switch to the compact

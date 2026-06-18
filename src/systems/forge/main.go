@@ -52,7 +52,6 @@ func initHTTPClient() *http.Client {
 	}
 }
 
-
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -159,23 +158,35 @@ func main() {
 		slog.Error("failed to migrate runner classes", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("database initialized")
-
-	rt, err := newRuntime()
-	if err != nil {
-		slog.Error("failed to initialize runtime", "error", err)
+	if err := migrateAndSeedRuntimeBackends(); err != nil {
+		slog.Error("failed to migrate runtime backends", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("runtime initialized", "type", envOrDefault("RUNTIME", "kubernetes"))
+	slog.Info("database initialized")
+
+	// The registry builds runtimes lazily per backend. Eagerly resolve the
+	// "default" backend so a broken default runtime fails fast at startup, while a
+	// misconfigured non-default backend only fails its own executions.
+	reg := newRuntimeRegistry()
+	if _, err := reg.Get(ctx, "default"); err != nil {
+		slog.Error("failed to initialize default runtime backend", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("runtime registry initialized", "default_type", defaultRuntimeType())
 
 	initAllowedImages(os.Getenv("ALLOWED_IMAGES"))
+
+	// Reap proxmox VMs orphaned by a previous crash. Must run before the worker
+	// pool starts: the sweep blanket-destroys forge-* VMs and so is only safe while
+	// nothing is processing jobs.
+	sweepProxmoxOrphans(ctx, reg)
 
 	// Rotate the gatekeeper service key every 25 minutes. GATEKEEPER_SERVICE_KEY
 	// must match the key in GATEKEEPER_SERVICES on gatekeeper. No-op if unset.
 	registry.StartKeyRotation(ctx, gatekeeperURL, "forge",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
-	workers := newWorkerPool(rt)
+	workers := newWorkerPool(reg)
 	workers.Start(ctx, 10)
 	slog.Info("worker pool started", "workers", 10)
 
@@ -192,6 +203,11 @@ func main() {
 	mux.HandleFunc("GET /runner-classes/{name}", handleGetRunnerClass)
 	mux.HandleFunc("PUT /runner-classes/{name}", handleUpdateRunnerClass)
 	mux.HandleFunc("DELETE /runner-classes/{name}", handleDeleteRunnerClass)
+	mux.HandleFunc("GET /runtime-backends", handleListRuntimeBackends)
+	mux.HandleFunc("POST /runtime-backends", handleCreateRuntimeBackend)
+	mux.HandleFunc("GET /runtime-backends/{name}", handleGetRuntimeBackend)
+	mux.HandleFunc("PUT /runtime-backends/{name}", handleUpdateRuntimeBackend(reg))
+	mux.HandleFunc("DELETE /runtime-backends/{name}", handleDeleteRuntimeBackend(reg))
 
 	port := envOrDefault("PORT", "8083")
 	wrapped := otelhttp.NewHandler(&logger{mux}, "forge",

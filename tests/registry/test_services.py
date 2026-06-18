@@ -417,3 +417,51 @@ class TestRotateServiceKey:
         )
         assert resp.status_code == 401
 
+    def test_bootstrap_key_rotates(self, registry_url, test_reader_account):
+        """The bootstrap key seeded from the environment can rotate the account."""
+        name, bootstrap = test_reader_account
+        resp = requests.post(
+            f"{registry_url}/service-accounts/rotate-key",
+            headers={"X-Service-Key": f"{name}:{bootstrap}"},
+        )
+        assert resp.status_code == 200
+        assert resp.json().get("key")
+
+    def test_rotated_key_rotates(self, registry_url, test_reader_account):
+        """A freshly rotated key is immediately usable to rotate again."""
+        name, bootstrap = test_reader_account
+        first = requests.post(
+            f"{registry_url}/service-accounts/rotate-key",
+            headers={"X-Service-Key": f"{name}:{bootstrap}"},
+        )
+        assert first.status_code == 200
+        rotated = first.json()["key"]
+
+        second = requests.post(
+            f"{registry_url}/service-accounts/rotate-key",
+            headers={"X-Service-Key": f"{name}:{rotated}"},
+        )
+        assert second.status_code == 200
+        assert second.json().get("key")
+
+    def test_bootstrap_key_survives_rotation(self, registry_url, test_reader_account):
+        """Recovery guarantee: the bootstrap key stays valid even after the account
+        has rotated past it, so a client that restarted back to its initial key can
+        re-authenticate instead of deadlocking — the failure a chaos test exercises.
+        Before the fix, rotation overwrote the stored hash and this returned 401."""
+        name, bootstrap = test_reader_account
+        # Rotate away from the bootstrap key.
+        rotate = requests.post(
+            f"{registry_url}/service-accounts/rotate-key",
+            headers={"X-Service-Key": f"{name}:{bootstrap}"},
+        )
+        assert rotate.status_code == 200
+
+        # The bootstrap key must still authenticate (permanent recovery credential).
+        recover = requests.post(
+            f"{registry_url}/service-accounts/rotate-key",
+            headers={"X-Service-Key": f"{name}:{bootstrap}"},
+        )
+        assert recover.status_code == 200
+        assert recover.json().get("key")
+

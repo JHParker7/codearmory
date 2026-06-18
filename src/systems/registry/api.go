@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -137,6 +138,57 @@ func hashServiceKey(key string) (string, error) {
 	return string(h), nil
 }
 
+// seedAccount is the bootstrap credential for one service account, captured from
+// the environment at startup.
+type seedAccount struct {
+	key  string
+	role string
+}
+
+// seedServiceKeys holds each service account's bootstrap (env-seeded) key, keyed
+// by account name. The bootstrap key is accepted as a permanent fallback in
+// authenticateServiceKey so a client that restarted back to its initial key — or a
+// Registry that restarted before a client rotated — can always re-authenticate and
+// roll the key forward again, instead of deadlocking on a rotated key neither side
+// can reproduce. Populated by seedServiceAccounts during startup, before the HTTP
+// server begins serving; read-only thereafter.
+var seedServiceKeys = map[string]seedAccount{}
+
+// matchesSeedKey reports whether key equals the bootstrap key seeded for name,
+// returning the seeded role on a match. Pure and DB-free so it stays testable.
+func matchesSeedKey(name, key string) (string, bool) {
+	seed, ok := seedServiceKeys[name]
+	if !ok || seed.key == "" {
+		return "", false
+	}
+	if subtle.ConstantTimeCompare([]byte(seed.key), []byte(key)) == 1 {
+		return seed.role, true
+	}
+	return "", false
+}
+
+// authenticateServiceKey verifies a presented key for the named account. It
+// accepts either the current rotated key (the bcrypt hash stored in Postgres) or
+// the bootstrap key seeded from the environment, and returns the account's role.
+// The bootstrap fallback is the recovery path that keeps key rotation from
+// deadlocking across restarts.
+func authenticateServiceKey(ctx context.Context, name, key string) (string, bool) {
+	if acct, err := lookupServiceAccount(ctx, name); err == nil {
+		if bcrypt.CompareHashAndPassword([]byte(acct.HashedKey), []byte(key)) == nil {
+			return acct.Role, true
+		}
+	}
+	if role, ok := matchesSeedKey(name, key); ok {
+		// Audit the recovery path: the rotated key did not match and the caller fell
+		// back to the long-lived bootstrap key. This is expected immediately after a
+		// restart, but unexpected at any other time — alert on it so a leaked
+		// bootstrap key being used in steady state is visible. Mirrors gatekeeper.
+		slog.WarnContext(ctx, "service auth: bootstrap key fallback used", "service", name)
+		return role, true
+	}
+	return "", false
+}
+
 // requireReadAuth verifies X-Service-Key against registry_service_accounts.
 // Any valid service account (any role) is accepted.
 // Returns the caller's service name and true on success.
@@ -163,16 +215,12 @@ func requireAuthWithRole(w http.ResponseWriter, r *http.Request, requiredRole st
 	}
 	name, key := header[:idx], header[idx+1:]
 
-	acct, err := lookupServiceAccount(r.Context(), name)
-	if err != nil {
+	role, ok := authenticateServiceKey(r.Context(), name, key)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return "", false
 	}
-	if bcrypt.CompareHashAndPassword([]byte(acct.HashedKey), []byte(key)) != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return "", false
-	}
-	if requiredRole != "" && acct.Role != requiredRole {
+	if requiredRole != "" && role != requiredRole {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return "", false
 	}

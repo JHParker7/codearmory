@@ -679,4 +679,3 @@ func TestStateCmd_Unlock_InvalidData_RunE(t *testing.T) {
 		t.Fatal("expected error for invalid unlock data, got nil")
 	}
 }
-

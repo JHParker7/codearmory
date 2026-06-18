@@ -32,6 +32,12 @@ spec:
       app.kubernetes.io/component: registry
   template:
     metadata:
+      annotations:
+        # Roll the registry pod whenever the manifest ConfigMap changes. The
+        # registry only ingests the manifest into its DB at startup (no runtime
+        # reload), so without this a manifest update (e.g. a new default_grant)
+        # silently never takes effect until the pod is restarted by hand.
+        checksum/registry-manifest: {{ include (print $.Template.BasePath "/registry-manifest-configmap.yaml") . | sha256sum }}
       labels:
         {{- include "codearmory.labels" . | nindent 8 }}
         app.kubernetes.io/component: registry

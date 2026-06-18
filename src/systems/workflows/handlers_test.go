@@ -166,35 +166,35 @@ func TestValidateStepRequest_HTTPMissingPath(t *testing.T) {
 // ── substitute ────────────────────────────────────────────────────────────────
 
 func TestSubstitute_NoPlaceholders(t *testing.T) {
-	got := substitute("/executions", map[string]string{"FOO": "bar"})
+	got := substitute("/executions", substContext{inputs: map[string]string{"FOO": "bar"}})
 	if got != "/executions" {
 		t.Fatalf("got %q, want %q", got, "/executions")
 	}
 }
 
 func TestSubstitute_Single(t *testing.T) {
-	got := substitute("/deployments/${ENV}", map[string]string{"ENV": "production"})
+	got := substitute("/deployments/${ENV}", substContext{inputs: map[string]string{"ENV": "production"}})
 	if got != "/deployments/production" {
 		t.Fatalf("got %q, want %q", got, "/deployments/production")
 	}
 }
 
 func TestSubstitute_Multiple(t *testing.T) {
-	got := substitute("${A}-${B}", map[string]string{"A": "hello", "B": "world"})
+	got := substitute("${A}-${B}", substContext{inputs: map[string]string{"A": "hello", "B": "world"}})
 	if got != "hello-world" {
 		t.Fatalf("got %q, want %q", got, "hello-world")
 	}
 }
 
 func TestSubstitute_UnknownKeyLeftAsIs(t *testing.T) {
-	got := substitute("${MISSING}", map[string]string{})
+	got := substitute("${MISSING}", substContext{inputs: map[string]string{}})
 	if got != "${MISSING}" {
 		t.Fatalf("got %q, want %q", got, "${MISSING}")
 	}
 }
 
 func TestSubstitute_EmptyInputs(t *testing.T) {
-	got := substitute("${KEY}", nil)
+	got := substitute("${KEY}", substContext{})
 	if got != "${KEY}" {
 		t.Fatalf("got %q, want %q", got, "${KEY}")
 	}
@@ -208,7 +208,7 @@ func TestExecuteHTTP_2xxSuccess(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/ok", "method": "GET"}}
-	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
@@ -220,7 +220,7 @@ func TestExecuteHTTP_4xxFails(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 	})
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/bad", "method": "GET"}}
-	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})
 	if err == nil {
 		t.Fatal("expected error for 4xx response")
 	}
@@ -234,7 +234,7 @@ func TestExecuteHTTP_ExactMatchSuccess(t *testing.T) {
 	step := Step{Action: ActionHTTP, With: map[string]any{
 		"service": "svc", "path": "/create", "method": "POST", "expected_status": float64(201),
 	}}
-	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})
 	if err != nil {
 		t.Fatalf("expected success for exact match 201, got %v", err)
 	}
@@ -248,7 +248,7 @@ func TestExecuteHTTP_ExactMatchFail(t *testing.T) {
 	step := Step{Action: ActionHTTP, With: map[string]any{
 		"service": "svc", "path": "/create", "method": "POST", "expected_status": float64(201),
 	}}
-	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})
 	if err == nil {
 		t.Fatal("expected error when status 200 != expected 201")
 	}
@@ -321,7 +321,7 @@ func TestWorkerPool_Cancel_Found(t *testing.T) {
 func TestExecuteStep_UnknownAction(t *testing.T) {
 	pool := &WorkerPool{}
 	step := Step{Action: "unknown/action"}
-	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})
 	if err == nil || !strings.Contains(err.Error(), "unknown action") {
 		t.Fatalf("expected unknown action error, got %v", err)
 	}
@@ -330,7 +330,7 @@ func TestExecuteStep_UnknownAction(t *testing.T) {
 func TestExecuteStep_HTTPUnknownService(t *testing.T) {
 	pool := &WorkerPool{}
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "no-such-svc", "path": "/foo"}}
-	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})
 	if err == nil || !strings.Contains(err.Error(), "unknown service") {
 		t.Fatalf("expected unknown service error, got %v", err)
 	}
@@ -344,7 +344,7 @@ func TestExecuteStep_HTTPSuccess(t *testing.T) {
 	})
 
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "mysvc", "path": "/health", "method": "GET"}}
-	body, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
+	body, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestExecuteStep_HTTPSubstitutesInputsInPath(t *testing.T) {
 	})
 
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/items/${ITEM_ID}", "method": "GET"}}
-	pool.executeStep(context.Background(), newTokenStore("", ""), step, map[string]string{"ITEM_ID": "abc-123"}) //nolint:errcheck
+	pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{inputs: map[string]string{"ITEM_ID": "abc-123"}}) //nolint:errcheck
 	if capturedPath != "/items/abc-123" {
 		t.Errorf("path = %q, want /items/abc-123", capturedPath)
 	}
@@ -377,7 +377,7 @@ func TestExecuteStep_HTTPForwardsAuthHeader(t *testing.T) {
 	})
 
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "svc", "path": "/endpoint", "method": "GET"}}
-	pool.executeStep(context.Background(), newTokenStore("my-token", ""), step, nil) //nolint:errcheck
+	pool.executeStep(context.Background(), newTokenStore("my-token", ""), step, substContext{}) //nolint:errcheck
 	if capturedAuth != "Bearer my-token" {
 		t.Errorf("Authorization = %q, want \"Bearer my-token\"", capturedAuth)
 	}
@@ -396,7 +396,7 @@ func TestExecuteStep_HTTPSendsBody(t *testing.T) {
 		"body": map[string]any{"image": "alpine:3.19"},
 		"expected_status": float64(201),
 	}}
-	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, nil)
+	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestExecuteStep_HTTPSubstitutesInputsInBody(t *testing.T) {
 		"service": "svc", "path": "/deploy", "method": "POST",
 		"body": map[string]any{"tag": "${IMAGE_TAG}"},
 	}}
-	pool.executeStep(context.Background(), newTokenStore("", ""), step, map[string]string{"IMAGE_TAG": "v1.2.3"}) //nolint:errcheck
+	pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{inputs: map[string]string{"IMAGE_TAG": "v1.2.3"}}) //nolint:errcheck
 	if !strings.Contains(string(capturedBodyBytes), "v1.2.3") {
 		t.Errorf("body %q missing substituted value", string(capturedBodyBytes))
 	}
@@ -660,7 +660,7 @@ func stepIDsOf(g stepGroup) []string {
 
 func TestSubstituteWith_StringValue(t *testing.T) {
 	with := map[string]any{"tag": "${IMAGE_TAG}"}
-	result := substituteWith(with, map[string]string{"IMAGE_TAG": "v1.2.3"})
+	result := substituteWith(with, substContext{inputs: map[string]string{"IMAGE_TAG": "v1.2.3"}})
 	if result["tag"] != "v1.2.3" {
 		t.Fatalf("got %q, want v1.2.3", result["tag"])
 	}
@@ -668,7 +668,7 @@ func TestSubstituteWith_StringValue(t *testing.T) {
 
 func TestSubstituteWith_NestedMap(t *testing.T) {
 	with := map[string]any{"inner": map[string]any{"key": "${VAL}"}}
-	result := substituteWith(with, map[string]string{"VAL": "hello"})
+	result := substituteWith(with, substContext{inputs: map[string]string{"VAL": "hello"}})
 	inner, _ := result["inner"].(map[string]any)
 	if inner["key"] != "hello" {
 		t.Fatalf("nested substitution failed: got %v", inner["key"])
@@ -677,7 +677,7 @@ func TestSubstituteWith_NestedMap(t *testing.T) {
 
 func TestSubstituteWith_SliceValues(t *testing.T) {
 	with := map[string]any{"items": []any{"${A}", "${B}"}}
-	result := substituteWith(with, map[string]string{"A": "x", "B": "y"})
+	result := substituteWith(with, substContext{inputs: map[string]string{"A": "x", "B": "y"}})
 	items, _ := result["items"].([]any)
 	if len(items) != 2 || items[0] != "x" || items[1] != "y" {
 		t.Fatalf("slice substitution failed: %v", items)
@@ -686,7 +686,7 @@ func TestSubstituteWith_SliceValues(t *testing.T) {
 
 func TestSubstituteWith_NoInputs(t *testing.T) {
 	with := map[string]any{"k": "${V}"}
-	result := substituteWith(with, nil)
+	result := substituteWith(with, substContext{})
 	// No inputs → with map returned as-is (unmodified).
 	if result["k"] != "${V}" {
 		t.Fatalf("got %q, want ${V}", result["k"])

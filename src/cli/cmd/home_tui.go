@@ -8,7 +8,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// goHomeMsg is sent by sub-TUIs when the user presses 'q' to return home.
+// goHomeMsg is sent by sub-TUIs when the user presses esc to return home.
 type goHomeMsg struct{}
 
 // launchMsg is sent by the home screen when the user selects an entry.
@@ -54,10 +54,19 @@ type appModel struct {
 
 func newAppModel() appModel {
 	screens := hubScreens()
-	return appModel{home: newHomeModel(screens), screens: screens}
+	m := appModel{home: newHomeModel(screens), screens: screens}
+	if isFirstUse() {
+		// Show the welcome prompt before the home menu so a fresh install lands
+		// in a discoverable spot rather than a list of services the user has no
+		// credentials for. Pressing 'n' falls through to the home menu.
+		m.active = newFirstUseModel()
+	}
+	return m
 }
 
-func (m appModel) Init() tea.Cmd { return nil }
+// Init starts the single auto-refresh ticker. It runs for the whole session and
+// is rescheduled in Update; the active screen re-fetches whenever it fires.
+func (m appModel) Init() tea.Cmd { return tuiAutoRefreshCmd() }
 
 // sized feeds the current terminal dimensions to a freshly-created sub-model so
 // it lays out correctly the moment it is shown, rather than waiting for the
@@ -80,12 +89,27 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.home = m.sized(newHomeModel(m.screens)).(homeModel)
 		return m, nil
 	}
+	if _, ok := msg.(launchSetupMsg); ok {
+		m.active = m.sized(newSetupTUIModel())
+		return m, m.active.Init()
+	}
 	if lm, ok := msg.(launchMsg); ok {
 		if lm.idx < 0 || lm.idx >= len(m.screens) {
 			return m, nil
 		}
 		m.active = m.sized(m.screens[lm.idx].New())
 		return m, m.active.Init()
+	}
+	// The auto-refresh ticker runs for the whole session. Reschedule it on every
+	// fire and forward the tick to the active screen so it re-fetches; the home
+	// menu has nothing to refresh, so it is skipped.
+	if _, ok := msg.(tuiAutoRefreshMsg); ok {
+		if m.active == nil {
+			return m, tuiAutoRefreshCmd()
+		}
+		next, cmd := m.active.Update(msg)
+		m.active = next
+		return m, tea.Batch(cmd, tuiAutoRefreshCmd())
 	}
 
 	if m.active != nil {
@@ -138,7 +162,7 @@ func (m homeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "ctrl+c", "esc":
+		case "ctrl+c", "esc":
 			return m, tea.Quit
 		case "up", "k":
 			if m.cursor > 0 {
@@ -191,7 +215,7 @@ func homeRows(entries []homeEntry, cursor int) []string {
 func (m homeModel) View() string {
 	rows := homeRows(m.entries, m.cursor)
 
-	help := tuiHelpStyle.Render("[↑↓/jk] navigate   [enter] open   [q] quit")
+	help := tuiHelpStyle.Render("[↑↓/jk] navigate   [enter] open   [esc] quit")
 
 	header := homeTitleStyle.Render("codearmory") + "  " + homeSubtitleStyle.Render("platform")
 	block := header + "\n\n" + homeBoxStyle.Render(strings.Join(rows, "\n")) + "\n\n" + help
@@ -203,14 +227,28 @@ func (m homeModel) View() string {
 
 // ── Standalone wrapper ────────────────────────────────────────────────────────
 
-// standaloneWrap adapts a sub-TUI for direct use (e.g. `armory ci tui`):
+// standaloneWrap adapts a sub-TUI for direct use (e.g. `armory pipelines tui`):
 // goHomeMsg becomes tea.Quit since there is no home screen to return to.
 type standaloneWrap struct{ inner tea.Model }
 
-func (w standaloneWrap) Init() tea.Cmd { return w.inner.Init() }
+func (w standaloneWrap) Init() tea.Cmd { return tea.Batch(w.inner.Init(), tuiAutoRefreshCmd()) }
 func (w standaloneWrap) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, ok := msg.(goHomeMsg); ok {
 		return w, tea.Quit
+	}
+	if _, ok := msg.(launchSetupMsg); ok {
+		// No home to fall back to in standalone mode; replace the inner model
+		// with the wizard so launching setup from `armory settings` works.
+		next := newSetupTUIModel()
+		w.inner = next
+		return w, next.Init()
+	}
+	// standaloneWrap owns the auto-refresh ticker for a screen run directly (e.g.
+	// `armory forge tui`): reschedule it and forward the tick to the inner model.
+	if _, ok := msg.(tuiAutoRefreshMsg); ok {
+		var cmd tea.Cmd
+		w.inner, cmd = w.inner.Update(msg)
+		return w, tea.Batch(cmd, tuiAutoRefreshCmd())
 	}
 	var cmd tea.Cmd
 	w.inner, cmd = w.inner.Update(msg)

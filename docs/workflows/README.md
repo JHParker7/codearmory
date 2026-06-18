@@ -115,11 +115,21 @@ Actions with an `async` block submit work and poll a status endpoint until it re
 
 See [chaos](../chaos/README.md) and [argo](../argo/README.md).
 
-## Input substitution
+## Input & output substitution
 
-`${KEY}` placeholders in any string value inside a step's `with` map are replaced with values from the run's `inputs` map at execution time. Substitution applies recursively to nested maps and arrays. Unrecognised keys are left as-is.
+`${...}` references in any string value inside a step's `with` map are resolved at execution time. Substitution applies recursively to nested maps and arrays; unrecognised references are left as-is. Supported forms:
 
-Example: a step with `"path": "/deploys/${ENV}"` and a run triggered with `{"inputs": {"ENV": "staging"}}` executes against `/deploys/staging`.
+- `${inputs.NAME}` (or bare `${NAME}`) — a value from the run's `inputs` map.
+- `${steps.STEP.output}` — the full output of an earlier step (by step name).
+- `${steps.STEP.output.field}` — a field of an earlier step's output, parsed as JSON (dotted paths supported, e.g. `${steps.create_ticket.output.ticket_id}`).
+
+Only outputs of steps that finished in a **prior** group are visible, so a step can never reference its own output or a sibling running in the same parallel group.
+
+Examples:
+
+- `"path": "/deploys/${ENV}"` with a run triggered as `{"inputs": {"ENV": "staging"}}` executes against `/deploys/staging`.
+- A `tickets/create` step with `"title": "Build failed: ${steps.build.output}"` interpolates the prior `build` step's output into the ticket title.
+- A `forge/run` step with `"env": {"SHA": "${steps.checkout.output.sha}"}` passes the `sha` field of the `checkout` step's JSON output as an env var.
 
 ## Configuration
 

@@ -25,11 +25,11 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
-	"golang.org/x/crypto/bcrypt"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -75,7 +75,7 @@ func requirePermission(w http.ResponseWriter, r *http.Request, action, resource 
 		attribute.String("permission.action", action),
 		attribute.String("permission.resource", resource),
 	)
-	ok, err := checkPermissions(ctx, userID, "gatekeeper", action, resource)
+	ok, detail, err := evaluatePermissions(ctx, userID, "gatekeeper", action, resource)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -86,7 +86,7 @@ func requirePermission(w http.ResponseWriter, r *http.Request, action, resource 
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		slog.WarnContext(ctx, "permission denied", "user_id", userID, "action", action, "resource", resource)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Error(w, detail.reason(), http.StatusForbidden)
 		return false
 	}
 	span.SetStatus(codes.Ok, "")
@@ -213,10 +213,11 @@ func authMiddleware(next http.Handler) http.Handler {
 }
 
 // matchPermission reports whether perm grants (service, action, resource).
+// A Service of "*" matches every service — used by the bootstrap admin grant.
 // Resource matching supports exact strings, wildcard "*", prefix "foo/*", and
 // per-segment wildcards like "foo/*/bar".
 func matchPermission(perm Permissions, service, action, resource string) bool {
-	if perm.Service != service {
+	if perm.Service != "*" && perm.Service != service {
 		return false
 	}
 	allowedAction := slices.Contains(perm.Actions, "*") || slices.Contains(perm.Actions, action)
@@ -274,12 +275,72 @@ func scopeResource(resource, username, orgName string) string {
 	return username + "/" + resource
 }
 
-// checkPermissions resolves the caller's effective permissions by walking both
-// their direct role and their team's role, then returns true on the first
-// matching (service, action, resource) triple. Resource matching supports exact
-// strings, wildcard "*", prefix "foo/*", and per-segment wildcards like
-// "foo/*/bar". Returns (false, nil) — not an error — when no match is found.
+// permissionDenial captures the human-readable context of a failed permission
+// check — the role(s) the subject holds, the resource as actually evaluated
+// (after user/org scoping), and the service/action that was missing — so 403
+// responses can tell the caller exactly what they lacked instead of a bare
+// "forbidden".
+type permissionDenial struct {
+	Roles    []string // role names (falling back to role IDs) consulted during the check
+	Service  string
+	Action   string
+	Resource string // resource as evaluated, after user/org scoping
+}
+
+// rolesLabel renders the consulted role(s) as a plain comma-separated list for
+// the structured "role" field, or "(none assigned)" when the subject has no role.
+func (d permissionDenial) rolesLabel() string {
+	if len(d.Roles) == 0 {
+		return "(none assigned)"
+	}
+	return strings.Join(d.Roles, ", ")
+}
+
+// reason builds the message surfaced in 403 responses across every interface.
+func (d permissionDenial) reason() string {
+	switch len(d.Roles) {
+	case 0:
+		return fmt.Sprintf("permission denied: no role assigned grants %q on %s resource %q",
+			d.Action, d.Service, d.Resource)
+	case 1:
+		return fmt.Sprintf("permission denied: role %q is not allowed to %q on %s resource %q",
+			d.Roles[0], d.Action, d.Service, d.Resource)
+	default:
+		return fmt.Sprintf("permission denied: roles %q are not allowed to %q on %s resource %q",
+			d.rolesLabel(), d.Action, d.Service, d.Resource)
+	}
+}
+
+// appendRoleLabel records a display label for role — its name, or its ID when
+// unnamed — skipping duplicates so the same role is never listed twice.
+func appendRoleLabel(labels []string, role Role) []string {
+	label := role.Name
+	if label == "" {
+		label = role.RoleID
+	}
+	if slices.Contains(labels, label) {
+		return labels
+	}
+	return append(labels, label)
+}
+
+// checkPermissions reports whether the caller may perform (service, action,
+// resource). It is a thin wrapper over evaluatePermissions for callers that do
+// not need the denial detail.
 func checkPermissions(ctx context.Context, userID string, service string, action string, resource string) (bool, error) {
+	granted, _, err := evaluatePermissions(ctx, userID, service, action, resource)
+	return granted, err
+}
+
+// evaluatePermissions resolves the caller's effective permissions by walking both
+// their direct role and their team's role, then returns true on the first
+// matching (service, action, resource) triple. The returned permissionDenial
+// records the role(s) consulted and the scoped resource so callers can build an
+// informative 403. Resource matching supports exact strings, wildcard "*", prefix
+// "foo/*", and per-segment wildcards like "foo/*/bar". Returns (false, detail,
+// nil) — not an error — when no match is found.
+func evaluatePermissions(ctx context.Context, userID string, service string, action string, resource string) (bool, permissionDenial, error) {
+	detail := permissionDenial{Service: service, Action: action, Resource: resource}
 	permissionCheck := PermissionsCheck{
 		PermissionsCheckID: uuid.New().String(),
 		Service:            service,
@@ -305,7 +366,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 		dbLog(err, "checkPermissions: failed to load user", "user_id", userID, "error", err)
 		permissionCheck.Granted = false
 		savePermissionsCheck(ctx, permissionCheck)
-		return false, err
+		return false, detail, err
 	}
 	user := row.(User)
 	permissionCheck.TeamID = user.TeamID
@@ -321,6 +382,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 		}
 	}
 	resource = scopeResource(resource, user.Username, orgName)
+	detail.Resource = resource
 
 	// When the session carries a scoped role (workflow run token), evaluate only
 	// the permissions in that role — the user's own role and team are bypassed.
@@ -331,9 +393,10 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 			span.SetStatus(codes.Ok, "scoped role not found — deny")
 			permissionCheck.Granted = false
 			savePermissionsCheck(ctx, permissionCheck)
-			return false, nil
+			return false, detail, nil
 		}
 		scopedRole := scopedRow.(Role)
+		detail.Roles = appendRoleLabel(detail.Roles, scopedRole)
 		var scopedPerms []Permissions
 		if len(scopedRole.PermissionsIDs) > 0 {
 			if err := connectRead().WithContext(ctx).
@@ -343,7 +406,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 				span.SetStatus(codes.Ok, "scoped perms load failed — deny")
 				permissionCheck.Granted = false
 				savePermissionsCheck(ctx, permissionCheck)
-				return false, nil
+				return false, detail, nil
 			}
 		}
 		for _, perm := range scopedPerms {
@@ -353,12 +416,12 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 			span.SetStatus(codes.Ok, "")
 			permissionCheck.Granted = true
 			savePermissionsCheck(ctx, permissionCheck)
-			return true, nil
+			return true, detail, nil
 		}
 		span.SetStatus(codes.Ok, "scoped role denied")
 		permissionCheck.Granted = false
 		savePermissionsCheck(ctx, permissionCheck)
-		return false, nil
+		return false, detail, nil
 	}
 	span.AddEvent("user.loaded", trace.WithAttributes(
 		attribute.Bool("user.has_role", user.RoleID != nil),
@@ -377,9 +440,10 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 			dbLog(err, "checkPermissions: failed to load user role", "user_id", userID, "role_id", *user.RoleID, "error", err)
 			permissionCheck.Granted = false
 			savePermissionsCheck(ctx, permissionCheck)
-			return false, err
+			return false, detail, err
 		}
 		role := roleRow.(Role)
+		detail.Roles = appendRoleLabel(detail.Roles, role)
 		span.AddEvent("role.loaded", trace.WithAttributes(
 			attribute.String("role.id", role.RoleID),
 			attribute.Int("role.permissions_count", len(role.PermissionsIDs)),
@@ -393,11 +457,44 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 				dbLog(err, "checkPermissions: failed to load permission", "user_id", userID, "permissions_id", pid, "error", err)
 				permissionCheck.Granted = false
 				savePermissionsCheck(ctx, permissionCheck)
-				return false, err
+				return false, detail, err
 			}
 			permissions = append(permissions, pRow.(Permissions))
 		}
 		span.AddEvent("direct_role.permissions_loaded", trace.WithAttributes(
+			attribute.Int("permissions.count", len(permissions)),
+		))
+	}
+
+	// The system-managed default role carries the user-scoped default grants. It
+	// is resolved alongside the personal role so its permissions are additive.
+	if user.DefaultRoleID != nil {
+		slog.DebugContext(ctx, "loading default role permissions", "user_id", userID, "role_id", *user.DefaultRoleID)
+		span.AddEvent("default_role.loading", trace.WithAttributes(attribute.String("role.id", *user.DefaultRoleID)))
+		roleRow, err := (Role{RoleID: *user.DefaultRoleID}).Get(ctx)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			dbLog(err, "checkPermissions: failed to load default role", "user_id", userID, "role_id", *user.DefaultRoleID, "error", err)
+			permissionCheck.Granted = false
+			savePermissionsCheck(ctx, permissionCheck)
+			return false, detail, err
+		}
+		role := roleRow.(Role)
+		detail.Roles = appendRoleLabel(detail.Roles, role)
+		for _, pid := range role.PermissionsIDs {
+			pRow, err := (Permissions{PermissionsID: pid}).Get(ctx)
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				dbLog(err, "checkPermissions: failed to load default permission", "user_id", userID, "permissions_id", pid, "error", err)
+				permissionCheck.Granted = false
+				savePermissionsCheck(ctx, permissionCheck)
+				return false, detail, err
+			}
+			permissions = append(permissions, pRow.(Permissions))
+		}
+		span.AddEvent("default_role.permissions_loaded", trace.WithAttributes(
 			attribute.Int("permissions.count", len(permissions)),
 		))
 	}
@@ -432,9 +529,10 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 				dbLog(err, "checkPermissions: failed to load team role", "user_id", userID, "team_id", team.TeamID, "role_id", *team.RoleID, "error", err)
 				permissionCheck.Granted = false
 				savePermissionsCheck(ctx, permissionCheck)
-				return false, err
+				return false, detail, err
 			}
 			role := row.(Role)
+			detail.Roles = appendRoleLabel(detail.Roles, role)
 			span.AddEvent("team_role.loaded", trace.WithAttributes(
 				attribute.String("role.id", role.RoleID),
 				attribute.Int("role.permissions_count", len(role.PermissionsIDs)),
@@ -448,7 +546,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 					dbLog(err, "checkPermissions: failed to load team permission", "user_id", userID, "team_id", team.TeamID, "permissions_id", pid, "error", err)
 					permissionCheck.Granted = false
 					savePermissionsCheck(ctx, permissionCheck)
-					return false, err
+					return false, detail, err
 				}
 				permissions = append(permissions, pRow.(Permissions))
 			}
@@ -474,7 +572,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 			slog.DebugContext(ctx, "permission granted", "user_id", userID, "service", service, "action", action, "resource", resource, "matched_permission_id", permission.PermissionsID)
 			permissionCheck.Granted = true
 			savePermissionsCheck(ctx, permissionCheck)
-			return true, nil
+			return true, detail, nil
 		}
 	}
 
@@ -486,7 +584,7 @@ func checkPermissions(ctx context.Context, userID string, service string, action
 	slog.DebugContext(ctx, "permission denied", "user_id", userID, "service", service, "action", action, "resource", resource, "permissions_checked", len(permissions))
 	permissionCheck.Granted = false
 	savePermissionsCheck(ctx, permissionCheck)
-	return false, nil
+	return false, detail, nil
 }
 
 // handleCheckPermissions is the public GET /check_permissions endpoint. It
@@ -519,7 +617,7 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 
 	clientID, _ := r.Context().Value(clientIDKey).(string)
 	if clientID != "" {
-		isAllowed, orgID, err := checkClientPermissions(r.Context(), clientID, req.Service, req.Action, req.Resource)
+		isAllowed, orgID, detail, err := checkClientPermissions(r.Context(), clientID, req.Service, req.Action, req.Resource)
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "client permission evaluation error")
@@ -535,11 +633,11 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Ok, "")
 		meterPermissionChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", isAllowed)))
 		slog.DebugContext(ctx, "check_permissions result (client)", "client_id", clientID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
-		json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": clientID, "org_id": orgID}) //nolint:errcheck
+		json.NewEncoder(w).Encode(denialResponse(isAllowed, clientID, orgID, detail)) //nolint:errcheck
 		return
 	}
 
-	isAllowed, err := checkPermissions(r.Context(), userID, req.Service, req.Action, req.Resource)
+	isAllowed, detail, err := evaluatePermissions(r.Context(), userID, req.Service, req.Action, req.Resource)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "evaluation error")
@@ -562,16 +660,34 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	if userRow, err := (User{UserID: userID}).Get(r.Context()); err == nil {
 		orgID = userRow.(User).OrgID
 	}
-	json.NewEncoder(w).Encode(map[string]any{"authorized": isAllowed, "user_id": userID, "org_id": orgID}) //nolint:errcheck
+	json.NewEncoder(w).Encode(denialResponse(isAllowed, userID, orgID, detail)) //nolint:errcheck
+}
+
+// denialResponse builds the /check_permissions JSON body, attaching the role,
+// resource, service, action, and a human-readable reason when the request was
+// not authorized so conductor (and every downstream interface) can surface why.
+func denialResponse(authorized bool, subjectID string, orgID *string, detail permissionDenial) map[string]any {
+	out := map[string]any{"authorized": authorized, "user_id": subjectID, "org_id": orgID}
+	if !authorized {
+		out["role"] = detail.rolesLabel()
+		out["service"] = detail.Service
+		out["action"] = detail.Action
+		out["resource"] = detail.Resource
+		out["reason"] = detail.reason()
+	}
+	return out
 }
 
 // checkClientPermissions evaluates whether the OAuth client with clientID may
 // perform action on resource within service, using the client's assigned role.
-// Returns (false, nil, nil) when the client has no role or the role grants no match.
-func checkClientPermissions(ctx context.Context, clientID, service, action, resource string) (bool, *string, error) {
+// The returned permissionDenial records the client's role and scoped resource so
+// callers can build an informative 403. Returns (false, orgID, detail, nil) when
+// the client has no role or the role grants no match.
+func checkClientPermissions(ctx context.Context, clientID, service, action, resource string) (bool, *string, permissionDenial, error) {
+	detail := permissionDenial{Service: service, Action: action, Resource: resource}
 	client, err := getOAuthClientByClientID(ctx, clientID)
 	if err != nil {
-		return false, nil, err
+		return false, nil, detail, err
 	}
 	var orgID *string
 	if client.OrgID != "" {
@@ -588,30 +704,32 @@ func checkClientPermissions(ctx context.Context, clientID, service, action, reso
 			}
 		}
 	}
+	detail.Resource = resource
 
 	if client.RoleID == nil {
-		return false, orgID, nil
+		return false, orgID, detail, nil
 	}
 	roleRow, err := (Role{RoleID: *client.RoleID}).Get(ctx)
 	if err != nil {
-		return false, orgID, nil
+		return false, orgID, detail, nil
 	}
 	role := roleRow.(Role)
+	detail.Roles = appendRoleLabel(detail.Roles, role)
 	if len(role.PermissionsIDs) == 0 {
-		return false, orgID, nil
+		return false, orgID, detail, nil
 	}
 	var perms []Permissions
 	if err := connectRead().WithContext(ctx).
 		Where("permissions_id IN ? AND active = true", role.PermissionsIDs).
 		Find(&perms).Error; err != nil {
-		return false, orgID, nil
+		return false, orgID, detail, nil
 	}
 	for _, p := range perms {
 		if matchPermission(p, service, action, resource) {
-			return true, orgID, nil
+			return true, orgID, detail, nil
 		}
 	}
-	return false, orgID, nil
+	return false, orgID, detail, nil
 }
 
 // handleAuthValidate returns the authenticated subject and its type ("user" or

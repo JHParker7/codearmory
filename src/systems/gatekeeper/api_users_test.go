@@ -1,8 +1,8 @@
 package main
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,8 +20,12 @@ func cleanupSignup(t *testing.T, userID string) {
 		return
 	}
 	u := row.(User)
-	if u.RoleID != nil {
-		rRow, err := (Role{RoleID: *u.RoleID}).Get(context.Background())
+	roleIDs := []*string{u.RoleID, u.DefaultRoleID}
+	for _, rid := range roleIDs {
+		if rid == nil {
+			continue
+		}
+		rRow, err := (Role{RoleID: *rid}).Get(context.Background())
 		if err == nil {
 			role := rRow.(Role)
 			for _, pid := range role.PermissionsIDs {

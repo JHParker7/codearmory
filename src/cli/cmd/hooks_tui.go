@@ -49,13 +49,14 @@ type hookTrigger struct {
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 
-type hookRulesMsg        []hookRule
-type hookEventsMsg       []hookEvent
-type hookEventDetailMsg  hookEvent
-type hooksErrMsg         struct{ err error }
-type hookDeletedMsg      struct{}
-type hookRuleCreatedMsg  struct{}
-type hooksFormErrMsg     struct{ err error }
+type hookRulesMsg []hookRule
+type hookEventsMsg []hookEvent
+type hookEventDetailMsg hookEvent
+type hookPipelinesMsg []tuiPipeline
+type hooksErrMsg struct{ err error }
+type hookDeletedMsg struct{}
+type hookRuleCreatedMsg struct{}
+type hooksFormErrMsg struct{ err error }
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 
@@ -79,6 +80,7 @@ type hooksModel struct {
 
 	rules      []hookRule
 	events     []hookEvent
+	pipelines  []tuiPipeline // workflow catalog for the rule form's workflow selector
 	selRule    *hookRule
 	selEvent   *hookEvent
 	confirmDel bool
@@ -188,9 +190,26 @@ func hooksDeleteRule(ruleID string) tea.Cmd {
 	}
 }
 
+// hooksFetchPipelines loads the workflow catalog for the rule form's workflow
+// selector, degrading to an empty list on failure so the field falls back to a
+// free-text input (and a workflows permission error never blanks the TUI).
+func hooksFetchPipelines() tea.Msg {
+	data, err := doRequest("GET", "/workflows/pipelines", nil)
+	if err != nil {
+		return hookPipelinesMsg(nil)
+	}
+	var ps []tuiPipeline
+	if err := json.Unmarshal(data, &ps); err != nil {
+		return hookPipelinesMsg(nil)
+	}
+	return hookPipelinesMsg(ps)
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-func (m hooksModel) Init() tea.Cmd { return hooksFetchRules }
+// Init loads the rules and batches the pipeline catalog so the create-rule
+// form's workflow selector is ready the moment it opens.
+func (m hooksModel) Init() tea.Cmd { return tea.Batch(hooksFetchRules, hooksFetchPipelines) }
 
 // ── Update ────────────────────────────────────────────────────────────────────
 
@@ -229,6 +248,10 @@ func (m hooksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rTable.SetRows(rows)
 		return m, nil
 
+	case hookPipelinesMsg:
+		m.pipelines = []tuiPipeline(msg)
+		return m, nil
+
 	case hookEventsMsg:
 		m.loading = false
 		m.events = []hookEvent(msg)
@@ -250,7 +273,7 @@ func (m hooksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		e := hookEvent(msg)
 		m.selEvent = &e
-		m.vp.SetContent(hooksRenderEventDetail(e))
+		m.vp.SetContent(hooksRenderEventDetail(e, m.pipelineNames()))
 		m.vp.GotoTop()
 		m.view = hooksViewEventDetail
 		return m, nil
@@ -269,10 +292,27 @@ func (m hooksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.form.errMsg = msg.err.Error()
 		return m, nil
 
+	case tuiAutoRefreshMsg:
+		// Silently re-fetch the current list so new rules/events appear without a
+		// loading flash or losing the cursor. The event-detail view shows an
+		// immutable past event, so it needs no refresh. The create form must not
+		// be disturbed.
+		switch m.view {
+		case hooksViewRules:
+			return m, hooksFetchRules
+		case hooksViewEvents:
+			repo := ""
+			if m.selRule != nil {
+				repo = m.selRule.Repo
+			}
+			return m, hooksFetchEvents(repo)
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.err != nil {
 			switch msg.String() {
-			case "q":
+			case "esc":
 				return m, func() tea.Msg { return goHomeMsg{} }
 			case "ctrl+c":
 				return m, tea.Quit
@@ -326,7 +366,7 @@ func (m hooksModel) hooksKeyRules(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.String() {
-	case "q":
+	case "esc":
 		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
@@ -345,7 +385,7 @@ func (m hooksModel) hooksKeyRules(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
 		return m, hooksFetchEvents("")
 	case "n":
 		var cmd tea.Cmd
-		m.form, cmd = newHooksRuleForm()
+		m.form, cmd = newHooksRuleForm(m.pipelines)
 		m.view = hooksViewCreate
 		return m, cmd
 	case "D":
@@ -365,11 +405,9 @@ func (m hooksModel) hooksKeyRules(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
 
 func (m hooksModel) hooksKeyEvents(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
-		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
-	case "b", "esc":
+	case "esc":
 		m.view = hooksViewRules
 		return m, nil
 	case "enter":
@@ -394,11 +432,9 @@ func (m hooksModel) hooksKeyEvents(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
 
 func (m hooksModel) hooksKeyEventDetail(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
-		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
-	case "b", "esc":
+	case "esc":
 		m.view = hooksViewEvents
 		m.selEvent = nil
 		return m, nil
@@ -410,15 +446,31 @@ func (m hooksModel) hooksKeyEventDetail(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
 
 // ── Create form ───────────────────────────────────────────────────────────────
 
-func newHooksRuleForm() (tuiForm, tea.Cmd) {
+func newHooksRuleForm(pipelines []tuiPipeline) (tuiForm, tea.Cmd) {
 	return newTUIForm("New Hook Rule",
 		formInput("name", "Name", "ci-push (required)"),
 		formInput("repo", "Repo", "myorg/myrepo (required)"),
 		formInput("events", "Events", "push pull_request (required)"),
-		formInput("workflow", "Workflow", "pipeline id (required)"),
+		hooksWorkflowField(pipelines),
 		formInput("secret", "Secret", "HMAC secret (required)"),
 		formInput("ref", "Ref filter", "refs/heads/main (optional)"),
 	)
+}
+
+// hooksWorkflowField builds the rule form's workflow picker: a selector of
+// pipeline names (submitting the workflow_id) when the catalog is available, or
+// a free-text id fallback when it could not be loaded.
+func hooksWorkflowField(pipelines []tuiPipeline) formField {
+	if len(pipelines) == 0 {
+		return formInput("workflow", "Workflow", "pipeline id (required)")
+	}
+	labels := make([]string, len(pipelines))
+	ids := make([]string, len(pipelines))
+	for i, p := range pipelines {
+		labels[i] = p.Name
+		ids[i] = p.WorkflowID
+	}
+	return formSelectKV("workflow", "Workflow", labels, ids)
 }
 
 func (m hooksModel) hooksKeyCreate(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
@@ -455,7 +507,7 @@ func (m hooksModel) hooksSubmitCreate() (hooksModel, tea.Cmd) {
 	case len(events) == 0:
 		m.form.errMsg = "at least one event is required"
 	case workflow == "":
-		m.form.errMsg = "workflow (pipeline id) is required"
+		m.form.errMsg = "a workflow is required"
 	case secret == "":
 		m.form.errMsg = "secret is required (webhook rules must have an HMAC secret)"
 	default:
@@ -496,7 +548,7 @@ func splitEvents(s string) []string {
 func (m hooksModel) View() string {
 	if m.err != nil {
 		return tuiErrStyle.Render("error: "+m.err.Error()) + "\n\n" +
-			tuiHelpStyle.Render("[q] home  [r] retry")
+			tuiHelpStyle.Render("[esc] home  [r] retry")
 	}
 	switch m.view {
 	case hooksViewCreate:
@@ -511,7 +563,7 @@ func (m hooksModel) View() string {
 
 func (m hooksModel) hooksViewRules() string {
 	title := tuiTitleStyle.Render("Hooks Rules")
-	help := tuiHelp("[↑↓/jk] navigate  [enter] events by repo  [e] all events  [n] new  [D] delete  [r] refresh  [q] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [enter] events by repo  [e] all events  [n] new  [D] delete  [r] refresh  [esc] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -539,7 +591,7 @@ func (m hooksModel) hooksViewEvents() string {
 		subtitle += ": " + m.selRule.Repo
 	}
 	title := tuiTitleStyle.Render("Hooks " + subtitle)
-	help := tuiHelp("[↑↓/jk] navigate  [enter] detail  [r] refresh  [b] back  [q] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [enter] detail  [r] refresh  [esc] back", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -555,14 +607,33 @@ func (m hooksModel) hooksViewEventDetail() string {
 		title = tuiTitleStyle.Render(m.selEvent.EventType) + "  " +
 			tuiMetaStyle.Render(m.selEvent.Repo)
 	}
-	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [b] back  [q] home", m.width)
+	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [esc] back", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
 	return title + "\n" + tuiBoxStyle.Render(m.vp.View()) + "\n" + help
 }
 
-func hooksRenderEventDetail(e hookEvent) string {
+// pipelineNames maps each known workflow_id to its pipeline name, for rendering
+// triggers by name rather than by opaque id.
+func (m hooksModel) pipelineNames() map[string]string {
+	names := make(map[string]string, len(m.pipelines))
+	for _, p := range m.pipelines {
+		names[p.WorkflowID] = p.Name
+	}
+	return names
+}
+
+// hooksWorkflowLabel renders a workflow's human-readable name when known,
+// falling back to its short id.
+func hooksWorkflowLabel(id string, names map[string]string) string {
+	if n := names[id]; n != "" {
+		return n
+	}
+	return tuiShortID(id)
+}
+
+func hooksRenderEventDetail(e hookEvent, wfNames map[string]string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb,
 		"Event ID:      %s\nRepo:          %s\nType:          %s\nRef:           %s\nStatus:        %s\nRules matched: %d\nReceived:      %s\n",
@@ -573,7 +644,7 @@ func hooksRenderEventDetail(e hookEvent) string {
 		sb.WriteString("\nTRIGGERS:\n")
 		for i, t := range e.Triggers {
 			fmt.Fprintf(&sb, "\n  [%d] rule: %s  workflow: %s  status: %s\n",
-				i+1, tuiShortID(t.RuleID), tuiShortID(t.WorkflowID), t.Status,
+				i+1, tuiShortID(t.RuleID), hooksWorkflowLabel(t.WorkflowID, wfNames), t.Status,
 			)
 			if t.RunID != nil {
 				fmt.Fprintf(&sb, "      run: %s\n", *t.RunID)

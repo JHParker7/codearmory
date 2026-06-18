@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -273,14 +274,42 @@ func TestHandleCancel_Unauthorized(t *testing.T) {
 	}
 }
 
-// --- newRuntime ---
+// --- buildRuntime / defaultRuntimeType ---
 
-func TestNewRuntime_UnknownRuntime(t *testing.T) {
-	t.Setenv("RUNTIME", "bogus")
-	_, err := newRuntime()
+func TestBuildRuntime_UnknownType(t *testing.T) {
+	_, err := buildRuntime(RuntimeBackend{Name: "x", Type: "bogus"})
 	if err == nil {
-		t.Fatal("expected error for unknown RUNTIME value")
+		t.Fatal("expected error for unknown runtime type")
 	}
+}
+
+// TestBuildRuntime_KataRequiresRuntimeClass guards the isolation boundary at the
+// point of use: a kata backend with no RuntimeClass (and no K8S_RUNTIME_CLASS)
+// must be rejected rather than silently built as a plain (runc) Kubernetes runtime.
+func TestBuildRuntime_KataRequiresRuntimeClass(t *testing.T) {
+	t.Setenv("K8S_RUNTIME_CLASS", "")
+	_, err := buildRuntime(RuntimeBackend{Name: "default", Type: "kata", Config: map[string]string{}})
+	if err == nil {
+		t.Fatal("expected kata without a RuntimeClass to be rejected (would run unsandboxed)")
+	}
+	if !strings.Contains(err.Error(), "RuntimeClass") {
+		t.Fatalf("error should explain the missing RuntimeClass, got: %v", err)
+	}
+}
+
+func TestDefaultRuntimeType(t *testing.T) {
+	t.Run("unset defaults to docker", func(t *testing.T) {
+		t.Setenv("RUNTIME", "")
+		if got := defaultRuntimeType(); got != "docker" {
+			t.Fatalf("got %q, want docker", got)
+		}
+	})
+	t.Run("passes through set value", func(t *testing.T) {
+		t.Setenv("RUNTIME", "kubernetes")
+		if got := defaultRuntimeType(); got != "kubernetes" {
+			t.Fatalf("got %q, want kubernetes", got)
+		}
+	})
 }
 
 // --- K8s runtime timeout is classified as TimedOut ---
@@ -341,12 +370,26 @@ func TestWorkerPool_Cancel_NotFound(t *testing.T) {
 func TestWorkerPool_Cancel_Found(t *testing.T) {
 	pool := &WorkerPool{}
 	called := false
-	pool.cancels.Store("exec-123", context.CancelFunc(func() { called = true }))
+	pool.cancels.Store("exec-123", runningExec{cancel: func() { called = true }})
 	if !pool.Cancel("exec-123") {
 		t.Fatal("expected true for known execution ID")
 	}
 	if !called {
 		t.Fatal("expected cancel func to be called")
+	}
+}
+
+// TestWorkerPool_Cancel_CallsRuntimeCancel verifies Cancel also drives the
+// resolved runtime's Cancel (stop+destroy for proxmox, job delete for k8s).
+func TestWorkerPool_Cancel_CallsRuntimeCancel(t *testing.T) {
+	pool := &WorkerPool{}
+	rt := &fakeRuntime{}
+	pool.cancels.Store("exec-9", runningExec{cancel: func() {}, rt: rt})
+	if !pool.Cancel("exec-9") {
+		t.Fatal("expected true for known execution ID")
+	}
+	if rt.cancelled != "exec-9" {
+		t.Fatalf("runtime Cancel got %q, want exec-9", rt.cancelled)
 	}
 }
 

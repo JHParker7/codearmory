@@ -70,7 +70,7 @@ services:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,hooks=hooks-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,outpost-gateway=outpost-gateway-local-secret,chaos=chaos-local-secret,argo=argo-local-secret,test-service=test-service-local-secret
+      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,notifications=notifications-local-secret,hooks=hooks-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,outpost-gateway=outpost-gateway-local-secret,chaos=chaos-local-secret,argo=argo-local-secret,test-service=test-service-local-secret
       SECRETS_LOOKUP_ALLOWED_CALLERS: "containers"
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
@@ -80,6 +80,12 @@ services:
       SIGNUP_RATE_WINDOW: 1h
       LOGIN_RATE_LIMIT: "1000"
       LOGIN_RATE_WINDOW: 1h
+      # Optional bootstrap admin. When both EMAIL and PASSWORD are set, gatekeeper
+      # seeds this account on startup with full access and the "first user becomes
+      # admin" fallback is disabled. Both read via secret() so *_FILE mounts work.
+      # GATEKEEPER_ADMIN_EMAIL: admin@codearmory.local
+      # GATEKEEPER_ADMIN_PASSWORD: changeme123
+      # GATEKEEPER_ADMIN_USERNAME: admin   # optional; defaults to the email local-part
     depends_on:
       postgres:
         condition: service_healthy
@@ -181,6 +187,13 @@ services:
       FORGE_EGRESS_PROXY: http://egress-proxy:3128
       # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
       # K8S_RUNTIME_CLASS: gvisor     # optional: use gVisor for stronger isolation
+      #
+      # Proxmox VM-per-job runtime: the PVE host is external (not part of this
+      # compose stack), so there is nothing to start here. To try it, set the token
+      # below and create a runtime backend of type "proxmox" via the API whose
+      # config points at your PVE host and whose egress_proxy reuses the same
+      # FORGE_EGRESS_PROXY URL above. secret_refs {token: "PROXMOX_TOKEN"}.
+      # PROXMOX_TOKEN: "root@pam!forge=00000000-0000-0000-0000-000000000000"
     volumes:
       # Mount the Docker socket for the local docker runtime.
       # Remove this when deploying to Kubernetes (use RUNTIME=kubernetes instead).
@@ -260,6 +273,23 @@ services:
       HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
     ports:
       - "8086:8086"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+    restart: on-failure
+
+  notifications:
+    build:
+      context: ../../src/systems/notifications
+    environment:
+      <<: *otel-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/notifications
+      GATEKEEPER_URL: http://gatekeeper:8081
+      GATEKEEPER_SERVICE_KEY: notifications-local-secret
+    ports:
+      - "8094:8094"
     depends_on:
       postgres:
         condition: service_healthy
@@ -551,6 +581,20 @@ services:
       GATEKEEPER_URL: http://gatekeeper:8081
     depends_on:
       tickets:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  notifications-integration-tests:
+    build:
+      context: ../../tests/notifications
+    environment:
+      NOTIFICATIONS_URL: http://notifications:8094
+      GATEKEEPER_URL: http://gatekeeper:8081
+    depends_on:
+      notifications:
         condition: service_started
       gatekeeper:
         condition: service_healthy

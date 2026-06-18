@@ -48,7 +48,7 @@ gatekeeper:
   env:
     logLevel: info
     # Comma-separated list of service names permitted to register.
-    permittedServices: "gatekeeper,blueprints,forge,workflows,tickets,hooks,outpost-gateway,chaos,argo"
+    permittedServices: "gatekeeper,blueprints,forge,workflows,tickets,notifications,hooks,outpost-gateway,chaos,argo"
     # Comma-separated CIDRs of trusted reverse proxies (optional).
     trustedProxyCIDRs: ""
     # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
@@ -57,6 +57,12 @@ gatekeeper:
     # Must match the URL Forgejo/Gitea clients use to reach this instance.
     # e.g. https://codearmory.example.com
     oidcIssuer: ""
+    # Optional bootstrap admin. When adminEmail and secret.adminPassword are both
+    # set, gatekeeper seeds this account on startup with full administrative access
+    # and the "first user becomes admin" fallback is disabled.
+    adminEmail: ""
+    # Optional; defaults to the email local-part when left empty.
+    adminUsername: ""
   secret:
     # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
@@ -77,6 +83,9 @@ gatekeeper:
     # Generate with: openssl ecparam -name prime256v1 -genkey -noout | openssl ec -out -
     # If unset, an ephemeral key is generated on startup (not suitable for production).
     oidcSigningKey: ""
+    # Password for the optional bootstrap admin (see gatekeeper.env.adminEmail).
+    # Leave empty to disable env-var admin seeding.
+    adminPassword: ""
   redis:
     enabled: true
     image:
@@ -110,7 +119,8 @@ registry:
     logLevel: info
     # Auto-populated as "blueprints=http://<fullname>-blueprints:8093,forge=http://<fullname>-forge:8083,
     # workflows=http://<fullname>-workflows:8085,tickets=http://<fullname>-tickets:8086,
-    # hooks=http://<fullname>-hooks:8087" when left empty. Override to use custom service URLs.
+    # notifications=http://<fullname>-notifications:8094,hooks=http://<fullname>-hooks:8087"
+    # when left empty. Override to use custom service URLs.
     services: ""
     otelEndpoint: ""
   secret:
@@ -259,6 +269,10 @@ forge:
     # Must match the forge entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
+    # Proxmox VE API token for the proxmox runtime backend, in the form
+    # "USER@REALM!TOKENID=SECRET". Only used when forge.proxmox.enabled is true;
+    # referenced by a runtime backend via secret_refs {token: "PROXMOX_TOKEN"}.
+    proxmoxToken: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -273,6 +287,13 @@ forge:
   dockerSocket:
     enabled: false
     path: /var/run/docker.sock
+  # Proxmox VM-per-job runtime backend. When enabled, the PROXMOX_TOKEN secret is
+  # mounted into forge so an admin can create a runtime backend of type "proxmox"
+  # (via POST /runtime-backends) that clones a throwaway VM per job. The backend's
+  # url/node/template_vmid/storage/bridge live in its API config, not here — this
+  # flag only gates whether the token secret is wired into the pod.
+  proxmox:
+    enabled: false
 
 # ── Workflows ─────────────────────────────────────────────────────────────────
 workflows:
@@ -342,6 +363,38 @@ tickets:
     # Shared HMAC secret for emitting ticket lifecycle events to the hooks service.
     # Synced from hooks.secret.hooksTriggerKey when hooks is enabled. Leave empty for auto-sync.
     hooksTriggerKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+# Notification delivery via pluggable integrations (Slack, email, webhook).
+notifications:
+  enabled: true
+  image:
+    repository: notifications
+    tag: ""
+  replicaCount: 1
+  port: 8094
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed when left empty.
+    databaseUrl: ""
+    # Must match the notifications entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
+    gatekeeperServiceKey: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -677,6 +730,7 @@ postgresql:
           CREATE DATABASE registry;
           CREATE DATABASE workflows;
           CREATE DATABASE tickets;
+          CREATE DATABASE notifications;
           CREATE DATABASE hooks;
           CREATE DATABASE gitea_integration;
           CREATE DATABASE outpost_gateway;

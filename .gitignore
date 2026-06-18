@@ -8,6 +8,7 @@ src/systems/hooks/hooks
 src/systems/forge/forge
 src/systems/mcp/codearmory-mcp
 src/systems/registry/registry
+src/systems/notifications/notifications
 src/systems/gitea_integration/gitea_integration
 src/systems/containers/containers
 src/systems/outpost-gateway/outpost-gateway

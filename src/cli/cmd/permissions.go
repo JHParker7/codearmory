@@ -72,14 +72,18 @@ func init() {
 			Use:   "get <id>",
 			Short: "Get a permission by ID",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gatekeeper/permissions/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("GET", "/gatekeeper/permissions/"+args[0], nil)
+			},
 		},
 		updateCmd,
 		&cobra.Command{
 			Use:   "delete <id>",
 			Short: "Delete a permission",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("DELETE", "/gatekeeper/permissions/"+args[0], nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("DELETE", "/gatekeeper/permissions/"+args[0], nil)
+			},
 		},
 	)
 	RegisterModule(Module{Name: "permissions", Command: permissionsCmd})

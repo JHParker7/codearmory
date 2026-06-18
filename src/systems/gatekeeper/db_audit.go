@@ -58,4 +58,3 @@ func (a AuditLog) List(ctx context.Context, limit, offset int) ([]db, error) {
 	}
 	return result, nil
 }
-

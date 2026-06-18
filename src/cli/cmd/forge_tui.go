@@ -30,15 +30,14 @@ type forgeExec struct {
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 
-type forgeExecsMsg      []forgeExec
+type forgeExecsMsg []forgeExec
 type forgeExecDetailMsg forgeExec
-type forgeErrMsg        struct{ err error }
-type forgeCancelledMsg  struct{}
-type forgeTickMsg       struct{}
-type forgeCreatedMsg    struct{}
-type forgeFormErrMsg    struct{ err error }
-type forgeImagesMsg     []string
-type forgeRunnersMsg    []string
+type forgeErrMsg struct{ err error }
+type forgeCancelledMsg struct{}
+type forgeCreatedMsg struct{}
+type forgeFormErrMsg struct{ err error }
+type forgeImagesMsg []string
+type forgeRunnersMsg []string
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 
@@ -129,8 +128,10 @@ func forgeFetchDetail(id string) tea.Cmd {
 	}
 }
 
-func forgeTickCmd() tea.Cmd {
-	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return forgeTickMsg{} })
+// forgeActive reports whether an execution is still in progress and thus worth
+// polling for fresh status and output.
+func forgeActive(status string) bool {
+	return status == "pending" || status == "running"
 }
 
 // forgeFetchImages loads the image allowlist for the create form's selector.
@@ -198,11 +199,7 @@ func (m forgeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.execs = []forgeExec(msg)
 		rows := make([]table.Row, len(m.execs))
-		hasActive := false
 		for i, e := range m.execs {
-			if e.Status == "pending" || e.Status == "running" {
-				hasActive = true
-			}
 			rows[i] = table.Row{
 				tuiShortID(e.ExecutionID),
 				e.Status,
@@ -213,17 +210,24 @@ func (m forgeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.eTable.SetRows(rows)
-		if hasActive {
-			return m, forgeTickCmd()
-		}
 		return m, nil
 
 	case forgeExecDetailMsg:
+		// wasLoading distinguishes an explicit open / manual refresh (which
+		// jumps to the top) from a silent 5s auto-refresh (which preserves the
+		// reader's scroll position, or follows the tail if already at bottom).
+		wasLoading := m.loading
 		m.loading = false
 		d := forgeExec(msg)
 		m.detail = &d
-		m.vp.SetContent(forgeRenderOutput(d))
-		m.vp.GotoTop()
+		atBottom := m.vp.AtBottom()
+		m.vp.SetContent(forgeRenderOutput(d)) // preserves YOffset (clamped)
+		switch {
+		case wasLoading:
+			m.vp.GotoTop()
+		case atBottom:
+			m.vp.GotoBottom()
+		}
 		return m, nil
 
 	case forgeCancelledMsg:
@@ -247,16 +251,24 @@ func (m forgeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runners = []string(msg)
 		return m, nil
 
-	case forgeTickMsg:
-		if m.view == forgeViewList {
+	case tuiAutoRefreshMsg:
+		// Silent re-fetch (no loading flash) so the page updates in place: the
+		// list keeps its cursor, and the output view keeps its scroll position
+		// (forgeExecDetailMsg preserves it when not loading).
+		switch m.view {
+		case forgeViewList:
 			return m, forgeFetchExecs
+		case forgeViewOutput:
+			if m.selExec != nil {
+				return m, forgeFetchDetail(m.selExec.ExecutionID)
+			}
 		}
 		return m, nil
 
 	case tea.KeyMsg:
 		if m.err != nil {
 			switch msg.String() {
-			case "q":
+			case "esc":
 				return m, func() tea.Msg { return goHomeMsg{} }
 			case "ctrl+c":
 				return m, tea.Quit
@@ -294,7 +306,7 @@ func (m forgeModel) forgeDelegate(msg tea.Msg) (forgeModel, tea.Cmd) {
 
 func (m forgeModel) forgeKeyList(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
+	case "esc":
 		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
@@ -315,7 +327,7 @@ func (m forgeModel) forgeKeyList(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
 		i := m.eTable.Cursor()
 		if i >= 0 && i < len(m.execs) {
 			e := m.execs[i]
-			if e.Status == "pending" || e.Status == "running" {
+			if forgeActive(e.Status) {
 				return m, func() tea.Msg {
 					_, _ = doRequest("DELETE", "/forge/executions/"+e.ExecutionID, nil)
 					return forgeCancelledMsg{}
@@ -333,11 +345,9 @@ func (m forgeModel) forgeKeyList(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
 
 func (m forgeModel) forgeKeyOutput(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
 	switch msg.String() {
-	case "q":
-		return m, func() tea.Msg { return goHomeMsg{} }
 	case "ctrl+c":
 		return m, tea.Quit
-	case "b", "esc":
+	case "esc":
 		m.view = forgeViewList
 		m.detail = nil
 		return m, nil
@@ -373,7 +383,7 @@ func newForgeCreateForm(images, runners []string) (tuiForm, tea.Cmd) {
 	}
 	return newTUIForm("New Execution",
 		imageField,
-		formInput("command", "Command", `sh -c "echo hi" (required)`),
+		formTextarea("command", "Command", "sh -c \"echo hi\"\nmultiple lines run as a script"),
 		formInput("env", "Env", "KEY=VALUE KEY2=VALUE2 (optional)"),
 		formInput("timeout", "Timeout", "seconds (optional)"),
 		runnerField,
@@ -407,7 +417,7 @@ func (m forgeModel) forgeSubmitCreate() (forgeModel, tea.Cmd) {
 		m.form.errMsg = "image is required"
 		return m, nil
 	}
-	command, err := parseCommandLine(m.form.value("command"))
+	command, err := buildForgeCommand(m.form.value("command"))
 	if err != nil {
 		m.form.errMsg = err.Error()
 		return m, nil
@@ -454,9 +464,22 @@ func forgeSubmitExec(image string, command []string, env map[string]string, time
 	}
 }
 
-// parseCommandLine splits a command line into argv, honouring single and double
-// quotes so `sh -c "echo hi"` yields ["sh","-c","echo hi"]. A backslash escapes
-// the next character outside single quotes.
+// buildForgeCommand turns the command field into the argv forge executes. Forge
+// runs argv directly with no shell, so a multi-line entry — which the user means
+// as a script, one command per line — can't be sent as bare tokens (they'd become
+// arguments to the first word). A multi-line entry is therefore wrapped as
+// `sh -c <script>` so every line runs; a single line is tokenised into argv as
+// before, preserving raw-argv use (explicit `sh -c "…"`, or images without a shell).
+func buildForgeCommand(raw string) ([]string, error) {
+	if strings.Contains(raw, "\n") {
+		return []string{"sh", "-c", raw}, nil
+	}
+	return parseCommandLine(raw)
+}
+
+// parseCommandLine splits a single command line into argv, honouring single and
+// double quotes so `sh -c "echo hi"` yields ["sh","-c","echo hi"]. A backslash
+// escapes the next character outside single quotes.
 func parseCommandLine(s string) ([]string, error) {
 	var (
 		args  []string
@@ -531,7 +554,7 @@ func parseEnvAssignments(s string) (map[string]string, error) {
 func (m forgeModel) View() string {
 	if m.err != nil {
 		return tuiErrStyle.Render("error: "+m.err.Error()) + "\n\n" +
-			tuiHelpStyle.Render("[q] home  [r] retry")
+			tuiHelpStyle.Render("[esc] home  [r] retry")
 	}
 	switch m.view {
 	case forgeViewCreate:
@@ -544,7 +567,7 @@ func (m forgeModel) View() string {
 
 func (m forgeModel) forgeViewList() string {
 	title := tuiTitleStyle.Render("Forge Executions")
-	help := tuiHelp("[↑↓/jk] navigate  [enter] output  [n] new  [x] cancel  [r] refresh  [q] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [enter] output  [n] new  [x] cancel  [r] refresh  [esc] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -556,7 +579,7 @@ func (m forgeModel) forgeViewList() string {
 
 func (m forgeModel) forgeViewOutput() string {
 	title := tuiTitleStyle.Render("Execution Output")
-	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [r] refresh  [b] back  [q] home", m.width)
+	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [r] refresh  [esc] back", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}

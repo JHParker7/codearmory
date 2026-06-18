@@ -158,14 +158,14 @@ func TestHooksModel_WindowResize(t *testing.T) {
 
 // ── Keys: rules view ─────────────────────────────────────────────────────────
 
-func TestHooksModel_Rules_Q_GoesHome(t *testing.T) {
+func TestHooksModel_Rules_Esc_GoesHome(t *testing.T) {
 	m := applyHooksMsg(newHooksModel(), hookRulesMsg([]hookRule{}))
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd == nil {
-		t.Fatal("q key should return a cmd")
+		t.Fatal("esc key should return a cmd")
 	}
 	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Errorf("q key returned %T, want goHomeMsg", cmd())
+		t.Errorf("esc key returned %T, want goHomeMsg", cmd())
 	}
 }
 
@@ -302,38 +302,16 @@ func TestHooksModel_Rules_R_Refreshes(t *testing.T) {
 
 // ── Keys: events view ─────────────────────────────────────────────────────────
 
-func TestHooksModel_Events_Q_GoesHome(t *testing.T) {
-	m := newHooksModel()
-	m.view = hooksViewEvents
-	m = applyHooksMsg(m, hookEventsMsg([]hookEvent{}))
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if cmd == nil {
-		t.Fatal("q should return a cmd")
-	}
-	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Error("q in events view should return goHomeMsg")
-	}
-}
-
-func TestHooksModel_Events_B_Back(t *testing.T) {
-	m := newHooksModel()
-	m.view = hooksViewEvents
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
-	m2 := updated.(hooksModel)
-	if m2.view != hooksViewRules {
-		t.Errorf("b: view = %v, want hooksViewRules", m2.view)
-	}
-	if cmd != nil {
-		t.Error("b should not emit a cmd")
-	}
-}
-
 func TestHooksModel_Events_Esc_Back(t *testing.T) {
 	m := newHooksModel()
 	m.view = hooksViewEvents
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if updated.(hooksModel).view != hooksViewRules {
-		t.Error("esc in events view should return to rules")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m2 := updated.(hooksModel)
+	if m2.view != hooksViewRules {
+		t.Errorf("esc: view = %v, want hooksViewRules", m2.view)
+	}
+	if cmd != nil {
+		t.Error("esc should not emit a cmd")
 	}
 }
 
@@ -399,51 +377,30 @@ func TestHooksModel_Events_R_Refreshes_WithRepoFilter(t *testing.T) {
 
 // ── Keys: event detail view ───────────────────────────────────────────────────
 
-func TestHooksModel_EventDetail_Q_GoesHome(t *testing.T) {
-	m := newHooksModel()
-	m.view = hooksViewEventDetail
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if cmd == nil {
-		t.Fatal("q should return a cmd")
-	}
-	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Error("q in event detail should return goHomeMsg")
-	}
-}
-
-func TestHooksModel_EventDetail_B_Back(t *testing.T) {
+func TestHooksModel_EventDetail_Esc_Back(t *testing.T) {
 	m := newHooksModel()
 	m.view = hooksViewEventDetail
 	m.selEvent = &hookEvent{EventID: "evt-1"}
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m2 := updated.(hooksModel)
 	if m2.view != hooksViewEvents {
-		t.Errorf("b: view = %v, want hooksViewEvents", m2.view)
+		t.Errorf("esc: view = %v, want hooksViewEvents", m2.view)
 	}
 	if m2.selEvent != nil {
 		t.Error("selEvent should be cleared on back")
 	}
 }
 
-func TestHooksModel_EventDetail_Esc_Back(t *testing.T) {
-	m := newHooksModel()
-	m.view = hooksViewEventDetail
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if updated.(hooksModel).view != hooksViewEvents {
-		t.Error("esc in event detail should return to events")
-	}
-}
-
 // ── Keys: error state ─────────────────────────────────────────────────────────
 
-func TestHooksModel_Error_Q_GoesHome(t *testing.T) {
+func TestHooksModel_Error_Esc_GoesHome(t *testing.T) {
 	m := applyHooksMsg(newHooksModel(), hooksErrMsg{err: fmt.Errorf("boom")})
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd == nil {
-		t.Fatal("q in error state should return a cmd")
+		t.Fatal("esc in error state should return a cmd")
 	}
 	if _, ok := cmd().(goHomeMsg); !ok {
-		t.Error("q in error state should return goHomeMsg")
+		t.Error("esc in error state should return goHomeMsg")
 	}
 }
 
@@ -571,7 +528,7 @@ func TestHooksRenderEventDetail_BasicFields(t *testing.T) {
 		RulesMatched: 2,
 		CreatedAt:    time.Time{},
 	}
-	out := hooksRenderEventDetail(e)
+	out := hooksRenderEventDetail(e, nil)
 	if !strings.Contains(out, "evt-abc") {
 		t.Errorf("output should contain event ID, got: %q", out)
 	}
@@ -585,7 +542,7 @@ func TestHooksRenderEventDetail_BasicFields(t *testing.T) {
 
 func TestHooksRenderEventDetail_NoTriggers(t *testing.T) {
 	e := hookEvent{EventID: "e1", Triggers: nil}
-	out := hooksRenderEventDetail(e)
+	out := hooksRenderEventDetail(e, nil)
 	if strings.Contains(out, "TRIGGERS") {
 		t.Error("should not show TRIGGERS section when there are none")
 	}
@@ -613,7 +570,7 @@ func TestHooksRenderEventDetail_WithTriggers(t *testing.T) {
 			},
 		},
 	}
-	out := hooksRenderEventDetail(e)
+	out := hooksRenderEventDetail(e, nil)
 	if !strings.Contains(out, "TRIGGERS") {
 		t.Error("output should contain TRIGGERS section")
 	}
@@ -763,10 +720,59 @@ func TestHooksModel_Rules_N_OpensCreateForm(t *testing.T) {
 	}
 }
 
+func TestHooksWorkflowField_SelectorWhenPipelinesKnown(t *testing.T) {
+	f := hooksWorkflowField([]tuiPipeline{
+		{WorkflowID: "wf-1", Name: "build-ci"},
+		{WorkflowID: "wf-2", Name: "deploy"},
+	})
+	if f.kind != fieldSelect {
+		t.Fatalf("workflow field kind = %v, want fieldSelect", f.kind)
+	}
+	if f.options[0] != "build-ci" || f.values[0] != "wf-1" {
+		t.Errorf("first option = %q/%q, want build-ci/wf-1", f.options[0], f.values[0])
+	}
+}
+
+func TestHooksWorkflowField_TextFallbackWhenEmpty(t *testing.T) {
+	if f := hooksWorkflowField(nil); f.kind != fieldText {
+		t.Errorf("workflow field with no pipelines should fall back to text, got kind %v", f.kind)
+	}
+}
+
+func TestHooksModel_Create_WorkflowSelectorSubmitsID(t *testing.T) {
+	m := newHooksModel()
+	m.pipelines = []tuiPipeline{{WorkflowID: "wf-xyz", Name: "build-ci"}}
+	m.form, _ = newHooksRuleForm(m.pipelines)
+	// The workflow field reads back the id, not the displayed name.
+	if got := m.form.value("workflow"); got != "wf-xyz" {
+		t.Errorf("workflow value = %q, want wf-xyz (the id)", got)
+	}
+}
+
+func TestHooksModel_PipelinesMsg_Populates(t *testing.T) {
+	m := applyHooksMsg(newHooksModel(), hookPipelinesMsg([]tuiPipeline{
+		{WorkflowID: "wf-1", Name: "build-ci"},
+	}))
+	if len(m.pipelines) != 1 || m.pipelines[0].WorkflowID != "wf-1" {
+		t.Errorf("pipelines = %v, want one wf-1", m.pipelines)
+	}
+}
+
+func TestHooksRenderEventDetail_ShowsWorkflowName(t *testing.T) {
+	e := hookEvent{
+		EventID:  "evt-1",
+		Triggers: []hookTrigger{{TriggerID: "t1", RuleID: "rule-abc", WorkflowID: "wf-xyz", Status: "dispatched"}},
+	}
+	out := hooksRenderEventDetail(e, map[string]string{"wf-xyz": "build-ci"})
+	if !strings.Contains(out, "build-ci") {
+		t.Errorf("trigger should render the pipeline name, got: %q", out)
+	}
+}
+
 func TestHooksModel_Create_Esc_BacksToRules(t *testing.T) {
 	m := newHooksModel()
 	m.view = hooksViewCreate
-	m.form, _ = newHooksRuleForm()
+	m.form, _ = newHooksRuleForm(nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if updated.(hooksModel).view != hooksViewRules {
 		t.Error("esc in create view should return to the rules list")
@@ -776,8 +782,8 @@ func TestHooksModel_Create_Esc_BacksToRules(t *testing.T) {
 func TestHooksModel_Create_Submit_MissingFields_StaysWithError(t *testing.T) {
 	m := newHooksModel()
 	m.view = hooksViewCreate
-	m.form, _ = newHooksRuleForm()
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m.form, _ = newHooksRuleForm(nil)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	m2 := updated.(hooksModel)
 	if m2.view != hooksViewCreate {
 		t.Error("submit with empty fields should stay in the create view")
@@ -806,7 +812,7 @@ func TestHooksModel_RuleCreatedMsg_ReturnsToRulesAndRefetches(t *testing.T) {
 func TestHooksModel_FormErrMsg_ShowsInlineError(t *testing.T) {
 	m := newHooksModel()
 	m.view = hooksViewCreate
-	m.form, _ = newHooksRuleForm()
+	m.form, _ = newHooksRuleForm(nil)
 	updated, _ := m.Update(hooksFormErrMsg{err: fmt.Errorf("workflow_id not found")})
 	m2 := updated.(hooksModel)
 	if m2.view != hooksViewCreate {
@@ -861,7 +867,7 @@ func TestHooksSubmitRule_HTTPError_ReturnsFormErr(t *testing.T) {
 func TestHooksView_CreateView_RendersForm(t *testing.T) {
 	m := newHooksModel()
 	m.view = hooksViewCreate
-	m.form, _ = newHooksRuleForm()
+	m.form, _ = newHooksRuleForm(nil)
 	if !strings.Contains(m.View(), "New Hook Rule") {
 		t.Error("create view should show the form heading")
 	}
@@ -885,5 +891,36 @@ func TestHooksTUICmd_RegisteredUnderHooks(t *testing.T) {
 func TestHooksCmd_HasRunE(t *testing.T) {
 	if hooksCmd.RunE == nil {
 		t.Error("hooksCmd.RunE should be set so 'armory hooks' launches the TUI")
+	}
+}
+
+// ── Auto-refresh ──────────────────────────────────────────────────────────────
+
+func TestHooksModel_AutoRefresh_RulesEmitsFetch(t *testing.T) {
+	m := newHooksModel()
+	m.loading = false
+	_, cmd := m.Update(tuiAutoRefreshMsg{})
+	if cmd == nil {
+		t.Error("auto-refresh in the rules view should emit a fetch cmd")
+	}
+}
+
+func TestHooksModel_AutoRefresh_EventsEmitsFetch(t *testing.T) {
+	m := newHooksModel()
+	m.view = hooksViewEvents
+	_, cmd := m.Update(tuiAutoRefreshMsg{})
+	if cmd == nil {
+		t.Error("auto-refresh in the events view should emit a fetch cmd")
+	}
+}
+
+func TestHooksModel_AutoRefresh_DetailAndFormNoop(t *testing.T) {
+	for _, v := range []hooksViewID{hooksViewEventDetail, hooksViewCreate} {
+		m := newHooksModel()
+		m.view = v
+		_, cmd := m.Update(tuiAutoRefreshMsg{})
+		if cmd != nil {
+			t.Errorf("view %d: auto-refresh should be a noop", v)
+		}
 	}
 }
