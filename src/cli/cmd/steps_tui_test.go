@@ -127,6 +127,103 @@ func TestStepsModel_N_OpensCreateStepForm(t *testing.T) {
 	}
 }
 
+// ── Model: edit-step flow ─────────────────────────────────────────────────────
+
+// sampleStep is a forge/run step used to exercise the edit pre-fill.
+func sampleStep() tuiStep {
+	return tuiStep{
+		StepID:      "s1",
+		Name:        "unit_tests",
+		Action:      "forge/run",
+		With:        map[string]any{"image": "ubuntu:22.04", "run": "go test ./..."},
+		Timeout:     120,
+		Description: "runs the tests",
+	}
+}
+
+func TestStepsModel_E_OpensEditStepFormPreFilled(t *testing.T) {
+	m := newStepsModel()
+	m.actions = []string{"forge/run", "http"}
+	m.images = []string{"ubuntu:22.04", "alpine:3.19"}
+	m = applyStepsMsg(m, tuiStepsMsg([]tuiStep{sampleStep()}))
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	m2 := updated.(stepsModel)
+
+	if m2.view != stepsViewEdit {
+		t.Fatalf("view = %v, want stepsViewEdit", m2.view)
+	}
+	if cmd == nil {
+		t.Error("opening the edit form should return a focus cmd")
+	}
+	if m2.editStepID != "s1" {
+		t.Errorf("editStepID = %q, want s1", m2.editStepID)
+	}
+	if m2.form.title != "Edit Step" {
+		t.Errorf("form title = %q, want Edit Step", m2.form.title)
+	}
+	for key, want := range map[string]string{
+		"name":       "unit_tests",
+		"action":     "forge/run",
+		"with.image": "ubuntu:22.04",
+		"with.run":   "go test ./...",
+		"timeout":    "120",
+		"desc":       "runs the tests",
+	} {
+		if got := m2.form.value(key); got != want {
+			t.Errorf("form[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// enter is an alias for edit on the highlighted row.
+func TestStepsModel_Enter_OpensEditStepForm(t *testing.T) {
+	m := applyStepsMsg(newStepsModel(), tuiStepsMsg([]tuiStep{sampleStep()}))
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if updated.(stepsModel).view != stepsViewEdit {
+		t.Error("enter on a step row should open the edit form")
+	}
+}
+
+func TestStepsModel_E_EmptyList_NoOp(t *testing.T) {
+	m := applyStepsMsg(newStepsModel(), tuiStepsMsg([]tuiStep{}))
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	if updated.(stepsModel).view != stepsViewList {
+		t.Error("edit with no steps should stay on the list")
+	}
+}
+
+func TestStepsModel_EditStep_Esc_BacksToList(t *testing.T) {
+	m := applyStepsMsg(newStepsModel(), tuiStepsMsg([]tuiStep{sampleStep()}))
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	updated, _ = updated.(stepsModel).Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(stepsModel).view != stepsViewList {
+		t.Error("esc in edit-step view should return to the steps list")
+	}
+}
+
+func TestStepsModel_EditStep_Submit_PutsToStepID(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"step_id":"s1"}`)
+	setupCLI(t, srv)
+
+	m := newStepsModel()
+	m.actions = []string{"forge/run"}
+	m.images = []string{"ubuntu:22.04"}
+	m = applyStepsMsg(m, tuiStepsMsg([]tuiStep{sampleStep()}))
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	_, cmd := updated.(stepsModel).Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd == nil {
+		t.Fatal("submitting the edit form should emit a request cmd")
+	}
+	if _, ok := cmd().(tuiStepCreatedMsg); !ok {
+		t.Fatalf("edit submit msg = %T, want a list-refresh msg", cmd())
+	}
+	if rec.Method != "PUT" || rec.Path != "/workflows/steps/s1" {
+		t.Errorf("request = %s %s, want PUT /workflows/steps/s1", rec.Method, rec.Path)
+	}
+}
+
 // ── Model: create-step flow ───────────────────────────────────────────────────
 
 func TestStepsModel_CreateStep_Esc_BacksToList(t *testing.T) {
@@ -646,6 +743,87 @@ func TestCIPostStep_PostsCorrectPayload(t *testing.T) {
 	gotWith, _ := got["with"].(map[string]any)
 	if gotWith["image"] != "ubuntu:22.04" || gotWith["run"] != "go test ./..." {
 		t.Errorf("with = %v, want image+run set", got["with"])
+	}
+}
+
+// ── Edit step: ciPutStep ──────────────────────────────────────────────────────
+
+func TestCIPutStep_PutsCorrectPayload(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"step_id":"s1"}`)
+	setupCLI(t, srv)
+
+	with := map[string]any{"image": "alpine:3.19", "run": "go vet ./..."}
+	msg := ciPutStep("s1", "unit_tests", "forge/run", "now vets", with, 90)()
+
+	if _, ok := msg.(tuiStepCreatedMsg); !ok {
+		t.Fatalf("msg = %T, want a list-refresh msg", msg)
+	}
+	if rec.Method != "PUT" || rec.Path != "/workflows/steps/s1" {
+		t.Errorf("request = %s %s, want PUT /workflows/steps/s1", rec.Method, rec.Path)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body, &got); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if got["name"] != "unit_tests" || got["action"] != "forge/run" {
+		t.Errorf("name/action = %v/%v, want unit_tests/forge/run", got["name"], got["action"])
+	}
+	if got["timeout"].(float64) != 90 {
+		t.Errorf("timeout = %v, want 90", got["timeout"])
+	}
+	gotWith, _ := got["with"].(map[string]any)
+	if gotWith["image"] != "alpine:3.19" || gotWith["run"] != "go vet ./..." {
+		t.Errorf("with = %v, want image+run set", got["with"])
+	}
+}
+
+// ── Edit step: stepEditValues (reverse of buildStepWith) ───────────────────────
+
+func TestStepEditValues_ReversesWithMap(t *testing.T) {
+	s := tuiStep{
+		StepID:      "s1",
+		Name:        "unit_tests",
+		Action:      "forge/run",
+		Timeout:     120,
+		Description: "runs the tests",
+		With: map[string]any{
+			"image": "ubuntu:22.04",
+			"run":   "go test ./...",
+			"env":   map[string]any{"CGO_ENABLED": "0", "GOFLAGS": "-count=1"},
+			"extra": "keep", // not in forge/run's schema → advanced With JSON
+		},
+	}
+	vals := stepEditValues(s)
+
+	for key, want := range map[string]string{
+		"name":       "unit_tests",
+		"action":     "forge/run",
+		"timeout":    "120",
+		"desc":       "runs the tests",
+		"with.image": "ubuntu:22.04",
+		"with.run":   "go test ./...",
+		// env map round-trips to sorted KEY=VALUE tokens.
+		"with.env": "CGO_ENABLED=0 GOFLAGS=-count=1",
+	} {
+		if got := vals[key]; got != want {
+			t.Errorf("vals[%q] = %q, want %q", key, got, want)
+		}
+	}
+	// Keys outside the action schema land in the advanced With JSON field.
+	if raw := vals["with."+rawWithKey]; !strings.Contains(raw, "extra") || !strings.Contains(raw, "keep") {
+		t.Errorf("with.%s = %q, want it to carry the leftover extra key", rawWithKey, raw)
+	}
+}
+
+// An int-valued with key (e.g. blueprints/backend ttl_secs) round-trips as digits,
+// not the float JSON decodes it into.
+func TestStepEditValues_FormatsIntWithoutDecimal(t *testing.T) {
+	s := tuiStep{
+		Action: "blueprints/backend",
+		With:   map[string]any{"ttl_secs": float64(14400)},
+	}
+	if got := stepEditValues(s)["with.ttl_secs"]; got != "14400" {
+		t.Errorf("with.ttl_secs = %q, want 14400", got)
 	}
 }
 

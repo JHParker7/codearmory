@@ -193,6 +193,17 @@ func (f *formField) setValue(val string) {
 	}
 }
 
+// setValues sets multiple fields at once, matching each field by key against the
+// supplied map (prefixed keys for schema fields). Unknown keys are ignored and
+// fields without an entry are left untouched. Used to pre-fill an edit form.
+func (f *tuiForm) setValues(vals map[string]string) {
+	for i := range f.fields {
+		if v, ok := vals[f.fields[i].key]; ok {
+			f.fields[i].setValue(v)
+		}
+	}
+}
+
 // focusActive focuses the active text/textarea field, blurs the rest, and returns
 // the cursor blink cmd. Select and button fields take no text focus.
 func (f *tuiForm) focusActive() tea.Cmd {

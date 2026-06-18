@@ -854,6 +854,7 @@ func TestTUIModel_Create_Submit_MissingName_StaysWithError(t *testing.T) {
 func TestTUIModel_PipelineCreatedMsg_ReturnsToListAndRefetches(t *testing.T) {
 	m := newTUIModel()
 	m.view = tuiViewCreate
+	m.submitting = true
 	updated, cmd := m.Update(tuiPipelineCreatedMsg{})
 	m2 := updated.(tuiModel)
 	if m2.view != tuiViewPipelines {
@@ -861,6 +862,35 @@ func TestTUIModel_PipelineCreatedMsg_ReturnsToListAndRefetches(t *testing.T) {
 	}
 	if !m2.loading || cmd == nil {
 		t.Error("tuiPipelineCreatedMsg should set loading and emit a refetch cmd")
+	}
+	if m2.submitting {
+		t.Error("tuiPipelineCreatedMsg should clear the submitting guard")
+	}
+}
+
+// A second Enter landing before the create POST completes must not fire a
+// second create cmd — the submitting guard swallows it.
+func TestTUIModel_Create_DoubleSubmit_OnlyCreatesOnce(t *testing.T) {
+	m := newTUIModel()
+	m.view = tuiViewCreate
+	m.form, _ = newCIPipelineForm()
+	m.form.setValues(map[string]string{"name": "my-pl", "steps": "build->test"})
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m2 := updated.(tuiModel)
+	if cmd == nil {
+		t.Fatal("first create submit should emit a request cmd")
+	}
+	if !m2.submitting {
+		t.Fatal("first create submit should set the submitting guard")
+	}
+
+	updated2, cmd2 := m2.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd2 != nil {
+		t.Error("second create submit while in-flight should not emit a second cmd")
+	}
+	if !updated2.(tuiModel).submitting {
+		t.Error("guard should stay set until the create resolves")
 	}
 }
 
@@ -1019,6 +1049,7 @@ func TestTUIModel_RunTriggeredMsg_NavigatesToRuns(t *testing.T) {
 
 	m := newTUIModel()
 	m.view = tuiViewRun
+	m.submitting = true
 	m.selPipeline = &tuiPipeline{WorkflowID: "wf-1"}
 	updated, cmd := m.Update(tuiRunTriggeredMsg{})
 	m2 := updated.(tuiModel)
@@ -1027,6 +1058,46 @@ func TestTUIModel_RunTriggeredMsg_NavigatesToRuns(t *testing.T) {
 	}
 	if !m2.loading || cmd == nil {
 		t.Error("tuiRunTriggeredMsg should set loading and emit a fetch-runs cmd")
+	}
+	if m2.submitting {
+		t.Error("tuiRunTriggeredMsg should clear the submitting guard")
+	}
+}
+
+// Pressing Enter twice quickly on the run form must trigger exactly one run:
+// the second submit is swallowed while the first POST is still in flight.
+func TestTUIModel_Run_DoubleSubmit_OnlyTriggersOnce(t *testing.T) {
+	m := newTUIModel()
+	m.view = tuiViewRun
+	m.selPipeline = &tuiPipeline{WorkflowID: "wf-1"}
+	m.form, _ = newCIRunForm("build")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m2 := updated.(tuiModel)
+	if cmd == nil {
+		t.Fatal("first run submit should emit a trigger cmd")
+	}
+	if !m2.submitting {
+		t.Fatal("first run submit should set the submitting guard")
+	}
+
+	updated2, cmd2 := m2.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd2 != nil {
+		t.Error("second run submit while in-flight should not emit a second trigger cmd")
+	}
+	if m2.form.errMsg != updated2.(tuiModel).form.errMsg {
+		t.Error("the swallowed submit should not alter the form error state")
+	}
+}
+
+// Reopening the run form clears any stale guard so a fresh form is submittable
+// even if a prior submit's terminal message was never delivered.
+func TestTUIModel_OpenRunForm_ClearsStaleSubmitting(t *testing.T) {
+	m := applyMsg(newTUIModel(), tuiPipelinesMsg([]tuiPipeline{{WorkflowID: "wf-1", Name: "build"}}))
+	m.submitting = true
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	if updated.(tuiModel).submitting {
+		t.Error("opening the run form should clear a stale submitting guard")
 	}
 }
 
@@ -1122,6 +1193,260 @@ func TestTUIView_PipelinesHelp_MentionsRun(t *testing.T) {
 	}))
 	if !strings.Contains(m.View(), "[R] run") {
 		t.Error("pipelines help should mention the [R] run shortcut")
+	}
+}
+
+// ── Parallel-group grouping ───────────────────────────────────────────────────
+
+func TestTuiStepRunRows_GroupsParallelBatch(t *testing.T) {
+	g := 0
+	steps := []tuiStepRun{
+		{StepIndex: 0, StepName: "build", Status: "completed"},
+		{StepIndex: 1, StepName: "test", Status: "completed", ParallelGroup: &g},
+		{StepIndex: 2, StepName: "lint", Status: "running", ParallelGroup: &g},
+		{StepIndex: 3, StepName: "scan", Status: "pending", ParallelGroup: &g},
+		{StepIndex: 4, StepName: "deploy", Status: "pending"},
+	}
+	rows := tuiStepRunRows(steps)
+	if len(rows) != len(steps) {
+		t.Fatalf("rows = %d, want %d (1:1 with step runs)", len(rows), len(steps))
+	}
+	// Sequential build → stage 1, no bracket glyph.
+	if rows[0][0] != "1" || rows[0][1] != "build" {
+		t.Errorf("row0 = %q/%q, want 1/build", rows[0][0], rows[0][1])
+	}
+	// Parallel batch shares stage 2: number on the first row only; ┌ ├ └ brackets.
+	if rows[1][0] != "2" || !strings.HasPrefix(rows[1][1], "┌ ") {
+		t.Errorf("row1 = %q/%q, want stage 2 with ┌ bracket", rows[1][0], rows[1][1])
+	}
+	if rows[2][0] != "" || !strings.HasPrefix(rows[2][1], "├ ") {
+		t.Errorf("row2 = %q/%q, want blank stage with ├ bracket", rows[2][0], rows[2][1])
+	}
+	if rows[3][0] != "" || !strings.HasPrefix(rows[3][1], "└ ") {
+		t.Errorf("row3 = %q/%q, want blank stage with └ bracket", rows[3][0], rows[3][1])
+	}
+	// Sequential numbering resumes at stage 3 after the batch (not step index 5).
+	if rows[4][0] != "3" || rows[4][1] != "deploy" {
+		t.Errorf("row4 = %q/%q, want 3/deploy", rows[4][0], rows[4][1])
+	}
+}
+
+func TestTuiStepRunRows_AllSequential_NoBrackets(t *testing.T) {
+	rows := tuiStepRunRows([]tuiStepRun{
+		{StepIndex: 0, StepName: "a"},
+		{StepIndex: 1, StepName: "b"},
+	})
+	for i, r := range rows {
+		if r[0] != fmt.Sprintf("%d", i+1) {
+			t.Errorf("row %d stage = %q, want %d", i, r[0], i+1)
+		}
+		if strings.ContainsAny(r[1], "┌├└") {
+			t.Errorf("row %d step %q should carry no bracket glyph", i, r[1])
+		}
+	}
+}
+
+func TestTuiRunHasParallel(t *testing.T) {
+	g, other := 1, 1
+	cases := []struct {
+		name  string
+		steps []tuiStepRun
+		want  bool
+	}{
+		{"no groups", []tuiStepRun{{StepName: "a"}, {StepName: "b"}}, false},
+		{"shared consecutive group", []tuiStepRun{{ParallelGroup: &g}, {ParallelGroup: &g}}, true},
+		{"same value but separated", []tuiStepRun{{ParallelGroup: &g}, {StepName: "x"}, {ParallelGroup: &other}}, false},
+	}
+	for _, c := range cases {
+		if got := tuiRunHasParallel(c.steps); got != c.want {
+			t.Errorf("%s: tuiRunHasParallel = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestTuiFetchRunDetail_AnnotatesParallelGroups(t *testing.T) {
+	g := 0
+	run := tuiRunFull{
+		tuiRun: tuiRun{RunID: "run-1", WorkflowID: "wf-1", Status: "completed"},
+		StepRuns: []tuiStepRun{
+			{StepIndex: 0, StepName: "build", Status: "completed"},
+			{StepIndex: 1, StepName: "test", Status: "completed"},
+			{StepIndex: 2, StepName: "lint", Status: "completed"},
+		},
+	}
+	def := tuiPipelineDef{
+		WorkflowID: "wf-1",
+		Steps: []tuiWorkflowStep{
+			{StepID: "s0", Name: "build"},
+			{StepID: "s1", Name: "test", ParallelGroup: &g},
+			{StepID: "s2", Name: "lint", ParallelGroup: &g},
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/workflows/runs/run-1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(jsonBody(run)) //nolint:errcheck
+	})
+	mux.HandleFunc("/workflows/pipelines/wf-1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(jsonBody(def)) //nolint:errcheck
+	})
+	setupCLI(t, routeServer(t, mux))
+
+	msg := tuiFetchRunDetail("run-1")()
+	result, ok := msg.(tuiRunDetailMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want tuiRunDetailMsg", msg)
+	}
+	if result.StepRuns[0].ParallelGroup != nil {
+		t.Errorf("build group = %d, want nil (sequential)", *result.StepRuns[0].ParallelGroup)
+	}
+	if result.StepRuns[1].ParallelGroup == nil || result.StepRuns[2].ParallelGroup == nil {
+		t.Fatal("test/lint should be annotated with their parallel group from the definition")
+	}
+	if *result.StepRuns[1].ParallelGroup != *result.StepRuns[2].ParallelGroup {
+		t.Error("test and lint should share the same parallel group")
+	}
+}
+
+func TestTuiFetchRunDetail_NoDefStillSucceeds(t *testing.T) {
+	// The pipeline definition is unavailable (404); the run detail must still load,
+	// just without parallel grouping.
+	run := tuiRunFull{
+		tuiRun:   tuiRun{RunID: "run-1", WorkflowID: "wf-1", Status: "completed"},
+		StepRuns: []tuiStepRun{{StepIndex: 0, StepName: "build", Status: "completed"}},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/workflows/runs/run-1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(jsonBody(run)) //nolint:errcheck
+	})
+	mux.HandleFunc("/workflows/pipelines/wf-1", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+	setupCLI(t, routeServer(t, mux))
+
+	msg := tuiFetchRunDetail("run-1")()
+	result, ok := msg.(tuiRunDetailMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want tuiRunDetailMsg", msg)
+	}
+	if len(result.StepRuns) != 1 || result.StepRuns[0].ParallelGroup != nil {
+		t.Error("run should load with no grouping when the definition is unavailable")
+	}
+}
+
+func TestTuiFetchRunDetail_FillsPendingSteps(t *testing.T) {
+	// The run has only reached its first step; the definition has three. The two
+	// not-yet-started steps must show up as pending so the live pipeline renders
+	// the whole plan, in step_index order.
+	run := tuiRunFull{
+		tuiRun: tuiRun{RunID: "run-1", WorkflowID: "wf-1", Status: "running"},
+		StepRuns: []tuiStepRun{
+			{StepIndex: 0, StepName: "build", Status: "completed"},
+		},
+	}
+	def := tuiPipelineDef{
+		WorkflowID: "wf-1",
+		Steps: []tuiWorkflowStep{
+			{StepID: "s0", Name: "build"},
+			{StepID: "s1", Name: "test"},
+			{StepID: "s2", Name: "deploy"},
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/workflows/runs/run-1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(jsonBody(run)) //nolint:errcheck
+	})
+	mux.HandleFunc("/workflows/pipelines/wf-1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(jsonBody(def)) //nolint:errcheck
+	})
+	setupCLI(t, routeServer(t, mux))
+
+	msg := tuiFetchRunDetail("run-1")()
+	result, ok := msg.(tuiRunDetailMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want tuiRunDetailMsg", msg)
+	}
+	if len(result.StepRuns) != 3 {
+		t.Fatalf("len(StepRuns) = %d, want 3 (1 run + 2 synthesised pending)", len(result.StepRuns))
+	}
+	want := []struct{ name, status string }{
+		{"build", "completed"}, {"test", "pending"}, {"deploy", "pending"},
+	}
+	for i, w := range want {
+		if result.StepRuns[i].StepIndex != i {
+			t.Errorf("StepRuns[%d].StepIndex = %d, want %d", i, result.StepRuns[i].StepIndex, i)
+		}
+		if result.StepRuns[i].StepName != w.name || result.StepRuns[i].Status != w.status {
+			t.Errorf("StepRuns[%d] = %q/%q, want %q/%q", i,
+				result.StepRuns[i].StepName, result.StepRuns[i].Status, w.name, w.status)
+		}
+	}
+}
+
+func TestTuiFetchRunPreview_FillsPendingForUnstartedRun(t *testing.T) {
+	// A freshly-triggered run with no step runs yet still shows its full plan as
+	// pending, so the live diagram is populated the moment the run is selected.
+	run := tuiRunFull{
+		tuiRun:   tuiRun{RunID: "run-1", WorkflowID: "wf-1", Status: "pending"},
+		StepRuns: nil,
+	}
+	def := tuiPipelineDef{
+		WorkflowID: "wf-1",
+		Steps: []tuiWorkflowStep{
+			{StepID: "s0", Name: "build"},
+			{StepID: "s1", Name: "test"},
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/workflows/runs/run-1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(jsonBody(run)) //nolint:errcheck
+	})
+	mux.HandleFunc("/workflows/pipelines/wf-1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(jsonBody(def)) //nolint:errcheck
+	})
+	setupCLI(t, routeServer(t, mux))
+
+	msg, ok := tuiFetchRunPreview("run-1")().(tuiRunDiagramMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want tuiRunDiagramMsg", msg)
+	}
+	if msg.detail == nil || len(msg.detail.StepRuns) != 2 {
+		t.Fatalf("detail StepRuns = %+v, want 2 pending steps", msg.detail)
+	}
+	for i, sr := range msg.detail.StepRuns {
+		if sr.Status != "pending" {
+			t.Errorf("StepRuns[%d].Status = %q, want pending", i, sr.Status)
+		}
+	}
+}
+
+func TestTUIView_RunDetail_ShowsParallelLegend(t *testing.T) {
+	g := 0
+	m := newTUIModel()
+	m.view = tuiViewRunDetail
+	m = applyMsg(m, tuiRunDetailMsg(tuiRunFull{
+		tuiRun: tuiRun{RunID: "r", Status: "completed"},
+		StepRuns: []tuiStepRun{
+			{StepIndex: 0, StepName: "test", Status: "completed", ParallelGroup: &g},
+			{StepIndex: 1, StepName: "lint", Status: "completed", ParallelGroup: &g},
+		},
+	}))
+	if !strings.Contains(m.View(), "parallel") {
+		t.Errorf("run detail with a parallel batch should show the legend, got: %q", m.View())
+	}
+}
+
+func TestTUIView_RunDetail_NoLegend_WhenSequential(t *testing.T) {
+	m := newTUIModel()
+	m.view = tuiViewRunDetail
+	m = applyMsg(m, tuiRunDetailMsg(tuiRunFull{
+		tuiRun: tuiRun{RunID: "r", Status: "completed"},
+		StepRuns: []tuiStepRun{
+			{StepIndex: 0, StepName: "build", Status: "completed"},
+			{StepIndex: 1, StepName: "deploy", Status: "completed"},
+		},
+	}))
+	if strings.Contains(m.View(), "ran in parallel") {
+		t.Error("a purely sequential run should not show the parallel legend")
 	}
 }
 

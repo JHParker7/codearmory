@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +56,7 @@ type stepsViewID int
 const (
 	stepsViewList stepsViewID = iota
 	stepsViewCreate
+	stepsViewEdit       // form: edit an existing step (pre-filled, PUT on submit)
 	stepsViewTest       // form: fill in the step's ${...} references
 	stepsViewTesting    // throwaway pipeline running
 	stepsViewTestResult // run outcome + output
@@ -92,6 +94,9 @@ type stepsModel struct {
 	outposts kvCatalog
 
 	form tuiForm
+	// editStepID is the id of the step being edited (stepsViewEdit); the edit form
+	// reuses the create form's fields but submits a PUT to this id on save.
+	editStepID string
 
 	// Standalone step test (run via a throwaway pipeline).
 	testStep   tuiStep
@@ -277,14 +282,14 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.actions = []string(msg)
 		// If the form was opened before the catalog landed, its Action field
 		// fell back to free-text; rebuild so it upgrades to the ←/→ selector.
-		if m.view == stepsViewCreate {
+		if m.view == stepsViewCreate || m.view == stepsViewEdit {
 			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
 		}
 		return m, nil
 
 	case tuiImagesMsg:
 		m.images = []string(msg)
-		if m.view == stepsViewCreate {
+		if m.view == stepsViewCreate || m.view == stepsViewEdit {
 			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
 		}
 		return m, nil
@@ -292,14 +297,14 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiTicketsMsg:
 		m.tickets = kvCatalog(msg)
 		// Upgrade an open ticket-reference field from free-text to a name picker.
-		if m.view == stepsViewCreate {
+		if m.view == stepsViewCreate || m.view == stepsViewEdit {
 			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
 		}
 		return m, nil
 
 	case tuiOutpostsMsg:
 		m.outposts = kvCatalog(msg)
-		if m.view == stepsViewCreate {
+		if m.view == stepsViewCreate || m.view == stepsViewEdit {
 			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
 		}
 		return m, nil
@@ -351,6 +356,8 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.keyList(msg)
 		case stepsViewCreate:
 			return m.keyCreate(msg)
+		case stepsViewEdit:
+			return m.keyEdit(msg)
 		case stepsViewTest:
 			return m.keyTest(msg)
 		case stepsViewTesting:
@@ -368,7 +375,7 @@ func (m stepsModel) delegate(msg tea.Msg) (stepsModel, tea.Cmd) {
 	switch m.view {
 	case stepsViewList:
 		m.sTable, cmd = m.sTable.Update(msg)
-	case stepsViewCreate, stepsViewTest:
+	case stepsViewCreate, stepsViewEdit, stepsViewTest:
 		m.form, _, cmd = m.form.update(msg)
 	}
 	return m, cmd
@@ -401,6 +408,8 @@ func (m stepsModel) keyList(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 			cmds = append(cmds, tuiFetchOutposts)
 		}
 		return m, tea.Batch(cmds...)
+	case "e", "enter":
+		return m.startStepEdit()
 	case "t":
 		return m.startStepTest()
 	case "r":
@@ -523,6 +532,7 @@ func idPickerField(key, label string, required bool, c kvCatalog) formField {
 // index is clamped because the field count changes between actions.
 func rebuildStepForm(old tuiForm, actions []string, cats stepCatalogs) tuiForm {
 	form, _ := newCIStepForm(old.value("action"), actions, cats)
+	form.title = old.title // preserve "Edit Step" (or "New Step") across rebuilds
 	form.focus = old.focus
 	if form.focus >= len(form.fields) {
 		form.focus = len(form.fields) - 1
@@ -565,41 +575,141 @@ func (m stepsModel) keyCreate(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 	return m, cmd
 }
 
-// submitCreate validates the step form and, if valid, returns the create cmd. The
-// `with` map is assembled from the action's tailored fields by buildStepWith,
-// which validates required fields and parses typed inputs (env tokens, ints, the
-// advanced With JSON). All validation happens here so errors surface inline.
-func (m stepsModel) submitCreate() (stepsModel, tea.Cmd) {
-	name := m.form.value("name")
-	action := m.form.value("action")
+// stepPayload is the validated, assembled step definition read off the form.
+type stepPayload struct {
+	name    string
+	action  string
+	desc    string
+	with    map[string]any
+	timeout int64
+}
+
+// parseStepForm validates the step form (shared by create and edit) and assembles
+// the `with` map via buildStepWith, which checks required fields and parses typed
+// inputs (env tokens, ints, the advanced With JSON). On any problem it returns a
+// non-empty error string for the caller to surface inline.
+func parseStepForm(form tuiForm) (stepPayload, string) {
+	name := form.value("name")
+	action := form.value("action")
 	if name == "" {
-		m.form.errMsg = "name is required"
-		return m, nil
+		return stepPayload{}, "name is required"
 	}
 	if action == "" {
-		m.form.errMsg = "action is required (e.g. forge/run)"
-		return m, nil
+		return stepPayload{}, "action is required (e.g. forge/run)"
 	}
 	timeout := int64(30)
-	if ts := m.form.value("timeout"); ts != "" {
+	if ts := form.value("timeout"); ts != "" {
 		t, err := strconv.ParseInt(ts, 10, 64)
 		if err != nil || t < 0 {
-			m.form.errMsg = "timeout must be a non-negative integer (seconds)"
-			return m, nil
+			return stepPayload{}, "timeout must be a non-negative integer (seconds)"
 		}
 		timeout = t
 	}
-	with, err := buildStepWith(action, m.form.value)
+	with, err := buildStepWith(action, form.value)
 	if err != nil {
-		m.form.errMsg = err.Error()
+		return stepPayload{}, err.Error()
+	}
+	return stepPayload{name: name, action: action, desc: form.value("desc"), with: with, timeout: timeout}, ""
+}
+
+// submitCreate validates the step form and, if valid, returns the create cmd.
+func (m stepsModel) submitCreate() (stepsModel, tea.Cmd) {
+	p, errMsg := parseStepForm(m.form)
+	if errMsg != "" {
+		m.form.errMsg = errMsg
 		return m, nil
 	}
 	m.form.errMsg = ""
-	return m, ciPostStep(name, action, m.form.value("desc"), with, timeout)
+	return m, ciPostStep(p.name, p.action, p.desc, p.with, p.timeout)
 }
 
 // ciPostStep POSTs an assembled step definition to the workflows service.
 func ciPostStep(name, action, desc string, with map[string]any, timeout int64) tea.Cmd {
+	return ciSaveStep("POST", "/workflows/steps", name, action, desc, with, timeout)
+}
+
+// ── Edit step form ──────────────────────────────────────────────────────────────
+
+// startStepEdit opens the edit form pre-filled with the highlighted step. It mirrors
+// the create form (same action-tailored fields) but submits a PUT on save. Like the
+// create path it re-fetches any catalog that hasn't landed so free-text fields
+// upgrade to pickers — and, because the form is pre-filled, those picker values are
+// carried over by rebuildStepForm when each catalog arrives.
+func (m stepsModel) startStepEdit() (stepsModel, tea.Cmd) {
+	cur := m.sTable.Cursor()
+	if cur < 0 || cur >= len(m.steps) {
+		return m, nil
+	}
+	s := m.steps[cur]
+	form, cmd := newCIStepForm(s.Action, m.actions, m.catalogs())
+	form.title = "Edit Step"
+	form.setValues(stepEditValues(s))
+	cmd = form.focusActive()
+	m.form = form
+	m.editStepID = s.StepID
+	m.view = stepsViewEdit
+
+	cmds := []tea.Cmd{cmd}
+	if len(m.actions) == 0 {
+		cmds = append(cmds, tuiFetchActions)
+	}
+	if len(m.images) == 0 {
+		cmds = append(cmds, tuiFetchImages)
+	}
+	if len(m.tickets.values) == 0 {
+		cmds = append(cmds, tuiFetchTickets)
+	}
+	if len(m.outposts.values) == 0 {
+		cmds = append(cmds, tuiFetchOutposts)
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// keyEdit drives the edit form. It is identical to keyCreate except submission PUTs
+// to the step being edited; the action-change rebuild is shared so changing the
+// action swaps the tailored fields just like in create.
+func (m stepsModel) keyEdit(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+	prevAction := m.form.value("action")
+	var (
+		action formAction
+		cmd    tea.Cmd
+	)
+	m.form, action, cmd = m.form.update(msg)
+	switch action {
+	case formCancel:
+		m.view = stepsViewList
+		return m, nil
+	case formSubmit:
+		return m.submitEdit()
+	}
+	if now := m.form.value("action"); now != prevAction && schemaKey(now) != schemaKey(prevAction) {
+		m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
+	}
+	return m, cmd
+}
+
+// submitEdit validates the edit form and, if valid, returns the update cmd.
+func (m stepsModel) submitEdit() (stepsModel, tea.Cmd) {
+	p, errMsg := parseStepForm(m.form)
+	if errMsg != "" {
+		m.form.errMsg = errMsg
+		return m, nil
+	}
+	m.form.errMsg = ""
+	return m, ciPutStep(m.editStepID, p.name, p.action, p.desc, p.with, p.timeout)
+}
+
+// ciPutStep PUTs an updated step definition (affects every pipeline referencing it).
+func ciPutStep(id, name, action, desc string, with map[string]any, timeout int64) tea.Cmd {
+	return ciSaveStep("PUT", "/workflows/steps/"+id, name, action, desc, with, timeout)
+}
+
+// ciSaveStep marshals a step definition and sends it with the given method/path,
+// backing both create (POST) and edit (PUT); both return to the refreshed list.
+func ciSaveStep(method, path, name, action, desc string, with map[string]any, timeout int64) tea.Cmd {
 	return func() tea.Msg {
 		payload := map[string]any{
 			"name":        name,
@@ -609,11 +719,97 @@ func ciPostStep(name, action, desc string, with map[string]any, timeout int64) t
 			"timeout":     timeout,
 		}
 		body, _ := json.Marshal(payload)
-		if _, err := doRequest("POST", "/workflows/steps", body); err != nil {
+		if _, err := doRequest(method, path, body); err != nil {
 			return tuiFormErrMsg{err}
 		}
 		return tuiStepCreatedMsg{}
 	}
+}
+
+// stepEditValues reverses buildStepWith: it maps an existing step back to the
+// create-form's string values (keyed by the prefixed form keys) so the edit form
+// opens pre-populated. Typed schema fields are formatted to match how the form
+// reads them back (ints as digits, env maps as KEY=VALUE tokens); any `with` keys
+// the action's schema doesn't cover fall into the advanced With JSON field.
+func stepEditValues(s tuiStep) map[string]string {
+	vals := map[string]string{
+		"name":    s.Name,
+		"action":  s.Action,
+		"timeout": strconv.FormatInt(s.Timeout, 10),
+		"desc":    s.Description,
+	}
+	consumed := map[string]bool{}
+	for _, f := range schemaForAction(s.Action) {
+		if f.kind == stepFieldJSON {
+			continue // the advanced With field collects leftovers below
+		}
+		v, ok := s.With[f.key]
+		if !ok {
+			continue
+		}
+		consumed[f.key] = true
+		if f.kind == stepFieldEnv {
+			vals[withKeyPrefix+f.key] = formatEnvTokens(v)
+		} else {
+			vals[withKeyPrefix+f.key] = formatScalarValue(v)
+		}
+	}
+	leftover := map[string]any{}
+	for k, v := range s.With {
+		if !consumed[k] {
+			leftover[k] = v
+		}
+	}
+	if len(leftover) > 0 {
+		if b, err := json.Marshal(leftover); err == nil {
+			vals[withKeyPrefix+rawWithKey] = string(b)
+		}
+	}
+	return vals
+}
+
+// formatScalarValue renders a with-map scalar back into the form's text form,
+// printing whole-number floats (how JSON decodes ints) without a decimal point and
+// falling back to JSON for anything unexpected.
+func formatScalarValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case float64:
+		if t == float64(int64(t)) {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	default:
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+}
+
+// formatEnvTokens renders an env map (stepFieldEnv) back to space-separated
+// KEY=VALUE tokens, quoting values that contain whitespace or quotes so the form's
+// parseCommandLine tokeniser round-trips them. Keys are sorted for stable output.
+func formatEnvTokens(v any) string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return formatScalarValue(v)
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	toks := make([]string, 0, len(keys))
+	for _, k := range keys {
+		val := formatScalarValue(m[k])
+		if strings.ContainsAny(val, " \t\"'") {
+			val = strconv.Quote(val)
+		}
+		toks = append(toks, k+"="+val)
+	}
+	return strings.Join(toks, " ")
 }
 
 // ── Test step (throwaway pipeline) ──────────────────────────────────────────────
@@ -722,7 +918,7 @@ func (m stepsModel) View() string {
 		return tuiErrStyle.Render(msg) + "\n\n" + tuiHelpStyle.Render(hint)
 	}
 	switch m.view {
-	case stepsViewCreate, stepsViewTest:
+	case stepsViewCreate, stepsViewEdit, stepsViewTest:
 		return m.form.view(m.width, m.height)
 	case stepsViewTesting:
 		return m.viewTesting()
@@ -734,7 +930,7 @@ func (m stepsModel) View() string {
 
 func (m stepsModel) viewList() string {
 	title := tuiTitleStyle.Render("Steps")
-	help := tuiHelp("[↑↓/jk] navigate  [n] new  [t] test  [r] refresh  [esc] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [n] new  [e] edit  [t] test  [r] refresh  [esc] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}

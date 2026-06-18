@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,6 +27,12 @@ var (
 	tuiHelpStyle  lipgloss.Style
 	tuiErrStyle   lipgloss.Style
 
+	// Pipeline flow-diagram styles: a sequential step is a plain bordered box,
+	// a parallel stage is accent-bordered, and stages are joined by muted arrows.
+	tuiDiagStepStyle  lipgloss.Style
+	tuiDiagParStyle   lipgloss.Style
+	tuiDiagArrowStyle lipgloss.Style
+
 	tuiStatusColors map[string]lipgloss.Color
 )
 
@@ -41,6 +48,16 @@ func buildCITUIStyles() {
 	tuiMetaStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
 	tuiHelpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
 	tuiErrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Danger))
+
+	tuiDiagStepStyle = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(activeTheme.Border)).
+		Padding(0, 1)
+	tuiDiagParStyle = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(activeTheme.Accent)).
+		Padding(0, 1)
+	tuiDiagArrowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
 
 	tuiStatusColors = map[string]lipgloss.Color{
 		"completed": lipgloss.Color(activeTheme.Accent),
@@ -80,19 +97,37 @@ type tuiRun struct {
 }
 
 type tuiStepRun struct {
-	StepRunID string     `json:"step_run_id"`
-	RunID     string     `json:"run_id"`
-	StepIndex int        `json:"step_index"`
-	StepName  string     `json:"step_name"`
-	Status    string     `json:"status"`
-	Output    *string    `json:"output"`
-	StartedAt *time.Time `json:"started_at"`
-	EndedAt   *time.Time `json:"ended_at"`
+	StepRunID     string     `json:"step_run_id"`
+	RunID         string     `json:"run_id"`
+	StepIndex     int        `json:"step_index"`
+	StepName      string     `json:"step_name"`
+	ParallelGroup *int       `json:"parallel_group"`
+	Status        string     `json:"status"`
+	Output        *string    `json:"output"`
+	StartedAt     *time.Time `json:"started_at"`
+	EndedAt       *time.Time `json:"ended_at"`
 }
 
 type tuiRunFull struct {
 	tuiRun
 	StepRuns []tuiStepRun `json:"step_runs"`
+}
+
+// tuiWorkflowStep is one step of a pipeline definition. ParallelGroup is the only
+// place parallelism is recorded: steps sharing the same non-nil group run
+// concurrently. The run record carries no grouping, so the run-detail view
+// derives it from the definition (see tuiAnnotateParallelGroups).
+type tuiWorkflowStep struct {
+	StepID        string `json:"step_id"`
+	Name          string `json:"name"`
+	ParallelGroup *int   `json:"parallel_group"`
+}
+
+// tuiPipelineDef is the subset of a pipeline (GET /pipelines/{id}) the run-detail
+// view needs: the ordered steps, whose positions line up with step_index.
+type tuiPipelineDef struct {
+	WorkflowID string            `json:"workflow_id"`
+	Steps      []tuiWorkflowStep `json:"steps"`
 }
 
 // ── View states ───────────────────────────────────────────────────────────────
@@ -113,6 +148,14 @@ const (
 type tuiPipelinesMsg []tuiPipeline
 type tuiRunsMsg []tuiRun
 type tuiRunDetailMsg tuiRunFull
+type tuiPipelineDefMsg struct {
+	workflowID string
+	steps      []tuiWorkflowStep
+}
+type tuiRunDiagramMsg struct {
+	runID  string
+	detail *tuiRunFull
+}
 type tuiErrMsg struct{ err error }
 type tuiPipelineCreatedMsg struct{}
 type tuiRunTriggeredMsg struct{}
@@ -123,9 +166,14 @@ type tuiFormErrMsg struct{ err error }
 type tuiModel struct {
 	view    tuiViewID
 	loading bool
-	err     error
-	width   int
-	height  int
+	// submitting guards the create/run forms against double-submit: it is set
+	// synchronously the moment a submit dispatches its cmd, and cleared when the
+	// resulting success/error message arrives. Without it, two Enter presses
+	// landing before the in-flight HTTP POST completes each fire their own cmd.
+	submitting bool
+	err        error
+	width      int
+	height     int
 
 	pTable table.Model
 	rTable table.Model
@@ -135,6 +183,17 @@ type tuiModel struct {
 	pipelines []tuiPipeline
 	runs      []tuiRun
 	runFull   *tuiRunFull
+
+	// pipeDefs caches each pipeline's ordered step definitions (workflow_id →
+	// steps), fetched lazily for the flow diagram shown under the pipelines list.
+	// The list endpoint strips steps, so the diagram needs the full GET per
+	// pipeline; caching keeps cursor movement from refetching on every keystroke.
+	pipeDefs map[string][]tuiWorkflowStep
+
+	// runDetails caches each run's full step detail (run_id → detail), fetched
+	// lazily for the live pipeline diagram shown under the runs list. Active runs
+	// are refetched on every auto-refresh tick so the diagram animates live.
+	runDetails map[string]*tuiRunFull
 
 	selPipeline *tuiPipeline
 	selRun      *tuiRun
@@ -186,9 +245,11 @@ var (
 
 func newTUIModel() tuiModel {
 	m := tuiModel{
-		loading: true,
-		width:   tuiDefaultWidth,
-		height:  tuiDefaultHeight,
+		loading:    true,
+		width:      tuiDefaultWidth,
+		height:     tuiDefaultHeight,
+		pipeDefs:   map[string][]tuiWorkflowStep{},
+		runDetails: map[string]*tuiRunFull{},
 	}
 	m.pTable = table.New(table.WithFocused(true))
 	m.pTable.SetStyles(tuiTableStyles())
@@ -201,14 +262,20 @@ func newTUIModel() tuiModel {
 	return m
 }
 
+// tuiDiagReserve is the number of lines the pipeline flow diagram occupies under
+// the pipelines list (one caption line plus the joined stage boxes). The
+// pipelines table reserves this on top of its normal chrome so the diagram and
+// help line always fit; tuiPipelineDiagramPanel renders to exactly this height.
+const tuiDiagReserve = 6
+
 // applyTableLayout resizes every table to the current terminal dimensions.
 func (m *tuiModel) applyTableLayout() {
 	m.pTable.SetColumns(tuiFitColumns(ciPipelineCols, m.width))
-	m.pTable.SetHeight(tuiTableHeight(m.height, tuiListChrome))
+	m.pTable.SetHeight(tuiTableHeight(m.height, tuiListChrome+tuiDiagReserve))
 	m.rTable.SetColumns(tuiFitColumns(ciRunCols, m.width))
-	m.rTable.SetHeight(tuiTableHeight(m.height, tuiListChrome))
+	m.rTable.SetHeight(tuiTableHeight(m.height, tuiListChrome+tuiDiagReserve))
 	m.dTable.SetColumns(tuiFitColumns(ciStepCols, m.width))
-	m.dTable.SetHeight(tuiTableHeight(m.height, tuiDetailChrome))
+	m.dTable.SetHeight(tuiTableHeight(m.height, tuiDetailChrome+tuiDiagReserve))
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -259,8 +326,149 @@ func tuiFetchRunDetail(runID string) tea.Cmd {
 		if err := json.Unmarshal(data, &r); err != nil {
 			return tuiErrMsg{err}
 		}
+		tuiAnnotateParallelGroups(&r)
 		return tuiRunDetailMsg(r)
 	}
+}
+
+// tuiFetchPipelineDef fetches a pipeline's full definition (its ordered steps,
+// with parallel groups) for the flow diagram. A fetch/parse failure is folded
+// into an empty-steps message rather than a tuiErrMsg: the diagram is auxiliary
+// and must never take over the whole pipelines view with an error.
+func tuiFetchPipelineDef(workflowID string) tea.Cmd {
+	return func() tea.Msg {
+		data, err := doRequest("GET", "/workflows/pipelines/"+workflowID, nil)
+		if err != nil {
+			return tuiPipelineDefMsg{workflowID: workflowID}
+		}
+		var def tuiPipelineDef
+		if err := json.Unmarshal(data, &def); err != nil {
+			return tuiPipelineDefMsg{workflowID: workflowID}
+		}
+		return tuiPipelineDefMsg{workflowID: workflowID, steps: def.Steps}
+	}
+}
+
+// tuiEnsureDiagram returns a cmd to fetch the highlighted pipeline's step
+// definition for the flow diagram, or nil when there is nothing to fetch or it
+// is already cached. Called whenever the pipelines list loads or the cursor
+// moves, so the diagram tracks the highlighted row without refetching per key.
+func (m tuiModel) tuiEnsureDiagram() tea.Cmd {
+	i := m.pTable.Cursor()
+	if i < 0 || i >= len(m.pipelines) {
+		return nil
+	}
+	id := m.pipelines[i].WorkflowID
+	if _, ok := m.pipeDefs[id]; ok {
+		return nil
+	}
+	return tuiFetchPipelineDef(id)
+}
+
+// tuiFetchRunPreview fetches a run's full step detail for the live pipeline
+// diagram under the runs list (same data the run-detail view uses, with parallel
+// groups annotated). Like the pipeline-def fetch, a failure degrades to an
+// empty detail rather than a tuiErrMsg so it never hijacks the runs view.
+func tuiFetchRunPreview(runID string) tea.Cmd {
+	return func() tea.Msg {
+		data, err := doRequest("GET", "/workflows/runs/"+runID, nil)
+		if err != nil {
+			return tuiRunDiagramMsg{runID: runID}
+		}
+		var r tuiRunFull
+		if err := json.Unmarshal(data, &r); err != nil {
+			return tuiRunDiagramMsg{runID: runID}
+		}
+		tuiAnnotateParallelGroups(&r)
+		return tuiRunDiagramMsg{runID: runID, detail: &r}
+	}
+}
+
+// tuiEnsureRunDiagram returns a cmd to fetch the highlighted run's step detail
+// for the live diagram under the runs list, or nil when nothing is needed.
+// Uncached runs are always fetched; with refreshActive set, an already-cached
+// run that is still running/pending is refetched too so the diagram stays live
+// (the auto-refresh tick passes true; plain cursor movement passes false).
+func (m tuiModel) tuiEnsureRunDiagram(refreshActive bool) tea.Cmd {
+	i := m.rTable.Cursor()
+	if i < 0 || i >= len(m.runs) {
+		return nil
+	}
+	r := m.runs[i]
+	_, ok := m.runDetails[r.RunID]
+	active := r.Status == "running" || r.Status == "pending"
+	if ok && !(refreshActive && active) {
+		return nil
+	}
+	return tuiFetchRunPreview(r.RunID)
+}
+
+// tuiAnnotateParallelGroups best-effort enriches a run from its pipeline
+// definition: it fills each step run's ParallelGroup (the run record stores no
+// grouping — only the definition does, via steps[].parallel_group, in step_index
+// order) and synthesises pending entries for steps the run has not reached yet
+// (see tuiFillPendingSteps) so the live diagram shows the whole plan. Any failure
+// (no workflow id, def fetch/parse error, or the pipeline was edited since the
+// run so step names no longer line up) leaves groups nil and falls back to
+// whatever step runs the API returned, ungrouped.
+func tuiAnnotateParallelGroups(r *tuiRunFull) {
+	if r.WorkflowID == "" {
+		return
+	}
+	data, err := doRequest("GET", "/workflows/pipelines/"+r.WorkflowID, nil)
+	if err != nil {
+		return
+	}
+	var def tuiPipelineDef
+	if err := json.Unmarshal(data, &def); err != nil {
+		return
+	}
+	for i := range r.StepRuns {
+		idx := r.StepRuns[i].StepIndex
+		if idx < 0 || idx >= len(def.Steps) {
+			continue
+		}
+		ds := def.Steps[idx]
+		// Guard against a definition that drifted since the run: if the step name
+		// at this index differs, skip rather than mislabel which steps ran together.
+		if ds.Name != "" && ds.Name != r.StepRuns[i].StepName {
+			continue
+		}
+		r.StepRuns[i].ParallelGroup = ds.ParallelGroup
+	}
+	tuiFillPendingSteps(r, def.Steps)
+}
+
+// tuiFillPendingSteps appends a synthetic "pending" step run for every step in
+// the pipeline definition the run has not started yet, then sorts all step runs
+// back into step_index order. The backend only records a step run once a step
+// starts, so without this the live diagram (and the run-detail table) would show
+// only running and finished steps and silently drop everything still to do.
+// Synthetic entries carry no StepRunID, output, or timestamps — they exist purely
+// to display the remaining plan, and render as ○ pending like any not-yet-run step.
+func tuiFillPendingSteps(r *tuiRunFull, def []tuiWorkflowStep) {
+	if len(def) == 0 {
+		return
+	}
+	seen := make(map[int]bool, len(r.StepRuns))
+	for _, sr := range r.StepRuns {
+		seen[sr.StepIndex] = true
+	}
+	for i, ds := range def {
+		if seen[i] {
+			continue
+		}
+		r.StepRuns = append(r.StepRuns, tuiStepRun{
+			RunID:         r.RunID,
+			StepIndex:     i,
+			StepName:      ds.Name,
+			ParallelGroup: ds.ParallelGroup,
+			Status:        "pending",
+		})
+	}
+	sort.SliceStable(r.StepRuns, func(a, b int) bool {
+		return r.StepRuns[a].StepIndex < r.StepRuns[b].StepIndex
+	})
 }
 
 // tuiAutoRefresh returns the fetch cmd for the current view so an auto-refresh
@@ -276,7 +484,9 @@ func (m tuiModel) tuiAutoRefresh() tea.Cmd {
 		if m.selPipeline != nil {
 			wid = m.selPipeline.WorkflowID
 		}
-		return tuiFetchRuns(wid)
+		// Also refresh the highlighted run's live pipeline diagram so an active
+		// run animates step-by-step alongside the run-list refresh.
+		return tea.Batch(tuiFetchRuns(wid), m.tuiEnsureRunDiagram(true))
 	case tuiViewRunDetail:
 		if m.selRun != nil {
 			return tuiFetchRunDetail(m.selRun.RunID)
@@ -319,6 +529,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.pTable.SetRows(rows)
+		return m, m.tuiEnsureDiagram()
+
+	case tuiPipelineDefMsg:
+		if m.pipeDefs == nil {
+			m.pipeDefs = map[string][]tuiWorkflowStep{}
+		}
+		m.pipeDefs[msg.workflowID] = msg.steps
 		return m, nil
 
 	case tuiRunsMsg:
@@ -335,35 +552,34 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.rTable.SetRows(rows)
+		return m, m.tuiEnsureRunDiagram(false)
+
+	case tuiRunDiagramMsg:
+		if m.runDetails == nil {
+			m.runDetails = map[string]*tuiRunFull{}
+		}
+		m.runDetails[msg.runID] = msg.detail
 		return m, nil
 
 	case tuiRunDetailMsg:
 		m.loading = false
 		rf := tuiRunFull(msg)
 		m.runFull = &rf
-		rows := make([]table.Row, len(rf.StepRuns))
-		for i, sr := range rf.StepRuns {
-			rows[i] = table.Row{
-				fmt.Sprintf("%d", sr.StepIndex+1),
-				sr.StepName,
-				sr.Status,
-				tuiFormatTime(sr.StartedAt),
-				tuiFormatDur(sr.StartedAt, sr.EndedAt),
-			}
-		}
-		m.dTable.SetRows(rows)
+		m.dTable.SetRows(tuiStepRunRows(rf.StepRuns))
 		return m, nil
 
 	case tuiAutoRefreshMsg:
 		return m, m.tuiAutoRefresh()
 
 	case tuiPipelineCreatedMsg:
+		m.submitting = false
 		m.view = tuiViewPipelines
 		m.loading = true
 		return m, tuiFetchPipelines
 
 	case tuiRunTriggeredMsg:
 		// Show the freshly-triggered run in the pipeline's run history.
+		m.submitting = false
 		m.view = tuiViewRuns
 		m.loading = true
 		wid := ""
@@ -373,6 +589,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tuiFetchRuns(wid)
 
 	case tuiFormErrMsg:
+		m.submitting = false
 		m.form.errMsg = msg.err.Error()
 		return m, nil
 
@@ -441,6 +658,7 @@ func (m tuiModel) tuiKeyPipelines(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 			return m, tuiFetchRuns(m.selPipeline.WorkflowID)
 		}
 	case "n":
+		m.submitting = false
 		var cmd tea.Cmd
 		m.form, cmd = newCIPipelineForm()
 		m.view = tuiViewCreate
@@ -453,10 +671,20 @@ func (m tuiModel) tuiKeyPipelines(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		}
 	case "r":
 		m.loading = true
+		// Drop cached step definitions so the flow diagram refetches fresh.
+		m.pipeDefs = map[string][]tuiWorkflowStep{}
 		return m, tuiFetchPipelines
 	}
+	// Navigation key: let the table move the cursor, then fetch the newly
+	// highlighted pipeline's diagram if it isn't cached yet.
+	prev := m.pTable.Cursor()
 	var cmd tea.Cmd
 	m.pTable, cmd = m.pTable.Update(msg)
+	if m.pTable.Cursor() != prev {
+		if dcmd := m.tuiEnsureDiagram(); dcmd != nil {
+			return m, tea.Batch(cmd, dcmd)
+		}
+	}
 	return m, cmd
 }
 
@@ -491,6 +719,9 @@ func (m tuiModel) tuiKeyCreate(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 
 // tuiSubmitCreate validates the form and, if valid, returns the create cmd.
 func (m tuiModel) tuiSubmitCreate() (tuiModel, tea.Cmd) {
+	if m.submitting {
+		return m, nil
+	}
 	name := m.form.value("name")
 	dsl := m.form.value("steps")
 	if name == "" {
@@ -502,6 +733,7 @@ func (m tuiModel) tuiSubmitCreate() (tuiModel, tea.Cmd) {
 		return m, nil
 	}
 	m.form.errMsg = ""
+	m.submitting = true
 	return m, ciSubmitCreatePipeline(name, m.form.value("desc"), dsl)
 }
 
@@ -535,6 +767,7 @@ func ciSubmitCreatePipeline(name, desc, dsl string) tea.Cmd {
 // current view so a cancel returns the user to where they triggered it from.
 func (m tuiModel) openRunForm() (tuiModel, tea.Cmd) {
 	m.runReturn = m.view
+	m.submitting = false
 	var cmd tea.Cmd
 	m.form, cmd = newCIRunForm(m.selPipeline.Name)
 	m.view = tuiViewRun
@@ -568,6 +801,9 @@ func (m tuiModel) tuiKeyRun(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 
 // tuiSubmitRun validates the inputs field and, if valid, returns the trigger cmd.
 func (m tuiModel) tuiSubmitRun() (tuiModel, tea.Cmd) {
+	if m.submitting {
+		return m, nil
+	}
 	if m.selPipeline == nil {
 		m.form.errMsg = "no pipeline selected"
 		return m, nil
@@ -578,6 +814,7 @@ func (m tuiModel) tuiSubmitRun() (tuiModel, tea.Cmd) {
 		return m, nil
 	}
 	m.form.errMsg = ""
+	m.submitting = true
 	return m, ciSubmitRunPipeline(m.selPipeline.WorkflowID, inputs)
 }
 
@@ -642,14 +879,24 @@ func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		}
 	case "r":
 		m.loading = true
+		// Drop cached run details so the live diagram refetches fresh.
+		m.runDetails = map[string]*tuiRunFull{}
 		wid := ""
 		if m.selPipeline != nil {
 			wid = m.selPipeline.WorkflowID
 		}
 		return m, tuiFetchRuns(wid)
 	}
+	// Navigation key: move the cursor, then fetch the newly highlighted run's
+	// live pipeline diagram if it isn't cached yet.
+	prev := m.rTable.Cursor()
 	var cmd tea.Cmd
 	m.rTable, cmd = m.rTable.Update(msg)
+	if m.rTable.Cursor() != prev {
+		if dcmd := m.tuiEnsureRunDiagram(false); dcmd != nil {
+			return m, tea.Batch(cmd, dcmd)
+		}
+	}
 	return m, cmd
 }
 
@@ -737,7 +984,33 @@ func (m tuiModel) tuiViewPipelines() string {
 	if len(m.pipelines) == 0 {
 		return title + "\n\n" + tuiMetaStyle.Render("No pipelines found.") + "\n\n" + help
 	}
-	return title + "\n" + tuiBoxStyle.Render(m.pTable.View()) + "\n" + help
+	return title + "\n" + tuiBoxStyle.Render(m.pTable.View()) + "\n" +
+		m.tuiPipelineDiagramPanel() + "\n" + help
+}
+
+// tuiPipelineDiagramPanel renders the flow diagram for the highlighted pipeline:
+// a caption naming the pipeline plus its step flow. It is clamped to exactly
+// tuiDiagReserve lines (the space applyTableLayout sets aside) so the list
+// layout stays put as the cursor moves between pipelines of different shapes.
+func (m tuiModel) tuiPipelineDiagramPanel() string {
+	i := m.pTable.Cursor()
+	if i < 0 || i >= len(m.pipelines) {
+		return tuiClampHeight("", tuiDiagReserve)
+	}
+	p := m.pipelines[i]
+	caption := tuiMetaStyle.Render("▾ " + tuiTrunc(p.Name, 48) + " — pipeline flow")
+
+	var body string
+	steps, ok := m.pipeDefs[p.WorkflowID]
+	switch {
+	case !ok:
+		body = tuiMetaStyle.Render("loading…")
+	case len(steps) == 0:
+		body = tuiMetaStyle.Render("(no steps defined)")
+	default:
+		body = tuiPipelineDiagram(steps, m.width)
+	}
+	return tuiClampHeight(caption+"\n"+body, tuiDiagReserve)
 }
 
 func (m tuiModel) tuiViewRuns() string {
@@ -753,7 +1026,33 @@ func (m tuiModel) tuiViewRuns() string {
 	if len(m.runs) == 0 {
 		return title + "\n\n" + tuiMetaStyle.Render("No runs found.") + "\n\n" + help
 	}
-	return title + "\n" + tuiBoxStyle.Render(m.rTable.View()) + "\n" + help
+	return title + "\n" + tuiBoxStyle.Render(m.rTable.View()) + "\n" +
+		m.tuiRunDiagramPanel() + "\n" + help
+}
+
+// tuiRunDiagramPanel renders the live pipeline diagram for the highlighted run
+// under the runs list: each step box coloured by its live status, so an active
+// run lights up stage by stage as the panel auto-refreshes. Clamped to exactly
+// tuiDiagReserve lines (reserved by applyTableLayout) so the layout stays put.
+func (m tuiModel) tuiRunDiagramPanel() string {
+	i := m.rTable.Cursor()
+	if i < 0 || i >= len(m.runs) {
+		return tuiClampHeight("", tuiDiagReserve)
+	}
+	r := m.runs[i]
+	caption := tuiMetaStyle.Render("▾ live pipeline · "+tuiShortID(r.RunID)+" · ") + tuiColorStatus(r.Status)
+
+	var body string
+	detail, ok := m.runDetails[r.RunID]
+	switch {
+	case !ok:
+		body = tuiMetaStyle.Render("loading…")
+	case detail == nil || len(detail.StepRuns) == 0:
+		body = tuiMetaStyle.Render("(no steps)")
+	default:
+		body = tuiRunDiagram(detail.StepRuns, m.width)
+	}
+	return tuiClampHeight(caption+"\n"+body, tuiDiagReserve)
 }
 
 func (m tuiModel) tuiViewRunDetail() string {
@@ -778,8 +1077,14 @@ func (m tuiModel) tuiViewRunDetail() string {
 	if d.StartedAt != nil {
 		meta += "  started: " + d.StartedAt.Local().Format("Jan 02 15:04:05")
 	}
+	if tuiRunHasParallel(d.StepRuns) {
+		meta += "\n┌├└ bracketed steps ran in parallel"
+	}
+	diagram := tuiClampHeight(
+		tuiMetaStyle.Render("▾ live pipeline")+"\n"+tuiRunDiagram(d.StepRuns, m.width),
+		tuiDiagReserve)
 	return title + live + "\n" + tuiMetaStyle.Render(meta) + "\n" +
-		tuiBoxStyle.Render(m.dTable.View()) + "\n" + help
+		diagram + "\n" + tuiBoxStyle.Render(m.dTable.View()) + "\n" + help
 }
 
 func (m tuiModel) tuiViewOutput() string {
@@ -789,6 +1094,314 @@ func (m tuiModel) tuiViewOutput() string {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// tuiStepRunRows builds the run-detail table rows, collapsing each parallel
+// batch — consecutive step runs sharing the same non-nil ParallelGroup — into a
+// bracketed block that shares one stage number, so it is visually obvious those
+// steps ran concurrently. Sequential steps render as a normal single row. Rows
+// stay 1:1 with stepRuns in order, so the table cursor still indexes StepRuns.
+func tuiStepRunRows(stepRuns []tuiStepRun) []table.Row {
+	rows := make([]table.Row, 0, len(stepRuns))
+	stage := 0
+	i := 0
+	for i < len(stepRuns) {
+		stage++
+		// Extent of this batch: consecutive runs sharing the same non-nil group.
+		j := i + 1
+		if g := stepRuns[i].ParallelGroup; g != nil {
+			for j < len(stepRuns) && stepRuns[j].ParallelGroup != nil && *stepRuns[j].ParallelGroup == *g {
+				j++
+			}
+		}
+		batch := stepRuns[i:j]
+		if len(batch) == 1 {
+			sr := batch[0]
+			rows = append(rows, table.Row{
+				fmt.Sprintf("%d", stage),
+				sr.StepName,
+				sr.Status,
+				tuiFormatTime(sr.StartedAt),
+				tuiFormatDur(sr.StartedAt, sr.EndedAt),
+			})
+			i = j
+			continue
+		}
+		for k, sr := range batch {
+			// ┌/├/└ bracket the members into one group; the stage number sits on
+			// the first row only so the block reads as a single parallel stage.
+			glyph, num := "├ ", ""
+			switch {
+			case k == 0:
+				glyph, num = "┌ ", fmt.Sprintf("%d", stage)
+			case k == len(batch)-1:
+				glyph = "└ "
+			}
+			rows = append(rows, table.Row{
+				num,
+				glyph + sr.StepName,
+				sr.Status,
+				tuiFormatTime(sr.StartedAt),
+				tuiFormatDur(sr.StartedAt, sr.EndedAt),
+			})
+		}
+		i = j
+	}
+	return rows
+}
+
+// tuiPipelineStages groups a pipeline's ordered steps into stages for the flow
+// diagram: consecutive steps sharing the same non-nil parallel group collapse
+// into one stage (they run concurrently); every other step is its own stage.
+// This mirrors the run-detail bracketing in tuiStepRunRows.
+func tuiPipelineStages(steps []tuiWorkflowStep) [][]string {
+	var stages [][]string
+	for i := 0; i < len(steps); {
+		j := i + 1
+		if g := steps[i].ParallelGroup; g != nil {
+			for j < len(steps) && steps[j].ParallelGroup != nil && *steps[j].ParallelGroup == *g {
+				j++
+			}
+		}
+		names := make([]string, 0, j-i)
+		for _, s := range steps[i:j] {
+			names = append(names, s.Name)
+		}
+		stages = append(stages, names)
+		i = j
+	}
+	return stages
+}
+
+// tuiPipelineDiagram renders the pipeline's steps as a left-to-right flow of
+// bordered stage boxes joined by arrows, parallel stages stacked in one
+// accent-bordered box. When the boxed form would overflow the terminal width it
+// falls back to a compact one-line "a → [b, c] → d" rendering wrapped to width.
+func tuiPipelineDiagram(steps []tuiWorkflowStep, width int) string {
+	stages := tuiPipelineStages(steps)
+	if len(stages) == 0 {
+		return tuiMetaStyle.Render("(no steps defined)")
+	}
+
+	parts := make([]string, 0, len(stages)*2-1)
+	for i, st := range stages {
+		if i > 0 {
+			parts = append(parts, tuiDiagArrowStyle.Render(" → "))
+		}
+		parts = append(parts, tuiStageBox(st))
+	}
+	diagram := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
+	if width <= 0 || lipgloss.Width(diagram) <= width {
+		return diagram
+	}
+	return tuiCompactFlow(stages, width)
+}
+
+// tuiStageBox renders one stage as a bordered box. A single (sequential) step
+// uses the plain border; a parallel stage stacks its step names and uses the
+// accent border so it reads as "these run together". Names are truncated and a
+// stage with more than three steps is summarised with a "+N more" line so the
+// box never grows past the reserved diagram height.
+func tuiStageBox(names []string) string {
+	const (
+		maxRows = 3
+		maxName = 16
+	)
+	lines := make([]string, 0, maxRows)
+	if len(names) > maxRows {
+		for _, n := range names[:maxRows-1] {
+			lines = append(lines, tuiTrunc(n, maxName))
+		}
+		lines = append(lines, fmt.Sprintf("+%d more", len(names)-(maxRows-1)))
+	} else {
+		for _, n := range names {
+			lines = append(lines, tuiTrunc(n, maxName))
+		}
+	}
+	style := tuiDiagStepStyle
+	if len(names) > 1 {
+		style = tuiDiagParStyle
+	}
+	return style.Render(strings.Join(lines, "\n"))
+}
+
+// tuiCompactFlow is the width-constrained fallback for the flow diagram: stages
+// on one line, parallel stages bracketed, joined by arrows and wrapped to width.
+func tuiCompactFlow(stages [][]string, width int) string {
+	parts := make([]string, len(stages))
+	for i, st := range stages {
+		if len(st) == 1 {
+			parts[i] = st[0]
+		} else {
+			parts[i] = "[" + strings.Join(st, ", ") + "]"
+		}
+	}
+	s := strings.Join(parts, " → ")
+	if width > 0 {
+		return lipgloss.NewStyle().Width(width).Render(s)
+	}
+	return s
+}
+
+// tuiClampHeight pads or truncates s to exactly n lines, so a variable-height
+// block occupies a fixed slot in a layout.
+func tuiClampHeight(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	for len(lines) < n {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ── Live run diagram ──────────────────────────────────────────────────────────
+
+// tuiStatusGlyph is a compact per-step status marker so the live diagram reads
+// even without colour (✓ done, ● running, ○ pending, ✗ failed, ⊘ cancelled).
+func tuiStatusGlyph(status string) string {
+	switch status {
+	case "completed":
+		return "✓"
+	case "running":
+		return "●"
+	case "failed":
+		return "✗"
+	case "cancelled":
+		return "⊘"
+	default: // pending / unknown
+		return "○"
+	}
+}
+
+// tuiStatusColor maps a status to its themed colour, matching the portal's
+// pill tones (green=done, amber=running, red=failed, dim=pending/cancelled).
+func tuiStatusColor(status string) lipgloss.Color {
+	if c, ok := tuiStatusColors[status]; ok {
+		return c
+	}
+	return lipgloss.Color(activeTheme.Muted)
+}
+
+// tuiRunBatches groups ordered step runs into stages for the diagram: runs of
+// consecutive steps sharing the same non-nil parallel group form one stage.
+func tuiRunBatches(stepRuns []tuiStepRun) [][]tuiStepRun {
+	var out [][]tuiStepRun
+	for i := 0; i < len(stepRuns); {
+		j := i + 1
+		if g := stepRuns[i].ParallelGroup; g != nil {
+			for j < len(stepRuns) && stepRuns[j].ParallelGroup != nil && *stepRuns[j].ParallelGroup == *g {
+				j++
+			}
+		}
+		out = append(out, stepRuns[i:j])
+		i = j
+	}
+	return out
+}
+
+// tuiStageStatus reduces a stage's step statuses to one, by precedence
+// failed > running > pending > cancelled > completed — the colour the stage box
+// border takes (a failed step makes the whole stage read as failed, etc.).
+func tuiStageStatus(batch []tuiStepRun) string {
+	rank := map[string]int{"completed": 0, "cancelled": 1, "pending": 2, "running": 3, "failed": 4}
+	best, bestRank := "completed", 0
+	for _, sr := range batch {
+		if r, ok := rank[sr.Status]; ok && r >= bestRank {
+			best, bestRank = sr.Status, r
+		}
+	}
+	return best
+}
+
+// tuiRunDiagram renders the run as a left-to-right flow of stage boxes coloured
+// by live status, joined by arrows; parallel steps stack in one box. It falls
+// back to a compact coloured one-liner when the boxed form overflows the width.
+func tuiRunDiagram(stepRuns []tuiStepRun, width int) string {
+	if len(stepRuns) == 0 {
+		return tuiMetaStyle.Render("(no steps)")
+	}
+	batches := tuiRunBatches(stepRuns)
+	parts := make([]string, 0, len(batches)*2-1)
+	for i, b := range batches {
+		if i > 0 {
+			parts = append(parts, tuiDiagArrowStyle.Render(" → "))
+		}
+		parts = append(parts, tuiRunStageBox(b))
+	}
+	diagram := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
+	if width <= 0 || lipgloss.Width(diagram) <= width {
+		return diagram
+	}
+	return tuiRunCompactFlow(batches, width)
+}
+
+// tuiRunStageBox renders one live stage: each step "glyph name" coloured by its
+// status, stacked, in a box whose border takes the stage's aggregate status
+// colour. Long stages are summarised with "+N more" to stay within the reserved
+// diagram height.
+func tuiRunStageBox(batch []tuiStepRun) string {
+	const (
+		maxRows = 3
+		maxName = 16
+	)
+	line := func(sr tuiStepRun) string {
+		txt := tuiStatusGlyph(sr.Status) + " " + tuiTrunc(sr.StepName, maxName)
+		return lipgloss.NewStyle().Foreground(tuiStatusColor(sr.Status)).Render(txt)
+	}
+	lines := make([]string, 0, maxRows)
+	if len(batch) > maxRows {
+		for _, sr := range batch[:maxRows-1] {
+			lines = append(lines, line(sr))
+		}
+		lines = append(lines, tuiMetaStyle.Render(fmt.Sprintf("+%d more", len(batch)-(maxRows-1))))
+	} else {
+		for _, sr := range batch {
+			lines = append(lines, line(sr))
+		}
+	}
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(tuiStatusColor(tuiStageStatus(batch))).
+		Padding(0, 1)
+	return box.Render(strings.Join(lines, "\n"))
+}
+
+// tuiRunCompactFlow is the width-constrained fallback for the live diagram:
+// status-coloured "glyph name" labels, parallel stages bracketed, joined by
+// arrows and wrapped to width.
+func tuiRunCompactFlow(batches [][]tuiStepRun, width int) string {
+	stageStrs := make([]string, len(batches))
+	for i, b := range batches {
+		labels := make([]string, len(b))
+		for k, sr := range b {
+			txt := tuiStatusGlyph(sr.Status) + " " + sr.StepName
+			labels[k] = lipgloss.NewStyle().Foreground(tuiStatusColor(sr.Status)).Render(txt)
+		}
+		s := strings.Join(labels, ", ")
+		if len(b) > 1 {
+			s = "[" + s + "]"
+		}
+		stageStrs[i] = s
+	}
+	joined := strings.Join(stageStrs, tuiDiagArrowStyle.Render(" → "))
+	if width > 0 {
+		return lipgloss.NewStyle().Width(width).Render(joined)
+	}
+	return joined
+}
+
+// tuiRunHasParallel reports whether any two consecutive step runs share a non-nil
+// parallel group, i.e. the run contains a parallel batch worth a legend.
+func tuiRunHasParallel(stepRuns []tuiStepRun) bool {
+	for i := 0; i+1 < len(stepRuns); i++ {
+		a, b := stepRuns[i].ParallelGroup, stepRuns[i+1].ParallelGroup
+		if a != nil && b != nil && *a == *b {
+			return true
+		}
+	}
+	return false
+}
 
 func tuiShortID(id string) string {
 	if len(id) > 8 {
