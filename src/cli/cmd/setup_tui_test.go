@@ -22,6 +22,23 @@ func driveSetup(t *testing.T, m setupTUIModel, msg tea.Msg) (setupTUIModel, tea.
 	return sm, cmd
 }
 
+// keySubmit submits the current wizard form. The shared tuiForm submits via its
+// Submit button or ctrl+s; a bare Enter advances between fields (so multi-line
+// fields can use Enter for newlines), so tests drive submission with ctrl+s.
+var keySubmit = tea.KeyMsg{Type: tea.KeyCtrlS}
+
+// countValueFields counts a form's value-bearing fields, excluding the trailing
+// Submit button that newTUIForm appends.
+func countValueFields(f tuiForm) int {
+	n := 0
+	for _, fld := range f.fields {
+		if fld.kind != fieldButton {
+			n++
+		}
+	}
+	return n
+}
+
 func emitsLaunchSetup(cmd tea.Cmd) bool {
 	if cmd == nil {
 		return false
@@ -151,7 +168,7 @@ func TestSetupTUI_BasicsRejectsEmptyURL(t *testing.T) {
 	m := newSetupTUIModel()
 	m.form.fields[0].input.SetValue("") // clear URL
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(keySubmit)
 	if cmd != nil {
 		t.Error("submitting an empty URL should not navigate away")
 	}
@@ -169,7 +186,7 @@ func TestSetupTUI_BasicsAdvancesToAccount(t *testing.T) {
 	restoreTheme(t)
 	m := newSetupTUIModel()
 	m.form.fields[0].input.SetValue("http://conductor.example/")
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = driveSetup(t, m, keySubmit)
 
 	if m.step != setupStepAccount {
 		t.Errorf("step = %d, want setupStepAccount after submitting basics", m.step)
@@ -188,13 +205,13 @@ func TestSetupTUI_AccountSkipGoesToResult(t *testing.T) {
 	restoreTheme(t)
 	m := newSetupTUIModel()
 	m.form.fields[0].input.SetValue("http://conductor.example")
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // basics -> account
+	m, _ = driveSetup(t, m, keySubmit) // basics -> account
 	// account form's only field is a select; default is "log in". Cycle left to "skip".
 	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyLeft})
 	if got := m.form.value("action"); got != setupActionSkip {
 		t.Fatalf("action = %q, want %q", got, setupActionSkip)
 	}
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = driveSetup(t, m, keySubmit)
 	if m.step != setupStepResult {
 		t.Errorf("step = %d, want setupStepResult after skipping the account step", m.step)
 	}
@@ -208,19 +225,19 @@ func TestSetupTUI_AccountSignupGoesToCredentialsWithUsername(t *testing.T) {
 	restoreTheme(t)
 	m := newSetupTUIModel()
 	m.form.fields[0].input.SetValue("http://conductor.example")
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // -> account
+	m, _ = driveSetup(t, m, keySubmit) // -> account
 	// cycle right once: log in -> sign up
 	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyRight})
 	if got := m.form.value("action"); got != setupActionSignup {
 		t.Fatalf("action = %q, want %q", got, setupActionSignup)
 	}
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = driveSetup(t, m, keySubmit)
 	if m.step != setupStepCredentials {
 		t.Fatalf("step = %d, want setupStepCredentials", m.step)
 	}
-	// signup form has email + username + password.
-	if len(m.form.fields) != 3 {
-		t.Errorf("signup credentials form has %d fields, want 3 (email, username, password)", len(m.form.fields))
+	// signup form has email + username + password (plus the trailing Submit button).
+	if n := countValueFields(m.form); n != 3 {
+		t.Errorf("signup credentials form has %d value fields, want 3 (email, username, password)", n)
 	}
 }
 
@@ -229,14 +246,14 @@ func TestSetupTUI_AccountLoginGoesToCredentialsWithoutUsername(t *testing.T) {
 	restoreTheme(t)
 	m := newSetupTUIModel()
 	m.form.fields[0].input.SetValue("http://conductor.example")
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // -> account
+	m, _ = driveSetup(t, m, keySubmit) // -> account
 	// default action is log in; submit straight through.
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = driveSetup(t, m, keySubmit)
 	if m.step != setupStepCredentials {
 		t.Fatalf("step = %d, want setupStepCredentials", m.step)
 	}
-	if len(m.form.fields) != 2 {
-		t.Errorf("login credentials form has %d fields, want 2 (email, password)", len(m.form.fields))
+	if n := countValueFields(m.form); n != 2 {
+		t.Errorf("login credentials form has %d value fields, want 2 (email, password)", n)
 	}
 }
 
@@ -245,8 +262,8 @@ func TestSetupTUI_CredentialsCancelGoesBackToAccount(t *testing.T) {
 	restoreTheme(t)
 	m := newSetupTUIModel()
 	m.form.fields[0].input.SetValue("http://conductor.example")
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // -> account
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // -> credentials (log in)
+	m, _ = driveSetup(t, m, keySubmit) // -> account
+	m, _ = driveSetup(t, m, keySubmit) // -> credentials (log in)
 	if m.step != setupStepCredentials {
 		t.Fatal("precondition: should be on credentials step")
 	}
@@ -261,10 +278,10 @@ func TestSetupTUI_CredentialsRejectsEmptyFields(t *testing.T) {
 	restoreTheme(t)
 	m := newSetupTUIModel()
 	m.form.fields[0].input.SetValue("http://conductor.example")
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // -> account
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // -> credentials (log in)
+	m, _ = driveSetup(t, m, keySubmit) // -> account
+	m, _ = driveSetup(t, m, keySubmit) // -> credentials (log in)
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.Update(keySubmit)
 	sm := next.(setupTUIModel)
 	if sm.form.errMsg == "" {
 		t.Error("empty email should produce an inline error")
@@ -292,11 +309,11 @@ func TestSetupTUI_CredentialsLoginFlow(t *testing.T) {
 
 	m := newSetupTUIModel()
 	m.form.fields[0].input.SetValue(srv.URL)
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // basics -> account
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // account -> credentials (log in)
+	m, _ = driveSetup(t, m, keySubmit) // basics -> account
+	m, _ = driveSetup(t, m, keySubmit) // account -> credentials (log in)
 	m.form.fields[0].input.SetValue("user@example.com")
 	m.form.fields[1].input.SetValue("hunter2")
-	m, _ = driveSetup(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = driveSetup(t, m, keySubmit)
 
 	if m.step != setupStepResult {
 		t.Errorf("step = %d, want setupStepResult after successful login", m.step)

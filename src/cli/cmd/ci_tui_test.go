@@ -646,7 +646,7 @@ func TestTuiFetchRunDetail_Success(t *testing.T) {
 	srv, rec := recordingServer(t, http.StatusOK, string(body))
 	setupCLI(t, srv)
 
-	msg := tuiFetchRunDetail("run-abc")()
+	msg := tuiFetchRunDetail("run-abc", nil)()
 
 	if rec.Method != "GET" || rec.Path != "/workflows/runs/run-abc" {
 		t.Errorf("request = %s %s, want GET /workflows/runs/run-abc", rec.Method, rec.Path)
@@ -667,7 +667,7 @@ func TestTuiFetchRunDetail_HTTPError(t *testing.T) {
 	srv, _ := recordingServer(t, http.StatusNotFound, `{"error":"not found"}`)
 	setupCLI(t, srv)
 
-	msg := tuiFetchRunDetail("nope")()
+	msg := tuiFetchRunDetail("nope", nil)()
 	if _, ok := msg.(tuiErrMsg); !ok {
 		t.Errorf("msg type = %T, want tuiErrMsg", msg)
 	}
@@ -1291,7 +1291,7 @@ func TestTuiFetchRunDetail_AnnotatesParallelGroups(t *testing.T) {
 	})
 	setupCLI(t, routeServer(t, mux))
 
-	msg := tuiFetchRunDetail("run-1")()
+	msg := tuiFetchRunDetail("run-1", nil)()
 	result, ok := msg.(tuiRunDetailMsg)
 	if !ok {
 		t.Fatalf("msg type = %T, want tuiRunDetailMsg", msg)
@@ -1323,7 +1323,7 @@ func TestTuiFetchRunDetail_NoDefStillSucceeds(t *testing.T) {
 	})
 	setupCLI(t, routeServer(t, mux))
 
-	msg := tuiFetchRunDetail("run-1")()
+	msg := tuiFetchRunDetail("run-1", nil)()
 	result, ok := msg.(tuiRunDetailMsg)
 	if !ok {
 		t.Fatalf("msg type = %T, want tuiRunDetailMsg", msg)
@@ -1360,7 +1360,7 @@ func TestTuiFetchRunDetail_FillsPendingSteps(t *testing.T) {
 	})
 	setupCLI(t, routeServer(t, mux))
 
-	msg := tuiFetchRunDetail("run-1")()
+	msg := tuiFetchRunDetail("run-1", nil)()
 	result, ok := msg.(tuiRunDetailMsg)
 	if !ok {
 		t.Fatalf("msg type = %T, want tuiRunDetailMsg", msg)
@@ -1405,7 +1405,7 @@ func TestTuiFetchRunPreview_FillsPendingForUnstartedRun(t *testing.T) {
 	})
 	setupCLI(t, routeServer(t, mux))
 
-	msg, ok := tuiFetchRunPreview("run-1")().(tuiRunDiagramMsg)
+	msg, ok := tuiFetchRunPreview("run-1", nil)().(tuiRunDiagramMsg)
 	if !ok {
 		t.Fatalf("msg type = %T, want tuiRunDiagramMsg", msg)
 	}

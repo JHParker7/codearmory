@@ -322,6 +322,37 @@ func TestTuiRunBatches_GroupsParallel(t *testing.T) {
 	}
 }
 
+func TestTuiFillPendingSteps_FillsActiveRun(t *testing.T) {
+	def := []tuiWorkflowStep{{Name: "build"}, {Name: "test"}, {Name: "deploy"}}
+	r := &tuiRunFull{
+		tuiRun:   tuiRun{RunID: "r1", Status: "running"},
+		StepRuns: []tuiStepRun{{StepIndex: 0, StepName: "build", Status: "completed"}},
+	}
+	tuiFillPendingSteps(r, def)
+	if len(r.StepRuns) != 3 {
+		t.Fatalf("active run should synthesise the steps ahead, got %d step runs", len(r.StepRuns))
+	}
+	for _, sr := range r.StepRuns {
+		if sr.StepIndex > 0 && sr.Status != "pending" {
+			t.Errorf("unreached step %d status = %q, want pending", sr.StepIndex, sr.Status)
+		}
+	}
+}
+
+func TestTuiFillPendingSteps_SkipsTerminalRun(t *testing.T) {
+	def := []tuiWorkflowStep{{Name: "build"}, {Name: "test"}, {Name: "deploy"}}
+	for _, status := range []string{"failed", "cancelled", "completed"} {
+		r := &tuiRunFull{
+			tuiRun:   tuiRun{RunID: "r1", Status: status},
+			StepRuns: []tuiStepRun{{StepIndex: 0, StepName: "build", Status: "failed"}},
+		}
+		tuiFillPendingSteps(r, def)
+		if len(r.StepRuns) != 1 {
+			t.Errorf("%s run must not gain synthetic pending steps for steps it never reached, got %d step runs", status, len(r.StepRuns))
+		}
+	}
+}
+
 func TestTuiRunDiagram_RendersGlyphsNamesArrows(t *testing.T) {
 	d := tuiRunDiagram([]tuiStepRun{
 		{StepName: "build", Status: "completed"},
@@ -369,7 +400,7 @@ func TestTuiFetchRunPreview_Success(t *testing.T) {
 	})
 	setupCLI(t, routeServer(t, mux))
 
-	msg, ok := tuiFetchRunPreview("run-1")().(tuiRunDiagramMsg)
+	msg, ok := tuiFetchRunPreview("run-1", nil)().(tuiRunDiagramMsg)
 	if !ok {
 		t.Fatalf("msg type = %T, want tuiRunDiagramMsg", msg)
 	}
@@ -382,7 +413,7 @@ func TestTuiFetchRunPreview_ErrorYieldsEmptyDetail(t *testing.T) {
 	srv, _ := recordingServer(t, http.StatusNotFound, `{"error":"nope"}`)
 	setupCLI(t, srv)
 
-	msg, ok := tuiFetchRunPreview("run-x")().(tuiRunDiagramMsg)
+	msg, ok := tuiFetchRunPreview("run-x", nil)().(tuiRunDiagramMsg)
 	if !ok {
 		t.Fatalf("msg type = %T, want tuiRunDiagramMsg even on error", msg)
 	}

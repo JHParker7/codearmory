@@ -153,8 +153,13 @@ type tuiPipelineDefMsg struct {
 	steps      []tuiWorkflowStep
 }
 type tuiRunDiagramMsg struct {
-	runID  string
-	detail *tuiRunFull
+	runID string
+	// workflowID and steps carry the pipeline definition resolved while annotating,
+	// so the Update handler can populate m.pipeDefs and later ticks reuse it instead
+	// of refetching the (immutable) definition on every refresh.
+	workflowID string
+	steps      []tuiWorkflowStep
+	detail     *tuiRunFull
 }
 type tuiErrMsg struct{ err error }
 type tuiPipelineCreatedMsg struct{}
@@ -316,18 +321,30 @@ func tuiFetchRuns(workflowID string) tea.Cmd {
 	}
 }
 
-func tuiFetchRunDetail(runID string) tea.Cmd {
+// tuiFetchAnnotatedRun fetches a run's full step detail and annotates parallel
+// groups, reusing cachedSteps to skip the immutable pipeline-definition refetch.
+// Returns the run and the step definition it used (so the caller can cache it).
+// Both run fetchers share this; they differ only in the message they wrap it in.
+func tuiFetchAnnotatedRun(runID string, cachedSteps []tuiWorkflowStep) (*tuiRunFull, []tuiWorkflowStep, error) {
+	data, err := doRequest("GET", "/workflows/runs/"+runID, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	var r tuiRunFull
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, nil, err
+	}
+	steps := tuiAnnotateParallelGroups(&r, cachedSteps)
+	return &r, steps, nil
+}
+
+func tuiFetchRunDetail(runID string, cachedSteps []tuiWorkflowStep) tea.Cmd {
 	return func() tea.Msg {
-		data, err := doRequest("GET", "/workflows/runs/"+runID, nil)
+		r, _, err := tuiFetchAnnotatedRun(runID, cachedSteps)
 		if err != nil {
 			return tuiErrMsg{err}
 		}
-		var r tuiRunFull
-		if err := json.Unmarshal(data, &r); err != nil {
-			return tuiErrMsg{err}
-		}
-		tuiAnnotateParallelGroups(&r)
-		return tuiRunDetailMsg(r)
+		return tuiRunDetailMsg(*r)
 	}
 }
 
@@ -369,18 +386,15 @@ func (m tuiModel) tuiEnsureDiagram() tea.Cmd {
 // diagram under the runs list (same data the run-detail view uses, with parallel
 // groups annotated). Like the pipeline-def fetch, a failure degrades to an
 // empty detail rather than a tuiErrMsg so it never hijacks the runs view.
-func tuiFetchRunPreview(runID string) tea.Cmd {
+func tuiFetchRunPreview(runID string, cachedSteps []tuiWorkflowStep) tea.Cmd {
 	return func() tea.Msg {
-		data, err := doRequest("GET", "/workflows/runs/"+runID, nil)
+		r, steps, err := tuiFetchAnnotatedRun(runID, cachedSteps)
 		if err != nil {
+			// The diagram is auxiliary — degrade to an empty detail rather than a
+			// tuiErrMsg so a fetch failure never hijacks the runs view.
 			return tuiRunDiagramMsg{runID: runID}
 		}
-		var r tuiRunFull
-		if err := json.Unmarshal(data, &r); err != nil {
-			return tuiRunDiagramMsg{runID: runID}
-		}
-		tuiAnnotateParallelGroups(&r)
-		return tuiRunDiagramMsg{runID: runID, detail: &r}
+		return tuiRunDiagramMsg{runID: runID, workflowID: r.WorkflowID, steps: steps, detail: r}
 	}
 }
 
@@ -400,7 +414,9 @@ func (m tuiModel) tuiEnsureRunDiagram(refreshActive bool) tea.Cmd {
 	if ok && !(refreshActive && active) {
 		return nil
 	}
-	return tuiFetchRunPreview(r.RunID)
+	// Reuse the cached pipeline definition (immutable) so a live run's per-tick
+	// refresh doesn't refetch it; nil falls back to a fetch the first time.
+	return tuiFetchRunPreview(r.RunID, m.pipeDefs[r.WorkflowID])
 }
 
 // tuiAnnotateParallelGroups best-effort enriches a run from its pipeline
@@ -411,24 +427,33 @@ func (m tuiModel) tuiEnsureRunDiagram(refreshActive bool) tea.Cmd {
 // (no workflow id, def fetch/parse error, or the pipeline was edited since the
 // run so step names no longer line up) leaves groups nil and falls back to
 // whatever step runs the API returned, ungrouped.
-func tuiAnnotateParallelGroups(r *tuiRunFull) {
+// cachedSteps, when non-nil, supplies the pipeline definition so the function
+// skips the GET /pipelines/{id} round-trip — the definition is immutable, so on
+// auto-refresh ticks it should be reused from m.pipeDefs rather than refetched.
+// Returns the step definition it used (cached or freshly fetched), or nil on
+// failure, so the caller can cache it for subsequent ticks.
+func tuiAnnotateParallelGroups(r *tuiRunFull, cachedSteps []tuiWorkflowStep) []tuiWorkflowStep {
 	if r.WorkflowID == "" {
-		return
+		return nil
 	}
-	data, err := doRequest("GET", "/workflows/pipelines/"+r.WorkflowID, nil)
-	if err != nil {
-		return
-	}
-	var def tuiPipelineDef
-	if err := json.Unmarshal(data, &def); err != nil {
-		return
+	steps := cachedSteps
+	if steps == nil {
+		data, err := doRequest("GET", "/workflows/pipelines/"+r.WorkflowID, nil)
+		if err != nil {
+			return nil
+		}
+		var def tuiPipelineDef
+		if err := json.Unmarshal(data, &def); err != nil {
+			return nil
+		}
+		steps = def.Steps
 	}
 	for i := range r.StepRuns {
 		idx := r.StepRuns[i].StepIndex
-		if idx < 0 || idx >= len(def.Steps) {
+		if idx < 0 || idx >= len(steps) {
 			continue
 		}
-		ds := def.Steps[idx]
+		ds := steps[idx]
 		// Guard against a definition that drifted since the run: if the step name
 		// at this index differs, skip rather than mislabel which steps ran together.
 		if ds.Name != "" && ds.Name != r.StepRuns[i].StepName {
@@ -436,7 +461,8 @@ func tuiAnnotateParallelGroups(r *tuiRunFull) {
 		}
 		r.StepRuns[i].ParallelGroup = ds.ParallelGroup
 	}
-	tuiFillPendingSteps(r, def.Steps)
+	tuiFillPendingSteps(r, steps)
+	return steps
 }
 
 // tuiFillPendingSteps appends a synthetic "pending" step run for every step in
@@ -448,6 +474,13 @@ func tuiAnnotateParallelGroups(r *tuiRunFull) {
 // to display the remaining plan, and render as ○ pending like any not-yet-run step.
 func tuiFillPendingSteps(r *tuiRunFull, def []tuiWorkflowStep) {
 	if len(def) == 0 {
+		return
+	}
+	// Only an in-flight run has steps genuinely still ahead of it. For a run that
+	// has already finished (completed/failed/cancelled), steps it never reached will
+	// never run, so synthesising "pending" rows for them would misrepresent
+	// never-to-run steps as still queued.
+	if r.Status != "running" && r.Status != "pending" {
 		return
 	}
 	seen := make(map[int]bool, len(r.StepRuns))
@@ -489,7 +522,7 @@ func (m tuiModel) tuiAutoRefresh() tea.Cmd {
 		return tea.Batch(tuiFetchRuns(wid), m.tuiEnsureRunDiagram(true))
 	case tuiViewRunDetail:
 		if m.selRun != nil {
-			return tuiFetchRunDetail(m.selRun.RunID)
+			return tuiFetchRunDetail(m.selRun.RunID, m.pipeDefs[m.selRun.WorkflowID])
 		}
 	}
 	return nil
@@ -559,6 +592,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.runDetails = map[string]*tuiRunFull{}
 		}
 		m.runDetails[msg.runID] = msg.detail
+		// Cache the pipeline definition resolved during annotation so subsequent
+		// ticks reuse it instead of refetching the immutable definition.
+		if msg.workflowID != "" && len(msg.steps) > 0 {
+			if m.pipeDefs == nil {
+				m.pipeDefs = map[string][]tuiWorkflowStep{}
+			}
+			m.pipeDefs[msg.workflowID] = msg.steps
+		}
 		return m, nil
 
 	case tuiRunDetailMsg:
@@ -857,7 +898,7 @@ func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 			m.selRun = &m.runs[i]
 			m.view = tuiViewRunDetail
 			m.loading = true
-			return m, tuiFetchRunDetail(m.selRun.RunID)
+			return m, tuiFetchRunDetail(m.selRun.RunID, m.pipeDefs[m.selRun.WorkflowID])
 		}
 	case "c":
 		i := m.rTable.Cursor()
@@ -926,7 +967,7 @@ func (m tuiModel) tuiKeyRunDetail(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	case "r":
 		if m.selRun != nil {
 			m.loading = true
-			return m, tuiFetchRunDetail(m.selRun.RunID)
+			return m, tuiFetchRunDetail(m.selRun.RunID, m.pipeDefs[m.selRun.WorkflowID])
 		}
 	}
 	var cmd tea.Cmd
