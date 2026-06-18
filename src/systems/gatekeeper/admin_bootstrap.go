@@ -2,13 +2,79 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
+
+// errNoDefaultGrants is returned by createUserWithBootstrapAdmin when a non-admin
+// signup is attempted while no user default grants are available — refusing to
+// create a permission-less account.
+var errNoDefaultGrants = errors.New("no default grants available")
+
+// firstUserAdvisoryKey is the fixed key for the Postgres transaction advisory lock
+// that serialises the first-user (bootstrap admin) determination, so two
+// concurrent signups on an empty database cannot both be granted admin.
+const firstUserAdvisoryKey int64 = 800108081
+
+// createUserWithBootstrapAdmin inserts personalRole and user in a single
+// transaction, deciding inside that transaction whether this is the very first
+// account — and therefore the bootstrap admin. The count and the insert are atomic:
+// on Postgres a transaction-scoped advisory lock serialises concurrent signups
+// (closing the count-then-create TOCTOU); on SQLite (tests) write transactions are
+// already serialised. When admin is granted, personalRole is named "admin" and a
+// wildcard permission is created in the same transaction.
+//
+// adminCandidate is false when an env-var admin is configured (the first-user
+// fallback is off), so the lock/count are skipped. When the user is not the admin
+// and no default grants are available, the whole transaction is rolled back with
+// errNoDefaultGrants so a permission-less account is never created.
+func createUserWithBootstrapAdmin(ctx context.Context, user *User, personalRole *Role, adminCandidate, grantsAvailable bool) (bool, error) {
+	grantedAdmin := false
+	err := connect().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if adminCandidate {
+			// Serialise the first-user determination on Postgres so concurrent
+			// signups on an empty DB cannot both win the admin grant.
+			if tx.Dialector.Name() == "postgres" {
+				if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", firstUserAdvisoryKey).Error; err != nil {
+					return err
+				}
+			}
+			var count int64
+			if err := tx.Model(&User{}).Where("active = ?", true).Count(&count).Error; err != nil {
+				return err
+			}
+			grantedAdmin = count == 0
+		}
+		if !grantedAdmin && !grantsAvailable {
+			return errNoDefaultGrants
+		}
+		if grantedAdmin {
+			adminPerm := newAdminPermission(user.UserID, user.Username)
+			adminPerm.Active = true
+			if err := tx.Create(&adminPerm).Error; err != nil {
+				return err
+			}
+			personalRole.Name = adminRoleName
+			personalRole.PermissionsIDs = []string{adminPerm.PermissionsID}
+		}
+		personalRole.Active = true
+		if err := tx.Create(personalRole).Error; err != nil {
+			return err
+		}
+		user.Active = true
+		if err := tx.Create(user).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	return grantedAdmin, err
+}
 
 // adminRoleName is the Name given to the bootstrap admin's personal role so the
 // account is easy to identify. Unlike the system-managed "default" role it stays
@@ -149,12 +215,17 @@ func ensureUserAdmin(ctx context.Context, user User) error {
 		}
 	}
 
-	// Already an admin? Skip so we don't pile up duplicate permissions each boot.
-	for _, pid := range personalRole.PermissionsIDs {
-		if row, err := (Permissions{PermissionsID: pid}).Get(ctx); err == nil {
-			if row.(Permissions).Service == "*" {
-				return nil
-			}
+	// Already an admin? One query (instead of a Get per permission) to detect any
+	// wildcard-service grant already attached to the role.
+	if len(personalRole.PermissionsIDs) > 0 {
+		var wildcard int64
+		if err := connectRead().WithContext(ctx).Model(&Permissions{}).
+			Where("permissions_id IN ? AND service = ? AND active = ?", personalRole.PermissionsIDs, "*", true).
+			Count(&wildcard).Error; err != nil {
+			return fmt.Errorf("check existing admin grant: %w", err)
+		}
+		if wildcard > 0 {
+			return nil
 		}
 	}
 
