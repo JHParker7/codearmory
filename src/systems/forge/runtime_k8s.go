@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -215,6 +216,7 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 
 	var timedOut bool
 	var exitCode int
+	var failedMsg string
 
 	for {
 		select {
@@ -233,8 +235,19 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 			}
 			if j.Status.Failed > 0 {
 				for _, cond := range j.Status.Conditions {
-					if cond.Type == batchv1.JobFailed && cond.Reason == "DeadlineExceeded" {
+					if cond.Type != batchv1.JobFailed {
+						continue
+					}
+					if cond.Reason == "DeadlineExceeded" {
 						timedOut = true
+					}
+					// Keep the job's own failure message (e.g. "Job has reached the
+					// specified backoff limit") as a fallback diagnostic for the
+					// no-pod case below; the events lookup yields a better one.
+					if m := strings.TrimSpace(cond.Message); m != "" {
+						failedMsg = m
+					} else if cond.Reason != "" {
+						failedMsg = cond.Reason
 					}
 				}
 				exitCode = 1
@@ -254,7 +267,7 @@ done:
 	case podErr != nil:
 		logErr = podErr
 	case pod == nil:
-		logErr = fmt.Errorf("no pod found for execution — logs unavailable (the pod may have been evicted or never scheduled)")
+		logErr = noPodError(r.jobFailureReason(jobName), failedMsg)
 	default:
 		stdout, logErr = r.collectLogs(pod.Name)
 	}
@@ -297,6 +310,59 @@ func (r *KubernetesRuntime) findPod(executionID string) (*corev1.Pod, error) {
 		return nil, nil
 	}
 	return &pods.Items[0], nil
+}
+
+// noPodError composes the diagnostic returned when a job reaches a terminal
+// state but no pod can be found. It prefers a reason pulled from the job's
+// events (which names the real cause — most often a RuntimeClass that does not
+// exist or has no node to run it, so "VM"/kata runners fail before a pod is ever
+// admitted), then the job's own failure-condition message, then a generic hint.
+func noPodError(eventReason, condMsg string) error {
+	switch {
+	case eventReason != "":
+		return fmt.Errorf("no pod ran for execution: %s", eventReason)
+	case condMsg != "":
+		return fmt.Errorf("no pod ran for execution: %s (no pod was scheduled)", condMsg)
+	default:
+		return fmt.Errorf("no pod found for execution — logs unavailable (the pod may have been evicted or never scheduled; verify the backend's RuntimeClass exists and a node can run it)")
+	}
+}
+
+// jobFailureReason returns a short, human-readable reason the job produced no
+// pod, taken from the job's most recent Warning event (e.g. a FailedCreate that
+// names a missing RuntimeClass). Returns "" when no informative event exists.
+// The field selector narrows the query on a real API server; the client-side
+// filter keeps it correct under the fake clientset, which ignores it.
+func (r *KubernetesRuntime) jobFailureReason(jobName string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	evs, err := r.client.CoreV1().Events(r.namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "involvedObject.kind=Job,involvedObject.name=" + jobName,
+	})
+	if err != nil {
+		return ""
+	}
+
+	var best *corev1.Event
+	for i := range evs.Items {
+		e := &evs.Items[i]
+		if e.InvolvedObject.Name != jobName || e.Type != corev1.EventTypeWarning {
+			continue
+		}
+		if best == nil || e.LastTimestamp.Time.After(best.LastTimestamp.Time) {
+			best = e
+		}
+	}
+	if best == nil {
+		return ""
+	}
+
+	msg := strings.TrimSpace(best.Message)
+	if best.Reason != "" {
+		return strings.TrimSpace(best.Reason + ": " + msg)
+	}
+	return msg
 }
 
 // collectLogs streams the runner container's combined stdout+stderr (Kubernetes
