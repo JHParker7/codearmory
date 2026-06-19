@@ -179,6 +179,22 @@ func gkCount(r gkRecord, key string) string {
 	return "0"
 }
 
+// gkStrSlice extracts a record field as a []string (a decoded JSON array of
+// strings), skipping any non-string elements.
+func gkStrSlice(r gkRecord, key string) []string {
+	raw, ok := r[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // gkCapitalize upper-cases the first letter of s (ASCII), for prompt verbs.
 func gkCapitalize(s string) string {
 	if s == "" {
@@ -231,6 +247,10 @@ type gkFormDoneMsg struct {
 	status  string
 }
 type gkRolesMsg []gkRecord
+
+// gkRoleDetailMsg carries the rendered role detail once its permission ids have
+// been resolved into full permission objects.
+type gkRoleDetailMsg struct{ content string }
 
 // ── Model ───────────────────────────────────────────────────────────────────
 
@@ -349,6 +369,64 @@ func gkFetchRoles() tea.Msg {
 	return gkRolesMsg(recs)
 }
 
+// gkResolveRolePerms fetches the full permission record for each of a role's
+// permission ids so the detail view can show the actual permissions (name,
+// service, actions, resources) instead of opaque ids. There is no list-by-ids
+// endpoint, so ids are fetched individually; an id that can't be fetched is
+// kept as a stub noting the error so one missing permission doesn't hide the
+// rest.
+func gkResolveRolePerms(rec gkRecord) tea.Cmd {
+	ids := gkStrSlice(rec, "permissions_ids")
+	return func() tea.Msg {
+		resolved := make([]any, 0, len(ids))
+		for _, id := range ids {
+			data, err := doRequest("GET", "/gatekeeper/permissions/"+id, nil)
+			if err != nil {
+				resolved = append(resolved, gkRecord{"permissions_id": id, "error": err.Error()})
+				continue
+			}
+			var p gkRecord
+			if err := json.Unmarshal(data, &p); err != nil {
+				resolved = append(resolved, gkRecord{"permissions_id": id, "error": err.Error()})
+				continue
+			}
+			resolved = append(resolved, p)
+		}
+		return gkRoleDetailMsg{content: gkRoleDetailContent(rec, resolved)}
+	}
+}
+
+// gkRoleBase copies a role record without the raw permissions_ids list, which
+// the detail view replaces with resolved permission objects.
+func gkRoleBase(rec gkRecord) gkRecord {
+	base := make(gkRecord, len(rec)+1)
+	for k, v := range rec {
+		if k != "permissions_ids" {
+			base[k] = v
+		}
+	}
+	return base
+}
+
+// gkRoleDetailContent renders a role as pretty JSON with permissions_ids
+// replaced by the resolved permission objects under a "permissions" key.
+func gkRoleDetailContent(rec gkRecord, perms []any) string {
+	if perms == nil {
+		perms = []any{}
+	}
+	base := gkRoleBase(rec)
+	base["permissions"] = perms
+	pretty, _ := json.MarshalIndent(base, "", "  ")
+	return string(pretty)
+}
+
+// gkRoleLoadingContent is shown while a role's permissions resolve: the role
+// JSON without the raw ids, plus a count of how many are still loading.
+func gkRoleLoadingContent(rec gkRecord, n int) string {
+	pretty, _ := json.MarshalIndent(gkRoleBase(rec), "", "  ")
+	return fmt.Sprintf("%s\n\nresolving %d permission(s)…", pretty, n)
+}
+
 func gkRunAction(section gkSection, method, path, label string) tea.Cmd {
 	return func() tea.Msg {
 		if _, err := doRequest(method, path, nil); err != nil {
@@ -429,6 +507,14 @@ func (m gatekeeperModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case gkRolesMsg:
 		m.roles = []gkRecord(msg)
+		return m, nil
+
+	case gkRoleDetailMsg:
+		// Resolved role permissions arrived; swap them into the detail view if
+		// it's still showing (the user may have navigated away meanwhile).
+		if m.view == gkViewDetail {
+			m.vp.SetContent(msg.content)
+		}
 		return m, nil
 
 	case gkActionMsg:
@@ -545,10 +631,22 @@ func (m gatekeeperModel) keyList(msg tea.KeyMsg) (gatekeeperModel, tea.Cmd) {
 	case "enter":
 		if rec, ok := m.currentRecord(); ok {
 			m.selLabel = gkStr(rec, m.def().nameKey)
+			m.view = gkViewDetail
+			// Roles store opaque permission ids; resolve them to real
+			// permissions so the detail view shows what the role actually grants.
+			if m.section == gkRoles {
+				if ids := gkStrSlice(rec, "permissions_ids"); len(ids) > 0 {
+					m.vp.SetContent(gkRoleLoadingContent(rec, len(ids)))
+					m.vp.GotoTop()
+					return m, gkResolveRolePerms(rec)
+				}
+				m.vp.SetContent(gkRoleDetailContent(rec, nil))
+				m.vp.GotoTop()
+				return m, nil
+			}
 			pretty, _ := json.MarshalIndent(rec, "", "  ")
 			m.vp.SetContent(string(pretty))
 			m.vp.GotoTop()
-			m.view = gkViewDetail
 		}
 		return m, nil
 	case "r":

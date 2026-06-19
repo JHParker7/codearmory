@@ -435,6 +435,138 @@ func TestGKRoleField_TextFallbackWhenEmpty(t *testing.T) {
 	}
 }
 
+func gkRolePermRecords(n int) []gkRecord {
+	out := make([]gkRecord, n)
+	for i := range out {
+		ids := make([]any, i+1)
+		for j := range ids {
+			ids[j] = fmt.Sprintf("perm-%d", j)
+		}
+		out[i] = gkRecord{
+			"role_id":         fmt.Sprintf("role-%04d", i),
+			"name":            fmt.Sprintf("role-%d", i),
+			"permissions_ids": ids,
+		}
+	}
+	return out
+}
+
+func TestGKResolveRolePerms_ReplacesIDsWithPermissions(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/gatekeeper/permissions/perm-1", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(gkRecord{ //nolint:errcheck
+			"permissions_id": "perm-1", "name": "read-repos", "service": "forge",
+			"actions": []string{"read"}, "resources": []string{"forge/repos/*"},
+		})
+	})
+	mux.HandleFunc("/gatekeeper/permissions/perm-2", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(gkRecord{ //nolint:errcheck
+			"permissions_id": "perm-2", "name": "run-ci", "service": "workflows",
+		})
+	})
+	setupCLI(t, routeServer(t, mux))
+
+	rec := gkRecord{"role_id": "role-1", "name": "ci", "permissions_ids": []any{"perm-1", "perm-2"}}
+	msg, ok := gkResolveRolePerms(rec)().(gkRoleDetailMsg)
+	if !ok {
+		t.Fatalf("resolve = %T, want gkRoleDetailMsg", gkResolveRolePerms(rec)())
+	}
+	if strings.Contains(msg.content, "permissions_ids") {
+		t.Error("detail should drop the raw permissions_ids key")
+	}
+	for _, want := range []string{"\"permissions\"", "read-repos", "forge/repos/*", "run-ci", "workflows"} {
+		if !strings.Contains(msg.content, want) {
+			t.Errorf("detail missing %q; got:\n%s", want, msg.content)
+		}
+	}
+}
+
+func TestGKResolveRolePerms_KeepsStubForMissing(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusNotFound, `{"error":"not found"}`)
+	setupCLI(t, srv)
+
+	rec := gkRecord{"role_id": "r", "name": "x", "permissions_ids": []any{"gone"}}
+	msg := gkResolveRolePerms(rec)().(gkRoleDetailMsg)
+	if !strings.Contains(msg.content, "gone") || !strings.Contains(msg.content, "error") {
+		t.Errorf("a missing permission should leave a stub naming the id and error; got:\n%s", msg.content)
+	}
+}
+
+func TestGKRoleDetailContent_EmptyPermsRendersArray(t *testing.T) {
+	got := gkRoleDetailContent(gkRecord{"name": "x", "permissions_ids": []any{"a"}}, nil)
+	if strings.Contains(got, "permissions_ids") {
+		t.Error("content should drop permissions_ids")
+	}
+	if !strings.Contains(got, "\"permissions\": []") {
+		t.Errorf("nil perms should render an empty array, got:\n%s", got)
+	}
+}
+
+func TestGKModel_Enter_OnRole_ResolvesPermissions(t *testing.T) {
+	m := newGatekeeperModel()
+	m.section = gkRoles
+	m = applyGK(m, gkRecordsMsg{section: gkRoles, records: gkRolePermRecords(1)})
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2 := updated.(gatekeeperModel)
+	if m2.view != gkViewDetail {
+		t.Fatalf("enter should open the role detail, view = %v", m2.view)
+	}
+	if cmd == nil {
+		t.Fatal("entering a role with permissions should dispatch a resolve cmd")
+	}
+	// The loading placeholder must not leak raw permission ids.
+	if strings.Contains(m2.vp.View(), "perm-0") {
+		t.Errorf("loading placeholder should strip raw ids, got:\n%s", m2.vp.View())
+	}
+	if !strings.Contains(m2.vp.View(), "resolving") {
+		t.Errorf("placeholder should note resolving, got:\n%s", m2.vp.View())
+	}
+}
+
+func TestGKModel_Enter_OnRole_NoPerms_NoResolve(t *testing.T) {
+	m := newGatekeeperModel()
+	m.section = gkRoles
+	m = applyGK(m, gkRecordsMsg{section: gkRoles, records: []gkRecord{
+		{"role_id": "role-1", "name": "ci", "permissions_ids": []any{}},
+	}})
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("a role with no permissions should not dispatch a resolve")
+	}
+	if !strings.Contains(updated.(gatekeeperModel).vp.View(), "\"permissions\": []") {
+		t.Error("a permissionless role should render an empty permissions array")
+	}
+}
+
+func TestGKModel_RoleDetailMsg_PopulatesViewportInDetail(t *testing.T) {
+	m := newGatekeeperModel()
+	m.view = gkViewDetail
+	m = applyGK(m, gkRoleDetailMsg{content: "RESOLVED-PERMS"})
+	if !strings.Contains(m.vp.View(), "RESOLVED-PERMS") {
+		t.Error("a role detail msg should populate the viewport when in detail view")
+	}
+}
+
+func TestGKModel_RoleDetailMsg_IgnoredOutsideDetail(t *testing.T) {
+	m := newGatekeeperModel() // list view
+	m = applyGK(m, gkRoleDetailMsg{content: "RESOLVED-PERMS"})
+	if strings.Contains(m.vp.View(), "RESOLVED-PERMS") {
+		t.Error("a stale role detail msg should be ignored once back in the list")
+	}
+}
+
+func TestGKStrSlice(t *testing.T) {
+	r := gkRecord{"ids": []any{"a", "b", 3, "c"}, "wrong": "x"}
+	if got := gkStrSlice(r, "ids"); len(got) != 3 || got[0] != "a" || got[2] != "c" {
+		t.Errorf("gkStrSlice dropped/garbled strings, got %v", got)
+	}
+	if gkStrSlice(r, "wrong") != nil || gkStrSlice(r, "missing") != nil {
+		t.Error("gkStrSlice of a non-array / missing field should be nil")
+	}
+}
+
 func TestGKModel_RolesMsg_Populates(t *testing.T) {
 	m := applyGK(newGatekeeperModel(), gkRolesMsg(gkRoleRecords(2)))
 	if len(m.roles) != 2 {
