@@ -40,6 +40,7 @@ type tuiActionsMsg []string
 type tuiImagesMsg []string
 type tuiTicketsMsg kvCatalog
 type tuiOutpostsMsg kvCatalog
+type tuiRunnerClassesMsg kvCatalog
 type tuiStepCreatedMsg struct{}
 
 // stepTestDoneMsg carries the result of a standalone step test (run via a
@@ -92,6 +93,10 @@ type stepsModel struct {
 	// outpost). Each degrades to a free-text id input when unavailable.
 	tickets  kvCatalog
 	outposts kvCatalog
+	// runnerClasses backs the forge/run form's Runner picker (name == value), so a
+	// step can pin a forge runner class. Degrades to a free-text input when
+	// unavailable; an empty selection lets forge apply its default class.
+	runnerClasses kvCatalog
 
 	form tuiForm
 	// editStepID is the id of the step being edited (stepsViewEdit); the edit form
@@ -106,7 +111,7 @@ type stepsModel struct {
 
 // catalogs bundles the model's option sources for the create-step form.
 func (m stepsModel) catalogs() stepCatalogs {
-	return stepCatalogs{images: m.images, tickets: m.tickets, outposts: m.outposts}
+	return stepCatalogs{images: m.images, tickets: m.tickets, outposts: m.outposts, runnerClasses: m.runnerClasses}
 }
 
 func newStepsModel() stepsModel {
@@ -130,10 +135,10 @@ func (m *stepsModel) applyLayout() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 // Init loads steps and batches the form's option catalogs (actions, forge images,
-// tickets, outposts) so every selector — including the name→id pickers — is ready
-// the moment the create-step form opens.
+// tickets, outposts, runner classes) so every selector — including the name pickers
+// — is ready the moment the create-step form opens.
 func (m stepsModel) Init() tea.Cmd {
-	return tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages, tuiFetchTickets, tuiFetchOutposts)
+	return tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages, tuiFetchTickets, tuiFetchOutposts, tuiFetchRunnerClasses)
 }
 
 // ── Fetch commands ────────────────────────────────────────────────────────────
@@ -247,6 +252,33 @@ func tuiFetchOutposts() tea.Msg {
 	return tuiOutpostsMsg(cat)
 }
 
+// tuiFetchRunnerClasses loads the forge runner-class catalog so the forge/run form
+// can offer a Runner picker (the class name is both shown and submitted). Only
+// enabled classes are offered — forge rejects a disabled class at run time. Degrades
+// to an empty catalog (free-text fallback) on failure.
+func tuiFetchRunnerClasses() tea.Msg {
+	data, err := doRequest("GET", "/forge/runner-classes", nil)
+	if err != nil {
+		return tuiRunnerClassesMsg{}
+	}
+	var rcs []struct {
+		Name    string `json:"name"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := json.Unmarshal(data, &rcs); err != nil {
+		return tuiRunnerClassesMsg{}
+	}
+	var cat kvCatalog
+	for _, rc := range rcs {
+		if rc.Name == "" || !rc.Enabled {
+			continue
+		}
+		cat.labels = append(cat.labels, rc.Name)
+		cat.values = append(cat.values, rc.Name)
+	}
+	return tuiRunnerClassesMsg(cat)
+}
+
 // ── Update ────────────────────────────────────────────────────────────────────
 
 func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -304,6 +336,14 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiOutpostsMsg:
 		m.outposts = kvCatalog(msg)
+		if m.view == stepsViewCreate || m.view == stepsViewEdit {
+			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
+		}
+		return m, nil
+
+	case tuiRunnerClassesMsg:
+		m.runnerClasses = kvCatalog(msg)
+		// Upgrade an open forge/run Runner field from free-text to a name picker.
 		if m.view == stepsViewCreate || m.view == stepsViewEdit {
 			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
 		}
@@ -407,6 +447,9 @@ func (m stepsModel) keyList(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 		if len(m.outposts.values) == 0 {
 			cmds = append(cmds, tuiFetchOutposts)
 		}
+		if len(m.runnerClasses.values) == 0 {
+			cmds = append(cmds, tuiFetchRunnerClasses)
+		}
 		return m, tea.Batch(cmds...)
 	case "e", "enter":
 		return m.startStepEdit()
@@ -490,9 +533,10 @@ func stepActionField(eff string, actions []string) formField {
 
 // stepSchemaField converts a schema field into a form field. A catalog-backed
 // field renders as a picker when its catalog is loaded — image as a plain ←/→
-// selector, ticket/outpost as a name→id selector (shows the name, submits the id)
-// — and degrades to a free-text input otherwise. Non-catalog fields are always
-// free text (parsed at submit time by buildStepWith).
+// selector, ticket/outpost/runner-class as a name selector (the value submitted is
+// the name for runner classes, the id behind the name for tickets/outposts) — and
+// degrades to a free-text input otherwise. Non-catalog fields are always free text
+// (parsed at submit time by buildStepWith).
 func stepSchemaField(sf stepField, cats stepCatalogs) formField {
 	key := withKeyPrefix + sf.key
 	switch sf.catalog {
@@ -500,7 +544,7 @@ func stepSchemaField(sf stepField, cats stepCatalogs) formField {
 		if len(cats.images) > 0 {
 			return formSelect(key, sf.label, cats.images)
 		}
-	case catTicket, catOutpost:
+	case catTicket, catOutpost, catRunnerClass:
 		if c := cats.forCatalog(sf.catalog); len(c.values) > 0 {
 			return idPickerField(key, sf.label, sf.required, c)
 		}
@@ -661,6 +705,9 @@ func (m stepsModel) startStepEdit() (stepsModel, tea.Cmd) {
 	}
 	if len(m.outposts.values) == 0 {
 		cmds = append(cmds, tuiFetchOutposts)
+	}
+	if len(m.runnerClasses.values) == 0 {
+		cmds = append(cmds, tuiFetchRunnerClasses)
 	}
 	return m, tea.Batch(cmds...)
 }

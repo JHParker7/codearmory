@@ -186,10 +186,10 @@ Manage CI/CD steps, pipelines, and runs. Steps are reusable building blocks; pip
 
 | Command | Flags | Description |
 |---------|-------|-------------|
-| `ci create step <name>` | `--action`, `--with <json>`, `--image`, `--run`, `--env KEY=VAL` (repeatable), `--timeout`, `--description`, `-f <file>` | Create a reusable step |
+| `ci create step <name>` | `--action`, `--with <json>`, `--image`, `--run`, `--runner-class`, `--env KEY=VAL` (repeatable), `--timeout`, `--description`, `-f <file>` | Create a reusable step |
 | `ci list steps` | | List all steps |
 | `ci get step <id>` | | Get a step |
-| `ci update step <id>` | `--action`, `--with <json>`, `--image`, `--run`, `--env KEY=VAL` (repeatable), `--timeout`, `--description`, `-f <file>` | Update a step |
+| `ci update step <id>` | `--action`, `--with <json>`, `--image`, `--run`, `--runner-class`, `--env KEY=VAL` (repeatable), `--timeout`, `--description`, `-f <file>` | Update a step |
 | `ci delete step <id>` | | Delete a step |
 
 **Pipelines**
@@ -217,7 +217,7 @@ Manage CI/CD steps, pipelines, and runs. Steps are reusable building blocks; pip
 |---------|-------------|
 | `ci list actions` | List available workflow actions from the service catalog |
 
-For `forge/run` steps, `--image` and `--run` are convenience flags that build the required `with` JSON automatically. For all other actions, `--with <json>` is required.
+For `forge/run` steps, `--image`, `--run`, `--env`, and `--runner-class` are convenience flags that build the required `with` JSON automatically (`--runner-class` is optional; forge applies its default class when omitted). For all other actions, `--with <json>` is required.
 
 ### `hooks`
 

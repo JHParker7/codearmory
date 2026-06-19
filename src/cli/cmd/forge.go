@@ -71,36 +71,7 @@ func init() {
 			if execRunnerClass != "" {
 				payload["runner_class"] = execRunnerClass
 			}
-			body, err := json.Marshal(payload)
-			if err != nil {
-				return err
-			}
-			data, err := doRequest("POST", "/forge/executions", body)
-			if err != nil {
-				return err
-			}
-			var resp struct {
-				ExecutionID string `json:"execution_id"`
-			}
-			if err := json.Unmarshal(data, &resp); err != nil || resp.ExecutionID == "" {
-				printResponse(data) // show whatever came back
-				// A 2xx without an execution_id means the job wasn't created (or the
-				// response is unrecognised); don't report success or silently skip
-				// --wait.
-				cmd.SilenceUsage = true
-				return fmt.Errorf("submission did not return an execution_id")
-			}
-			if execWait {
-				fmt.Fprintf(os.Stderr, "forge job: %s started\n", resp.ExecutionID)
-				if err := waitForExecution(resp.ExecutionID, execTimeout); err != nil {
-					cmd.SilenceUsage = true // the job ran but failed — not a CLI usage error
-					return err
-				}
-				return nil
-			}
-			fmt.Printf("forge job: %s started\n", resp.ExecutionID)
-			fmt.Printf("track output with: armory forge exec get %s\n", resp.ExecutionID)
-			return nil
+			return submitForgeExecution(cmd, payload, execTimeout, execWait)
 		},
 	}
 	runCmd.Flags().StringVar(&execImage, "image", "", "Container image to run (required)")
@@ -125,9 +96,29 @@ func init() {
 	}
 	listExecCmd.Flags().StringVar(&execListStatus, "status", "", "Filter: pending, running, completed, failed, timed_out, cancelled")
 
+	var execRerunWait bool
+
+	rerunCmd := &cobra.Command{
+		Use:   "rerun <id>",
+		Short: "Resubmit an execution with the same image, command, env, and runner class",
+		Long: `Resubmit a previous execution as a brand-new run, copying its image,
+command, environment, timeout, and runner class. The original execution is left
+untouched, and resubmission goes through the normal submit path so the current
+image allowlist and runner-class rules are re-enforced.
+
+  armory forge exec rerun 3f2a1b…          # queue a fresh copy
+  armory forge exec rerun 3f2a1b… --wait   # wait for it to finish and print its output`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return rerunForgeExecution(cmd, args[0], execRerunWait)
+		},
+	}
+	rerunCmd.Flags().BoolVar(&execRerunWait, "wait", false, "Wait for the execution to finish, print its output, and exit non-zero if it failed")
+
 	execCmd.AddCommand(
 		runCmd,
 		listExecCmd,
+		rerunCmd,
 		&cobra.Command{
 			Use:   "get <id>",
 			Short: "Get an execution, including its stdout and stderr",
@@ -267,6 +258,81 @@ func init() {
 	forgeCmd.AddCommand(execCmd, rcCmd)
 	// The forge module (command + home-screen) is registered in forge_tui.go,
 	// alongside the screen it contributes.
+}
+
+// submitForgeExecution POSTs a forge execution payload, then either prints the
+// started-job hint or — when wait is true — blocks until the job finishes,
+// prints its output, and returns a non-nil error if it failed. timeout bounds
+// the --wait poll (0 = server default). It is shared by `exec run` and
+// `exec rerun`, which differ only in how they assemble the payload.
+func submitForgeExecution(cmd *cobra.Command, payload map[string]any, timeout int, wait bool) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	data, err := doRequest("POST", "/forge/executions", body)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		ExecutionID string `json:"execution_id"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil || resp.ExecutionID == "" {
+		printResponse(data) // show whatever came back
+		// A 2xx without an execution_id means the job wasn't created (or the
+		// response is unrecognised); don't report success or silently skip --wait.
+		cmd.SilenceUsage = true
+		return fmt.Errorf("submission did not return an execution_id")
+	}
+	if wait {
+		fmt.Fprintf(os.Stderr, "forge job: %s started\n", resp.ExecutionID)
+		if err := waitForExecution(resp.ExecutionID, timeout); err != nil {
+			cmd.SilenceUsage = true // the job ran but failed — not a CLI usage error
+			return err
+		}
+		return nil
+	}
+	fmt.Printf("forge job: %s started\n", resp.ExecutionID)
+	fmt.Printf("track output with: armory forge exec get %s\n", resp.ExecutionID)
+	return nil
+}
+
+// rerunForgeExecution fetches an existing execution and resubmits it as a new
+// run with the same image, command, env, timeout, and runner class. The
+// original record is never modified.
+func rerunForgeExecution(cmd *cobra.Command, id string, wait bool) error {
+	data, err := doRequest("GET", "/forge/executions/"+id, nil)
+	if err != nil {
+		return err
+	}
+	var src struct {
+		Image       string            `json:"image"`
+		Command     []string          `json:"command"`
+		Env         map[string]string `json:"env"`
+		Timeout     int64             `json:"timeout"`
+		RunnerClass string            `json:"runner_class"`
+	}
+	if err := json.Unmarshal(data, &src); err != nil {
+		return fmt.Errorf("unexpected execution response: %s", data)
+	}
+	if src.Image == "" || len(src.Command) == 0 {
+		cmd.SilenceUsage = true
+		return fmt.Errorf("execution %s cannot be rerun: it has no recorded image or command", id)
+	}
+	payload := map[string]any{
+		"image":   src.Image,
+		"command": src.Command,
+	}
+	if len(src.Env) > 0 {
+		payload["env"] = src.Env
+	}
+	if src.Timeout > 0 {
+		payload["timeout"] = src.Timeout
+	}
+	if src.RunnerClass != "" {
+		payload["runner_class"] = src.RunnerClass
+	}
+	return submitForgeExecution(cmd, payload, int(src.Timeout), wait)
 }
 
 // waitForExecution polls a forge execution until it reaches a terminal state,

@@ -26,6 +26,12 @@ type forgeExec struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
 	EndedAt     *time.Time `json:"ended_at,omitempty"`
+	// Command, Env, and Timeout are carried so the list/output views can rerun
+	// an execution without a second fetch — both the list and detail endpoints
+	// return them. They are not displayed in the table.
+	Command []string          `json:"command,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	Timeout int64             `json:"timeout,omitempty"`
 }
 
 // ── Messages ──────────────────────────────────────────────────────────────────
@@ -334,6 +340,11 @@ func (m forgeModel) forgeKeyList(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
 				}
 			}
 		}
+	case "R":
+		i := m.eTable.Cursor()
+		if i >= 0 && i < len(m.execs) && len(m.execs[i].Command) > 0 {
+			return m, forgeRerunExec(m.execs[i])
+		}
 	case "r":
 		m.loading = true
 		return m, forgeFetchExecs
@@ -351,6 +362,16 @@ func (m forgeModel) forgeKeyOutput(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
 		m.view = forgeViewList
 		m.detail = nil
 		return m, nil
+	case "R":
+		// Prefer the freshly-fetched detail; fall back to the list row. Both
+		// carry the command needed to rerun.
+		src := m.detail
+		if src == nil {
+			src = m.selExec
+		}
+		if src != nil && len(src.Command) > 0 {
+			return m, forgeRerunExec(*src)
+		}
 	case "r":
 		if m.selExec != nil {
 			m.loading = true
@@ -464,6 +485,31 @@ func forgeSubmitExec(image string, command []string, env map[string]string, time
 	}
 }
 
+// forgeRerunExec resubmits an execution with the same image, command, env,
+// timeout, and runner class, creating a brand-new run. On success the list
+// refreshes (via forgeCreatedMsg) so the fresh job appears; a failure surfaces
+// as an error rather than being swallowed, so the user is never misled into
+// thinking the rerun queued when it didn't.
+func forgeRerunExec(e forgeExec) tea.Cmd {
+	return func() tea.Msg {
+		payload := map[string]any{"image": e.Image, "command": e.Command}
+		if len(e.Env) > 0 {
+			payload["env"] = e.Env
+		}
+		if e.Timeout > 0 {
+			payload["timeout"] = e.Timeout
+		}
+		if e.RunnerClass != "" {
+			payload["runner_class"] = e.RunnerClass
+		}
+		body, _ := json.Marshal(payload)
+		if _, err := doRequest("POST", "/forge/executions", body); err != nil {
+			return forgeErrMsg{err}
+		}
+		return forgeCreatedMsg{}
+	}
+}
+
 // buildForgeCommand turns the command field into the argv forge executes. Forge
 // runs argv directly with no shell, so a multi-line entry — which the user means
 // as a script, one command per line — can't be sent as bare tokens (they'd become
@@ -567,7 +613,7 @@ func (m forgeModel) View() string {
 
 func (m forgeModel) forgeViewList() string {
 	title := tuiTitleStyle.Render("Forge Executions")
-	help := tuiHelp("[↑↓/jk] navigate  [enter] output  [n] new  [x] cancel  [r] refresh  [esc] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [enter] output  [n] new  [R] rerun  [x] cancel  [r] refresh  [esc] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -579,7 +625,7 @@ func (m forgeModel) forgeViewList() string {
 
 func (m forgeModel) forgeViewOutput() string {
 	title := tuiTitleStyle.Render("Execution Output")
-	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [r] refresh  [esc] back", m.width)
+	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [R] rerun  [r] refresh  [esc] back", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
