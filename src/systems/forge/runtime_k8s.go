@@ -194,7 +194,17 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 					Volumes: []corev1.Volume{{
 						Name: "tmp",
 						VolumeSource: corev1.VolumeSource{
-							EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &tmpSize},
+							// Memory-backed (tmpfs), matching the docker runtime's `--tmpfs /tmp`
+							// and the `TmpfsMB` runner-class field. Critically, this is what makes
+							// Firecracker (kata-fc) work: Firecracker has no virtio-fs/9p
+							// filesystem sharing, so a default node-backed emptyDir cannot be
+							// shared into the microVM and the container never starts. A Memory
+							// emptyDir lives inside the guest and needs no host sharing. The size
+							// counts against the pod memory limit, same as the docker tmpfs.
+							EmptyDir: &corev1.EmptyDirVolumeSource{
+								Medium:    corev1.StorageMediumMemory,
+								SizeLimit: &tmpSize,
+							},
 						},
 					}},
 				},
@@ -275,6 +285,17 @@ done:
 		logErr = noPodError(r.jobFailureReason(jobName), failedMsg)
 	default:
 		stdout, logErr = r.collectLogs(pod.Name)
+		// A pod that never started its container (CreateContainerError,
+		// ImagePullBackOff, OOMKilled, a kata microVM that failed to boot) has no
+		// logs to stream — the real cause is in the container state / pod events,
+		// not the empty log stream. Surface it instead of an opaque stream error.
+		// This only reaches the caller when the command actually failed (the stderr
+		// gate below requires a non-zero exit), so a silent successful run is safe.
+		if strings.TrimSpace(stdout) == "" {
+			if detail := r.podFailureDetail(pod, jobName); detail != "" {
+				logErr = fmt.Errorf("pod produced no logs: %s", detail)
+			}
+		}
 	}
 
 	if timedOut {
@@ -334,16 +355,20 @@ func noPodError(eventReason, condMsg string) error {
 }
 
 // jobFailureReason returns a short, human-readable reason the job produced no
-// pod, taken from the job's most recent Warning event (e.g. a FailedCreate that
-// names a missing RuntimeClass). Returns "" when no informative event exists.
-// The field selector narrows the query on a real API server; the client-side
-// filter keeps it correct under the fake clientset, which ignores it.
+// usable pod, taken from the most recent Warning event for the job or one of its
+// pods. The job emits FailedCreate/BackoffLimitExceeded (e.g. a missing
+// RuntimeClass); the scheduler and kubelet emit FailedScheduling and
+// FailedCreatePodSandBox on the *pod* (e.g. no kata-capable node, or a microVM
+// that fails to boot) — and those pod events survive even after the pod object is
+// gone, which is the common no-pod case. Returns "" when no informative event
+// exists. The field selector narrows to Warnings on a real API server; the
+// client-side filter keeps it correct under the fake clientset, which ignores it.
 func (r *KubernetesRuntime) jobFailureReason(jobName string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	evs, err := r.client.CoreV1().Events(r.namespace).List(ctx, metav1.ListOptions{
-		FieldSelector: "involvedObject.kind=Job,involvedObject.name=" + jobName,
+		FieldSelector: "type=" + corev1.EventTypeWarning,
 	})
 	if err != nil {
 		return ""
@@ -352,7 +377,7 @@ func (r *KubernetesRuntime) jobFailureReason(jobName string) string {
 	var best *corev1.Event
 	for i := range evs.Items {
 		e := &evs.Items[i]
-		if e.InvolvedObject.Name != jobName || e.Type != corev1.EventTypeWarning {
+		if e.Type != corev1.EventTypeWarning || !involvesJob(e, jobName) {
 			continue
 		}
 		if best == nil || eventTime(e).After(eventTime(best)) {
@@ -362,16 +387,37 @@ func (r *KubernetesRuntime) jobFailureReason(jobName string) string {
 	if best == nil {
 		return ""
 	}
+	return joinReasonMessage(best.Reason, best.Message)
+}
 
-	msg := strings.TrimSpace(best.Message)
-	reason := strings.TrimSpace(best.Reason)
+// involvesJob reports whether a namespace event belongs to the given job — either
+// the Job object itself (FailedCreate, BackoffLimitExceeded) or one of the pods it
+// created, named "<jobName>-<suffix>" (FailedScheduling, FailedCreatePodSandBox).
+// The trailing dash keeps "forge-exec-1" from matching "forge-exec-12"'s pods.
+func involvesJob(e *corev1.Event, jobName string) bool {
+	o := e.InvolvedObject
+	switch o.Kind {
+	case "Job":
+		return o.Name == jobName
+	case "Pod":
+		return strings.HasPrefix(o.Name, jobName+"-")
+	default:
+		return false
+	}
+}
+
+// joinReasonMessage formats a Reason/Message pair into a single line without a
+// dangling colon when either half is empty.
+func joinReasonMessage(reason, message string) string {
+	reason = strings.TrimSpace(reason)
+	message = strings.TrimSpace(message)
 	switch {
-	case reason != "" && msg != "":
-		return reason + ": " + msg
+	case reason != "" && message != "":
+		return reason + ": " + message
 	case reason != "":
 		return reason
 	default:
-		return msg
+		return message
 	}
 }
 
@@ -404,6 +450,43 @@ func (r *KubernetesRuntime) collectLogs(podName string) (string, error) {
 	var buf bytes.Buffer
 	io.Copy(&buf, io.LimitReader(stream, maxOutputBytes)) //nolint:errcheck
 	return buf.String(), nil
+}
+
+// podFailureDetail explains why a pod that exists produced no usable logs: first
+// the runner container's own waiting/terminated state (the precise cause), then
+// the most recent Warning event for the job or its pods. Returns "" when nothing
+// informative is available, so a genuinely silent failure falls back to the exit
+// code alone.
+func (r *KubernetesRuntime) podFailureDetail(pod *corev1.Pod, jobName string) string {
+	if s := containerStateReason(pod); s != "" {
+		return s
+	}
+	return r.jobFailureReason(jobName)
+}
+
+// containerStateReason extracts a failure reason from the runner container's
+// status when it produced no logs: a Waiting reason (CreateContainerError,
+// ImagePullBackOff, ErrImagePull, a kata sandbox that failed to boot) or an
+// abnormal Terminated state (OOMKilled, ContainerCannotRun, StartError, or any
+// terminated container carrying a message). A plain non-zero "Error" exit with no
+// message is left to the exit code and reported as "" so a normal command failure
+// is not dressed up as an infrastructure error.
+func containerStateReason(pod *corev1.Pod) string {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name != "runner" {
+			continue
+		}
+		if w := cs.State.Waiting; w != nil && strings.TrimSpace(w.Reason) != "" {
+			return joinReasonMessage(w.Reason, w.Message)
+		}
+		if t := cs.State.Terminated; t != nil {
+			reason := strings.TrimSpace(t.Reason)
+			if strings.TrimSpace(t.Message) != "" || (reason != "" && reason != "Error" && reason != "Completed") {
+				return joinReasonMessage(t.Reason, t.Message)
+			}
+		}
+	}
+	return ""
 }
 
 // podExitCode reads the runner container's terminated exit code from a pod

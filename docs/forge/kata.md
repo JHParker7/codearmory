@@ -144,5 +144,11 @@ moves an already-queued job.
   Kata binaries, pods scheduled there fail to start; that surfaces as a per-job
   failure, not a worker crash. Constrain scheduling (taints/affinity) to Kata-capable
   nodes as needed.
+- **Firecracker (`kata-fc`) has no filesystem sharing.** Unlike `kata-qemu`/`kata-clh`,
+  Firecracker supports no virtio-fs/9p, so a host-shared (node-backed) volume cannot be
+  mounted into the microVM. Forge sizes the job's writable `/tmp` (`tmpfs_mb`) as a
+  *memory-backed* emptyDir for exactly this reason, so it boots on `kata-fc` as well as
+  every other VMM. The cost is that `/tmp` usage counts against the runner class's
+  `memory_mb` (same as the docker runtime's tmpfs) — size the two together.
 - **Backend resolution failures are per-job**, same as every non-default backend: a
   bad `runtime_class` fails only its own executions, not the worker.
