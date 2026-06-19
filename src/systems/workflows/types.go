@@ -150,6 +150,11 @@ type WorkflowStepRun struct {
 	StepName     string     `json:"step_name"              gorm:"column:step_name"`
 	Status       string     `json:"status"                 gorm:"column:status;default:'pending'"`
 	Output       *string    `json:"output,omitempty"       gorm:"column:response_body"`
+	// MemoryUsedMB/MemoryLimitMB are carried through from the forge execution a
+	// forge-backed step ran (NULL for non-forge steps and when forge could not
+	// measure usage). See forge's Execution for how they are captured.
+	MemoryUsedMB  *int64     `json:"memory_used_mb,omitempty"  gorm:"column:memory_used_mb"`
+	MemoryLimitMB *int64     `json:"memory_limit_mb,omitempty" gorm:"column:memory_limit_mb"`
 	StartedAt    *time.Time `json:"started_at,omitempty"   gorm:"column:started_at"`
 	EndedAt      *time.Time `json:"ended_at,omitempty"     gorm:"column:ended_at"`
 }

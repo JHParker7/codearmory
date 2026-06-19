@@ -23,6 +23,8 @@ type forgeExec struct {
 	ExitCode    *int       `json:"exit_code,omitempty"`
 	Stdout      *string    `json:"stdout,omitempty"`
 	Stderr      *string    `json:"stderr,omitempty"`
+	MemoryUsedMB  *int64   `json:"memory_used_mb,omitempty"`
+	MemoryLimitMB *int64   `json:"memory_limit_mb,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
 	EndedAt     *time.Time `json:"ended_at,omitempty"`
@@ -628,7 +630,11 @@ func (m forgeModel) forgeViewOutput() string {
 	if d.ExitCode != nil {
 		exitStr = fmt.Sprintf("  exit: %d", *d.ExitCode)
 	}
-	meta := tuiMetaStyle.Render(tuiTrunc(d.Image, 36) + "  " + tuiColorStatus(d.Status) + exitStr)
+	memStr := ""
+	if mem := tuiFormatMem(d.MemoryUsedMB, d.MemoryLimitMB); mem != "" {
+		memStr = "  mem: " + mem
+	}
+	meta := tuiMetaStyle.Render(tuiTrunc(d.Image, 36) + "  " + tuiColorStatus(d.Status) + exitStr + memStr)
 	return tuiTitleStyle.Render(tuiShortID(d.ExecutionID)) + "  " + meta + "\n" +
 		tuiBoxStyle.Render(m.vp.View()) + "\n" + help
 }

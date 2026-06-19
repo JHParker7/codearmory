@@ -370,11 +370,13 @@ func waitForExecution(id string, serverTimeout int) error {
 			return err
 		}
 		var ex struct {
-			Status   string  `json:"status"`
-			Image    string  `json:"image"`
-			Stdout   *string `json:"stdout"`
-			Stderr   *string `json:"stderr"`
-			ExitCode *int    `json:"exit_code"`
+			Status        string  `json:"status"`
+			Image         string  `json:"image"`
+			Stdout        *string `json:"stdout"`
+			Stderr        *string `json:"stderr"`
+			ExitCode      *int    `json:"exit_code"`
+			MemoryUsedMB  *int64  `json:"memory_used_mb"`
+			MemoryLimitMB *int64  `json:"memory_limit_mb"`
 		}
 		if err := json.Unmarshal(data, &ex); err != nil {
 			return fmt.Errorf("unexpected execution response: %s", data)
@@ -384,6 +386,9 @@ func waitForExecution(id string, serverTimeout int) error {
 		case "completed":
 			printStream(os.Stdout, ex.Stdout)
 			printStream(os.Stderr, ex.Stderr)
+			if mem := tuiFormatMem(ex.MemoryUsedMB, ex.MemoryLimitMB); mem != "" {
+				fmt.Fprintf(os.Stderr, "memory: %s\n", mem)
+			}
 			return nil
 		case "failed", "timed_out":
 			// On failure the captured output is diagnostic, not a result, so route
@@ -392,6 +397,9 @@ func waitForExecution(id string, serverTimeout int) error {
 			// from `2>` redirection.)
 			printStream(os.Stderr, ex.Stdout)
 			printStream(os.Stderr, ex.Stderr)
+			if mem := tuiFormatMem(ex.MemoryUsedMB, ex.MemoryLimitMB); mem != "" {
+				fmt.Fprintf(os.Stderr, "memory: %s\n", mem)
+			}
 
 			ctxStr := ""
 			if ex.Image != "" {

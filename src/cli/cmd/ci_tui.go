@@ -104,6 +104,8 @@ type tuiStepRun struct {
 	ParallelGroup *int       `json:"parallel_group"`
 	Status        string     `json:"status"`
 	Output        *string    `json:"output"`
+	MemoryUsedMB  *int64     `json:"memory_used_mb"`
+	MemoryLimitMB *int64     `json:"memory_limit_mb"`
 	StartedAt     *time.Time `json:"started_at"`
 	EndedAt       *time.Time `json:"ended_at"`
 }
@@ -243,6 +245,7 @@ var (
 		{"#", 3, 0},
 		{"STEP", 16, 1},
 		{"STATUS", 11, 0},
+		{"MEM", 9, 0},
 		{"STARTED", 18, 0},
 		{"DURATION", 10, 0},
 	}
@@ -1161,6 +1164,7 @@ func tuiStepRunRows(stepRuns []tuiStepRun) []table.Row {
 				fmt.Sprintf("%d", stage),
 				sr.StepName,
 				sr.Status,
+				tuiFormatMemShort(sr.MemoryUsedMB, sr.MemoryLimitMB),
 				tuiFormatTime(sr.StartedAt),
 				tuiFormatDur(sr.StartedAt, sr.EndedAt),
 			})
@@ -1181,6 +1185,7 @@ func tuiStepRunRows(stepRuns []tuiStepRun) []table.Row {
 				num,
 				glyph + sr.StepName,
 				sr.Status,
+				tuiFormatMemShort(sr.MemoryUsedMB, sr.MemoryLimitMB),
 				tuiFormatTime(sr.StartedAt),
 				tuiFormatDur(sr.StartedAt, sr.EndedAt),
 			})
@@ -1481,6 +1486,38 @@ func tuiFormatDur(start, end *time.Time) string {
 		return fmt.Sprintf("%ds", int(d.Seconds()))
 	}
 	return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+}
+
+// tuiFormatMem renders a run's memory as "used / limit MB" when both are known,
+// falling back to the limit alone (suffixed "limit") when usage was not captured
+// — a short job a metrics-server never sampled. Returns "" when neither is known
+// so callers can omit the field. tuiFormatMemShort is the compact table variant.
+func tuiFormatMem(usedMB, limitMB *int64) string {
+	switch {
+	case usedMB != nil && limitMB != nil:
+		return fmt.Sprintf("%d / %d MB", *usedMB, *limitMB)
+	case usedMB != nil:
+		return fmt.Sprintf("%d MB", *usedMB)
+	case limitMB != nil:
+		return fmt.Sprintf("%d MB limit", *limitMB)
+	default:
+		return ""
+	}
+}
+
+// tuiFormatMemShort is the table-cell form: "180/256", "256↑" for limit-only, or
+// "—" when unknown. Kept narrow so it fits a fixed-width column.
+func tuiFormatMemShort(usedMB, limitMB *int64) string {
+	switch {
+	case usedMB != nil && limitMB != nil:
+		return fmt.Sprintf("%d/%d", *usedMB, *limitMB)
+	case usedMB != nil:
+		return fmt.Sprintf("%d", *usedMB)
+	case limitMB != nil:
+		return fmt.Sprintf("%d↑", *limitMB)
+	default:
+		return "—"
+	}
 }
 
 // ── Command ───────────────────────────────────────────────────────────────────

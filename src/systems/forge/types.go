@@ -36,9 +36,15 @@ type Execution struct {
 	ExitCode  *int       `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
 	Stdout    *string    `gorm:"column:stdout"                                           json:"stdout,omitempty"`
 	Stderr    *string    `gorm:"column:stderr"                                           json:"stderr,omitempty"`
-	CreatedAt time.Time  `gorm:"column:created_at;not null;default:now()"                json:"created_at"`
-	StartedAt *time.Time `gorm:"column:started_at"                                       json:"started_at,omitempty"`
-	EndedAt   *time.Time `gorm:"column:ended_at"                                         json:"ended_at,omitempty"`
+	// MemoryUsedMB is the peak memory the run's container consumed, captured
+	// best-effort from the runtime (k8s metrics-server / docker stats). It is NULL
+	// when metrics are unavailable — most often a very short job a metrics-server
+	// never sampled. MemoryLimitMB is the runner class's memory ceiling at run time.
+	MemoryUsedMB  *int64     `gorm:"column:memory_used_mb"                                json:"memory_used_mb,omitempty"`
+	MemoryLimitMB *int64     `gorm:"column:memory_limit_mb"                               json:"memory_limit_mb,omitempty"`
+	CreatedAt     time.Time  `gorm:"column:created_at;not null;default:now()"            json:"created_at"`
+	StartedAt     *time.Time `gorm:"column:started_at"                                   json:"started_at,omitempty"`
+	EndedAt       *time.Time `gorm:"column:ended_at"                                     json:"ended_at,omitempty"`
 }
 
 // RunnerClass defines the resource limits for a named execution tier. The same
@@ -91,4 +97,8 @@ type RunResult struct {
 	Stdout   string
 	Stderr   string
 	ExitCode *int
+	// MemoryUsedMB is the peak container memory in MB, nil when the runtime could
+	// not measure it. MemoryLimitMB is the runner class's memory ceiling.
+	MemoryUsedMB  *int64
+	MemoryLimitMB *int64
 }

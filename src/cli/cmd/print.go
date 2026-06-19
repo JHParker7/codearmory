@@ -485,6 +485,8 @@ var fieldLabels = map[string]string{
 	"permissions_ids": "Permissions",
 	"runner_class":    "Runner",
 	"exit_code":       "Exit Code",
+	"memory_used_mb":  "Memory Used (MB)",
+	"memory_limit_mb": "Memory Limit (MB)",
 	"event_type":      "Event",
 	"resource_type":   "Resource Type",
 	"resource_id":     "Resource",

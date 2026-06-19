@@ -205,13 +205,13 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 				finalStatus = StatusFailed
 				break
 			}
-			output, stepErr := p.executeStep(runCtx, store, ws.Step, substContext{inputs: inputs, outputs: visible})
+			res, stepErr := p.executeStep(runCtx, store, ws.Step, substContext{inputs: inputs, outputs: visible})
 			if stepErr != nil {
 				if errors.Is(stepErr, context.Canceled) {
-					p.finishStepRun(stepRunID, StatusCancelled, strPtr(stepErr.Error()))
+					p.finishStepRun(stepRunID, StatusCancelled, strPtr(stepErr.Error()), res.MemoryUsedMB, res.MemoryLimitMB)
 					finalStatus = StatusCancelled
 				} else {
-					p.finishStepRun(stepRunID, StatusFailed, strPtr(stepErr.Error()))
+					p.finishStepRun(stepRunID, StatusFailed, strPtr(stepErr.Error()), res.MemoryUsedMB, res.MemoryLimitMB)
 					finalStatus = StatusFailed
 				}
 				break
@@ -220,8 +220,8 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 				attribute.String("workflow.id", workflowID),
 				attribute.String("status", StatusCompleted),
 			))
-			p.finishStepRun(stepRunID, StatusCompleted, strPtr(output))
-			stepOutputs[ws.Name] = output
+			p.finishStepRun(stepRunID, StatusCompleted, strPtr(res.Output), res.MemoryUsedMB, res.MemoryLimitMB)
+			stepOutputs[ws.Name] = res.Output
 			slog.InfoContext(ctx, "worker: step completed", "run_id", runID, "step", i, "action", ws.Action)
 			continue
 		}
@@ -233,6 +233,8 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			action    string
 			stepIdx   int
 			output    string
+			usedMB    *int64
+			limitMB   *int64
 			err       error
 		}
 
@@ -260,12 +262,12 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 				select {
 				case sem <- struct{}{}: // acquire
 				case <-runCtx.Done():
-					results <- parallelResult{stepRunIDs[j], ws.Name, ws.Action, group.indices[j], "", context.Canceled}
+					results <- parallelResult{stepRunID: stepRunIDs[j], name: ws.Name, action: ws.Action, stepIdx: group.indices[j], err: context.Canceled}
 					return
 				}
 				defer func() { <-sem }() // release
-				out, err := p.executeStep(runCtx, store, ws.Step, substContext{inputs: inputs, outputs: visible})
-				results <- parallelResult{stepRunIDs[j], ws.Name, ws.Action, group.indices[j], out, err}
+				res, err := p.executeStep(runCtx, store, ws.Step, substContext{inputs: inputs, outputs: visible})
+				results <- parallelResult{stepRunIDs[j], ws.Name, ws.Action, group.indices[j], res.Output, res.MemoryUsedMB, res.MemoryLimitMB, err}
 			}(j, ws)
 		}
 
@@ -284,7 +286,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 					status = StatusFailed
 					finalStatus = StatusFailed
 				}
-				p.finishStepRun(r.stepRunID, status, strPtr(r.err.Error()))
+				p.finishStepRun(r.stepRunID, status, strPtr(r.err.Error()), r.usedMB, r.limitMB)
 				slog.WarnContext(ctx, "worker: parallel step failed", "run_id", runID, "step", r.stepIdx, "action", r.action)
 				groupFailed = true
 			} else {
@@ -292,7 +294,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 					attribute.String("workflow.id", workflowID),
 					attribute.String("status", StatusCompleted),
 				))
-				p.finishStepRun(r.stepRunID, StatusCompleted, strPtr(r.output))
+				p.finishStepRun(r.stepRunID, StatusCompleted, strPtr(r.output), r.usedMB, r.limitMB)
 				groupOutputs[r.name] = r.output
 				slog.InfoContext(ctx, "worker: parallel step completed", "run_id", runID, "step", r.stepIdx, "action", r.action)
 			}
@@ -354,11 +356,38 @@ func (p *WorkerPool) rotateToken(ctx context.Context, store *tokenStore, runID, 
 	}
 }
 
+// stepResult is the outcome of running a step. Output is persisted as the step's
+// response body. MemoryUsedMB/MemoryLimitMB are populated only for forge-backed
+// async steps whose poll response carried them (the forge execution JSON), and
+// are nil for every other action — so memory surfaces wherever the step ran a
+// container, without coupling the generic poller to forge.
+type stepResult struct {
+	Output        string
+	MemoryUsedMB  *int64
+	MemoryLimitMB *int64
+}
+
+// jsonInt64Ptr converts a value pulled from a decoded JSON object into an *int64,
+// returning nil when it is absent or not numeric. JSON numbers decode to float64
+// in a map[string]any (or json.Number when UseNumber is set), so both are handled.
+func jsonInt64Ptr(v any) *int64 {
+	switch n := v.(type) {
+	case float64:
+		i := int64(n)
+		return &i
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return &i
+		}
+	}
+	return nil
+}
+
 // executeStep dispatches a step to either the http escape-hatch or the registry
 // action catalog. Returns the step output and a non-nil error on failure.
 // context.Canceled means the run was cancelled. sc carries the run inputs and
 // prior step outputs interpolated into the step's With values.
-func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step Step, sc substContext) (string, error) {
+func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step Step, sc substContext) (stepResult, error) {
 	with := substituteWith(step.With, sc)
 	// Clamp to [defaultTimeout, maxTimeout]. Zero means "use default"; negative
 	// is treated the same way since a non-positive duration would fire immediately.
@@ -372,21 +401,22 @@ func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step St
 	defer cancel()
 
 	if step.Action == ActionHTTP {
-		return p.executeHTTP(stepCtx, store, with)
+		out, err := p.executeHTTP(stepCtx, store, with)
+		return stepResult{Output: out}, err
 	}
 
 	actionCatalogMu.RLock()
 	def, ok := actionCatalog[step.Action]
 	actionCatalogMu.RUnlock()
 	if !ok {
-		return "", fmt.Errorf("unknown action %q — register it in the service catalog or use the http escape hatch", step.Action)
+		return stepResult{}, fmt.Errorf("unknown action %q — register it in the service catalog or use the http escape hatch", step.Action)
 	}
 	return p.executeAction(stepCtx, store, def, with)
 }
 
 // executeAction dispatches a catalog action: applies body transforms, sends the
 // HTTP request, then polls if the action is async.
-func (p *WorkerPool) executeAction(ctx context.Context, store *tokenStore, def ActionDef, with map[string]any) (string, error) {
+func (p *WorkerPool) executeAction(ctx context.Context, store *tokenStore, def ActionDef, with map[string]any) (stepResult, error) {
 	body := make(map[string]any, len(with))
 	for k, v := range with {
 		body[k] = v
@@ -428,13 +458,13 @@ func (p *WorkerPool) executeAction(ctx context.Context, store *tokenStore, def A
 
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return "", fmt.Errorf("marshal %s payload: %w", def.Name, err)
+		return stepResult{}, fmt.Errorf("marshal %s payload: %w", def.Name, err)
 	}
 
 	url := strings.TrimRight(def.ServiceURL, "/") + resolvedPath
 	req, err := http.NewRequestWithContext(ctx, def.Method, url, bytes.NewReader(payload))
 	if err != nil {
-		return "", fmt.Errorf("build %s request: %w", def.Name, err)
+		return stepResult{}, fmt.Errorf("build %s request: %w", def.Name, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if tok := store.getToken(); tok != "" {
@@ -443,40 +473,40 @@ func (p *WorkerPool) executeAction(ctx context.Context, store *tokenStore, def A
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", def.Name, err)
+		return stepResult{}, fmt.Errorf("%s: %w", def.Name, err)
 	}
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	resp.Body.Close()
 
 	if def.Async == nil {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return string(respBody), fmt.Errorf("%s returned %d: %s", def.Name, resp.StatusCode, strings.TrimSpace(string(respBody)))
+			return stepResult{Output: string(respBody)}, fmt.Errorf("%s returned %d: %s", def.Name, resp.StatusCode, strings.TrimSpace(string(respBody)))
 		}
-		return string(respBody), nil
+		return stepResult{Output: string(respBody)}, nil
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("%s returned %d: %s", def.Name, resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return stepResult{}, fmt.Errorf("%s returned %d: %s", def.Name, resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
 	var submission map[string]any
 	if err := json.Unmarshal(respBody, &submission); err != nil {
-		return "", fmt.Errorf("%s: parse submission response: %w", def.Name, err)
+		return stepResult{}, fmt.Errorf("%s: parse submission response: %w", def.Name, err)
 	}
 	idVal, ok := submission[def.Async.IDField]
 	if !ok {
-		return "", fmt.Errorf("%s: submission response missing field %q", def.Name, def.Async.IDField)
+		return stepResult{}, fmt.Errorf("%s: submission response missing field %q", def.Name, def.Async.IDField)
 	}
 	jobID, ok := idVal.(string)
 	if !ok || jobID == "" {
-		return "", fmt.Errorf("%s: async ID field %q is not a string", def.Name, def.Async.IDField)
+		return stepResult{}, fmt.Errorf("%s: async ID field %q is not a string", def.Name, def.Async.IDField)
 	}
 	return p.pollAction(ctx, store, def, jobID)
 }
 
 // pollAction polls the job status URL until a terminal state is reached or the
 // context is cancelled.
-func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def ActionDef, jobID string) (string, error) {
+func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def ActionDef, jobID string) (stepResult, error) {
 	interval := time.Duration(def.Async.PollIntervalSecs) * time.Second
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -488,13 +518,13 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 	for {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return stepResult{}, ctx.Err()
 		case <-ticker.C:
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
 		if err != nil {
-			return "", fmt.Errorf("build poll request: %w", err)
+			return stepResult{}, fmt.Errorf("build poll request: %w", err)
 		}
 		if tok := store.getToken(); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
@@ -512,6 +542,13 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 		}
 		status, _ := result[def.Async.StatusField].(string)
 
+		// memory_used_mb / memory_limit_mb are present on a forge execution's poll
+		// response and absent elsewhere; jsonInt64Ptr yields nil when missing, so
+		// this is a no-op for non-forge actions. Captured on both success and
+		// failure — an OOM-killed step is exactly when its memory matters.
+		used := jsonInt64Ptr(result["memory_used_mb"])
+		limit := jsonInt64Ptr(result["memory_limit_mb"])
+
 		for _, s := range def.Async.SuccessStates {
 			if status == s {
 				out := ""
@@ -520,7 +557,7 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 						out, _ = v.(string)
 					}
 				}
-				return out, nil
+				return stepResult{Output: out, MemoryUsedMB: used, MemoryLimitMB: limit}, nil
 			}
 		}
 		for _, s := range def.Async.FailureStates {
@@ -541,12 +578,13 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 					}
 				}
 				exitCode := result["exit_code"]
-				return strings.Join(parts, "\n"), fmt.Errorf("%s %s (exit code: %v)", def.Name, status, exitCode)
+				return stepResult{Output: strings.Join(parts, "\n"), MemoryUsedMB: used, MemoryLimitMB: limit},
+					fmt.Errorf("%s %s (exit code: %v)", def.Name, status, exitCode)
 			}
 		}
 		for _, s := range def.Async.CancelStates {
 			if status == s {
-				return "", context.Canceled
+				return stepResult{}, context.Canceled
 			}
 		}
 		// Status is not in any known terminal or cancel set — keep polling.
@@ -658,8 +696,8 @@ func (p *WorkerPool) startStepRun(runID, stepRunID string, index int, name strin
 	return (WorkflowStepRun{StepRunID: stepRunID, RunID: runID, StepIndex: index, StepName: name}).Add(context.Background())
 }
 
-func (p *WorkerPool) finishStepRun(stepRunID, status string, output *string) {
-	(WorkflowStepRun{StepRunID: stepRunID}).Complete(context.Background(), status, output)
+func (p *WorkerPool) finishStepRun(stepRunID, status string, output *string, usedMB, limitMB *int64) {
+	(WorkflowStepRun{StepRunID: stepRunID}).Complete(context.Background(), status, output, usedMB, limitMB)
 }
 
 func (p *WorkerPool) failRun(runID, sessionID string) {

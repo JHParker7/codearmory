@@ -122,7 +122,7 @@ func (e Execution) List(ctx context.Context, limit, offset int) ([]db, error) {
 	// rerun action) can resubmit an execution without a second fetch; stdout/stderr
 	// stay out of the list because they can be large.
 	q := connect().WithContext(ctx).
-		Select("execution_id, user_id, image, command, env, timeout_secs, status, exit_code, created_at, started_at, ended_at, runner_class").
+		Select("execution_id, user_id, image, command, env, timeout_secs, status, exit_code, memory_used_mb, memory_limit_mb, created_at, started_at, ended_at, runner_class").
 		Where("user_id = ?", e.UserID).
 		Order("created_at DESC").
 		Limit(limit)
@@ -173,9 +173,11 @@ func (e Execution) Complete(_ context.Context, status string, result RunResult) 
 	)
 	if err := connect().WithContext(context.Background()).Exec(`
 		UPDATE executions
-		SET status = ?, exit_code = ?, stdout = ?, stderr = ?, ended_at = now()
+		SET status = ?, exit_code = ?, stdout = ?, stderr = ?,
+		    memory_used_mb = ?, memory_limit_mb = ?, ended_at = now()
 		WHERE execution_id = ?`,
-		status, result.ExitCode, result.Stdout, result.Stderr, e.ExecutionID,
+		status, result.ExitCode, result.Stdout, result.Stderr,
+		result.MemoryUsedMB, result.MemoryLimitMB, e.ExecutionID,
 	).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
