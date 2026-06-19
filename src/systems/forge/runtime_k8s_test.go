@@ -484,6 +484,85 @@ func TestPodRemovedError(t *testing.T) {
 	}
 }
 
+// TestParsePodMetricsMemoryMB checks PodMetrics payloads are summed across
+// containers and converted to whole MiB, with ok=false for empty/garbage input.
+func TestParsePodMetricsMemoryMB(t *testing.T) {
+	// 184320Ki = 188743680 bytes = exactly 180 MiB.
+	if mb, ok := parsePodMetricsMemoryMB([]byte(`{"containers":[{"name":"runner","usage":{"cpu":"5m","memory":"184320Ki"}}]}`)); !ok || mb != 180 {
+		t.Errorf("single container = %d ok=%v, want 180 true", mb, ok)
+	}
+	// Multiple containers are summed: 100Mi + 50Mi = 150Mi.
+	if mb, ok := parsePodMetricsMemoryMB([]byte(`{"containers":[{"usage":{"memory":"100Mi"}},{"usage":{"memory":"50Mi"}}]}`)); !ok || mb != 150 {
+		t.Errorf("summed = %d ok=%v, want 150 true", mb, ok)
+	}
+	if _, ok := parsePodMetricsMemoryMB([]byte(`{}`)); ok {
+		t.Error("empty payload should be ok=false")
+	}
+	if _, ok := parsePodMetricsMemoryMB([]byte(`not json`)); ok {
+		t.Error("garbage should be ok=false")
+	}
+}
+
+// TestWaitAndCollect_RecordsPeakMemory verifies the metrics sample taken while
+// polling is recorded as the run's MemoryUsedMB, and that the right pod is sampled.
+func TestWaitAndCollect_RecordsPeakMemory(t *testing.T) {
+	const execID = "exec-mem"
+	const jobName = "forge-" + execID
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: "forge"},
+		Status:     batchv1.JobStatus{Succeeded: 1},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName + "-abcde",
+			Namespace: "forge",
+			Labels:    map[string]string{"execution-id": execID},
+		},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name:  "runner",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+		}}},
+	}
+
+	r := &KubernetesRuntime{
+		client:    fake.NewSimpleClientset(job, pod),
+		namespace: "forge",
+		podMemoryMB: func(_ context.Context, name string) (int64, bool) {
+			if name != pod.Name {
+				t.Errorf("sampled wrong pod %q, want %q", name, pod.Name)
+			}
+			return 200, true
+		},
+	}
+
+	res, err := r.waitAndCollect(context.Background(), Execution{ExecutionID: execID, TimeoutSecs: 30}, jobName)
+	if err != nil {
+		t.Fatalf("waitAndCollect: %v", err)
+	}
+	if res.MemoryUsedMB == nil || *res.MemoryUsedMB != 200 {
+		t.Errorf("MemoryUsedMB = %v, want 200 from the metrics sample", res.MemoryUsedMB)
+	}
+}
+
+// TestWaitAndCollect_NoMetricsLeavesMemoryNil guards the nil-fetcher path (tests
+// and clusters without metrics-server): no sample means MemoryUsedMB stays nil.
+func TestWaitAndCollect_NoMetricsLeavesMemoryNil(t *testing.T) {
+	const execID = "exec-nomem"
+	const jobName = "forge-" + execID
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: "forge"}, Status: batchv1.JobStatus{Succeeded: 1}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: jobName + "-x", Namespace: "forge", Labels: map[string]string{"execution-id": execID}}}
+	r := &KubernetesRuntime{client: fake.NewSimpleClientset(job, pod), namespace: "forge"} // podMemoryMB nil
+
+	res, err := r.waitAndCollect(context.Background(), Execution{ExecutionID: execID, TimeoutSecs: 30}, jobName)
+	if err != nil {
+		t.Fatalf("waitAndCollect: %v", err)
+	}
+	if res.MemoryUsedMB != nil {
+		t.Errorf("MemoryUsedMB = %v, want nil with no metrics fetcher", *res.MemoryUsedMB)
+	}
+}
+
 // TestResolveRuntimeClass checks the precedence a kata/kubernetes backend uses to
 // pick its RuntimeClass: explicit per-backend config wins, then the legacy
 // process-wide env var, then nil (the cluster's default runtime).

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,6 +34,12 @@ type KubernetesRuntime struct {
 	client       kubernetes.Interface
 	namespace    string
 	runtimeClass *string
+	// podMemoryMB returns a pod's current memory usage in MB from the
+	// metrics.k8s.io API, with ok=false when metrics are unavailable (no
+	// metrics-server installed, or the pod has not been scraped yet — common for
+	// short jobs). Injected in newKubernetesRuntime; left nil by tests that build
+	// the runtime directly, so the sampling loop must nil-check it.
+	podMemoryMB func(ctx context.Context, podName string) (int64, bool)
 }
 
 // k8sKeyRuntimeClass is the backend config key naming the Kubernetes RuntimeClass
@@ -62,11 +69,59 @@ func newKubernetesRuntime(configRuntimeClass string) (*KubernetesRuntime, error)
 		return nil, err
 	}
 
-	return &KubernetesRuntime{
+	rt := &KubernetesRuntime{
 		client:       client,
 		namespace:    envOrDefault("K8S_NAMESPACE", "forge"),
 		runtimeClass: resolveRuntimeClass(configRuntimeClass),
-	}, nil
+	}
+	rt.podMemoryMB = rt.fetchPodMemoryMB
+	return rt, nil
+}
+
+// fetchPodMemoryMB reads the pod's summed container memory usage from the
+// metrics.k8s.io API. It goes through the existing client's REST client via
+// AbsPath so it needs no extra dependency or config — the request hits the same
+// apiserver with the same credentials. ok=false on any failure (no metrics-server,
+// pod not yet scraped, parse error) so the caller simply records no usage.
+func (r *KubernetesRuntime) fetchPodMemoryMB(ctx context.Context, podName string) (int64, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	raw, err := r.client.CoreV1().RESTClient().Get().
+		AbsPath("/apis/metrics.k8s.io/v1beta1/namespaces", r.namespace, "pods", podName).
+		DoRaw(ctx)
+	if err != nil {
+		return 0, false
+	}
+	return parsePodMetricsMemoryMB(raw)
+}
+
+// parsePodMetricsMemoryMB sums the memory usage across a PodMetrics' containers
+// and returns whole MB (MiB). Split from the REST call so it can be unit-tested
+// without a metrics API. Returns ok=false when the payload carries no usable
+// memory figure.
+func parsePodMetricsMemoryMB(raw []byte) (int64, bool) {
+	var pm struct {
+		Containers []struct {
+			Usage struct {
+				Memory string `json:"memory"`
+			} `json:"usage"`
+		} `json:"containers"`
+	}
+	if err := json.Unmarshal(raw, &pm); err != nil {
+		return 0, false
+	}
+	var totalBytes int64
+	for _, c := range pm.Containers {
+		q, err := resource.ParseQuantity(c.Usage.Memory)
+		if err != nil {
+			continue
+		}
+		totalBytes += q.Value()
+	}
+	if totalBytes <= 0 {
+		return 0, false
+	}
+	return totalBytes / (1024 * 1024), true
 }
 
 // resolveRuntimeClass picks the RuntimeClass pointer for a kubernetes/kata
@@ -115,6 +170,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 	}
 
 	result, err := r.waitAndCollect(ctx, exec, job.Name)
+	result.MemoryLimitMB = ptr(spec.MemoryMB)
 	// Always clean up, even on error or cancellation.
 	r.deleteJob(context.Background(), job.Name)
 	return result, err
@@ -236,6 +292,10 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 	// preserves the pod's last-known state so the real cause is surfaced instead of
 	// the opaque "no pod found" message.
 	var lastPod *corev1.Pod
+	// peakMemMB tracks the highest memory sample seen from metrics.k8s.io across the
+	// run. metrics-server scrapes roughly every 15 s, so a short job may never be
+	// sampled (peak stays 0 → recorded as no usage); the limit is set separately.
+	var peakMemMB int64
 
 	for {
 		select {
@@ -249,6 +309,11 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 			}
 			if p, perr := r.findPod(exec.ExecutionID); perr == nil && p != nil {
 				lastPod = p
+			}
+			if r.podMemoryMB != nil && lastPod != nil {
+				if mb, ok := r.podMemoryMB(pollCtx, lastPod.Name); ok && mb > peakMemMB {
+					peakMemMB = mb
+				}
 			}
 
 			if j.Status.Succeeded > 0 {
@@ -339,8 +404,14 @@ done:
 		}
 	}
 
+	// memUsed is the peak memory sample, nil when metrics never yielded one.
+	var memUsed *int64
+	if peakMemMB > 0 {
+		memUsed = ptr(peakMemMB)
+	}
+
 	if timedOut {
-		return RunResult{Stdout: stdout, ExitCode: ptr(exitCode)},
+		return RunResult{Stdout: stdout, ExitCode: ptr(exitCode), MemoryUsedMB: memUsed},
 			fmt.Errorf("timed out after %ds: %w", exec.TimeoutSecs, context.DeadlineExceeded)
 	}
 
@@ -358,7 +429,7 @@ done:
 	if logErr != nil && exitCode != 0 {
 		stderr = "forge: " + logErr.Error()
 	}
-	return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: ptr(exitCode)}, nil
+	return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: ptr(exitCode), MemoryUsedMB: memUsed}, nil
 }
 
 // findPod returns the single pod for an execution, or (nil, nil) if none exists

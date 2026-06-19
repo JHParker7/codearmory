@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -117,6 +119,27 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 		return RunResult{}, fmt.Errorf("container start: %w", err)
 	}
 
+	// Sample memory in the background while the container runs: the cgroup stats
+	// disappear when it stops, so a post-exit read returns zero. peakMemBytes holds
+	// the highest sample seen (atomic — the sampler goroutine writes, Run reads).
+	var peakMemBytes int64
+	samplerDone := make(chan struct{})
+	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-samplerDone:
+				return
+			case <-t.C:
+				if b, ok := r.sampleMemoryBytes(containerID); ok && b > atomic.LoadInt64(&peakMemBytes) {
+					atomic.StoreInt64(&peakMemBytes, b)
+				}
+			}
+		}
+	}()
+	defer close(samplerDone)
+
 	// Wrap ctx with the execution's own timeout so the container is stopped and
 	// the result recorded as timed_out rather than running forever.
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, time.Duration(exec.TimeoutSecs)*time.Second)
@@ -137,18 +160,61 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 		exitCode = int(status.StatusCode)
 	}
 
+	// The container has exited; record the memory ceiling and peak usage so far.
+	memLimitMB := ptr(spec.MemoryMB)
+	var memUsedMB *int64
+	if b := atomic.LoadInt64(&peakMemBytes); b > 0 {
+		memUsedMB = ptr(b / (1024 * 1024))
+	}
+
 	stdout, stderr, err := r.collectLogs(containerID)
 	if err != nil {
 		// Keep the exit code. Only surface the collection failure as stderr when
 		// the command itself failed; on a successful run a log-collection note
 		// would masquerade as the job's own stderr.
-		res := RunResult{ExitCode: ptr(exitCode)}
+		res := RunResult{ExitCode: ptr(exitCode), MemoryUsedMB: memUsedMB, MemoryLimitMB: memLimitMB}
 		if exitCode != 0 {
 			res.Stderr = fmt.Sprintf("forge: failed to collect container logs: %v", err)
 		}
 		return res, nil
 	}
-	return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: ptr(exitCode)}, nil
+	return RunResult{Stdout: stdout, Stderr: stderr, ExitCode: ptr(exitCode), MemoryUsedMB: memUsedMB, MemoryLimitMB: memLimitMB}, nil
+}
+
+// sampleMemoryBytes reads the container's current memory usage from the Docker
+// stats endpoint, preferring the cgroup-v1 peak (max_usage) and falling back to
+// current usage minus page cache on cgroup v2 (which has no max_usage). ok=false
+// on any error or a zero reading. Decoded into a minimal local struct so it is
+// independent of Docker client type churn.
+func (r *DockerRuntime) sampleMemoryBytes(containerID string) (int64, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resp, err := r.client.ContainerStats(ctx, containerID, false)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	var s struct {
+		MemoryStats struct {
+			Usage    int64            `json:"usage"`
+			MaxUsage int64            `json:"max_usage"`
+			Stats    map[string]int64 `json:"stats"`
+		} `json:"memory_stats"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return 0, false
+	}
+	used := s.MemoryStats.MaxUsage
+	if used == 0 {
+		used = s.MemoryStats.Usage
+		if inactive := s.MemoryStats.Stats["inactive_file"]; inactive > 0 && inactive < used {
+			used -= inactive
+		}
+	}
+	if used <= 0 {
+		return 0, false
+	}
+	return used, true
 }
 
 func (r *DockerRuntime) collectLogs(containerID string) (stdout, stderr string, err error) {
