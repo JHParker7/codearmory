@@ -492,16 +492,7 @@ func forgeSubmitExec(image string, command []string, env map[string]string, time
 // thinking the rerun queued when it didn't.
 func forgeRerunExec(e forgeExec) tea.Cmd {
 	return func() tea.Msg {
-		payload := map[string]any{"image": e.Image, "command": e.Command}
-		if len(e.Env) > 0 {
-			payload["env"] = e.Env
-		}
-		if e.Timeout > 0 {
-			payload["timeout"] = e.Timeout
-		}
-		if e.RunnerClass != "" {
-			payload["runner_class"] = e.RunnerClass
-		}
+		payload := forgeRerunPayload(e.Image, e.Command, e.Env, e.Timeout, e.RunnerClass)
 		body, _ := json.Marshal(payload)
 		if _, err := doRequest("POST", "/forge/executions", body); err != nil {
 			return forgeErrMsg{err}

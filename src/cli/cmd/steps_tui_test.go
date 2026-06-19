@@ -431,6 +431,26 @@ func TestStepsModel_EditStep_RunnerPickerPreselectsStoredClass(t *testing.T) {
 	}
 }
 
+// Editing a step pinned to a runner class the catalog no longer offers (e.g. an
+// operator disabled it) must preserve the stored class, not silently drop it to
+// forge's default on save.
+func TestStepsModel_EditStep_PreservesRunnerClassMissingFromCatalog(t *testing.T) {
+	m := newStepsModel()
+	m.actions = []string{"forge/run"}
+	m.images = []string{"ubuntu:22.04"}
+	// "large" is absent from the catalog (disabled); only "standard" remains.
+	m.runnerClasses = kvCatalog{labels: []string{"standard"}, values: []string{"standard"}}
+	s := sampleStep()
+	s.With["runner_class"] = "large"
+	m = applyStepsMsg(m, tuiStepsMsg([]tuiStep{s}))
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	m2 := updated.(stepsModel)
+	if got := m2.form.value("with.runner_class"); got != "large" {
+		t.Errorf("runner_class = %q, want large (preserved despite not being in catalog)", got)
+	}
+}
+
 // ── View: rendering ───────────────────────────────────────────────────────────
 
 func TestStepsView_LoadingList(t *testing.T) {

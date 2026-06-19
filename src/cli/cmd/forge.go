@@ -319,20 +319,25 @@ func rerunForgeExecution(cmd *cobra.Command, id string, wait bool) error {
 		cmd.SilenceUsage = true
 		return fmt.Errorf("execution %s cannot be rerun: it has no recorded image or command", id)
 	}
-	payload := map[string]any{
-		"image":   src.Image,
-		"command": src.Command,
-	}
-	if len(src.Env) > 0 {
-		payload["env"] = src.Env
-	}
-	if src.Timeout > 0 {
-		payload["timeout"] = src.Timeout
-	}
-	if src.RunnerClass != "" {
-		payload["runner_class"] = src.RunnerClass
-	}
+	payload := forgeRerunPayload(src.Image, src.Command, src.Env, src.Timeout, src.RunnerClass)
 	return submitForgeExecution(cmd, payload, int(src.Timeout), wait)
+}
+
+// forgeRerunPayload assembles the POST body that resubmits an execution with the
+// same parameters, omitting empty optional fields so forge applies its own
+// defaults. Shared by the `exec rerun` command and the TUI rerun action.
+func forgeRerunPayload(image string, command []string, env map[string]string, timeout int64, runnerClass string) map[string]any {
+	payload := map[string]any{"image": image, "command": command}
+	if len(env) > 0 {
+		payload["env"] = env
+	}
+	if timeout > 0 {
+		payload["timeout"] = timeout
+	}
+	if runnerClass != "" {
+		payload["runner_class"] = runnerClass
+	}
+	return payload
 }
 
 // waitForExecution polls a forge execution until it reaches a terminal state,

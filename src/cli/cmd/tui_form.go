@@ -168,9 +168,11 @@ func (f tuiForm) value(key string) string {
 
 // setValue sets a field's value: a selector selects the matching option (a
 // key/value select matches against its parallel value list — the id — a plain
-// select against its visible options), leaving the current choice if the value
-// isn't found; a text field replaces its contents. Used when rebuilding a form
-// against a catalog that arrived after the form was opened.
+// select against its visible options); a non-empty value the options don't
+// include is appended as its own option so a stored value the catalog no longer
+// offers round-trips instead of being silently dropped; a text field replaces
+// its contents. Used when rebuilding a form against a catalog that arrived after
+// the form was opened.
 func (f *formField) setValue(val string) {
 	switch f.kind {
 	case fieldSelect:
@@ -183,6 +185,19 @@ func (f *formField) setValue(val string) {
 				f.sel = i
 				return
 			}
+		}
+		// The value isn't one of the current options. Rather than silently
+		// snapping to the existing choice — which would drop a stored value the
+		// catalog no longer offers (e.g. a runner class an operator disabled) or
+		// a free-text entry typed before the catalog arrived — keep it as its own
+		// option so an edit round-trips faithfully. The empty value already maps
+		// to the leading "(none)/(default)" entry, so skip it.
+		if val != "" {
+			f.options = append(f.options, val)
+			if f.values != nil {
+				f.values = append(f.values, val)
+			}
+			f.sel = len(f.options) - 1
 		}
 	case fieldTextarea:
 		f.area.SetValue(val)
