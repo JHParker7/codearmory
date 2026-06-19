@@ -227,6 +227,14 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 	var timedOut bool
 	var exitCode int
 	var failedMsg string
+	// lastPod retains the most recent pod snapshot seen while polling. A kata pod
+	// that fails (a non-zero exit, StartError, a microVM that boots then dies,
+	// OOMKilled) can be evicted or garbage-collected before the job is observed
+	// terminal, leaving the findPod() at `done` empty — and then the container
+	// state, exit code, and failure reason are gone with it. Snapshotting each tick
+	// preserves the pod's last-known state so the real cause is surfaced instead of
+	// the opaque "no pod found" message.
+	var lastPod *corev1.Pod
 
 	for {
 		select {
@@ -237,6 +245,9 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 			j, err := r.client.BatchV1().Jobs(r.namespace).Get(pollCtx, jobName, metav1.GetOptions{})
 			if err != nil {
 				return RunResult{}, fmt.Errorf("get job: %w", err)
+			}
+			if p, perr := r.findPod(exec.ExecutionID); perr == nil && p != nil {
+				lastPod = p
 			}
 
 			if j.Status.Succeeded > 0 {
@@ -267,9 +278,16 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 	}
 
 done:
-	// Resolve the pod once and derive both logs and the real exit code from the
-	// same snapshot (avoids two separate List calls against the API server).
+	// Resolve the pod once for the freshest state, then derive both logs and the
+	// real exit code from the same snapshot. Fall back to the last snapshot seen
+	// while polling: a failed kata pod can be evicted/GC'd between the terminal-job
+	// observation and this lookup, and that snapshot still carries its container
+	// state and exit code. A nil here means no pod was ever observed on any tick —
+	// the genuine "never scheduled" case, left to the events-based noPodError.
 	pod, podErr := r.findPod(exec.ExecutionID)
+	if pod == nil && podErr == nil {
+		pod = lastPod
+	}
 
 	var stdout string
 	var logErr error

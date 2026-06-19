@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func stdRunnerSpec() RunnerClass {
@@ -363,6 +367,63 @@ func TestPodFailureDetail(t *testing.T) {
 	noState := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "runner"}}}}
 	if got := r.podFailureDetail(noState, jobName); !strings.Contains(got, "FailedScheduling") {
 		t.Errorf("podFailureDetail should fall back to events, got %q", got)
+	}
+}
+
+// TestWaitAndCollect_UsesLastPodSnapshotWhenPodVanishes guards the kata no-pod
+// regression: a pod that ran and failed, then was evicted or garbage-collected
+// before the job was observed terminal, leaves findPod() empty at `done`. Without
+// the retained snapshot the run reports the job-level exit guess and the opaque
+// "no pod found" message; with it, the pod's real terminated exit code survives.
+func TestWaitAndCollect_UsesLastPodSnapshotWhenPodVanishes(t *testing.T) {
+	const execID = "exec-1"
+	const jobName = "forge-" + execID
+
+	failedJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: "forge"},
+		Status:     batchv1.JobStatus{Failed: 1},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName + "-abcde",
+			Namespace: "forge",
+			Labels:    map[string]string{"execution-id": execID},
+		},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "runner",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				Reason: "StartError", Message: "failed to start microVM", ExitCode: 128,
+			}},
+		}}},
+	}
+
+	cs := fake.NewSimpleClientset(failedJob)
+	// The pod is visible on the first List (the snapshot captured while polling)
+	// and gone on every later List (evicted/GC'd before the done lookup).
+	var podLists int
+	cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		podLists++
+		if podLists == 1 {
+			return true, &corev1.PodList{Items: []corev1.Pod{*pod}}, nil
+		}
+		return true, &corev1.PodList{}, nil
+	})
+
+	r := &KubernetesRuntime{client: cs, namespace: "forge"}
+	exec := Execution{ExecutionID: execID, TimeoutSecs: 30}
+
+	res, err := r.waitAndCollect(context.Background(), exec, jobName)
+	if err != nil {
+		t.Fatalf("waitAndCollect error: %v", err)
+	}
+	if res.ExitCode == nil || *res.ExitCode != 128 {
+		t.Errorf("exit code = %v, want 128 recovered from the last pod snapshot (got the job-level guess instead)", res.ExitCode)
+	}
+	if strings.Contains(res.Stderr, "no pod found") {
+		t.Errorf("stderr fell back to the generic no-pod message despite a captured snapshot: %q", res.Stderr)
+	}
+	if podLists < 2 {
+		t.Errorf("expected the pod to be listed while polling and again at done, got %d lists", podLists)
 	}
 }
 
