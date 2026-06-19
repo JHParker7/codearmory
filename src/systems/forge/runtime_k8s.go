@@ -267,6 +267,11 @@ done:
 	case podErr != nil:
 		logErr = podErr
 	case pod == nil:
+		if timedOut {
+			// The timeout return below discards logErr, so skip the
+			// network-bound job-event lookup on this path.
+			break
+		}
 		logErr = noPodError(r.jobFailureReason(jobName), failedMsg)
 	default:
 		stdout, logErr = r.collectLogs(pod.Name)
@@ -350,7 +355,7 @@ func (r *KubernetesRuntime) jobFailureReason(jobName string) string {
 		if e.InvolvedObject.Name != jobName || e.Type != corev1.EventTypeWarning {
 			continue
 		}
-		if best == nil || e.LastTimestamp.Time.After(best.LastTimestamp.Time) {
+		if best == nil || eventTime(e).After(eventTime(best)) {
 			best = e
 		}
 	}
@@ -359,10 +364,27 @@ func (r *KubernetesRuntime) jobFailureReason(jobName string) string {
 	}
 
 	msg := strings.TrimSpace(best.Message)
-	if best.Reason != "" {
-		return strings.TrimSpace(best.Reason + ": " + msg)
+	reason := strings.TrimSpace(best.Reason)
+	switch {
+	case reason != "" && msg != "":
+		return reason + ": " + msg
+	case reason != "":
+		return reason
+	default:
+		return msg
 	}
-	return msg
+}
+
+// eventTime returns the most recent timestamp an event carries. Aggregated
+// (series) events populate EventTime and leave the legacy LastTimestamp zero, so
+// taking whichever is later keeps "most recent Warning wins" correct on modern
+// clusters instead of comparing two zero LastTimestamps.
+func eventTime(e *corev1.Event) time.Time {
+	t := e.LastTimestamp.Time
+	if e.EventTime.Time.After(t) {
+		t = e.EventTime.Time
+	}
+	return t
 }
 
 // collectLogs streams the runner container's combined stdout+stderr (Kubernetes

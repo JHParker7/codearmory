@@ -172,6 +172,58 @@ func TestJobFailureReason_NoEvents(t *testing.T) {
 	}
 }
 
+// Aggregated/series events leave the legacy LastTimestamp zero and populate
+// EventTime instead; jobFailureReason must still pick the most recent Warning by
+// EventTime rather than returning whichever event happened to be listed first.
+func TestJobFailureReason_UsesEventTimeWhenLastTimestampZero(t *testing.T) {
+	const jobName = "forge-exec-1"
+	t0 := time.Unix(1_700_000_000, 0)
+
+	cs := fake.NewSimpleClientset(
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: "ev-old", Namespace: "forge"},
+			InvolvedObject: corev1.ObjectReference{Kind: "Job", Name: jobName},
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedScheduling",
+			Message:        "0/3 nodes are available",
+			EventTime:      metav1.NewMicroTime(t0.Add(1 * time.Second)),
+		},
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: "ev-new", Namespace: "forge"},
+			InvolvedObject: corev1.ObjectReference{Kind: "Job", Name: jobName},
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedCreate",
+			Message:        `RuntimeClass "kata-qemu" not found`,
+			EventTime:      metav1.NewMicroTime(t0.Add(5 * time.Second)),
+		},
+	)
+	r := &KubernetesRuntime{client: cs, namespace: "forge"}
+
+	got := r.jobFailureReason(jobName)
+	if !strings.Contains(got, "kata-qemu") {
+		t.Errorf("jobFailureReason = %q, want the most-recent (EventTime) FailedCreate reason", got)
+	}
+}
+
+// A Warning event with a Reason but an empty Message must not yield a dangling
+// "Reason:" with a trailing colon.
+func TestJobFailureReason_NoDanglingColon(t *testing.T) {
+	const jobName = "forge-exec-1"
+	cs := fake.NewSimpleClientset(&corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: "ev", Namespace: "forge"},
+		InvolvedObject: corev1.ObjectReference{Kind: "Job", Name: jobName},
+		Type:           corev1.EventTypeWarning,
+		Reason:         "BackoffLimitExceeded",
+		Message:        "",
+		LastTimestamp:  metav1.NewTime(time.Unix(1_700_000_000, 0)),
+	})
+	r := &KubernetesRuntime{client: cs, namespace: "forge"}
+
+	if got := r.jobFailureReason(jobName); got != "BackoffLimitExceeded" {
+		t.Errorf("jobFailureReason = %q, want %q with no trailing colon", got, "BackoffLimitExceeded")
+	}
+}
+
 // TestResolveRuntimeClass checks the precedence a kata/kubernetes backend uses to
 // pick its RuntimeClass: explicit per-backend config wins, then the legacy
 // process-wide env var, then nil (the cluster's default runtime).
