@@ -419,11 +419,55 @@ func TestWaitAndCollect_UsesLastPodSnapshotWhenPodVanishes(t *testing.T) {
 	if res.ExitCode == nil || *res.ExitCode != 128 {
 		t.Errorf("exit code = %v, want 128 recovered from the last pod snapshot (got the job-level guess instead)", res.ExitCode)
 	}
-	if strings.Contains(res.Stderr, "no pod found") {
-		t.Errorf("stderr fell back to the generic no-pod message despite a captured snapshot: %q", res.Stderr)
+	// The cause is recovered from the snapshot, not leaked as a raw "pods ... not
+	// found" stream error nor flattened to the generic no-pod message.
+	if !strings.Contains(res.Stderr, "StartError") || !strings.Contains(res.Stderr, "microVM") {
+		t.Errorf("stderr = %q, want the snapshot's StartError detail", res.Stderr)
+	}
+	if strings.Contains(res.Stderr, "no pod found") || strings.Contains(res.Stderr, "stream pod logs") {
+		t.Errorf("stderr leaked a generic/raw message despite a captured snapshot: %q", res.Stderr)
 	}
 	if podLists < 2 {
 		t.Errorf("expected the pod to be listed while polling and again at done, got %d lists", podLists)
+	}
+}
+
+// TestPodStatusReason checks pod-level failures are surfaced when the container
+// status carries no terminated state — chiefly Eviction, which the kubelet records
+// on the pod (Status.Reason "Evicted") when a memory-backed /tmp exceeds its
+// SizeLimit or the node is under memory pressure. An ordinary running/succeeded pod
+// yields nothing.
+func TestPodStatusReason(t *testing.T) {
+	evicted := &corev1.Pod{Status: corev1.PodStatus{
+		Phase:   corev1.PodFailed,
+		Reason:  "Evicted",
+		Message: "Pod ephemeral local storage usage exceeds the total limit of containers",
+	}}
+	if got := podStatusReason(evicted); !strings.Contains(got, "Evicted") {
+		t.Errorf("podStatusReason = %q, want the Evicted reason", got)
+	}
+
+	running := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	if got := podStatusReason(running); got != "" {
+		t.Errorf("podStatusReason = %q, want empty for a running pod", got)
+	}
+}
+
+// TestPodFailureDetail_EvictedPodLevel verifies an evicted pod whose container
+// shows no terminated state still surfaces the eviction (via the pod status),
+// rather than falling through to the events lookup.
+func TestPodFailureDetail_EvictedPodLevel(t *testing.T) {
+	r := &KubernetesRuntime{client: fake.NewSimpleClientset(), namespace: "forge"}
+	pod := &corev1.Pod{
+		Status: corev1.PodStatus{
+			Phase:             corev1.PodFailed,
+			Reason:            "Evicted",
+			Message:           "The node was low on resource: memory",
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "runner"}}, // no terminated/waiting state
+		},
+	}
+	if got := r.podFailureDetail(pod, "forge-exec-1"); !strings.Contains(got, "Evicted") {
+		t.Errorf("podFailureDetail = %q, want the pod-level Evicted reason", got)
 	}
 }
 

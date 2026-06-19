@@ -285,8 +285,13 @@ done:
 	// state and exit code. A nil here means no pod was ever observed on any tick —
 	// the genuine "never scheduled" case, left to the events-based noPodError.
 	pod, podErr := r.findPod(exec.ExecutionID)
+	podGone := false
 	if pod == nil && podErr == nil {
 		pod = lastPod
+		// A non-nil snapshot here means the pod existed while polling but its live
+		// object is now gone (evicted/GC'd). There are no logs left to stream, so
+		// the cause must come from the snapshot's state and the surviving events.
+		podGone = pod != nil
 	}
 
 	var stdout string
@@ -301,6 +306,18 @@ done:
 			break
 		}
 		logErr = noPodError(r.jobFailureReason(jobName), failedMsg)
+	case podGone:
+		// The pod was removed before we could read it — most often an eviction (a
+		// memory-backed /tmp that exceeds its SizeLimit, or node memory pressure)
+		// or pod garbage collection. Calling collectLogs would only yield a raw
+		// "pods ... not found"; instead recover the cause from the snapshot's
+		// container/pod state and the Warning events that outlive the pod, with a
+		// clean, actionable message as the last resort.
+		if detail := r.podFailureDetail(pod, jobName); detail != "" {
+			logErr = fmt.Errorf("pod produced no logs: %s", detail)
+		} else {
+			logErr = fmt.Errorf("pod was removed before its logs could be read — likely evicted (a memory-backed /tmp exceeding its SizeLimit, or node memory pressure) or garbage-collected")
+		}
 	default:
 		stdout, logErr = r.collectLogs(pod.Name)
 		// A pod that never started its container (CreateContainerError,
@@ -479,7 +496,24 @@ func (r *KubernetesRuntime) podFailureDetail(pod *corev1.Pod, jobName string) st
 	if s := containerStateReason(pod); s != "" {
 		return s
 	}
+	if s := podStatusReason(pod); s != "" {
+		return s
+	}
 	return r.jobFailureReason(jobName)
+}
+
+// podStatusReason surfaces a failure recorded on the pod's own status rather than
+// the container's — most importantly Eviction, which the kubelet reports by
+// setting Status.Reason ("Evicted") and Status.Message when it removes the pod out
+// from under a still-Running container (a memory-backed /tmp that exceeds its
+// SizeLimit, or node memory pressure). The container status then shows no
+// terminated state, so containerStateReason misses it. Returns "" for a pod that
+// failed by an ordinary container exit, leaving that to the exit code.
+func podStatusReason(pod *corev1.Pod) string {
+	if pod.Status.Phase != corev1.PodFailed && strings.TrimSpace(pod.Status.Reason) == "" {
+		return ""
+	}
+	return joinReasonMessage(pod.Status.Reason, pod.Status.Message)
 }
 
 // containerStateReason extracts a failure reason from the runner container's
