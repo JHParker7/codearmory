@@ -723,6 +723,130 @@ func TestForgeSubmitExec_HTTPError_ReturnsFormErr(t *testing.T) {
 	}
 }
 
+// ── Rerun flow ────────────────────────────────────────────────────────────────
+
+func TestForgeRerunExec_PostsCopiedPayload(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"execution_id":"new-1"}`)
+	setupCLI(t, srv)
+
+	e := forgeExec{
+		ExecutionID: "orig-1",
+		Image:       "ubuntu:22.04",
+		Command:     []string{"sh", "-c", "echo hi"},
+		Env:         map[string]string{"FOO": "bar"},
+		Timeout:     120,
+		RunnerClass: "large",
+		Status:      "completed",
+	}
+	msg := forgeRerunExec(e)()
+	if _, ok := msg.(forgeCreatedMsg); !ok {
+		t.Fatalf("msg = %T, want forgeCreatedMsg", msg)
+	}
+	if rec.Method != "POST" || rec.Path != "/forge/executions" {
+		t.Errorf("request = %s %s, want POST /forge/executions", rec.Method, rec.Path)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body, &got); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if got["image"] != "ubuntu:22.04" {
+		t.Errorf("image = %v, want ubuntu:22.04", got["image"])
+	}
+	cmd, _ := got["command"].([]any)
+	if len(cmd) != 3 || cmd[2] != "echo hi" {
+		t.Errorf("command = %v, want [sh -c echo hi]", got["command"])
+	}
+	if got["runner_class"] != "large" {
+		t.Errorf("runner_class = %v, want large", got["runner_class"])
+	}
+}
+
+func TestForgeRerunExec_HTTPError_ReturnsErr(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusBadRequest, `{"error":"image not allowed"}`)
+	setupCLI(t, srv)
+	e := forgeExec{Image: "x", Command: []string{"sh"}}
+	if _, ok := forgeRerunExec(e)().(forgeErrMsg); !ok {
+		t.Error("HTTP error should return forgeErrMsg so the failure isn't swallowed")
+	}
+}
+
+func TestForgeModel_List_R_Capital_Reruns(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"execution_id":"new-1"}`)
+	setupCLI(t, srv)
+
+	m := applyForgeMsg(newForgeModel(), forgeExecsMsg([]forgeExec{
+		{ExecutionID: "orig-1", Image: "ubuntu:22.04", Command: []string{"sh", "-c", "echo hi"}, Status: "completed"},
+	}))
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	if cmd == nil {
+		t.Fatal("R on a row with a command should emit a rerun cmd")
+	}
+	if _, ok := cmd().(forgeCreatedMsg); !ok {
+		t.Errorf("rerun cmd returned %T, want forgeCreatedMsg", cmd())
+	}
+	if rec.Method != "POST" || rec.Path != "/forge/executions" {
+		t.Errorf("request = %s %s, want POST /forge/executions", rec.Method, rec.Path)
+	}
+}
+
+func TestForgeModel_List_R_Capital_Noop_WhenNoCommand(t *testing.T) {
+	// A row without a captured command can't be rerun; R must not emit a cmd
+	// (so no request is sent).
+	m := applyForgeMsg(newForgeModel(), forgeExecsMsg([]forgeExec{
+		{ExecutionID: "orig-1", Image: "ubuntu:22.04", Status: "completed"},
+	}))
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	if cmd != nil {
+		t.Error("R on a row without a command should not emit a cmd")
+	}
+}
+
+func TestForgeModel_Output_R_Capital_Reruns(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"execution_id":"new-1"}`)
+	setupCLI(t, srv)
+
+	m := newForgeModel()
+	m.view = forgeViewOutput
+	m.selExec = &forgeExec{ExecutionID: "orig-1", Image: "ubuntu:22.04", Command: []string{"sh", "-c", "echo hi"}}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	if cmd == nil {
+		t.Fatal("R in output view should emit a rerun cmd")
+	}
+	if _, ok := cmd().(forgeCreatedMsg); !ok {
+		t.Errorf("rerun cmd returned %T, want forgeCreatedMsg", cmd())
+	}
+	if rec.Method != "POST" || rec.Path != "/forge/executions" {
+		t.Errorf("request = %s %s, want POST /forge/executions", rec.Method, rec.Path)
+	}
+}
+
+func TestForgeModel_Output_R_Capital_Noop_WhenNoCommand(t *testing.T) {
+	m := newForgeModel()
+	m.view = forgeViewOutput
+	m.selExec = &forgeExec{ExecutionID: "orig-1", Image: "ubuntu:22.04"}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	if cmd != nil {
+		t.Error("R with no captured command should not emit a cmd")
+	}
+}
+
+// The list endpoint returns command/env; the model must decode them so a rerun
+// works straight from the list without a second fetch.
+func TestForgeFetchExecs_DecodesCommand(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusOK,
+		`[{"execution_id":"e1","image":"ubuntu:22.04","command":["sh","-c","echo hi"],"status":"completed"}]`)
+	setupCLI(t, srv)
+
+	msg := forgeFetchExecs()
+	execs, ok := msg.(forgeExecsMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want forgeExecsMsg", msg)
+	}
+	if len(execs) != 1 || len(execs[0].Command) != 3 || execs[0].Command[2] != "echo hi" {
+		t.Errorf("command = %v, want [sh -c echo hi] decoded from the list", execs[0].Command)
+	}
+}
+
 // ── buildForgeCommand ──────────────────────────────────────────────────────────
 
 // A single line is tokenised into argv (forge runs argv with no shell).
@@ -768,6 +892,13 @@ func TestForgeView_ListHelp_MentionsNew(t *testing.T) {
 	m := applyForgeMsg(newForgeModel(), forgeExecsMsg([]forgeExec{}))
 	if !strings.Contains(m.View(), "new") {
 		t.Error("list help should mention the new-execution shortcut")
+	}
+}
+
+func TestForgeView_ListHelp_MentionsRerun(t *testing.T) {
+	m := applyForgeMsg(newForgeModel(), forgeExecsMsg([]forgeExec{}))
+	if !strings.Contains(m.View(), "rerun") {
+		t.Error("list help should mention the rerun shortcut")
 	}
 }
 

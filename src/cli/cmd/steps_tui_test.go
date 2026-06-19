@@ -371,6 +371,86 @@ func TestStepsModel_CreateStepForm_ImageFallsBackToText(t *testing.T) {
 	}
 }
 
+// ── Step form: runner-class selector ───────────────────────────────────────────
+
+func TestStepsModel_CreateStepForm_UsesRunnerSelector(t *testing.T) {
+	m := newStepsModel()
+	m.runnerClasses = kvCatalog{labels: []string{"standard", "large"}, values: []string{"standard", "large"}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m2 := updated.(stepsModel)
+	// forge/run's Runner field is an optional name selector: it defaults to the
+	// leading "(none)" choice (empty), so forge applies its own default class.
+	if got := m2.form.value("with.runner_class"); got != "" {
+		t.Errorf("runner default = %q, want empty (none selected)", got)
+	}
+	// Tab order: name(0), action(1), image(2), run(3), env(4), runner(5).
+	f := m2.form
+	for range 5 {
+		f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyRight}) // (none) → standard
+	if got := f.value("with.runner_class"); got != "standard" {
+		t.Errorf("runner after cycle = %q, want standard", got)
+	}
+	if v := f.view(80, 24); !strings.Contains(v, "standard") {
+		t.Errorf("form should display the runner class name; view = %q", v)
+	}
+}
+
+func TestStepsModel_CreateStepForm_RunnerFallsBackToText(t *testing.T) {
+	m := newStepsModel() // m.runnerClasses is empty
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m2 := updated.(stepsModel)
+	// With no catalog the Runner field is a free-text input, so a typed class name
+	// still works (a selector would ignore runes).
+	f := m2.form
+	for range 5 {
+		f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	f, _, _ = f.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("custom")})
+	if got := f.value("with.runner_class"); got != "custom" {
+		t.Errorf("runner after typing = %q, want custom (free-text fallback)", got)
+	}
+}
+
+// Editing a step whose With pins a runner class should pre-select that class in
+// the picker (round-trips through stepEditValues).
+func TestStepsModel_EditStep_RunnerPickerPreselectsStoredClass(t *testing.T) {
+	m := newStepsModel()
+	m.actions = []string{"forge/run"}
+	m.images = []string{"ubuntu:22.04"}
+	m.runnerClasses = kvCatalog{labels: []string{"standard", "large"}, values: []string{"standard", "large"}}
+	s := sampleStep()
+	s.With["runner_class"] = "large"
+	m = applyStepsMsg(m, tuiStepsMsg([]tuiStep{s}))
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	m2 := updated.(stepsModel)
+	if got := m2.form.value("with.runner_class"); got != "large" {
+		t.Errorf("runner_class = %q, want large (picker pre-selected from stored With)", got)
+	}
+}
+
+// Editing a step pinned to a runner class the catalog no longer offers (e.g. an
+// operator disabled it) must preserve the stored class, not silently drop it to
+// forge's default on save.
+func TestStepsModel_EditStep_PreservesRunnerClassMissingFromCatalog(t *testing.T) {
+	m := newStepsModel()
+	m.actions = []string{"forge/run"}
+	m.images = []string{"ubuntu:22.04"}
+	// "large" is absent from the catalog (disabled); only "standard" remains.
+	m.runnerClasses = kvCatalog{labels: []string{"standard"}, values: []string{"standard"}}
+	s := sampleStep()
+	s.With["runner_class"] = "large"
+	m = applyStepsMsg(m, tuiStepsMsg([]tuiStep{s}))
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	m2 := updated.(stepsModel)
+	if got := m2.form.value("with.runner_class"); got != "large" {
+		t.Errorf("runner_class = %q, want large (preserved despite not being in catalog)", got)
+	}
+}
+
 // ── View: rendering ───────────────────────────────────────────────────────────
 
 func TestStepsView_LoadingList(t *testing.T) {
@@ -559,6 +639,41 @@ func TestTUIFetchOutposts_ErrorDegradesToEmpty(t *testing.T) {
 	cat, ok := tuiFetchOutposts().(tuiOutpostsMsg)
 	if !ok || len(cat.values) != 0 {
 		t.Errorf("outposts = %#v, want empty tuiOutpostsMsg on error", cat)
+	}
+}
+
+// ── Fetch: tuiFetchRunnerClasses ───────────────────────────────────────────────
+
+func TestTUIFetchRunnerClasses_FiltersDisabled(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK,
+		`[{"name":"standard","enabled":true},{"name":"large","enabled":true},{"name":"retired","enabled":false}]`)
+	setupCLI(t, srv)
+	msg := tuiFetchRunnerClasses()
+	if rec.Method != "GET" || rec.Path != "/forge/runner-classes" {
+		t.Errorf("request = %s %s, want GET /forge/runner-classes", rec.Method, rec.Path)
+	}
+	cat, ok := msg.(tuiRunnerClassesMsg)
+	if !ok || len(cat.values) != 2 {
+		t.Fatalf("msg = %#v, want 2 enabled classes", msg)
+	}
+	// Name is both shown and submitted (no separate id).
+	if cat.labels[0] != "standard" || cat.values[0] != "standard" {
+		t.Errorf("entry 0 = %q/%q, want standard/standard", cat.labels[0], cat.values[0])
+	}
+	// Disabled classes are dropped — forge rejects them at run time.
+	for _, v := range cat.values {
+		if v == "retired" {
+			t.Error("disabled class 'retired' should be filtered out")
+		}
+	}
+}
+
+func TestTUIFetchRunnerClasses_ErrorDegradesToEmpty(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusForbidden, `nope`)
+	setupCLI(t, srv)
+	cat, ok := tuiFetchRunnerClasses().(tuiRunnerClassesMsg)
+	if !ok || len(cat.values) != 0 {
+		t.Errorf("runner classes = %#v, want empty tuiRunnerClassesMsg on error", cat)
 	}
 }
 

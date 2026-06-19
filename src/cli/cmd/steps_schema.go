@@ -47,10 +47,11 @@ const (
 // for images, the image ref itself). When a catalog is unavailable the field
 // degrades to a free-text input so the form still works.
 const (
-	catNone    = ""
-	catImage   = "image"   // forge image allowlist (name == value)
-	catTicket  = "ticket"  // tickets: show title, submit ticket_id
-	catOutpost = "outpost" // outposts: show name, submit outpost_id
+	catNone        = ""
+	catImage       = "image"        // forge image allowlist (name == value)
+	catTicket      = "ticket"       // tickets: show title, submit ticket_id
+	catOutpost     = "outpost"      // outposts: show name, submit outpost_id
+	catRunnerClass = "runner-class" // forge runner classes (name == value)
 )
 
 // stepField describes one input within an action's schema. key is the with-map
@@ -76,9 +77,10 @@ type kvCatalog struct {
 // stepCatalogs bundles the option sources the create-step form draws on, so a
 // single value threads through form construction and rebuilds.
 type stepCatalogs struct {
-	images   []string
-	tickets  kvCatalog
-	outposts kvCatalog
+	images        []string
+	tickets       kvCatalog
+	outposts      kvCatalog
+	runnerClasses kvCatalog
 }
 
 // forCatalog returns the kvCatalog backing a catalog name (empty for image/none).
@@ -88,6 +90,8 @@ func (c stepCatalogs) forCatalog(name string) kvCatalog {
 		return c.tickets
 	case catOutpost:
 		return c.outposts
+	case catRunnerClass:
+		return c.runnerClasses
 	default:
 		return kvCatalog{}
 	}
@@ -101,6 +105,7 @@ var stepActionSchema = map[string][]stepField{
 		{key: "image", label: "Image", placeholder: "ubuntu:22.04 (required)", required: true, catalog: catImage},
 		{key: "run", label: "Run", placeholder: "go test ./...\n(multi-line ok)", required: true, multiline: true},
 		{key: "env", label: "Env", placeholder: "KEY=VALUE  KEY2=${steps.build.output}", kind: stepFieldEnv},
+		{key: "runner_class", label: "Runner", placeholder: "runner class (optional, default standard)", catalog: catRunnerClass},
 	},
 	"tickets/create": {
 		{key: "title", label: "Title", placeholder: "Build failed: ${steps.build.output}", required: true},

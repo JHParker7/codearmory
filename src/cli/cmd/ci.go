@@ -142,6 +142,7 @@ func init() {
 		stepWith        string
 		stepImage       string
 		stepRun         string
+		stepRunnerClass string
 		stepEnvs        []string
 		stepDescription string
 		stepTimeout     int64
@@ -193,7 +194,7 @@ Use "armory pipelines list actions" to see all registered catalog actions.
 				if stepAction == "" {
 					return fmt.Errorf("--action is required (run \"armory pipelines list actions\" to see available actions)")
 				}
-				with, err := buildWith(stepAction, stepWith, stepImage, stepRun, stepEnvs)
+				with, err := buildWith(stepAction, stepWith, stepImage, stepRun, stepRunnerClass, stepEnvs)
 				if err != nil {
 					return err
 				}
@@ -218,6 +219,7 @@ Use "armory pipelines list actions" to see all registered catalog actions.
 	createStepCmd.Flags().StringVar(&stepWith, "with", "", "Step configuration as a JSON object")
 	createStepCmd.Flags().StringVar(&stepImage, "image", "", "Container image (forge/run convenience flag, e.g. ubuntu:22.04)")
 	createStepCmd.Flags().StringVar(&stepRun, "run", "", "Shell command to run (forge/run convenience flag)")
+	createStepCmd.Flags().StringVar(&stepRunnerClass, "runner-class", "", "Forge runner class (forge/run convenience flag, e.g. large; defaults to standard)")
 	createStepCmd.Flags().StringArrayVar(&stepEnvs, "env", nil, "Env var KEY=VALUE (forge/run convenience flag, repeatable)")
 	createStepCmd.Flags().StringVar(&stepDescription, "description", "", "Human-readable description")
 	createStepCmd.Flags().Int64Var(&stepTimeout, "timeout", 30, "Step timeout in seconds")
@@ -251,6 +253,7 @@ Use "armory pipelines list actions" to see all registered catalog actions.
 		updateStepWith        string
 		updateStepImage       string
 		updateStepRun         string
+		updateStepRunnerClass string
 		updateStepEnvs        []string
 		updateStepDescription string
 		updateStepTimeout     int64
@@ -275,7 +278,7 @@ Use "armory pipelines list actions" to see all registered catalog actions.
 				if updateStepAction == "" {
 					return fmt.Errorf("--action is required (or use -f <file>)")
 				}
-				with, err := buildWith(updateStepAction, updateStepWith, updateStepImage, updateStepRun, updateStepEnvs)
+				with, err := buildWith(updateStepAction, updateStepWith, updateStepImage, updateStepRun, updateStepRunnerClass, updateStepEnvs)
 				if err != nil {
 					return err
 				}
@@ -314,6 +317,7 @@ Use "armory pipelines list actions" to see all registered catalog actions.
 	updateStepCmd.Flags().StringVar(&updateStepWith, "with", "", "Step configuration as a JSON object")
 	updateStepCmd.Flags().StringVar(&updateStepImage, "image", "", "Container image (forge/run convenience flag)")
 	updateStepCmd.Flags().StringVar(&updateStepRun, "run", "", "Shell command to run (forge/run convenience flag)")
+	updateStepCmd.Flags().StringVar(&updateStepRunnerClass, "runner-class", "", "Forge runner class (forge/run convenience flag, e.g. large; defaults to standard)")
 	updateStepCmd.Flags().StringArrayVar(&updateStepEnvs, "env", nil, "Env var KEY=VALUE (forge/run convenience flag, repeatable)")
 	updateStepCmd.Flags().StringVar(&updateStepDescription, "description", "", "Human-readable description")
 	updateStepCmd.Flags().Int64Var(&updateStepTimeout, "timeout", 30, "Step timeout in seconds")
@@ -686,9 +690,9 @@ Supply a value for each ${...} reference the step uses with --input:
 }
 
 // buildWith constructs the step With map from CLI flags.
-// For forge/run, --image, --run, and --env are convenience flags merged into
-// any --with JSON base. For all other actions, --with JSON is required.
-func buildWith(action, withJSON, image, run string, envs []string) (map[string]any, error) {
+// For forge/run, --image, --run, --env, and --runner-class are convenience flags
+// merged into any --with JSON base. For all other actions, --with JSON is required.
+func buildWith(action, withJSON, image, run, runnerClass string, envs []string) (map[string]any, error) {
 	with := map[string]any{}
 
 	if withJSON != "" {
@@ -703,6 +707,9 @@ func buildWith(action, withJSON, image, run string, envs []string) (map[string]a
 		}
 		if run != "" {
 			with["run"] = run
+		}
+		if runnerClass != "" {
+			with["runner_class"] = runnerClass
 		}
 		if len(envs) > 0 {
 			env := map[string]string{}
