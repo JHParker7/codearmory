@@ -224,6 +224,148 @@ func TestJobFailureReason_NoDanglingColon(t *testing.T) {
 	}
 }
 
+// TestBuildJob_TmpfsMemoryBacked guards that /tmp is a memory-backed emptyDir.
+// A default node-backed emptyDir cannot be shared into a Firecracker (kata-fc)
+// microVM — Firecracker has no virtio-fs/9p — so the container never starts and
+// the execution fails with no pod logs. Memory-backed matches the docker runtime's
+// tmpfs and works under every VMM.
+func TestBuildJob_TmpfsMemoryBacked(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge"}
+	exec := Execution{ExecutionID: "exec-1", Image: "alpine:3.19", Command: []string{"true"}, TimeoutSecs: 30}
+
+	vols := r.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec.Volumes
+	if len(vols) != 1 || vols[0].Name != "tmp" {
+		t.Fatalf("want a single 'tmp' volume, got %+v", vols)
+	}
+	ed := vols[0].EmptyDir
+	if ed == nil {
+		t.Fatal("tmp volume is not an emptyDir")
+	}
+	if ed.Medium != corev1.StorageMediumMemory {
+		t.Errorf("tmp emptyDir medium = %q, want Memory (required for Firecracker/kata-fc)", ed.Medium)
+	}
+	if ed.SizeLimit == nil || ed.SizeLimit.IsZero() {
+		t.Error("tmp emptyDir should carry a SizeLimit from TmpfsMB")
+	}
+}
+
+// TestContainerStateReason checks the runner container's state is turned into a
+// useful reason for the no-logs path: a Waiting reason and abnormal Terminated
+// states surface, while a plain non-zero "Error" exit is left to the exit code.
+func TestContainerStateReason(t *testing.T) {
+	mk := func(state corev1.ContainerState) *corev1.Pod {
+		return &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: "runner", State: state},
+		}}}
+	}
+
+	cases := []struct {
+		name  string
+		pod   *corev1.Pod
+		want  string // substring; "" means expect empty
+		empty bool
+	}{
+		{
+			name: "waiting reason surfaces",
+			pod:  mk(corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerError", Message: "failed to create shim: boot microVM"}}),
+			want: "CreateContainerError",
+		},
+		{
+			name: "oomkilled surfaces",
+			pod:  mk(corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled", ExitCode: 137}}),
+			want: "OOMKilled",
+		},
+		{
+			name:  "plain error exit is left to the exit code",
+			pod:   mk(corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1}}),
+			empty: true,
+		},
+		{
+			name:  "no runner container",
+			pod:   &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "other"}}}},
+			empty: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := containerStateReason(tc.pod)
+			if tc.empty {
+				if got != "" {
+					t.Errorf("containerStateReason = %q, want empty", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("containerStateReason = %q, want substring %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestJobFailureReason_IncludesPodEvents verifies the diagnostic also reads pod
+// events — FailedCreatePodSandBox is emitted on the pod, not the job, and is the
+// real cause when a kata microVM fails to boot. An unrelated job's pod event must
+// not leak in.
+func TestJobFailureReason_IncludesPodEvents(t *testing.T) {
+	const jobName = "forge-exec-1"
+	t0 := time.Unix(1_700_000_000, 0)
+
+	cs := fake.NewSimpleClientset(
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: "ev-pod", Namespace: "forge"},
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "forge-exec-1-abcde"},
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedCreatePodSandBox",
+			Message:        "Failed to create pod sandbox: firecracker does not support filesystem sharing",
+			LastTimestamp:  metav1.NewTime(t0.Add(5 * time.Second)),
+		},
+		&corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: "ev-other-pod", Namespace: "forge"},
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "forge-exec-12-zzzzz"},
+			Type:           corev1.EventTypeWarning,
+			Reason:         "FailedCreatePodSandBox",
+			Message:        "a different execution's failure",
+			LastTimestamp:  metav1.NewTime(t0.Add(20 * time.Second)),
+		},
+	)
+	r := &KubernetesRuntime{client: cs, namespace: "forge"}
+
+	got := r.jobFailureReason(jobName)
+	if !strings.Contains(got, "FailedCreatePodSandBox") || !strings.Contains(got, "filesystem sharing") {
+		t.Errorf("jobFailureReason = %q, want the pod's FailedCreatePodSandBox reason", got)
+	}
+	if strings.Contains(got, "different execution") {
+		t.Errorf("jobFailureReason leaked another execution's pod event: %q", got)
+	}
+}
+
+// TestPodFailureDetail checks the container state wins over events, and that the
+// event lookup is the fallback when the container carries no reason.
+func TestPodFailureDetail(t *testing.T) {
+	const jobName = "forge-exec-1"
+	cs := fake.NewSimpleClientset(&corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: "ev-pod", Namespace: "forge"},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "forge-exec-1-abcde"},
+		Type:           corev1.EventTypeWarning,
+		Reason:         "FailedScheduling",
+		Message:        "0/3 nodes are available: no node has the kata-fc handler",
+		LastTimestamp:  metav1.NewTime(time.Unix(1_700_000_000, 0)),
+	})
+	r := &KubernetesRuntime{client: cs, namespace: "forge"}
+
+	withState := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: "runner", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}},
+	}}}
+	if got := r.podFailureDetail(withState, jobName); !strings.Contains(got, "ImagePullBackOff") {
+		t.Errorf("podFailureDetail should prefer the container state, got %q", got)
+	}
+
+	noState := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "runner"}}}}
+	if got := r.podFailureDetail(noState, jobName); !strings.Contains(got, "FailedScheduling") {
+		t.Errorf("podFailureDetail should fall back to events, got %q", got)
+	}
+}
+
 // TestResolveRuntimeClass checks the precedence a kata/kubernetes backend uses to
 // pick its RuntimeClass: explicit per-backend config wins, then the legacy
 // process-wide env var, then nil (the cluster's default runtime).

@@ -4,9 +4,13 @@ on:
   push:
     branches:
       - main
+      - beta
+      - alpha
   pull_request:
     branches:
       - main
+      - beta
+      - alpha
 
 permissions:
   contents: read
@@ -140,6 +144,8 @@ jobs:
     outputs:
       new_release_published: ${{ steps.semantic.outputs.new_release_published }}
       new_release_version: ${{ steps.semantic.outputs.new_release_version }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      image_latest: ${{ steps.meta.outputs.image_latest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -151,11 +157,23 @@ jobs:
             @semantic-release/changelog@6.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Mark release as pre-release
+      # alpha/beta are prerelease channels in .releaserc.json, so semantic-release
+      # marks their GitHub releases as pre-release automatically. The image tag uses a
+      # branch-derived prefix (none / beta- / alpha-) over the clean X.Y.Z version.
+      - name: Compute image tags
+        id: meta
         if: steps.semantic.outputs.new_release_published == 'true'
-        run: gh release edit "v${{ steps.semantic.outputs.new_release_version }}" --prerelease
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ steps.semantic.outputs.new_release_version }}"
+          base="${version%%-*}"
+          case "${{ github.ref_name }}" in
+            main)  prefix="";       latest="latest" ;;
+            beta)  prefix="beta-";  latest="beta-latest" ;;
+            alpha) prefix="alpha-"; latest="alpha-latest" ;;
+            *)     prefix="${{ github.ref_name }}-"; latest="${{ github.ref_name }}-latest" ;;
+          esac
+          echo "image_tag=${prefix}${base}" >> "$GITHUB_OUTPUT"
+          echo "image_latest=${latest}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: release
@@ -242,8 +260,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/code-armory-app/${{ matrix.name }}:alpha-${{ needs.release.outputs.new_release_version }}
-            ghcr.io/code-armory-app/${{ matrix.name }}:alpha-latest
+            ghcr.io/code-armory-app/${{ matrix.name }}:${{ needs.release.outputs.image_tag }}
+            ghcr.io/code-armory-app/${{ matrix.name }}:${{ needs.release.outputs.image_latest }}
 
   build-cli:
     needs: release

@@ -7,6 +7,15 @@ on:
         description: "Version tag to publish (without leading v, e.g. 1.4.1)"
         required: true
         type: string
+      channel:
+        description: "Release channel the tag belongs to"
+        required: true
+        default: alpha
+        type: choice
+        options:
+          - alpha
+          - beta
+          - main
 
 permissions:
   packages: write
@@ -77,6 +86,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      - name: Compute image tags
+        id: meta
+        run: |
+          case "${{ inputs.channel }}" in
+            main)  prefix="";       latest="latest" ;;
+            beta)  prefix="beta-";  latest="beta-latest" ;;
+            alpha) prefix="alpha-"; latest="alpha-latest" ;;
+          esac
+          echo "image_tag=${prefix}${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          echo "image_latest=${latest}" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
@@ -94,5 +113,5 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/code-armory-app/${{ matrix.name }}:alpha-${{ inputs.version }}
-            ghcr.io/code-armory-app/${{ matrix.name }}:alpha-latest
+            ghcr.io/code-armory-app/${{ matrix.name }}:${{ steps.meta.outputs.image_tag }}
+            ghcr.io/code-armory-app/${{ matrix.name }}:${{ steps.meta.outputs.image_latest }}
