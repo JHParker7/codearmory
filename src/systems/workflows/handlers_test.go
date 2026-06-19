@@ -344,12 +344,93 @@ func TestExecuteStep_HTTPSuccess(t *testing.T) {
 	})
 
 	step := Step{Action: ActionHTTP, With: map[string]any{"service": "mysvc", "path": "/health", "method": "GET"}}
-	body, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})
+	res, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(body, "ok") {
-		t.Errorf("body = %q, missing expected content", body)
+	if !strings.Contains(res.Output, "ok") {
+		t.Errorf("output = %q, missing expected content", res.Output)
+	}
+}
+
+// TestExecuteAction_ThreadsForgeMemory verifies a forge-backed async step carries
+// the execution's memory_used_mb/memory_limit_mb (read from the poll response)
+// into the step result, alongside the normal output.
+func TestExecuteAction_ThreadsForgeMemory(t *testing.T) {
+	srv := fakeService(t, "forge", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			w.Write([]byte(`{"execution_id":"exec-1"}`)) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"completed","stdout":"hi","memory_used_mb":180,"memory_limit_mb":256}`)) //nolint:errcheck
+	})
+	def := ActionDef{
+		Name:       "forge/run",
+		ServiceURL: srv.URL,
+		Method:     http.MethodPost,
+		Path:       "/executions",
+		Async: &AsyncConfig{
+			IDField:          "execution_id",
+			PollPath:         "/executions/{id}",
+			PollIntervalSecs: 1,
+			StatusField:      "status",
+			SuccessStates:    []string{"completed"},
+			FailureStates:    []string{"failed"},
+			OutputField:      "stdout",
+		},
+	}
+
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"image": "alpine"})
+	if err != nil {
+		t.Fatalf("executeAction: %v", err)
+	}
+	if res.Output != "hi" {
+		t.Errorf("output = %q, want hi", res.Output)
+	}
+	if res.MemoryUsedMB == nil || *res.MemoryUsedMB != 180 {
+		t.Errorf("MemoryUsedMB = %v, want 180", res.MemoryUsedMB)
+	}
+	if res.MemoryLimitMB == nil || *res.MemoryLimitMB != 256 {
+		t.Errorf("MemoryLimitMB = %v, want 256", res.MemoryLimitMB)
+	}
+}
+
+// TestExecuteAction_NonForgeNoMemory checks an async step whose poll response
+// carries no memory fields leaves the memory pointers nil — memory is forge-only.
+func TestExecuteAction_NonForgeNoMemory(t *testing.T) {
+	srv := fakeService(t, "svc", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Write([]byte(`{"id":"job-1"}`)) //nolint:errcheck
+			return
+		}
+		w.Write([]byte(`{"state":"done","result":"ok"}`)) //nolint:errcheck
+	})
+	def := ActionDef{
+		Name: "other/run", ServiceURL: srv.URL, Method: http.MethodPost, Path: "/jobs",
+		Async: &AsyncConfig{IDField: "id", PollPath: "/jobs/{id}", PollIntervalSecs: 1, StatusField: "state", SuccessStates: []string{"done"}, OutputField: "result"},
+	}
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{})
+	if err != nil {
+		t.Fatalf("executeAction: %v", err)
+	}
+	if res.MemoryUsedMB != nil || res.MemoryLimitMB != nil {
+		t.Errorf("non-forge step carried memory: used=%v limit=%v", res.MemoryUsedMB, res.MemoryLimitMB)
+	}
+}
+
+// TestJSONInt64Ptr covers the JSON-number-to-*int64 conversion used to pull memory
+// figures out of a decoded poll response (default Unmarshal yields float64).
+func TestJSONInt64Ptr(t *testing.T) {
+	if p := jsonInt64Ptr(float64(180)); p == nil || *p != 180 {
+		t.Errorf("float64(180) -> %v, want 180", p)
+	}
+	if p := jsonInt64Ptr(nil); p != nil {
+		t.Errorf("nil -> %v, want nil", p)
+	}
+	if p := jsonInt64Ptr("nope"); p != nil {
+		t.Errorf("string -> %v, want nil", p)
 	}
 }
 
