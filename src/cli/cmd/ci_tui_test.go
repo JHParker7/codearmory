@@ -101,6 +101,30 @@ func TestTuiFormatDur_NilEnd_UsesNow(t *testing.T) {
 	}
 }
 
+// ── Helper: tuiFormatMem / tuiFormatMemShort ──────────────────────────────────
+
+func i64(v int64) *int64 { return &v }
+
+func TestTuiFormatMem(t *testing.T) {
+	cases := []struct {
+		used, limit *int64
+		long, short string
+	}{
+		{i64(180), i64(256), "180 / 256 MB", "180/256"},
+		{nil, i64(256), "256 MB limit", "256↑"}, // usage unavailable → limit only
+		{i64(180), nil, "180 MB", "180"},
+		{nil, nil, "", "—"},
+	}
+	for _, c := range cases {
+		if got := tuiFormatMem(c.used, c.limit); got != c.long {
+			t.Errorf("tuiFormatMem(%v,%v) = %q, want %q", c.used, c.limit, got, c.long)
+		}
+		if got := tuiFormatMemShort(c.used, c.limit); got != c.short {
+			t.Errorf("tuiFormatMemShort(%v,%v) = %q, want %q", c.used, c.limit, got, c.short)
+		}
+	}
+}
+
 // ── Model: initial state ──────────────────────────────────────────────────────
 
 func TestTUIModel_InitialState(t *testing.T) {
