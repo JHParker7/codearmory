@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
@@ -200,6 +201,16 @@ func TestHandleList_Success_DB(t *testing.T) {
 	}
 	if len(executions) > 0 && executions[0].ExecutionID != execID {
 		t.Errorf("execution_id = %q, want %q", executions[0].ExecutionID, execID)
+	}
+	// The list must carry command/timeout so consumers (e.g. the CLI rerun action)
+	// can resubmit without a second fetch.
+	if len(executions) > 0 {
+		if want := []string{"echo", "test"}; !reflect.DeepEqual(executions[0].Command, want) {
+			t.Errorf("command = %v, want %v", executions[0].Command, want)
+		}
+		if executions[0].TimeoutSecs != 30 {
+			t.Errorf("timeout_secs = %d, want 30", executions[0].TimeoutSecs)
+		}
 	}
 }
 
