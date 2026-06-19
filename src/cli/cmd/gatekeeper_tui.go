@@ -249,8 +249,13 @@ type gkFormDoneMsg struct {
 type gkRolesMsg []gkRecord
 
 // gkRoleDetailMsg carries the rendered role detail once its permission ids have
-// been resolved into full permission objects.
-type gkRoleDetailMsg struct{ content string }
+// been resolved into full permission objects. roleID identifies the role the
+// content belongs to, so a resolve that finishes after the user has opened a
+// different role can be discarded instead of clobbering the role now on screen.
+type gkRoleDetailMsg struct {
+	roleID  string
+	content string
+}
 
 // ── Model ───────────────────────────────────────────────────────────────────
 
@@ -280,7 +285,8 @@ type gatekeeperModel struct {
 
 	pending *gkPending // confirm prompt in the list view
 
-	selLabel string // selected record label, for the detail title
+	selLabel     string // selected record label, for the detail title
+	roleDetailID string // id of the role whose detail is open, to drop stale resolves
 
 	status    string // transient one-line status (action result)
 	statusErr bool
@@ -376,12 +382,17 @@ func gkFetchRoles() tea.Msg {
 // kept as a stub noting the error so one missing permission doesn't hide the
 // rest.
 func gkResolveRolePerms(rec gkRecord) tea.Cmd {
+	roleID := gkStr(rec, "role_id")
 	ids := gkStrSlice(rec, "permissions_ids")
 	return func() tea.Msg {
 		resolved := make([]any, 0, len(ids))
+		anyOK, authDenied := false, false
 		for _, id := range ids {
 			data, err := doRequest("GET", "/gatekeeper/permissions/"+id, nil)
 			if err != nil {
+				if gkForbidden(err) {
+					authDenied = true
+				}
 				resolved = append(resolved, gkRecord{"permissions_id": id, "error": err.Error()})
 				continue
 			}
@@ -391,9 +402,33 @@ func gkResolveRolePerms(rec gkRecord) tea.Cmd {
 				continue
 			}
 			resolved = append(resolved, p)
+			anyOK = true
 		}
-		return gkRoleDetailMsg{content: gkRoleDetailContent(rec, resolved)}
+		// When the caller simply lacks the getPermission grant every fetch is
+		// forbidden — don't bury the view under a wall of identical errors. Fall
+		// back to the plain role record with its raw ids, the view shown before
+		// resolution was added. A genuinely-missing (404) permission still
+		// surfaces as a stub, since that path leaves authDenied false.
+		if !anyOK && authDenied {
+			return gkRoleDetailMsg{roleID: roleID, content: gkRoleRawContent(rec)}
+		}
+		return gkRoleDetailMsg{roleID: roleID, content: gkRoleDetailContent(rec, resolved)}
 	}
+}
+
+// gkForbidden reports whether a doRequest error is an auth/permission denial
+// (HTTP 401/403) rather than a not-found or transport error.
+func gkForbidden(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "HTTP 403") || strings.Contains(s, "HTTP 401")
+}
+
+// gkRoleRawContent renders a role as pretty JSON exactly as fetched, keeping its
+// raw permissions_ids. Used as the graceful fallback when no permission could be
+// resolved into a full object.
+func gkRoleRawContent(rec gkRecord) string {
+	pretty, _ := json.MarshalIndent(rec, "", "  ")
+	return string(pretty)
 }
 
 // gkRoleBase copies a role record without the raw permissions_ids list, which
@@ -510,9 +545,10 @@ func (m gatekeeperModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case gkRoleDetailMsg:
-		// Resolved role permissions arrived; swap them into the detail view if
-		// it's still showing (the user may have navigated away meanwhile).
-		if m.view == gkViewDetail {
+		// Resolved role permissions arrived; swap them in only if their role is
+		// still the one on screen — the user may have navigated away or opened a
+		// different role while the per-id fetches were in flight.
+		if m.view == gkViewDetail && msg.roleID == m.roleDetailID {
 			m.vp.SetContent(msg.content)
 		}
 		return m, nil
@@ -635,6 +671,7 @@ func (m gatekeeperModel) keyList(msg tea.KeyMsg) (gatekeeperModel, tea.Cmd) {
 			// Roles store opaque permission ids; resolve them to real
 			// permissions so the detail view shows what the role actually grants.
 			if m.section == gkRoles {
+				m.roleDetailID = gkStr(rec, m.def().idKey)
 				if ids := gkStrSlice(rec, "permissions_ids"); len(ids) > 0 {
 					m.vp.SetContent(gkRoleLoadingContent(rec, len(ids)))
 					m.vp.GotoTop()

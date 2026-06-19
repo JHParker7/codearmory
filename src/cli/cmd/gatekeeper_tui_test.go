@@ -492,6 +492,26 @@ func TestGKResolveRolePerms_KeepsStubForMissing(t *testing.T) {
 	}
 }
 
+// When the caller lacks getPermission every fetch is forbidden (HTTP 403); the
+// detail must fall back to the raw role record with its ids, not a wall of
+// identical error stubs.
+func TestGKResolveRolePerms_ForbiddenFallsBackToRawIDs(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusForbidden, `{"error":"forbidden"}`)
+	setupCLI(t, srv)
+
+	rec := gkRecord{"role_id": "r", "name": "x", "permissions_ids": []any{"p1", "p2"}}
+	msg := gkResolveRolePerms(rec)().(gkRoleDetailMsg)
+	if !strings.Contains(msg.content, "permissions_ids") {
+		t.Errorf("a forbidden resolve should keep the raw permissions_ids; got:\n%s", msg.content)
+	}
+	if strings.Contains(msg.content, "error") {
+		t.Errorf("a forbidden resolve should not render per-id error stubs; got:\n%s", msg.content)
+	}
+	if msg.roleID != "r" {
+		t.Errorf("roleID = %q, want r", msg.roleID)
+	}
+}
+
 func TestGKRoleDetailContent_EmptyPermsRendersArray(t *testing.T) {
 	got := gkRoleDetailContent(gkRecord{"name": "x", "permissions_ids": []any{"a"}}, nil)
 	if strings.Contains(got, "permissions_ids") {
@@ -514,6 +534,10 @@ func TestGKModel_Enter_OnRole_ResolvesPermissions(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("entering a role with permissions should dispatch a resolve cmd")
+	}
+	// The open role is recorded so a later resolve can be matched against it.
+	if m2.roleDetailID != "role-0000" {
+		t.Errorf("roleDetailID = %q, want role-0000", m2.roleDetailID)
 	}
 	// The loading placeholder must not leak raw permission ids.
 	if strings.Contains(m2.vp.View(), "perm-0") {
@@ -554,6 +578,28 @@ func TestGKModel_RoleDetailMsg_IgnoredOutsideDetail(t *testing.T) {
 	m = applyGK(m, gkRoleDetailMsg{content: "RESOLVED-PERMS"})
 	if strings.Contains(m.vp.View(), "RESOLVED-PERMS") {
 		t.Error("a stale role detail msg should be ignored once back in the list")
+	}
+}
+
+// A resolve that finishes after the user has opened a different role must not
+// overwrite the role now on screen.
+func TestGKModel_RoleDetailMsg_IgnoredForStaleRole(t *testing.T) {
+	m := newGatekeeperModel()
+	m.view = gkViewDetail
+	m.roleDetailID = "role-current"
+	m = applyGK(m, gkRoleDetailMsg{roleID: "role-stale", content: "STALE-PERMS"})
+	if strings.Contains(m.vp.View(), "STALE-PERMS") {
+		t.Error("a resolve for a different role should not clobber the open role's detail")
+	}
+}
+
+func TestGKModel_RoleDetailMsg_AppliedForCurrentRole(t *testing.T) {
+	m := newGatekeeperModel()
+	m.view = gkViewDetail
+	m.roleDetailID = "role-current"
+	m = applyGK(m, gkRoleDetailMsg{roleID: "role-current", content: "FRESH-PERMS"})
+	if !strings.Contains(m.vp.View(), "FRESH-PERMS") {
+		t.Error("the open role's own resolve should populate the viewport")
 	}
 }
 
