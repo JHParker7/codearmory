@@ -471,6 +471,19 @@ func TestPodFailureDetail_EvictedPodLevel(t *testing.T) {
 	}
 }
 
+// TestPodRemovedError checks the last-resort diagnostic for a pod that vanished
+// before its logs could be read names eviction (the common kata cause), so a run
+// never surfaces the raw "stream pod logs: pods ... not found" Kubernetes error.
+func TestPodRemovedError(t *testing.T) {
+	got := podRemovedError().Error()
+	if !strings.Contains(got, "removed before its logs could be read") || !strings.Contains(got, "evicted") {
+		t.Errorf("podRemovedError = %q, want a clean evicted/removed message", got)
+	}
+	if strings.Contains(got, "stream pod logs") || strings.Contains(got, "not found") {
+		t.Errorf("podRemovedError leaked a raw stream error: %q", got)
+	}
+}
+
 // TestResolveRuntimeClass checks the precedence a kata/kubernetes backend uses to
 // pick its RuntimeClass: explicit per-backend config wins, then the legacy
 // process-wide env var, then nil (the cluster's default runtime).

@@ -13,6 +13,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -316,7 +317,7 @@ done:
 		if detail := r.podFailureDetail(pod, jobName); detail != "" {
 			logErr = fmt.Errorf("pod produced no logs: %s", detail)
 		} else {
-			logErr = fmt.Errorf("pod was removed before its logs could be read — likely evicted (a memory-backed /tmp exceeding its SizeLimit, or node memory pressure) or garbage-collected")
+			logErr = podRemovedError()
 		}
 	default:
 		stdout, logErr = r.collectLogs(pod.Name)
@@ -329,6 +330,11 @@ done:
 		if strings.TrimSpace(stdout) == "" {
 			if detail := r.podFailureDetail(pod, jobName); detail != "" {
 				logErr = fmt.Errorf("pod produced no logs: %s", detail)
+			} else if apierrors.IsNotFound(logErr) {
+				// The pod was found at `done` but deleted out from under us before
+				// the log stream opened (the eviction/GC race), so collectLogs
+				// returned a raw "pods ... not found". Don't leak it.
+				logErr = podRemovedError()
 			}
 		}
 	}
@@ -387,6 +393,16 @@ func noPodError(eventReason, condMsg string) error {
 	default:
 		return fmt.Errorf("no pod found for execution — logs unavailable (the pod may have been evicted or never scheduled; verify the backend's RuntimeClass exists and a node can run it)")
 	}
+}
+
+// podRemovedError is the diagnostic for a pod that vanished before its logs could
+// be read, leaving no surviving container/pod state or event to explain why. The
+// overwhelmingly common cause is an eviction — and the memory-backed /tmp the kata
+// runtime requires (Firecracker cannot share a node-backed volume into the microVM)
+// counts against the pod memory limit, so a job that fills /tmp past its SizeLimit
+// is evicted and its pod removed before we can read it.
+func podRemovedError() error {
+	return fmt.Errorf("pod was removed before its logs could be read — likely evicted (a memory-backed /tmp exceeding its SizeLimit, or node memory pressure) or garbage-collected")
 }
 
 // jobFailureReason returns a short, human-readable reason the job produced no
