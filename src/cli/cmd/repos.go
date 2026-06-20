@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
 
@@ -274,5 +275,15 @@ func init() {
 	// "repos" is a capability slot: a deployment backed by GitHub instead of
 	// Gitea can register an alternative provider and select it via the
 	// "providers" config (providers.repos = "github").
-	RegisterModule(Module{Name: "gitea", Slot: "repos", Command: reposCmd})
+	RegisterModule(Module{
+		Name:    "gitea",
+		Slot:    "repos",
+		Order:   75,
+		Command: reposCmd,
+		Screens: []HubScreen{{
+			Title: "Repos",
+			Desc:  "Repositories, branches, commits and pull requests",
+			New:   func() tea.Model { return newReposModel() },
+		}},
+	})
 }

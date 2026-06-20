@@ -913,9 +913,10 @@ func TestGKCmd_Registered(t *testing.T) {
 	}
 }
 
-// gkScreenIndex returns the hub-menu position of the Gatekeeper screen, or -1.
+// gkScreenIndex returns the admin-menu position of the Gatekeeper screen, or -1.
+// Gatekeeper is an admin screen, so it lives in the admin hub.
 func gkScreenIndex() int {
-	for i, s := range hubScreens() {
+	for i, s := range adminScreens() {
 		if s.Title == "Gatekeeper" {
 			return i
 		}
@@ -927,9 +928,9 @@ func TestGKHome_RegisteredAsScreen(t *testing.T) {
 	isolateHome(t)
 	idx := gkScreenIndex()
 	if idx < 0 {
-		t.Fatal("Gatekeeper should be registered as a hub screen")
+		t.Fatal("Gatekeeper should be registered as an admin hub screen")
 	}
-	if _, ok := hubScreens()[idx].New().(gatekeeperModel); !ok {
+	if _, ok := adminScreens()[idx].New().(gatekeeperModel); !ok {
 		t.Error("the Gatekeeper screen's New() should build a gatekeeperModel")
 	}
 }
@@ -940,7 +941,7 @@ func TestGKHome_LaunchOpensModel(t *testing.T) {
 	if idx < 0 {
 		t.Fatal("Gatekeeper screen not registered")
 	}
-	updated, _ := newAppModel().Update(launchMsg{idx: idx})
+	updated, _ := newAdminAppModel().Update(launchMsg{idx: idx})
 	if _, ok := updated.(appModel).active.(gatekeeperModel); !ok {
 		t.Error("launching the Gatekeeper screen should make a gatekeeperModel active")
 	}

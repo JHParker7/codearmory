@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
 
@@ -200,5 +201,10 @@ channel you can access.
 		Name:    "notifications",
 		Order:   25,
 		Command: notificationsCmd,
+		Screens: []HubScreen{{
+			Title: "Notifications",
+			Desc:  "Notification channels (Slack, email, webhook)",
+			New:   func() tea.Model { return newNotificationsModel() },
+		}},
 	})
 }
