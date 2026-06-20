@@ -65,6 +65,18 @@ func (r *runtimeRegistry) Evict(name string) {
 	delete(r.cache, name)
 }
 
+// isVMIsolatedBackendType reports whether a backend type runs each job inside its
+// own VM, making the VM — not a shared host kernel — the isolation boundary. Only
+// these backends may run a privileged runner class (root + writable rootfs): on a
+// shared-kernel container backend (docker/kubernetes) that would be a host escape.
+// This is the single source of truth consulted by both the API gate
+// (validatePrivilegedBackend) and the runtime build below, so the two never
+// disagree about which backends are VM-isolated. "kata" is the Kubernetes runtime
+// pinned to a VM-isolating RuntimeClass; "proxmox" boots a throwaway VM per job.
+func isVMIsolatedBackendType(t string) bool {
+	return t == "kata" || t == "proxmox"
+}
+
 // buildRuntime constructs the concrete Runtime for a backend. docker and
 // kubernetes keep reading their existing env vars (FORGE_NETWORK_MODE,
 // K8S_NAMESPACE, …) so an existing single-runtime deployment is unchanged; the
@@ -77,7 +89,7 @@ func buildRuntime(b RuntimeBackend) (Runtime, error) {
 		// Optional per-backend RuntimeClass; empty falls back to K8S_RUNTIME_CLASS.
 		// Not VM-isolated: a shared host kernel, so privileged runner classes are
 		// ignored and the locked-down sandbox is always applied.
-		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], false)
+		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], isVMIsolatedBackendType(b.Type))
 	case "kata":
 		// Kata is the Kubernetes runtime pinned to a VM-isolating RuntimeClass. The
 		// RuntimeClass is mandatory: without one the pod silently falls back to the
@@ -91,7 +103,7 @@ func buildRuntime(b RuntimeBackend) (Runtime, error) {
 		}
 		// VM-isolated: the job runs inside a microVM, so a runner class may opt into
 		// running as root (RunnerClass.Privileged) for package managers / apt.
-		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], true)
+		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], isVMIsolatedBackendType(b.Type))
 	case "docker":
 		return newDockerRuntime()
 	case "proxmox":

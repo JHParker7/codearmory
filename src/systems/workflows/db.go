@@ -673,4 +673,3 @@ func recoverStuckRunsDB() int64 {
 	}
 	return result.RowsAffected
 }
-

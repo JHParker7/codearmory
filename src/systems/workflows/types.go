@@ -125,38 +125,38 @@ func (Workflow) TableName() string { return "workflows" }
 // it is never the triggering user's own session token. RunSessionID tracks the
 // underlying gatekeeper session so it can be revoked on terminal state.
 type WorkflowRun struct {
-	RunID       string            `json:"run_id"       gorm:"column:run_id;primaryKey"`
-	WorkflowID  string            `json:"workflow_id"  gorm:"column:workflow_id"`
-	TriggeredBy string            `json:"triggered_by" gorm:"column:triggered_by"`
-	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
-	Status      string            `json:"status"       gorm:"column:status;default:'pending'"`
-	CurrentStep int               `json:"current_step" gorm:"column:current_step;default:0"`
-	Inputs      map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
-	Token          string            `json:"-"            gorm:"column:token"`
-	RunSessionID   string            `json:"-"            gorm:"column:run_session_id"`
-	StepRuns    []WorkflowStepRun `json:"step_runs"    gorm:"-"`
-	CreatedAt   time.Time         `json:"created_at"   gorm:"column:created_at"`
-	StartedAt   *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`
-	EndedAt     *time.Time        `json:"ended_at,omitempty"   gorm:"column:ended_at"`
+	RunID        string            `json:"run_id"       gorm:"column:run_id;primaryKey"`
+	WorkflowID   string            `json:"workflow_id"  gorm:"column:workflow_id"`
+	TriggeredBy  string            `json:"triggered_by" gorm:"column:triggered_by"`
+	OrgID        string            `json:"org_id"       gorm:"column:org_id;default:''"`
+	Status       string            `json:"status"       gorm:"column:status;default:'pending'"`
+	CurrentStep  int               `json:"current_step" gorm:"column:current_step;default:0"`
+	Inputs       map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
+	Token        string            `json:"-"            gorm:"column:token"`
+	RunSessionID string            `json:"-"            gorm:"column:run_session_id"`
+	StepRuns     []WorkflowStepRun `json:"step_runs"    gorm:"-"`
+	CreatedAt    time.Time         `json:"created_at"   gorm:"column:created_at"`
+	StartedAt    *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`
+	EndedAt      *time.Time        `json:"ended_at,omitempty"   gorm:"column:ended_at"`
 }
 
 func (WorkflowRun) TableName() string { return "workflow_runs" }
 
 // WorkflowStepRun is the execution record for one step within a WorkflowRun.
 type WorkflowStepRun struct {
-	StepRunID    string     `json:"step_run_id"            gorm:"column:step_run_id;primaryKey"`
-	RunID        string     `json:"run_id"                 gorm:"column:run_id"`
-	StepIndex    int        `json:"step_index"             gorm:"column:step_index"`
-	StepName     string     `json:"step_name"              gorm:"column:step_name"`
-	Status       string     `json:"status"                 gorm:"column:status;default:'pending'"`
-	Output       *string    `json:"output,omitempty"       gorm:"column:response_body"`
+	StepRunID string  `json:"step_run_id"            gorm:"column:step_run_id;primaryKey"`
+	RunID     string  `json:"run_id"                 gorm:"column:run_id"`
+	StepIndex int     `json:"step_index"             gorm:"column:step_index"`
+	StepName  string  `json:"step_name"              gorm:"column:step_name"`
+	Status    string  `json:"status"                 gorm:"column:status;default:'pending'"`
+	Output    *string `json:"output,omitempty"       gorm:"column:response_body"`
 	// MemoryUsedMB/MemoryLimitMB are carried through from the forge execution a
 	// forge-backed step ran (NULL for non-forge steps and when forge could not
 	// measure usage). See forge's Execution for how they are captured.
 	MemoryUsedMB  *int64     `json:"memory_used_mb,omitempty"  gorm:"column:memory_used_mb"`
 	MemoryLimitMB *int64     `json:"memory_limit_mb,omitempty" gorm:"column:memory_limit_mb"`
-	StartedAt    *time.Time `json:"started_at,omitempty"   gorm:"column:started_at"`
-	EndedAt      *time.Time `json:"ended_at,omitempty"     gorm:"column:ended_at"`
+	StartedAt     *time.Time `json:"started_at,omitempty"   gorm:"column:started_at"`
+	EndedAt       *time.Time `json:"ended_at,omitempty"     gorm:"column:ended_at"`
 }
 
 func (WorkflowStepRun) TableName() string { return "workflow_step_runs" }

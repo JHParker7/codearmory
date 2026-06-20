@@ -129,7 +129,7 @@ func parsePodMetricsMemoryMB(raw []byte) (int64, bool) {
 	if totalBytes <= 0 {
 		return 0, false
 	}
-	return totalBytes / (1024 * 1024), true
+	return totalBytes / bytesPerMiB, true
 }
 
 // resolveRuntimeClass picks the RuntimeClass pointer for a kubernetes/kata
@@ -178,7 +178,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 	}
 
 	result, err := r.waitAndCollect(ctx, exec, job.Name)
-	result.MemoryLimitMB = ptr(spec.MemoryMB)
+	// Stamp the configured limit only when the job actually ran (it has an exit
+	// code). A cancelled or never-scheduled execution returns an empty result and
+	// must not report a limit for work that never happened.
+	if result.ExitCode != nil {
+		result.MemoryLimitMB = ptr(spec.MemoryMB)
+	}
 	// Always clean up, even on error or cancellation.
 	r.deleteJob(context.Background(), job.Name)
 	return result, err
@@ -350,7 +355,7 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 			if err != nil {
 				return RunResult{}, fmt.Errorf("get job: %w", err)
 			}
-			if p, perr := r.findPod(exec.ExecutionID); perr == nil && p != nil {
+			if p, perr := r.findPod(pollCtx, exec.ExecutionID); perr == nil && p != nil {
 				lastPod = p
 			}
 			if r.podMemoryMB != nil && lastPod != nil {
@@ -393,7 +398,7 @@ done:
 	// observation and this lookup, and that snapshot still carries its container
 	// state and exit code. A nil here means no pod was ever observed on any tick —
 	// the genuine "never scheduled" case, left to the events-based noPodError.
-	pod, podErr := r.findPod(exec.ExecutionID)
+	pod, podErr := r.findPod(pollCtx, exec.ExecutionID)
 	podGone := false
 	if pod == nil && podErr == nil {
 		pod = lastPod
@@ -477,8 +482,8 @@ done:
 
 // findPod returns the single pod for an execution, or (nil, nil) if none exists
 // yet (e.g. evicted or never scheduled).
-func (r *KubernetesRuntime) findPod(executionID string) (*corev1.Pod, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func (r *KubernetesRuntime) findPod(ctx context.Context, executionID string) (*corev1.Pod, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	pods, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{

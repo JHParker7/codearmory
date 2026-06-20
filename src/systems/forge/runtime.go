@@ -46,3 +46,8 @@ func proxyEnvPairs(proxy string) [][2]string {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// bytesPerMiB is the divisor for converting a byte count to whole MiB, used by
+// the docker and kubernetes runtimes when recording peak memory usage so the
+// conversion lives in one place.
+const bytesPerMiB = 1024 * 1024

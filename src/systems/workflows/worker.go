@@ -650,7 +650,7 @@ func (p *WorkerPool) executeHTTP(ctx context.Context, store *tokenStore, with ma
 		"authorization": true,
 		"x-service-key": true,
 		"cookie":        true,
-		"x-user-id":    true,
+		"x-user-id":     true,
 	}
 	for k, v := range withStringMap(with, "headers") {
 		if !reservedHeaders[strings.ToLower(k)] {

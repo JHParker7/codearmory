@@ -55,21 +55,32 @@ func backendOrDefault(backend string) string {
 	return backend
 }
 
+// errBackendLookup wraps a non-"not found" failure (e.g. a transient DB error)
+// while resolving the backend a privileged runner class targets, so the handler
+// returns 500 instead of reporting it as a 400 "backend not found" validation
+// error.
+var errBackendLookup = errors.New("backend lookup failed")
+
 // validatePrivilegedBackend rejects a privileged runner class that does not target
-// a VM-isolated (kata) backend. Root + writable rootfs is only safe behind the
-// microVM boundary; on container backends (docker/kubernetes/runc) it would be a
+// a VM-isolated backend. Root + writable rootfs is only safe behind a VM boundary;
+// on shared-kernel container backends (docker/kubernetes/runc) it would be a
 // host-kernel escape risk. This is the user-facing guard; buildJob enforces the
-// same rule at runtime as a second layer (it drops privileged off a kata backend).
+// same rule at runtime as a second layer (it drops privileged off a non-VM
+// backend). A genuine lookup failure is returned wrapped in errBackendLookup so
+// the caller can distinguish it from a real validation rejection.
 func validatePrivilegedBackend(ctx context.Context, backend string, privileged bool) error {
 	if !privileged {
 		return nil
 	}
 	row, err := (RuntimeBackend{Name: backend}).Get(ctx)
-	if err != nil {
-		return fmt.Errorf("privileged requires an existing kata backend; backend %q not found", backend)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("privileged requires an existing VM-isolated backend; backend %q not found", backend)
 	}
-	if b := row.(RuntimeBackend); b.Type != "kata" {
-		return fmt.Errorf("privileged is only allowed on kata (VM-isolated) backends; backend %q is type %q", backend, b.Type)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errBackendLookup, err)
+	}
+	if b := row.(RuntimeBackend); !isVMIsolatedBackendType(b.Type) {
+		return fmt.Errorf("privileged is only allowed on VM-isolated backends (kata, proxmox); backend %q is type %q", backend, b.Type)
 	}
 	return nil
 }
@@ -189,6 +200,13 @@ func handleCreateRunnerClass(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("runner_class.name", b.Name))
 
 	if err := validatePrivilegedBackend(ctx, backendOrDefault(b.Backend), b.Privileged); err != nil {
+		if errors.Is(err, errBackendLookup) {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "db query failed")
+			slog.ErrorContext(ctx, "create runner class: backend lookup error", "user_id", userID, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 		span.SetStatus(codes.Error, "validation failed")
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -263,6 +281,13 @@ func handleUpdateRunnerClass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validatePrivilegedBackend(ctx, backendOrDefault(b.Backend), b.Privileged); err != nil {
+		if errors.Is(err, errBackendLookup) {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "db query failed")
+			slog.ErrorContext(ctx, "update runner class: backend lookup error", "user_id", userID, "name", name, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 		span.SetStatus(codes.Error, "validation failed")
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
