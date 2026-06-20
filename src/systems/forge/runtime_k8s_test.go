@@ -71,6 +71,74 @@ func TestBuildJob_NonRootSecurityContext(t *testing.T) {
 	}
 }
 
+// TestBuildJob_PrivilegedKata verifies the kata (VM-isolated) opt-in: a runner
+// class with Privileged runs the job as root with a writable rootfs and privilege
+// escalation allowed so package managers work — the microVM is the boundary.
+func TestBuildJob_PrivilegedKata(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge", vmIsolated: true}
+	spec := stdRunnerSpec()
+	spec.Privileged = true
+	exec := Execution{ExecutionID: "exec-1", Image: "ubuntu:22.04", Command: []string{"apt-get", "update"}, TimeoutSecs: 30}
+
+	pod := r.buildJob(exec, spec).Spec.Template.Spec
+
+	if got := pod.SecurityContext.RunAsNonRoot; got == nil || *got {
+		t.Error("pod RunAsNonRoot should be false when privileged")
+	}
+	if got := pod.SecurityContext.RunAsUser; got == nil || *got != 0 {
+		t.Errorf("pod RunAsUser = %v, want 0", got)
+	}
+	sc := pod.Containers[0].SecurityContext
+	if sc.RunAsUser == nil || *sc.RunAsUser != 0 {
+		t.Errorf("container RunAsUser = %v, want 0", sc.RunAsUser)
+	}
+	if sc.RunAsNonRoot == nil || *sc.RunAsNonRoot {
+		t.Error("container RunAsNonRoot should be false when privileged")
+	}
+	if sc.ReadOnlyRootFilesystem == nil || *sc.ReadOnlyRootFilesystem {
+		t.Error("container ReadOnlyRootFilesystem should be false when privileged (apt needs a writable rootfs)")
+	}
+	if sc.AllowPrivilegeEscalation == nil || !*sc.AllowPrivilegeEscalation {
+		t.Error("container AllowPrivilegeEscalation should be true when privileged")
+	}
+	if sc.Capabilities != nil && len(sc.Capabilities.Drop) > 0 {
+		t.Errorf("privileged container should not drop capabilities, got %+v", sc.Capabilities)
+	}
+}
+
+// TestBuildJob_PrivilegedIgnoredWithoutVMIsolation is the security gate: a
+// Privileged runner class on a non-VM-isolated (plain kubernetes/runc) backend
+// MUST stay fully locked down — root in a shared-kernel container is an escape
+// risk, so the flag is dropped at runtime regardless of what the class requests.
+func TestBuildJob_PrivilegedIgnoredWithoutVMIsolation(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge", vmIsolated: false}
+	spec := stdRunnerSpec()
+	spec.Privileged = true
+	exec := Execution{ExecutionID: "exec-1", Image: "ubuntu:22.04", Command: []string{"apt-get", "update"}, TimeoutSecs: 30}
+
+	pod := r.buildJob(exec, spec).Spec.Template.Spec
+
+	if got := pod.SecurityContext.RunAsNonRoot; got == nil || !*got {
+		t.Error("pod RunAsNonRoot must remain true on a non-VM backend even with privileged set")
+	}
+	if got := pod.SecurityContext.RunAsUser; got == nil || *got != sandboxUID {
+		t.Errorf("pod RunAsUser = %v, want %d (privileged must be ignored off kata)", got, sandboxUID)
+	}
+	sc := pod.Containers[0].SecurityContext
+	if sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem {
+		t.Error("container ReadOnlyRootFilesystem must remain true on a non-VM backend")
+	}
+	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+		t.Error("container AllowPrivilegeEscalation must remain false on a non-VM backend")
+	}
+	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("container must still drop ALL capabilities on a non-VM backend, got %+v", sc.Capabilities)
+	}
+	if sc.RunAsUser == nil || *sc.RunAsUser != sandboxUID {
+		t.Errorf("container RunAsUser = %v, want %d", sc.RunAsUser, sandboxUID)
+	}
+}
+
 // TestBuildJob_PlumbsExecutionFields checks command/image/naming/timeout and the
 // service-account-token isolation are wired into the Job.
 func TestBuildJob_PlumbsExecutionFields(t *testing.T) {

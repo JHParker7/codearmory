@@ -53,7 +53,7 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 	if err != nil {
 		return RunResult{}, fmt.Errorf("runner class: %w", err)
 	}
-	memLimit := spec.MemoryMB * 1024 * 1024
+	memLimit := spec.MemoryMB * bytesPerMiB
 	cpuQuota := spec.CPUMillicores * 100 // 1000m → 100000 (one full core)
 	pidsLimit := spec.PidsLimit
 	tmpfsOpt := fmt.Sprintf("size=%dm", spec.TmpfsMB)
@@ -140,6 +140,17 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 	}()
 	defer close(samplerDone)
 
+	// memStats returns the configured limit and the peak usage sampled so far. It
+	// is read on every return path that follows ContainerStart — including timeout
+	// and wait-error — so a container that OOMs or times out still records its
+	// memory, exactly the case where the figure matters most.
+	memStats := func() (used *int64, limit *int64) {
+		if b := atomic.LoadInt64(&peakMemBytes); b > 0 {
+			used = ptr(b / bytesPerMiB)
+		}
+		return used, ptr(spec.MemoryMB)
+	}
+
 	// Wrap ctx with the execution's own timeout so the container is stopped and
 	// the result recorded as timed_out rather than running forever.
 	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, time.Duration(exec.TimeoutSecs)*time.Second)
@@ -151,21 +162,19 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 	select {
 	case <-timeoutCtx.Done():
 		r.client.ContainerStop(context.Background(), containerID, container.StopOptions{}) //nolint
-		return RunResult{}, timeoutCtx.Err()
+		memUsedMB, memLimitMB := memStats()
+		return RunResult{MemoryUsedMB: memUsedMB, MemoryLimitMB: memLimitMB}, timeoutCtx.Err()
 	case err := <-errCh:
 		if err != nil {
-			return RunResult{}, fmt.Errorf("container wait: %w", err)
+			memUsedMB, memLimitMB := memStats()
+			return RunResult{MemoryUsedMB: memUsedMB, MemoryLimitMB: memLimitMB}, fmt.Errorf("container wait: %w", err)
 		}
 	case status := <-statusCh:
 		exitCode = int(status.StatusCode)
 	}
 
 	// The container has exited; record the memory ceiling and peak usage so far.
-	memLimitMB := ptr(spec.MemoryMB)
-	var memUsedMB *int64
-	if b := atomic.LoadInt64(&peakMemBytes); b > 0 {
-		memUsedMB = ptr(b / (1024 * 1024))
-	}
+	memUsedMB, memLimitMB := memStats()
 
 	stdout, stderr, err := r.collectLogs(containerID)
 	if err != nil {

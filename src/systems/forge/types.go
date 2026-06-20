@@ -31,11 +31,11 @@ type Execution struct {
 	// Backend is the runtime backend this execution runs on, snapshotted from the
 	// runner class at submit time so re-pointing the class mid-flight cannot move
 	// an already-queued job to a different runtime.
-	Backend   string     `gorm:"column:backend;not null;default:default"                 json:"backend"`
-	Status    string     `gorm:"column:status;not null;default:pending"                  json:"status"`
-	ExitCode  *int       `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
-	Stdout    *string    `gorm:"column:stdout"                                           json:"stdout,omitempty"`
-	Stderr    *string    `gorm:"column:stderr"                                           json:"stderr,omitempty"`
+	Backend  string  `gorm:"column:backend;not null;default:default"                 json:"backend"`
+	Status   string  `gorm:"column:status;not null;default:pending"                  json:"status"`
+	ExitCode *int    `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
+	Stdout   *string `gorm:"column:stdout"                                           json:"stdout,omitempty"`
+	Stderr   *string `gorm:"column:stderr"                                           json:"stderr,omitempty"`
 	// MemoryUsedMB is the peak memory the run's container consumed, captured
 	// best-effort from the runtime (k8s metrics-server / docker stats). It is NULL
 	// when metrics are unavailable — most often a very short job a metrics-server
@@ -63,6 +63,14 @@ type RunnerClass struct {
 	// working unchanged.
 	Backend string `gorm:"not null;default:default"   json:"backend"`
 	Enabled bool   `gorm:"not null;default:true"      json:"enabled"`
+	// Privileged runs the job as root with a writable root filesystem and
+	// privilege escalation allowed, so package managers (apt/pacman/dnf) work. It
+	// is ONLY honoured by VM-isolated (kata) backends, where the microVM — not the
+	// container — is the isolation boundary. On container backends
+	// (docker/kubernetes/runc) it is ignored at runtime: root in a shared-kernel
+	// container is an escape risk, so the locked-down sandbox is always applied
+	// there regardless of this flag.
+	Privileged bool `gorm:"not null;default:false"     json:"privileged"`
 }
 
 // RuntimeBackend is an admin-managed runtime target. Type selects the runtime

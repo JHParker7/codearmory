@@ -16,18 +16,18 @@ import (
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type forgeExec struct {
-	ExecutionID string     `json:"execution_id"`
-	Image       string     `json:"image"`
-	RunnerClass string     `json:"runner_class"`
-	Status      string     `json:"status"`
-	ExitCode    *int       `json:"exit_code,omitempty"`
-	Stdout      *string    `json:"stdout,omitempty"`
-	Stderr      *string    `json:"stderr,omitempty"`
-	MemoryUsedMB  *int64   `json:"memory_used_mb,omitempty"`
-	MemoryLimitMB *int64   `json:"memory_limit_mb,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	StartedAt   *time.Time `json:"started_at,omitempty"`
-	EndedAt     *time.Time `json:"ended_at,omitempty"`
+	ExecutionID   string     `json:"execution_id"`
+	Image         string     `json:"image"`
+	RunnerClass   string     `json:"runner_class"`
+	Status        string     `json:"status"`
+	ExitCode      *int       `json:"exit_code,omitempty"`
+	Stdout        *string    `json:"stdout,omitempty"`
+	Stderr        *string    `json:"stderr,omitempty"`
+	MemoryUsedMB  *int64     `json:"memory_used_mb,omitempty"`
+	MemoryLimitMB *int64     `json:"memory_limit_mb,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	EndedAt       *time.Time `json:"ended_at,omitempty"`
 	// Command, Env, and Timeout are carried so the list/output views can rerun
 	// an execution without a second fetch — both the list and detail endpoints
 	// return them. They are not displayed in the table.

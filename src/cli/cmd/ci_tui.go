@@ -1488,36 +1488,35 @@ func tuiFormatDur(start, end *time.Time) string {
 	return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
 }
 
+// formatMem picks one of four format strings based on which of used/limit are
+// known, so the field-presence logic lives in one place and the long and short
+// variants can't drift. both takes two ints, usedOnly/limitOnly take one, and
+// none is returned verbatim when neither is known.
+func formatMem(usedMB, limitMB *int64, both, usedOnly, limitOnly, none string) string {
+	switch {
+	case usedMB != nil && limitMB != nil:
+		return fmt.Sprintf(both, *usedMB, *limitMB)
+	case usedMB != nil:
+		return fmt.Sprintf(usedOnly, *usedMB)
+	case limitMB != nil:
+		return fmt.Sprintf(limitOnly, *limitMB)
+	default:
+		return none
+	}
+}
+
 // tuiFormatMem renders a run's memory as "used / limit MB" when both are known,
 // falling back to the limit alone (suffixed "limit") when usage was not captured
 // — a short job a metrics-server never sampled. Returns "" when neither is known
 // so callers can omit the field. tuiFormatMemShort is the compact table variant.
 func tuiFormatMem(usedMB, limitMB *int64) string {
-	switch {
-	case usedMB != nil && limitMB != nil:
-		return fmt.Sprintf("%d / %d MB", *usedMB, *limitMB)
-	case usedMB != nil:
-		return fmt.Sprintf("%d MB", *usedMB)
-	case limitMB != nil:
-		return fmt.Sprintf("%d MB limit", *limitMB)
-	default:
-		return ""
-	}
+	return formatMem(usedMB, limitMB, "%d / %d MB", "%d MB", "%d MB limit", "")
 }
 
 // tuiFormatMemShort is the table-cell form: "180/256", "256↑" for limit-only, or
 // "—" when unknown. Kept narrow so it fits a fixed-width column.
 func tuiFormatMemShort(usedMB, limitMB *int64) string {
-	switch {
-	case usedMB != nil && limitMB != nil:
-		return fmt.Sprintf("%d/%d", *usedMB, *limitMB)
-	case usedMB != nil:
-		return fmt.Sprintf("%d", *usedMB)
-	case limitMB != nil:
-		return fmt.Sprintf("%d↑", *limitMB)
-	default:
-		return "—"
-	}
+	return formatMem(usedMB, limitMB, "%d/%d", "%d", "%d↑", "—")
 }
 
 // ── Command ───────────────────────────────────────────────────────────────────

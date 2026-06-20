@@ -474,7 +474,7 @@ func TestExecuteStep_HTTPSendsBody(t *testing.T) {
 
 	step := Step{Action: ActionHTTP, With: map[string]any{
 		"service": "svc", "path": "/run", "method": "POST",
-		"body": map[string]any{"image": "alpine:3.19"},
+		"body":            map[string]any{"image": "alpine:3.19"},
 		"expected_status": float64(201),
 	}}
 	_, err := pool.executeStep(context.Background(), newTokenStore("", ""), step, substContext{})

@@ -34,6 +34,12 @@ type KubernetesRuntime struct {
 	client       kubernetes.Interface
 	namespace    string
 	runtimeClass *string
+	// vmIsolated is true only for the "kata" backend: the pod runs inside a
+	// hardware-virtualized microVM, so a runner class may opt into running the job
+	// as root (RunnerClass.Privileged). It is false for the plain "kubernetes"
+	// backend (shared host kernel), where privileged is ignored and the
+	// locked-down sandbox is always applied.
+	vmIsolated bool
 	// podMemoryMB returns a pod's current memory usage in MB from the
 	// metrics.k8s.io API, with ok=false when metrics are unavailable (no
 	// metrics-server installed, or the pod has not been scraped yet — common for
@@ -51,7 +57,8 @@ const k8sKeyRuntimeClass = "runtime_class"
 // newKubernetesRuntime builds a Kubernetes runtime. configRuntimeClass is the
 // backend's per-backend RuntimeClass (the "runtime_class" config key); see
 // resolveRuntimeClass for how it combines with the legacy K8S_RUNTIME_CLASS env.
-func newKubernetesRuntime(configRuntimeClass string) (*KubernetesRuntime, error) {
+// vmIsolated is true only for the kata backend, gating the privileged-job opt-in.
+func newKubernetesRuntime(configRuntimeClass string, vmIsolated bool) (*KubernetesRuntime, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		kubeconfig := os.Getenv("KUBECONFIG")
@@ -73,6 +80,7 @@ func newKubernetesRuntime(configRuntimeClass string) (*KubernetesRuntime, error)
 		client:       client,
 		namespace:    envOrDefault("K8S_NAMESPACE", "forge"),
 		runtimeClass: resolveRuntimeClass(configRuntimeClass),
+		vmIsolated:   vmIsolated,
 	}
 	rt.podMemoryMB = rt.fetchPodMemoryMB
 	return rt, nil
@@ -121,7 +129,7 @@ func parsePodMetricsMemoryMB(raw []byte) (int64, bool) {
 	if totalBytes <= 0 {
 		return 0, false
 	}
-	return totalBytes / (1024 * 1024), true
+	return totalBytes / bytesPerMiB, true
 }
 
 // resolveRuntimeClass picks the RuntimeClass pointer for a kubernetes/kata
@@ -170,7 +178,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 	}
 
 	result, err := r.waitAndCollect(ctx, exec, job.Name)
-	result.MemoryLimitMB = ptr(spec.MemoryMB)
+	// Stamp the configured limit only when the job actually ran (it has an exit
+	// code). A cancelled or never-scheduled execution returns an empty result and
+	// must not report a limit for work that never happened.
+	if result.ExitCode != nil {
+		result.MemoryLimitMB = ptr(spec.MemoryMB)
+	}
 	// Always clean up, even on error or cancellation.
 	r.deleteJob(context.Background(), job.Name)
 	return result, err
@@ -190,6 +203,12 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 	for k, v := range exec.Env {
 		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 	}
+
+	// privileged is honoured only on a VM-isolated (kata) backend: the microVM is
+	// the boundary, so root in the guest is safe. On a shared-kernel container
+	// backend the flag is dropped and the locked-down sandbox always applies.
+	privileged := spec.Privileged && r.vmIsolated
+	podSC, containerSC := podSecurityContexts(privileged)
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -216,13 +235,7 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 					// Prevent the pod from inheriting cluster credentials via
 					// the default service account token.
 					AutomountServiceAccountToken: ptr(false),
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot:   ptr(true),
-						RunAsUser:      ptr(sandboxUID),
-						RunAsGroup:     ptr(sandboxUID),
-						FSGroup:        ptr(sandboxUID), // make the /tmp emptyDir writable by the sandbox group
-						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-					},
+					SecurityContext:              podSC,
 					Containers: []corev1.Container{{
 						Name:    "runner",
 						Image:   exec.Image,
@@ -238,15 +251,8 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 								corev1.ResourceCPU:    cpuLimit,
 							},
 						},
-						SecurityContext: &corev1.SecurityContext{
-							AllowPrivilegeEscalation: ptr(false),
-							ReadOnlyRootFilesystem:   ptr(true),
-							RunAsNonRoot:             ptr(true),
-							RunAsUser:                ptr(sandboxUID),
-							RunAsGroup:               ptr(sandboxUID),
-							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-						},
-						VolumeMounts: []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}},
+						SecurityContext: containerSC,
+						VolumeMounts:    []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}},
 					}},
 					Volumes: []corev1.Volume{{
 						Name: "tmp",
@@ -268,6 +274,48 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 			},
 		},
 	}
+}
+
+// podSecurityContexts returns the pod- and container-level security contexts for a
+// job. The default (privileged=false) is the locked-down sandbox applied to every
+// container backend: non-root on a pinned UID, read-only rootfs, all capabilities
+// dropped, no privilege escalation, seccomp RuntimeDefault. When privileged is true
+// — only ever set for a VM-isolated kata backend whose runner class opted in — the
+// job runs as root with a writable rootfs and privilege escalation allowed so
+// package managers (apt/pacman/dnf) work; the microVM, not the container, is the
+// isolation boundary. It deliberately does NOT set container Privileged or host
+// namespaces, so the pod stays within the PodSecurity "baseline" level (the forge
+// namespace must therefore not enforce "restricted" for privileged classes).
+func podSecurityContexts(privileged bool) (*corev1.PodSecurityContext, *corev1.SecurityContext) {
+	if privileged {
+		return &corev1.PodSecurityContext{
+				RunAsNonRoot:   ptr(false),
+				RunAsUser:      ptr(int64(0)),
+				RunAsGroup:     ptr(int64(0)),
+				FSGroup:        ptr(int64(0)),
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			}, &corev1.SecurityContext{
+				AllowPrivilegeEscalation: ptr(true),
+				ReadOnlyRootFilesystem:   ptr(false),
+				RunAsNonRoot:             ptr(false),
+				RunAsUser:                ptr(int64(0)),
+				RunAsGroup:               ptr(int64(0)),
+			}
+	}
+	return &corev1.PodSecurityContext{
+			RunAsNonRoot:   ptr(true),
+			RunAsUser:      ptr(sandboxUID),
+			RunAsGroup:     ptr(sandboxUID),
+			FSGroup:        ptr(sandboxUID), // make the /tmp emptyDir writable by the sandbox group
+			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		}, &corev1.SecurityContext{
+			AllowPrivilegeEscalation: ptr(false),
+			ReadOnlyRootFilesystem:   ptr(true),
+			RunAsNonRoot:             ptr(true),
+			RunAsUser:                ptr(sandboxUID),
+			RunAsGroup:               ptr(sandboxUID),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		}
 }
 
 func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, jobName string) (RunResult, error) {
@@ -307,7 +355,7 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 			if err != nil {
 				return RunResult{}, fmt.Errorf("get job: %w", err)
 			}
-			if p, perr := r.findPod(exec.ExecutionID); perr == nil && p != nil {
+			if p, perr := r.findPod(pollCtx, exec.ExecutionID); perr == nil && p != nil {
 				lastPod = p
 			}
 			if r.podMemoryMB != nil && lastPod != nil {
@@ -350,7 +398,7 @@ done:
 	// observation and this lookup, and that snapshot still carries its container
 	// state and exit code. A nil here means no pod was ever observed on any tick —
 	// the genuine "never scheduled" case, left to the events-based noPodError.
-	pod, podErr := r.findPod(exec.ExecutionID)
+	pod, podErr := r.findPod(pollCtx, exec.ExecutionID)
 	podGone := false
 	if pod == nil && podErr == nil {
 		pod = lastPod
@@ -434,8 +482,8 @@ done:
 
 // findPod returns the single pod for an execution, or (nil, nil) if none exists
 // yet (e.g. evicted or never scheduled).
-func (r *KubernetesRuntime) findPod(executionID string) (*corev1.Pod, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func (r *KubernetesRuntime) findPod(ctx context.Context, executionID string) (*corev1.Pod, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	pods, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{
