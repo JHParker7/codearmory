@@ -859,6 +859,19 @@ components:
             this is the response body. For catalog actions, this is the action
             output. Up to 1 MB is stored. Null while the step is pending or
             running.
+        memory_used_mb:
+          type: integer
+          nullable: true
+          description: |
+            Peak container memory (in megabytes) of the forge execution a
+            `forge/run` step ran. Null for non-forge steps and when forge could
+            not measure usage.
+        memory_limit_mb:
+          type: integer
+          nullable: true
+          description: |
+            The runner class's memory ceiling (in megabytes) for a `forge/run`
+            step's execution. Null for non-forge steps.
         started_at:
           type: string
           format: date-time

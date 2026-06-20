@@ -155,10 +155,11 @@ This is safe because the **microVM**, not the container, is the isolation bounda
 the same model the proxmox backend uses to run jobs as root in a disposable VM. Two
 guardrails:
 
-- **Kata only.** `privileged` is rejected at the API for any non-kata backend, and
-  dropped at runtime if it ever reaches one (`buildJob`): root + writable rootfs in a
-  shared-kernel (runc) container would be a host-kernel escape risk. It is honoured
-  solely on the VM-isolated kata runtime.
+- **VM-isolated backends only.** `privileged` is honoured solely on VM-isolated
+  backends — kata and proxmox. The API rejects it for any shared-kernel backend
+  (`docker`/`kubernetes`), and forge drops it at runtime if it ever reaches one
+  (`buildJob`): root + writable rootfs in a shared-kernel (runc) container would be a
+  host-kernel escape risk.
 - **PodSecurity.** A privileged pod runs as root, so the `forge` namespace must not
   enforce the PodSecurity `restricted` profile — use `baseline` or `privileged`:
   `kubectl label ns forge pod-security.kubernetes.io/enforce=baseline --overwrite`.

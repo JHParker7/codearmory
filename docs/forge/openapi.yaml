@@ -544,6 +544,22 @@ components:
           description: |
             Standard error (up to 1 MB). Present on `GET /executions/{id}` once
             execution is complete. Not included in list responses.
+        memory_used_mb:
+          type: integer
+          nullable: true
+          readOnly: true
+          description: |
+            Peak memory in megabytes the run's container consumed, captured
+            best-effort from the runtime (Kubernetes metrics-server / docker
+            stats). Null when metrics were unavailable — most often a job too
+            short for the metrics-server to sample.
+        memory_limit_mb:
+          type: integer
+          nullable: true
+          readOnly: true
+          description: |
+            The runner class's memory ceiling (in megabytes) at run time. Null
+            for runs that never executed.
         created_at:
           type: string
           format: date-time
@@ -603,8 +619,9 @@ components:
           description: |
             Run the job as root with a writable root filesystem and privilege
             escalation allowed, so package managers (apt/pacman/dnf) work. Honoured
-            ONLY by kata (VM-isolated) backends; ignored on container backends
-            (docker/kubernetes), which always run the locked-down non-root sandbox.
+            ONLY by VM-isolated backends (kata, proxmox); ignored on shared-kernel
+            container backends (docker/kubernetes), which always run the
+            locked-down non-root sandbox.
           example: false
 
     RunnerClassBody:
@@ -662,8 +679,9 @@ components:
           type: boolean
           description: |
             Run the job as root with a writable root filesystem (apt/pacman/dnf).
-            Only valid when `backend` is a kata (VM-isolated) backend — the API
-            returns `400` if set on any other backend type. Defaults to false.
+            Only valid when `backend` is a VM-isolated backend (kata or proxmox) —
+            the API returns `400` if set on any shared-kernel (docker/kubernetes)
+            backend. Defaults to false.
           example: false
 
     RuntimeBackend:
@@ -675,8 +693,10 @@ components:
           example: proxmox-prod
         type:
           type: string
-          enum: [docker, kubernetes, proxmox]
-          description: Runtime implementation this backend selects.
+          enum: [docker, kubernetes, proxmox, kata]
+          description: |
+            Runtime implementation this backend selects. `kata` is the Kubernetes
+            runtime pinned to a VM-isolating RuntimeClass.
           example: proxmox
         enabled:
           type: boolean
