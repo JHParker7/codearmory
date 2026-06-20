@@ -598,6 +598,14 @@ components:
           type: boolean
           description: Whether this class can be selected for new submissions.
           example: true
+        privileged:
+          type: boolean
+          description: |
+            Run the job as root with a writable root filesystem and privilege
+            escalation allowed, so package managers (apt/pacman/dnf) work. Honoured
+            ONLY by kata (VM-isolated) backends; ignored on container backends
+            (docker/kubernetes), which always run the locked-down non-root sandbox.
+          example: false
 
     RunnerClassBody:
       type: object
@@ -650,6 +658,13 @@ components:
           type: boolean
           description: Whether the class can be selected for new submissions.
           example: true
+        privileged:
+          type: boolean
+          description: |
+            Run the job as root with a writable root filesystem (apt/pacman/dnf).
+            Only valid when `backend` is a kata (VM-isolated) backend — the API
+            returns `400` if set on any other backend type. Defaults to false.
+          example: false
 
     RuntimeBackend:
       type: object

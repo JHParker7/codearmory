@@ -64,3 +64,59 @@ func TestRunnerClass_BackendAndDisk_DB(t *testing.T) {
 		t.Errorf("disk_gb after update = %d, want 80", got.DiskGB)
 	}
 }
+
+// TestRunnerClass_Privileged_DB checks the privileged opt-in is accepted and
+// persisted on a kata backend, but rejected on a non-VM (container) backend —
+// the user-facing half of the guard whose runtime half lives in buildJob.
+func TestRunnerClass_Privileged_DB(t *testing.T) {
+	requireForgeDB(t)
+	kataBackend := "be-" + uuid.New().String()
+	dockerBackend := "be-" + uuid.New().String()
+	className := "rc-" + uuid.New().String()
+	t.Cleanup(func() {
+		connect().Exec(`DELETE FROM runner_classes WHERE name = ?`, className)                          //nolint:errcheck
+		connect().Exec(`DELETE FROM runtime_backends WHERE name IN (?, ?)`, kataBackend, dockerBackend) //nolint:errcheck
+	})
+
+	mkBackend := func(body string) {
+		authAs(t, "admin")
+		r := httptest.NewRequest(http.MethodPost, "/runtime-backends", bytes.NewBufferString(body))
+		r.Header.Set("Authorization", "Bearer t")
+		w := httptest.NewRecorder()
+		handleCreateRuntimeBackend(w, r)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("create backend: got %d, want 201: %s", w.Code, w.Body.String())
+		}
+	}
+	mkBackend(`{"name":"` + kataBackend + `","type":"kata","enabled":true,"config":{"runtime_class":"kata"}}`)
+	mkBackend(`{"name":"` + dockerBackend + `","type":"docker","enabled":true,"config":{}}`)
+
+	// privileged on a kata backend is accepted and persisted.
+	authAs(t, "admin")
+	okBody := `{"name":"` + className + `","memory_mb":2048,"cpu_millicores":1000,"pids_limit":64,` +
+		`"tmpfs_mb":256,"disk_gb":10,"backend":"` + kataBackend + `","enabled":true,"privileged":true}`
+	r := httptest.NewRequest(http.MethodPost, "/runner-classes", bytes.NewBufferString(okBody))
+	r.Header.Set("Authorization", "Bearer t")
+	w := httptest.NewRecorder()
+	handleCreateRunnerClass(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create privileged kata class: got %d, want 201: %s", w.Code, w.Body.String())
+	}
+	var created RunnerClass
+	json.NewDecoder(w.Body).Decode(&created) //nolint:errcheck
+	if !created.Privileged {
+		t.Error("privileged should be persisted as true on a kata backend")
+	}
+
+	// privileged on a non-kata (container) backend is rejected — never inserted.
+	authAs(t, "admin")
+	badBody := `{"name":"rc-` + uuid.New().String() + `","memory_mb":2048,"cpu_millicores":1000,"pids_limit":64,` +
+		`"tmpfs_mb":256,"disk_gb":10,"backend":"` + dockerBackend + `","enabled":true,"privileged":true}`
+	r = httptest.NewRequest(http.MethodPost, "/runner-classes", bytes.NewBufferString(badBody))
+	r.Header.Set("Authorization", "Bearer t")
+	w = httptest.NewRecorder()
+	handleCreateRunnerClass(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("create privileged docker class: got %d, want 400: %s", w.Code, w.Body.String())
+	}
+}

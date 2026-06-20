@@ -18,10 +18,13 @@ apply unchanged, and every container hardening setting (non-root, read-only root
 the VM boundary.
 
 Compared to the **proxmox** backend, kata needs no template, no guest agent, and no
-PVE API token — Kata builds the guest from the submitted image — but the job runs as
-the same locked-down non-root container it would under plain Kubernetes (no full root
-or in-VM Docker daemon). Use **kata** for stronger isolation of the *same* untrusted
-workloads; use **proxmox** for CI work that genuinely needs root and `docker build`.
+PVE API token — Kata builds the guest from the submitted image. By default the job
+runs as the same locked-down non-root container it would under plain Kubernetes, but
+because the microVM (not the container) is the security boundary, a runner class may
+set `privileged: true` to run the job as **root with a writable rootfs** so package
+managers (`apt`/`pacman`/`dnf`) work — see *Privileged jobs* below. Use **kata** for
+strongly-isolated workloads that need either a locked-down sandbox or root + package
+installs; use **proxmox** for CI that needs an in-VM **Docker daemon** / `docker build`.
 
 ```
 POST /executions (runner_class → backend snapshot)
@@ -131,6 +134,39 @@ curl -X POST "$CONDUCTOR/forge/runner-classes" \
 Users then submit against it as usual — `runner_class: "kata-standard"`. The backend
 is snapshotted onto the execution at submit, so re-pointing the class afterward never
 moves an already-queued job.
+
+### Privileged jobs (root / package managers)
+
+By default kata jobs run as the locked-down non-root sandbox (read-only rootfs, all
+capabilities dropped, no privilege escalation) — so `apt`/`pacman`/`dnf` fail with
+permission errors, exactly as on the `kubernetes` backend. Set `privileged: true` on
+the runner class to run the job as **root with a writable root filesystem** and
+privilege escalation allowed, so package managers and other root operations work:
+
+```bash
+curl -X PUT "$CONDUCTOR/forge/runner-classes/kata-standard" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' \
+  -d '{ "name": "kata-standard", "memory_mb": 2048, "cpu_millicores": 1000,
+        "pids_limit": 128, "tmpfs_mb": 256, "backend": "kata-prod",
+        "enabled": true, "privileged": true }'
+```
+
+This is safe because the **microVM**, not the container, is the isolation boundary —
+the same model the proxmox backend uses to run jobs as root in a disposable VM. Two
+guardrails:
+
+- **Kata only.** `privileged` is rejected at the API for any non-kata backend, and
+  dropped at runtime if it ever reaches one (`buildJob`): root + writable rootfs in a
+  shared-kernel (runc) container would be a host-kernel escape risk. It is honoured
+  solely on the VM-isolated kata runtime.
+- **PodSecurity.** A privileged pod runs as root, so the `forge` namespace must not
+  enforce the PodSecurity `restricted` profile — use `baseline` or `privileged`:
+  `kubectl label ns forge pod-security.kubernetes.io/enforce=baseline --overwrite`.
+  The pod still stays within `baseline`: it does not set container `privileged`, host
+  namespaces, or host paths.
+
+It does **not** provide an in-VM Docker daemon — for `docker build` use the proxmox
+backend. The egress proxy / NetworkPolicy isolation applies to privileged jobs too.
 
 ## Notes & limits
 

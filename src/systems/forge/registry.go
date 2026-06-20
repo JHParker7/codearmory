@@ -75,7 +75,9 @@ func buildRuntime(b RuntimeBackend) (Runtime, error) {
 	switch b.Type {
 	case "kubernetes":
 		// Optional per-backend RuntimeClass; empty falls back to K8S_RUNTIME_CLASS.
-		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass])
+		// Not VM-isolated: a shared host kernel, so privileged runner classes are
+		// ignored and the locked-down sandbox is always applied.
+		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], false)
 	case "kata":
 		// Kata is the Kubernetes runtime pinned to a VM-isolating RuntimeClass. The
 		// RuntimeClass is mandatory: without one the pod silently falls back to the
@@ -87,7 +89,9 @@ func buildRuntime(b RuntimeBackend) (Runtime, error) {
 		if resolveRuntimeClass(b.Config[k8sKeyRuntimeClass]) == nil {
 			return nil, fmt.Errorf("kata runtime requires a RuntimeClass: set the backend %q config key or the K8S_RUNTIME_CLASS env var", k8sKeyRuntimeClass)
 		}
-		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass])
+		// VM-isolated: the job runs inside a microVM, so a runner class may opt into
+		// running as root (RunnerClass.Privileged) for package managers / apt.
+		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], true)
 	case "docker":
 		return newDockerRuntime()
 	case "proxmox":

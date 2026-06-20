@@ -302,6 +302,7 @@ func (rc RunnerClass) Update(ctx context.Context) error {
 		"disk_gb":        rc.DiskGB,
 		"backend":        rc.Backend,
 		"enabled":        rc.Enabled,
+		"privileged":     rc.Privileged,
 	})
 	if result.Error != nil {
 		span.RecordError(result.Error)
