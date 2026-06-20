@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
 
@@ -89,5 +90,15 @@ func init() {
 	// "containers" is a capability slot so a deployment using a different image
 	// registry can register an alternative provider and select it via the
 	// "providers" config (providers.containers = "...").
-	RegisterModule(Module{Name: "registry", Slot: "containers", Command: containersCmd})
+	RegisterModule(Module{
+		Name:    "registry",
+		Slot:    "containers",
+		Order:   80,
+		Command: containersCmd,
+		Screens: []HubScreen{{
+			Title: "Containers",
+			Desc:  "Browse image repositories, tags and manifests",
+			New:   func() tea.Model { return newContainersModel() },
+		}},
+	})
 }

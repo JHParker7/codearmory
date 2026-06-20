@@ -87,9 +87,10 @@ func TestHomeRows_StaySingleLine(t *testing.T) {
 }
 
 // The registered Gatekeeper screen's description fits the column without being
-// truncated, so it reads in full on the home menu.
+// truncated, so it reads in full on the admin menu. Gatekeeper is an admin
+// screen, so it lives in adminScreens(), not the user hub.
 func TestHomeGatekeeperDescFits(t *testing.T) {
-	for _, s := range hubScreens() {
+	for _, s := range adminScreens() {
 		if s.Title == "Gatekeeper" {
 			if len(s.Desc) > homeDescWidth {
 				t.Errorf("Gatekeeper desc %q is %d chars, exceeds column width %d", s.Desc, len(s.Desc), homeDescWidth)
@@ -97,5 +98,5 @@ func TestHomeGatekeeperDescFits(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("Gatekeeper screen not registered")
+	t.Fatal("Gatekeeper screen not registered in the admin hub")
 }

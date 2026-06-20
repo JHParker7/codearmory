@@ -546,7 +546,7 @@ Pre-built binaries for Linux, macOS, and Windows are attached to each [GitHub re
 ### Authentication
 
 ```bash
-armory login --url http://conductor:8080 --email alice@example.com
+armory auth login --url http://conductor:8080 --email alice@example.com
 # Prompts for password; stores token locally
 ```
 
@@ -555,26 +555,25 @@ The CLI stores the JWT and refresh token and renews them transparently.
 ### Common operations
 
 ```bash
-# Org management
-armory orgs create --name acme --display-name "Acme Corp"
-armory orgs invite --org acme --email bob@example.com
+# Org management (admin)
+armory admin orgs create acme
+armory admin orgs invite acme bob@example.com
 
-# Trigger a workflow run
-armory workflows run <workflow-id> --input ENV=staging --input VERSION=v1.2
+# Trigger a pipeline run
+armory pipelines run pipeline <pipeline-id> --input ENV=staging --input VERSION=v1.2
 
 # Watch a run
-armory runs get <run-id>
+armory pipelines get run <run-id>
 
 # Manage tickets
 armory tickets create --title "Deploy v2" --priority high
 armory tickets update <ticket-id> --status in_progress
-
-# Register a service with the platform
-armory services register \
-  --name my-tool \
-  --url http://my-tool:9000 \
-  --prefix /tools
 ```
+
+Services are registered with the platform through the **Registry manifest**
+(`infra/local/registry-manifest.json`, or the Helm equivalent), not via the CLI —
+see [Registry](registry/README.md). Conductor will not route to a service that is
+not in the manifest.
 
 ---
 

@@ -45,17 +45,27 @@ func buildHomeStyles() {
 // (hubScreens), so a new service appears here simply by registering a Module
 // with Screens — no edits to this file.
 type appModel struct {
-	width   int
-	height  int
-	home    homeModel
-	active  tea.Model   // currently-shown screen; nil means the home menu
-	screens []HubScreen // home-menu screens, indexed by menu position
+	width    int
+	height   int
+	home     homeModel
+	active   tea.Model   // currently-shown screen; nil means the home menu
+	screens  []HubScreen // home-menu screens, indexed by menu position
+	subtitle string      // home header subtitle ("platform" / "admin")
 }
 
-func newAppModel() appModel {
-	screens := hubScreens()
-	m := appModel{home: newHomeModel(screens), screens: screens}
-	if isFirstUse() {
+// newAppModel builds the user hub from the non-admin module screens.
+func newAppModel() appModel { return newHubModel(hubScreens(), "platform", true) }
+
+// newAdminAppModel builds the admin hub from the admin module screens. It skips
+// the first-use welcome (an admin opening this is already set up) and labels the
+// header so it's unmistakable which surface you're on.
+func newAdminAppModel() appModel { return newHubModel(adminScreens(), "admin", false) }
+
+// newHubModel assembles a hub over the given screens. allowFirstUse gates the
+// fresh-install welcome prompt, which only makes sense on the user hub.
+func newHubModel(screens []HubScreen, subtitle string, allowFirstUse bool) appModel {
+	m := appModel{home: newHomeModel(screens, subtitle), screens: screens, subtitle: subtitle}
+	if allowFirstUse && isFirstUse() {
 		// Show the welcome prompt before the home menu so a fresh install lands
 		// in a discoverable spot rather than a list of services the user has no
 		// credentials for. Pressing 'n' falls through to the home menu.
@@ -86,11 +96,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if _, ok := msg.(goHomeMsg); ok {
 		m.active = nil
-		m.home = m.sized(newHomeModel(m.screens)).(homeModel)
+		m.home = m.sized(newHomeModel(m.screens, m.subtitle)).(homeModel)
 		return m, nil
 	}
-	if _, ok := msg.(launchSetupMsg); ok {
-		m.active = m.sized(newSetupTUIModel())
+	if _, ok := msg.(launchSettingsMsg); ok {
+		m.active = m.sized(newSettingsModel())
 		return m, m.active.Init()
 	}
 	if lm, ok := msg.(launchMsg); ok {
@@ -137,20 +147,23 @@ type homeEntry struct {
 }
 
 type homeModel struct {
-	entries []homeEntry
-	cursor  int
-	width   int
-	height  int
+	entries  []homeEntry
+	cursor   int
+	width    int
+	height   int
+	subtitle string // header subtitle shown next to "codearmory"
 }
 
 // newHomeModel builds the launcher menu from the registry-provided screens, in
 // the same order they are dispatched (launchMsg.idx indexes appModel.screens).
-func newHomeModel(screens []HubScreen) homeModel {
+// subtitle labels the header ("platform" for the user hub, "admin" for the
+// admin hub).
+func newHomeModel(screens []HubScreen, subtitle string) homeModel {
 	entries := make([]homeEntry, len(screens))
 	for i, s := range screens {
 		entries[i] = homeEntry{name: s.Title, desc: s.Desc}
 	}
-	return homeModel{entries: entries}
+	return homeModel{entries: entries, subtitle: subtitle}
 }
 
 func (m homeModel) Init() tea.Cmd { return nil }
@@ -217,7 +230,11 @@ func (m homeModel) View() string {
 
 	help := tuiHelpStyle.Render("[↑↓/jk] navigate   [enter] open   [esc] quit")
 
-	header := homeTitleStyle.Render("codearmory") + "  " + homeSubtitleStyle.Render("platform")
+	subtitle := m.subtitle
+	if subtitle == "" {
+		subtitle = "platform"
+	}
+	header := homeTitleStyle.Render("codearmory") + "  " + homeSubtitleStyle.Render(subtitle)
 	block := header + "\n\n" + homeBoxStyle.Render(strings.Join(rows, "\n")) + "\n\n" + help
 	if m.width > 0 && m.height > 0 {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, block)
@@ -235,13 +252,6 @@ func (w standaloneWrap) Init() tea.Cmd { return tea.Batch(w.inner.Init(), tuiAut
 func (w standaloneWrap) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, ok := msg.(goHomeMsg); ok {
 		return w, tea.Quit
-	}
-	if _, ok := msg.(launchSetupMsg); ok {
-		// No home to fall back to in standalone mode; replace the inner model
-		// with the wizard so launching setup from `armory settings` works.
-		next := newSetupTUIModel()
-		w.inner = next
-		return w, next.Init()
 	}
 	// standaloneWrap owns the auto-refresh ticker for a screen run directly (e.g.
 	// `armory forge tui`): reschedule it and forward the tick to the inner model.

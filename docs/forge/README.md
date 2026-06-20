@@ -126,6 +126,10 @@ Runner classes define the resource limits applied to execution containers. They 
 
 These three classes are seeded automatically on startup if absent. Operators can edit them or add custom classes via the API. Changes take effect immediately for new submissions — no restart required.
 
+### Privileged classes (root for package managers)
+
+A runner class may set `privileged: true` to run jobs as **root with a writable root filesystem** and privilege escalation allowed, so package managers (`apt`/`pacman`/`dnf`) and other root operations work. This is honoured **only on VM-isolated backends** (`kata`, `proxmox`), where the microVM — not the container — is the isolation boundary. The API rejects `privileged` on shared-kernel container backends (`docker`/`kubernetes`) with `400`, and forge drops the flag at runtime if it ever reaches one (root + writable rootfs in a shared-kernel container is a host-escape risk). See [kata.md](kata.md#privileged-jobs-root--package-managers).
+
 ### Selecting a runner class
 
 Set `runner_class` in the submit request body. Defaults to `standard` when omitted. Submitting with a disabled or nonexistent class returns `400 Bad Request`.
@@ -222,6 +226,8 @@ curl -X POST http://conductor:8080/executions \
   "exit_code": 0,
   "stdout": "hello\n",
   "stderr": "",
+  "memory_used_mb": 18,
+  "memory_limit_mb": 256,
   "created_at": "2026-05-27T12:00:00Z",
   "started_at": "2026-05-27T12:00:01Z",
   "ended_at": "2026-05-27T12:00:02Z"
@@ -229,6 +235,8 @@ curl -X POST http://conductor:8080/executions \
 ```
 
 **Status values:** `pending` → `running` → `completed` | `failed` | `timed_out` | `cancelled`
+
+`memory_used_mb` is the peak memory the container consumed, captured best-effort from the runtime (Kubernetes metrics-server / docker stats); it is `null` when metrics were unavailable — most often a job too short to be sampled. `memory_limit_mb` is the runner class's memory ceiling at run time.
 
 ### Cancel an execution
 

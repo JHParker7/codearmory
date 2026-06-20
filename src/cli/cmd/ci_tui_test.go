@@ -412,11 +412,17 @@ func TestTUIModel_Runs_CancelKey_PendingRun(t *testing.T) {
 
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 
+	// Cancel is now async: pressing 'c' returns a cmd that performs the DELETE
+	// when run (rather than blocking the UI thread inside Update).
+	if cmd == nil {
+		t.Fatal("cancel should return a cmd")
+	}
+	msg := cmd()
 	if !deleteCalled {
 		t.Error("cancel key should have issued a DELETE request for a pending run")
 	}
-	if cmd == nil {
-		t.Error("cancel should return a reload cmd")
+	if a, ok := msg.(tuiRunActionMsg); !ok || a.err != nil {
+		t.Errorf("cancel cmd returned %#v, want a successful tuiRunActionMsg", msg)
 	}
 }
 
@@ -948,7 +954,7 @@ func TestCISubmitCreatePipeline_ResolvesStepsAndPosts(t *testing.T) {
 	})
 	setupCLI(t, routeServer(t, mux))
 
-	msg := ciSubmitCreatePipeline("my-pl", "desc", "build->test")()
+	msg := ciSubmitSavePipeline("", "my-pl", "desc", "build->test")()
 	if _, ok := msg.(tuiPipelineCreatedMsg); !ok {
 		t.Fatalf("msg = %T, want tuiPipelineCreatedMsg", msg)
 	}
@@ -972,7 +978,7 @@ func TestCISubmitCreatePipeline_ResolvesStepsAndPosts(t *testing.T) {
 
 func TestCISubmitCreatePipeline_BadDSL_ReturnsFormErr(t *testing.T) {
 	// An empty parallel-group segment is a DSL parse error; no HTTP needed.
-	if _, ok := ciSubmitCreatePipeline("n", "", "build->[]")().(tuiFormErrMsg); !ok {
+	if _, ok := ciSubmitSavePipeline("", "n", "", "build->[]")().(tuiFormErrMsg); !ok {
 		t.Error("a malformed DSL should return tuiFormErrMsg")
 	}
 }
@@ -983,6 +989,53 @@ func TestTUIView_CreateView_RendersForm(t *testing.T) {
 	m.form, _ = newCIPipelineForm()
 	if !strings.Contains(m.View(), "New Pipeline") {
 		t.Error("create view should show the form heading")
+	}
+}
+
+func TestStepsToDSL_RoundTrip(t *testing.T) {
+	g0 := 0
+	steps := []tuiWorkflowStep{
+		{Name: "build"},
+		{Name: "lint", ParallelGroup: &g0},
+		{Name: "test", ParallelGroup: &g0},
+		{Name: "deploy"},
+	}
+	if got := stepsToDSL(steps); got != "build->[lint,test]->deploy" {
+		t.Errorf("stepsToDSL = %q, want build->[lint,test]->deploy", got)
+	}
+}
+
+func TestPipelineEditLoaded_OpensPrefilledForm(t *testing.T) {
+	m := newTUIModel()
+	updated, _ := m.Update(pipelineEditLoadedMsg{workflowID: "wf1", name: "ci", desc: "d", dsl: "build->test"})
+	m2 := updated.(tuiModel)
+	if m2.view != tuiViewCreate || m2.editPipelineID != "wf1" {
+		t.Fatalf("edit-loaded should open the form for wf1 (view=%v id=%q)", m2.view, m2.editPipelineID)
+	}
+	if m2.form.value("name") != "ci" || m2.form.value("steps") != "build->test" {
+		t.Errorf("edit form not pre-filled: name=%q steps=%q", m2.form.value("name"), m2.form.value("steps"))
+	}
+}
+
+func TestCISubmitSavePipeline_EditPuts(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /workflows/steps", func(w http.ResponseWriter, r *http.Request) {
+		// resolveStepName looks up by name; return a matching id.
+		w.Write([]byte(`[{"step_id":"id-build","name":"build"}]`)) //nolint:errcheck
+	})
+	var method, path string
+	mux.HandleFunc("PUT /workflows/pipelines/{id}", func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		w.Write([]byte(`{"workflow_id":"wf1"}`)) //nolint:errcheck
+	})
+	setupCLI(t, routeServer(t, mux))
+
+	msg := ciSubmitSavePipeline("wf1", "ci", "", "build")()
+	if _, ok := msg.(tuiPipelineCreatedMsg); !ok {
+		t.Fatalf("msg = %T, want tuiPipelineCreatedMsg", msg)
+	}
+	if method != "PUT" || path != "/workflows/pipelines/wf1" {
+		t.Errorf("request = %s %s, want PUT /workflows/pipelines/wf1", method, path)
 	}
 }
 
@@ -1480,4 +1533,75 @@ func TestTUIView_RunDetail_NoLegend_WhenSequential(t *testing.T) {
 func applyMsg(m tuiModel, msg tea.Msg) tuiModel {
 	updated, _ := m.Update(msg)
 	return updated.(tuiModel)
+}
+
+// ── Run cancel (Batch 3 polish) ────────────────────────────────────────────────
+
+func TestTUICancelRun_Success(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, ``)
+	setupCLI(t, srv)
+	msg := tuiCancelRun("run-1")()
+	a, ok := msg.(tuiRunActionMsg)
+	if !ok || a.err != nil || a.cancelled != "run-1" {
+		t.Fatalf("msg = %#v, want cancelled run-1", msg)
+	}
+	if rec.Method != "DELETE" || rec.Path != "/workflows/runs/run-1" {
+		t.Errorf("request = %s %s, want DELETE /workflows/runs/run-1", rec.Method, rec.Path)
+	}
+}
+
+func TestTUICancelRun_Error(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusInternalServerError, `boom`)
+	setupCLI(t, srv)
+	if a, ok := tuiCancelRun("run-1")().(tuiRunActionMsg); !ok || a.err == nil {
+		t.Error("a failed cancel should return tuiRunActionMsg with an error")
+	}
+}
+
+func TestTUIRuns_C_OnlyCancelsActive(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusOK, ``)
+	setupCLI(t, srv)
+
+	running := newTUIModel()
+	running.view = tuiViewRuns
+	upd, _ := running.Update(tuiRunsMsg([]tuiRun{{RunID: "run-1", Status: "running"}}))
+	_, cmd := upd.(tuiModel).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	if cmd == nil {
+		t.Fatal("c on a running run should emit a cancel cmd")
+	}
+	if _, ok := cmd().(tuiRunActionMsg); !ok {
+		t.Errorf("c cmd returned %T, want tuiRunActionMsg", cmd())
+	}
+
+	done := newTUIModel()
+	done.view = tuiViewRuns
+	upd2, _ := done.Update(tuiRunsMsg([]tuiRun{{RunID: "run-2", Status: "completed"}}))
+	_, cmd2 := upd2.(tuiModel).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	if cmd2 != nil {
+		t.Error("c on a completed run must not cancel")
+	}
+}
+
+func TestTUIRunActionMsg_ErrorSetsStatus(t *testing.T) {
+	upd, cmd := newTUIModel().Update(tuiRunActionMsg{err: fmt.Errorf("nope")})
+	m := upd.(tuiModel)
+	if !m.runStatusErr || !strings.Contains(m.runStatus, "nope") {
+		t.Errorf("error should set a run status (got %q err=%v)", m.runStatus, m.runStatusErr)
+	}
+	if cmd != nil {
+		t.Error("a cancel error should not refetch")
+	}
+}
+
+func TestTUIRunActionMsg_SuccessRefetches(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusOK, `[]`)
+	setupCLI(t, srv)
+	upd, cmd := newTUIModel().Update(tuiRunActionMsg{cancelled: "run-1"})
+	m := upd.(tuiModel)
+	if m.runStatusErr || !strings.Contains(m.runStatus, "cancelled") {
+		t.Errorf("success should set a non-error status (got %q)", m.runStatus)
+	}
+	if !m.loading || cmd == nil {
+		t.Error("a successful cancel should refetch the runs list")
+	}
 }

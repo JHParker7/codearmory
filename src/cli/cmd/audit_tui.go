@@ -300,6 +300,7 @@ func init() {
 	})
 	RegisterModule(Module{
 		Name:    "audit",
+		Admin:   true,
 		Order:   50,
 		Command: auditCmd,
 		Screens: []HubScreen{{

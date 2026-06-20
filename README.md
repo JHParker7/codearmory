@@ -102,14 +102,14 @@ Starts PostgreSQL, Redis, and all services. API gateway at `http://localhost:808
 
 ```bash
 # Sign up and get a token
-armory login --url http://localhost:8080 --email you@example.com
+armory auth login --url http://localhost:8080 --email you@example.com
 
 # Trigger a sandboxed run from the terminal
-armory executions run --image alpine:3.19 --cmd "echo hello"
+armory forge exec run --image alpine:3.19 -- echo hello
 
-# Create a pipeline and run it
-armory workflows create --file deploy.yaml
-armory workflows run <workflow-id> --input ENV=staging --input VERSION=v1.2
+# Create a pipeline from existing steps and run it
+armory pipelines create pipeline myrepo main "build->test->deploy"
+armory pipelines run pipeline <pipeline-id> --input ENV=staging --input VERSION=v1.2
 ```
 
 **Helm (production):**
@@ -144,26 +144,48 @@ State is scoped per user: `/blueprints/state/{username}/{workspace}`.
 
 ## Extending pipelines with custom services
 
-Conductor routes to services listed in Registry. To add a new pipeline target — an internal deploy tool, a notification service, a custom API — register it and start using it in workflow steps immediately:
+Conductor routes to every service listed in the **Registry**. To add a new
+pipeline target — an internal deploy tool, a notification service, a custom API —
+register it in the Registry manifest (`infra/local/registry-manifest.json`, or the
+Helm equivalent) with its routes, any catalog **actions** pipelines can call, and
+the permissions granted by default:
 
-```bash
-# Register your service
-armory services register \
-  --name deployer \
-  --url http://my-deployer:9000 \
-  --prefix /deploy
-
-# Use it as a pipeline step (in deploy.yaml):
-steps:
-  - name: run-deployer
-    service: deployer
-    method: POST
-    path: /deploy/${ENV}
-    body:
-      version: ${VERSION}
+```json
+{
+  "name": "deployer",
+  "url": "http://my-deployer:9000",
+  "forward_auth": false,
+  "service_key": "deployer-registry-secret",
+  "endpoints": [
+    { "method": "POST", "path": "/deploy", "action": "deploy", "resource": "deployer/deploy" }
+  ],
+  "actions": [
+    { "name": "deployer/deploy", "method": "POST", "path": "/deploy" }
+  ],
+  "default_grants": [
+    { "grant_on": "user", "actions": ["deploy"], "resources": ["{username}/deployer/deploy"] }
+  ]
+}
 ```
 
-No code changes to your existing service. Conductor handles auth and routing; your service just receives authenticated HTTP requests.
+Conductor picks the service up on its next Registry poll. Now reference the action
+from a reusable step and drop it into a pipeline — `${...}` resolves run inputs
+and prior step outputs at execution time:
+
+```bash
+armory pipelines create step run-deployer \
+  --action deployer/deploy \
+  --with '{"env":"${ENV}","version":"${VERSION}"}'
+
+armory pipelines create pipeline myrepo main "build->test->run-deployer"
+armory pipelines run pipeline <pipeline-id> --input ENV=staging --input VERSION=v1.2
+```
+
+No code changes to your existing service. With `forward_auth: false` (the default),
+Conductor strips the caller's bearer token and injects `X-User-ID` plus signed
+`X-Conductor-*` headers, so your service can trust requests arrived through the
+gateway. Run `armory pipelines list actions` to see every action the catalog
+exposes.
 
 ---
 
@@ -172,17 +194,16 @@ No code changes to your existing service. Conductor handles auth and routing; yo
 The `armory` CLI covers the full platform. You never need to open a browser.
 
 ```bash
-armory login                                        # authenticate
-armory workflows list                               # see all pipelines
-armory workflows run <id> --input KEY=VALUE         # trigger a run
-armory runs get <id>                                # inspect results
-armory executions run --image node:20 --cmd "npm test"
+armory auth login                                    # authenticate
+armory pipelines list pipelines                      # see all pipelines
+armory pipelines run pipeline <id> --input KEY=VALUE # trigger a run
+armory pipelines get run <id>                        # inspect results
+armory forge exec run --image node:20 -- npm test    # sandboxed run
 armory tickets create --title "Deploy v2" --priority high
 armory tickets update <id> --status in_progress
-armory hooks rules create --repo myorg/myapp --event push --workflow <id>
-armory containers repos list
-armory services register --name my-tool --url http://...
-armory orgs invite --email colleague@example.com
+armory hooks rules create --name ci --repo myorg/myapp --events push --workflow <id> --secret <hmac>
+armory containers list repos
+armory admin orgs invite <org> colleague@example.com
 ```
 
 Binaries for Linux, macOS, and Windows are attached to each [GitHub release](../../releases).

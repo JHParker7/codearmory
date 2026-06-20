@@ -13,7 +13,7 @@ import (
 
 var forgeCmd = &cobra.Command{
 	Use:   "forge",
-	Short: "Sandboxed code execution and runner class management",
+	Short: "Sandboxed code execution",
 }
 
 func init() {
@@ -255,9 +255,14 @@ image allowlist and runner-class rules are re-enforced.
 		},
 	)
 
-	forgeCmd.AddCommand(execCmd, rcCmd)
-	// The forge module (command + home-screen) is registered in forge_tui.go,
-	// alongside the screen it contributes.
+	forgeCmd.AddCommand(execCmd)
+	// Runner-class management is an admin control, so it hangs off the admin
+	// `forge-runtimes` command (`armory admin forge-runtimes runner-classes …`)
+	// rather than the user-facing `armory forge`. forgeRuntimesCmd is a package
+	// var, initialised before any init() runs, so it is safe to reference here.
+	forgeRuntimesCmd.AddCommand(rcCmd)
+	// The forge module (command + home-screen) is registered in forge_tui.go;
+	// the admin forge-runtimes module is registered in forge_runtimes_tui.go.
 }
 
 // submitForgeExecution POSTs a forge execution payload, then either prints the

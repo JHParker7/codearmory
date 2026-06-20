@@ -411,6 +411,8 @@ Returns `202 Accepted` with the created run (status `pending`). Poll `GET /runs/
       "step_name": "run-forge",
       "status": "completed",
       "output": "...",
+      "memory_used_mb": 142,
+      "memory_limit_mb": 2048,
       "started_at": "...",
       "ended_at": "..."
     }
@@ -424,6 +426,8 @@ Returns `202 Accepted` with the created run (status `pending`). Poll `GET /runs/
 **Run status values:** `pending` → `running` → `completed` | `failed` | `cancelled`
 
 **Step status values:** `running` → `completed` | `failed` | `cancelled`
+
+For `forge/run` steps, `memory_used_mb` (peak container memory) and `memory_limit_mb` (the runner class's ceiling) are carried through from the underlying forge execution. Both are `null` for non-forge steps and when forge could not measure usage.
 
 The `output` field on each step run contains the action result: the response body for `http` steps, or the action output for catalog actions. It is `null` while the step is pending or running. Up to 1 MB is stored per step.
 

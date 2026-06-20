@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
 
@@ -58,7 +59,16 @@ func init() {
 		secretsProviderCmd(),
 	)
 
-	RegisterModule(Module{Name: "secrets", Command: secretsCmd})
+	RegisterModule(Module{
+		Name:    "secrets",
+		Order:   70,
+		Command: secretsCmd,
+		Screens: []HubScreen{{
+			Title: "Secrets",
+			Desc:  "Manage encrypted secrets (names only)",
+			New:   func() tea.Model { return newSecretsModel() },
+		}},
+	})
 }
 
 func secretsUpdateCmd() *cobra.Command {

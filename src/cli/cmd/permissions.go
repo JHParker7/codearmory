@@ -86,5 +86,5 @@ func init() {
 			},
 		},
 	)
-	RegisterModule(Module{Name: "permissions", Command: permissionsCmd})
+	RegisterModule(Module{Name: "permissions", Admin: true, Command: permissionsCmd})
 }

@@ -211,6 +211,7 @@ const (
 	gkViewList gkViewID = iota
 	gkViewDetail
 	gkViewForm
+	gkViewRoleEdit // unified role + permissions editor
 )
 
 type gkFormKind int
@@ -282,6 +283,8 @@ type gatekeeperModel struct {
 	formKind        gkFormKind
 	formTargetID    string // resource id an invite form targets
 	formTargetLabel string
+
+	roleEditor roleEditorModel // active when view == gkViewRoleEdit
 
 	pending *gkPending // confirm prompt in the list view
 
@@ -514,6 +517,13 @@ func (m gatekeeperModel) Init() tea.Cmd {
 }
 
 func (m gatekeeperModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// The role editor is a self-contained sub-component; while it's open every
+	// message goes to it, except the messages that close it (which belong to the
+	// parent) and the window resize (handled by both).
+	if m.view == gkViewRoleEdit {
+		return m.updateRoleEditor(msg)
+	}
+
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -638,6 +648,50 @@ func (m gatekeeperModel) switchSection(s gkSection) (gatekeeperModel, tea.Cmd) {
 	return m, nil
 }
 
+// openRoleEditor enters the unified role + permissions editor. For "edit" it
+// kicks off resolving the role's permissions so they can be edited in place; for
+// "create" it opens an empty editor.
+func (m gatekeeperModel) openRoleEditor(mode string, rec gkRecord) (gatekeeperModel, tea.Cmd) {
+	roleID := gkStr(rec, "role_id")
+	name := gkStr(rec, "name")
+	m.roleEditor = newRoleEditor(mode, roleID, name, m.width, m.height)
+	m.view = gkViewRoleEdit
+	m.status = ""
+	if mode == "edit" {
+		m.roleEditor.loading = true
+		return m, roleEditorResolve(roleID, name, gkStrSlice(rec, "permissions_ids"))
+	}
+	return m, nil
+}
+
+// updateRoleEditor delegates to the embedded role editor while it is open,
+// intercepting the messages that close it (done/cancel) since those return the
+// gatekeeper model to its list. A successful save refreshes the roles section.
+func (m gatekeeperModel) updateRoleEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg.(type) {
+	case roleEditorDoneMsg:
+		m.view = gkViewList
+		m.status = "✓ role saved"
+		m.statusErr = false
+		m.loading = true
+		return m, gkFetch(gkRoles, m.srFilter)
+	case roleEditorCancelMsg:
+		m.view = gkViewList
+		return m, nil
+	case tuiAutoRefreshMsg:
+		return m, nil // never disturb an open editor
+	}
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width, m.height = ws.Width, ws.Height
+		m.vp.Width = ws.Width - 4
+		m.vp.Height = ws.Height - 9
+		m.applyTableLayout()
+	}
+	var cmd tea.Cmd
+	m.roleEditor, cmd = m.roleEditor.update(msg)
+	return m, cmd
+}
+
 func (m gatekeeperModel) keyList(msg tea.KeyMsg) (gatekeeperModel, tea.Cmd) {
 	if m.pending != nil {
 		run := m.pending.run
@@ -697,12 +751,21 @@ func (m gatekeeperModel) keyList(msg tea.KeyMsg) (gatekeeperModel, tea.Cmd) {
 			return m, gkFetch(m.section, m.srFilter)
 		}
 	case "n":
+		if m.section == gkRoles {
+			return m.openRoleEditor("create", nil)
+		}
 		if m.def().canCreate {
 			kind := gkFormCreateTeam
 			if m.section == gkOrgs {
 				kind = gkFormCreateOrg
 			}
 			return m.openForm(kind)
+		}
+	case "e":
+		if m.section == gkRoles {
+			if rec, ok := m.currentRecord(); ok {
+				return m.openRoleEditor("edit", rec)
+			}
 		}
 	case "i":
 		if m.def().canInvite {
@@ -894,6 +957,8 @@ func (m gatekeeperModel) View() string {
 		return m.form.view(m.width, m.height)
 	case gkViewDetail:
 		return m.viewDetail()
+	case gkViewRoleEdit:
+		return m.roleEditor.view(m.width, m.height)
 	}
 	return m.viewList()
 }
@@ -917,6 +982,9 @@ func (m gatekeeperModel) listHelp() string {
 	parts := []string{"[tab] section", "[↑↓/jk] nav", "[enter] detail"}
 	for _, a := range m.def().actions {
 		parts = append(parts, "["+a.key+"] "+a.label)
+	}
+	if m.section == gkRoles {
+		parts = append(parts, "[n] new", "[e] edit")
 	}
 	if m.def().canCreate {
 		parts = append(parts, "[n] new")
@@ -1000,6 +1068,7 @@ func init() {
 	})
 	RegisterModule(Module{
 		Name:    "gatekeeper",
+		Admin:   true,
 		Order:   60,
 		Command: gatekeeperCmd,
 		Screens: []HubScreen{{
