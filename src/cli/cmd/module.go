@@ -27,9 +27,17 @@ type HubScreen struct {
 // alternatives: exactly one is active, chosen by the "providers" map in the CLI
 // config and defaulting to the first registered. A module with an empty Slot is
 // always active. Order sets the home-menu position (ascending).
+//
+// Admin marks a module as platform administration (e.g. gatekeeper, forge
+// runtimes, audit, org/role management) that a regular user does not touch. Its
+// Command is wired under `armory admin` instead of the root, and its Screens go
+// into the separate admin hub (adminScreens) rather than the user hub
+// (hubScreens). Permission enforcement stays server-side; the split is purely
+// organisational, keeping the top-level surface focused on developer tasks.
 type Module struct {
 	Name    string
 	Slot    string
+	Admin   bool
 	Order   int
 	Command *cobra.Command
 	Screens []HubScreen
@@ -87,27 +95,43 @@ func pickProvider(opts []Module, want string) Module {
 
 var wireOnce sync.Once
 
-// wireModules attaches every active module's command to the root command. It is
+// wireModules attaches every active module's command to the command tree. It is
 // idempotent (guarded by wireOnce) and called from Execute() in production and
 // from TestMain in tests, after all init() registrations have run — the registry
 // cannot be wired from an init() because Go's per-file init order would let some
-// modules register after root.go.
+// modules register after root.go. User module commands hang off the root;
+// admin module commands hang off `armory admin`.
 func wireModules() {
 	wireOnce.Do(func() {
+		rootCmd.AddCommand(adminCmd)
 		for _, m := range activeModules() {
-			if m.Command != nil {
+			if m.Command == nil {
+				continue
+			}
+			if m.Admin {
+				adminCmd.AddCommand(m.Command)
+			} else {
 				rootCmd.AddCommand(m.Command)
 			}
 		}
 	})
 }
 
-// hubScreens returns the home-menu screens of all active modules, in module
-// Order then per-module Screens order.
-func hubScreens() []HubScreen {
+// hubScreens returns the user hub's screens — the home-menu screens of all
+// active non-admin modules, in module Order then per-module Screens order.
+func hubScreens() []HubScreen { return screensFor(false) }
+
+// adminScreens returns the admin hub's screens — those of active admin modules,
+// shown under `armory admin` rather than the user home menu.
+func adminScreens() []HubScreen { return screensFor(true) }
+
+// screensFor collects the screens of active modules whose Admin flag matches.
+func screensFor(admin bool) []HubScreen {
 	var out []HubScreen
 	for _, m := range activeModules() {
-		out = append(out, m.Screens...)
+		if m.Admin == admin {
+			out = append(out, m.Screens...)
+		}
 	}
 	return out
 }
