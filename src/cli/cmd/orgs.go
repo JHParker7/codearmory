@@ -105,5 +105,5 @@ func init() {
 		},
 		inviteCmd,
 	)
-	RegisterModule(Module{Name: "orgs", Command: orgsCmd})
+	RegisterModule(Module{Name: "orgs", Admin: true, Command: orgsCmd})
 }

@@ -212,27 +212,45 @@ func TestHooksModel_Rules_Enter_Noop_WhenEmpty(t *testing.T) {
 	}
 }
 
-func TestHooksModel_Rules_E_LoadsAllEvents(t *testing.T) {
+func TestHooksModel_Rules_A_LoadsAllEvents(t *testing.T) {
 	srv, rec := recordingServer(t, http.StatusOK, `[]`)
 	setupCLI(t, srv)
 
 	m := applyHooksMsg(newHooksModel(), hookRulesMsg([]hookRule{}))
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	m2 := updated.(hooksModel)
 
 	if m2.view != hooksViewEvents {
-		t.Errorf("e key: view = %v, want hooksViewEvents", m2.view)
+		t.Errorf("a key: view = %v, want hooksViewEvents", m2.view)
 	}
 	if m2.selRule != nil {
-		t.Error("e key should not set selRule (shows all events)")
+		t.Error("a key should not set selRule (shows all events)")
 	}
 	if cmd == nil {
-		t.Fatal("e key should emit a fetch cmd")
+		t.Fatal("a key should emit a fetch cmd")
 	}
 	cmd()
 	// No ?repo= query parameter should be in the URL.
 	if strings.Contains(rec.Query, "repo=") {
-		t.Errorf("e key should fetch events without a repo filter; query = %q", rec.Query)
+		t.Errorf("a key should fetch events without a repo filter; query = %q", rec.Query)
+	}
+}
+
+func TestHooksModel_Rules_E_OpensPrefilledEditForm(t *testing.T) {
+	m := applyHooksMsg(newHooksModel(), hookRulesMsg([]hookRule{
+		{RuleID: "r1", Name: "ci-push", Repo: "org/repo", Events: []string{"push"}, WorkflowID: "wf1", RefFilter: "refs/heads/main", InputMapping: map[string]string{"k": "v"}},
+	}))
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	m2 := updated.(hooksModel)
+	if m2.view != hooksViewCreate || m2.formMode != hooksFormEdit || m2.editRuleID != "r1" {
+		t.Fatalf("e on a rule should open the edit form (view=%v mode=%v id=%q)", m2.view, m2.formMode, m2.editRuleID)
+	}
+	if m2.form.value("name") != "ci-push" || m2.form.value("repo") != "org/repo" {
+		t.Errorf("edit form not pre-filled: name=%q repo=%q", m2.form.value("name"), m2.form.value("repo"))
+	}
+	// input_mapping is preserved out-of-band so the edit can't wipe it.
+	if m2.editInputMapping["k"] != "v" {
+		t.Errorf("editInputMapping = %v, want preserved {k:v}", m2.editInputMapping)
 	}
 }
 
@@ -827,8 +845,8 @@ func TestHooksSubmitRule_PostsCorrectPayload(t *testing.T) {
 	srv, rec := recordingServer(t, http.StatusCreated, `{"rule_id":"r1"}`)
 	setupCLI(t, srv)
 
-	msg := hooksSubmitRule("ci-push", "org/repo", []string{"push", "tag"},
-		"wf-1", "s3cr3t", "refs/heads/main")()
+	msg := hooksSubmitRule(hooksFormCreate, "", "ci-push", "org/repo", []string{"push", "tag"},
+		"wf-1", "s3cr3t", "refs/heads/main", map[string]string{})()
 
 	if _, ok := msg.(hookRuleCreatedMsg); !ok {
 		t.Fatalf("msg = %T, want hookRuleCreatedMsg", msg)
@@ -858,7 +876,7 @@ func TestHooksSubmitRule_PostsCorrectPayload(t *testing.T) {
 func TestHooksSubmitRule_HTTPError_ReturnsFormErr(t *testing.T) {
 	srv, _ := recordingServer(t, http.StatusUnprocessableEntity, `{"error":"workflow_id not found"}`)
 	setupCLI(t, srv)
-	msg := hooksSubmitRule("n", "r", []string{"push"}, "bad", "s", "")()
+	msg := hooksSubmitRule(hooksFormCreate, "", "n", "r", []string{"push"}, "bad", "s", "", map[string]string{})()
 	if _, ok := msg.(hooksFormErrMsg); !ok {
 		t.Errorf("msg = %T, want hooksFormErrMsg on HTTP error", msg)
 	}
@@ -870,6 +888,33 @@ func TestHooksView_CreateView_RendersForm(t *testing.T) {
 	m.form, _ = newHooksRuleForm(nil)
 	if !strings.Contains(m.View(), "New Hook Rule") {
 		t.Error("create view should show the form heading")
+	}
+}
+
+func TestHooksSubmitRule_EditPutsAndKeepsSecretAndMapping(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"rule_id":"r1"}`)
+	setupCLI(t, srv)
+
+	// Edit with a blank secret: the secret key must be omitted (server keeps it),
+	// and the preserved input_mapping must be sent so it isn't wiped.
+	msg := hooksSubmitRule(hooksFormEdit, "r1", "ci", "org/repo", []string{"push"},
+		"wf-1", "", "", map[string]string{"k": "v"})()
+	if _, ok := msg.(hookRuleCreatedMsg); !ok {
+		t.Fatalf("msg = %T, want hookRuleCreatedMsg", msg)
+	}
+	if rec.Method != "PUT" || rec.Path != "/hooks/rules/r1" {
+		t.Errorf("request = %s %s, want PUT /hooks/rules/r1", rec.Method, rec.Path)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body, &got); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if _, present := got["secret"]; present {
+		t.Errorf("a blank secret must be omitted on edit so the server keeps it; body=%s", rec.Body)
+	}
+	mapping, _ := got["input_mapping"].(map[string]any)
+	if mapping["k"] != "v" {
+		t.Errorf("input_mapping = %v, want preserved {k:v}", got["input_mapping"])
 	}
 }
 

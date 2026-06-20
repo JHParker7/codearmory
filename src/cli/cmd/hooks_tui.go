@@ -24,6 +24,10 @@ type hookRule struct {
 	WorkflowID string    `json:"workflow_id"`
 	Active     bool      `json:"active"`
 	CreatedAt  time.Time `json:"created_at"`
+	// InputMapping is carried so an edit can preserve it — the rule form doesn't
+	// expose it, and the update endpoint replaces it wholesale (a missing mapping
+	// would wipe it).
+	InputMapping map[string]string `json:"input_mapping,omitempty"`
 }
 
 type hookEvent struct {
@@ -58,6 +62,14 @@ type hookDeletedMsg struct{}
 type hookRuleCreatedMsg struct{}
 type hooksFormErrMsg struct{ err error }
 
+// hooksFormMode distinguishes the rule form's create vs edit behaviour.
+type hooksFormMode int
+
+const (
+	hooksFormCreate hooksFormMode = iota
+	hooksFormEdit
+)
+
 // ── Views ─────────────────────────────────────────────────────────────────────
 
 type hooksViewID int
@@ -84,6 +96,10 @@ type hooksModel struct {
 	selRule    *hookRule
 	selEvent   *hookEvent
 	confirmDel bool
+
+	formMode         hooksFormMode     // create vs edit for the rule form
+	editRuleID       string            // rule being edited (PUT target); "" when creating
+	editInputMapping map[string]string // preserved across an edit (the form doesn't expose it)
 
 	rTable table.Model
 	eTable table.Model
@@ -378,16 +394,29 @@ func (m hooksModel) hooksKeyRules(msg tea.KeyMsg) (hooksModel, tea.Cmd) {
 			m.loading = true
 			return m, hooksFetchEvents(m.selRule.Repo)
 		}
-	case "e":
+	case "a":
 		m.view = hooksViewEvents
 		m.selRule = nil
 		m.loading = true
 		return m, hooksFetchEvents("")
 	case "n":
+		m.formMode = hooksFormCreate
+		m.editRuleID = ""
 		var cmd tea.Cmd
 		m.form, cmd = newHooksRuleForm(m.pipelines)
 		m.view = hooksViewCreate
 		return m, cmd
+	case "e":
+		i := m.rTable.Cursor()
+		if i >= 0 && i < len(m.rules) {
+			m.formMode = hooksFormEdit
+			m.editRuleID = m.rules[i].RuleID
+			m.editInputMapping = m.rules[i].InputMapping
+			var cmd tea.Cmd
+			m.form, cmd = newHooksRuleEditForm(m.rules[i], m.pipelines)
+			m.view = hooksViewCreate
+			return m, cmd
+		}
 	case "D":
 		i := m.rTable.Cursor()
 		if i >= 0 && i < len(m.rules) {
@@ -457,6 +486,24 @@ func newHooksRuleForm(pipelines []tuiPipeline) (tuiForm, tea.Cmd) {
 	)
 }
 
+// newHooksRuleEditForm builds the rule form pre-filled from an existing rule. The
+// secret is never returned by the API, so the field is left blank with a hint
+// that blank keeps the current secret (the update endpoint treats an omitted
+// secret as "leave unchanged").
+func newHooksRuleEditForm(r hookRule, pipelines []tuiPipeline) (tuiForm, tea.Cmd) {
+	wf := hooksWorkflowField(pipelines)
+	wf.setValue(r.WorkflowID)
+	f, cmd := newTUIForm("Edit Hook Rule",
+		formInputDefault("name", "Name", "ci-push (required)", r.Name),
+		formInputDefault("repo", "Repo", "myorg/myrepo (required)", r.Repo),
+		formInputDefault("events", "Events", "push pull_request (required)", strings.Join(r.Events, " ")),
+		wf,
+		formInput("secret", "Secret", "leave blank to keep current"),
+		formInputDefault("ref", "Ref filter", "refs/heads/main (optional)", r.RefFilter),
+	)
+	return f, cmd
+}
+
 // hooksWorkflowField builds the rule form's workflow picker: a selector of
 // pipeline names (submitting the workflow_id) when the catalog is available, or
 // a free-text id fallback when it could not be loaded.
@@ -508,16 +555,23 @@ func (m hooksModel) hooksSubmitCreate() (hooksModel, tea.Cmd) {
 		m.form.errMsg = "at least one event is required"
 	case workflow == "":
 		m.form.errMsg = "a workflow is required"
-	case secret == "":
+	case m.formMode == hooksFormCreate && secret == "":
 		m.form.errMsg = "secret is required (webhook rules must have an HMAC secret)"
 	default:
 		m.form.errMsg = ""
-		return m, hooksSubmitRule(name, repo, events, workflow, secret, m.form.value("ref"))
+		mapping := map[string]string{}
+		if m.formMode == hooksFormEdit && m.editInputMapping != nil {
+			mapping = m.editInputMapping
+		}
+		return m, hooksSubmitRule(m.formMode, m.editRuleID, name, repo, events, workflow, secret, m.form.value("ref"), mapping)
 	}
 	return m, nil
 }
 
-func hooksSubmitRule(name, repo string, events []string, workflow, secret, ref string) tea.Cmd {
+// hooksSubmitRule POSTs a new rule or PUTs an existing one. On edit a blank
+// secret is omitted so the server keeps the current one; input_mapping is passed
+// through (the form doesn't expose it) so an edit never silently clears it.
+func hooksSubmitRule(mode hooksFormMode, ruleID, name, repo string, events []string, workflow, secret, ref string, inputMapping map[string]string) tea.Cmd {
 	return func() tea.Msg {
 		payload := map[string]any{
 			"name":          name,
@@ -525,11 +579,17 @@ func hooksSubmitRule(name, repo string, events []string, workflow, secret, ref s
 			"events":        events,
 			"workflow_id":   workflow,
 			"ref_filter":    ref,
-			"secret":        secret,
-			"input_mapping": map[string]string{},
+			"input_mapping": inputMapping,
+		}
+		if secret != "" {
+			payload["secret"] = secret
+		}
+		method, path := "POST", "/hooks/rules"
+		if mode == hooksFormEdit {
+			method, path = "PUT", "/hooks/rules/"+ruleID
 		}
 		body, _ := json.Marshal(payload)
-		if _, err := doRequest("POST", "/hooks/rules", body); err != nil {
+		if _, err := doRequest(method, path, body); err != nil {
 			return hooksFormErrMsg{err}
 		}
 		return hookRuleCreatedMsg{}
@@ -563,7 +623,7 @@ func (m hooksModel) View() string {
 
 func (m hooksModel) hooksViewRules() string {
 	title := tuiTitleStyle.Render("Hooks Rules")
-	help := tuiHelp("[↑↓/jk] navigate  [enter] events by repo  [e] all events  [n] new  [D] delete  [r] refresh  [esc] home", m.width)
+	help := tuiHelp("[↑↓/jk] nav  [enter] events  [a] all events  [n] new  [e] edit  [D] delete  [r] refresh  [esc] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}

@@ -206,6 +206,15 @@ type tuiModel struct {
 	selRun      *tuiRun
 	outputTitle string
 
+	// editPipelineID is the workflow being edited in tuiViewCreate; "" means the
+	// form is a create. It selects PUT vs POST on submit.
+	editPipelineID string
+
+	// runStatus is a transient one-line result of a run action (e.g. a cancel
+	// failure) shown under the runs list; runStatusErr tints it as an error.
+	runStatus    string
+	runStatusErr bool
+
 	form      tuiForm
 	runReturn tuiViewID // view to restore when the run form is cancelled
 }
@@ -321,6 +330,25 @@ func tuiFetchRuns(workflowID string) tea.Cmd {
 			return tuiErrMsg{err}
 		}
 		return tuiRunsMsg(rs)
+	}
+}
+
+// tuiRunActionMsg is the outcome of a run action (cancel). cancelled identifies
+// the run so the runs list can report it; a non-nil err surfaces as a status
+// line instead of being silently swallowed.
+type tuiRunActionMsg struct {
+	cancelled string
+	err       error
+}
+
+// tuiCancelRun cancels a run via the API. It runs as a cmd (not a blocking call
+// inside Update) so the UI never stalls on the request, and it reports failures.
+func tuiCancelRun(runID string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := doRequest("DELETE", "/workflows/runs/"+runID, nil); err != nil {
+			return tuiRunActionMsg{err: err}
+		}
+		return tuiRunActionMsg{cancelled: runID}
 	}
 }
 
@@ -617,13 +645,43 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiPipelineCreatedMsg:
 		m.submitting = false
+		m.editPipelineID = ""
 		m.view = tuiViewPipelines
 		m.loading = true
 		return m, tuiFetchPipelines
 
+	case pipelineEditLoadedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.form, cmd = newCIPipelineEditForm(msg.name, msg.dsl, msg.desc)
+		m.editPipelineID = msg.workflowID
+		m.submitting = false
+		m.view = tuiViewCreate
+		return m, cmd
+
 	case tuiRunTriggeredMsg:
 		// Show the freshly-triggered run in the pipeline's run history.
 		m.submitting = false
+		m.view = tuiViewRuns
+		m.loading = true
+		wid := ""
+		if m.selPipeline != nil {
+			wid = m.selPipeline.WorkflowID
+		}
+		return m, tuiFetchRuns(wid)
+
+	case tuiRunActionMsg:
+		if msg.err != nil {
+			m.runStatus = "✗ cancel failed: " + msg.err.Error()
+			m.runStatusErr = true
+			return m, nil
+		}
+		m.runStatus = "✓ cancelled " + tuiShortID(msg.cancelled)
+		m.runStatusErr = false
+		// Return to the runs list and refresh so the new status shows.
 		m.view = tuiViewRuns
 		m.loading = true
 		wid := ""
@@ -699,14 +757,22 @@ func (m tuiModel) tuiKeyPipelines(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 			m.selPipeline = &m.pipelines[i]
 			m.view = tuiViewRuns
 			m.loading = true
+			m.runStatus = ""
 			return m, tuiFetchRuns(m.selPipeline.WorkflowID)
 		}
 	case "n":
 		m.submitting = false
+		m.editPipelineID = ""
 		var cmd tea.Cmd
 		m.form, cmd = newCIPipelineForm()
 		m.view = tuiViewCreate
 		return m, cmd
+	case "e":
+		i := m.pTable.Cursor()
+		if i < len(m.pipelines) {
+			m.selPipeline = &m.pipelines[i]
+			return m, tuiFetchPipelineForEdit(m.selPipeline.WorkflowID)
+		}
 	case "R":
 		i := m.pTable.Cursor()
 		if i < len(m.pipelines) {
@@ -742,6 +808,15 @@ func newCIPipelineForm() (tuiForm, tea.Cmd) {
 	)
 }
 
+// newCIPipelineEditForm is the create form pre-filled from an existing pipeline.
+func newCIPipelineEditForm(name, dsl, desc string) (tuiForm, tea.Cmd) {
+	return newTUIForm("Edit Pipeline",
+		formInputDefault("name", "Name", "my-pipeline (required)", name),
+		formInputDefault("steps", "Steps", "build->test->deploy (required)", dsl),
+		formInputDefault("desc", "Desc", "description (optional)", desc),
+	)
+}
+
 func (m tuiModel) tuiKeyCreate(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
@@ -754,6 +829,7 @@ func (m tuiModel) tuiKeyCreate(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	switch action {
 	case formCancel:
 		m.view = tuiViewPipelines
+		m.editPipelineID = ""
 		return m, nil
 	case formSubmit:
 		return m.tuiSubmitCreate()
@@ -761,7 +837,8 @@ func (m tuiModel) tuiKeyCreate(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	return m, cmd
 }
 
-// tuiSubmitCreate validates the form and, if valid, returns the create cmd.
+// tuiSubmitCreate validates the pipeline form and, if valid, returns the save
+// cmd — a create (POST) or, when editing, an update (PUT).
 func (m tuiModel) tuiSubmitCreate() (tuiModel, tea.Cmd) {
 	if m.submitting {
 		return m, nil
@@ -778,12 +855,13 @@ func (m tuiModel) tuiSubmitCreate() (tuiModel, tea.Cmd) {
 	}
 	m.form.errMsg = ""
 	m.submitting = true
-	return m, ciSubmitCreatePipeline(name, m.form.value("desc"), dsl)
+	return m, ciSubmitSavePipeline(m.editPipelineID, name, m.form.value("desc"), dsl)
 }
 
-// ciSubmitCreatePipeline resolves the DSL step names to IDs and POSTs the new
-// pipeline. Name/DSL resolution errors surface as an inline form error.
-func ciSubmitCreatePipeline(name, desc, dsl string) tea.Cmd {
+// ciSubmitSavePipeline resolves the DSL step names to IDs and POSTs a new
+// pipeline (editID == "") or PUTs an existing one. Name/DSL resolution errors
+// surface as an inline form error.
+func ciSubmitSavePipeline(editID, name, desc, dsl string) tea.Cmd {
 	return func() tea.Msg {
 		nodes, err := parseDSL(dsl)
 		if err != nil {
@@ -798,11 +876,72 @@ func ciSubmitCreatePipeline(name, desc, dsl string) tea.Cmd {
 			payload["description"] = desc
 		}
 		body, _ := json.Marshal(payload)
-		if _, err := doRequest("POST", "/workflows/pipelines", body); err != nil {
+		method, path := "POST", "/workflows/pipelines"
+		if editID != "" {
+			method, path = "PUT", "/workflows/pipelines/"+editID
+		}
+		if _, err := doRequest(method, path, body); err != nil {
 			return tuiFormErrMsg{err}
 		}
 		return tuiPipelineCreatedMsg{}
 	}
+}
+
+// pipelineEditLoadedMsg carries a pipeline's current definition, rendered back to
+// the DSL, so the edit form can open pre-filled.
+type pipelineEditLoadedMsg struct {
+	workflowID string
+	name       string
+	desc       string
+	dsl        string
+	err        error
+}
+
+// tuiFetchPipelineForEdit loads a pipeline's full definition and renders its
+// steps back into the DSL so the edit form round-trips faithfully.
+func tuiFetchPipelineForEdit(workflowID string) tea.Cmd {
+	return func() tea.Msg {
+		data, err := doRequest("GET", "/workflows/pipelines/"+workflowID, nil)
+		if err != nil {
+			return pipelineEditLoadedMsg{err: err}
+		}
+		var def struct {
+			WorkflowID  string            `json:"workflow_id"`
+			Name        string            `json:"name"`
+			Description string            `json:"description"`
+			Steps       []tuiWorkflowStep `json:"steps"`
+		}
+		if err := json.Unmarshal(data, &def); err != nil {
+			return pipelineEditLoadedMsg{err: err}
+		}
+		return pipelineEditLoadedMsg{workflowID: def.WorkflowID, name: def.Name, desc: def.Description, dsl: stepsToDSL(def.Steps)}
+	}
+}
+
+// stepsToDSL renders an ordered step list back into the pipeline DSL, collapsing
+// consecutive steps that share a parallel group into "[a,b]" segments — the
+// inverse of parseDSL.
+func stepsToDSL(steps []tuiWorkflowStep) string {
+	var segs []string
+	for i := 0; i < len(steps); {
+		g := steps[i].ParallelGroup
+		if g == nil {
+			segs = append(segs, steps[i].Name)
+			i++
+			continue
+		}
+		var names []string
+		for i < len(steps) && steps[i].ParallelGroup != nil && *steps[i].ParallelGroup == *g {
+			names = append(names, steps[i].Name)
+			i++
+		}
+		if len(names) == 1 {
+			segs = append(segs, names[0])
+		} else {
+			segs = append(segs, "["+strings.Join(names, ",")+"]")
+		}
+	}
+	return strings.Join(segs, "->")
 }
 
 // ── Run form ──────────────────────────────────────────────────────────────────
@@ -908,13 +1047,9 @@ func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		if i < len(m.runs) {
 			r := m.runs[i]
 			if r.Status == "pending" || r.Status == "running" {
-				_, _ = doRequest("DELETE", "/workflows/runs/"+r.RunID, nil)
-				m.loading = true
-				wid := ""
-				if m.selPipeline != nil {
-					wid = m.selPipeline.WorkflowID
-				}
-				return m, tuiFetchRuns(wid)
+				m.runStatus = "cancelling " + tuiShortID(r.RunID) + "…"
+				m.runStatusErr = false
+				return m, tuiCancelRun(r.RunID)
 			}
 		}
 	case "R":
@@ -923,6 +1058,7 @@ func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		}
 	case "r":
 		m.loading = true
+		m.runStatus = ""
 		// Drop cached run details so the live diagram refetches fresh.
 		m.runDetails = map[string]*tuiRunFull{}
 		wid := ""
@@ -950,6 +1086,14 @@ func (m tuiModel) tuiKeyRunDetail(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		return m, tea.Quit
 	case "esc":
 		m.view = tuiViewRuns
+		return m, nil
+	case "c":
+		// Cancel the run being watched, if it is still in progress.
+		if m.selRun != nil && (m.selRun.Status == "pending" || m.selRun.Status == "running") {
+			m.runStatus = "cancelling " + tuiShortID(m.selRun.RunID) + "…"
+			m.runStatusErr = false
+			return m, tuiCancelRun(m.selRun.RunID)
+		}
 		return m, nil
 	case "enter":
 		if m.runFull == nil {
@@ -1021,7 +1165,7 @@ func (m tuiModel) View() string {
 
 func (m tuiModel) tuiViewPipelines() string {
 	title := tuiTitleStyle.Render("Pipelines")
-	help := tuiHelp("[↑↓/jk] navigate  [enter] runs  [R] run  [n] new  [r] refresh  [esc] home", m.width)
+	help := tuiHelp("[↑↓/jk] navigate  [enter] runs  [R] run  [n] new  [e] edit  [r] refresh  [esc] home", m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -1067,11 +1211,19 @@ func (m tuiModel) tuiViewRuns() string {
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
+	status := ""
+	if m.runStatus != "" {
+		if m.runStatusErr {
+			status = tuiErrStyle.Render(m.runStatus) + "\n"
+		} else {
+			status = tuiMetaStyle.Render(m.runStatus) + "\n"
+		}
+	}
 	if len(m.runs) == 0 {
-		return title + "\n\n" + tuiMetaStyle.Render("No runs found.") + "\n\n" + help
+		return title + "\n\n" + tuiMetaStyle.Render("No runs found.") + "\n\n" + status + help
 	}
 	return title + "\n" + tuiBoxStyle.Render(m.rTable.View()) + "\n" +
-		m.tuiRunDiagramPanel() + "\n" + help
+		m.tuiRunDiagramPanel() + "\n" + status + help
 }
 
 // tuiRunDiagramPanel renders the live pipeline diagram for the highlighted run

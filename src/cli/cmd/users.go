@@ -112,7 +112,7 @@ func init() {
 			},
 		},
 	)
-	RegisterModule(Module{Name: "users", Command: usersCmd})
+	RegisterModule(Module{Name: "users", Admin: true, Command: usersCmd})
 }
 
 // myProfile fetches the authenticated user's own profile.

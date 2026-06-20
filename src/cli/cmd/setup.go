@@ -42,8 +42,8 @@ var (
 	flagSetupSignup   bool
 )
 
-// setupCmd is the line-based setup wizard. The TUI variant (`armory setup tui`)
-// and its hub-menu screen are wired in setup_tui.go.
+// setupCmd is the line-based, scriptable setup wizard. The interactive TUI lives
+// in the settings screen (settings_tui.go), reachable via `armory settings`.
 var setupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Configure conductor URL and authenticate",
@@ -56,14 +56,13 @@ keychain is unavailable).
   # Fully interactive:
   armory setup
 
-  # TUI form variant:
-  armory setup tui
-
   # Set URL only (skips login prompt):
   armory setup --url http://conductor:8080
 
   # Set URL and log in non-interactively:
-  armory setup --url http://conductor:8080 --email admin@example.com`,
+  armory setup --url http://conductor:8080 --email admin@example.com
+
+For a TUI form, use ` + "`armory settings`" + `.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// ── Step 1: conductor URL ─────────────────────────────────────
 
@@ -127,6 +126,10 @@ func init() {
 	setupCmd.Flags().StringVar(&flagSetupEmail, "email", "", "email address (skips login prompt, still asks for password)")
 	setupCmd.Flags().StringVar(&flagSetupUsername, "username", "", "username for sign up (implies --signup)")
 	setupCmd.Flags().BoolVar(&flagSetupSignup, "signup", false, "create a new account instead of logging in to an existing one")
+
+	// Wire the scriptable `armory setup` command. It has no hub-menu screen: the
+	// interactive flow lives in the settings screen (settings_tui.go).
+	RegisterModule(Module{Name: "setup", Order: 110, Command: setupCmd})
 }
 
 func isTerminal() bool {

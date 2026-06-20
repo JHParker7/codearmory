@@ -72,5 +72,5 @@ func init() {
 		},
 	)
 
-	RegisterModule(Module{Name: "service-requests", Command: serviceRequestsCmd})
+	RegisterModule(Module{Name: "service-requests", Admin: true, Command: serviceRequestsCmd})
 }
