@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "codearmory.fullname" . }}-portal
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: portal
+spec:
+  replicas: {{ .Values.portal.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "codearmory.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: portal
+  template:
+    metadata:
+      labels:
+        {{- include "codearmory.labels" . | nindent 8 }}
+        app.kubernetes.io/component: portal
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: portal
+          image: "{{ include "codearmory.image" (list . .Values.portal) }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.portal.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.portal.port | quote }}
+            # The BFF proxies /api/* to conductor. Defaults to the in-cluster
+            # conductor Service; override via portal.conductorUrl.
+            - name: CONDUCTOR_URL
+              value: {{ .Values.portal.conductorUrl | default (printf "http://%s-conductor:%v" (include "codearmory.fullname" .) .Values.conductor.port) | quote }}
+            {{- if .Values.portal.env.metricsEnabled }}
+            - name: METRICS_ENABLED
+              value: "true"
+            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.portal.env) | nindent 12 }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.portal.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Node writes nothing to the image filesystem at runtime, but a writable
+        # /tmp keeps readOnlyRootFilesystem safe against incidental temp use.
+        - name: tmp
+          emptyDir: {}
