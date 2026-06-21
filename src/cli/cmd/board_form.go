@@ -51,6 +51,10 @@ func sendCreateTicket(title, priority, status, timescale, dueDate, description s
 		if description != "" {
 			payload["description"] = description
 		}
+		// Tag the ticket with the project the user is working in.
+		if p := projectFilter(); p != "" {
+			payload["project"] = p
+		}
 		body, _ := json.Marshal(payload)
 		if _, err := doRequest("POST", "/tickets/tickets", body); err != nil {
 			return boardErrMsg{err}

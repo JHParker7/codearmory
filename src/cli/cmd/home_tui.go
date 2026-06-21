@@ -152,6 +152,7 @@ type homeModel struct {
 	width    int
 	height   int
 	subtitle string // header subtitle shown next to "codearmory"
+	project  string // current project badge, read once at build time
 }
 
 // newHomeModel builds the launcher menu from the registry-provided screens, in
@@ -163,7 +164,10 @@ func newHomeModel(screens []HubScreen, subtitle string) homeModel {
 	for i, s := range screens {
 		entries[i] = homeEntry{name: s.Title, desc: s.Desc}
 	}
-	return homeModel{entries: entries, subtitle: subtitle}
+	// Read the current project once here rather than on every View() render
+	// (Bubbletea re-renders on every key/resize/tick). newHomeModel runs on
+	// launch and on each return-to-home, so the badge stays current.
+	return homeModel{entries: entries, subtitle: subtitle, project: loadConfig().CurrentProject}
 }
 
 func (m homeModel) Init() tea.Cmd { return nil }
@@ -235,6 +239,9 @@ func (m homeModel) View() string {
 		subtitle = "platform"
 	}
 	header := homeTitleStyle.Render("codearmory") + "  " + homeSubtitleStyle.Render(subtitle)
+	if m.project != "" {
+		header += "  " + lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Accent)).Render("⬡ "+m.project)
+	}
 	block := header + "\n\n" + homeBoxStyle.Render(strings.Join(rows, "\n")) + "\n\n" + help
 	if m.width > 0 && m.height > 0 {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, block)

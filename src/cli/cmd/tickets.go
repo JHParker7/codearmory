@@ -70,6 +70,10 @@ func init() {
 			if ticketForge != "" {
 				payload["forge_execution_id"] = ticketForge
 			}
+			// Tag the ticket with the project the user is working in.
+			if p := projectFilter(); p != "" {
+				payload["project"] = p
+			}
 			body, err := json.Marshal(payload)
 			if err != nil {
 				return err
@@ -113,6 +117,9 @@ func init() {
 			}
 			if listAssignee != "" {
 				q.Set("assignee_id", listAssignee)
+			}
+			if p := projectFilter(); p != "" {
+				q.Set("project", p)
 			}
 			path := "/tickets/tickets"
 			if len(q) > 0 {

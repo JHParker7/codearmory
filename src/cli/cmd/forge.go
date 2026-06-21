@@ -71,6 +71,10 @@ func init() {
 			if execRunnerClass != "" {
 				payload["runner_class"] = execRunnerClass
 			}
+			// Tag the execution with the project the user is working in.
+			if p := projectFilter(); p != "" {
+				payload["project"] = p
+			}
 			return submitForgeExecution(cmd, payload, execTimeout, execWait)
 		},
 	}
@@ -91,7 +95,7 @@ func init() {
 			if execListStatus != "" {
 				path += "?status=" + url.QueryEscape(execListStatus)
 			}
-			return apiCall("GET", path, nil)
+			return apiCall("GET", appendProjectParam(path), nil)
 		},
 	}
 	listExecCmd.Flags().StringVar(&execListStatus, "status", "", "Filter: pending, running, completed, failed, timed_out, cancelled")
@@ -341,6 +345,11 @@ func forgeRerunPayload(image string, command []string, env map[string]string, ti
 	}
 	if runnerClass != "" {
 		payload["runner_class"] = runnerClass
+	}
+	// Tag the rerun with the project the user is working in, matching `exec run`
+	// and the TUI submit so the fresh run isn't hidden by a project filter.
+	if p := projectFilter(); p != "" {
+		payload["project"] = p
 	}
 	return payload
 }

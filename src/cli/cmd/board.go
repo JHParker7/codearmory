@@ -195,7 +195,7 @@ func fetchBoardData() tea.Msg {
 	statuses := fetchBoardFieldDefs("status", defaultBoardStatuses)
 	priorities := fetchBoardFieldDefs("priority", defaultBoardPriorities)
 
-	data, err := doRequest("GET", "/tickets/tickets", nil)
+	data, err := doRequest("GET", appendProjectParam("/tickets/tickets"), nil)
 	if err != nil {
 		return boardErrMsg{err}
 	}
