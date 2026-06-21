@@ -1,0 +1,49 @@
+{{- if and .Values.builder.enabled .Values.builder.serviceAccount.create }}
+# Role in the instance namespace lets builder's reconciler create, reconfigure and
+# tear down the Deployments and Services for the non-core services an instance admin
+# enables. It can read existing Deployments (to clone a platform service's spec) and
+# the Secrets those workloads reference. Scoped to .Release.Namespace — builder
+# deploys into the instance it runs in, not arbitrary namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "codearmory.fullname" . }}-builder
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: builder
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # Pods (read-only) so the reconciler can observe rollout/readiness of what it
+  # deployed.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Secrets: read (resolve references, read conductor-forward-key) and write
+  # (synthesize a service's Secret when provisioning it with no Helm change).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "codearmory.fullname" . }}-builder
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: builder
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "codearmory.fullname" . }}-builder
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "codearmory.builder.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

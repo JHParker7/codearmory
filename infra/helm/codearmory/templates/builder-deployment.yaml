@@ -1,0 +1,127 @@
+{{- if .Values.builder.enabled }}
+{{- $full := include "codearmory.fullname" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-builder
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: builder
+spec:
+  replicas: {{ .Values.builder.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "codearmory.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: builder
+  template:
+    metadata:
+      labels:
+        {{- include "codearmory.labels" . | nindent 8 }}
+        app.kubernetes.io/component: builder
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.builder.serviceAccount.create }}
+      serviceAccountName: {{ include "codearmory.builder.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
+      containers:
+        - name: builder
+          image: "{{ include "codearmory.image" (list . .Values.builder) }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.builder.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.builder.port | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.builder.env.logLevel | quote }}
+            - name: GATEKEEPER_URL
+              value: "http://{{ $full }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+            - name: REGISTRY_URL
+              value: "http://{{ $full }}-registry:{{ .Values.registry.port }}"
+            {{- include "codearmory.otel.envs" (list . .Values.builder.env) | nindent 12 }}
+            {{- include "codearmory.postgresql.env" (list . "builder" "builder" $full) | nindent 12 }}
+            - name: GATEKEEPER_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $full }}-builder
+                  key: gatekeeper-service-key
+            - name: REGISTRY_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $full }}-builder
+                  key: registry-service-key
+            - name: BUILDER_INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $full }}-builder
+                  key: builder-internal-key
+            # Encrypts admin-supplied per-service DB URLs at rest (needed for the
+            # /services API to accept a db_url, independent of the reconciler).
+            - name: BUILDER_SECRETS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $full }}-builder
+                  key: builder-secrets-key
+            {{- if .Values.builder.reconcile.enabled }}
+            # Reconciler: deploy/teardown + dynamically provision non-core services.
+            - name: BUILDER_RECONCILE
+              value: "true"
+            - name: CONDUCTOR_SECRET_NAME
+              value: {{ $full }}-conductor
+            - name: BUILDER_RECONCILE_INTERVAL
+              value: {{ .Values.builder.reconcile.interval | quote }}
+            - name: BUILDER_TARGET_NAMESPACE
+              value: {{ .Values.builder.reconcile.targetNamespace | default .Release.Namespace | quote }}
+            - name: BUILDER_RELEASE_PREFIX
+              value: {{ .Values.builder.reconcile.releasePrefix | default $full | quote }}
+            - name: BUILDER_IMAGE_REGISTRY
+              value: {{ .Values.imageRegistry | quote }}
+            - name: BUILDER_IMAGE_TAG
+              value: {{ .Values.imageTag | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- end }}
+            {{- include "codearmory.tls.envs" .Values.builder.tls | nindent 12 }}
+          {{- with (include "codearmory.tls.volumeMounts" .Values.builder.tls) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.builder.resources | nindent 12 }}
+      {{- with (include "codearmory.tls.volumes" .Values.builder.tls) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
+{{- end }}
