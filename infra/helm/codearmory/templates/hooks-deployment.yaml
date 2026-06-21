@@ -1,4 +1,4 @@
-{{- if .Values.hooks.enabled }}
+{{- if and .Values.hooks.enabled .Values.hooks.deploy }}
 {{- $fullname := include "codearmory.fullname" . }}
 apiVersion: apps/v1
 kind: Deployment

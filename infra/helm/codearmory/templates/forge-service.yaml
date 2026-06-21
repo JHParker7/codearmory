@@ -1,4 +1,4 @@
-{{- if .Values.forge.enabled }}
+{{- if and .Values.forge.enabled .Values.forge.deploy }}
 apiVersion: v1
 kind: Service
 metadata:

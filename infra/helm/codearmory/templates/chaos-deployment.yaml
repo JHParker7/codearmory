@@ -1,4 +1,4 @@
-{{- if .Values.chaos.enabled }}
+{{- if and .Values.chaos.enabled .Values.chaos.deploy }}
 {{- $full := include "codearmory.fullname" . -}}
 apiVersion: apps/v1
 kind: Deployment

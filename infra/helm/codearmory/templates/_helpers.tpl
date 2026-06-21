@@ -299,3 +299,14 @@ Forge service account name.
 {{- default "default" .Values.forge.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Builder service account name (used by the reconciler to manage deployments).
+*/}}
+{{- define "codearmory.builder.serviceAccountName" -}}
+{{- if .Values.builder.serviceAccount.create }}
+{{- default (printf "%s-builder" (include "codearmory.fullname" .)) .Values.builder.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.builder.serviceAccount.name }}
+{{- end }}
+{{- end }}

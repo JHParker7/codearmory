@@ -48,6 +48,10 @@ spec:
               value: {{ .Values.gatekeeper.env.logLevel | quote }}
             - name: PERMITTED_SERVICES
               value: {{ .Values.gatekeeper.env.permittedServices | quote }}
+            {{- if .Values.gatekeeper.env.secretsLookupAllowedCallers }}
+            - name: SECRETS_LOOKUP_ALLOWED_CALLERS
+              value: {{ .Values.gatekeeper.env.secretsLookupAllowedCallers | quote }}
+            {{- end }}
             {{- if .Values.gatekeeper.env.trustedProxyCIDRs }}
             - name: TRUSTED_PROXY_CIDRS
               value: {{ .Values.gatekeeper.env.trustedProxyCIDRs | quote }}
@@ -71,6 +75,15 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-gatekeeper
                   key: registry-service-key
+            {{- if .Values.builder.enabled }}
+            - name: BUILDER_URL
+              value: "http://{{ include "codearmory.fullname" . }}-builder:{{ .Values.builder.port }}"
+            - name: BUILDER_INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-gatekeeper
+                  key: builder-internal-key
+            {{- end }}
             {{- if .Values.gatekeeper.env.oidcIssuer }}
             - name: OIDC_ISSUER
               value: {{ .Values.gatekeeper.env.oidcIssuer | quote }}

@@ -12,6 +12,7 @@
 {{- $manifest = replace "http://outpost-gateway:"   (printf "http://%s-outpost-gateway:" $fullname)   $manifest -}}
 {{- $manifest = replace "http://chaos:"             (printf "http://%s-chaos:" $fullname)             $manifest -}}
 {{- $manifest = replace "http://argo:"              (printf "http://%s-argo:" $fullname)              $manifest -}}
+{{- $manifest = replace "http://builder:"           (printf "http://%s-builder:" $fullname)           $manifest -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

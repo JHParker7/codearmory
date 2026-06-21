@@ -10,3 +10,4 @@ CREATE DATABASE gitea_integration;
 CREATE DATABASE outpost_gateway;
 CREATE DATABASE chaos;
 CREATE DATABASE argo;
+CREATE DATABASE builder;

@@ -48,7 +48,12 @@ gatekeeper:
   env:
     logLevel: info
     # Comma-separated list of service names permitted to register.
-    permittedServices: "gatekeeper,blueprints,forge,workflows,tickets,notifications,hooks,outpost-gateway,chaos,argo"
+    permittedServices: "gatekeeper,blueprints,forge,workflows,tickets,notifications,hooks,outpost-gateway,chaos,argo,builder"
+    # Comma-separated services allowed to resolve org secrets via the internal
+    # lookup endpoint (deny-all when empty). Set to "containers,forge" to let the
+    # container registry resolve per-org creds and forge resolve "secret:<name>"
+    # job secret_refs. Requires the secrets feature (gatekeeperSecretsKey).
+    secretsLookupAllowedCallers: ""
     # Comma-separated CIDRs of trusted reverse proxies (optional).
     trustedProxyCIDRs: ""
     # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
@@ -145,6 +150,7 @@ registry:
 # ── Blueprints ────────────────────────────────────────────────────────────────
 blueprints:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: blueprints
     tag: ""
@@ -231,9 +237,45 @@ conductor:
             pathType: Prefix
     tls: []
 
+# ── Portal (web app: React SPA + Express BFF) ─────────────────────────────────
+# User-facing web UI. Serves the SPA and proxies /api to conductor. It is a
+# conductor *client*, not a routed backend, so it has no registry manifest entry
+# and no gatekeeper service key.
+portal:
+  image:
+    repository: portal
+    tag: ""
+  replicaCount: 1
+  port: 3001
+  # Upstream conductor base URL. Defaults to the in-cluster conductor Service.
+  conductorUrl: ""
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 192Mi
+  env:
+    otelEndpoint: ""
+    metricsEnabled: false
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: app.codearmory.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
 # ── Forge ─────────────────────────────────────────────────────────────────────
 forge:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: forge
     tag: ""
@@ -298,6 +340,7 @@ forge:
 # ── Workflows ─────────────────────────────────────────────────────────────────
 workflows:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: workflows
     tag: ""
@@ -339,6 +382,7 @@ workflows:
 # ── Tickets ───────────────────────────────────────────────────────────────────
 tickets:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: tickets
     tag: ""
@@ -374,6 +418,7 @@ tickets:
 # Notification delivery via pluggable integrations (Slack, email, webhook).
 notifications:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: notifications
     tag: ""
@@ -407,6 +452,7 @@ notifications:
 # integrations (chaos, argo). Distinct from conductor.
 outpostGateway:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: outpost-gateway
     tag: ""
@@ -446,6 +492,7 @@ outpostGateway:
 # an outpost via the outpost-gateway.
 chaos:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: chaos
     tag: ""
@@ -475,10 +522,68 @@ chaos:
     clientCertSecret: ""
     caBundle: ""
 
+# ── Builder ───────────────────────────────────────────────────────────────────
+# Org-level service control plane: org admins enable/disable/configure services
+# for their org. A null/"default" org is the baseline every org inherits.
+builder:
+  enabled: true
+  image:
+    repository: builder
+    tag: ""
+  replicaCount: 1
+  port: 8095
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  # ServiceAccount + Role granting the reconciler rights to manage Deployments and
+  # Services in this namespace. Required when reconcile.enabled is true.
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  # Phase 2 reconciler: an instance admin enabling a non-core service (in the
+  # default/admin scope) makes builder deploy it; disabling tears it down. On by
+  # default because this chart deploys only the core services and relies on builder
+  # to bring up the rest on demand. Fails soft if the cluster is unreachable, so a
+  # non-k8s/dev deploy is unaffected. Requires serviceAccount.create (the deploy RBAC).
+  reconcile:
+    enabled: true
+    interval: 30s
+    # Namespace to deploy workloads into. Empty = the release namespace (the pod's
+    # own namespace, via the downward API).
+    targetNamespace: ""
+    # Name prefix for created workloads (Deployment/Service codearmory-<svc>). Empty
+    # = the chart fullname, so they slot into the existing Service routing.
+    releasePrefix: ""
+  secret:
+    databaseUrl: ""
+    gatekeeperServiceKey: ""
+    registryServiceKey: ""
+    # Shared with gatekeeper's org-service disable-gate. Leave empty for auto-sync.
+    internalKey: ""
+    # AES-256-GCM key (64 hex chars) encrypting admin-supplied per-service DB URLs.
+    # Auto-generated on first install and preserved across upgrades; rotating it
+    # orphans stored URLs. Leave empty for auto-generation.
+    secretsKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
 # ── Argo ──────────────────────────────────────────────────────────────────────
 # Second integration (Argo CD app sync) proving the framework generalises.
 argo:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: argo
     tag: ""
@@ -509,6 +614,7 @@ argo:
 # ── Hooks ─────────────────────────────────────────────────────────────────────
 hooks:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: hooks
     tag: ""
@@ -543,6 +649,7 @@ hooks:
 # ── Containers ────────────────────────────────────────────────────────────────
 containers:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: containers
     tag: ""
@@ -578,6 +685,7 @@ containers:
 # ── Egress Proxy ──────────────────────────────────────────────────────────────
 egressProxy:
   enabled: true
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: egress-proxy
     tag: ""
@@ -600,6 +708,7 @@ egressProxy:
 # ── Gitea integration ─────────────────────────────────────────────────────────
 giteaIntegration:
   enabled: false
+  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: gitea_integration
     tag: ""
@@ -627,6 +736,14 @@ giteaIntegration:
     # Must match the gitea_integration entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
+    # Shared key authenticating forge → /internal/clone-token (resolves
+    # "gitea:<owner>/<repo>" job secret_refs). The forge deployment reads this same
+    # secret, so the two always match. Auto-generated and preserved; leave empty.
+    # NOTE: when global.externalSecrets is true the chart does not create this
+    # Secret — your externally-managed "<release>-gitea-integration" Secret MUST
+    # include a "gitea-internal-key" entry, or both the gitea-integration and forge
+    # pods will fail to start (CreateContainerConfigError).
+    internalKey: ""
   tls:
     certSecret: ""
     clientAuth: ""

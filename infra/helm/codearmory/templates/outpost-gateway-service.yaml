@@ -1,4 +1,4 @@
-{{- if .Values.outpostGateway.enabled }}
+{{- if and .Values.outpostGateway.enabled .Values.outpostGateway.deploy }}
 apiVersion: v1
 kind: Service
 metadata:

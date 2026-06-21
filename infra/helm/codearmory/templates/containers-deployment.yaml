@@ -1,4 +1,4 @@
-{{- if .Values.containers.enabled }}
+{{- if and .Values.containers.enabled .Values.containers.deploy }}
 {{- $fullname := include "codearmory.fullname" . }}
 apiVersion: apps/v1
 kind: Deployment

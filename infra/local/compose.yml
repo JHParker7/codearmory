@@ -70,10 +70,14 @@ services:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,notifications=notifications-local-secret,hooks=hooks-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,outpost-gateway=outpost-gateway-local-secret,chaos=chaos-local-secret,argo=argo-local-secret,test-service=test-service-local-secret
-      SECRETS_LOOKUP_ALLOWED_CALLERS: "containers"
+      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,notifications=notifications-local-secret,hooks=hooks-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,outpost-gateway=outpost-gateway-local-secret,chaos=chaos-local-secret,argo=argo-local-secret,builder=builder-local-secret,test-service=test-service-local-secret
+      SECRETS_LOOKUP_ALLOWED_CALLERS: "containers,forge"
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
+      # Org-service disable-gate: when both are set, gatekeeper denies requests to
+      # services an org has disabled in builder. Unset = gate inert (fail-open).
+      BUILDER_URL: http://builder:8095
+      BUILDER_INTERNAL_KEY: builder-internal-local-secret
       OIDC_ISSUER: http://localhost:8080
       GATEKEEPER_SECRETS_KEY: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
       SIGNUP_RATE_LIMIT: "1000"
@@ -106,7 +110,7 @@ services:
     environment:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/registry
-      REGISTRY_SERVICE_ACCOUNTS: conductor=registry-read-local-secret,workflows=workflows-registry-local-secret,gatekeeper=gatekeeper-registry-read-local-secret,registry-test-reader=registry-test-reader-local-secret
+      REGISTRY_SERVICE_ACCOUNTS: conductor=registry-read-local-secret,workflows=workflows-registry-local-secret,gatekeeper=gatekeeper-registry-read-local-secret,builder=builder-registry-read-local-secret,registry-test-reader=registry-test-reader-local-secret
       REGISTRY_ADMIN_ACCOUNTS: registry-admin=registry-admin-local-secret
       SERVICES: blueprints=http://blueprints:8093,forge=http://forge:8083,gatekeeper=http://gatekeeper:8081
       CONDUCTOR_URL: http://conductor:8080
@@ -180,6 +184,12 @@ services:
       ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25
       # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: forge-local-secret
+      # Job secret_refs: forge resolves "secret:<name>" via gatekeeper (forge must
+      # be in SECRETS_LOOKUP_ALLOWED_CALLERS) and "gitea:<owner>/<repo>" by minting
+      # a Forgejo clone URL via gitea-integration. GITEA_INTERNAL_KEY must match the
+      # value on the gitea-integration service.
+      GITEA_INTERNAL_URL: http://gitea-integration:8088
+      GITEA_INTERNAL_KEY: forge-gitea-internal-local-secret
       # Execution containers join the internal forge-exec network and route all
       # outbound traffic through the egress proxy's allowlist. Direct internet
       # access is blocked by the internal: true flag on that network.
@@ -230,6 +240,21 @@ services:
       gatekeeper:
         condition: service_healthy
       registry:
+        condition: service_started
+    restart: on-failure
+
+  portal:
+    build:
+      context: ../../src/systems/portal
+    environment:
+      <<: *otel-env
+      PORT: "3001"
+      CONDUCTOR_URL: http://conductor:8080
+      METRICS_ENABLED: "true"
+    ports:
+      - "3001:3001"
+    depends_on:
+      conductor:
         condition: service_started
     restart: on-failure
 
@@ -347,6 +372,31 @@ services:
         condition: service_started
     restart: on-failure
 
+  builder:
+    build:
+      context: ../../src/systems/builder
+    environment:
+      <<: *otel-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/builder
+      GATEKEEPER_URL: http://gatekeeper:8081
+      # Must match the builder entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: builder-local-secret
+      REGISTRY_URL: http://registry:8084
+      # Must match the builder entry in registry's REGISTRY_SERVICE_ACCOUNTS.
+      REGISTRY_SERVICE_KEY: builder-registry-read-local-secret
+      # Shared with gatekeeper so its disable-gate can read effective org state.
+      BUILDER_INTERNAL_KEY: builder-internal-local-secret
+    ports:
+      - "8095:8095"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+      registry:
+        condition: service_started
+    restart: on-failure
+
   argo:
     build:
       context: ../../src/systems/argo
@@ -433,6 +483,9 @@ services:
       GATEKEEPER_URL: http://gatekeeper:8081
       GATEKEEPER_SERVICE_KEY: gitea-integration-local-secret
       GITEA_URL: http://forgejo:3000
+      # Shared key authenticating forge → /internal/clone-token. Must match the
+      # GITEA_INTERNAL_KEY on the forge service.
+      GITEA_INTERNAL_KEY: forge-gitea-internal-local-secret
     ports:
       - "8088:8088"
     volumes:
@@ -517,6 +570,20 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+    profiles: [test]
+    restart: no
+
+  portal-integration-tests:
+    build:
+      context: ../../tests/portal
+    environment:
+      PORTAL_URL: http://portal:3001
+      API_URL: http://conductor:8080
+    depends_on:
+      portal:
+        condition: service_started
+      conductor:
+        condition: service_started
     profiles: [test]
     restart: no
 

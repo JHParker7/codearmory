@@ -1,4 +1,4 @@
-{{- if .Values.giteaIntegration.enabled }}
+{{- if and .Values.giteaIntegration.enabled .Values.giteaIntegration.deploy }}
 apiVersion: v1
 kind: Service
 metadata:

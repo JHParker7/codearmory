@@ -1,4 +1,4 @@
-{{- if .Values.egressProxy.enabled }}
+{{- if and .Values.egressProxy.enabled .Values.egressProxy.deploy }}
 apiVersion: v1
 kind: Service
 metadata:

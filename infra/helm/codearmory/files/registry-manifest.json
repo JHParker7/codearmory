@@ -347,6 +347,7 @@
       { "method": "POST",   "path": "/repos",                                      "action": "createRepo",    "resource": "gitea_integration/repos"                                },
       { "method": "GET",    "path": "/repos/{owner}/{name}",                       "action": "getRepo",       "resource": "gitea_integration/repos/{owner}/{name}"                 },
       { "method": "DELETE", "path": "/repos/{owner}/{name}",                       "action": "deleteRepo",    "resource": "gitea_integration/repos/{owner}/{name}"                 },
+      { "method": "PUT",    "path": "/repos/{owner}/{name}/project",               "action": "setRepoProject","resource": "gitea_integration/repos/{owner}/{name}"                 },
       { "method": "GET",    "path": "/repos/{owner}/{name}/branches",              "action": "listBranch",    "resource": "gitea_integration/repos/{owner}/{name}"                 },
       { "method": "GET",    "path": "/repos/{owner}/{name}/tags",                  "action": "listTag",       "resource": "gitea_integration/repos/{owner}/{name}"                 },
       { "method": "GET",    "path": "/repos/{owner}/{name}/releases",              "action": "listRelease",   "resource": "gitea_integration/repos/{owner}/{name}"                 },
@@ -364,7 +365,7 @@
       },
       {
         "grant_on": "user",
-        "actions": ["getRepo", "deleteRepo", "listBranch", "listTag", "listRelease", "listCommit", "listPull", "createPull", "getPull", "mergePull"],
+        "actions": ["getRepo", "deleteRepo", "setRepoProject", "listBranch", "listTag", "listRelease", "listCommit", "listPull", "createPull", "getPull", "mergePull"],
         "resources": ["{username}/gitea_integration/repos/*"]
       },
       {
@@ -488,6 +489,27 @@
         "grant_on": "user",
         "actions": ["listApp", "getApp", "syncApp", "getSync"],
         "resources": ["{username}/argo/apps", "{username}/argo/apps/*", "{username}/argo/syncs", "{username}/argo/syncs/*"]
+      }
+    ]
+  },
+  {
+    "name": "builder",
+    "url": "http://builder:8095",
+    "description": "Org-level service control plane (enable/disable/configure services per org)",
+    "forward_auth": true,
+    "service_key": "builder-registry-local-secret",
+    "endpoints": [
+      { "method": "GET",    "path": "/orgs/{id}/services",           "action": "listOrgServices",     "resource": "builder/orgs/{id}" },
+      { "method": "GET",    "path": "/orgs/{id}/services/{service}", "action": "getOrgService",       "resource": "builder/orgs/{id}" },
+      { "method": "PUT",    "path": "/orgs/{id}/services/{service}", "action": "configureOrgService", "resource": "builder/orgs/{id}" },
+      { "method": "DELETE", "path": "/orgs/{id}/services/{service}", "action": "deleteOrgService",    "resource": "builder/orgs/{id}" }
+    ],
+    "actions": [],
+    "default_grants": [
+      {
+        "grant_on": "org",
+        "actions": ["listOrgServices", "getOrgService", "configureOrgService", "deleteOrgService"],
+        "resources": ["{username}/builder/orgs/{org_id}"]
       }
     ]
   }

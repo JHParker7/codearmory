@@ -1,4 +1,4 @@
-{{- if .Values.containers.enabled }}
+{{- if and .Values.containers.enabled .Values.containers.deploy }}
 apiVersion: v1
 kind: Service
 metadata:
