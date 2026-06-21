@@ -178,10 +178,11 @@ func (r *KubernetesRuntime) Run(ctx context.Context, exec Execution) (RunResult,
 	}
 
 	result, err := r.waitAndCollect(ctx, exec, job.Name)
-	// Stamp the configured limit only when the job actually ran (it has an exit
-	// code). A cancelled or never-scheduled execution returns an empty result and
-	// must not report a limit for work that never happened.
-	if result.ExitCode != nil {
+	// Stamp the configured limit whenever the job actually ran — it produced an
+	// exit code, or we sampled memory before a cancellation. A never-scheduled
+	// execution has neither and must not report a limit for work that never
+	// happened.
+	if result.ExitCode != nil || result.MemoryUsedMB != nil {
 		result.MemoryLimitMB = ptr(spec.MemoryMB)
 	}
 	// Always clean up, even on error or cancellation.
@@ -349,7 +350,13 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 		select {
 		case <-pollCtx.Done():
 			// Caller cancelled (DELETE request) or our safety deadline hit.
-			return RunResult{}, pollCtx.Err()
+			// Preserve any memory sampled before cancellation — the job did run
+			// and consume it, so report it like the docker runtime does.
+			var memUsed *int64
+			if peakMemMB > 0 {
+				memUsed = ptr(peakMemMB)
+			}
+			return RunResult{MemoryUsedMB: memUsed}, pollCtx.Err()
 		case <-ticker.C:
 			j, err := r.client.BatchV1().Jobs(r.namespace).Get(pollCtx, jobName, metav1.GetOptions{})
 			if err != nil {

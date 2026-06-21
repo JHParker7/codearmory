@@ -42,6 +42,7 @@ type Ticket struct {
 	DueDate          *time.Time      `json:"due_date,omitempty" gorm:"column:due_date"`
 	CreatedBy        string          `json:"created_by"         gorm:"column:created_by"`
 	OrgID            string          `json:"org_id"             gorm:"column:org_id;default:''"`
+	Project          string          `json:"project,omitempty"  gorm:"column:project;default:''"`
 	AssigneeID       *string         `json:"assignee_id,omitempty"        gorm:"column:assignee_id"`
 	WorkflowID       *string         `json:"workflow_id,omitempty"        gorm:"column:workflow_id"`
 	RunID            *string         `json:"run_id,omitempty"             gorm:"column:run_id"`

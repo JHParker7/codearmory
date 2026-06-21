@@ -162,7 +162,9 @@ func getTicket(ctx context.Context, id string) (Ticket, error) {
 }
 
 // listTickets returns active tickets accessible to the caller with optional filters.
-func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilter, assigneeFilter, timescaleFilter string) ([]Ticket, error) {
+// projectFilter is a view filter only — it never widens access beyond the
+// created_by/org_id scope above.
+func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilter, assigneeFilter, timescaleFilter, projectFilter string) ([]Ticket, error) {
 	q := connectRead().WithContext(ctx).
 		Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID)
 	if statusFilter != "" {
@@ -176,6 +178,9 @@ func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilte
 	}
 	if timescaleFilter != "" {
 		q = q.Where("timescale = ?", timescaleFilter)
+	}
+	if projectFilter != "" {
+		q = q.Where("project = ?", projectFilter)
 	}
 	var tickets []Ticket
 	if err := q.Order("created_at DESC").Limit(100).Find(&tickets).Error; err != nil {

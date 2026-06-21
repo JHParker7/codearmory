@@ -31,11 +31,24 @@ type Execution struct {
 	// Backend is the runtime backend this execution runs on, snapshotted from the
 	// runner class at submit time so re-pointing the class mid-flight cannot move
 	// an already-queued job to a different runtime.
-	Backend  string  `gorm:"column:backend;not null;default:default"                 json:"backend"`
-	Status   string  `gorm:"column:status;not null;default:pending"                  json:"status"`
-	ExitCode *int    `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
-	Stdout   *string `gorm:"column:stdout"                                           json:"stdout,omitempty"`
-	Stderr   *string `gorm:"column:stderr"                                           json:"stderr,omitempty"`
+	Backend string `gorm:"column:backend;not null;default:default"                 json:"backend"`
+	// OrgID is the submitter's org, snapshotted from the gatekeeper permission
+	// check at submit time. The worker uses it to resolve org-scoped secrets
+	// (secret: refs) at dispatch without a live request context.
+	OrgID string `gorm:"column:org_id;not null;default:''" json:"org_id,omitempty"`
+	// Project is a free-text workspace label used only to filter list views; it is
+	// not a security boundary (access stays governed by UserID/OrgID).
+	Project string `gorm:"column:project;not null;default:''" json:"project,omitempty"`
+	// SecretRefs maps a target env var NAME to a credential reference resolved at
+	// dispatch and injected into the runtime env — never into the persisted env.
+	// Reference schemes: "secret:<name>" (gatekeeper org secret) and
+	// "gitea:<owner>/<repo>" (a minted Forgejo clone URL). Only the references are
+	// stored here; the resolved values are never persisted or logged.
+	SecretRefs map[string]string `gorm:"column:secret_refs;type:jsonb;not null;default:'{}';serializer:json" json:"secret_refs,omitempty"`
+	Status     string            `gorm:"column:status;not null;default:pending"                  json:"status"`
+	ExitCode   *int              `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
+	Stdout     *string           `gorm:"column:stdout"                                           json:"stdout,omitempty"`
+	Stderr     *string           `gorm:"column:stderr"                                           json:"stderr,omitempty"`
 	// MemoryUsedMB is the peak memory the run's container consumed, captured
 	// best-effort from the runtime (k8s metrics-server / docker stats). It is NULL
 	// when metrics are unavailable — most often a very short job a metrics-server
@@ -65,11 +78,16 @@ type RunnerClass struct {
 	Enabled bool   `gorm:"not null;default:true"      json:"enabled"`
 	// Privileged runs the job as root with a writable root filesystem and
 	// privilege escalation allowed, so package managers (apt/pacman/dnf) work. It
-	// is ONLY honoured by VM-isolated (kata) backends, where the microVM — not the
-	// container — is the isolation boundary. On container backends
-	// (docker/kubernetes/runc) it is ignored at runtime: root in a shared-kernel
-	// container is an escape risk, so the locked-down sandbox is always applied
-	// there regardless of this flag.
+	// is only meaningful on VM-isolated backends, where the microVM/VM — not the
+	// container — is the isolation boundary:
+	//   - kata: the k8s runtime applies it via the pod/container securityContext.
+	//   - proxmox: every job already runs as root in a throwaway VM with a real
+	//     Docker daemon, so the flag has no additional effect (effectively always
+	//     on). validatePrivilegedBackend still requires a privileged class to
+	//     target such a backend.
+	// On shared-kernel container backends (docker/kubernetes/runc) it is ignored
+	// at runtime: root in a shared-kernel container is an escape risk, so the
+	// locked-down sandbox is always applied there regardless of this flag.
 	Privileged bool `gorm:"not null;default:false"     json:"privileged"`
 }
 
@@ -96,6 +114,13 @@ type submitRequest struct {
 	Env         map[string]string `json:"env"`
 	Timeout     int64             `json:"timeout"`
 	RunnerClass string            `json:"runner_class"`
+	Project     string            `json:"project"`
+	// SecretRefs maps a target env var NAME to a credential reference. Supported
+	// schemes: "secret:<name>" resolves a gatekeeper org secret (e.g. a git SSH
+	// deploy key or token for GitHub/Bitbucket); "gitea:<owner>/<repo>" mints a
+	// short-lived Forgejo clone URL. Resolved at dispatch, injected into the
+	// runtime env, and never persisted.
+	SecretRefs map[string]string `json:"secret_refs"`
 }
 
 // RunResult holds the output of a completed container run. ExitCode is a pointer

@@ -363,6 +363,9 @@ func main() {
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_step_runs_run ON workflow_step_runs (run_id, step_index)`).Error; err != nil {
 		slog.Warn("failed to create workflow_step_runs index", "error", err)
 	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project ON workflows (project) WHERE project <> ''`).Error; err != nil {
+		slog.Warn("failed to create workflows project index", "error", err)
+	}
 	slog.Info("database initialized")
 
 	initTokenEncryption()

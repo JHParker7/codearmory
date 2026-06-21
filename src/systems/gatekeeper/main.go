@@ -81,6 +81,15 @@ func envDuration(key string, def time.Duration) time.Duration {
 	return def
 }
 
+// coreServiceNames is the set of service identities seeded from the configured
+// GATEKEEPER_SERVICES env var. Runtime service-account registration (builder's
+// /internal/service-accounts) must never overwrite one of these — otherwise a
+// holder of BUILDER_INTERNAL_KEY could re-key a core service and impersonate it.
+var coreServiceNames = map[string]bool{}
+
+// isCoreServiceName reports whether name is a statically-configured core service.
+func isCoreServiceName(name string) bool { return coreServiceNames[name] }
+
 // seedServiceAccounts reads GATEKEEPER_SERVICES (format "name=key,name=key") and
 // upserts ServiceAccount rows. For new accounts, both HashedKey and
 // HashedBootstrapKey are set to the provided key's hash. For existing accounts,
@@ -101,6 +110,7 @@ func seedServiceAccounts(ctx context.Context) {
 			continue
 		}
 		name, key := entry[:idx], entry[idx+1:]
+		coreServiceNames[name] = true
 		hash, err := bcrypt.GenerateFromPassword([]byte(key), 12)
 		if err != nil {
 			slog.ErrorContext(ctx, "seedServiceAccounts: bcrypt failed", "name", name, "error", err)
@@ -217,6 +227,10 @@ func main() {
 	mux.HandleFunc("POST /internal/oauth/clients", handleCreateOAuthClient)
 	mux.HandleFunc("GET /internal/oauth/clients", handleListOAuthClients)
 	mux.HandleFunc("DELETE /internal/oauth/clients/{id}", handleDeleteOAuthClient)
+	// Runtime service registration for builder (auth: BUILDER_INTERNAL_KEY) — lets
+	// builder bring a non-core service online with no Helm change.
+	mux.HandleFunc("POST /internal/service-accounts", handleRegisterServiceAccount)
+	mux.HandleFunc("DELETE /internal/service-accounts/{name}", handleDeregisterServiceAccount)
 	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
 	mux.Handle("GET /auth/validate", authMiddleware(http.HandlerFunc(handleAuthValidate)))
 

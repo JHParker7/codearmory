@@ -1,0 +1,64 @@
+package main
+
+import "testing"
+
+func TestParseCredentialRef(t *testing.T) {
+	cases := []struct {
+		ref        string
+		wantScheme string
+		wantArg    string
+		wantErr    bool
+	}{
+		{"secret:github-deploy-key", "secret", "github-deploy-key", false},
+		{"gitea:acme/widgets", "gitea", "acme/widgets", false},
+		{"secret:", "", "", true},
+		{"", "", "", true},
+		{"bogus:x", "", "", true},
+		{"gitea:acme", "", "", true},               // missing repo
+		{"gitea:acme/widgets/extra", "", "", true}, // too many segments
+		{"gitea:/widgets", "", "", true},           // empty owner
+	}
+	for _, c := range cases {
+		scheme, arg, err := parseCredentialRef(c.ref)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("parseCredentialRef(%q): expected error, got scheme=%q arg=%q", c.ref, scheme, arg)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseCredentialRef(%q): unexpected error %v", c.ref, err)
+			continue
+		}
+		if scheme != c.wantScheme || arg != c.wantArg {
+			t.Errorf("parseCredentialRef(%q) = (%q,%q), want (%q,%q)", c.ref, scheme, arg, c.wantScheme, c.wantArg)
+		}
+	}
+}
+
+func TestValidateSecretRefs(t *testing.T) {
+	cases := []struct {
+		name    string
+		refs    map[string]string
+		env     map[string]string
+		orgID   string
+		wantErr bool
+	}{
+		{"secret with org", map[string]string{"GIT_SSH_KEY": "secret:k"}, nil, "org1", false},
+		{"gitea needs no org", map[string]string{"REPO_URL": "gitea:acme/widgets"}, nil, "", false},
+		{"secret without org", map[string]string{"X": "secret:k"}, nil, "", true},
+		{"invalid target key", map[string]string{"1BAD": "gitea:a/b"}, nil, "", true},
+		{"blocked target key", map[string]string{"LD_PRELOAD": "gitea:a/b"}, nil, "", true},
+		{"collides with env", map[string]string{"TOKEN": "gitea:a/b"}, map[string]string{"TOKEN": "x"}, "", true},
+		{"malformed ref", map[string]string{"X": "nope"}, nil, "org1", true},
+	}
+	for _, c := range cases {
+		err := validateSecretRefs(c.refs, c.env, c.orgID)
+		if c.wantErr && err == nil {
+			t.Errorf("%s: expected error, got nil", c.name)
+		}
+		if !c.wantErr && err != nil {
+			t.Errorf("%s: unexpected error %v", c.name, err)
+		}
+	}
+}

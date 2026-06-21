@@ -308,11 +308,16 @@ func getWorkflow(ctx context.Context, id string) (Workflow, error) {
 	return wf, nil
 }
 
-// listWorkflows returns active workflows accessible to the caller.
-func listWorkflows(ctx context.Context, userID, orgID string) ([]Workflow, error) {
+// listWorkflows returns active workflows accessible to the caller, with an
+// optional project filter (a view filter, not a security boundary).
+func listWorkflows(ctx context.Context, userID, orgID, projectFilter string) ([]Workflow, error) {
 	var wfs []Workflow
-	if err := connectRead().WithContext(ctx).
-		Where("active=? AND (created_by=? OR (org_id!='' AND org_id=?))", true, userID, orgID).
+	q := connectRead().WithContext(ctx).
+		Where("active=? AND (created_by=? OR (org_id!='' AND org_id=?))", true, userID, orgID)
+	if projectFilter != "" {
+		q = q.Where("project=?", projectFilter)
+	}
+	if err := q.
 		Order("created_at desc").
 		Limit(100).
 		Find(&wfs).Error; err != nil {

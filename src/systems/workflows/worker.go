@@ -584,7 +584,9 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 		}
 		for _, s := range def.Async.CancelStates {
 			if status == s {
-				return stepResult{}, context.Canceled
+				// Carry memory through on cancel too — a step cancelled after an
+				// OOM/timeout still has meaningful usage figures.
+				return stepResult{MemoryUsedMB: used, MemoryLimitMB: limit}, context.Canceled
 			}
 		}
 		// Status is not in any known terminal or cancel set — keep polling.

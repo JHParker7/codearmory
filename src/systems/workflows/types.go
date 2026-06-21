@@ -110,6 +110,7 @@ type Workflow struct {
 	Description string            `json:"description"  gorm:"column:description;default:''"`
 	CreatedBy   string            `json:"created_by"   gorm:"column:created_by"`
 	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
+	Project     string            `json:"project,omitempty" gorm:"column:project;default:''"`
 	RoleID      string            `json:"role_id,omitempty" gorm:"column:role_id;default:''"`
 	Active      bool              `json:"active"       gorm:"column:active;default:true"`
 	CreatedAt   time.Time         `json:"created_at"   gorm:"column:created_at"`
@@ -129,6 +130,7 @@ type WorkflowRun struct {
 	WorkflowID   string            `json:"workflow_id"  gorm:"column:workflow_id"`
 	TriggeredBy  string            `json:"triggered_by" gorm:"column:triggered_by"`
 	OrgID        string            `json:"org_id"       gorm:"column:org_id;default:''"`
+	Project      string            `json:"project,omitempty" gorm:"column:project;default:''"`
 	Status       string            `json:"status"       gorm:"column:status;default:'pending'"`
 	CurrentStep  int               `json:"current_step" gorm:"column:current_step;default:0"`
 	Inputs       map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`

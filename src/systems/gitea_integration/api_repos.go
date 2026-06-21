@@ -40,7 +40,29 @@ func handleListRepos(w http.ResponseWriter, r *http.Request) {
 		limit = 20
 	}
 
-	repos, err := gitea.listRepos(ctx, callerUsername, page, limit)
+	// When filtering by project the match can sit on any Gitea page, so fetch the
+	// user's full repo set and filter/paginate in memory below. Without a filter,
+	// proxy Gitea's own pagination directly.
+	projectFilter := r.URL.Query().Get("project")
+	var repos []Repo
+	var err error
+	if projectFilter != "" {
+		const pageSize = 50
+		const maxPages = 50
+		for p := 1; p <= maxPages; p++ {
+			var batch []Repo
+			batch, err = gitea.listRepos(ctx, callerUsername, p, pageSize)
+			if err != nil {
+				break
+			}
+			repos = append(repos, batch...)
+			if len(batch) < pageSize {
+				break
+			}
+		}
+	} else {
+		repos, err = gitea.listRepos(ctx, callerUsername, page, limit)
+	}
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gitea error")
@@ -49,9 +71,109 @@ func handleListRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stamp each repo with its project label from the local mapping table.
+	names := make([]string, len(repos))
+	for i := range repos {
+		names[i] = repos[i].FullName
+	}
+	projects, perr := repoProjectsByFullName(ctx, names)
+	if perr != nil {
+		// When filtering by project, a failed label lookup would leave every
+		// repo's Project empty and the filter below would silently drop them
+		// all — making a transient DB error look like "no repos in this
+		// project". Fail loudly instead. Without a filter the labels are
+		// cosmetic, so degrade gracefully.
+		if projectFilter != "" {
+			span.RecordError(perr)
+			span.SetStatus(codes.Error, "project lookup failed")
+			slog.ErrorContext(ctx, "list repos: project lookup failed", "user_id", userID, "error", perr)
+			http.Error(w, "failed to list repositories", http.StatusBadGateway)
+			return
+		}
+		slog.WarnContext(ctx, "list repos: project lookup failed", "user_id", userID, "error", perr)
+	} else {
+		for i := range repos {
+			repos[i].Project = projects[repos[i].FullName]
+		}
+	}
+	if projectFilter != "" {
+		filtered := make([]Repo, 0, len(repos))
+		for _, rp := range repos {
+			if rp.Project == projectFilter {
+				filtered = append(filtered, rp)
+			}
+		}
+		// Paginate the filtered set in memory so page/limit still apply.
+		start := min((page-1)*limit, len(filtered))
+		end := min(start+limit, len(filtered))
+		repos = filtered[start:end]
+	}
+
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(repos) //nolint:errcheck
+}
+
+// handleSetRepoProject assigns (or, with an empty project, clears) the project
+// label for a repo. The project is a view filter only; access is still gated by
+// the repo permission check and ownerAllowed below.
+func handleSetRepoProject(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("gitea").Start(r.Context(), "handleSetRepoProject")
+	defer span.End()
+
+	owner := r.PathValue("owner")
+	name := r.PathValue("name")
+
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "setRepoProject", "gitea_integration/repos/"+owner+"/"+name)
+	if !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	span.AddEvent("permission.granted")
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.String("repo.name", owner+"/"+name),
+	)
+
+	callerUsername, ok := sudoFor(ctx, w, userID)
+	if !ok {
+		return
+	}
+	if !ownerAllowed(owner, callerUsername, resolveOrgName(ctx, r, orgID)) {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var req struct {
+		Project string `json:"project"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	fullName := owner + "/" + name
+	rp := RepoProject{FullName: fullName, Project: req.Project}
+	var err error
+	if req.Project == "" {
+		err = rp.Remove(ctx)
+	} else {
+		err = rp.Upsert(ctx)
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
+		slog.ErrorContext(ctx, "set repo project: db error", "user_id", userID, "repo", fullName, "error", err)
+		http.Error(w, "failed to set project", http.StatusInternalServerError)
+		return
+	}
+
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "repo project set", "user_id", userID, "repo", fullName, "project", req.Project)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rp) //nolint:errcheck
 }
 
 func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +264,10 @@ func handleGetRepo(w http.ResponseWriter, r *http.Request) {
 		slog.ErrorContext(ctx, "get repo: gitea error", "user_id", userID, "owner", owner, "name", name, "error", err)
 		http.Error(w, "failed to get repository", http.StatusBadGateway)
 		return
+	}
+
+	if projects, perr := repoProjectsByFullName(ctx, []string{repo.FullName}); perr == nil {
+		repo.Project = projects[repo.FullName]
 	}
 
 	span.SetStatus(codes.Ok, "")

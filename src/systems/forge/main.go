@@ -154,6 +154,9 @@ func main() {
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS executions_pending ON executions (status) WHERE status IN ('pending', 'running')`).Error; err != nil {
 		slog.Warn("failed to create executions pending index", "error", err)
 	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS executions_user_project ON executions (user_id, project) WHERE project <> ''`).Error; err != nil {
+		slog.Warn("failed to create executions project index", "error", err)
+	}
 	if err := migrateAndSeedRunnerClasses(); err != nil {
 		slog.Error("failed to migrate runner classes", "error", err)
 		os.Exit(1)
@@ -183,7 +186,9 @@ func main() {
 
 	// Rotate the gatekeeper service key every 25 minutes. GATEKEEPER_SERVICE_KEY
 	// must match the key in GATEKEEPER_SERVICES on gatekeeper. No-op if unset.
-	registry.StartKeyRotation(ctx, gatekeeperURL, "forge",
+	// The returned accessor yields the live key so credential lookups (see
+	// credentials.go) authenticate with the current value, not the bootstrap one.
+	forgeServiceKey = registry.StartKeyRotation(ctx, gatekeeperURL, "forge",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	workers := newWorkerPool(reg)

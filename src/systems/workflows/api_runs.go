@@ -173,6 +173,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		WorkflowID:   wf.WorkflowID,
 		TriggeredBy:  userID,
 		OrgID:        orgID,
+		Project:      wf.Project,
 		Status:       StatusPending,
 		Inputs:       req.Inputs,
 		Token:        encToken,

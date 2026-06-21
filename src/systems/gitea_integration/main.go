@@ -153,9 +153,12 @@ func main() {
 	initMetrics()
 	httpClient = initHTTPClient()
 
-	if err := connect().AutoMigrate(&GiteaAccount{}); err != nil {
+	if err := connect().AutoMigrate(&GiteaAccount{}, &RepoProject{}); err != nil {
 		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
+	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_gitea_repo_projects_project ON gitea_repo_projects (project) WHERE project <> ''`).Error; err != nil {
+		slog.Warn("failed to create gitea_repo_projects project index", "error", err)
 	}
 	slog.Info("database initialized")
 
@@ -180,10 +183,15 @@ func main() {
 	registry.StartKeyRotation(ctx, gatekeeperURL, "gitea",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
+	if giteaInternalKey == "" {
+		slog.Warn("GITEA_INTERNAL_KEY not set — /internal/clone-token will reject all callers")
+	}
+
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	mux.HandleFunc("POST /internal/registry-token", handleInternalRegistryToken)
+	mux.HandleFunc("POST /internal/clone-token", handleInternalCloneToken)
 
 	mux.HandleFunc("GET /account", handleGetAccount)
 	mux.HandleFunc("PUT /account", handleLinkAccount)
@@ -193,6 +201,7 @@ func main() {
 	mux.HandleFunc("POST /repos", handleCreateRepo)
 	mux.HandleFunc("GET /repos/{owner}/{name}", handleGetRepo)
 	mux.HandleFunc("DELETE /repos/{owner}/{name}", handleDeleteRepo)
+	mux.HandleFunc("PUT /repos/{owner}/{name}/project", handleSetRepoProject)
 	mux.HandleFunc("GET /repos/{owner}/{name}/branches", handleListBranches)
 	mux.HandleFunc("GET /repos/{owner}/{name}/tags", handleListTags)
 	mux.HandleFunc("GET /repos/{owner}/{name}/releases", handleListReleases)
