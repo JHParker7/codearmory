@@ -40,6 +40,18 @@ jobs:
       - name: Run blueprints unit tests
         run: cd src/systems/blueprints; go test .
 
+  builder-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run builder unit tests
+        run: cd src/systems/builder; go test .
+
   conductor-unit-test:
     runs-on: ubuntu-latest
     steps:
@@ -128,6 +140,7 @@ jobs:
     needs:
       - gatekeeper-unit-test
       - blueprints-unit-test
+      - builder-unit-test
       - conductor-unit-test
       - cli-unit-test
       - forge-unit-test
@@ -188,6 +201,8 @@ jobs:
             context: src/systems/gatekeeper
           - name: blueprints
             context: src/systems/blueprints
+          - name: builder
+            context: src/systems/builder
           - name: conductor
             context: src/systems/conductor
           - name: forge
