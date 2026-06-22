@@ -31,6 +31,8 @@ jobs:
             context: src/systems/gatekeeper
           - name: blueprints
             context: src/systems/blueprints
+          - name: builder
+            context: src/systems/builder
           - name: conductor
             context: src/systems/conductor
           - name: forge
