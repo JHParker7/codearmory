@@ -121,7 +121,7 @@ func reconcileInterval() time.Duration {
 // its own override. BUILDER_DEFAULT_REPLICAS; 0 (unset/invalid) leaves it at 1.
 func defaultReplicaFloor() int32 {
 	if v := strings.TrimSpace(os.Getenv("BUILDER_DEFAULT_REPLICAS")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil && n > 0 {
 			return int32(n)
 		}
 	}
