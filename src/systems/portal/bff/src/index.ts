@@ -1,5 +1,6 @@
 import './observability/tracing.js';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -15,6 +16,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 app.use(express.json());
+
+const spaFallbackLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Request logging + response-time recording (route label resolved at finish time).
 app.use((req, res, next) => {
@@ -63,7 +71,7 @@ app.use('/api', api);
 const publicDir = path.join(__dirname, '..', 'public');
 if (existsSync(publicDir)) {
   app.use(express.static(publicDir));
-  app.get('*', (_req, res) => {
+  app.get('*', spaFallbackLimiter, (_req, res) => {
     res.sendFile(path.join(publicDir, 'index.html'));
   });
 }
