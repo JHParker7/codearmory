@@ -90,6 +90,7 @@ export function AppLayout() {
           <NavItem to="/app/chaos" label="chaos/" service="chaos" />
           <NavItem to="/app/argo" label="argo/" service="argo" />
           <NavItem to="/app/gatekeeper" label="gatekeeper/" />
+          {permissions?.['builder:configureOrgService'] && <NavItem to="/app/builder" label="builder/" />}
           {permissions?.['gatekeeper:listAuditLog'] && <NavItem to="/app/audit" label="audit/" />}
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
           <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase' }}>account</div>

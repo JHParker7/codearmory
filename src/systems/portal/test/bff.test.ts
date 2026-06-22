@@ -67,6 +67,9 @@ import {
   deleteTeam,
   inviteToTeam,
   deleteComment,
+  listOrgServices,
+  setOrgService,
+  deleteOrgService,
 } from '../src/api/bff.ts';
 import type { WorkspaceView } from '../src/api/bff.ts';
 
@@ -1147,6 +1150,73 @@ describe('bff client', () => {
       fetchStub.resolves(mockText(404, 'not found'));
       try {
         await deleteComment(TOKEN, 'tkt1', 'nope');
+        expect.fail('should have thrown');
+      } catch (err: unknown) {
+        expect((err as { status: number }).status).to.equal(404);
+      }
+    });
+  });
+
+  // ── Builder (per-org service control plane) ──────────────────────────────────
+
+  describe('listOrgServices', () => {
+    it('GETs /api/builder/orgs/:orgId/services with Authorization', async () => {
+      const svcs = [{ service: 'workflows', enabled: true, kind: 'platform', source: 'catalog' }];
+      fetchStub.resolves(mockResponse(200, svcs));
+      const res = await listOrgServices(TOKEN, 'org-1');
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/builder/orgs/org-1/services');
+      expect(opts.method).to.equal('GET');
+      expect((opts.headers as Record<string, string>)['Authorization']).to.equal(`Bearer ${TOKEN}`);
+      expect(res).to.deep.equal(svcs);
+    });
+  });
+
+  describe('setOrgService', () => {
+    it('PUTs the config body to /api/builder/orgs/:orgId/services/:service', async () => {
+      const body = { enabled: false, kind: 'platform', config: { foo: 'bar' } };
+      const view = { service: 'forge', enabled: false, kind: 'platform', source: 'override', config: { foo: 'bar' } };
+      fetchStub.resolves(mockResponse(200, view));
+      const res = await setOrgService(TOKEN, 'org-1', 'forge', body);
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/builder/orgs/org-1/services/forge');
+      expect(opts.method).to.equal('PUT');
+      expect(JSON.parse(opts.body as string)).to.deep.equal(body);
+      expect(res).to.deep.equal(view);
+    });
+
+    it('addresses the default baseline scope via the literal "default" id', async () => {
+      fetchStub.resolves(mockResponse(200, { service: 'hooks', enabled: true, kind: 'platform', source: 'default' }));
+      await setOrgService(TOKEN, 'default', 'hooks', { enabled: true });
+      const [url] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/builder/orgs/default/services/hooks');
+    });
+
+    it('throws 400 when the server rejects a core service', async () => {
+      fetchStub.resolves(mockText(400, 'core services cannot be configured'));
+      try {
+        await setOrgService(TOKEN, 'org-1', 'gatekeeper', { enabled: false });
+        expect.fail('should have thrown');
+      } catch (err: unknown) {
+        expect((err as { status: number }).status).to.equal(400);
+      }
+    });
+  });
+
+  describe('deleteOrgService', () => {
+    it('DELETEs /api/builder/orgs/:orgId/services/:service', async () => {
+      fetchStub.resolves(mock204());
+      await deleteOrgService(TOKEN, 'org-1', 'forge');
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/builder/orgs/org-1/services/forge');
+      expect(opts.method).to.equal('DELETE');
+      expect((opts.headers as Record<string, string>)['Authorization']).to.equal(`Bearer ${TOKEN}`);
+    });
+
+    it('throws 404 when no override is configured', async () => {
+      fetchStub.resolves(mockText(404, 'no override configured for that service'));
+      try {
+        await deleteOrgService(TOKEN, 'org-1', 'forge');
         expect.fail('should have thrown');
       } catch (err: unknown) {
         expect((err as { status: number }).status).to.equal(404);

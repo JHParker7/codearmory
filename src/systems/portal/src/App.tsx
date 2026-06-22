@@ -6,6 +6,7 @@ import { Setup } from './pages/Setup';
 import { AppLayout } from './pages/app/AppLayout';
 import { Blueprints } from './pages/app/Blueprints';
 import { Gatekeeper } from './pages/app/Gatekeeper';
+import { Builder } from './pages/app/Builder';
 import { Workflows } from './pages/app/Workflows';
 import { Forge } from './pages/app/Forge';
 import { Tickets } from './pages/app/Tickets';
@@ -83,6 +84,7 @@ export function App() {
             <Route path="chaos" element={<Chaos />} />
             <Route path="argo" element={<Argo />} />
             <Route path="gatekeeper" element={<Gatekeeper />} />
+            <Route path="builder" element={<Builder />} />
             <Route path="audit" element={<Audit />} />
             <Route path="settings" element={<Settings />} />
           </Route>

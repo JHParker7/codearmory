@@ -118,10 +118,17 @@ const PERMISSION_GATES = [
 export const hydratePermissions = createAsyncThunk(
   'auth/hydratePermissions',
   async (_, { getState }) => {
-    const { token } = (getState() as { auth: AuthState }).auth;
+    const { token, user } = (getState() as { auth: AuthState }).auth;
     if (!token) return {};
+    // The builder configure grant is scoped to the caller's own org, so its
+    // resource is only knowable once the user (and org_id) is hydrated. Append it
+    // dynamically; gatekeeper prepends the username and matches the org id.
+    const gates: { service: string; action: string; resource: string }[] = [...PERMISSION_GATES];
+    if (user?.org_id) {
+      gates.push({ service: 'builder', action: 'configureOrgService', resource: `builder/orgs/${user.org_id}` });
+    }
     const results = await Promise.all(
-      PERMISSION_GATES.map(async g => {
+      gates.map(async g => {
         const key = `${g.service}:${g.action}`;
         try {
           const { authorized } = await checkPermission(token, g.service, g.action, g.resource);
