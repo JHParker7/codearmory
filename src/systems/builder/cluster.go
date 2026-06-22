@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -30,6 +32,17 @@ const (
 	labelInstance  = "app.kubernetes.io/instance"
 	labelName      = "app.kubernetes.io/name"
 	managedByValue = "codearmory-builder"
+
+	// annotationRotatedAt carries the current rotation bucket (now truncated to the
+	// rotate interval) on the pod template. It changes only on an interval boundary,
+	// so periodic reconciles within the same window leave the template byte-identical
+	// (no churn); on the boundary the new value rolls the pods — restoring them to the
+	// image to shed drift or a compromised process. See stampRotation.
+	annotationRotatedAt = "codearmory.io/rotated-at"
+
+	// minReadySeconds requires a new pod to stay Ready before a rollout proceeds to the
+	// next, so a crash-looping image can't churn the whole set unnoticed.
+	minReadySeconds = 10
 )
 
 // workloadSpec is the desired workload for one service. Image/Port are optional:
@@ -37,11 +50,13 @@ const (
 // (the Helm-rendered spec) and falls back to the image registry/tag + a known port
 // only when there is nothing to clone.
 type workloadSpec struct {
-	Service string
-	Image   string            // explicit image (custom services); "" => clone or template
-	Port    int32             // explicit port; 0 => clone or known-port catalog
-	Env     map[string]string // config overrides applied on top of the base env
-	DBUrl   string            // decrypted admin-supplied database URL ("" if none)
+	Service        string
+	Image          string            // explicit image (custom services); "" => clone or template
+	Port           int32             // explicit port; 0 => clone or known-port catalog
+	Env            map[string]string // config overrides applied on top of the base env
+	DBUrl          string            // decrypted admin-supplied database URL ("" if none)
+	Replicas       int32             // desired replicas; 0 => backend default (then 1)
+	RotateInterval time.Duration     // periodic rolling-restart cadence; 0 => backend default (then off)
 }
 
 // clusterBackend is the reconciler's view of the cluster. The k8s implementation
@@ -84,6 +99,14 @@ type k8sBackend struct {
 	registry  string // image registry for the template fallback
 	tag       string // image tag for the template fallback
 	prov      provisioningConfig
+
+	// defaultReplicas is the replica floor applied to every managed workload that does
+	// not set its own (0 => 1). rotateInterval is the default periodic rolling-restart
+	// cadence (0 => off). Both are overridable per service via reserved config knobs.
+	defaultReplicas int32
+	rotateInterval  time.Duration
+	// nowFn is the clock for rotation bucketing; overridden in tests.
+	nowFn func() time.Time
 }
 
 // newK8sBackend builds a backend from in-cluster config, falling back to a
@@ -111,7 +134,7 @@ func newK8sBackend(namespace, prefix, registry, tag string) (*k8sBackend, error)
 	if prefix == "" {
 		prefix = "codearmory"
 	}
-	return &k8sBackend{client: client, namespace: namespace, prefix: prefix, registry: registry, tag: tag}, nil
+	return &k8sBackend{client: client, namespace: namespace, prefix: prefix, registry: registry, tag: tag, nowFn: time.Now}, nil
 }
 
 func (b *k8sBackend) name(service string) string { return b.prefix + "-" + service }
@@ -157,6 +180,9 @@ func (b *k8sBackend) EnsureService(ctx context.Context, spec workloadSpec) error
 	if err := b.applyService(ctx, spec.Service, port); err != nil {
 		return fmt.Errorf("apply service %s: %w", b.name(spec.Service), err)
 	}
+	if err := b.applyPDB(ctx, spec.Service, b.replicasFor(spec)); err != nil {
+		return fmt.Errorf("apply poddisruptionbudget %s: %w", b.name(spec.Service), err)
+	}
 	return nil
 }
 
@@ -169,6 +195,9 @@ func (b *k8sBackend) RemoveService(ctx context.Context, service string) error {
 	}
 	if err := b.client.CoreV1().Services(b.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete service %s: %w", name, err)
+	}
+	if err := b.client.PolicyV1().PodDisruptionBudgets(b.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete poddisruptionbudget %s: %w", name, err)
 	}
 	if b.provisioningOn() {
 		b.deprovision(ctx, service)
@@ -207,15 +236,90 @@ func (b *k8sBackend) buildDeployment(ctx context.Context, spec workloadSpec) (*a
 
 	name := b.name(spec.Service)
 	podTemplate.Labels = mergeLabels(podTemplate.Labels, b.labels(spec.Service))
-	replicas := int32(1)
+
+	// Stamp the rotation bucket so a periodic rolling restart fires once per interval
+	// (not on every reconcile) — restoring the pods to the image to shed drift.
+	if rotate := b.rotateFor(spec); rotate > 0 {
+		b.stampRotation(&podTemplate, rotate)
+	}
+
+	replicas := b.replicasFor(spec)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace, Labels: b.labels(spec.Service)},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: b.selector(spec.Service)},
 			Template: podTemplate,
+			// maxUnavailable:0/maxSurge:1 brings a replacement Ready before retiring an
+			// old pod, so a deploy or periodic rotation never drops below the replica
+			// floor — the "always N healthy" guarantee during voluntary churn.
+			Strategy:        rollingStrategy(),
+			MinReadySeconds: minReadySeconds,
 		},
 	}, nil
+}
+
+// rollingStrategy keeps the ready count at the replica floor throughout a rollout:
+// surge one new pod, never take an old one down until its replacement is Ready.
+func rollingStrategy() appsv1.DeploymentStrategy {
+	maxUnavailable := intstr.FromInt(0)
+	maxSurge := intstr.FromInt(1)
+	return appsv1.DeploymentStrategy{
+		Type: appsv1.RollingUpdateDeploymentStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDeployment{
+			MaxUnavailable: &maxUnavailable,
+			MaxSurge:       &maxSurge,
+		},
+	}
+}
+
+// replicasFor resolves the replica count: per-service override, else the backend
+// default, else 1 (the historical behaviour).
+func (b *k8sBackend) replicasFor(spec workloadSpec) int32 {
+	if spec.Replicas > 0 {
+		return spec.Replicas
+	}
+	if b.defaultReplicas > 0 {
+		return b.defaultReplicas
+	}
+	return 1
+}
+
+// rotateFor resolves the periodic-restart cadence: per-service override, else the
+// backend default, else 0 (disabled).
+func (b *k8sBackend) rotateFor(spec workloadSpec) time.Duration {
+	if spec.RotateInterval > 0 {
+		return spec.RotateInterval
+	}
+	return b.rotateInterval
+}
+
+// stampRotation writes the current interval bucket onto the pod template. The value
+// is identical for every reconcile within a window (so the update is a no-op and the
+// pods are left alone) and flips exactly once per interval (rolling the pods back to
+// the image). Buckets are anchored to the UTC day so the boundaries are stable across
+// timezones and land on intuitive wall-clock times. See rotationBucket.
+func (b *k8sBackend) stampRotation(pt *corev1.PodTemplateSpec, interval time.Duration) {
+	now := time.Now
+	if b.nowFn != nil {
+		now = b.nowFn
+	}
+	if pt.Annotations == nil {
+		pt.Annotations = map[string]string{}
+	}
+	pt.Annotations[annotationRotatedAt] = rotationBucket(now().UTC(), interval).Format(time.RFC3339)
+}
+
+// rotationBucket returns the start of the current interval bucket anchored to the UTC
+// day. Anchoring to midnight (rather than time.Truncate, which buckets relative to the
+// Unix epoch) keeps the boundaries on intuitive wall-clock times for intervals that
+// don't evenly divide a day — e.g. a 7h cadence rolls at 00:00, 07:00, 14:00, 21:00
+// each day instead of drifting. For intervals that do divide a day (30m, 1h, …) it is
+// identical to epoch-relative truncation.
+func rotationBucket(now time.Time, interval time.Duration) time.Time {
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	elapsed := now.Sub(dayStart)
+	return dayStart.Add((elapsed / interval) * interval)
 }
 
 // findBaseDeployment returns a platform (non-builder) Deployment for the service to
@@ -415,6 +519,47 @@ func (b *k8sBackend) applyService(ctx context.Context, service string, port int3
 	existing.Labels = mergeLabels(existing.Labels, desired.Labels)
 	existing.Spec.Selector = desired.Spec.Selector
 	existing.Spec.Ports = desired.Spec.Ports
+	_, err = api.Update(ctx, existing, metav1.UpdateOptions{})
+	return err
+}
+
+// applyPDB keeps a PodDisruptionBudget in sync with the replica count so node drains
+// and other involuntary evictions can't take the workload below its floor. minAvailable
+// is replicas-1: a drain may evict one pod at a time while the rest stay up. A single
+// replica gets NO PDB (minAvailable on one pod would wedge every drain), and any stale
+// PDB from a prior higher count is removed.
+func (b *k8sBackend) applyPDB(ctx context.Context, service string, replicas int32) error {
+	name := b.name(service)
+	api := b.client.PolicyV1().PodDisruptionBudgets(b.namespace)
+
+	if replicas < 2 {
+		if err := api.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	}
+
+	minAvail := intstr.FromInt(int(replicas - 1))
+	desired := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace, Labels: b.labels(service)},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MinAvailable: &minAvail,
+			Selector:     &metav1.LabelSelector{MatchLabels: b.selector(service)},
+		},
+	}
+	existing, err := api.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = api.Create(ctx, desired, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if existing.Labels[labelManagedBy] != managedByValue {
+		return fmt.Errorf("refusing to overwrite PodDisruptionBudget %q owned by %q, not %s", name, existing.Labels[labelManagedBy], managedByValue)
+	}
+	existing.Labels = mergeLabels(existing.Labels, desired.Labels)
+	existing.Spec = desired.Spec
 	_, err = api.Update(ctx, existing, metav1.UpdateOptions{})
 	return err
 }

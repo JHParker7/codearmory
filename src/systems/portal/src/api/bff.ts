@@ -47,6 +47,34 @@ export function login(email: string, password: string) {
   return req<LoginResult>('POST', '/gatekeeper/login', undefined, { email, password });
 }
 
+// ── First-run setup ─────────────────────────────────────────────────────────
+// Public, unauthenticated. Reports whether the instance has been bootstrapped
+// (has at least one user). The portal routes to the first-run setup page when
+// initialized is false.
+
+export interface SetupStatus {
+  initialized: boolean;
+}
+
+// Time-bounded so a hung upstream can't trap the SetupGate on the loading screen
+// forever (the app's entire render is gated on this resolving). On timeout the
+// fetch aborts and rejects, which checkSetup treats as a failed attempt.
+export async function getSetupStatus(timeoutMs = 4000): Promise<SetupStatus> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(BASE + '/gatekeeper/setup/status', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+    return (await res.json()) as SetupStatus;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── Users ─────────────────────────────────────────────────────────────────────
 
 export interface User {
@@ -939,23 +967,51 @@ export function checkPermission(token: string, service: string, action: string, 
   return req<{ authorized: boolean }>('POST', '/gatekeeper/check_permissions', token, { service, action, resource });
 }
 
-// ── Builder — per-org service enablement ──────────────────────────────────────
-// The builder control plane reports which platform services are enabled for an
-// org (overlaying the catalog, the "default" baseline, and the org's overrides).
-// The sidebar uses this to hide services an org has turned off. `core` services
-// (gatekeeper, conductor, registry, builder) are always enabled.
+// ── Builder — per-org service control plane ───────────────────────────────────
+// The builder control plane reports the effective state of every platform
+// service for an org, overlaying the live catalog, the "default" baseline, and
+// the org's own overrides. The sidebar uses the list to hide services an org has
+// turned off; the builder admin page lets admins toggle, configure, and register
+// services. `core` services (gatekeeper, conductor, registry, builder) are always
+// enabled and cannot be configured. Use the literal org id "default" to address
+// the baseline every org inherits (platform-admin only).
 
 export interface OrgService {
   service: string;
   enabled: boolean;
-  kind: string;
-  source: string;
-  core?: boolean;
+  kind: string;   // "platform" | "custom"
+  source: string; // "catalog" | "default" | "override" | "custom" | "core"
+  config?: Record<string, unknown>;
+  image?: string;
+  port?: number;
   description?: string;
+  core?: boolean;
+  db_configured?: boolean;
+  db_host?: string;
+}
+
+// SetOrgServiceBody is the PUT payload. `db_url` is write-only — it is encrypted
+// on receipt and never read back (only the redacted db_host is returned).
+export interface SetOrgServiceBody {
+  enabled?: boolean;
+  kind?: string;
+  config?: Record<string, unknown>;
+  image?: string;
+  port?: number;
+  description?: string;
+  db_url?: string;
 }
 
 export function listOrgServices(token: string, orgId: string) {
   return req<OrgService[]>('GET', `/builder/orgs/${orgId}/services`, token);
+}
+
+export function setOrgService(token: string, orgId: string, service: string, body: SetOrgServiceBody) {
+  return req<OrgService>('PUT', `/builder/orgs/${orgId}/services/${encodeURIComponent(service)}`, token, body);
+}
+
+export function deleteOrgService(token: string, orgId: string, service: string) {
+  return req<void>('DELETE', `/builder/orgs/${orgId}/services/${encodeURIComponent(service)}`, token);
 }
 
 // ── Outposts ──────────────────────────────────────────────────────────────────

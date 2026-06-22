@@ -1,13 +1,24 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { T } from '../theme';
 import { Logo } from '../components/Logo';
 import { PromptField, StrengthBar } from '../components/AuthFields';
 import { useAppDispatch } from '../store/hooks';
 import { signupAndLogin } from '../store/authSlice';
+import { markInitialized } from '../store/setupSlice';
 import { passwordScore } from '../utils';
 
-export function Signup() {
+// The core platform services this instance provides. Shown on first run so the
+// operator knows what their administrator account will govern. These are always
+// part of a codearmory deployment — the bootstrap admin holds full access to all.
+const CORE_SERVICES: { name: string; blurb: string }[] = [
+  { name: 'gatekeeper/', blurb: 'identity, RBAC, orgs & teams, sessions' },
+  { name: 'blueprints/', blurb: 'OpenTofu / Terraform remote state backend' },
+  { name: 'forge/', blurb: 'sandboxed, isolated command execution' },
+  { name: 'workflows/', blurb: 'CI/CD pipeline orchestration & runs' },
+];
+
+export function Setup() {
   const navigate = useNavigate();
   const dispatch = useAppDispatch();
 
@@ -15,7 +26,6 @@ export function Signup() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPw, setShowPw] = useState(false);
-  const [terms, setTerms] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
@@ -23,7 +33,6 @@ export function Signup() {
   const formValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
     && /^[a-zA-Z0-9_-]{1,64}$/.test(username)
     && score >= 3
-    && terms
     && !submitting;
 
   const submit = async (e: React.FormEvent) => {
@@ -32,21 +41,26 @@ export function Signup() {
     setSubmitting(true);
     setError('');
 
+    // The very first account created on an empty instance is granted the bootstrap
+    // admin role by Gatekeeper (wildcard permission), so this both completes setup
+    // and logs the operator in as administrator.
     const result = await dispatch(signupAndLogin({ email, username, password }));
 
     if (signupAndLogin.fulfilled.match(result)) {
+      dispatch(markInitialized());
       navigate('/app/blueprints');
       return;
     }
 
     const payload = result.payload as { status?: number; message: string } | undefined;
     if (payload?.status === -1) {
-      // Account created but auto-login failed
-      navigate('/login', { state: { message: 'Account created. Please log in.' } });
+      // Admin account created but auto-login failed — setup is done; go log in.
+      dispatch(markInitialized());
+      navigate('/login', { state: { message: 'Admin account created. Please log in.' } });
       return;
     }
     if (payload?.status === 409) setError('ERR · email or username already taken');
-    else setError(`ERR · ${payload?.message ?? 'signup failed'}`);
+    else setError(`ERR · ${payload?.message ?? 'setup failed'}`);
     setSubmitting(false);
   };
 
@@ -56,12 +70,12 @@ export function Signup() {
 
       {/* Status bar */}
       <div style={{ position: 'relative', height: 28, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px', fontSize: 11, color: T.faint, letterSpacing: 0.3, borderBottom: `1px solid ${T.border}`, background: 'rgba(0,0,0,0.3)' }}>
-        <span><span style={{ color: T.green }}>●</span>&nbsp;&nbsp;armory-prod-us-east · TLS</span>
-        <span>codearmory v2.4.1 · region: iad-1</span>
+        <span><span style={{ color: T.amber }}>●</span>&nbsp;&nbsp;new instance · uninitialized</span>
+        <span>codearmory · first-run setup</span>
       </div>
 
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '40px 24px' }}>
-        <div style={{ width: 540, background: T.card, border: `1px solid ${T.borderHi}`, boxShadow: '0 24px 60px rgba(0,0,0,0.6)' }}>
+        <div style={{ width: 620, background: T.card, border: `1px solid ${T.borderHi}`, boxShadow: '0 24px 60px rgba(0,0,0,0.6)' }}>
           {/* Window chrome */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.cardHi }}>
             <span style={{ display: 'flex', gap: 6 }}>
@@ -69,18 +83,34 @@ export function Signup() {
               <span style={{ width: 10, height: 10, borderRadius: 5, background: '#3a3530' }} />
               <span style={{ width: 10, height: 10, borderRadius: 5, background: T.green }} />
             </span>
-            <span style={{ flex: 1, textAlign: 'center', fontSize: 11.5, color: T.dim, letterSpacing: 0.4 }}>codearmory ~ signup.sh</span>
-            <span style={{ fontSize: 11, color: T.faint }}>72×24</span>
+            <span style={{ flex: 1, textAlign: 'center', fontSize: 11.5, color: T.dim, letterSpacing: 0.4 }}>codearmory ~ setup.sh</span>
+            <span style={{ fontSize: 11, color: T.faint }}>80×30</span>
           </div>
 
           <div style={{ padding: '24px 28px 22px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
               <Logo size={18} />
-              <pre style={{ margin: 0, color: T.green, fontSize: 11, lineHeight: 1.25 }}>{`c o d e · a r m o r y · signup`}</pre>
+              <pre style={{ margin: 0, color: T.green, fontSize: 11, lineHeight: 1.25 }}>{`c o d e · a r m o r y · first-run setup`}</pre>
             </div>
-            <div style={{ fontSize: 12, color: T.dim, marginBottom: 22, lineHeight: 1.6 }}>
-              <span style={{ color: T.green }}>#</span> register a new identity — opentofu state, ci/cd, on one host.<br />
-              <span style={{ color: T.green }}>#</span> free to self-host · up to 3 collaborators on day one.
+            <div style={{ fontSize: 12, color: T.dim, marginBottom: 18, lineHeight: 1.6 }}>
+              <span style={{ color: T.green }}>#</span> no users exist yet — let's initialize this instance.<br />
+              <span style={{ color: T.green }}>#</span> the account you create becomes the platform <span style={{ color: T.textHi }}>administrator</span>.
+            </div>
+
+            {/* Core services orientation */}
+            <div style={{ border: `1px solid ${T.border}`, background: T.cardHi, padding: '12px 14px', marginBottom: 18 }}>
+              <div style={{ fontSize: 10.5, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 9 }}>core services your admin will govern</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 18px' }}>
+                {CORE_SERVICES.map((s) => (
+                  <div key={s.name} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12 }}>
+                    <span style={{ color: T.green }}>[✓]</span>
+                    <span>
+                      <span style={{ color: T.textHi }}>{s.name}</span>
+                      <span style={{ color: T.faint, display: 'block', fontSize: 10.5, marginTop: 1 }}>{s.blurb}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
 
             {error && (
@@ -88,9 +118,9 @@ export function Signup() {
             )}
 
             <form onSubmit={submit}>
-              <PromptField prompt="email --primary" value={email} onChange={setEmail} type="email" placeholder="you@company.dev" hint="we'll log you in automatically after signup." />
-              <PromptField prompt="username --handle" value={username} onChange={(v) => setUsername(v.toLowerCase().replace(/[^a-z0-9_-]/g, ''))} placeholder="janedoe" hint={`/^[a-z0-9_-]{1,64}$/ · your workspace path`} />
-              <PromptField prompt="password --new" value={password} onChange={setPassword} type={showPw ? 'text' : 'password'} placeholder="••••••••••••"
+              <PromptField prompt="admin email --primary" value={email} onChange={setEmail} type="email" placeholder="you@company.dev" hint="we'll log you in automatically once setup completes." />
+              <PromptField prompt="admin username --handle" value={username} onChange={(v) => setUsername(v.toLowerCase().replace(/[^a-z0-9_-]/g, ''))} placeholder="admin" hint={`/^[a-z0-9_-]{1,64}$/ · your workspace path`} />
+              <PromptField prompt="admin password --new" value={password} onChange={setPassword} type={showPw ? 'text' : 'password'} placeholder="••••••••••••"
                 rightSlot={
                   <button type="button" tabIndex={-1} onClick={() => setShowPw((s) => !s)}
                     style={{ background: 'transparent', border: 0, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '2px 6px', cursor: 'pointer', letterSpacing: 0.4 }}>
@@ -100,29 +130,16 @@ export function Signup() {
               />
               <StrengthBar score={score} checks={checks} />
 
-              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 18, cursor: 'pointer', fontSize: 12, color: T.dim, lineHeight: 1.5 }} onClick={() => setTerms((t) => !t)}>
-                <span style={{ color: T.green, fontFamily: T.mono, marginTop: 0 }}>{terms ? '[x]' : '[ ]'}</span>
-                <span>
-                  I accept the <a href="#" style={{ color: T.text, borderBottom: `1px solid ${T.borderHi}`, textDecoration: 'none' }}>terms</a>{' '}
-                  and <a href="#" style={{ color: T.text, borderBottom: `1px solid ${T.borderHi}`, textDecoration: 'none' }}>privacy policy</a>.
-                </span>
-              </label>
-
               <button type="submit" disabled={!formValid}
                 style={{ width: '100%', padding: '11px 14px', background: formValid ? T.green : 'transparent', color: formValid ? T.bg : T.faint, border: `1px solid ${formValid ? T.green : T.border}`, fontFamily: T.mono, fontSize: 13, fontWeight: 600, letterSpacing: 0.5, cursor: formValid ? 'pointer' : 'not-allowed', transition: 'all .15s' }}>
-                {submitting ? '[ initializing · · · ]' : formValid ? '[ ↵ ./create-account ]' : '[ complete required fields ]'}
+                {submitting ? '[ initializing instance · · · ]' : formValid ? '[ ↵ ./initialize --admin ]' : '[ complete required fields ]'}
               </button>
-
-              <div style={{ marginTop: 16, fontSize: 11, color: T.faint, textAlign: 'center', letterSpacing: 0.3 }}>
-                already enlisted?{' '}
-                <Link to="/login" style={{ color: T.dim, textDecoration: 'none', borderBottom: `1px solid ${T.border}` }}>./login</Link>
-              </div>
             </form>
           </div>
 
           <div style={{ borderTop: `1px solid ${T.border}`, padding: '8px 14px', display: 'flex', justifyContent: 'space-between', fontSize: 10.5, color: T.faint, letterSpacing: 0.3, background: T.cardHi }}>
             <span>tab · navigate</span>
-            <span>esc · cancel</span>
+            <span>first account → administrator</span>
             <span>⏎ submit</span>
           </div>
         </div>

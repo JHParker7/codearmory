@@ -15,11 +15,16 @@ const PORT = parseInt(process.env.PORT ?? '3001', 10);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
+// Behind the k8s ingress/Service, the TCP peer is the proxy, so without this every
+// client collapses to one IP and shares a single rate-limit bucket (one user's
+// traffic would 429 everyone). Trust one proxy hop so req.ip is the real client IP
+// from X-Forwarded-For. Configurable via TRUST_PROXY for multi-hop setups.
+app.set('trust proxy', Number(process.env.TRUST_PROXY ?? 1));
 app.use(express.json());
 
 const spaFallbackLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  max: 100, // limit each client IP to 100 requests per windowMs
   standardHeaders: true,
   legacyHeaders: false,
 });

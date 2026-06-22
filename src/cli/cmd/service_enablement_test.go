@@ -71,6 +71,34 @@ func TestDisabledServices_FailsOpenUnderTest(t *testing.T) {
 	}
 }
 
+// knownPlatformServices is the set of builder/registry service names a CLI module
+// may declare as its backing Service. It mirrors builder's catalog plus the core
+// control-plane services. The guard test below fails if a module's Service drifts
+// from a real name (e.g. "outpost" instead of "outpost-gateway") — the failure mode
+// the module→service mapping otherwise hides until a user notices a module that
+// won't hide. Keep this in sync with builder's service catalog.
+var knownPlatformServices = map[string]bool{
+	"gatekeeper": true, "conductor": true, "registry": true, "builder": true,
+	"blueprints": true, "forge": true, "workflows": true, "tickets": true,
+	"hooks": true, "containers": true, "gitea_integration": true,
+	"chaos": true, "argo": true, "outpost-gateway": true, "notifications": true,
+}
+
+// TestModuleServices_KnownNames asserts every registered module's Service (when set)
+// names a real platform service, catching a typo or stale name in the CLI half of the
+// module→service mapping that the portal/manifest copies wouldn't surface.
+func TestModuleServices_KnownNames(t *testing.T) {
+	for _, m := range moduleRegistry {
+		if m.Service == "" {
+			continue // account/core modules are never service-gated
+		}
+		if !knownPlatformServices[m.Service] {
+			t.Errorf("module %q declares Service %q, not a known platform service "+
+				"(fix the typo, or update knownPlatformServices to match the builder catalog)", m.Name, m.Service)
+		}
+	}
+}
+
 func screenTitles(screens []HubScreen) []string {
 	out := make([]string, len(screens))
 	for i, s := range screens {
