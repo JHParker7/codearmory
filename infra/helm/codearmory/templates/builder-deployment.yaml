@@ -90,6 +90,18 @@ spec:
               value: {{ $full }}-conductor
             - name: BUILDER_RECONCILE_INTERVAL
               value: {{ .Values.builder.reconcile.interval | quote }}
+            {{- if .Values.builder.reconcile.defaultReplicas }}
+            # Replica floor applied to every managed (non-core) workload. Combined with
+            # the surge-first rollout strategy + PDB, keeps ≥ (this − 1) pods healthy.
+            - name: BUILDER_DEFAULT_REPLICAS
+              value: {{ .Values.builder.reconcile.defaultReplicas | quote }}
+            {{- end }}
+            {{- if .Values.builder.reconcile.rotateInterval }}
+            # Periodic rolling restart of every managed workload — restores pods to the
+            # image to shed drift / a compromised process. Go duration, e.g. "30m".
+            - name: BUILDER_ROTATE_INTERVAL
+              value: {{ .Values.builder.reconcile.rotateInterval | quote }}
+            {{- end }}
             - name: BUILDER_TARGET_NAMESPACE
               value: {{ .Values.builder.reconcile.targetNamespace | default .Release.Namespace | quote }}
             - name: BUILDER_RELEASE_PREFIX

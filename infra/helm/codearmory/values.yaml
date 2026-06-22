@@ -562,6 +562,17 @@ builder:
     # Name prefix for created workloads (Deployment/Service codearmory-<svc>). Empty
     # = the chart fullname, so they slot into the existing Service routing.
     releasePrefix: ""
+    # Replica floor for every builder-managed (non-core) workload. Builder always sets
+    # a surge-first rollout strategy (maxUnavailable:0, maxSurge:1); at ≥2 it also
+    # creates a PodDisruptionBudget (minAvailable = replicas-1) so node drains can't
+    # take it below the floor. 0/empty keeps the historical single replica. A
+    # per-service override is the "replicas" key in that service's builder config.
+    defaultReplicas: 2
+    # Periodic rolling restart of every managed workload, restoring pods to the image
+    # to shed drift or a compromised process. Go duration (e.g. "30m", "1h"); honoured
+    # via a bucketed pod-template annotation, so it rolls once per interval, not every
+    # reconcile. Empty disables it. Per-service override: the "rotateInterval" config key.
+    rotateInterval: "30m"
   secret:
     databaseUrl: ""
     gatekeeperServiceKey: ""
