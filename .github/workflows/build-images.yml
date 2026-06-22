@@ -43,6 +43,8 @@ jobs:
             context: src/systems/workflows
           - name: tickets
             context: src/systems/tickets
+          - name: notifications
+            context: src/systems/notifications
           - name: hooks
             context: src/systems/hooks
           - name: egress-proxy
