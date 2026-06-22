@@ -1695,6 +1695,7 @@ func startCITUI() error {
 func init() {
 	RegisterModule(Module{
 		Name:    "workflows",
+		Service: "workflows",
 		Order:   10,
 		Command: ciCmd,
 		Screens: []HubScreen{

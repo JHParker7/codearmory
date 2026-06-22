@@ -199,6 +199,7 @@ channel you can access.
 
 	RegisterModule(Module{
 		Name:    "notifications",
+		Service: "notifications",
 		Order:   25,
 		Command: notificationsCmd,
 		Screens: []HubScreen{{

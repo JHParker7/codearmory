@@ -909,6 +909,7 @@ func init() {
 	})
 	RegisterModule(Module{
 		Name:    "forge-runtimes",
+		Service: "forge",
 		Admin:   true,
 		Order:   31, // first in the admin hub, ahead of audit (50) and gatekeeper (60)
 		Command: forgeRuntimesCmd,

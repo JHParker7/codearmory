@@ -3,9 +3,15 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
 import { Logo } from '../../components/Logo';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
-import { logout, hydrateUser, hydratePermissions } from '../../store/authSlice';
+import { logout, hydrateUser, hydratePermissions, hydrateServices } from '../../store/authSlice';
 
-function NavItem({ to, label, badge }: { to: string; label: string; badge?: string }) {
+// NavItem renders a sidebar link. When `service` is set, the item hides itself
+// if that platform service is disabled for the org (per builder). While the
+// enablement set is still loading or unresolved (disabledServices === null) the
+// item shows — the sidebar fails open rather than flashing items away.
+function NavItem({ to, label, badge, service }: { to: string; label: string; badge?: string; service?: string }) {
+  const disabledServices = useAppSelector(s => s.auth.disabledServices);
+  if (service && disabledServices?.includes(service)) return null;
   return (
     <NavLink to={to} style={({ isActive }) => ({
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -29,6 +35,7 @@ function NavItem({ to, label, badge }: { to: string; label: string; badge?: stri
 export function AppLayout() {
   const user = useAppSelector(s => s.auth.user);
   const permissions = useAppSelector(s => s.auth.permissions);
+  const disabledServices = useAppSelector(s => s.auth.disabledServices);
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
 
@@ -39,6 +46,10 @@ export function AppLayout() {
   useEffect(() => {
     if (user && !permissions) dispatch(hydratePermissions());
   }, [user, permissions]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (user?.org_id && disabledServices === null) dispatch(hydrateServices());
+  }, [user, disabledServices]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLogout = () => {
     dispatch(logout());
@@ -68,16 +79,16 @@ export function AppLayout() {
         {/* Nav */}
         <nav style={{ flex: 1, padding: '8px 0', overflowY: 'auto' }}>
           <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase' }}>modules</div>
-          <NavItem to="/app/blueprints" label="blueprints/" />
-          <NavItem to="/app/forge" label="forge/" />
-          <NavItem to="/app/workflows" label="workflows/" />
-          <NavItem to="/app/tickets" label="tickets/" />
-          <NavItem to="/app/hooks" label="hooks/" />
-          <NavItem to="/app/containers" label="containers/" />
-          <NavItem to="/app/gitea" label="git/" />
-          <NavItem to="/app/outposts" label="outposts/" />
-          <NavItem to="/app/chaos" label="chaos/" />
-          <NavItem to="/app/argo" label="argo/" />
+          <NavItem to="/app/blueprints" label="blueprints/" service="blueprints" />
+          <NavItem to="/app/forge" label="forge/" service="forge" />
+          <NavItem to="/app/workflows" label="workflows/" service="workflows" />
+          <NavItem to="/app/tickets" label="tickets/" service="tickets" />
+          <NavItem to="/app/hooks" label="hooks/" service="hooks" />
+          <NavItem to="/app/containers" label="containers/" service="containers" />
+          <NavItem to="/app/gitea" label="git/" service="gitea_integration" />
+          <NavItem to="/app/outposts" label="outposts/" service="outpost-gateway" />
+          <NavItem to="/app/chaos" label="chaos/" service="chaos" />
+          <NavItem to="/app/argo" label="argo/" service="argo" />
           <NavItem to="/app/gatekeeper" label="gatekeeper/" />
           {permissions?.['gatekeeper:listAuditLog'] && <NavItem to="/app/audit" label="audit/" />}
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />

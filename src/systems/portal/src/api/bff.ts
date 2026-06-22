@@ -939,6 +939,25 @@ export function checkPermission(token: string, service: string, action: string, 
   return req<{ authorized: boolean }>('POST', '/gatekeeper/check_permissions', token, { service, action, resource });
 }
 
+// ── Builder — per-org service enablement ──────────────────────────────────────
+// The builder control plane reports which platform services are enabled for an
+// org (overlaying the catalog, the "default" baseline, and the org's overrides).
+// The sidebar uses this to hide services an org has turned off. `core` services
+// (gatekeeper, conductor, registry, builder) are always enabled.
+
+export interface OrgService {
+  service: string;
+  enabled: boolean;
+  kind: string;
+  source: string;
+  core?: boolean;
+  description?: string;
+}
+
+export function listOrgServices(token: string, orgId: string) {
+  return req<OrgService[]>('GET', `/builder/orgs/${orgId}/services`, token);
+}
+
 // ── Outposts ──────────────────────────────────────────────────────────────────
 
 export interface Outpost {

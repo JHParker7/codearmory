@@ -433,6 +433,7 @@ func init() {
 	})
 	RegisterModule(Module{
 		Name:    "chaos",
+		Service: "chaos",
 		Order:   45,
 		Command: chaosCmd,
 		Screens: []HubScreen{{

@@ -34,9 +34,19 @@ type HubScreen struct {
 // into the separate admin hub (adminScreens) rather than the user hub
 // (hubScreens). Permission enforcement stays server-side; the split is purely
 // organisational, keeping the top-level surface focused on developer tasks.
+//
+// Service names the builder catalog service this module is a front-end for (e.g.
+// "forge", "gitea_integration"). When that service is disabled for the caller's
+// org, the live TUI hub drops the module entirely (see enabledScreensFor), so a
+// deployment with most services off shows a short, relevant menu rather than a
+// wall of dead entries. Leave it empty for account/core modules (settings, auth,
+// org-services) that must always be reachable — those are never hidden. The
+// filter is hub-only; cobra commands stay wired so scripts keep working (a
+// disabled service simply 403s).
 type Module struct {
 	Name    string
 	Slot    string
+	Service string
 	Admin   bool
 	Order   int
 	Command *cobra.Command
@@ -132,6 +142,34 @@ func screensFor(admin bool) []HubScreen {
 		if m.Admin == admin {
 			out = append(out, m.Screens...)
 		}
+	}
+	return out
+}
+
+// enabledScreensFor is screensFor restricted to services enabled for the
+// caller's org: a module whose Service is disabled (per disabledServices) is
+// dropped from the hub entirely. The live TUI entry points use this so disabled
+// services vanish from the menu; screensFor stays unfiltered for tests and any
+// non-TUI caller. Modules with no Service (account/core) are always kept, and
+// disabledServices fails open, so this never hides more than it should.
+func enabledScreensFor(admin bool) []HubScreen {
+	return filterScreens(admin, disabledServices())
+}
+
+// filterScreens is the pure core of enabledScreensFor: it collects the screens
+// of active modules whose Admin flag matches, skipping any module whose Service
+// is in disabled. Split out from the fetch so the hiding logic is testable
+// without a live builder.
+func filterScreens(admin bool, disabled map[string]bool) []HubScreen {
+	var out []HubScreen
+	for _, m := range activeModules() {
+		if m.Admin != admin {
+			continue
+		}
+		if m.Service != "" && disabled[m.Service] {
+			continue
+		}
+		out = append(out, m.Screens...)
 	}
 	return out
 }

@@ -93,6 +93,7 @@ func init() {
 	RegisterModule(Module{
 		Name:    "registry",
 		Slot:    "containers",
+		Service: "containers",
 		Order:   80,
 		Command: containersCmd,
 		Screens: []HubScreen{{

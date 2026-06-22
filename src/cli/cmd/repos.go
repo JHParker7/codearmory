@@ -300,6 +300,7 @@ func init() {
 	RegisterModule(Module{
 		Name:    "gitea",
 		Slot:    "repos",
+		Service: "gitea_integration",
 		Order:   75,
 		Command: reposCmd,
 		Screens: []HubScreen{{
