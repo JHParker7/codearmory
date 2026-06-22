@@ -122,10 +122,14 @@ func (e Execution) List(ctx context.Context, limit, offset int) ([]db, error) {
 	// rerun action) can resubmit an execution without a second fetch; stdout/stderr
 	// stay out of the list because they can be large.
 	q := connect().WithContext(ctx).
-		Select("execution_id, user_id, image, command, env, timeout_secs, status, exit_code, memory_used_mb, memory_limit_mb, created_at, started_at, ended_at, runner_class").
+		Select("execution_id, user_id, image, command, env, timeout_secs, status, exit_code, memory_used_mb, memory_limit_mb, created_at, started_at, ended_at, runner_class, project").
 		Where("user_id = ?", e.UserID).
 		Order("created_at DESC").
 		Limit(limit)
+	// Project is an optional view filter, not a security boundary.
+	if e.Project != "" {
+		q = q.Where("project = ?", e.Project)
+	}
 	if offset > 0 {
 		q = q.Offset(offset)
 	}
@@ -212,13 +216,15 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		TimeoutSecs int64  `gorm:"column:timeout_secs"`
 		RunnerClass string `gorm:"column:runner_class"`
 		Backend     string `gorm:"column:backend"`
+		OrgID       string `gorm:"column:org_id"`
+		SecretRefs  []byte `gorm:"column:secret_refs"`
 	}
 	var raw pendingRow
 
 	// FOR UPDATE SKIP LOCKED lets multiple workers run in parallel: each goroutine
 	// locks exactly one pending row and skips any already locked by a sibling.
 	result := tx.Raw(`
-		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class, backend
+		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class, backend, org_id, secret_refs
 		FROM executions WHERE status = 'pending' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
 	`).Scan(&raw)
 	if result.Error != nil {
@@ -241,6 +247,17 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 	exec.TimeoutSecs = raw.TimeoutSecs
 	exec.RunnerClass = raw.RunnerClass
 	exec.Backend = raw.Backend
+	exec.OrgID = raw.OrgID
+
+	if len(raw.SecretRefs) > 0 {
+		if err := json.Unmarshal(raw.SecretRefs, &exec.SecretRefs); err != nil {
+			tx.Rollback() //nolint:errcheck
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			slog.ErrorContext(ctx, "worker: unmarshal secret_refs", "execution_id", exec.ExecutionID, "error", err)
+			return Execution{}, false
+		}
+	}
 
 	if err := json.Unmarshal(raw.Command, &exec.Command); err != nil {
 		tx.Rollback() //nolint:errcheck

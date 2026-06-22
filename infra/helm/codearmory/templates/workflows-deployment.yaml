@@ -1,4 +1,4 @@
-{{- if .Values.workflows.enabled }}
+{{- if and .Values.workflows.enabled .Values.workflows.deploy }}
 {{- $fullname := include "codearmory.fullname" . }}
 {{- $services := .Values.workflows.env.services | default (printf "forge=http://%s-forge:%d,blueprints=http://%s-blueprints:%d" $fullname (.Values.forge.port | int) $fullname (.Values.blueprints.port | int)) }}
 apiVersion: apps/v1

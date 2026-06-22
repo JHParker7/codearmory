@@ -14,7 +14,20 @@ type GiteaAccount struct {
 
 func (GiteaAccount) TableName() string { return "gitea_accounts" }
 
-// Repo mirrors the Gitea repository API response fields we expose.
+// RepoProject tags a repository (by its globally-unique owner/repo full name)
+// with a free-text workspace project label. It is the only local persistence for
+// repos, which are otherwise proxied live from Gitea. The project is a view
+// filter, not a security boundary.
+type RepoProject struct {
+	FullName  string    `json:"full_name" gorm:"column:full_name;primaryKey"`
+	Project   string    `json:"project"   gorm:"column:project"`
+	UpdatedAt time.Time `json:"updated_at" gorm:"column:updated_at"`
+}
+
+func (RepoProject) TableName() string { return "gitea_repo_projects" }
+
+// Repo mirrors the Gitea repository API response fields we expose. Project is not
+// returned by Gitea — it is stamped locally from the RepoProject mapping table.
 type Repo struct {
 	ID            int64     `json:"id"`
 	Name          string    `json:"name"`
@@ -28,6 +41,7 @@ type Repo struct {
 	DefaultBranch string    `json:"default_branch"`
 	Stars         int       `json:"stars_count"`
 	Forks         int       `json:"forks_count"`
+	Project       string    `json:"project,omitempty" gorm:"-"`
 	CreatedAt     time.Time `json:"created"`
 	UpdatedAt     time.Time `json:"updated"`
 }

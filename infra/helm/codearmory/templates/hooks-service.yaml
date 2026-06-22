@@ -1,4 +1,4 @@
-{{- if .Values.hooks.enabled }}
+{{- if and .Values.hooks.enabled .Values.hooks.deploy }}
 apiVersion: v1
 kind: Service
 metadata:

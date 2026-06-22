@@ -239,7 +239,9 @@ func init() {
 			Use:   "list",
 			Short: "List your repositories",
 			Args:  cobra.NoArgs,
-			RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/gitea_integration/repos", nil) },
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return apiCall("GET", appendProjectParam("/gitea_integration/repos"), nil)
+			},
 		},
 		createRepoCmd,
 		&cobra.Command{
@@ -264,6 +266,26 @@ func init() {
 					return err
 				}
 				return apiCall("DELETE", "/gitea_integration/repos/"+owner+"/"+name, nil)
+			},
+		},
+		&cobra.Command{
+			Use:   "project <owner>/<name> [project]",
+			Short: "Assign a repo to a project (omit the project to clear it)",
+			Args:  cobra.RangeArgs(1, 2),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				owner, name, err := splitOwnerName(args[0])
+				if err != nil {
+					return err
+				}
+				project := ""
+				if len(args) == 2 {
+					project = args[1]
+				}
+				body, err := json.Marshal(map[string]string{"project": project})
+				if err != nil {
+					return err
+				}
+				return apiCall("PUT", "/gitea_integration/repos/"+owner+"/"+name+"/project", body)
 			},
 		},
 		branchesCmd,

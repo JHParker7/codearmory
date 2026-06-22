@@ -88,6 +88,11 @@ paths:
             type: string
             format: uuid
           description: Filter by assignee user ID
+        - name: project
+          in: query
+          schema:
+            type: string
+          description: Filter by project (workspace) label
       responses:
         '200':
           description: List of tickets (comments array is empty in list responses)
@@ -277,6 +282,9 @@ components:
           type: string
           enum: [low, medium, high, critical]
           default: medium
+        project:
+          type: string
+          description: Free-text project (workspace) label; a view filter, not a permission boundary
         created_by:
           type: string
           format: uuid
@@ -355,6 +363,9 @@ components:
           type: string
           enum: [low, medium, high, critical]
           default: medium
+        project:
+          type: string
+          description: Project (workspace) label to tag the ticket with
         assignee_id:
           type: string
           format: uuid
@@ -389,6 +400,9 @@ components:
           type: string
           enum: [low, medium, high, critical]
           description: Omitting preserves the current priority
+        project:
+          type: string
+          description: Project (workspace) label; omitting (or empty) preserves the current value
         assignee_id:
           type: string
           format: uuid

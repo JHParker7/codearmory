@@ -26,6 +26,7 @@ type createTicketRequest struct {
 	Description      string  `json:"description"`
 	Status           string  `json:"status"`
 	Priority         string  `json:"priority"`
+	Project          string  `json:"project"`
 	Timescale        string  `json:"timescale"`
 	DueDate          *string `json:"due_date"`
 	AssigneeID       *string `json:"assignee_id"`
@@ -39,6 +40,7 @@ type updateTicketRequest struct {
 	Description      *string `json:"description"`
 	Status           string  `json:"status"`
 	Priority         string  `json:"priority"`
+	Project          string  `json:"project"`
 	Timescale        string  `json:"timescale"`
 	DueDate          *string `json:"due_date"`
 	AssigneeID       *string `json:"assignee_id"`
@@ -117,6 +119,7 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		Description:      req.Description,
 		Status:           status,
 		Priority:         priority,
+		Project:          req.Project,
 		Timescale:        req.Timescale,
 		DueDate:          dueDate,
 		CreatedBy:        userID,
@@ -169,6 +172,7 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 	priorityFilter := q.Get("priority")
 	assigneeFilter := q.Get("assignee_id")
 	timescaleFilter := q.Get("timescale")
+	projectFilter := q.Get("project")
 
 	if statusFilter != "" && !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindStatus, validStatuses), statusFilter) {
 		http.Error(w, "invalid status filter", http.StatusBadRequest)
@@ -179,7 +183,7 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tickets, err := listTickets(ctx, userID, orgID, statusFilter, priorityFilter, assigneeFilter, timescaleFilter)
+	tickets, err := listTickets(ctx, userID, orgID, statusFilter, priorityFilter, assigneeFilter, timescaleFilter, projectFilter)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
@@ -322,6 +326,9 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	// string (empty = omitted); DueDate is a pointer (nil = omitted, "" = clear).
 	if req.Timescale != "" {
 		existing.Timescale = req.Timescale
+	}
+	if req.Project != "" {
+		existing.Project = req.Project
 	}
 	if req.DueDate != nil {
 		existing.DueDate = dueDate

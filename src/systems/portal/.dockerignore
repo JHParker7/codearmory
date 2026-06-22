@@ -1,0 +1,9 @@
+node_modules
+bff/node_modules
+dist
+bff/dist
+public
+.pytest_cache
+test
+**/*.test.ts
+.mocharc.cjs

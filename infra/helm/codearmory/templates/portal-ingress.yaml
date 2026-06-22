@@ -1,0 +1,36 @@
+{{- if .Values.portal.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "codearmory.fullname" . }}-portal
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: portal
+  {{- with .Values.portal.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.portal.ingress.className }}
+  ingressClassName: {{ .Values.portal.ingress.className }}
+  {{- end }}
+  {{- with .Values.portal.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.portal.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "codearmory.fullname" $ }}-portal
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

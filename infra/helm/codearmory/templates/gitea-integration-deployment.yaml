@@ -1,4 +1,4 @@
-{{- if .Values.giteaIntegration.enabled }}
+{{- if and .Values.giteaIntegration.enabled .Values.giteaIntegration.deploy }}
 {{- $fullname := include "codearmory.fullname" . }}
 apiVersion: apps/v1
 kind: Deployment
@@ -69,6 +69,11 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-gitea-integration
                   key: gatekeeper-service-key
+            - name: GITEA_INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-gitea-integration
+                  key: gitea-internal-key
             {{- include "codearmory.tls.envs" .Values.giteaIntegration.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.giteaIntegration.tls) }}
           volumeMounts:

@@ -64,10 +64,10 @@ func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string
 	}
 
 	payload, _ := json.Marshal(map[string]any{
-		"workflow_id":  workflowID,
-		"user_id":      userID,
-		"org_id":       orgID,
-		"permissions":  perms,
+		"workflow_id": workflowID,
+		"user_id":     userID,
+		"org_id":      orgID,
+		"permissions": perms,
 	})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -164,6 +164,7 @@ func bearerToken(r *http.Request) string {
 type createWorkflowRequest struct {
 	Name        string            `json:"name"`
 	Description string            `json:"description"`
+	Project     string            `json:"project,omitempty"`
 	Steps       []WorkflowStepRef `json:"steps,omitempty"`
 }
 
@@ -224,6 +225,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		WorkflowID:  uuid.New().String(),
 		Name:        req.Name,
 		Description: req.Description,
+		Project:     req.Project,
 		CreatedBy:   userID,
 		OrgID:       orgID,
 		Active:      true,
@@ -277,7 +279,7 @@ func handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	wfs, err := listWorkflows(ctx, userID, orgID)
+	wfs, err := listWorkflows(ctx, userID, orgID, r.URL.Query().Get("project"))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
@@ -416,6 +418,11 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	oldRoleID := existing.RoleID
 	existing.Name = req.Name
 	existing.Description = req.Description
+	// Guard like tickets: a partial PUT that omits project must not silently
+	// wipe the stored label (the CLI/TUI update payloads don't send project).
+	if req.Project != "" {
+		existing.Project = req.Project
+	}
 	existing.StepRefs = refs
 	existing.Steps = newSteps
 	existing.UpdatedAt = time.Now().UTC()

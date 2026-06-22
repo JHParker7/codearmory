@@ -264,6 +264,12 @@ paths:
         their org. `steps` is an empty array in list responses.
 
         Permission: `listWorkflow` on `workflows/workflows`.
+      parameters:
+        - name: project
+          in: query
+          schema:
+            type: string
+          description: Filter by project (workspace) label
       responses:
         '200':
           description: List of workflows
@@ -736,6 +742,9 @@ components:
         org_id:
           type: string
           readOnly: true
+        project:
+          type: string
+          description: Free-text project (workspace) label; a view filter, not a permission boundary
         active:
           type: boolean
           readOnly: true
@@ -765,6 +774,9 @@ components:
           example: deploy-staging
         description:
           type: string
+        project:
+          type: string
+          description: Project (workspace) label to tag the pipeline with
         steps:
           type: array
           description: |
@@ -805,6 +817,10 @@ components:
         org_id:
           type: string
           readOnly: true
+        project:
+          type: string
+          readOnly: true
+          description: Inherited from the parent pipeline at trigger time
         status:
           type: string
           enum: [pending, running, completed, failed, cancelled]

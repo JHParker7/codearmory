@@ -1,4 +1,4 @@
-{{- if .Values.chaos.enabled }}
+{{- if and .Values.chaos.enabled .Values.chaos.deploy }}
 apiVersion: v1
 kind: Service
 metadata:

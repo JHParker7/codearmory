@@ -375,6 +375,7 @@ JSON file (-f) — uses step IDs directly:
 			var payload struct {
 				Name        string            `json:"name"`
 				Description string            `json:"description"`
+				Project     string            `json:"project,omitempty"`
 				Steps       []workflowStepRef `json:"steps,omitempty"`
 			}
 
@@ -408,6 +409,9 @@ JSON file (-f) — uses step IDs directly:
 			if payload.Description == "" {
 				payload.Description = "Pipeline for " + repo + " on " + branch
 			}
+			// Tag the new pipeline with the project the user is working in, unless
+			// overridden by --project or suppressed by --all.
+			payload.Project = projectFilter()
 
 			body, err := json.Marshal(payload)
 			if err != nil {
@@ -425,7 +429,9 @@ JSON file (-f) — uses step IDs directly:
 		Use:   "pipelines",
 		Short: "List pipelines",
 		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, args []string) error { return apiCall("GET", "/workflows/pipelines", nil) },
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return apiCall("GET", appendProjectParam("/workflows/pipelines"), nil)
+		},
 	})
 
 	// ── armory pipelines get pipeline ────────────────────────────────────────────────

@@ -121,6 +121,7 @@ src/
     argo/           Argo CD sync control plane (outpost integration)
     outpost/        Customer-deployed in-cluster agent (chaos/argo modules; only K8s code)
     mcp/            stdio MCP server (not a deployed service)
+    portal/         Web app — React SPA + Express BFF (Node, not Go); proxies /api to conductor
 infra/
   local/            Docker Compose stack for local development
     registry-manifest.json   Service route/action/RBAC definitions

@@ -114,10 +114,18 @@ func splitTrim(s string) []string {
 // Forge calls gatekeeper directly so that auth is enforced even if a compromised
 // conductor strips or forges the X-User-ID header.
 func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request, action, resource string) (string, bool) {
-	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || token == "" {
+	userID, _, ok := checkGatekeeperOrg(ctx, w, r, action, resource)
+	return userID, ok
+}
+
+// checkGatekeeperOrg is checkGatekeeper that also returns the caller's org ID
+// (empty when the user has no org). The org is needed to resolve org-scoped
+// secrets, so submit snapshots it onto the execution.
+func checkGatekeeperOrg(ctx context.Context, w http.ResponseWriter, r *http.Request, action, resource string) (userID, orgID string, ok bool) {
+	token, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !found || token == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return "", false
+		return "", "", false
 	}
 
 	body, _ := json.Marshal(map[string]string{
@@ -129,7 +137,7 @@ func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request
 	if err != nil {
 		slog.ErrorContext(ctx, "forge: failed to build gatekeeper request", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return "", false
+		return "", "", false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -138,31 +146,35 @@ func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request
 	if err != nil {
 		slog.ErrorContext(ctx, "forge: gatekeeper check_permissions failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return "", false
+		return "", "", false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return "", false
+		return "", "", false
 	}
 	if resp.StatusCode >= 500 {
 		io.Copy(io.Discard, resp.Body) //nolint:errcheck
 		slog.ErrorContext(ctx, "forge: gatekeeper unavailable", "status", resp.StatusCode)
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return "", false
+		return "", "", false
 	}
 
 	var result struct {
-		Authorized bool   `json:"authorized"`
-		UserID     string `json:"user_id"`
+		Authorized bool    `json:"authorized"`
+		UserID     string  `json:"user_id"`
+		OrgID      *string `json:"org_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || !result.Authorized {
 		http.Error(w, "forbidden", http.StatusForbidden)
-		return "", false
+		return "", "", false
 	}
 
-	return result.UserID, true
+	if result.OrgID != nil {
+		orgID = *result.OrgID
+	}
+	return result.UserID, orgID, true
 }
 
 // ── Submit ────────────────────────────────────────────────────────────────────
@@ -171,7 +183,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("forge").Start(r.Context(), "handleSubmit")
 	defer span.End()
 
-	userID, ok := checkGatekeeper(ctx, w, r, "createExecution", "forge/executions")
+	userID, orgID, ok := checkGatekeeperOrg(ctx, w, r, "createExecution", "forge/executions")
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -214,6 +226,13 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if req.SecretRefs == nil {
+		req.SecretRefs = map[string]string{}
+	}
+	if err := validateSecretRefs(req.SecretRefs, req.Env, orgID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if req.RunnerClass == "" {
 		req.RunnerClass = "standard"
 	}
@@ -246,6 +265,9 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		TimeoutSecs: req.Timeout,
 		RunnerClass: req.RunnerClass,
 		Backend:     backend,
+		OrgID:       orgID,
+		Project:     req.Project,
+		SecretRefs:  req.SecretRefs,
 		Status:      StatusPending,
 	}
 	if err := exec.Add(ctx); err != nil {
@@ -320,7 +342,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("permission.granted")
 	slog.InfoContext(ctx, "list executions request", "user_id", userID)
 
-	rows, err := (Execution{UserID: userID}).List(ctx, 100, 0)
+	rows, err := (Execution{UserID: userID, Project: r.URL.Query().Get("project")}).List(ctx, 100, 0)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

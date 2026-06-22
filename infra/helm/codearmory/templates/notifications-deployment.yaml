@@ -1,4 +1,4 @@
-{{- if .Values.notifications.enabled }}
+{{- if and .Values.notifications.enabled .Values.notifications.deploy }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

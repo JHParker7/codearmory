@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 
@@ -172,9 +173,29 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	if gerr != nil {
 		runErr = fmt.Errorf("runtime backend %q: %w", exec.Backend, gerr)
 	} else {
+		// Register the cancel handler before any potentially-blocking work.
+		// Credential resolution makes network calls (gatekeeper, gitea), so a
+		// DELETE arriving during that window must be able to interrupt runCtx
+		// rather than silently no-op because the execution isn't tracked yet.
 		p.cancels.Store(exec.ExecutionID, runningExec{cancel: cancel, rt: rt})
 		defer p.cancels.Delete(exec.ExecutionID)
-		result, runErr = rt.Run(runCtx, exec)
+
+		// Resolve credential references (secret_refs) into a runtime-only env copy.
+		// Resolved values are injected into the sandbox but never persisted or
+		// logged. A resolution failure fails the execution rather than running the
+		// command without the credentials it asked for.
+		creds, cerr := resolveCredentials(runCtx, exec)
+		if cerr != nil {
+			runErr = fmt.Errorf("resolve credentials: %w", cerr)
+		} else {
+			if len(creds) > 0 {
+				merged := make(map[string]string, len(exec.Env)+len(creds))
+				maps.Copy(merged, exec.Env)
+				maps.Copy(merged, creds)
+				exec.Env = merged // local copy only; Complete() never writes env back
+			}
+			result, runErr = rt.Run(runCtx, exec)
+		}
 	}
 
 	status, result, sysErr := classifyResult(exec, result, runErr)

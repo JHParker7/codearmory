@@ -1,4 +1,4 @@
-{{- if and .Values.blueprints.enabled .Values.blueprints.redis.enabled }}
+{{- if and .Values.blueprints.enabled .Values.blueprints.deploy .Values.blueprints.redis.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

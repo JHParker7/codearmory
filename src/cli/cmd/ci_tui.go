@@ -304,7 +304,7 @@ func (m tuiModel) Init() tea.Cmd {
 // ── Fetch commands ────────────────────────────────────────────────────────────
 
 func tuiFetchPipelines() tea.Msg {
-	data, err := doRequest("GET", "/workflows/pipelines", nil)
+	data, err := doRequest("GET", appendProjectParam("/workflows/pipelines"), nil)
 	if err != nil {
 		return tuiErrMsg{err}
 	}
@@ -875,11 +875,17 @@ func ciSubmitSavePipeline(editID, name, desc, dsl string) tea.Cmd {
 		if desc != "" {
 			payload["description"] = desc
 		}
-		body, _ := json.Marshal(payload)
 		method, path := "POST", "/workflows/pipelines"
 		if editID != "" {
+			// Edit: omit project so the server preserves the stored label
+			// (it guards against an empty project wiping it).
 			method, path = "PUT", "/workflows/pipelines/"+editID
+		} else if p := projectFilter(); p != "" {
+			// Create: tag with the current project so the new pipeline isn't
+			// hidden by the project-filtered list it was created from.
+			payload["project"] = p
 		}
+		body, _ := json.Marshal(payload)
 		if _, err := doRequest(method, path, body); err != nil {
 			return tuiFormErrMsg{err}
 		}

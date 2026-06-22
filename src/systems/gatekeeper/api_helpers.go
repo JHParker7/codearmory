@@ -384,6 +384,19 @@ func evaluatePermissions(ctx context.Context, userID string, service string, act
 	resource = scopeResource(resource, user.Username, orgName)
 	detail.Resource = resource
 
+	// Org-service gate: deny outright if the caller's org has disabled this service
+	// in builder. Inert and fail-open when the gate is not configured.
+	gateOrgID := ""
+	if user.OrgID != nil {
+		gateOrgID = *user.OrgID
+	}
+	if serviceDisabledForOrg(ctx, gateOrgID, service) {
+		span.SetStatus(codes.Ok, "service disabled for org")
+		permissionCheck.Granted = false
+		savePermissionsCheck(ctx, permissionCheck)
+		return false, detail, nil
+	}
+
 	// When the session carries a scoped role (workflow run token), evaluate only
 	// the permissions in that role — the user's own role and team are bypassed.
 	if scopedRoleID, _ := ctx.Value(scopedRoleKey).(string); scopedRoleID != "" {

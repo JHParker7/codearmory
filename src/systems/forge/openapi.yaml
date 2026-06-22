@@ -100,6 +100,12 @@ paths:
         responses; use `GET /executions/{id}` to retrieve output.
 
         Permission: `listExecution` on `forge/executions`.
+      parameters:
+        - name: project
+          in: query
+          schema:
+            type: string
+          description: Filter by project (workspace) label
       responses:
         '200':
           description: List of executions
@@ -495,6 +501,27 @@ components:
             disabled.
           default: standard
           example: standard
+        project:
+          type: string
+          description: Project (workspace) label to tag the execution with
+        secret_refs:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Maps a target env var name to a credential reference, resolved at
+            dispatch and injected into the runtime env only — never persisted or
+            logged. Supported references:
+              * `secret:<name>` — a gatekeeper org secret (e.g. a git SSH deploy
+                key or token for GitHub/Bitbucket). Requires org membership.
+              * `gitea:<owner>/<repo>` — mints a short-lived Forgejo clone URL
+                (`https://user:token@host/owner/repo.git`) for the caller's
+                linked account.
+            Target keys follow the same rules as `env` and may not collide with a
+            plaintext `env` key.
+          example:
+            REPO_URL: gitea:codearmory/codearmory
+            GIT_DEPLOY_KEY: secret:github-deploy-key
 
     Execution:
       type: object
@@ -525,6 +552,9 @@ components:
           type: string
           description: Runner class used for this execution.
           example: standard
+        project:
+          type: string
+          description: Free-text project (workspace) label; a view filter, not a permission boundary
         status:
           type: string
           enum: [pending, running, completed, failed, timed_out, cancelled]

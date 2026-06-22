@@ -122,6 +122,7 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 		WorkflowID:   wf.WorkflowID,
 		TriggeredBy:  req.TriggeredBy,
 		OrgID:        wf.OrgID,
+		Project:      wf.Project,
 		Status:       StatusPending,
 		Inputs:       req.Inputs,
 		Token:        encToken,

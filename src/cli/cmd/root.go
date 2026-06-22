@@ -34,6 +34,10 @@ type cliConfig struct {
 	// name (e.g. {"repos": "github"}). Slots with no entry use the first
 	// registered provider. See Module.Slot in module.go.
 	Providers map[string]string `json:"providers,omitempty"`
+	// CurrentProject is the sticky workspace label the user is "working in". When
+	// set, list views auto-filter to it and creates are tagged with it, unless
+	// overridden per-command by --project or --all. See project.go.
+	CurrentProject string `json:"current_project,omitempty"`
 }
 
 func configPath() string {

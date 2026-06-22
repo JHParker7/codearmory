@@ -1,0 +1,185 @@
+import { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { T } from '../theme';
+import { Logo } from '../components/Logo';
+import { useAppDispatch } from '../store/hooks';
+import { signupAndLogin } from '../store/authSlice';
+import { passwordScore } from '../utils';
+
+function StrengthBar({ score, checks }: { score: number; checks: Record<string, boolean> }) {
+  const total = 16;
+  const filled = Math.round((score / 5) * total);
+  const color = score >= 4 ? T.green : score >= 3 ? T.amber : score >= 1 ? T.red : T.faint;
+  const label = ['empty', 'weak', 'fair', 'good', 'strong', 'excellent'][score];
+  return (
+    <div style={{ fontFamily: T.mono, fontSize: 11.5, marginTop: -4, marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: T.dim }}>
+        <span style={{ color: T.faint }}>strength</span>
+        <span style={{ color, letterSpacing: 1 }}>
+          [{'█'.repeat(filled)}<span style={{ color: T.border }}>{'░'.repeat(total - filled)}</span>]
+        </span>
+        <span style={{ color, marginLeft: 'auto' }}>{label}</span>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 14px', marginTop: 6, color: T.faint, fontSize: 10.5, letterSpacing: 0.2 }}>
+        {([['len', 'len ≥ 8'], ['upper', '[A-Z]'], ['lower', '[a-z]'], ['num', '[0-9]'], ['sym', '[!@#$%]']] as [string, string][]).map(([k, l]) => (
+          <span key={k} style={{ color: checks[k] ? T.green : T.faint }}>{checks[k] ? '[x]' : '[ ]'} {l}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PromptField({
+  prompt, value, onChange, type = 'text', placeholder, hint, rightSlot,
+}: {
+  prompt: string; value: string; onChange: (v: string) => void;
+  type?: string; placeholder?: string; hint?: string;
+  rightSlot?: React.ReactNode;
+}) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 5 }}>
+        <span style={{ fontSize: 12, color: focused ? T.green : T.dim, fontFamily: T.mono, letterSpacing: 0.3 }}>
+          <span style={{ color: T.green }}>$</span> {prompt}
+        </span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', background: T.cardHi, border: `1px solid ${focused ? T.green : T.border}`, boxShadow: focused ? `0 0 0 3px ${T.greenSoft}` : 'none', transition: 'border-color .15s, box-shadow .15s', padding: '8px 12px' }}>
+        <span style={{ color: T.green, fontFamily: T.mono, fontSize: 13.5, marginRight: 8, userSelect: 'none' }}>›</span>
+        <input
+          type={type} value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+          placeholder={placeholder}
+          style={{ flex: 1, background: 'transparent', border: 0, outline: 'none', color: T.text, fontFamily: T.mono, fontSize: 13.5, letterSpacing: 0.2, padding: 0 }}
+        />
+        {rightSlot}
+      </div>
+      {hint && <div style={{ fontSize: 11, color: T.faint, fontFamily: T.mono, marginTop: 5, letterSpacing: 0.2 }}>{hint}</div>}
+    </div>
+  );
+}
+
+export function Signup() {
+  const navigate = useNavigate();
+  const dispatch = useAppDispatch();
+
+  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPw, setShowPw] = useState(false);
+  const [terms, setTerms] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const { score, checks } = passwordScore(password);
+  const formValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    && /^[a-zA-Z0-9_-]{1,64}$/.test(username)
+    && score >= 3
+    && terms
+    && !submitting;
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formValid) return;
+    setSubmitting(true);
+    setError('');
+
+    const result = await dispatch(signupAndLogin({ email, username, password }));
+
+    if (signupAndLogin.fulfilled.match(result)) {
+      navigate('/app/blueprints');
+      return;
+    }
+
+    const payload = result.payload as { status?: number; message: string } | undefined;
+    if (payload?.status === -1) {
+      // Account created but auto-login failed
+      navigate('/login', { state: { message: 'Account created. Please log in.' } });
+      return;
+    }
+    if (payload?.status === 409) setError('ERR · email or username already taken');
+    else setError(`ERR · ${payload?.message ?? 'signup failed'}`);
+    setSubmitting(false);
+  };
+
+  return (
+    <div style={{ width: '100%', minHeight: '100vh', background: T.bg, fontFamily: T.mono, color: T.text, position: 'relative', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ position: 'absolute', inset: 0, backgroundImage: `linear-gradient(180deg, ${T.greenSoft} 0%, transparent 30%)`, pointerEvents: 'none' }} />
+
+      {/* Status bar */}
+      <div style={{ position: 'relative', height: 28, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px', fontSize: 11, color: T.faint, letterSpacing: 0.3, borderBottom: `1px solid ${T.border}`, background: 'rgba(0,0,0,0.3)' }}>
+        <span><span style={{ color: T.green }}>●</span>&nbsp;&nbsp;armory-prod-us-east · TLS</span>
+        <span>codearmory v2.4.1 · region: iad-1</span>
+      </div>
+
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '40px 24px' }}>
+        <div style={{ width: 540, background: T.card, border: `1px solid ${T.borderHi}`, boxShadow: '0 24px 60px rgba(0,0,0,0.6)' }}>
+          {/* Window chrome */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.cardHi }}>
+            <span style={{ display: 'flex', gap: 6 }}>
+              <span style={{ width: 10, height: 10, borderRadius: 5, background: '#3a3530' }} />
+              <span style={{ width: 10, height: 10, borderRadius: 5, background: '#3a3530' }} />
+              <span style={{ width: 10, height: 10, borderRadius: 5, background: T.green }} />
+            </span>
+            <span style={{ flex: 1, textAlign: 'center', fontSize: 11.5, color: T.dim, letterSpacing: 0.4 }}>codearmory ~ signup.sh</span>
+            <span style={{ fontSize: 11, color: T.faint }}>72×24</span>
+          </div>
+
+          <div style={{ padding: '24px 28px 22px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+              <Logo size={18} />
+              <pre style={{ margin: 0, color: T.green, fontSize: 11, lineHeight: 1.25 }}>{`c o d e · a r m o r y · signup`}</pre>
+            </div>
+            <div style={{ fontSize: 12, color: T.dim, marginBottom: 22, lineHeight: 1.6 }}>
+              <span style={{ color: T.green }}>#</span> register a new identity — opentofu state, ci/cd, on one host.<br />
+              <span style={{ color: T.green }}>#</span> free to self-host · up to 3 collaborators on day one.
+            </div>
+
+            {error && (
+              <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', marginBottom: 16, fontFamily: T.mono, fontSize: 12, color: T.red }}>{error}</div>
+            )}
+
+            <form onSubmit={submit}>
+              <PromptField prompt="email --primary" value={email} onChange={setEmail} type="email" placeholder="you@company.dev" hint="we'll log you in automatically after signup." />
+              <PromptField prompt="username --handle" value={username} onChange={(v) => setUsername(v.toLowerCase().replace(/[^a-z0-9_-]/g, ''))} placeholder="janedoe" hint={`/^[a-z0-9_-]{1,64}$/ · your workspace path`} />
+              <PromptField prompt="password --new" value={password} onChange={setPassword} type={showPw ? 'text' : 'password'} placeholder="••••••••••••"
+                rightSlot={
+                  <button type="button" tabIndex={-1} onClick={() => setShowPw((s) => !s)}
+                    style={{ background: 'transparent', border: 0, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '2px 6px', cursor: 'pointer', letterSpacing: 0.4 }}>
+                    {showPw ? '--hide' : '--show'}
+                  </button>
+                }
+              />
+              <StrengthBar score={score} checks={checks} />
+
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 18, cursor: 'pointer', fontSize: 12, color: T.dim, lineHeight: 1.5 }} onClick={() => setTerms((t) => !t)}>
+                <span style={{ color: T.green, fontFamily: T.mono, marginTop: 0 }}>{terms ? '[x]' : '[ ]'}</span>
+                <span>
+                  I accept the <a href="#" style={{ color: T.text, borderBottom: `1px solid ${T.borderHi}`, textDecoration: 'none' }}>terms</a>{' '}
+                  and <a href="#" style={{ color: T.text, borderBottom: `1px solid ${T.borderHi}`, textDecoration: 'none' }}>privacy policy</a>.
+                </span>
+              </label>
+
+              <button type="submit" disabled={!formValid}
+                style={{ width: '100%', padding: '11px 14px', background: formValid ? T.green : 'transparent', color: formValid ? T.bg : T.faint, border: `1px solid ${formValid ? T.green : T.border}`, fontFamily: T.mono, fontSize: 13, fontWeight: 600, letterSpacing: 0.5, cursor: formValid ? 'pointer' : 'not-allowed', transition: 'all .15s' }}>
+                {submitting ? '[ initializing · · · ]' : formValid ? '[ ↵ ./create-account ]' : '[ complete required fields ]'}
+              </button>
+
+              <div style={{ marginTop: 16, fontSize: 11, color: T.faint, textAlign: 'center', letterSpacing: 0.3 }}>
+                already enlisted?{' '}
+                <Link to="/login" style={{ color: T.dim, textDecoration: 'none', borderBottom: `1px solid ${T.border}` }}>./login</Link>
+              </div>
+            </form>
+          </div>
+
+          <div style={{ borderTop: `1px solid ${T.border}`, padding: '8px 14px', display: 'flex', justifyContent: 'space-between', fontSize: 10.5, color: T.faint, letterSpacing: 0.3, background: T.cardHi }}>
+            <span>tab · navigate</span>
+            <span>esc · cancel</span>
+            <span>⏎ submit</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -182,7 +182,7 @@ func rpBase(r *rpRepo) string {
 // ── Fetch / mutate ────────────────────────────────────────────────────────────
 
 func rpFetchRepos() tea.Msg {
-	data, err := doRequest("GET", "/gitea_integration/repos", nil)
+	data, err := doRequest("GET", appendProjectParam("/gitea_integration/repos"), nil)
 	if err != nil {
 		return rpErrMsg{err}
 	}

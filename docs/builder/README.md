@@ -1,0 +1,158 @@
+# Builder — org-level service control plane
+
+`builder` (`:8095`) lets org admins **enable, disable, configure, register and
+remove** services for their org in a user-friendly way. It is the declarative
+desired-state store that a reconciling controller (Phase 2) will turn into actual
+per-org workloads.
+
+## Model
+
+A **null/`default` org** is the baseline: its rows form the defaults every org
+inherits. A real org's row for the same service **overrides** the baseline. Only
+an explicit `enabled: false` blocks a service — anything unconfigured is
+**default-on**, so existing behaviour never breaks.
+
+Each `(org, service)` row carries:
+
+- `enabled` — on/off for that org;
+- `kind` — `platform` (a toggle/override of a registered service) or `custom`
+  (an org-declared service, to be reconciled in Phase 2);
+- `config` — free-form JSON the service (or the Phase 2 controller) consumes;
+- `image` / `port` — for `custom` services.
+
+The control-plane core (`gatekeeper`, `conductor`, `registry`, `builder`) is
+always enabled and cannot be toggled off.
+
+## API
+
+All routes are reached through conductor (`/builder/...`) and are authorised by
+gatekeeper against `builder/orgs/{id}`. Use the literal id `default` to manage the
+baseline (platform admins only).
+
+| Method | Path | Action |
+|---|---|---|
+| GET | `/orgs/{id}/services` | `listOrgServices` |
+| GET | `/orgs/{id}/services/{service}` | `getOrgService` |
+| PUT | `/orgs/{id}/services/{service}` | `configureOrgService` |
+| DELETE | `/orgs/{id}/services/{service}` | `deleteOrgService` |
+
+`GET /orgs/{id}/services` returns the live registry catalog overlaid with the
+default baseline and the org's overrides, so the admin UI lists every available
+service with its effective state and `source` (`catalog`/`default`/`override`/
+`custom`). `DELETE` removes an override (reverting to the baseline) or deletes a
+custom service.
+
+Org owners receive the four actions automatically on org creation via the
+`grant_on: "org"` default grant in the registry manifest. **Pre-existing orgs**
+(created before this feature) need a one-off backfill grant, since org-scoped
+default grants are applied at create time, not rebuilt on login.
+
+### Internal
+
+`GET /internal/org-services/effective?org_id=` (shared `BUILDER_INTERNAL_KEY`
+bearer) returns the set of services explicitly disabled for an org. Gatekeeper's
+disable-gate calls this, caches it briefly, and denies requests to disabled
+services. The gate is **config-gated** (inert unless gatekeeper has both
+`BUILDER_URL` and `BUILDER_INTERNAL_KEY`) and **fails open**, so a builder outage
+never locks the platform.
+
+## Configuration
+
+| Env | Purpose |
+|---|---|
+| `DATABASE_URL` | Postgres DSN (`builder` database) |
+| `GATEKEEPER_URL` / `GATEKEEPER_SERVICE_KEY` | permission checks + service registration |
+| `REGISTRY_URL` / `REGISTRY_SERVICE_KEY` | fetch the service catalog (read account) |
+| `BUILDER_INTERNAL_KEY` | shared bearer for the gatekeeper disable-gate |
+
+`builder` must appear in gatekeeper's `GATEKEEPER_SERVICES` and registry's
+`REGISTRY_SERVICE_ACCOUNTS` (read), and be registered in the registry manifest.
+
+## Reconciler (deploy on enable)
+
+**The Helm chart deploys only the core services** — gatekeeper, conductor, registry,
+builder and portal. Every other service is `enabled: true` but `deploy: false`, so the
+chart still provisions its **Secret, gatekeeper identity and registry route** (the
+"slot") but not its workload. Builder fills the slot on demand: an instance admin
+enables a non-core service and the reconciler deploys it; disabling tears it down.
+This keeps a fresh install minimal and lets each instance run only what it uses.
+
+The reconciler turns the instance admin's desired state into running workloads:
+enabling a non-core service in the **default/admin scope** makes builder deploy it
+into the instance namespace; disabling tears it down; reconfiguring rolls it with
+the new env. Single-namespace (one instance) — only a platform admin can write the
+default scope, so only they drive deploys. **On by default** in the chart
+(`builder.reconcile.enabled: true`); fails soft when the cluster is unreachable.
+
+How a workload is built:
+
+- **platform service** (e.g. forge): clone the service's existing base Deployment
+  (the Helm-rendered spec — env, secrets, probes), re-namespace it, and apply the
+  `config` JSON as env overrides;
+- **custom service**: render a minimal Deployment from the row's `image`/`port`/
+  `config`, with the standard gatekeeper/db wiring from the conventional
+  `<prefix>-<service>` Secret;
+- a matching `<prefix>-<service>` ClusterIP Service is created so the existing
+  registry routing reaches it. Builder-managed workloads are labelled
+  `app.kubernetes.io/managed-by: codearmory-builder`, so the reconciler reclaims
+  exactly what it owns.
+
+**Off by default** and **single-namespace**. Config:
+
+| Env | Default | Purpose |
+|---|---|---|
+| `BUILDER_RECONCILE` | unset (off) | enable the reconcile loop |
+| `BUILDER_RECONCILE_INTERVAL` | `30s` | reconcile cadence (also nudged on each admin write) |
+| `BUILDER_TARGET_NAMESPACE` | pod namespace | namespace workloads deploy into |
+| `BUILDER_RELEASE_PREFIX` | `codearmory` | workload name prefix (`<prefix>-<service>`) |
+| `BUILDER_IMAGE_REGISTRY` / `BUILDER_IMAGE_TAG` | — | image source for the template fallback |
+
+The reconciler needs the `serviceAccount.create` Role (Deployments/Services in the
+namespace): set `builder.reconcile.enabled=true` and `builder.serviceAccount.create=true`.
+It connects via in-cluster config, or `KUBECONFIG` out-of-cluster. Verified live against
+a Talos cluster (`TestLiveReconcile`, opt-in via `BUILDER_LIVE_TEST=1`).
+
+## Dynamic provisioning (no Helm change)
+
+Builder can bring a non-core service online on a running instance with **no Helm
+change** — it provisions the two things Helm would otherwise supply, then deploys:
+
+1. **Gatekeeper identity** — builder generates a key and registers it at runtime via
+   gatekeeper's `POST /internal/service-accounts` (auth: `BUILDER_INTERNAL_KEY`).
+   Gatekeeper's permission check falls back to the live `ServiceAccount` table, so the
+   service authenticates without being in `GATEKEEPER_SERVICES`. Idempotent — a
+   reconcile reuses the existing key (no pod churn).
+2. **Secret** — builder synthesizes `<prefix>-<service>` with the generated
+   gatekeeper key, the shared `conductor-forward-key` (read from the conductor
+   Secret), and the admin-supplied **DB URL**. It merges into a chart-provisioned
+   Secret if one exists, rather than clobbering it.
+
+Builder **never creates the database** — the admin supplies a per-service DB URL for
+a role already scoped to an existing database (builder needs no superuser/`CREATEDB`).
+
+### Per-service DB URL (write-only, encrypted)
+
+The admin sets a service's DB URL through the masked field in the org-services TUI
+(or `PUT .../services/{service}` with `db_url`). It is:
+
+- **encrypted at rest** — AES-256-GCM under builder's own `BUILDER_SECRETS_KEY`
+  (separate from gatekeeper's key), **bound to the service name as AAD** so a stored
+  URL can't be swapped between services;
+- **write-only** — never returned; `GET` shows only `db_configured` + a redacted
+  `db_host`; never logged;
+- validated as a `postgres://` URL on entry.
+
+> Hardening planned: a **Vault Transit** backend (key never leaves Vault, built-in
+> rotation + audit) behind the same encrypt/decrypt calls, adopted by gatekeeper and
+> builder via one toggle. The local AES scheme above is the baseline.
+
+On by default with the reconciler; `BUILDER_PROVISION=false` disables it (e.g. when
+the chart pre-provisions every service). Needs `BUILDER_SECRETS_KEY` (auto-generated
+by the chart) and the secrets-write RBAC.
+
+### Per-org (future)
+
+Per-org namespaces + per-org routing are intentionally **not** built yet: that needs
+an `org_id` JWT claim (gatekeeper) and conductor per-org backend selection. The
+desired-state model (`OrgService`, default-baseline inheritance) is forward-compatible
+with it.

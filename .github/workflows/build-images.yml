@@ -59,6 +59,8 @@ jobs:
             context: src/systems/argo
           - name: outpost
             context: src/systems/outpost
+          - name: portal
+            context: src/systems/portal
           - name: gatekeeper-tests
             context: tests/gatekeeper
           - name: blueprints-tests
@@ -83,6 +85,10 @@ jobs:
             context: tests/chaos
           - name: argo-tests
             context: tests/argo
+          - name: portal-tests
+            context: tests/portal
+          - name: portal-frontend-tests
+            context: tests/portal-frontend
     steps:
       - name: Checkout
         uses: actions/checkout@v5

@@ -69,7 +69,7 @@ func (m firstUseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "y", "Y", "enter":
 			return m, launchSettings
-		case "n", "N", "esc", "q":
+		case "n", "N", "esc":
 			return m, goHome
 		case "ctrl+c":
 			return m, tea.Quit
@@ -86,7 +86,7 @@ func (m firstUseModel) View() string {
 		"Would you like to configure codearmory now?",
 		"It covers the conductor URL, theme, and account sign-in.",
 	}, "\n")
-	hint := tuiFormHint.Render("[y/enter] yes   [n/esc/q] skip to menu   [ctrl+c] quit")
+	hint := tuiFormHint.Render("[y/enter] yes   [n/esc] skip to menu   [ctrl+c] quit")
 	box := tuiFormBox.Render(heading + "\n\n" + body + "\n\n" + hint)
 	if m.width > 0 && m.height > 0 {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)

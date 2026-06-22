@@ -1,4 +1,4 @@
-{{- if .Values.egressProxy.enabled }}
+{{- if and .Values.egressProxy.enabled .Values.egressProxy.deploy }}
 {{- $fullname := include "codearmory.fullname" . }}
 apiVersion: apps/v1
 kind: Deployment

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -270,16 +271,30 @@ func (c *giteaClient) listUserTokens(ctx context.Context, username string) ([]gi
 	return tokens, nil
 }
 
-// createRegistryToken creates a Gitea API token scoped to package read/write
-// for the given user via admin Sudo. Returns the raw token value (only available
-// at creation time — Gitea does not expose it again after this call).
-func (c *giteaClient) createRegistryToken(ctx context.Context, username, name string) (string, error) {
+// Token-name prefixes used for the per-purpose tokens this service mints. Each
+// prefix is both how a token is named at creation and how it is matched for
+// prefix-based cleanup, so the two must stay in sync — keep them here.
+const (
+	registryTokenPrefix = "codearmory-reg-"
+	cloneTokenPrefix    = "codearmory-clone-"
+)
+
+// cloneTokenRetain bounds how many of the newest clone tokens pruneCloneTokens
+// keeps. It must comfortably exceed the number of a single user's concurrently
+// in-flight forge clones so a prune never revokes a token a running job still
+// needs (forge runs ~10 workers globally).
+const cloneTokenRetain = 16
+
+// createScopedToken creates a Gitea API token with the given scopes for the user
+// via admin Sudo. Returns the raw token value (only available at creation time —
+// Gitea does not expose it again after this call).
+func (c *giteaClient) createScopedToken(ctx context.Context, username, name string, scopes []string) (string, error) {
 	var result struct {
 		SHA1 string `json:"sha1"`
 	}
 	if err := c.post(ctx, "/users/"+url.PathEscape(username)+"/tokens", username, map[string]any{
 		"name":   name,
-		"scopes": []string{"read:package", "write:package"},
+		"scopes": scopes,
 	}, &result); err != nil {
 		return "", err
 	}
@@ -289,20 +304,65 @@ func (c *giteaClient) createRegistryToken(ctx context.Context, username, name st
 	return result.SHA1, nil
 }
 
-// cleanRegistryTokens deletes all tokens matching the "codearmory-reg-" prefix
-// for the given user. Deletion failures are logged but do not abort the loop.
-func (c *giteaClient) cleanRegistryTokens(ctx context.Context, username string) error {
+// createRegistryToken creates a Gitea API token scoped to package read/write.
+func (c *giteaClient) createRegistryToken(ctx context.Context, username, name string) (string, error) {
+	return c.createScopedToken(ctx, username, name, []string{"read:package", "write:package"})
+}
+
+// createCloneToken creates a Gitea API token scoped to repository read for the
+// given user. It is minted per forge execution so a sandboxed job can clone a
+// private repo over HTTPS. The caller prunes older clone tokens afterward (see
+// pruneCloneTokens) so they do not accumulate, since Gitea personal access
+// tokens cannot be given an expiry.
+func (c *giteaClient) createCloneToken(ctx context.Context, username, name string) (string, error) {
+	return c.createScopedToken(ctx, username, name, []string{"read:repository"})
+}
+
+// cleanTokensByPrefix deletes all of the user's tokens whose name starts with
+// prefix. Deletion failures are logged but do not abort the loop.
+func (c *giteaClient) cleanTokensByPrefix(ctx context.Context, username, prefix string) error {
 	tokens, err := c.listUserTokens(ctx, username)
 	if err != nil {
 		return fmt.Errorf("list tokens: %w", err)
 	}
 	for _, t := range tokens {
-		if !strings.HasPrefix(t.Name, "codearmory-reg-") {
+		if !strings.HasPrefix(t.Name, prefix) {
 			continue
 		}
 		path := fmt.Sprintf("/users/%s/tokens/%d", url.PathEscape(username), t.ID)
 		if err := c.delete(ctx, path, username); err != nil {
-			slog.WarnContext(ctx, "clean registry tokens: delete failed", "username", username, "token_id", t.ID, "error", err)
+			slog.WarnContext(ctx, "clean tokens: delete failed", "username", username, "prefix", prefix, "token_id", t.ID, "error", err)
+		}
+	}
+	return nil
+}
+
+// cleanRegistryTokens deletes all of the user's "codearmory-reg-" tokens.
+func (c *giteaClient) cleanRegistryTokens(ctx context.Context, username string) error {
+	return c.cleanTokensByPrefix(ctx, username, registryTokenPrefix)
+}
+
+// pruneCloneTokens deletes the user's "codearmory-clone-" tokens beyond the
+// newest keep (ordered by token ID, which Gitea assigns monotonically). Callers
+// mint the new token FIRST and prune afterward — rather than deleting all then
+// creating — so a concurrent execution's just-minted token (a high ID) survives
+// and parallel forge runs for the same user don't revoke each other's token.
+func (c *giteaClient) pruneCloneTokens(ctx context.Context, username string, keep int) error {
+	tokens, err := c.listUserTokens(ctx, username)
+	if err != nil {
+		return fmt.Errorf("list tokens: %w", err)
+	}
+	clone := make([]giteaUserToken, 0, len(tokens))
+	for _, t := range tokens {
+		if strings.HasPrefix(t.Name, cloneTokenPrefix) {
+			clone = append(clone, t)
+		}
+	}
+	sort.Slice(clone, func(i, j int) bool { return clone[i].ID > clone[j].ID })
+	for i := keep; i < len(clone); i++ {
+		path := fmt.Sprintf("/users/%s/tokens/%d", url.PathEscape(username), clone[i].ID)
+		if err := c.delete(ctx, path, username); err != nil {
+			slog.WarnContext(ctx, "prune clone tokens: delete failed", "username", username, "token_id", clone[i].ID, "error", err)
 		}
 	}
 	return nil

@@ -15,6 +15,7 @@ src/systems/outpost-gateway/outpost-gateway
 src/systems/chaos/chaos
 src/systems/argo/argo
 src/systems/outpost/outpost
+src/systems/builder/builder
 src/cli/armory
 
 # SQLite databases

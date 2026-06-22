@@ -111,7 +111,7 @@ func (m *forgeModel) applyTableLayout() {
 // ── Fetch commands ────────────────────────────────────────────────────────────
 
 func forgeFetchExecs() tea.Msg {
-	data, err := doRequest("GET", "/forge/executions", nil)
+	data, err := doRequest("GET", appendProjectParam("/forge/executions"), nil)
 	if err != nil {
 		return forgeErrMsg{err}
 	}
@@ -478,6 +478,11 @@ func forgeSubmitExec(image string, command []string, env map[string]string, time
 		}
 		if runner != "" {
 			payload["runner_class"] = runner
+		}
+		// Tag with the current project so the new run isn't hidden by the
+		// project-filtered list the user just created it from.
+		if p := projectFilter(); p != "" {
+			payload["project"] = p
 		}
 		body, _ := json.Marshal(payload)
 		if _, err := doRequest("POST", "/forge/executions", body); err != nil {

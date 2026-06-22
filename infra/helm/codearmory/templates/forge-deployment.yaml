@@ -1,4 +1,4 @@
-{{- if .Values.forge.enabled }}
+{{- if and .Values.forge.enabled .Values.forge.deploy }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -85,6 +85,18 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-forge
                   key: gatekeeper-service-key
+            {{- if .Values.giteaIntegration.enabled }}
+            # Resolve "gitea:<owner>/<repo>" job secret_refs into Forgejo clone URLs
+            # via gitea-integration. The shared key is sourced from that service's
+            # secret so the two always match.
+            - name: GITEA_INTERNAL_URL
+              value: "http://{{ include "codearmory.fullname" . }}-gitea-integration:{{ .Values.giteaIntegration.port }}"
+            - name: GITEA_INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codearmory.fullname" . }}-gitea-integration
+                  key: gitea-internal-key
+            {{- end }}
             {{- if .Values.forge.proxmox.enabled }}
             # Proxmox VE API token consumed by a runtime backend of type "proxmox"
             # via secret_refs {token: "PROXMOX_TOKEN"}. Optional so a missing key
