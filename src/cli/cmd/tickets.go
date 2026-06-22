@@ -286,6 +286,7 @@ func init() {
 	)
 	RegisterModule(Module{
 		Name:    "tickets",
+		Service: "tickets",
 		Order:   20,
 		Command: ticketsCmd,
 		Screens: []HubScreen{{

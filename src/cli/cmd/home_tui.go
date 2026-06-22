@@ -53,13 +53,15 @@ type appModel struct {
 	subtitle string      // home header subtitle ("platform" / "admin")
 }
 
-// newAppModel builds the user hub from the non-admin module screens.
-func newAppModel() appModel { return newHubModel(hubScreens(), "platform", true) }
+// newAppModel builds the user hub from the non-admin module screens, minus any
+// whose backing service is disabled for the caller's org (enabledScreensFor).
+func newAppModel() appModel { return newHubModel(enabledScreensFor(false), "platform", true) }
 
-// newAdminAppModel builds the admin hub from the admin module screens. It skips
-// the first-use welcome (an admin opening this is already set up) and labels the
-// header so it's unmistakable which surface you're on.
-func newAdminAppModel() appModel { return newHubModel(adminScreens(), "admin", false) }
+// newAdminAppModel builds the admin hub from the admin module screens (likewise
+// minus disabled services). It skips the first-use welcome (an admin opening
+// this is already set up) and labels the header so it's unmistakable which
+// surface you're on.
+func newAdminAppModel() appModel { return newHubModel(enabledScreensFor(true), "admin", false) }
 
 // newHubModel assembles a hub over the given screens. allowFirstUse gates the
 // fresh-install welcome prompt, which only makes sense on the user hub.

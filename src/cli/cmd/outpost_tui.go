@@ -348,6 +348,7 @@ func init() {
 	})
 	RegisterModule(Module{
 		Name:    "outpost",
+		Service: "outpost-gateway",
 		Admin:   true,
 		Order:   32,
 		Command: outpostCmd,

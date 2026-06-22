@@ -679,6 +679,7 @@ func init() {
 	})
 	RegisterModule(Module{
 		Name:    "forge",
+		Service: "forge",
 		Order:   30,
 		Command: forgeCmd,
 		Screens: []HubScreen{{

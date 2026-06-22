@@ -271,6 +271,7 @@ func init() {
 	})
 	RegisterModule(Module{
 		Name:    "argo",
+		Service: "argo",
 		Order:   46,
 		Command: argoCmd,
 		Screens: []HubScreen{{

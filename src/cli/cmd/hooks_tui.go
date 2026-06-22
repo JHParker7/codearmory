@@ -737,6 +737,7 @@ func init() {
 	})
 	RegisterModule(Module{
 		Name:    "hooks",
+		Service: "hooks",
 		Order:   40,
 		Command: hooksCmd,
 		Screens: []HubScreen{{

@@ -74,7 +74,7 @@ jobs:
         with:
           go-version: "1.25"
       - name: Run cli unit tests
-        run: cd src/cli; go test .
+        run: cd src/cli; go test ./...
 
   forge-unit-test:
     runs-on: ubuntu-latest
@@ -136,6 +136,114 @@ jobs:
       - name: Run tickets unit tests
         run: cd src/systems/tickets; go test .
 
+  notifications-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run notifications unit tests
+        run: cd src/systems/notifications; go test .
+
+  containers-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run containers unit tests
+        run: cd src/systems/containers; go test .
+
+  gitea_integration-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run gitea_integration unit tests
+        run: cd src/systems/gitea_integration; go test .
+
+  mcp-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run mcp unit tests
+        run: cd src/systems/mcp; go test .
+
+  egress-proxy-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run egress-proxy unit tests
+        run: cd src/systems/egress-proxy; go test .
+
+  outpost-gateway-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run outpost-gateway unit tests
+        run: cd src/systems/outpost-gateway; go test .
+
+  outpost-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run outpost unit tests
+        run: cd src/systems/outpost; go test .
+
+  chaos-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run chaos unit tests
+        run: cd src/systems/chaos; go test .
+
+  argo-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run argo unit tests
+        run: cd src/systems/argo; go test .
+
   release:
     needs:
       - gatekeeper-unit-test
@@ -148,6 +256,15 @@ jobs:
       - workflows-unit-test
       - hooks-unit-test
       - tickets-unit-test
+      - notifications-unit-test
+      - containers-unit-test
+      - gitea_integration-unit-test
+      - mcp-unit-test
+      - egress-proxy-unit-test
+      - outpost-gateway-unit-test
+      - outpost-unit-test
+      - chaos-unit-test
+      - argo-unit-test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -213,6 +330,8 @@ jobs:
             context: src/systems/workflows
           - name: tickets
             context: src/systems/tickets
+          - name: notifications
+            context: src/systems/notifications
           - name: hooks
             context: src/systems/hooks
           - name: egress-proxy
@@ -231,6 +350,8 @@ jobs:
             context: src/systems/argo
           - name: outpost
             context: src/systems/outpost
+          - name: portal
+            context: src/systems/portal
           - name: gatekeeper-tests
             context: tests/gatekeeper
           - name: blueprints-tests

@@ -1,5 +1,5 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { getUser, updateUser, login as apiLogin, signup as apiSignup, checkPermission } from '../api/bff';
+import { getUser, updateUser, login as apiLogin, signup as apiSignup, checkPermission, listOrgServices } from '../api/bff';
 import type { User, SignupPayload } from '../api/bff';
 import { decodeUserId } from '../utils';
 
@@ -12,6 +12,10 @@ export interface AuthState {
   status: 'idle' | 'loading' | 'succeeded' | 'failed';
   error: string | null;
   permissions: Record<string, boolean> | null;
+  // Names of platform services this org has disabled (from the builder control
+  // plane). null = not yet resolved (or unresolvable) → show everything. The
+  // sidebar hides any module whose service appears here. Fails open by design.
+  disabledServices: string[] | null;
 }
 
 function readStoredToken() {
@@ -32,6 +36,7 @@ const initialState: AuthState = {
   user: null,
   error: null,
   permissions: null,
+  disabledServices: null,
 };
 
 // ── Thunks ────────────────────────────────────────────────────────────────────
@@ -130,6 +135,23 @@ export const hydratePermissions = createAsyncThunk(
   },
 );
 
+// Resolves which platform services the caller's org has disabled, so the sidebar
+// can hide them. Fails open: no org, or any error, yields [] (show everything).
+export const hydrateServices = createAsyncThunk(
+  'auth/hydrateServices',
+  async (_, { getState }) => {
+    const { token, user } = (getState() as { auth: AuthState }).auth;
+    const orgId = user?.org_id;
+    if (!token || !orgId) return [] as string[];
+    try {
+      const services = await listOrgServices(token, orgId);
+      return services.filter(s => !s.core && !s.enabled).map(s => s.service);
+    } catch {
+      return [] as string[];
+    }
+  },
+);
+
 export const saveUser = createAsyncThunk(
   'auth/saveUser',
   async (
@@ -163,6 +185,7 @@ const authSlice = createSlice({
       state.status = 'idle';
       state.error = null;
       state.permissions = null;
+      state.disabledServices = null;
     },
   },
   extraReducers(builder) {
@@ -215,6 +238,9 @@ const authSlice = createSlice({
       })
       .addCase(hydratePermissions.fulfilled, (state, action) => {
         state.permissions = action.payload;
+      })
+      .addCase(hydrateServices.fulfilled, (state, action) => {
+        state.disabledServices = action.payload;
       });
   },
 });
