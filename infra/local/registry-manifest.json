@@ -12,6 +12,7 @@
       { "method": "POST",   "path": "/oauth/authorize",                      "action": "oidcAuthorize",     "resource": "gatekeeper/oidc",             "public": true  },
       { "method": "POST",   "path": "/oauth/token",                          "action": "oidcToken",         "resource": "gatekeeper/oidc",             "public": true  },
       { "method": "GET",    "path": "/oauth/userinfo",                       "action": "oidcUserinfo",      "resource": "gatekeeper/oidc",             "public": true  },
+      { "method": "GET",    "path": "/setup/status",                         "action": "setupStatus",       "resource": "gatekeeper/setup",            "public": true  },
       { "method": "POST",   "path": "/signup",                               "action": "signup",            "resource": "gatekeeper/users",            "public": true  },
       { "method": "POST",   "path": "/login",                                "action": "login",             "resource": "gatekeeper/users",            "public": true  },
       { "method": "GET",    "path": "/users",                                "action": "listUser",          "resource": "gatekeeper/users"             },

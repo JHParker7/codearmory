@@ -47,6 +47,19 @@ export function login(email: string, password: string) {
   return req<LoginResult>('POST', '/gatekeeper/login', undefined, { email, password });
 }
 
+// ── First-run setup ─────────────────────────────────────────────────────────
+// Public, unauthenticated. Reports whether the instance has been bootstrapped
+// (has at least one user). The portal routes to the first-run setup page when
+// initialized is false.
+
+export interface SetupStatus {
+  initialized: boolean;
+}
+
+export function getSetupStatus() {
+  return req<SetupStatus>('GET', '/gatekeeper/setup/status');
+}
+
 // ── Users ─────────────────────────────────────────────────────────────────────
 
 export interface User {

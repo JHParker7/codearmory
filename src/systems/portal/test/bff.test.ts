@@ -3,6 +3,7 @@ import { expect } from 'chai';
 import {
   signup,
   login,
+  getSetupStatus,
   getUser,
   updateUser,
   getWorkspaceState,
@@ -179,6 +180,28 @@ describe('bff client', () => {
       } catch (err: unknown) {
         expect((err as { status: number }).status).to.equal(401);
       }
+    });
+  });
+
+  // ── getSetupStatus ────────────────────────────────────────────────────────
+
+  describe('getSetupStatus', () => {
+    it('GETs /api/gatekeeper/setup/status without a token', async () => {
+      fetchStub.resolves(mockResponse(200, { initialized: false }));
+
+      const res = await getSetupStatus();
+
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/gatekeeper/setup/status');
+      expect(opts.method).to.equal('GET');
+      expect((opts.headers as Record<string, string>)['Authorization']).to.be.undefined;
+      expect(res.initialized).to.be.false;
+    });
+
+    it('returns initialized=true once the instance has users', async () => {
+      fetchStub.resolves(mockResponse(200, { initialized: true }));
+      const res = await getSetupStatus();
+      expect(res.initialized).to.be.true;
     });
   });
 
