@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -48,11 +49,18 @@ func fetchDisabledServices() map[string]bool {
 	if tok == "" {
 		return out // not logged in — hide nothing
 	}
-	// osvScopePath resolves the caller's org id (a profile fetch); with no org it
-	// targets "default", which a non-admin can't read — that 403 fails open below.
-	id := osvScopePath("org")
 
-	req, err := http.NewRequest("GET", conductorURL()+"/builder/orgs/"+id+"/services", nil)
+	// One 4s budget for the whole probe (org-id resolution + the services call), so a
+	// slow/unreachable conductor never stalls synchronous hub startup. Both requests
+	// share this deadline and the short-timeout client — never the 30s default client.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	// Resolve the caller's org id within the budget; "" => "default", which a
+	// non-admin can't read — that 403 fails open below.
+	id := fastOrgID(ctx, tok)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", conductorURL()+"/builder/orgs/"+id+"/services", nil)
 	if err != nil {
 		return out
 	}
@@ -84,4 +92,42 @@ func fetchDisabledServices() map[string]bool {
 		}
 	}
 	return out
+}
+
+// fastOrgID resolves the caller's org id within ctx's deadline, returning "default"
+// (the baseline scope, which fails open for a non-admin) if it can't be read in time.
+// It deliberately uses the short-timeout enablementClient rather than the shared 30s
+// doRequest path, so the hub's fail-fast startup budget actually holds.
+func fastOrgID(ctx context.Context, tok string) string {
+	sub, err := subjectFromToken(tok)
+	if err != nil {
+		return "default"
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", conductorURL()+"/gatekeeper/users/"+sub, nil)
+	if err != nil {
+		return "default"
+	}
+	req.Header.Set("User-Agent", "armory-cli")
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	resp, err := enablementClient.Do(req)
+	if err != nil {
+		return "default"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "default"
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "default"
+	}
+	var profile map[string]any
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return "default"
+	}
+	if id, ok := profile["org_id"].(string); ok && id != "" {
+		return id
+	}
+	return "default"
 }

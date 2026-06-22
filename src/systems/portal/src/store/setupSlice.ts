@@ -9,17 +9,30 @@ export interface SetupState {
 
 const initialState: SetupState = { initialized: null };
 
-// Resolves whether the instance has any users yet. Fails OPEN: any error (the
-// status route not yet known to conductor, a network blip, an unexpected status)
-// resolves to initialized=true, so a misconfiguration never traps users on the
-// setup page — the normal login flow stays reachable.
+// Resolves whether the instance has any users yet. Retries a few times (each attempt
+// time-bounded) so a transient failure doesn't decide routing prematurely — most
+// importantly the brief window on a fresh deploy before conductor has polled the
+// /setup/status route into its table, during which a fail-open-to-true would route the
+// first operator to /login (where no account exists) instead of /setup.
+//
+// After the retries are exhausted it fails OPEN: any persistent error resolves to
+// initialized=true, so a misconfiguration never traps users on the setup page — the
+// normal login flow stays reachable, and a reload re-checks once upstream recovers.
+const SETUP_CHECK_ATTEMPTS = 4;
+const SETUP_RETRY_DELAY_MS = 1500;
+
 export const checkSetup = createAsyncThunk('setup/check', async () => {
-  try {
-    const { initialized } = await getSetupStatus();
-    return initialized;
-  } catch {
-    return true;
+  for (let i = 0; i < SETUP_CHECK_ATTEMPTS; i++) {
+    try {
+      const { initialized } = await getSetupStatus();
+      return initialized;
+    } catch {
+      if (i < SETUP_CHECK_ATTEMPTS - 1) {
+        await new Promise((r) => setTimeout(r, SETUP_RETRY_DELAY_MS));
+      }
+    }
   }
+  return true;
 });
 
 const setupSlice = createSlice({

@@ -46,3 +46,21 @@ func TestHandleSetupStatus_TrueAfterFirstSignup(t *testing.T) {
 		t.Fatal("expected initialized=true once a user exists")
 	}
 }
+
+func TestHandleSetupStatus_TrueWhenOnlyInactiveUsers(t *testing.T) {
+	useIsolatedDB(t)
+
+	w := doSignup(t, signupRequest{Email: "admin@test.com", Username: "admin-user", Password: "password123"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("signup: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	// Deactivate every account. The instance is still bootstrapped, so setup status
+	// must stay true — otherwise it would re-route to first-run setup and the next
+	// signup would be granted bootstrap admin.
+	if err := connect().Model(&User{}).Where("1 = 1").Update("active", false).Error; err != nil {
+		t.Fatalf("deactivate users: %v", err)
+	}
+	if resp := getSetupStatus(t); !resp.Initialized {
+		t.Fatal("expected initialized=true with only inactive users (instance already bootstrapped)")
+	}
+}

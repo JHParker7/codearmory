@@ -45,8 +45,11 @@ func createUserWithBootstrapAdmin(ctx context.Context, user *User, personalRole 
 					return err
 				}
 			}
-			var count int64
-			if err := tx.Model(&User{}).Where("active = ?", true).Count(&count).Error; err != nil {
+			// Count every account (not just active ones): once any user has
+			// existed the instance is bootstrapped, so deactivating users can never
+			// reopen the first-user admin grant. See instanceUserCount.
+			count, err := instanceUserCount(tx)
+			if err != nil {
 				return err
 			}
 			grantedAdmin = count == 0

@@ -9,7 +9,7 @@ import (
 )
 
 // setupStatusResponse reports whether the instance has completed first-run setup.
-// Initialized is true once at least one active user exists.
+// Initialized is true once any user account exists (active or not).
 type setupStatusResponse struct {
 	Initialized bool `json:"initialized"`
 }
@@ -27,8 +27,11 @@ func handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleSetupStatus")
 	defer span.End()
 
-	var count int64
-	if err := connectRead().WithContext(ctx).Model(&User{}).Where("active = ?", true).Count(&count).Error; err != nil {
+	// Use the primary (connect, not connectRead) so a freshly-created first user is
+	// seen immediately: a replica still lagging at 0 users would wrongly report
+	// initialized=false and re-route a just-bootstrapped instance back to setup.
+	count, err := instanceUserCount(connect().WithContext(ctx))
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		http.Error(w, "failed to read setup status", http.StatusInternalServerError)

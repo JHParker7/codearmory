@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector, useAppDispatch } from '../../store/hooks';
-import { hydrateServices } from '../../store/authSlice';
+import { hydrateServices, setDisabledServices } from '../../store/authSlice';
 import { listOrgServices, setOrgService, deleteOrgService } from '../../api/bff';
 import type { OrgService, SetOrgServiceBody } from '../../api/bff';
 
@@ -25,11 +25,10 @@ const inputStyle = {
   boxSizing: 'border-box' as const,
 };
 
-// Control-plane services that can never be toggled or configured. The list view
-// from /services does not flag these (only the single-service read does), so we
-// mirror builder's own coreServices set to grey them out client-side too.
-const CORE_SERVICES = new Set(['gatekeeper', 'conductor', 'registry', 'builder']);
-const isCore = (s: OrgService) => !!s.core || CORE_SERVICES.has(s.service);
+// Control-plane services that can never be toggled or configured. The server flags
+// these with `core` on every row (list and single-service reads alike), so we trust
+// that flag rather than mirroring builder's coreServices set here.
+const isCore = (s: OrgService) => !!s.core;
 
 // A row is removable only when an actual override exists at the current scope:
 // at the org scope that means source override/custom; at the default scope the
@@ -95,12 +94,16 @@ export function Builder() {
 
   const scopeId = scope === 'default' ? 'default' : orgId;
 
-  const fetchServices = useCallback(async () => {
-    if (!scopeId) { setLoading(false); setServices([]); return; }
+  const fetchServices = useCallback(async (): Promise<OrgService[] | null> => {
+    if (!scopeId) { setLoading(false); setServices([]); return null; }
     setLoading(true); setError(null);
-    try { setServices(await listOrgServices(token, scopeId)); }
-    catch (e: unknown) { setError((e as Error).message); setServices([]); }
-    finally { setLoading(false); }
+    try {
+      const list = await listOrgServices(token, scopeId);
+      setServices(list);
+      return list;
+    } catch (e: unknown) {
+      setError((e as Error).message); setServices([]); return null;
+    } finally { setLoading(false); }
   }, [token, scopeId]);
 
   useEffect(() => { fetchServices(); }, [fetchServices]);
@@ -111,9 +114,19 @@ export function Builder() {
 
   const selectedSvc = services.find(s => s.service === selected) ?? null;
 
-  // After any mutation: reload this scope and refresh the sidebar's disabled set
-  // so a service turned off here disappears from the nav (and back when re-enabled).
-  const afterMutation = async () => { await fetchServices(); dispatch(hydrateServices()); };
+  // After any mutation: reload this scope and refresh the sidebar's disabled set so a
+  // service turned off here disappears from the nav (and back when re-enabled). At the
+  // caller's own org scope the freshly-fetched list IS the sidebar's source, so reuse
+  // it directly; a default-scope edit changes every org's effective view, so re-derive
+  // the user's org from the server.
+  const afterMutation = async () => {
+    const list = await fetchServices();
+    if (scope === 'org' && list) {
+      dispatch(setDisabledServices(list.filter(s => !s.core && !s.enabled).map(s => s.service)));
+    } else {
+      dispatch(hydrateServices());
+    }
+  };
 
   const toggle = async (svc: OrgService) => {
     const body: SetOrgServiceBody = { enabled: !svc.enabled, kind: svc.kind || 'platform' };
@@ -269,6 +282,12 @@ export function Builder() {
       {scope === 'default' && (
         <div style={{ padding: '8px 24px', borderBottom: `1px solid ${T.border}`, background: T.amberSoft, fontFamily: T.mono, fontSize: 11, color: T.amber }}>
           editing the platform-wide baseline every org inherits — platform-admin only
+        </div>
+      )}
+
+      {scope === 'org' && (
+        <div style={{ padding: '8px 24px', borderBottom: `1px solid ${T.border}`, background: T.card, fontFamily: T.mono, fontSize: 11, color: T.faint }}>
+          this org's toggles control which services it sees · what is actually deployed (config, replicas, rotation, image/port) is governed by the default baseline
         </div>
       )}
 

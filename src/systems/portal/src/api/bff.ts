@@ -56,8 +56,23 @@ export interface SetupStatus {
   initialized: boolean;
 }
 
-export function getSetupStatus() {
-  return req<SetupStatus>('GET', '/gatekeeper/setup/status');
+// Time-bounded so a hung upstream can't trap the SetupGate on the loading screen
+// forever (the app's entire render is gated on this resolving). On timeout the
+// fetch aborts and rejects, which checkSetup treats as a failed attempt.
+export async function getSetupStatus(timeoutMs = 4000): Promise<SetupStatus> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(BASE + '/gatekeeper/setup/status', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+    return (await res.json()) as SetupStatus;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────

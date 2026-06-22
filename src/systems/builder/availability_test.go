@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -39,8 +41,12 @@ func TestParseRotateInterval(t *testing.T) {
 		{"1h", time.Hour},
 		{float64(45), 45 * time.Minute}, // number => minutes
 		{15, 15 * time.Minute},
+		{"45", 45 * time.Minute},             // bare numeric string => minutes (env parity)
+		{float64(1e12), maxRotateInterval},   // would overflow int64 ns => clamped
+		{"100000h", maxRotateInterval},       // huge but valid duration => clamped
 		{"garbage", 0},
 		{float64(0), 0},
+		{float64(-5), 0},
 		{nil, 0},
 	}
 	for _, c := range cases {
@@ -198,6 +204,79 @@ func TestApplyPDB(t *testing.T) {
 	}
 	if _, err := api.Get(ctx, "codearmory-forge", metav1.GetOptions{}); err == nil {
 		t.Error("expected single-replica PDB to be removed")
+	}
+}
+
+func TestApplyPDB_UpdatesExisting(t *testing.T) {
+	ctx := context.Background()
+	b := fixedBackend(time.Now())
+	api := b.client.PolicyV1().PodDisruptionBudgets("codearmory")
+
+	// First apply creates the PDB at minAvailable = 2 (replicas 3).
+	if err := b.applyPDB(ctx, "forge", 3); err != nil {
+		t.Fatalf("applyPDB create: %v", err)
+	}
+	// Re-applying at a higher replica count must update the existing object in place
+	// (the Get-then-Update branch), not error or duplicate.
+	if err := b.applyPDB(ctx, "forge", 5); err != nil {
+		t.Fatalf("applyPDB update: %v", err)
+	}
+	pdb, err := api.Get(ctx, "codearmory-forge", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pdb: %v", err)
+	}
+	if pdb.Spec.MinAvailable.IntValue() != 4 {
+		t.Errorf("minAvailable = %v, want 4 after update", pdb.Spec.MinAvailable)
+	}
+}
+
+func TestApplyPDB_RefusesForeign(t *testing.T) {
+	ctx := context.Background()
+	b := fixedBackend(time.Now())
+	api := b.client.PolicyV1().PodDisruptionBudgets("codearmory")
+
+	// A PDB someone else owns (e.g. the Helm chart) must never be hijacked.
+	minAvail := intstr.FromInt(1)
+	foreign := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "codearmory-forge",
+			Namespace: "codearmory",
+			Labels:    map[string]string{labelManagedBy: "Helm"},
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{MinAvailable: &minAvail},
+	}
+	if _, err := api.Create(ctx, foreign, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed foreign pdb: %v", err)
+	}
+	if err := b.applyPDB(ctx, "forge", 3); err == nil {
+		t.Error("expected applyPDB to refuse overwriting a foreign-owned PDB")
+	}
+	// The foreign PDB must be left untouched.
+	got, err := api.Get(ctx, "codearmory-forge", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pdb: %v", err)
+	}
+	if got.Spec.MinAvailable.IntValue() != 1 || got.Labels[labelManagedBy] != "Helm" {
+		t.Errorf("foreign PDB was modified: minAvailable=%v labels=%v", got.Spec.MinAvailable, got.Labels)
+	}
+}
+
+func TestRotationBucket_NonDivisorInterval(t *testing.T) {
+	interval := 7 * time.Hour
+	// 7h buckets anchored to UTC midnight: 00:00, 07:00, 14:00, 21:00, then reset.
+	cases := []struct {
+		now    time.Time
+		bucket time.Time
+	}{
+		{time.Date(2026, 6, 22, 6, 59, 0, 0, time.UTC), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2026, 6, 22, 7, 1, 0, 0, time.UTC), time.Date(2026, 6, 22, 7, 0, 0, 0, time.UTC)},
+		{time.Date(2026, 6, 22, 21, 30, 0, 0, time.UTC), time.Date(2026, 6, 22, 21, 0, 0, 0, time.UTC)},
+		{time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)}, // resets at midnight
+	}
+	for _, c := range cases {
+		if got := rotationBucket(c.now, interval); !got.Equal(c.bucket) {
+			t.Errorf("rotationBucket(%v, 7h) = %v, want %v", c.now, got, c.bucket)
+		}
 	}
 }
 

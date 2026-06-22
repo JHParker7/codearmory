@@ -1,4 +1,4 @@
-import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
+import { createSlice, createAsyncThunk, type PayloadAction } from '@reduxjs/toolkit';
 import { getUser, updateUser, login as apiLogin, signup as apiSignup, checkPermission, listOrgServices } from '../api/bff';
 import type { User, SignupPayload } from '../api/bff';
 import { decodeUserId } from '../utils';
@@ -194,6 +194,12 @@ const authSlice = createSlice({
       state.permissions = null;
       state.disabledServices = null;
     },
+    // Replace the disabled-services set directly. Used by the builder page after a
+    // mutation at the caller's own org scope, where it already holds the fresh list
+    // and a re-fetch (hydrateServices) would be a redundant identical request.
+    setDisabledServices(state, action: PayloadAction<string[]>) {
+      state.disabledServices = action.payload;
+    },
   },
   extraReducers(builder) {
     builder
@@ -252,5 +258,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { logout } = authSlice.actions;
+export const { logout, setDisabledServices } = authSlice.actions;
 export const authReducer = authSlice.reducer;

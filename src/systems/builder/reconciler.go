@@ -130,12 +130,12 @@ func defaultReplicaFloor() int32 {
 
 // defaultRotateInterval is the periodic rolling-restart cadence applied to every
 // managed workload without its own override. BUILDER_ROTATE_INTERVAL is a Go duration
-// ("30m", "1h"); empty/invalid disables rotation.
+// ("30m", "1h") or a bare number of minutes ("45"); empty/invalid disables rotation.
+// It shares parseRotateInterval with the per-service config knob so both paths agree
+// on units and the same sanity cap.
 func defaultRotateInterval() time.Duration {
 	if v := strings.TrimSpace(os.Getenv("BUILDER_ROTATE_INTERVAL")); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
+		return parseRotateInterval(v)
 	}
 	return 0
 }
@@ -319,24 +319,49 @@ func parseReplicas(v any) int32 {
 	return int32(n)
 }
 
+// maxRotateInterval caps any configured cadence so a wild value can't overflow the
+// int64-nanosecond Duration — which would wrap negative (silently disabling rotation)
+// or wrap small-positive (rolling the pods on nearly every reconcile).
+const maxRotateInterval = 720 * time.Hour // 30 days
+
 // parseRotateInterval reads a cadence from a Go duration string ("30m", "1h") or a
-// number interpreted as minutes. Invalid or non-positive values yield 0 (disabled).
+// number interpreted as minutes (a bare numeric string counts as minutes too, so the
+// env and per-service config paths agree). Invalid or non-positive values yield 0
+// (disabled); anything above maxRotateInterval is clamped to it.
 func parseRotateInterval(v any) time.Duration {
+	var d time.Duration
 	switch val := v.(type) {
 	case string:
-		if d, err := time.ParseDuration(strings.TrimSpace(val)); err == nil && d > 0 {
-			return d
+		s := strings.TrimSpace(val)
+		if parsed, err := time.ParseDuration(s); err == nil {
+			d = parsed
+		} else if mins, err := strconv.Atoi(s); err == nil {
+			d = minutesToDuration(float64(mins))
 		}
 	case float64:
-		if val > 0 {
-			return time.Duration(val) * time.Minute
-		}
+		d = minutesToDuration(val)
 	case int:
-		if val > 0 {
-			return time.Duration(val) * time.Minute
-		}
+		d = minutesToDuration(float64(val))
 	}
-	return 0
+	if d <= 0 {
+		return 0
+	}
+	if d > maxRotateInterval {
+		return maxRotateInterval
+	}
+	return d
+}
+
+// minutesToDuration converts a minute count to a Duration without overflowing int64
+// nanoseconds: a count beyond the cap is returned as the cap, non-positive as 0.
+func minutesToDuration(mins float64) time.Duration {
+	if mins <= 0 {
+		return 0
+	}
+	if mins > float64(maxRotateInterval/time.Minute) {
+		return maxRotateInterval
+	}
+	return time.Duration(mins) * time.Minute
 }
 
 // configToEnv flattens the free-form config object to env overrides: scalar values

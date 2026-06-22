@@ -294,11 +294,11 @@ func (b *k8sBackend) rotateFor(spec workloadSpec) time.Duration {
 	return b.rotateInterval
 }
 
-// stampRotation writes the current interval bucket onto the pod template. Truncating
-// to the interval means the value is identical for every reconcile within a window
-// (so the update is a no-op and the pods are left alone) and flips exactly once per
-// interval (rolling the pods back to the image). now() is bucketed in UTC so the
-// boundaries are stable regardless of the cluster's timezone.
+// stampRotation writes the current interval bucket onto the pod template. The value
+// is identical for every reconcile within a window (so the update is a no-op and the
+// pods are left alone) and flips exactly once per interval (rolling the pods back to
+// the image). Buckets are anchored to the UTC day so the boundaries are stable across
+// timezones and land on intuitive wall-clock times. See rotationBucket.
 func (b *k8sBackend) stampRotation(pt *corev1.PodTemplateSpec, interval time.Duration) {
 	now := time.Now
 	if b.nowFn != nil {
@@ -307,7 +307,19 @@ func (b *k8sBackend) stampRotation(pt *corev1.PodTemplateSpec, interval time.Dur
 	if pt.Annotations == nil {
 		pt.Annotations = map[string]string{}
 	}
-	pt.Annotations[annotationRotatedAt] = now().UTC().Truncate(interval).Format(time.RFC3339)
+	pt.Annotations[annotationRotatedAt] = rotationBucket(now().UTC(), interval).Format(time.RFC3339)
+}
+
+// rotationBucket returns the start of the current interval bucket anchored to the UTC
+// day. Anchoring to midnight (rather than time.Truncate, which buckets relative to the
+// Unix epoch) keeps the boundaries on intuitive wall-clock times for intervals that
+// don't evenly divide a day — e.g. a 7h cadence rolls at 00:00, 07:00, 14:00, 21:00
+// each day instead of drifting. For intervals that do divide a day (30m, 1h, …) it is
+// identical to epoch-relative truncation.
+func rotationBucket(now time.Time, interval time.Duration) time.Time {
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	elapsed := now.Sub(dayStart)
+	return dayStart.Add((elapsed / interval) * interval)
 }
 
 // findBaseDeployment returns a platform (non-builder) Deployment for the service to

@@ -218,6 +218,15 @@ func handleDeleteOrgService(w http.ResponseWriter, r *http.Request) {
 func buildEffectiveView(ctx context.Context, orgID string) ([]serviceView, error) {
 	views := map[string]*serviceView{}
 
+	// 0. Core control-plane services: always present, always on, never configurable.
+	// The catalog (step 1) excludes them and their rows can't be written, so seeding
+	// them here is what puts them in the list — flagged Core so every consumer (the
+	// admin UI, the sidebar, the CLI hub) can trust that flag instead of re-hardcoding
+	// the set.
+	for name := range coreServices {
+		views[name] = &serviceView{Service: name, Enabled: true, Kind: kindPlatform, Source: "core", Core: true}
+	}
+
 	// 1. Seed from the registry catalog: every platform service, default-on.
 	for _, c := range serviceCatalog(ctx) {
 		views[c.Name] = &serviceView{
