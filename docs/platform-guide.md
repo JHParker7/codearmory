@@ -10,22 +10,17 @@ This guide explains what each CodeArmory service does, how they fit together, an
 2. [Authentication and authorisation — Gatekeeper](#authentication-and-authorisation--gatekeeper)
 3. [API Gateway — Conductor](#api-gateway--conductor)
 4. [Service Discovery — Registry](#service-discovery--registry)
-5. [Infrastructure State — Blueprints](#infrastructure-state--blueprints)
-6. [Sandboxed Execution — Forge](#sandboxed-execution--forge)
-7. [Pipeline Orchestration — Workflows](#pipeline-orchestration--workflows)
-8. [Git Webhooks — Hooks](#git-webhooks--hooks)
-9. [Task Tracking — Tickets](#task-tracking--tickets)
-10. [Forgejo/Gitea Integration — Gitea Integration](#forgejoitea-integration--gitea-integration)
-11. [Container Registry Management — Containers](#container-registry-management--containers)
-12. [Cluster Integrations — Outposts, Chaos, Argo](#cluster-integrations--outposts-chaos-argo)
-13. [Egress Proxy](#egress-proxy)
-14. [CLI — Armory](#cli--armory)
-15. [Observability](#observability)
-16. [Running the stack](#running-the-stack)
+5. [Sandboxed Execution — Forge](#sandboxed-execution--forge)
+6. [Pipeline Orchestration — Workflows](#pipeline-orchestration--workflows)
+7. [Git Webhooks — Hooks](#git-webhooks--hooks)
+8. [Cluster Integrations — Outposts](#cluster-integrations--outposts)
+9. [CLI — Armory](#cli--armory)
+10. [Observability](#observability)
+11. [Running the stack](#running-the-stack)
 
 ---
 
-Some services are now maintained in their own repos (`codearmory-<svc>`) and deployed at runtime by Builder: Blueprints, Tickets, Containers, Gitea Integration, Notifications, Chaos, Argo, the Egress Proxy, and the MCP server. They remain full platform features; only their source lives elsewhere.
+The platform is modular. The sections below cover the core services that ship in this repo; additional capabilities are deployed and registered at runtime as modules by **Builder**.
 
 ---
 
@@ -34,22 +29,19 @@ Some services are now maintained in their own repos (`codearmory-<svc>`) and dep
 Every user-facing request enters through **Conductor** (the API gateway). Conductor validates the request, checks the caller's permissions with **Gatekeeper**, then proxies to the appropriate backend service. No backend service is exposed directly to users.
 
 ```
-Browser / CLI / Terraform
+Browser / CLI
         │
         ▼
    Conductor :8080           ← single entry point for all traffic
         │
         ├── POST /signup, POST /login ──► Gatekeeper :8081  (public)
         │
-        ├── /state/...            ──────► Blueprints        :8093  (Terraform state)
-        ├── /executions/...       ──────► Forge             :8083  (sandboxed runners)
-        ├── /workflows/...        ──────► Workflows         :8085  (pipelines)
-        ├── /tickets/...          ──────► Tickets           :8086  (task tracker)
-        ├── /hooks/...            ──────► Hooks             :8087  (webhook receiver)
-        ├── /gitea_integration/...──────► Gitea Integration :8088  (repo / PR management)
-        └── /containers/...       ──────► Containers        :8089  (OCI registry proxy)
+        ├── /executions/...       ──────► Forge      :8083  (sandboxed runners)
+        ├── /workflows/...        ──────► Workflows  :8085  (pipelines)
+        └── /hooks/...            ──────► Hooks      :8087  (webhook receiver)
 
    Registry :8082  ← Conductor polls this to build its routing table
+   Builder  :8095  ← org control plane; deploys + registers optional service modules
 ```
 
 **Auth model.** Every non-public route requires an `Authorization: Bearer <token>` header. The token is an ES256-signed JWT issued by Gatekeeper. Backend services never verify JWTs themselves — they ask Gatekeeper via `POST /check_permissions`, which returns the `user_id`, `org_id`, and whether the permission is granted. This means all permission logic is centralised in one place.
@@ -78,7 +70,7 @@ Calling `POST /login` returns a short-lived JWT (default 15 minutes) and a long-
 
 ### Permissions
 
-Permissions follow a `resource/subresource` path structure. A role grants named permissions (e.g. `createTicket`, `triggerRun`) on a resource path. Roles can be attached to individual users or to teams.
+Permissions follow a `resource/subresource` path structure. A role grants named permissions (e.g. `createExecution`, `triggerRun`) on a resource path. Roles can be attached to individual users or to teams.
 
 When a backend service calls `POST /check_permissions`, it passes the Bearer token and the permission + resource it wants to check. Gatekeeper returns the resolved `user_id` and `org_id` alongside the allow/deny result. All authorisation cache entries are invalidated immediately when a role is updated.
 
@@ -159,47 +151,6 @@ Once registered, Conductor picks up the new service on its next poll (every 30 s
 
 ---
 
-## Infrastructure State — Blueprints
-
-**Port:** 8093
-
-Blueprints implements the [Terraform HTTP backend protocol](https://developer.hashicorp.com/terraform/language/settings/backends/http). It stores OpenTofu/Terraform workspace state in PostgreSQL with locking support to prevent concurrent state writes.
-
-### Using Blueprints as a Terraform backend
-
-In your Terraform configuration:
-
-```hcl
-terraform {
-  backend "http" {
-    address        = "http://conductor:8080/blueprints/state/alice/my-project"
-    lock_address   = "http://conductor:8080/blueprints/state/alice/my-project"
-    unlock_address = "http://conductor:8080/blueprints/state/alice/my-project"
-    username       = "alice"
-    password       = "<your-jwt>"
-  }
-}
-```
-
-No other changes to your Terraform code are needed. State is versioned and stored in Postgres; a complete audit trail of all state reads, writes, and lock operations is kept.
-
-### State paths
-
-| Scope | Path pattern |
-|-------|-------------|
-| User-scoped | `/state/{username}/{workspace}` |
-| Org-scoped | `/{org}/state/{team}/{workspace}` |
-
-Locking and unlocking use `LOCK` and `UNLOCK` HTTP methods on the same path, following the Terraform HTTP backend specification.
-
-### Why self-hosted state?
-
-- State files often contain secrets. With Blueprints, they never leave your network.
-- You control the database backup strategy.
-- No per-workspace costs or seat limits.
-
----
-
 ## Sandboxed Execution — Forge
 
 **Port:** 8083
@@ -237,7 +188,7 @@ Poll `GET /executions/{id}` to check status. The full log output is available on
 Each container is isolated at the OS level. Forge enforces:
 
 - **Read-only root filesystem** — the container cannot write to its own image layers.
-- **No network** — containers cannot make outbound connections unless explicitly configured.
+- **No network** — containers cannot make outbound connections unless explicitly configured. When outbound access is needed, Forge supports optional egress allowlisting so workloads can reach only an approved set of domains.
 - **Dropped capabilities** — all Linux capabilities are dropped; only the minimum required to run the command are re-added.
 - **Resource limits** — CPU and memory limits are set per execution.
 - **Timeout enforcement** — containers that exceed `timeout_secs` are forcibly stopped.
@@ -252,7 +203,7 @@ Forge is registered as a named service in the Workflows `SERVICES` env var. A wo
 
 **Port:** 8085
 
-Workflows runs sequences of HTTP steps — in order, one at a time — against registered backend services. It is the glue that connects Forge, Blueprints, and any other service into a repeatable pipeline.
+Workflows runs sequences of HTTP steps — in order, one at a time — against registered backend services. It is the glue that connects Forge and any other registered service into a repeatable pipeline.
 
 ### Anatomy of a workflow
 
@@ -260,7 +211,7 @@ A workflow is a named list of steps. Each step specifies:
 
 | Field | What it does |
 |-------|-------------|
-| `service` | Which registered service to call (e.g. `forge`, `blueprints`) |
+| `service` | Which registered service to call (e.g. `forge`) |
 | `method` | HTTP method (default `POST`) |
 | `path` | Path on the target service. Supports `${KEY}` substitution. |
 | `body` | JSON body. Supports `${KEY}` substitution. |
@@ -353,191 +304,40 @@ Hooks processes any webhook payload format that includes repository and branch i
 
 ---
 
-## Task Tracking — Tickets
+## Cluster Integrations — Outposts
 
-**Port:** 8086
+**Ports:** Outpost Gateway 8092. Outpost: no port (dials out).
 
-Tickets is a lightweight task tracker scoped to organisations. Its distinguishing feature is that tickets can carry references to related Workflows runs and Forge executions, linking deployment tasks to the pipeline runs that executed them.
-
-### Creating and managing tickets
-
-```bash
-# Create a ticket linked to a workflow run
-curl -X POST http://localhost:8080/tickets/tickets \
-  -H "Authorization: Bearer <token>" \
-  -d '{
-    "title": "Deploy v2.1.0 to production",
-    "description": "Coordinate the production release",
-    "priority": "high",
-    "assignee_id": "user-uuid",
-    "workflow_id": "wf-uuid",
-    "run_id": "run-uuid"
-  }'
-```
-
-### Status and priority
-
-| Status | Meaning |
-|--------|---------|
-| `open` | Default — not started |
-| `in_progress` | Actively being worked |
-| `resolved` | Work complete |
-| `closed` | No further action |
-
-Priority values: `low`, `medium` (default), `high`, `critical`. Any status transition in any direction is permitted.
-
-### Visibility
-
-Tickets are visible to their creator and to any user in the same org. Requests from out-of-org users receive `404 Not Found` rather than `403 Forbidden` to avoid leaking whether a ticket ID exists. List queries are filtered at the database layer.
-
-### Comments
-
-Comments are threaded under tickets and follow the same visibility rules as the parent ticket. Comment deletion is soft (`active = false`). The comment author and any org member with access to the ticket can delete a comment.
-
-### Linked resources
-
-The `workflow_id`, `run_id`, and `forge_execution_id` fields are plain-text references — Tickets stores them but does not validate them against Workflows or Forge. They are useful for tracing which pipeline run corresponds to a given task.
-
----
-
-## Forgejo/Gitea Integration — Gitea Integration
-
-**Port:** 8088
-
-The Gitea Integration service connects CodeArmory to a Forgejo (or Gitea) instance. Users link their CodeArmory account to their Forgejo identity with a one-time token verification, then use the platform API to manage repositories and pull requests without leaving the platform.
-
-### Account linking
-
-Before using any repository or PR endpoint, a user links their Forgejo account:
-
-```bash
-curl -X PUT http://localhost:8080/gitea_integration/account \
-  -H "Authorization: Bearer <token>" \
-  -d '{"gitea_username": "alice", "gitea_token": "<forgejo-pat>"}'
-```
-
-The `gitea_token` is a personal access token from Forgejo. It is used once to verify that the user controls the claimed Forgejo account and is never stored. Subsequent operations use the admin token with per-user `Sudo`.
-
-### Repositories and pull requests
-
-```bash
-# Create a repository
-curl -X POST http://localhost:8080/gitea_integration/repos \
-  -H "Authorization: Bearer <token>" \
-  -d '{"name": "my-app", "auto_init": true}'
-
-# List open pull requests
-curl http://localhost:8080/gitea_integration/repos/alice/my-app/pulls \
-  -H "Authorization: Bearer <token>"
-
-# Merge a pull request
-curl -X POST http://localhost:8080/gitea_integration/repos/alice/my-app/pulls/1/merge \
-  -H "Authorization: Bearer <token>" \
-  -d '{"Do": "merge"}'
-```
-
-### Git smart protocol
-
-The service also proxies the Git HTTP smart protocol, so `git clone`, `git push`, and `git pull` routed through the platform work transparently. Git clients authenticate with their Forgejo credentials directly.
-
----
-
-## Container Registry Management — Containers
-
-**Port:** 8089
-
-The Containers service provides authenticated management access to an external OCI registry (Docker Hub, GHCR, ECR, or any distribution-spec registry). It adds RBAC-enforced visibility and deletion on top of the registry's native API, and proxies the OCI distribution protocol so `docker push`/`pull` can be routed through the platform.
-
-```bash
-# List repositories
-curl http://localhost:8080/containers/repositories \
-  -H "Authorization: Bearer <token>"
-
-# List tags for an image
-curl http://localhost:8080/containers/repositories/myorg/myapp/tags \
-  -H "Authorization: Bearer <token>"
-
-# Delete a manifest by digest
-curl -X DELETE \
-  http://localhost:8080/containers/repositories/myorg/myapp/manifests/sha256:abc123 \
-  -H "Authorization: Bearer <token>"
-```
-
-The management API (`/repositories`, `/tags`, `/manifests`) is gated by Gatekeeper RBAC. The `/v2/...` OCI distribution proxy passes requests to the upstream registry without RBAC interception — Docker clients authenticate directly with their registry credentials.
-
----
-
-## Cluster Integrations — Outposts, Chaos, Argo
-
-**Ports:** Outpost Gateway 8092, Chaos 8090, Argo 8091. Outpost: no port (dials out).
-
-Some capabilities — running chaos-engineering experiments, driving Argo CD syncs — require acting *inside* a Kubernetes cluster. CodeArmory never reaches into a cluster from the control plane. Instead, a single customer-deployed **outpost** runs in (or against) the target cluster and **dials out** to the control plane. This means no inbound access to your cluster and no control-plane cluster credentials, and the same mechanism serves both self-hosted and SaaS.
+Some capabilities require acting *inside* a Kubernetes cluster. CodeArmory never reaches into a cluster from the control plane. Instead, a single customer-deployed **outpost** runs in (or against) the target cluster and **dials out** to the control plane. This means no inbound access to your cluster and no control-plane cluster credentials, and the same mechanism serves both self-hosted and SaaS. Integrations are pluggable modules loaded by the outpost.
 
 ```
 your cluster                                     control plane
 ┌─ outpost ───────────────┐   HTTPS    ┌─ Outpost Gateway :8092 ─────────────┐
-│ modules: chaos, argo    │  outbound  │ enroll · long-poll commands ·       │
+│ pluggable modules       │  outbound  │ enroll · long-poll commands ·       │
 │ (you choose which)      │ ◄────────► │ ingest events  (Postgres backbone)  │
 └─────────────────────────┘  long-poll └──────────┬──────────────────────────┘
-                              + POST     dispatch by integration
-                                    Chaos :8090   ·   Argo :8091   → Workflows / Hooks / Portal
+                              + POST     dispatch to consumer
+                                         consumer service → Workflows / Hooks / Portal
 ```
 
-**How it flows.** A control service (Chaos, Argo) enqueues a *command* for an outpost via the gateway. The outpost long-polls, the right module performs the action in-cluster, and reports *events* back. The gateway delivers each event to the owning service, which updates its records and weaves the result into workflows, hooks, and the portal. Everything is at-least-once and idempotent, backed by Postgres queues — no message broker.
+**How it flows.** A consumer service enqueues a *command* for an outpost via the gateway. The outpost long-polls, the right module performs the action in-cluster, and reports *events* back. The gateway delivers each event to the owning consumer service, which updates its records and weaves the result into workflows, hooks, and the portal. Everything is at-least-once and idempotent, backed by Postgres queues — no message broker.
 
 ### Deploying an outpost
 
-1. In the portal's **Outposts** page, add an outpost and choose its modules (chaos, argo). Copy the single-use enrollment token.
+1. In the portal's **Outposts** page, add an outpost and choose its modules. Copy the single-use enrollment token.
 2. Install the outpost in your cluster with the dedicated chart:
 
    ```bash
    helm install my-outpost infra/helm/outpost \
      --namespace codearmory-outpost --create-namespace \
      --set controlPlaneURL=https://gateway.example.com \
-     --set modules="chaos\,argo" \
      --set enrollmentToken=<token>
    ```
 
-   The chart grants least-privilege RBAC per module (chaos → `litmuschaos.io` CRDs + a runner ServiceAccount per target namespace; argo → `argoproj.io` Applications). The chaos module also requires the Litmus chaos-operator to be installed in-cluster (see the [chart README](../infra/helm/outpost/README.md)).
+   The chart grants least-privilege RBAC per module (see the [chart README](../infra/helm/outpost/README.md)).
 3. The outpost's status moves to `connected` once it enrolls and heartbeats.
 
-### Chaos engineering
-
-Start an experiment against a workload by label selector; the verdict comes back as the experiment moves `pending → running → Pass`/`Fail`/`Error`:
-
-```bash
-curl -X POST http://localhost:8090/experiments \
-  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
-  -d '{"outpost_id":"<id>","experiment_type":"pod-delete",
-       "target_app_ns":"demo","target_app_label":"app.kubernetes.io/component=conductor"}'
-```
-
-A pipeline can **gate on a verdict** with the `chaos/run-experiment` action — the step fails unless the experiment passes. See Chaos.
-
-### Argo CD sync
-
-Applications appear automatically as the outpost reports them. Trigger a sync and watch it converge to `Synced`/`Failed`, or gate a pipeline on a healthy sync with the `argo/sync` action:
-
-```bash
-curl -X POST http://localhost:8091/apps/guestbook/sync \
-  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" -d '{"revision":"HEAD"}'
-```
-
-See Argo. Both are the same framework — adding the next integration is a new outpost module + a thin consumer service, nothing in the core. Full detail: [outpost/README.md](outpost/README.md).
-
----
-
-## Egress Proxy
-
-**Port:** 3128
-
-The Egress Proxy is an allowlist-enforcing HTTP CONNECT proxy used by Forge execution containers. It provides controlled outbound internet access for CI/CD workloads (package downloads, module fetches) without opening broad internet access.
-
-The Egress Proxy is optional, controlled by `EGRESS_PROXY_ENABLED` (default on). Disable it for kata/Cloud-Hypervisor and other VM-isolated runtimes, which isolate egress at the VM level.
-
-It is not a user-facing service — it sits on an internal Docker/Kubernetes network and is configured via Forge's `FORGE_EGRESS_PROXY` environment variable. Containers route outbound HTTP and HTTPS traffic through it automatically when `HTTP_PROXY`/`HTTPS_PROXY` are set.
-
-Connections to hosts not in `PROXY_ALLOWED_DOMAINS` are refused before any data is exchanged. See Egress Proxy and the [Forge README](forge/README.md) for setup details.
+Integrations are pluggable — adding the next one is a new outpost module plus a thin consumer service, nothing in the core. Full detail: [outpost/README.md](outpost/README.md).
 
 ---
 
@@ -571,9 +371,8 @@ armory pipelines run pipeline <pipeline-id> --input ENV=staging --input VERSION=
 # Watch a run
 armory pipelines get run <run-id>
 
-# Manage tickets
-armory tickets create --title "Deploy v2" --priority high
-armory tickets update <ticket-id> --status in_progress
+# Run a sandboxed execution
+armory forge run --image alpine:3.19 -- sh -c "echo hello"
 ```
 
 Services are registered with the platform through the **Registry manifest**
@@ -593,29 +392,17 @@ All services emit OpenTelemetry traces and metrics. Set `OTEL_EXPORTER_OTLP_ENDP
 
 | Service | Metric | Labels |
 |---------|--------|--------|
-| Blueprints | `blueprints.state.get.total` | `result` (found/not_found) |
-| Blueprints | `blueprints.state.update.total` | — |
-| Blueprints | `blueprints.state.delete.total` | — |
-| Blueprints | `blueprints.state.lock.total` | `result` (ok/conflict) |
-| Blueprints | `blueprints.state.unlock.total` | — |
-| Blueprints | `blueprints.permission_checks.total` | `authorized` (true/false) |
 | Conductor | `conductor.requests.allowed.total` | — |
 | Conductor | `conductor.requests.rejected.total` | `reason` (no_token/malformed_token/unauthorized/gatekeeper_error/user_not_found) |
 | Conductor | `conductor.ips.blocked.total` | `source_ip` |
-| Containers | `containers.manifests.deleted.total` | `repo.namespace` |
 | Forge | `forge.executions.submitted.total` | `image` |
 | Forge | `forge.executions.completed.total` | `status` |
 | Forge | `forge.executions.cancelled.total` | — |
 | Gatekeeper | `gatekeeper.logins.total` | — |
 | Gatekeeper | `gatekeeper.permission_checks.total` | `result` (allowed/denied) |
-| Gitea Integration | `gitea.repos.created.total` | — |
-| Gitea Integration | `gitea.pulls.created.total` | — |
-| Gitea Integration | `gitea.pulls.merged.total` | — |
 | Hooks | `hooks.received.total` | `repo` |
 | Hooks | `hooks.rules.matched.total` | `repo`, `workflow.id` |
 | Hooks | `hooks.runs.triggered.total` | `workflow.id` |
-| Tickets | `tickets.created.total` | `priority` |
-| Tickets | `tickets.resolved.total` | `status` |
 | Workflows | `workflows.runs.triggered.total` | `workflow.id` |
 | Workflows | `workflows.runs.completed.total` | `workflow.id`, `status` |
 | Workflows | `workflows.steps.completed.total` | `workflow.id`, `status` |
@@ -633,7 +420,7 @@ cd infra/local
 docker compose up --build
 ```
 
-This starts PostgreSQL, Redis, and all eight services. Services are available at their respective ports; Conductor at `:8080` is the entry point for API calls.
+This starts PostgreSQL, Redis, and the core services. Services are available at their respective ports; Conductor at `:8080` is the entry point for API calls.
 
 ### Production (Helm)
 
@@ -650,14 +437,12 @@ You can run a subset of services depending on your use case:
 
 | Use case | Required services |
 |----------|------------------|
-| Terraform state only | Gatekeeper, Conductor, Registry, Blueprints |
-| CI/CD pipelines only | Gatekeeper, Conductor, Registry, Forge, Workflows, Hooks |
-| Forge with egress control | Add Egress Proxy; set `FORGE_NETWORK_MODE` and `FORGE_EGRESS_PROXY` on Forge |
-| Forgejo/Gitea integration | Add Gitea Integration; requires a running Forgejo instance |
-| OCI registry management | Add Containers; requires an upstream OCI registry |
-| Full platform | All services |
+| Core only | Gatekeeper, Conductor, Registry, Builder, Portal |
+| CI/CD pipelines | Add Forge, Workflows, Hooks |
+| Cluster integrations | Add Outpost Gateway, and deploy an outpost in the target cluster |
+| Optional capabilities | Deployed and registered at runtime as modules by Builder |
 
-Gatekeeper, Conductor, and Registry are required by any configuration. The remaining services are independently deployable.
+Gatekeeper, Conductor, Registry, Builder, and Portal are the core required by any configuration. The remaining services are independently deployable.
 
 ### Environment variable conventions
 

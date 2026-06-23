@@ -127,4 +127,4 @@ tests/              Python integration tests (pytest) per service
 docs/               Per-service READMEs and platform guide
 ```
 
-**Spun off** into their own `codearmory-<svc>` repos (deployed + registered by builder, not in this tree): **argo** (Argo CD sync control plane), **blueprints** (Terraform/OpenTofu HTTP state backend), **chaos** (chaos-engineering control plane), **containers** (OCI registry management proxy), **egress-proxy** (allowlist HTTP CONNECT proxy for forge), **gitea_integration** (Forgejo/Gitea — repos, PRs, git proxy), **mcp** (stdio MCP server), **notifications**, **tickets** (task tracker).
+**Spun off** into their own `codearmory-<svc>` repos (deployed + registered by builder at runtime, not in this tree): argo, blueprints, chaos, containers, egress-proxy, gitea_integration, mcp, notifications, tickets.
