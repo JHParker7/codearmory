@@ -113,7 +113,7 @@ Actions with an `async` block submit work and poll a status endpoint until it re
 }
 ```
 
-See [chaos](../chaos/README.md) and [argo](../argo/README.md).
+See the chaos and argo consumer services (now in their own `codearmory-chaos` / `codearmory-argo` repos).
 
 ## Input & output substitution
 

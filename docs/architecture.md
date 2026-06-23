@@ -5,21 +5,23 @@
 | Service | Port | Role |
 |---------|------|------|
 | [Gatekeeper](gatekeeper/architecture.md)             | 8081 | Authentication, session management, RBAC, OIDC provider |
-| [Blueprints](blueprints/architecture.md)             | 8093 | Self-hosted Terraform HTTP backend |
+| Blueprints                                           | 8093 | Self-hosted Terraform HTTP backend (separate repo) |
 | [Conductor](conductor/architecture.md)               | 8080 | API gateway — identity check, RBAC, reverse proxy |
 | [Forge](forge/architecture.md)                       | 8083 | Sandboxed container execution |
 | [Registry](registry/architecture.md)                 | 8082 | Service catalogue polled by Conductor |
 | [Workflows](workflows/architecture.md)               | 8085 | CI/CD pipeline orchestrator |
-| [Tickets](tickets/architecture.md)                   | 8086 | Org-scoped task tracker |
+| Tickets                                              | 8086 | Org-scoped task tracker (separate repo) |
 | [Hooks](hooks/architecture.md)                       | 8087 | Webhook receiver and pipeline trigger |
-| [Gitea Integration](gitea_integration/README.md)     | 8088 | Forgejo/Gitea repository and PR management |
-| [Containers](containers/README.md)                   | 8089 | OCI registry management proxy |
-| [Chaos](chaos/README.md)                             | 8090 | Chaos-engineering control plane (outpost integration) |
-| [Argo](argo/README.md)                               | 8091 | Argo CD sync control plane (outpost integration) |
+| Gitea Integration                                    | 8088 | Forgejo/Gitea repository and PR management (separate repo) |
+| Containers                                           | 8089 | OCI registry management proxy (separate repo) |
+| Chaos                                                | 8090 | Chaos-engineering control plane (outpost integration) (separate repo) |
+| Argo                                                 | 8091 | Argo CD sync control plane (outpost integration) (separate repo) |
 | [Outpost Gateway](outpost-gateway/README.md)         | 8092 | Outpost-facing connection point + event backbone |
 | [Outpost](outpost/README.md)                         | —    | Customer-deployed in-cluster agent (chaos/argo modules) |
-| [Egress Proxy](egress-proxy/README.md)               | 3128 | Allowlist-enforcing HTTP CONNECT proxy for Forge |
-| MCP Server                                           | stdio | Local MCP server wrapping the full platform API |
+| Egress Proxy                                         | 3128 | Optional allowlist-enforcing HTTP CONNECT proxy for Forge (separate repo) |
+| MCP Server                                           | stdio | Local MCP server wrapping the full platform API (separate repo) |
+
+Services marked *(separate repo)* live in their own `codearmory-<svc>` repos and are deployed + registered at runtime by **builder**; the rest are core services in this monorepo.
 
 ## Service topology
 
