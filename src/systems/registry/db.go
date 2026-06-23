@@ -402,6 +402,37 @@ func rotateServiceKeyDB(ctx context.Context, name, newHash string) error {
 		Error
 }
 
+// reactivateServiceByName flips a soft-deleted service row back to active and
+// refreshes its url/description/forward_auth (and service_key when setKey is true)
+// in place, preserving its service_id — and thus its child roles/endpoints/grants,
+// which the caller replaces next via replaceServiceManifest. Returns
+// gorm.ErrRecordNotFound when no row with that name exists. service_key is left
+// untouched when setKey is false so an empty request key never clobbers a stored one.
+func reactivateServiceByName(ctx context.Context, name, url, description string, forwardAuth bool, hashedKey string, setKey bool) error {
+	ctx, span := otel.Tracer("registry").Start(ctx, "db.service.reactivate")
+	defer span.End()
+	span.SetAttributes(attribute.String("service.name", name))
+	q := `UPDATE services SET active = true, url = ?, description = ?, forward_auth = ?, updated_at = now()`
+	args := []any{url, description, forwardAuth}
+	if setKey {
+		q += `, service_key = ?`
+		args = append(args, hashedKey)
+	}
+	q += ` WHERE name = ?`
+	args = append(args, name)
+	result := connect().WithContext(ctx).Exec(q, args...)
+	if result.Error != nil {
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
 // upsertServiceModelByName creates or updates a service by its unique name.
 // Used when seeding services from the SERVICES environment variable.
 func upsertServiceModelByName(ctx context.Context, svc ServiceModel) error {

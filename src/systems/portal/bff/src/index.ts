@@ -19,7 +19,15 @@ const app = express();
 // client collapses to one IP and shares a single rate-limit bucket (one user's
 // traffic would 429 everyone). Trust one proxy hop so req.ip is the real client IP
 // from X-Forwarded-For. Configurable via TRUST_PROXY for multi-hop setups.
-app.set('trust proxy', Number(process.env.TRUST_PROXY ?? 1));
+// TRUST_PROXY accepts: a boolean ('true'/'false'), a numeric hop count ('1'),
+// or an Express preset string ('loopback'). Default: trust one proxy hop.
+const trustProxyRaw = (process.env.TRUST_PROXY ?? '1').trim();
+const trustProxy: boolean | number | string =
+  trustProxyRaw === 'true' ? true
+  : trustProxyRaw === 'false' ? false
+  : /^\d+$/.test(trustProxyRaw) ? Number(trustProxyRaw)
+  : trustProxyRaw;
+app.set('trust proxy', trustProxy);
 app.use(express.json());
 
 const spaFallbackLimiter = rateLimit({

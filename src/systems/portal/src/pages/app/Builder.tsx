@@ -51,6 +51,21 @@ function parseConfigText(text: string): Record<string, unknown> | undefined {
   return v as Record<string, unknown>;
 }
 
+// parseSecretsText turns the secrets textarea into a write-only map of env-key → value.
+// Empty → undefined (keep existing). Every value must be a string.
+function parseSecretsText(text: string): Record<string, string> | undefined {
+  const t = text.trim();
+  if (!t) return undefined;
+  const v = JSON.parse(t);
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) throw new Error('secrets must be a JSON object');
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (typeof val !== 'string') throw new Error(`secret "${k}" must be a string value`);
+    out[k] = val;
+  }
+  return out;
+}
+
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div style={{ marginBottom: 12 }}>
@@ -69,9 +84,10 @@ interface FormState {
   description: string;
   config: string;
   db_url: string;
+  secrets: string;
 }
 
-const BLANK_FORM: FormState = { service: '', enabled: true, kind: 'custom', image: '', port: '', description: '', config: '', db_url: '' };
+const BLANK_FORM: FormState = { service: '', enabled: true, kind: 'custom', image: '', port: '', description: '', config: '', db_url: '', secrets: '' };
 
 export function Builder() {
   const token = useAppSelector(s => s.auth.token)!;
@@ -159,6 +175,7 @@ export function Builder() {
       description: svc.description ?? '',
       config: svc.config && Object.keys(svc.config).length ? JSON.stringify(svc.config, null, 2) : '',
       db_url: '',
+      secrets: '',
     });
     setFormError(null); setCreating(false); setEditing(true);
   };
@@ -176,6 +193,10 @@ export function Builder() {
     try { config = parseConfigText(form.config); }
     catch (e: unknown) { setFormError((e as Error).message); return; }
 
+    let secrets: Record<string, string> | undefined;
+    try { secrets = parseSecretsText(form.secrets); }
+    catch (e: unknown) { setFormError((e as Error).message); return; }
+
     if (kind === 'custom') {
       if (!form.image.trim()) { setFormError('custom services require an image'); return; }
       const p = Number(form.port);
@@ -190,6 +211,7 @@ export function Builder() {
     }
     if (form.description.trim()) body.description = form.description.trim();
     if (form.db_url.trim()) body.db_url = form.db_url.trim();
+    if (secrets !== undefined) body.secrets = secrets;
 
     setSaving(true); setFormError(null);
     try {
@@ -242,6 +264,10 @@ export function Builder() {
         </Field>
         <Field label="db url · write-only, postgres://…">
           <input value={form.db_url} type="password" placeholder="leave blank to keep" onChange={e => setForm(f => ({ ...f, db_url: e.target.value }))} style={{ ...inputStyle, background: T.cardHi }} />
+        </Field>
+        <Field label="secrets · write-only JSON, encrypted (e.g. REDIS_URL, GITEA_ADMIN_TOKEN)">
+          <textarea value={form.secrets} rows={4} placeholder={'leave blank to keep · {\n  "REDIS_URL": "redis://…"\n}'} onChange={e => setForm(f => ({ ...f, secrets: e.target.value }))}
+            style={{ ...inputStyle, background: T.cardHi, resize: 'vertical' }} />
         </Field>
         <div style={{ display: 'flex', gap: 8 }}>
           <button onClick={() => submit(mode)} disabled={saving}

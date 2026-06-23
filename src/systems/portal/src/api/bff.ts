@@ -990,8 +990,10 @@ export interface OrgService {
   db_host?: string;
 }
 
-// SetOrgServiceBody is the PUT payload. `db_url` is write-only — it is encrypted
-// on receipt and never read back (only the redacted db_host is returned).
+// SetOrgServiceBody is the PUT payload. `db_url` and `secrets` are write-only — they
+// are encrypted on receipt and never read back (only the redacted db_host is returned).
+// `secrets` carries sensitive config keyed by env var (e.g. REDIS_URL, GITEA_ADMIN_TOKEN)
+// that a service declares in its secretConfig; non-sensitive config goes in `config`.
 export interface SetOrgServiceBody {
   enabled?: boolean;
   kind?: string;
@@ -1000,6 +1002,7 @@ export interface SetOrgServiceBody {
   port?: number;
   description?: string;
   db_url?: string;
+  secrets?: Record<string, string>;
 }
 
 export function listOrgServices(token: string, orgId: string) {

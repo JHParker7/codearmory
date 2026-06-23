@@ -1,21 +1,7 @@
+{{- /* Non-core service URLs are registered with the registry at runtime by builder
+       (POST /services), not seeded here — the chart ships only core services. SERVICES
+       remains an optional admin override for pre-seeding extra service URLs. */ -}}
 {{- $services := .Values.registry.env.services -}}
-{{- if not $services -}}
-{{- $fullname := include "codearmory.fullname" . -}}
-{{- $svcs := list -}}
-{{- if .Values.blueprints.enabled -}}
-{{- $svcs = append $svcs (printf "blueprints=http://%s-blueprints:%d" $fullname (.Values.blueprints.port | int)) -}}
-{{- end -}}
-{{- if .Values.forge.enabled -}}
-{{- $svcs = append $svcs (printf "forge=http://%s-forge:%d" $fullname (.Values.forge.port | int)) -}}
-{{- end -}}
-{{- if .Values.containers.enabled -}}
-{{- $svcs = append $svcs (printf "containers=http://%s-containers:%d" $fullname (.Values.containers.port | int)) -}}
-{{- end -}}
-{{- if .Values.giteaIntegration.enabled -}}
-{{- $svcs = append $svcs (printf "gitea_integration=http://%s-gitea-integration:%d" $fullname (.Values.giteaIntegration.port | int)) -}}
-{{- end -}}
-{{- $services = join "," $svcs -}}
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -103,15 +89,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-conductor
                   key: conductor-notify-key
-            {{- if .Values.workflows.enabled }}
-            - name: WORKFLOWS_URL
-              value: "http://{{ include "codearmory.fullname" . }}-workflows:{{ .Values.workflows.port }}"
-            - name: WORKFLOWS_NOTIFY_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "codearmory.fullname" . }}-workflows
-                  key: registry-notify-key
-            {{- end }}
+            {{- /* The registry no longer push-notifies workflows (a builder-managed,
+                   non-core service): workflows pulls the action catalog via its own
+                   periodic GET /actions poll, so the registry needs no workflows key. */}}
             {{- include "codearmory.tls.envs" .Values.registry.tls | nindent 12 }}
           volumeMounts:
             - name: registry-manifest

@@ -1,0 +1,106 @@
+{
+  "registryName": "hooks",
+  "k8sName": "hooks",
+  "imageRepo": "hooks",
+  "port": 8087,
+  "forward_auth": true,
+  "description": "Webhook ingestion and pipeline rule management",
+  "registryAccount": false,
+  "infra": {},
+  "derivedSecrets": [
+    {
+      "envVar": "HOOKS_TRIGGER_KEY",
+      "kind": "shared",
+      "name": "hooks-trigger-key"
+    }
+  ],
+  "requiredConfig": [
+    "DATABASE_URL"
+  ],
+  "optionalConfig": [],
+  "secretConfig": [
+    "DATABASE_URL"
+  ],
+  "envExtras": {
+    "WORKFLOWS_URL": "http://${PREFIX}-workflows:8085"
+  },
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/hooks",
+      "action": "receiveHook",
+      "resource": "hooks/hooks",
+      "public": true
+    },
+    {
+      "method": "POST",
+      "path": "/hooks/github",
+      "action": "receiveGithubHook",
+      "resource": "hooks/hooks",
+      "public": true
+    },
+    {
+      "method": "POST",
+      "path": "/rules",
+      "action": "createRule",
+      "resource": "hooks/rules"
+    },
+    {
+      "method": "GET",
+      "path": "/rules",
+      "action": "listRule",
+      "resource": "hooks/rules"
+    },
+    {
+      "method": "GET",
+      "path": "/rules/{id}",
+      "action": "getRule",
+      "resource": "hooks/rules/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/rules/{id}",
+      "action": "updateRule",
+      "resource": "hooks/rules/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/rules/{id}",
+      "action": "deleteRule",
+      "resource": "hooks/rules/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/events",
+      "action": "listEvent",
+      "resource": "hooks/events"
+    },
+    {
+      "method": "GET",
+      "path": "/events/{id}",
+      "action": "getEvent",
+      "resource": "hooks/events/{id}"
+    }
+  ],
+  "actions": [],
+  "default_grants": [
+    {
+      "grant_on": "user",
+      "actions": [
+        "createRule",
+        "listRule",
+        "getRule",
+        "updateRule",
+        "deleteRule",
+        "listEvent",
+        "getEvent"
+      ],
+      "resources": [
+        "{username}/hooks/rules",
+        "{username}/hooks/rules/*",
+        "{username}/hooks/events",
+        "{username}/hooks/events/*"
+      ]
+    }
+  ]
+}

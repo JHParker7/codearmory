@@ -80,6 +80,22 @@ func getOrgService(ctx context.Context, orgID, service string) (OrgService, erro
 	return row, nil
 }
 
+// getOrgServicePrimary loads the row from the primary (not the read replica), so a
+// value written earlier in the same admin flow is visible. The enable-time validation
+// gate uses it: a just-stored db_url/secret must not be missed to a lagging replica.
+func getOrgServicePrimary(ctx context.Context, orgID, service string) (OrgService, error) {
+	ctx, span := otel.Tracer("builder").Start(ctx, "db.org_service.get_primary")
+	defer span.End()
+	span.SetAttributes(attribute.String("org.id", orgID), attribute.String("service", service))
+	var row OrgService
+	if err := connect().WithContext(ctx).
+		Where("org_id = ? AND service_name = ?", orgID, service).
+		First(&row).Error; err != nil {
+		return OrgService{}, err
+	}
+	return row, nil
+}
+
 // listOrgServices returns every desired-state row for a single scope (no default
 // merge — callers that need the merge use the catalog overlay).
 func listOrgServices(ctx context.Context, orgID string) ([]OrgService, error) {
@@ -122,6 +138,10 @@ func upsertOrgService(ctx context.Context, in OrgService) (OrgService, error) {
 		if in.DBURLCiphertext != nil {
 			updates["db_url_ct"] = in.DBURLCiphertext
 			updates["db_host"] = in.DBHost
+		}
+		// Likewise the encrypted secrets map: keep the stored one unless re-supplied.
+		if in.SecretsCiphertext != nil {
+			updates["secrets_ct"] = in.SecretsCiphertext
 		}
 		if err := connect().WithContext(ctx).Model(&OrgService{}).
 			Where("org_service_id = ?", existing.OrgServiceID).

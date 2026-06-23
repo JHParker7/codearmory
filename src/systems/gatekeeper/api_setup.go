@@ -15,7 +15,7 @@ type setupStatusResponse struct {
 }
 
 // handleSetupStatus is a public (unauthenticated) endpoint reporting whether the
-// instance has been bootstrapped yet — i.e. whether any active user account exists.
+// instance has been bootstrapped yet — i.e. whether any user account (active or not) exists.
 // The portal calls it on load with no session: when initialized is false it routes
 // to the first-run setup page, which creates the very first account (made the
 // bootstrap admin by createUserWithBootstrapAdmin). It deliberately returns only a

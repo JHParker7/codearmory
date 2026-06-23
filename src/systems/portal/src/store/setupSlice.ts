@@ -18,8 +18,8 @@ const initialState: SetupState = { initialized: null };
 // After the retries are exhausted it fails OPEN: any persistent error resolves to
 // initialized=true, so a misconfiguration never traps users on the setup page — the
 // normal login flow stays reachable, and a reload re-checks once upstream recovers.
-const SETUP_CHECK_ATTEMPTS = 4;
-const SETUP_RETRY_DELAY_MS = 1500;
+const SETUP_CHECK_ATTEMPTS = 8;
+const SETUP_RETRY_DELAY_MS = 2000;
 
 export const checkSetup = createAsyncThunk('setup/check', async () => {
   for (let i = 0; i < SETUP_CHECK_ATTEMPTS; i++) {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -159,6 +160,109 @@ func TestHandleCreateService_Duplicate(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got %d, want 409", w.Code)
+	}
+}
+
+// TestHandleCreateService_ReactivatesSoftDeleted proves the disable→re-enable path:
+// an active name is still a 409 duplicate, but a soft-deleted (disabled) name is
+// reactivated in place — preserving its service_id — instead of 409ing forever. It
+// also asserts conductor is notified on the writes.
+func TestHandleCreateService_ReactivatesSoftDeleted(t *testing.T) {
+	requireDB(t)
+
+	name := uuid.New().String()
+	t.Cleanup(func() {
+		connect().Exec(`DELETE FROM services WHERE name = ?`, name) //nolint:errcheck
+	})
+
+	var notified int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&notified, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	t.Setenv("CONDUCTOR_URL", srv.URL)
+	t.Setenv("CONDUCTOR_NOTIFY_KEY", "k")
+
+	create := func() *httptest.ResponseRecorder {
+		body := bytes.NewBufferString(`{"name":"` + name + `","url":"http://svc:9000"}`)
+		r := httptest.NewRequest(http.MethodPost, "/services", body)
+		r.Header.Set("X-Service-Key", testAdminKey)
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handleCreateService(w, r)
+		return w
+	}
+
+	// 1. first create → 201
+	w1 := create()
+	if w1.Code != http.StatusCreated {
+		t.Fatalf("create: got %d, want 201: %s", w1.Code, w1.Body.String())
+	}
+	var svc1 Service
+	json.NewDecoder(w1.Body).Decode(&svc1) //nolint:errcheck
+
+	// 2. active duplicate → still 409
+	if w2 := create(); w2.Code != http.StatusConflict {
+		t.Fatalf("active duplicate: got %d, want 409", w2.Code)
+	}
+
+	// 3. soft-delete (disable)
+	rdel := httptest.NewRequest(http.MethodDelete, "/services/"+svc1.ServiceID, nil)
+	rdel.Header.Set("X-Service-Key", testAdminKey)
+	rdel.SetPathValue("id", svc1.ServiceID)
+	wdel := httptest.NewRecorder()
+	handleDeleteService(wdel, rdel)
+	if wdel.Code != http.StatusNoContent {
+		t.Fatalf("delete: got %d, want 204", wdel.Code)
+	}
+
+	// 4. re-create same name → reactivated (200), same id, active
+	w3 := create()
+	if w3.Code != http.StatusOK {
+		t.Fatalf("reactivate: got %d, want 200: %s", w3.Code, w3.Body.String())
+	}
+	var svc3 Service
+	json.NewDecoder(w3.Body).Decode(&svc3) //nolint:errcheck
+	if svc3.ServiceID != svc1.ServiceID {
+		t.Errorf("reactivated id = %q, want same as original %q", svc3.ServiceID, svc1.ServiceID)
+	}
+	if !svc3.Active {
+		t.Error("reactivated service should be active")
+	}
+	if atomic.LoadInt32(&notified) == 0 {
+		t.Error("expected conductor to be notified on writes")
+	}
+}
+
+// TestHandleUpsertServiceAccount_CreatesUsableReadAccount proves builder can grant a
+// runtime-deployed service (e.g. workflows) a registry read-account that then
+// authenticates — the path that lets a builder-deployed service pull GET /actions.
+func TestHandleUpsertServiceAccount_CreatesUsableReadAccount(t *testing.T) {
+	requireDB(t)
+
+	name := "wf-" + uuid.New().String()
+	t.Cleanup(func() {
+		connect().Exec(`DELETE FROM registry_service_accounts WHERE name = ?`, name) //nolint:errcheck
+	})
+
+	body := bytes.NewBufferString(`{"name":"` + name + `","key":"derived-key","role":"read"}`)
+	r := httptest.NewRequest(http.MethodPost, "/service-accounts", body)
+	r.Header.Set("X-Service-Key", testAdminKey)
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handleUpsertServiceAccount(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("upsert: got %d, want 204: %s", w.Code, w.Body.String())
+	}
+
+	// The new account authenticates as a read account: GET /services succeeds.
+	r2 := httptest.NewRequest(http.MethodGet, "/services", nil)
+	r2.Header.Set("X-Service-Key", name+":derived-key")
+	w2 := httptest.NewRecorder()
+	handleListServices(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("list with upserted account: got %d, want 200", w2.Code)
 	}
 }
 

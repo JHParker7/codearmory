@@ -71,6 +71,45 @@ func handleGetOrgService(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(view) //nolint:errcheck
 }
 
+// missingRequiredConfig returns the def's requiredConfig keys not satisfied by this
+// request or already stored. A key is satisfied by: plain config in the request,
+// DATABASE_URL via a supplied or previously-stored db_url, or a sensitive key supplied
+// now (req.Secrets) or previously stored (existing.SecretsCiphertext). Config is
+// replaced on each PUT, so only the request's config counts; db_url and secrets are
+// kept when not re-supplied, so the stored ones count.
+func missingRequiredConfig(def serviceDef, req setServiceRequest, existing OrgService, service string) ([]string, error) {
+	satisfied := map[string]bool{}
+	for k := range req.Config {
+		satisfied[k] = true
+	}
+	if strings.TrimSpace(req.DBUrl) != "" || existing.DBURLCiphertext != nil {
+		satisfied["DATABASE_URL"] = true
+	}
+	if len(req.Secrets) > 0 {
+		for k := range req.Secrets {
+			satisfied[k] = true
+		}
+	} else if existing.SecretsCiphertext != nil && secretsEncryptionEnabled() {
+		// A decrypt failure is an internal error, NOT "the keys are missing" — surface
+		// it so the caller returns 500 rather than wrongly blocking a re-enable whose
+		// secrets are still stored (and live in the Secret) with a misleading 400.
+		m, err := decryptSecretsMap(existing.SecretsCiphertext, service)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt stored secrets for %s: %w", service, err)
+		}
+		for k := range m {
+			satisfied[k] = true
+		}
+	}
+	var missing []string
+	for _, k := range def.RequiredConfig {
+		if !satisfied[k] {
+			missing = append(missing, k)
+		}
+	}
+	return missing, nil
+}
+
 func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleSetOrgService")
 	defer span.End()
@@ -153,6 +192,44 @@ func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 		}
 		row.DBURLCiphertext = ct
 		row.DBHost = host
+	}
+
+	// Admin-supplied sensitive config (REDIS_URL, GITEA_ADMIN_TOKEN, …) is encrypted as
+	// a map, bound to the service. Builder writes each entry into the service Secret.
+	if len(req.Secrets) > 0 {
+		if !secretsEncryptionEnabled() {
+			http.Error(w, "secret storage is disabled (BUILDER_SECRETS_KEY not set)", http.StatusServiceUnavailable)
+			return
+		}
+		ct, err := encryptSecretsMap(req.Secrets, service)
+		if err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		row.SecretsCiphertext = ct
+	}
+
+	// Validation gate: enabling a platform service in the default scope makes builder
+	// deploy it, so its required connection config must be present (now or already
+	// stored). Org-scope toggles only flip the access gate (they inherit the default
+	// deployment), so they are not gated.
+	if enabled && kind == kindPlatform && orgID == defaultOrgID {
+		if def, ok := embeddedServiceDef(service); ok {
+			// Read from the primary so a db_url/secret stored in a prior request is
+			// seen (a lagging replica would falsely report it missing).
+			existing, _ := getOrgServicePrimary(ctx, orgID, service)
+			missing, err := missingRequiredConfig(def, req, existing, service)
+			if err != nil {
+				span.RecordError(err)
+				slog.ErrorContext(ctx, "validate required config", "org_id", orgID, "service", service, "error", err)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			if len(missing) > 0 {
+				http.Error(w, "missing required config before enabling "+service+": "+strings.Join(missing, ", "), http.StatusBadRequest)
+				return
+			}
+		}
 	}
 
 	if _, err := upsertOrgService(ctx, row); err != nil {

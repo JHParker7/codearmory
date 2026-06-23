@@ -81,6 +81,13 @@ func startReconciler(ctx context.Context) {
 	// image. Per-service config knobs override these.
 	backend.defaultReplicas = defaultReplicaFloor()
 	backend.rotateInterval = defaultRotateInterval()
+	if v := strings.TrimSpace(os.Getenv("BUILDER_IMAGE_PULL_SECRETS")); v != "" {
+		for _, s := range strings.Split(v, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				backend.imagePullSecrets = append(backend.imagePullSecrets, s)
+			}
+		}
+	}
 	if backend.defaultReplicas > 0 || backend.rotateInterval > 0 {
 		slog.InfoContext(ctx, "workload availability defaults", "replicas", backend.defaultReplicas, "rotate_interval", backend.rotateInterval)
 	}
@@ -260,6 +267,13 @@ func specFromRow(row OrgService) workloadSpec {
 			spec.DBUrl = dbURL
 		} else {
 			slog.Error("failed to decrypt service db url", "service", row.ServiceName, "error", err)
+		}
+	}
+	if len(row.SecretsCiphertext) > 0 && secretsEncryptionEnabled() {
+		if m, err := decryptSecretsMap(row.SecretsCiphertext, row.ServiceName); err == nil {
+			spec.Secrets = m
+		} else {
+			slog.Error("failed to decrypt service secrets", "service", row.ServiceName, "error", err)
 		}
 	}
 	return spec
