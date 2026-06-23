@@ -94,8 +94,8 @@ class TestMissingAuth:
     def test_no_header_on_post_orgs(self, base_url):
         self._assert_401(base_url, "post", "/gatekeeper/orgs")
 
-    def test_no_header_on_state_route(self, base_url):
-        self._assert_401(base_url, "get", f"/blueprints/state/alice/dev")
+    def test_no_header_on_forge_route(self, base_url):
+        self._assert_401(base_url, "get", "/forge/executions")
 
     def test_non_bearer_scheme_returns_401(self, base_url):
         resp = requests.get(
@@ -290,6 +290,6 @@ class TestDeletedUser:
             headers=bearer(token),
         )
 
-        for path in ["/gatekeeper/orgs", "/gatekeeper/teams", f"/blueprints/state/{uid}/dev"]:
+        for path in ["/gatekeeper/orgs", "/gatekeeper/teams", "/forge/executions"]:
             resp = requests.get(f"{base_url}{path}", headers=bearer(token))
             assert resp.status_code == 401, f"expected 401 for {path}, got {resp.status_code}"
