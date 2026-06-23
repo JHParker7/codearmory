@@ -97,6 +97,12 @@ func handleCommands(w http.ResponseWriter, r *http.Request) {
 	for {
 		cmds, err := claimCommands(ctx, o.OutpostID, 16)
 		if err != nil {
+			// A cancelled/expired request context (client disconnected or the
+			// long-poll deadline hit mid-claim) is a normal termination, not a
+			// server error — return without a 5xx.
+			if ctx.Err() != nil {
+				return
+			}
 			span.RecordError(err)
 			http.Error(w, "failed to claim commands", http.StatusInternalServerError)
 			return

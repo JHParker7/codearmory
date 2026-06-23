@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -344,12 +345,78 @@ func main() {
 		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
 		defer shutdown(context.Background())
 	}
+	if err := run(ctx); err != nil {
+		slog.Error("fatal", "error", err)
+		stop()
+		os.Exit(1)
+	}
+}
+
+// buildClientTLSConfig builds the optional mTLS client-auth config from env.
+// Returns an error instead of exiting so the branches are unit-testable.
+func buildClientTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{}
+	switch os.Getenv("TLS_CLIENT_AUTH") {
+	case "require":
+		caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+		if caFile == "" {
+			return nil, errors.New("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+		}
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read TLS_CLIENT_CA_FILE %q: %w", caFile, err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("TLS_CLIENT_CA_FILE %q contains no valid PEM certificates", caFile)
+		}
+		tlsCfg.ClientCAs = caPool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	case "request":
+		tlsCfg.ClientAuth = tls.RequestClientCert
+	}
+	return tlsCfg, nil
+}
+
+// buildMux registers all routes (the cancel route needs the worker pool) and
+// returns the handler. Extracted from main so the routing table is unit-testable.
+func buildMux(workers *WorkerPool) http.Handler {
+	mux := telemetry.NewMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
+	mux.HandleFunc("GET /actions", handleListActions)
+
+	mux.HandleFunc("POST /steps", handleCreateStep)
+	mux.HandleFunc("GET /steps", handleListSteps)
+	mux.HandleFunc("GET /steps/{id}", handleGetStep)
+	mux.HandleFunc("PUT /steps/{id}", handleUpdateStep)
+	mux.HandleFunc("DELETE /steps/{id}", handleDeleteStep)
+
+	mux.HandleFunc("POST /pipelines", handleCreateWorkflow)
+	mux.HandleFunc("GET /pipelines", handleListWorkflows)
+	mux.HandleFunc("GET /pipelines/{id}", handleGetWorkflow)
+	mux.HandleFunc("PUT /pipelines/{id}", handleUpdateWorkflow)
+	mux.HandleFunc("DELETE /pipelines/{id}", handleDeleteWorkflow)
+
+	mux.HandleFunc("POST /pipelines/{id}/runs", handleTriggerRun)
+	mux.HandleFunc("POST /internal/catalog/refresh", handleCatalogRefresh)
+	mux.HandleFunc("POST /internal/pipelines/{id}/runs", handleInternalTriggerRun)
+	mux.HandleFunc("GET /internal/pipelines/{id}", handleInternalGetWorkflow)
+	mux.HandleFunc("GET /internal/runs/{id}", handleInternalGetRun)
+	mux.HandleFunc("GET /runs", handleListRuns)
+	mux.HandleFunc("GET /runs/{id}", handleGetRun)
+	mux.HandleFunc("DELETE /runs/{id}", handleCancelRun(workers))
+	return mux
+}
+
+// run owns the full service lifecycle (migrate, worker pool, serve, graceful
+// shutdown), returning an error instead of os.Exit-ing so it is unit-testable.
+func run(ctx context.Context) error {
 	initMetrics()
 	httpClient = initHTTPClient()
 
 	if err := connect().AutoMigrate(&Step{}, &Workflow{}, &WorkflowRun{}, &WorkflowStepRun{}); err != nil {
-		slog.Error("failed to run AutoMigrate", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("AutoMigrate: %w", err)
 	}
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_runs_queue ON workflow_runs (status, created_at) WHERE status IN ('pending', 'running')`).Error; err != nil {
 		slog.Warn("failed to create workflow_runs index", "error", err)
@@ -389,34 +456,8 @@ func main() {
 	workers.Start(ctx, 5)
 	slog.Info("worker pool started", "workers", 5)
 
-	mux := telemetry.NewMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
-	mux.HandleFunc("GET /actions", handleListActions)
-
-	mux.HandleFunc("POST /steps", handleCreateStep)
-	mux.HandleFunc("GET /steps", handleListSteps)
-	mux.HandleFunc("GET /steps/{id}", handleGetStep)
-	mux.HandleFunc("PUT /steps/{id}", handleUpdateStep)
-	mux.HandleFunc("DELETE /steps/{id}", handleDeleteStep)
-
-	mux.HandleFunc("POST /pipelines", handleCreateWorkflow)
-	mux.HandleFunc("GET /pipelines", handleListWorkflows)
-	mux.HandleFunc("GET /pipelines/{id}", handleGetWorkflow)
-	mux.HandleFunc("PUT /pipelines/{id}", handleUpdateWorkflow)
-	mux.HandleFunc("DELETE /pipelines/{id}", handleDeleteWorkflow)
-
-	mux.HandleFunc("POST /pipelines/{id}/runs", handleTriggerRun)
-	mux.HandleFunc("POST /internal/catalog/refresh", handleCatalogRefresh)
-	mux.HandleFunc("POST /internal/pipelines/{id}/runs", handleInternalTriggerRun)
-	mux.HandleFunc("GET /internal/pipelines/{id}", handleInternalGetWorkflow)
-	mux.HandleFunc("GET /internal/runs/{id}", handleInternalGetRun)
-	mux.HandleFunc("GET /runs", handleListRuns)
-	mux.HandleFunc("GET /runs/{id}", handleGetRun)
-	mux.HandleFunc("DELETE /runs/{id}", handleCancelRun(workers))
-
 	port := envOrDefault("PORT", "8085")
-	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{mux}), "workflows",
+	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{buildMux(workers)}), "workflows",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
 
@@ -430,31 +471,13 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 	if certFile != "" && keyFile != "" {
-		tlsCfg := &tls.Config{}
-		switch os.Getenv("TLS_CLIENT_AUTH") {
-		case "require":
-			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
-			if caFile == "" {
-				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
-				os.Exit(1)
-			}
-			caCert, err := os.ReadFile(caFile)
-			if err != nil {
-				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
-				os.Exit(1)
-			}
-			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(caCert) {
-				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
-				os.Exit(1)
-			}
-			tlsCfg.ClientCAs = caPool
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		case "request":
-			tlsCfg.ClientAuth = tls.RequestClientCert
+		tlsCfg, err := buildClientTLSConfig()
+		if err != nil {
+			return fmt.Errorf("TLS client-auth config: %w", err)
 		}
 		srv.TLSConfig = tlsCfg
 	}
+	serveErr := make(chan error, 1)
 	go func() {
 		var err error
 		if certFile != "" && keyFile != "" {
@@ -465,17 +488,20 @@ func main() {
 			err = srv.ListenAndServe()
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
+			serveErr <- err
 		}
 	}()
 
-	<-ctx.Done()
-	stop()
+	select {
+	case err := <-serveErr:
+		return fmt.Errorf("server error: %w", err)
+	case <-ctx.Done():
+	}
 	slog.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown error", "error", err)
+		return fmt.Errorf("shutdown: %w", err)
 	}
+	return nil
 }

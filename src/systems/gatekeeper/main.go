@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -207,6 +208,104 @@ func main() {
 		slog.Warn("REGISTRY_URL not set — default grants will not be loaded from registry; signup permissions will be minimal")
 	}
 
+	mux := buildMux()
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8081"
+	}
+
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "gatekeeper")
+	if err != nil {
+		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
+	} else {
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
+		defer shutdown(context.Background())
+	}
+	initMetrics()
+	initCache()
+	initPermittedServices()
+	initTrustedProxies()
+	initAuditPermissionChecks()
+
+	wrappedMux := otelhttp.NewHandler(NewLogger(limitBody(mux)), "gatekeeper",
+		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
+	)
+
+	certFile := os.Getenv("TLS_CERT_FILE")
+	keyFile := os.Getenv("TLS_KEY_FILE")
+
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      wrappedMux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	if certFile != "" && keyFile != "" {
+		tlsCfg, err := buildClientTLSConfig()
+		if err != nil {
+			slog.Error("TLS client-auth config", "error", err)
+			os.Exit(1)
+		}
+		srv.TLSConfig = tlsCfg
+	}
+
+	go func() {
+		var err error
+		if certFile != "" && keyFile != "" {
+			slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
+			err = srv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			slog.Info("listening", "port", port)
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "error", err)
+	}
+}
+
+// buildClientTLSConfig builds the optional mTLS client-auth config from env,
+// returning an error instead of exiting so its branches are unit-testable.
+func buildClientTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{}
+	switch os.Getenv("TLS_CLIENT_AUTH") {
+	case "require":
+		caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+		if caFile == "" {
+			return nil, errors.New("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+		}
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read TLS_CLIENT_CA_FILE %q: %w", caFile, err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("TLS_CLIENT_CA_FILE %q contains no valid PEM certificates", caFile)
+		}
+		tlsCfg.ClientCAs = caPool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	case "request":
+		tlsCfg.ClientAuth = tls.RequestClientCert
+	}
+	return tlsCfg, nil
+}
+
+// buildMux builds the full routing table. Extracted from main so the route set
+// is unit-testable without standing up the server.
+func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -314,95 +413,7 @@ func main() {
 	mux.Handle("GET /service-permission-requests/{id}", mw(handleGetServicePermissionRequest))
 	mux.Handle("POST /service-permission-requests/{id}/approve", mw(handleApproveServicePermissionRequest))
 	mux.Handle("POST /service-permission-requests/{id}/decline", mw(handleDeclineServicePermissionRequest))
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
-	}
-
-	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "gatekeeper")
-	if err != nil {
-		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
-	} else {
-		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
-		defer shutdown(context.Background())
-	}
-	initMetrics()
-	initCache()
-	initPermittedServices()
-	initTrustedProxies()
-	initAuditPermissionChecks()
-
-	wrappedMux := otelhttp.NewHandler(NewLogger(limitBody(mux)), "gatekeeper",
-		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
-	)
-
-	certFile := os.Getenv("TLS_CERT_FILE")
-	keyFile := os.Getenv("TLS_KEY_FILE")
-
-	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      wrappedMux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  120 * time.Second,
-	}
-
-	if certFile != "" && keyFile != "" {
-		tlsCfg := &tls.Config{}
-		// TLS_CLIENT_AUTH controls whether client certificates are requested.
-		// Set to "require" to enforce mTLS (needed for ClientCertFingerprints binding).
-		//   Requires TLS_CLIENT_CA_FILE to be set; clients must present a cert signed by that CA.
-		// Set to "request" to request but not require a client cert.
-		// Default (unset): no client certificate requested.
-		switch os.Getenv("TLS_CLIENT_AUTH") {
-		case "require":
-			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
-			if caFile == "" {
-				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
-				os.Exit(1)
-			}
-			caCert, err := os.ReadFile(caFile)
-			if err != nil {
-				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
-				os.Exit(1)
-			}
-			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(caCert) {
-				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
-				os.Exit(1)
-			}
-			tlsCfg.ClientCAs = caPool
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		case "request":
-			tlsCfg.ClientAuth = tls.RequestClientCert
-		}
-		srv.TLSConfig = tlsCfg
-	}
-
-	go func() {
-		var err error
-		if certFile != "" && keyFile != "" {
-			slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
-			err = srv.ListenAndServeTLS(certFile, keyFile)
-		} else {
-			slog.Info("listening", "port", port)
-			err = srv.ListenAndServe()
-		}
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	<-ctx.Done()
-	stop()
-	slog.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown error", "error", err)
-	}
+	return mux
 }
 
 // applyForeignKeys adds FK constraints after all tables exist. Each statement

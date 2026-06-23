@@ -13,7 +13,24 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
+
+// testDBReady is set in TestMain when the in-memory test DB is migrated. The
+// dequeue's FOR UPDATE SKIP LOCKED and the run timestamps are dialect-portable
+// (skipLocked + CURRENT_TIMESTAMP), so the suite runs on hermetic sqlite.
+var testDBReady bool
+
+// requireDB skips a test when the test database failed to initialise.
+func requireDB(t *testing.T) {
+	t.Helper()
+	if !testDBReady {
+		t.Skip("workflows test database not available")
+	}
+}
 
 // fakeGatekeeper spins up a test server that always returns the given status
 // and body, overriding the package-level gatekeeperURL for the test duration.
@@ -50,6 +67,21 @@ func TestMain(m *testing.M) {
 	initMetrics()
 	httpClient = initHTTPClient()
 	gatekeeperClient = newGatekeeperClient()
+
+	// Hermetic in-memory sqlite (mirrors gatekeeper) — no external Postgres.
+	conn, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	if err == nil {
+		if migrateErr := conn.AutoMigrate(&Step{}, &Workflow{}, &WorkflowRun{}, &WorkflowStepRun{}); migrateErr == nil {
+			dbInitMu.Lock()
+			gormDB = conn
+			gormDBRead = conn
+			dbInitMu.Unlock()
+			testDBReady = true
+		}
+	}
+
 	os.Exit(m.Run())
 }
 

@@ -30,6 +30,16 @@ var gormDB *gorm.DB
 var gormDBRead *gorm.DB
 var dbInitMu sync.Mutex
 
+// skipLocked applies FOR UPDATE SKIP LOCKED so concurrent workers never dequeue
+// the same run twice. It is a Postgres feature; on other dialects (sqlite in unit
+// tests, which is single-writer) it is a no-op so the dequeue path stays testable.
+func skipLocked(tx *gorm.DB) *gorm.DB {
+	if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		return tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
+	}
+	return tx
+}
+
 func connect() *gorm.DB {
 	dbInitMu.Lock()
 	defer dbInitMu.Unlock()
@@ -208,7 +218,7 @@ func getStepsByIDs(ctx context.Context, ids []string) ([]Step, error) {
 // Returns the number of rows affected (0 if the run was not in a cancellable state).
 func cancelRun(ctx context.Context, id string) (int64, error) {
 	result := connect().WithContext(ctx).Exec(
-		"UPDATE workflow_runs SET status='cancelled', ended_at=now(), token=NULL WHERE run_id=? AND status IN ('pending','running')", id,
+		"UPDATE workflow_runs SET status='cancelled', ended_at=CURRENT_TIMESTAMP, token=NULL WHERE run_id=? AND status IN ('pending','running')", id,
 	)
 	return result.RowsAffected, result.Error
 }
@@ -391,7 +401,7 @@ func (run WorkflowRun) Remove(ctx context.Context) error {
 	defer span.End()
 	span.SetAttributes(attribute.String("run.id", run.RunID))
 	if err := connect().WithContext(ctx).Exec(
-		"UPDATE workflow_runs SET status='cancelled', ended_at=now(), token=NULL WHERE run_id=? AND status IN ('pending','running')", run.RunID,
+		"UPDATE workflow_runs SET status='cancelled', ended_at=CURRENT_TIMESTAMP, token=NULL WHERE run_id=? AND status IN ('pending','running')", run.RunID,
 	).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -494,7 +504,7 @@ func (WorkflowRun) Dequeue(ctx context.Context) (*WorkflowRun, error) {
 	defer tx.Rollback() //nolint:errcheck
 
 	var run WorkflowRun
-	result := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+	result := skipLocked(tx).
 		Where("status = 'pending'").
 		Order("created_at").
 		Limit(1).
@@ -509,7 +519,7 @@ func (WorkflowRun) Dequeue(ctx context.Context) (*WorkflowRun, error) {
 		return nil, nil
 	}
 
-	r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", run.RunID)
+	r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=CURRENT_TIMESTAMP WHERE run_id=?", run.RunID)
 	if r.Error != nil {
 		span.RecordError(r.Error)
 		span.SetStatus(codes.Error, r.Error.Error())
@@ -547,7 +557,7 @@ func (run WorkflowRun) Complete(_ context.Context, status string) {
 		attribute.String("status", status),
 	)
 	if err := connect().WithContext(context.Background()).Exec(
-		"UPDATE workflow_runs SET status=?, ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
+		"UPDATE workflow_runs SET status=?, ended_at=CURRENT_TIMESTAMP, token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
 		status, run.RunID,
 	).Error; err != nil {
 		span.RecordError(err)
@@ -588,7 +598,7 @@ func (sr WorkflowStepRun) Add(_ context.Context) error {
 	)
 	if err := connect().Exec(
 		`INSERT INTO workflow_step_runs (step_run_id, run_id, step_index, step_name, status, started_at)
-		 VALUES (?, ?, ?, ?, 'running', now())`,
+		 VALUES (?, ?, ?, ?, 'running', CURRENT_TIMESTAMP)`,
 		sr.StepRunID, sr.RunID, sr.StepIndex, sr.StepName,
 	).Error; err != nil {
 		span.RecordError(err)
@@ -662,7 +672,7 @@ func (sr WorkflowStepRun) Complete(_ context.Context, status string, output *str
 		attribute.String("status", status),
 	)
 	connect().WithContext(context.Background()).Exec( //nolint:errcheck — step result is best-effort; run status is authoritative
-		`UPDATE workflow_step_runs SET status=?, response_body=?, memory_used_mb=?, memory_limit_mb=?, ended_at=now() WHERE step_run_id=?`,
+		`UPDATE workflow_step_runs SET status=?, response_body=?, memory_used_mb=?, memory_limit_mb=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=?`,
 		status, output, usedMB, limitMB, sr.StepRunID)
 	span.SetStatus(codes.Ok, "")
 }
@@ -670,7 +680,7 @@ func (sr WorkflowStepRun) Complete(_ context.Context, status string, output *str
 // recoverStuckRunsDB marks any runs left in 'running' state as 'failed' on startup.
 func recoverStuckRunsDB() int64 {
 	result := connect().Exec(
-		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE status='running'",
+		"UPDATE workflow_runs SET status='failed', ended_at=CURRENT_TIMESTAMP, token=NULL, run_session_id=NULL WHERE status='running'",
 	)
 	if result.Error != nil {
 		slog.Error("startup: failed to recover stuck runs", "error", result.Error)

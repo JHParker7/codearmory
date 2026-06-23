@@ -1,10 +1,16 @@
 {{- $fullname := include "codearmory.fullname" . -}}
 {{- $manifest := .Files.Get "files/registry-manifest.json" -}}
-{{- /* The chart ships only the CORE service manifest entries (gatekeeper, builder).
-       Every non-core service registers its own routes/RBAC with the registry at runtime
-       via builder, so their URLs are not substituted here. */ -}}
+{{- /* The chart ships the CORE service manifest entries (gatekeeper, builder, and the
+       forge + workflows CI/CD pair). Every non-core service registers its own routes/RBAC
+       with the registry at runtime via builder, so their URLs are not substituted here. */ -}}
 {{- $manifest = replace "http://gatekeeper:"        (printf "http://%s-gatekeeper:" $fullname)        $manifest -}}
 {{- $manifest = replace "http://builder:"           (printf "http://%s-builder:" $fullname)           $manifest -}}
+{{- if .Values.forge.enabled -}}
+{{- $manifest = replace "http://forge:"             (printf "http://%s-forge:" $fullname)             $manifest -}}
+{{- end -}}
+{{- if .Values.workflows.enabled -}}
+{{- $manifest = replace "http://workflows:"         (printf "http://%s-workflows:" $fullname)         $manifest -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

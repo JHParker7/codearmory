@@ -47,13 +47,15 @@ gatekeeper:
       memory: 256Mi
   env:
     logLevel: info
-    # Comma-separated list of service names permitted to register.
-    permittedServices: "gatekeeper,registry,builder"
+    # Comma-separated list of service names permitted to register. Core services
+    # deployed by this chart (incl. the forge + workflows CI/CD pair) are listed
+    # here; non-core services are auto-permitted at runtime when builder registers them.
+    permittedServices: "gatekeeper,registry,builder,forge,workflows"
     # Comma-separated services allowed to resolve org secrets via the internal
-    # lookup endpoint (deny-all when empty). Set to "containers,forge" to let the
-    # container registry resolve per-org creds and forge resolve "secret:<name>"
-    # job secret_refs. Requires the secrets feature (gatekeeperSecretsKey).
-    secretsLookupAllowedCallers: ""
+    # lookup endpoint (deny-all when empty). Defaults to "forge" so forge can resolve
+    # "secret:<name>" job secret_refs; add "containers" to let the container registry
+    # resolve per-org creds. Requires the secrets feature (gatekeeperSecretsKey).
+    secretsLookupAllowedCallers: "forge"
     # Comma-separated CIDRs of trusted reverse proxies (optional).
     trustedProxyCIDRs: ""
     # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
@@ -230,6 +232,124 @@ portal:
             pathType: Prefix
     tls: []
 
+# ── Forge ─────────────────────────────────────────────────────────────────────
+# Sandboxed command execution — one half of the core CI/CD pair (with workflows).
+# Shipped by this chart as a core service so pipelines can run out of the box; set
+# enabled=false only if you intend to run an external forge.
+forge:
+  enabled: true
+  image:
+    repository: forge
+    tag: ""
+  replicaCount: 1
+  port: 8083
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    logLevel: info
+    # Container runtime: "kubernetes" (recommended) or "docker".
+    # When set to "docker", mount the Docker socket via forge.dockerSocket.
+    runtime: kubernetes
+    # Comma-separated list of container images forge is permitted to run.
+    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25"
+    # Kubernetes namespace in which forge creates sandbox Jobs. Empty = the release
+    # namespace (so a default install works with no prerequisite). Set a dedicated
+    # namespace — which MUST already exist — for stronger isolation of sandbox Jobs.
+    k8sNamespace: ""
+    # Optional RuntimeClass for stronger isolation (e.g. "gvisor", "kata").
+    k8sRuntimeClass: ""
+    # Resource limits applied to each sandbox container.
+    containerMemoryLimit: "256Mi"
+    containerCpuLimit: "500m"
+    otelEndpoint: ""
+    # Optional domain-allowlisting egress proxy URL for sandbox traffic. Empty by
+    # default: the egress proxy is a non-core service builder deploys as forge infra.
+    # Set this (e.g. http://<release>-egress-proxy:3128) once one is reachable, or
+    # leave empty for direct/VM-level egress.
+    egressProxyUrl: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
+    databaseUrl: ""
+    # Must match conductor.secret.conductorForwardKey. Auto-synced on upgrades.
+    conductorForwardKey: ""
+    # Must match the forge entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
+    gatekeeperServiceKey: ""
+    # Proxmox VE API token for the proxmox runtime backend, in the form
+    # "USER@REALM!TOKENID=SECRET". Only used when forge.proxmox.enabled is true;
+    # referenced by a runtime backend via secret_refs {token: "PROXMOX_TOKEN"}.
+    proxmoxToken: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  # Mount the Docker socket when forge.env.runtime is "docker".
+  dockerSocket:
+    enabled: false
+    path: /var/run/docker.sock
+  # Proxmox VM-per-job runtime backend. When enabled, the PROXMOX_TOKEN secret is
+  # mounted into forge so an admin can create a runtime backend of type "proxmox"
+  # (via POST /runtime-backends) that clones a throwaway VM per job. The backend's
+  # url/node/template_vmid/storage/bridge live in its API config, not here — this
+  # flag only gates whether the token secret is wired into the pod.
+  proxmox:
+    enabled: false
+
+# ── Workflows ─────────────────────────────────────────────────────────────────
+# CI/CD pipeline orchestration — the other half of the core CI/CD pair (with forge).
+# Sequences forge executions (and any other registered service) into runs.
+workflows:
+  enabled: true
+  image:
+    repository: workflows
+    tag: ""
+  replicaCount: 1
+  port: 8085
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    logLevel: info
+    # Comma-separated "name=url" pairs of services that workflow steps may call.
+    # Defaults to "forge=http://<fullname>-forge:8083" (the core step target) when
+    # left empty. Override to add non-core targets (e.g. blueprints) that builder
+    # has deployed and registered, or to change URLs.
+    services: ""
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
+    databaseUrl: ""
+    # Must match the workflows entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
+    gatekeeperServiceKey: ""
+    # Shared HMAC secret with the hooks service for authenticating internal trigger requests.
+    # Auto-synced from hooks.secret.hooksTriggerKey when hooks is deployed. Leave empty for auto-generation.
+    hooksTriggerKey: ""
+    # AES-256 key for encrypting run tokens at rest in the database.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
+    tokenKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
 # ── Builder ───────────────────────────────────────────────────────────────────
 # Org-level service control plane: org admins enable/disable/configure services
 # for their org. A null/"default" org is the baseline every org inherits.
@@ -338,10 +458,12 @@ postgresql:
   primary:
     initdb:
       scripts:
-        # Only the CORE service databases. Non-core services are deployed by builder
-        # with an admin-supplied db_url (HA Postgres / Neon / managed), so the bundled
-        # subchart never provisions their databases.
+        # Only the CORE service databases (incl. the forge + workflows CI/CD pair).
+        # Non-core services are deployed by builder with an admin-supplied db_url (HA
+        # Postgres / Neon / managed), so the bundled subchart never provisions theirs.
         init.sql: |
           CREATE DATABASE gatekeeper;
           CREATE DATABASE registry;
           CREATE DATABASE builder;
+          CREATE DATABASE forge;
+          CREATE DATABASE workflows;

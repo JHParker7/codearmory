@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
@@ -29,12 +28,6 @@ func fakeGatekeeper(t *testing.T, status int, body string) {
 		gatekeeperClient.URL = orig
 		srv.Close()
 	})
-}
-
-func TestMain(m *testing.M) {
-	initMetrics()
-	gatekeeperClient = newGatekeeperClient()
-	os.Exit(m.Run())
 }
 
 // ── CheckPermissions ──────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -130,48 +131,36 @@ func limitBody(next http.Handler) http.Handler {
 	})
 }
 
-func main() {
-	logLevel := slog.LevelInfo
-	if v := os.Getenv("LOG_LEVEL"); v != "" {
-		_ = logLevel.UnmarshalText([]byte(v))
+// buildClientTLSConfig builds the optional mTLS client-auth config from the
+// TLS_CLIENT_AUTH / TLS_CLIENT_CA_FILE env vars. Returns an error instead of
+// exiting so the branches are unit-testable (main turns the error into a fatal).
+func buildClientTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{}
+	switch os.Getenv("TLS_CLIENT_AUTH") {
+	case "require":
+		caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+		if caFile == "" {
+			return nil, errors.New("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+		}
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read TLS_CLIENT_CA_FILE %q: %w", caFile, err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("TLS_CLIENT_CA_FILE %q contains no valid PEM certificates", caFile)
+		}
+		tlsCfg.ClientCAs = caPool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	case "request":
+		tlsCfg.ClientAuth = tls.RequestClientCert
 	}
-	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
-	slog.SetDefault(slog.New(jsonHandler))
+	return tlsCfg, nil
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
-	defer stop()
-
-	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "outpost-gateway")
-	if err != nil {
-		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
-	} else {
-		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
-		defer shutdown(context.Background())
-	}
-	initMetrics()
-	httpClient = initHTTPClient()
-
-	if err := connect().AutoMigrate(&Outpost{}, &OutpostCommand{}, &OutpostEvent{}); err != nil {
-		slog.Error("failed to migrate tables", "error", err)
-		os.Exit(1)
-	}
-	slog.Info("database initialized")
-
-	if outpostInternalKey == "" {
-		slog.Error("OUTPOST_INTERNAL_KEY not set — internal command/event auth is disabled and will reject all internal traffic")
-	}
-	if len(eventConsumers) == 0 {
-		slog.Warn("EVENT_CONSUMERS not set — no integration consumers configured; events cannot be delivered")
-	} else {
-		slog.Info("event consumers configured", "integrations", len(eventConsumers))
-	}
-
-	gatekeeperClient = newGatekeeperClient()
-	registry.StartKeyRotation(ctx, gatekeeperURL, "outpost-gateway",
-		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
-
-	startDispatcher(ctx)
-
+// buildMux registers every route and returns the handler. Extracted from main so
+// the routing table is unit-testable without standing up a server or TLS.
+func buildMux() http.Handler {
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
@@ -191,9 +180,64 @@ func main() {
 
 	// Internal (service HMAC). Control-plane services enqueue commands here.
 	mux.HandleFunc("POST /internal/commands", handleEnqueueCommand)
+	return mux
+}
+
+func main() {
+	logLevel := slog.LevelInfo
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		_ = logLevel.UnmarshalText([]byte(v))
+	}
+	jsonHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+	slog.SetDefault(slog.New(jsonHandler))
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "outpost-gateway")
+	if err != nil {
+		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
+	} else {
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
+		defer shutdown(context.Background())
+	}
+	if err := run(ctx); err != nil {
+		slog.Error("fatal", "error", err)
+		stop()
+		os.Exit(1)
+	}
+}
+
+// run owns the full server lifecycle: migrate, wire dependencies, serve, and
+// gracefully shut down when ctx is cancelled. Extracted from main and returning
+// an error instead of os.Exit-ing so a test can start it on an ephemeral port,
+// hit it, and cancel — covering the bootstrap and ListenAndServe/Shutdown paths.
+func run(ctx context.Context) error {
+	initMetrics()
+	httpClient = initHTTPClient()
+
+	if err := connect().AutoMigrate(&Outpost{}, &OutpostCommand{}, &OutpostEvent{}); err != nil {
+		return fmt.Errorf("migrate tables: %w", err)
+	}
+	slog.Info("database initialized")
+
+	if outpostInternalKey == "" {
+		slog.Error("OUTPOST_INTERNAL_KEY not set — internal command/event auth is disabled and will reject all internal traffic")
+	}
+	if len(eventConsumers) == 0 {
+		slog.Warn("EVENT_CONSUMERS not set — no integration consumers configured; events cannot be delivered")
+	} else {
+		slog.Info("event consumers configured", "integrations", len(eventConsumers))
+	}
+
+	gatekeeperClient = newGatekeeperClient()
+	registry.StartKeyRotation(ctx, gatekeeperURL, "outpost-gateway",
+		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
+
+	startDispatcher(ctx)
 
 	port := envOrDefault("PORT", "8092")
-	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{mux}), "outpost-gateway",
+	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{buildMux()}), "outpost-gateway",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
 
@@ -208,31 +252,13 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 	if certFile != "" && keyFile != "" {
-		tlsCfg := &tls.Config{}
-		switch os.Getenv("TLS_CLIENT_AUTH") {
-		case "require":
-			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
-			if caFile == "" {
-				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
-				os.Exit(1)
-			}
-			caCert, err := os.ReadFile(caFile)
-			if err != nil {
-				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
-				os.Exit(1)
-			}
-			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(caCert) {
-				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
-				os.Exit(1)
-			}
-			tlsCfg.ClientCAs = caPool
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		case "request":
-			tlsCfg.ClientAuth = tls.RequestClientCert
+		tlsCfg, err := buildClientTLSConfig()
+		if err != nil {
+			return fmt.Errorf("TLS client-auth config: %w", err)
 		}
 		srv.TLSConfig = tlsCfg
 	}
+	serveErr := make(chan error, 1)
 	go func() {
 		var err error
 		if certFile != "" && keyFile != "" {
@@ -243,17 +269,20 @@ func main() {
 			err = srv.ListenAndServe()
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
+			serveErr <- err
 		}
 	}()
 
-	<-ctx.Done()
-	stop()
+	select {
+	case err := <-serveErr:
+		return fmt.Errorf("server error: %w", err)
+	case <-ctx.Done():
+	}
 	slog.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown error", "error", err)
+		return fmt.Errorf("shutdown: %w", err)
 	}
+	return nil
 }

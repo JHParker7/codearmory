@@ -21,6 +21,16 @@ var gormDB *gorm.DB
 var gormDBRead *gorm.DB
 var dbInitMu sync.Mutex
 
+// skipLocked applies FOR UPDATE SKIP LOCKED so concurrent pollers never claim the
+// same row twice. It is a Postgres feature; on other dialects (sqlite in tests,
+// which is single-writer) it is a no-op so the same code path stays exercisable.
+func skipLocked(tx *gorm.DB) *gorm.DB {
+	if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		return tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
+	}
+	return tx
+}
+
 func connect() *gorm.DB {
 	dbInitMu.Lock()
 	defer dbInitMu.Unlock()
@@ -72,7 +82,10 @@ func isDuplicateKey(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "23505")
+	msg := err.Error()
+	// Postgres ("duplicate key"/SQLSTATE 23505) and sqlite ("UNIQUE constraint failed").
+	return strings.Contains(msg, "duplicate key") || strings.Contains(msg, "23505") ||
+		strings.Contains(msg, "UNIQUE constraint failed")
 }
 
 // getOutpost loads an active outpost by id.
@@ -143,7 +156,7 @@ func claimCommands(ctx context.Context, outpostID string, n int) ([]OutpostComma
 
 	leaseCutoff := time.Now().UTC().Add(-commandClaimLease)
 	var cmds []OutpostCommand
-	res := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+	res := skipLocked(tx).
 		Where("outpost_id=? AND (status=? OR (status=? AND claimed_at < ?))",
 			outpostID, CmdPending, CmdClaimed, leaseCutoff).
 		Order("created_at").
@@ -206,7 +219,7 @@ func claimDueEvents(ctx context.Context, n int, lease time.Duration) ([]OutpostE
 	defer tx.Rollback() //nolint:errcheck
 
 	var events []OutpostEvent
-	res := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+	res := skipLocked(tx).
 		Where("status=? AND next_retry_at <= ?", EvPending, time.Now().UTC()).
 		Order("next_retry_at").
 		Limit(n).
