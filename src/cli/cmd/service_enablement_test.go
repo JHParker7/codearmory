@@ -16,58 +16,75 @@ func titlesPresent(screens []HubScreen, titles ...string) bool {
 	return true
 }
 
-// TestFilterScreens_HidesDisabledService verifies that a module whose Service is
-// disabled drops out of the hub, while account/core modules (empty Service) and
-// other still-enabled services remain.
-func TestFilterScreens_HidesDisabledService(t *testing.T) {
-	full := filterScreens(false, nil)
+// registeredAll returns every backing Service of an active module on the given hub
+// (admin or user) — the registered set under which nothing is service-hidden.
+func registeredAll(admin bool) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range activeModules() {
+		if m.Admin == admin && m.Service != "" {
+			out[m.Service] = true
+		}
+	}
+	return out
+}
+
+// TestFilterScreens_HidesUnregisteredService verifies that a module whose Service
+// is NOT in the registered routing table drops out of the hub, while account/core
+// modules (empty Service) and other registered services remain.
+func TestFilterScreens_HidesUnregisteredService(t *testing.T) {
+	full := filterScreens(false, nil) // nil = unknown → fail open, nothing hidden
 	if !titlesPresent(full, "Forge", "Hooks") {
 		t.Fatalf("expected Forge and Hooks in the unfiltered user hub, got %v", screenTitles(full))
 	}
 
-	filtered := filterScreens(false, map[string]bool{"forge": true})
+	// Registered = everything except forge → forge is hidden, hooks remain.
+	registered := registeredAll(false)
+	delete(registered, "forge")
+	filtered := filterScreens(false, registered)
 	if titlesPresent(filtered, "Forge") {
-		t.Errorf("Forge screen should be hidden when the forge service is disabled")
+		t.Errorf("Forge screen should be hidden when the forge service is not registered")
 	}
 	if !titlesPresent(filtered, "Hooks") {
-		t.Errorf("Hooks screen should remain when only forge is disabled")
+		t.Errorf("Hooks screen should remain when only forge is unregistered")
 	}
 	if len(filtered) != len(full)-1 {
-		t.Errorf("disabling forge should remove exactly one screen: full=%d filtered=%d", len(full), len(filtered))
+		t.Errorf("dropping forge should remove exactly one screen: full=%d filtered=%d", len(full), len(filtered))
 	}
 }
 
-// TestFilterScreens_AdminServiceHidden verifies the same applies to the admin
-// hub: disabling forge hides the Forge Runtimes admin screen, but never the
-// always-on Org Services screen (builder is core, and that screen has no
-// Service, so it must survive — it's how you re-enable things).
-func TestFilterScreens_AdminServiceHidden(t *testing.T) {
+// TestFilterScreens_AdminUnregisteredHidden verifies the same applies to the admin
+// hub: an unregistered forge hides the Forge Runtimes admin screen, but never the
+// always-on Org Services screen (it has no Service, so it must survive — it's how
+// you enable things).
+func TestFilterScreens_AdminUnregisteredHidden(t *testing.T) {
 	full := filterScreens(true, nil)
 	if !titlesPresent(full, "Forge Runtimes", "Org Services") {
 		t.Fatalf("expected Forge Runtimes and Org Services in the admin hub, got %v", screenTitles(full))
 	}
 
-	filtered := filterScreens(true, map[string]bool{"forge": true})
+	registered := registeredAll(true)
+	delete(registered, "forge")
+	filtered := filterScreens(true, registered)
 	if titlesPresent(filtered, "Forge Runtimes") {
-		t.Errorf("Forge Runtimes should be hidden when the forge service is disabled")
+		t.Errorf("Forge Runtimes should be hidden when the forge service is not registered")
 	}
 	if !titlesPresent(filtered, "Org Services") {
-		t.Errorf("Org Services must always remain — it's how a disabled service gets re-enabled")
+		t.Errorf("Org Services must always remain — it has no Service and is how you enable things")
 	}
 }
 
-// TestDisabledServices_FailsOpenUnderTest documents the hermetic-test guard:
-// disabledServices never reaches a builder during `go test`, so it yields an
-// empty set and the live entry points behave exactly like the unfiltered hub.
-func TestDisabledServices_FailsOpenUnderTest(t *testing.T) {
-	if got := disabledServices(); len(got) != 0 {
-		t.Errorf("disabledServices() should be empty under test, got %v", got)
+// TestRegisteredServices_FailsOpenUnderTest documents the hermetic-test guard:
+// registeredServices never reaches conductor during `go test`, so it yields nil
+// (unknown) and the live entry points behave exactly like the unfiltered hub.
+func TestRegisteredServices_FailsOpenUnderTest(t *testing.T) {
+	if got := registeredServices(); got != nil {
+		t.Errorf("registeredServices() should be nil (fail open) under test, got %v", got)
 	}
 	if len(enabledScreensFor(false)) != len(hubScreens()) {
-		t.Errorf("with nothing disabled, the user hub should match hubScreens()")
+		t.Errorf("with the routing table unknown, the user hub should match hubScreens()")
 	}
 	if len(enabledScreensFor(true)) != len(adminScreens()) {
-		t.Errorf("with nothing disabled, the admin hub should match adminScreens()")
+		t.Errorf("with the routing table unknown, the admin hub should match adminScreens()")
 	}
 }
 

@@ -146,27 +146,29 @@ func screensFor(admin bool) []HubScreen {
 	return out
 }
 
-// enabledScreensFor is screensFor restricted to services enabled for the
-// caller's org: a module whose Service is disabled (per disabledServices) is
-// dropped from the hub entirely. The live TUI entry points use this so disabled
-// services vanish from the menu; screensFor stays unfiltered for tests and any
-// non-TUI caller. Modules with no Service (account/core) are always kept, and
-// disabledServices fails open, so this never hides more than it should.
+// enabledScreensFor is screensFor restricted to services that are actually up: a
+// module whose Service is not registered/routable in conductor (per
+// registeredServices) is dropped from the hub entirely. The live TUI entry points
+// use this so services that aren't deployed vanish from the menu; screensFor stays
+// unfiltered for tests and any non-TUI caller. Modules with no Service
+// (account/core) are always kept, and registeredServices fails open, so this never
+// hides more than it should.
 func enabledScreensFor(admin bool) []HubScreen {
-	return filterScreens(admin, disabledServices())
+	return filterScreens(admin, registeredServices())
 }
 
-// filterScreens is the pure core of enabledScreensFor: it collects the screens
-// of active modules whose Admin flag matches, skipping any module whose Service
-// is in disabled. Split out from the fetch so the hiding logic is testable
-// without a live builder.
-func filterScreens(admin bool, disabled map[string]bool) []HubScreen {
+// filterScreens is the pure core of enabledScreensFor: it collects the screens of
+// active modules whose Admin flag matches, skipping any module whose Service is
+// NOT in registered. A nil registered map means "unknown" (fail open) — nothing is
+// hidden; a non-nil map hides any service-backed module outside it. Split out from
+// the fetch so the hiding logic is testable without a live conductor.
+func filterScreens(admin bool, registered map[string]bool) []HubScreen {
 	var out []HubScreen
 	for _, m := range activeModules() {
 		if m.Admin != admin {
 			continue
 		}
-		if m.Service != "" && disabled[m.Service] {
+		if m.Service != "" && registered != nil && !registered[m.Service] {
 			continue
 		}
 		out = append(out, m.Screens...)

@@ -1,5 +1,5 @@
-import { createSlice, createAsyncThunk, type PayloadAction } from '@reduxjs/toolkit';
-import { getUser, updateUser, login as apiLogin, signup as apiSignup, checkPermission, listOrgServices } from '../api/bff';
+import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
+import { getUser, updateUser, login as apiLogin, signup as apiSignup, checkPermission, listRegisteredServices } from '../api/bff';
 import type { User, SignupPayload } from '../api/bff';
 import { decodeUserId } from '../utils';
 
@@ -12,10 +12,13 @@ export interface AuthState {
   status: 'idle' | 'loading' | 'succeeded' | 'failed';
   error: string | null;
   permissions: Record<string, boolean> | null;
-  // Names of platform services this org has disabled (from the builder control
-  // plane). null = not yet resolved (or unresolvable) → show everything. The
-  // sidebar hides any module whose service appears here. Fails open by design.
-  disabledServices: string[] | null;
+  // Names of platform services currently registered/routable in conductor (the
+  // live routing table — manifest- and builder-registered alike). The sidebar
+  // shows a module only when its backing service appears here. null = unresolved
+  // (error or in flight); combined with servicesResolved this fails OPEN — a
+  // module is hidden only once we hold a resolved, non-null list that omits it.
+  registeredServices: string[] | null;
+  servicesResolved: boolean;
 }
 
 function readStoredToken() {
@@ -36,7 +39,8 @@ const initialState: AuthState = {
   user: null,
   error: null,
   permissions: null,
-  disabledServices: null,
+  registeredServices: null,
+  servicesResolved: false,
 };
 
 // ── Thunks ────────────────────────────────────────────────────────────────────
@@ -118,15 +122,16 @@ const PERMISSION_GATES = [
 export const hydratePermissions = createAsyncThunk(
   'auth/hydratePermissions',
   async (_, { getState }) => {
-    const { token, user } = (getState() as { auth: AuthState }).auth;
+    const { token } = (getState() as { auth: AuthState }).auth;
     if (!token) return {};
-    // The builder configure grant is scoped to the caller's own org, so its
-    // resource is only knowable once the user (and org_id) is hydrated. Append it
-    // dynamically; gatekeeper prepends the username and matches the org id.
-    const gates: { service: string; action: string; resource: string }[] = [...PERMISSION_GATES];
-    if (user?.org_id) {
-      gates.push({ service: 'builder', action: 'configureOrgService', resource: `builder/orgs/${user.org_id}` });
-    }
+    // Builder is a system-admin-only global control plane: the configure grant is
+    // checked against the single "default" baseline, never the caller's org. Only
+    // the wildcard admin matches builder/orgs/default, so this gate alone surfaces
+    // builder/ for the system admin and hides it for everyone else.
+    const gates: { service: string; action: string; resource: string }[] = [
+      ...PERMISSION_GATES,
+      { service: 'builder', action: 'configureOrgService', resource: 'builder/orgs/default' },
+    ];
     const results = await Promise.all(
       gates.map(async g => {
         const key = `${g.service}:${g.action}`;
@@ -142,19 +147,19 @@ export const hydratePermissions = createAsyncThunk(
   },
 );
 
-// Resolves which platform services the caller's org has disabled, so the sidebar
-// can hide them. Fails open: no org, or any error, yields [] (show everything).
-export const hydrateServices = createAsyncThunk(
-  'auth/hydrateServices',
+// Resolves the set of services currently registered/routable in conductor, so the
+// sidebar can show only modules that are actually deployed. Returns null on any
+// error so the UI fails OPEN (shows everything) rather than hiding a live module.
+export const hydrateRegisteredServices = createAsyncThunk(
+  'auth/hydrateRegisteredServices',
   async (_, { getState }) => {
-    const { token, user } = (getState() as { auth: AuthState }).auth;
-    const orgId = user?.org_id;
-    if (!token || !orgId) return [] as string[];
+    const { token } = (getState() as { auth: AuthState }).auth;
+    if (!token) return null;
     try {
-      const services = await listOrgServices(token, orgId);
-      return services.filter(s => !s.core && !s.enabled).map(s => s.service);
+      const services = await listRegisteredServices(token);
+      return services.map(s => s.name);
     } catch {
-      return [] as string[];
+      return null;
     }
   },
 );
@@ -192,13 +197,8 @@ const authSlice = createSlice({
       state.status = 'idle';
       state.error = null;
       state.permissions = null;
-      state.disabledServices = null;
-    },
-    // Replace the disabled-services set directly. Used by the builder page after a
-    // mutation at the caller's own org scope, where it already holds the fresh list
-    // and a re-fetch (hydrateServices) would be a redundant identical request.
-    setDisabledServices(state, action: PayloadAction<string[]>) {
-      state.disabledServices = action.payload;
+      state.registeredServices = null;
+      state.servicesResolved = false;
     },
   },
   extraReducers(builder) {
@@ -252,11 +252,14 @@ const authSlice = createSlice({
       .addCase(hydratePermissions.fulfilled, (state, action) => {
         state.permissions = action.payload;
       })
-      .addCase(hydrateServices.fulfilled, (state, action) => {
-        state.disabledServices = action.payload;
+      .addCase(hydrateRegisteredServices.fulfilled, (state, action) => {
+        // Resolved (success or handled error). A null payload (error) leaves the
+        // sidebar failing open; a non-null list lets it hide unregistered modules.
+        state.registeredServices = action.payload;
+        state.servicesResolved = true;
       });
   },
 });
 
-export const { logout, setDisabledServices } = authSlice.actions;
+export const { logout } = authSlice.actions;
 export const authReducer = authSlice.reducer;

@@ -967,14 +967,13 @@ export function checkPermission(token: string, service: string, action: string, 
   return req<{ authorized: boolean }>('POST', '/gatekeeper/check_permissions', token, { service, action, resource });
 }
 
-// ── Builder — per-org service control plane ───────────────────────────────────
-// The builder control plane reports the effective state of every platform
-// service for an org, overlaying the live catalog, the "default" baseline, and
-// the org's own overrides. The sidebar uses the list to hide services an org has
-// turned off; the builder admin page lets admins toggle, configure, and register
-// services. `core` services (gatekeeper, conductor, registry, builder) are always
-// enabled and cannot be configured. Use the literal org id "default" to address
-// the baseline every org inherits (platform-admin only).
+// ── Builder — global service control plane (system admin) ─────────────────────
+// Builder is a SYSTEM-ADMIN-only control plane over the single global service
+// baseline (addressed by the literal id "default"). The admin page lets the admin
+// toggle, configure, and register platform services for the whole instance; there
+// are no per-org overrides. `core` services (gatekeeper, conductor, registry,
+// builder) are always enabled and cannot be configured. Reads are granted to all
+// users (read-only); only the system admin may write.
 
 export interface OrgService {
   service: string;
@@ -1005,16 +1004,33 @@ export interface SetOrgServiceBody {
   secrets?: Record<string, string>;
 }
 
-export function listOrgServices(token: string, orgId: string) {
-  return req<OrgService[]>('GET', `/builder/orgs/${orgId}/services`, token);
+export function listServices(token: string) {
+  return req<OrgService[]>('GET', '/builder/services', token);
 }
 
-export function setOrgService(token: string, orgId: string, service: string, body: SetOrgServiceBody) {
-  return req<OrgService>('PUT', `/builder/orgs/${orgId}/services/${encodeURIComponent(service)}`, token, body);
+export function setService(token: string, service: string, body: SetOrgServiceBody) {
+  return req<OrgService>('PUT', `/builder/services/${encodeURIComponent(service)}`, token, body);
 }
 
-export function deleteOrgService(token: string, orgId: string, service: string) {
-  return req<void>('DELETE', `/builder/orgs/${orgId}/services/${encodeURIComponent(service)}`, token);
+export function deleteService(token: string, service: string) {
+  return req<void>('DELETE', `/builder/services/${encodeURIComponent(service)}`, token);
+}
+
+// ── Registered services (routing availability) ────────────────────────────────
+// Conductor's live routing table: every service currently registered/routable,
+// whether it registered from the manifest at startup (core / compose / Helm) or
+// was deployed-and-registered by builder at runtime when the system admin enabled
+// it. The sidebar uses this to show only services that are actually up — a service
+// builder later disables is unregistered and drops out. Public read on conductor;
+// no permissions required.
+export interface RegisteredService {
+  name: string;
+  description?: string;
+}
+
+export async function listRegisteredServices(token: string): Promise<RegisteredService[]> {
+  const res = await req<{ services: RegisteredService[] }>('GET', '/services', token);
+  return res.services ?? [];
 }
 
 // ── Outposts ──────────────────────────────────────────────────────────────────

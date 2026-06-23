@@ -3,12 +3,13 @@ import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { T } from '../../theme';
 import { Logo } from '../../components/Logo';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
-import { logout, hydrateUser, hydratePermissions, hydrateServices } from '../../store/authSlice';
+import { logout, hydrateUser, hydratePermissions, hydrateRegisteredServices } from '../../store/authSlice';
 
-// Maps each service-gated /app route segment to its backing platform service, so a
-// disabled service's page is blocked on direct navigation/refresh — not just hidden
-// from the sidebar. Routes gated by permission (gatekeeper, builder, audit) or the
-// account section (settings) are intentionally absent: they are never org-disabled.
+// Maps each service-gated /app route segment to its backing platform service, so an
+// unavailable service's page is blocked on direct navigation/refresh — not just
+// hidden from the sidebar. Routes gated by permission (gatekeeper, builder, audit)
+// or the account section (settings) are intentionally absent: they are always
+// reachable when the user holds the permission.
 const ROUTE_SERVICE: Record<string, string> = {
   blueprints: 'blueprints',
   forge: 'forge',
@@ -22,13 +23,20 @@ const ROUTE_SERVICE: Record<string, string> = {
   argo: 'argo',
 };
 
+// isUnavailable reports whether a service-backed module should be hidden/blocked:
+// true only once we hold a RESOLVED, non-null routing table that omits the service.
+// While the table is in flight or errored (registeredServices === null) it stays
+// false — the sidebar fails OPEN rather than flashing live modules away.
+function isUnavailable(service: string, registered: string[] | null): boolean {
+  return registered !== null && !registered.includes(service);
+}
+
 // NavItem renders a sidebar link. When `service` is set, the item hides itself
-// if that platform service is disabled for the org (per builder). While the
-// enablement set is still loading or unresolved (disabledServices === null) the
-// item shows — the sidebar fails open rather than flashing items away.
+// unless that platform service is currently registered/routable in conductor —
+// so modules that aren't actually deployed never appear.
 function NavItem({ to, label, badge, service }: { to: string; label: string; badge?: string; service?: string }) {
-  const disabledServices = useAppSelector(s => s.auth.disabledServices);
-  if (service && disabledServices?.includes(service)) return null;
+  const registeredServices = useAppSelector(s => s.auth.registeredServices);
+  if (service && isUnavailable(service, registeredServices)) return null;
   return (
     <NavLink to={to} style={({ isActive }) => ({
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -52,15 +60,16 @@ function NavItem({ to, label, badge, service }: { to: string; label: string; bad
 export function AppLayout() {
   const user = useAppSelector(s => s.auth.user);
   const permissions = useAppSelector(s => s.auth.permissions);
-  const disabledServices = useAppSelector(s => s.auth.disabledServices);
+  const registeredServices = useAppSelector(s => s.auth.registeredServices);
+  const servicesResolved = useAppSelector(s => s.auth.servicesResolved);
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { pathname } = useLocation();
 
   const activeSegment = pathname.replace(/^\/app\/?/, '').split('/')[0];
   const activeService = ROUTE_SERVICE[activeSegment];
-  // Fail open while the set is still resolving (null), mirroring the sidebar.
-  const serviceDisabled = !!activeService && !!disabledServices?.includes(activeService);
+  // Fail open while the routing table is unresolved (null), mirroring the sidebar.
+  const serviceUnavailable = !!activeService && isUnavailable(activeService, registeredServices);
 
   useEffect(() => {
     if (!user) dispatch(hydrateUser());
@@ -71,8 +80,8 @@ export function AppLayout() {
   }, [user, permissions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (user?.org_id && disabledServices === null) dispatch(hydrateServices());
-  }, [user, disabledServices]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (user && !servicesResolved) dispatch(hydrateRegisteredServices());
+  }, [user, servicesResolved]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLogout = () => {
     dispatch(logout());
@@ -132,11 +141,11 @@ export function AppLayout() {
 
       {/* Main content */}
       <main style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
-        {serviceDisabled ? (
+        {serviceUnavailable ? (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
             <div style={{ textAlign: 'center', fontFamily: T.mono }}>
-              <div style={{ fontSize: 14, color: T.textHi, marginBottom: 6 }}>{activeSegment}/ is disabled for this org</div>
-              <div style={{ fontSize: 12, color: T.faint }}>an administrator can re-enable it in builder/</div>
+              <div style={{ fontSize: 14, color: T.textHi, marginBottom: 6 }}>{activeSegment}/ is not available on this instance</div>
+              <div style={{ fontSize: 12, color: T.faint }}>a system administrator can enable it in builder/</div>
             </div>
           </div>
         ) : (

@@ -453,49 +453,36 @@
   {
     "name": "builder",
     "url": "http://builder:8095",
-    "description": "Org-level service control plane (enable/disable/configure services per org)",
+    "description": "Global service control plane (system admin only; manages the single global service baseline for the whole instance)",
     "forward_auth": true,
     "service_key": "builder-registry-local-secret",
     "endpoints": [
       {
         "method": "GET",
-        "path": "/orgs/{id}/services",
+        "path": "/services",
         "action": "listOrgServices",
-        "resource": "builder/orgs/{id}"
+        "resource": "builder/orgs/default"
       },
       {
         "method": "GET",
-        "path": "/orgs/{id}/services/{service}",
+        "path": "/services/{service}",
         "action": "getOrgService",
-        "resource": "builder/orgs/{id}"
+        "resource": "builder/orgs/default"
       },
       {
         "method": "PUT",
-        "path": "/orgs/{id}/services/{service}",
+        "path": "/services/{service}",
         "action": "configureOrgService",
-        "resource": "builder/orgs/{id}"
+        "resource": "builder/orgs/default"
       },
       {
         "method": "DELETE",
-        "path": "/orgs/{id}/services/{service}",
+        "path": "/services/{service}",
         "action": "deleteOrgService",
-        "resource": "builder/orgs/{id}"
+        "resource": "builder/orgs/default"
       }
     ],
     "actions": [],
-    "default_grants": [
-      {
-        "grant_on": "org",
-        "actions": [
-          "listOrgServices",
-          "getOrgService",
-          "configureOrgService",
-          "deleteOrgService"
-        ],
-        "resources": [
-          "{username}/builder/orgs/{org_id}"
-        ]
-      }
-    ]
+    "default_grants": []
   }
 ]
