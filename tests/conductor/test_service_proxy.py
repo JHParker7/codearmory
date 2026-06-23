@@ -9,7 +9,6 @@ Conductor routes /{service}/{path} requests by:
   6. Returns 404 if the service or endpoint is not registered.
 
 Registry is pre-seeded (infra/local/registry-manifest.json) with:
-  - "blueprints" → http://blueprints:8093
   - "forge"      → http://forge:8083
 """
 
@@ -46,59 +45,6 @@ class TestUnregisteredService:
             headers=bearer(token),
         )
         assert resp.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# Blueprints proxy
-# ---------------------------------------------------------------------------
-# Conductor routes /blueprints/... to blueprints (http://blueprints:8093),
-# stripping the leading /blueprints prefix.  A new user has permission for
-# their own state namespace so /blueprints/state/{username}/dev returns 204.
-
-
-class TestBlueprintsProxy:
-    def test_get_own_state_reaches_blueprints(self, base_url, token, new_user):
-        """/blueprints/state/{username}/dev → 204 for an empty workspace.
-
-        Blueprints returns 204 when the workspace exists but is empty.
-        Gatekeeper has no /state/ route and would return 404; a 204 here
-        confirms the request reached Blueprints.
-        """
-        resp = requests.get(
-            f"{base_url}/blueprints/state/{new_user['username']}/dev",
-            headers=bearer(token),
-        )
-        assert resp.status_code not in (404, 503)
-
-    def test_proxy_requires_auth(self, base_url):
-        """GET /blueprints/state/alice/dev without a token → 401 from conductor."""
-        resp = requests.get(f"{base_url}/blueprints/state/alice/dev")
-        assert resp.status_code == 401
-
-    def test_other_user_state_is_forbidden(self, base_url, token):
-        """/blueprints/state/{other_username}/dev with a valid token → 403.
-
-        The permission check or blueprints itself denies access to another
-        user's state namespace.
-        """
-        other = f"other_{rand_id()[:8]}"
-        resp = requests.get(
-            f"{base_url}/blueprints/state/{other}/dev",
-            headers=bearer(token),
-        )
-        assert resp.status_code == 403
-
-    def test_post_state_reaches_blueprints(self, base_url, token, new_user):
-        """POST /blueprints/state/{username}/ws with a valid JSON body is proxied.
-
-        Conductor must not return 404 or 503; the response comes from Blueprints.
-        """
-        resp = requests.post(
-            f"{base_url}/blueprints/state/{new_user['username']}/ws",
-            json={"version": 4, "terraform_version": "1.5.0", "resources": []},
-            headers=bearer(token),
-        )
-        assert resp.status_code not in (404, 503)
 
 
 # ---------------------------------------------------------------------------
@@ -150,26 +96,17 @@ class TestForgeProxy:
 
 class TestRBACEnforcement:
     def test_missing_permission_returns_403(self, base_url, token):
-        """A user who does not own the target namespace gets 403.
-
-        Accessing /blueprints/state/{other_user}/dev triggers a gatekeeper
-        permission check that fails, so conductor returns 403 without
-        forwarding the request to blueprints.
+        """A new user has no createRunnerClass grant, so POST /forge/runner-classes
+        triggers a gatekeeper permission check that fails; conductor returns 403
+        without forwarding.
         """
-        other = f"stranger_{rand_id()[:8]}"
-        resp = requests.get(
-            f"{base_url}/blueprints/state/{other}/dev",
-            headers=bearer(token),
-        )
+        resp = requests.post(f"{base_url}/forge/runner-classes", json={"name": "x"}, headers=bearer(token))
         assert resp.status_code == 403
 
     def test_valid_permission_is_forwarded(self, base_url, token, new_user):
         """A user with permission for their own namespace gets a backend response.
 
-        The response must not be 401, 403, or 503 — it comes from blueprints.
+        The response must not be 401, 403, or 503 — it comes from forge.
         """
-        resp = requests.get(
-            f"{base_url}/blueprints/state/{new_user['username']}/dev",
-            headers=bearer(token),
-        )
+        resp = requests.get(f"{base_url}/forge/executions", headers=bearer(token))
         assert resp.status_code not in (401, 403, 503)

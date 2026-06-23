@@ -24,7 +24,8 @@
   "optionalConfig": [
     "RUNTIME",
     "ALLOWED_IMAGES",
-    "K8S_RUNTIME_CLASS"
+    "K8S_RUNTIME_CLASS",
+    "EGRESS_PROXY_ENABLED"
   ],
   "secretConfig": [
     "DATABASE_URL"

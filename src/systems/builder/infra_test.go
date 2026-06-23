@@ -170,6 +170,53 @@ func TestEnsureInfra_ForgeDeploysEgressProxyAndRBAC(t *testing.T) {
 	}
 }
 
+func TestEnsureInfra_EgressProxyDisabled(t *testing.T) {
+	httpClient = initHTTPClient()
+	b := newTestBackend(t, &registerRecorder{})
+	ctx := context.Background()
+
+	spec := workloadSpec{Service: "forge", Env: map[string]string{"EGRESS_PROXY_ENABLED": "false"}}
+	if err := b.ensureInfra(ctx, spec); err != nil {
+		t.Fatalf("ensureInfra: %v", err)
+	}
+	// No egress-proxy and no NetworkPolicy when the knob is off (kata isolates egress itself).
+	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err == nil {
+		t.Error("egress-proxy deployed despite EGRESS_PROXY_ENABLED=false")
+	}
+	if _, err := b.client.NetworkingV1().NetworkPolicies("codearmory").Get(ctx, b.forgeNetworkPolicyName("forge"), metav1.GetOptions{}); err == nil {
+		t.Error("NetworkPolicy created despite egress proxy disabled")
+	}
+	// RBAC is independent of the egress proxy — the k8s runtime still needs it.
+	if _, err := b.client.CoreV1().ServiceAccounts("codearmory").Get(ctx, "codearmory-forge", metav1.GetOptions{}); err != nil {
+		t.Errorf("forge serviceaccount missing: %v", err)
+	}
+	// templatePod must not point forge at a proxy that isn't deployed.
+	c := b.templatePod(spec).Spec.Containers[0]
+	if v, _ := envValue(c, "FORGE_EGRESS_PROXY"); v != "" {
+		t.Errorf("FORGE_EGRESS_PROXY = %q, want unset when egress proxy disabled", v)
+	}
+}
+
+func TestEnsureInfra_EgressProxyToggleOffCleansUp(t *testing.T) {
+	httpClient = initHTTPClient()
+	b := newTestBackend(t, &registerRecorder{})
+	ctx := context.Background()
+
+	if err := b.ensureInfra(ctx, workloadSpec{Service: "forge"}); err != nil {
+		t.Fatalf("ensureInfra (on): %v", err)
+	}
+	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err != nil {
+		t.Fatalf("egress-proxy should exist after enabled pass: %v", err)
+	}
+	// Toggling the knob off on a later reconcile removes the now-unwanted proxy.
+	if err := b.ensureInfra(ctx, workloadSpec{Service: "forge", Env: map[string]string{"EGRESS_PROXY_ENABLED": "false"}}); err != nil {
+		t.Fatalf("ensureInfra (off): %v", err)
+	}
+	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err == nil {
+		t.Error("egress-proxy not cleaned up after toggling EGRESS_PROXY_ENABLED=false")
+	}
+}
+
 func TestEnsureService_GiteaNamedWithHyphen(t *testing.T) {
 	httpClient = initHTTPClient()
 	rec := &registerRecorder{}

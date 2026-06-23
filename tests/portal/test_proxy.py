@@ -121,15 +121,15 @@ class TestAuthProxy:
 
 
 # ---------------------------------------------------------------------------
-# Conductor validation surfaces through the proxy
+# Validation surfaced through the proxy: conductor 400s pass through unchanged
 # ---------------------------------------------------------------------------
 
 
 class TestValidationProxy:
-    """
-    Conductor validates inputs before touching any backend. These tests confirm
-    that 400 responses pass through nginx unchanged.
-    """
+    """Conductor validates inputs before touching any backend; these confirm 400s
+    pass through the portal BFF unchanged. (The blueprints state-slug cases were
+    dropped when blueprints was spun out; conductor's path-param slug/UUID validation
+    is covered by a conductor Go unit test.)"""
 
     def test_signup_missing_email_returns_400(self, portal_url):
         resp = requests.post(
@@ -165,14 +165,6 @@ class TestValidationProxy:
 
     def test_get_user_non_uuid_returns_400(self, portal_url, auth_header):
         resp = requests.get(f"{portal_url}/api/gatekeeper/users/not-a-uuid", headers=auth_header, timeout=10)
-        assert resp.status_code == 400
-
-    def test_state_slug_with_special_chars_returns_400(self, portal_url, auth_header):
-        resp = requests.get(f"{portal_url}/api/state/bad!user/dev", headers=auth_header, timeout=10)
-        assert resp.status_code == 400
-
-    def test_state_workspace_slug_too_long_returns_400(self, portal_url, auth_header):
-        resp = requests.get(f"{portal_url}/api/state/alice/{'a' * 65}", headers=auth_header, timeout=10)
         assert resp.status_code == 400
 
 

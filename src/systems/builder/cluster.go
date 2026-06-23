@@ -471,7 +471,14 @@ func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
 	setRef("GATEKEEPER_SERVICE_KEY", "gatekeeper-service-key")
 	setRef("CONDUCTOR_FORWARD_KEY", "conductor-forward-key")
 	if hasDef {
+		egressOn := egressProxyEnabled(spec)
 		for k, v := range def.EnvExtras {
+			// When the egress proxy is disabled (e.g. kata), don't point forge at a
+			// proxy that isn't deployed — leave FORGE_EGRESS_PROXY unset so the runtime
+			// falls back to direct/VM-level egress.
+			if k == "FORGE_EGRESS_PROXY" && !egressOn {
+				continue
+			}
 			v = strings.ReplaceAll(v, "${PREFIX}", b.prefix)
 			v = strings.ReplaceAll(v, "${NAMESPACE}", b.namespace)
 			setVal(k, v)
