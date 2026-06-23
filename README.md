@@ -39,6 +39,8 @@ It's also built to grow with you. Every service in the platform is registered th
 
 Every request enters through Conductor. Backend services delegate auth to Gatekeeper — permission logic stays in one place across the whole platform.
 
+Non-core services (Blueprints, Tickets, Containers, Gitea Integration, Notifications, Chaos, Argo, the Egress Proxy, and the MCP server) live in their own `codearmory-<svc>` repos and are deployed at runtime by Builder.
+
 ```
  Browser / CLI / Terraform / Git client
           │
@@ -218,17 +220,17 @@ Binaries for Linux, macOS, and Windows are attached to each [GitHub release](../
 | Gatekeeper | 8081 | [Auth + RBAC + OIDC](docs/gatekeeper/README.md) |
 | Registry | 8082 | [Service discovery](docs/registry/README.md) |
 | Forge | 8083 | [Sandboxed execution](docs/forge/README.md) |
-| Blueprints | 8093 | [Terraform state](docs/blueprints/README.md) |
+| Blueprints | 8093 | Terraform state |
 | Workflows | 8085 | [Pipeline orchestration](docs/workflows/README.md) |
-| Tickets | 8086 | [Task tracker](docs/tickets/README.md) |
+| Tickets | 8086 | Task tracker |
 | Hooks | 8087 | [Webhook receiver](docs/hooks/README.md) |
-| Gitea Integration | 8088 | [Forgejo/Gitea repos + PRs](docs/gitea_integration/README.md) |
-| Containers | 8089 | [OCI registry management](docs/containers/README.md) |
-| Chaos | 8090 | [Chaos engineering](docs/chaos/README.md) |
-| Argo | 8091 | [Argo CD sync](docs/argo/README.md) |
+| Gitea Integration | 8088 | Forgejo/Gitea repos + PRs |
+| Containers | 8089 | OCI registry management |
+| Chaos | 8090 | Chaos engineering |
+| Argo | 8091 | Argo CD sync |
 | Outpost Gateway | 8092 | [Cluster integration backbone](docs/outpost-gateway/README.md) |
 | Outpost | — | [Customer-deployed cluster agent](docs/outpost/README.md) |
-| Egress Proxy | 3128 | [Allowlist proxy for Forge](docs/egress-proxy/README.md) |
+| Egress Proxy | 3128 | Optional allowlist proxy for Forge |
 | Armory CLI | — | [Command reference](docs/cli/README.md) |
 
 Full platform guide with worked examples: [docs/platform-guide.md](docs/platform-guide.md)

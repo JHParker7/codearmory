@@ -5,8 +5,8 @@ The **outpost** is a single, customer-deployed agent that is the *only* thing in
 This page describes the framework. The pieces that build on it have their own docs:
 
 - **[outpost-gateway](../outpost-gateway/README.md)** — the outpost-facing connection point + Postgres event backbone.
-- **[chaos](../chaos/README.md)** — chaos-engineering control plane (first integration).
-- **[argo](../argo/README.md)** — Argo CD sync control plane (second integration).
+- **chaos** — chaos-engineering control plane (first integration; now a separate `codearmory-chaos` repo).
+- **argo** — Argo CD sync control plane (second integration; now a separate `codearmory-argo` repo).
 
 ## Why an outpost
 

@@ -25,6 +25,10 @@ This guide explains what each CodeArmory service does, how they fit together, an
 
 ---
 
+Some services are now maintained in their own repos (`codearmory-<svc>`) and deployed at runtime by Builder: Blueprints, Tickets, Containers, Gitea Integration, Notifications, Chaos, Argo, the Egress Proxy, and the MCP server. They remain full platform features; only their source lives elsewhere.
+
+---
+
 ## How the platform fits together
 
 Every user-facing request enters through **Conductor** (the API gateway). Conductor validates the request, checks the caller's permissions with **Gatekeeper**, then proxies to the appropriate backend service. No backend service is exposed directly to users.
@@ -508,7 +512,7 @@ curl -X POST http://localhost:8090/experiments \
        "target_app_ns":"demo","target_app_label":"app.kubernetes.io/component=conductor"}'
 ```
 
-A pipeline can **gate on a verdict** with the `chaos/run-experiment` action — the step fails unless the experiment passes. See [chaos](chaos/README.md).
+A pipeline can **gate on a verdict** with the `chaos/run-experiment` action — the step fails unless the experiment passes. See Chaos.
 
 ### Argo CD sync
 
@@ -519,7 +523,7 @@ curl -X POST http://localhost:8091/apps/guestbook/sync \
   -H "Authorization: Bearer <token>" -H "Content-Type: application/json" -d '{"revision":"HEAD"}'
 ```
 
-See [argo](argo/README.md). Both are the same framework — adding the next integration is a new outpost module + a thin consumer service, nothing in the core. Full detail: [outpost/README.md](outpost/README.md).
+See Argo. Both are the same framework — adding the next integration is a new outpost module + a thin consumer service, nothing in the core. Full detail: [outpost/README.md](outpost/README.md).
 
 ---
 
@@ -529,9 +533,11 @@ See [argo](argo/README.md). Both are the same framework — adding the next inte
 
 The Egress Proxy is an allowlist-enforcing HTTP CONNECT proxy used by Forge execution containers. It provides controlled outbound internet access for CI/CD workloads (package downloads, module fetches) without opening broad internet access.
 
+The Egress Proxy is optional, controlled by `EGRESS_PROXY_ENABLED` (default on). Disable it for kata/Cloud-Hypervisor and other VM-isolated runtimes, which isolate egress at the VM level.
+
 It is not a user-facing service — it sits on an internal Docker/Kubernetes network and is configured via Forge's `FORGE_EGRESS_PROXY` environment variable. Containers route outbound HTTP and HTTPS traffic through it automatically when `HTTP_PROXY`/`HTTPS_PROXY` are set.
 
-Connections to hosts not in `PROXY_ALLOWED_DOMAINS` are refused before any data is exchanged. See the [Egress Proxy README](egress-proxy/README.md) and [Forge README](forge/README.md) for setup details.
+Connections to hosts not in `PROXY_ALLOWED_DOMAINS` are refused before any data is exchanged. See Egress Proxy and the [Forge README](forge/README.md) for setup details.
 
 ---
 
