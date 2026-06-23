@@ -8,14 +8,16 @@ import { signupAndLogin } from '../store/authSlice';
 import { markInitialized } from '../store/setupSlice';
 import { passwordScore } from '../utils';
 
-// The core platform services this instance provides. Shown on first run so the
-// operator knows what their administrator account will govern. These are always
-// part of a codearmory deployment — the bootstrap admin holds full access to all.
+// The control-plane core that ships with every codearmory deployment and is always
+// on (it cannot be toggled off). Shown on first run so the operator knows what their
+// administrator account will govern. Every other capability — forge, workflows,
+// blueprints, and the rest — is deployed and registered at runtime via builder/, so
+// it is deliberately not listed here.
 const CORE_SERVICES: { name: string; blurb: string }[] = [
   { name: 'gatekeeper/', blurb: 'identity, RBAC, orgs & teams, sessions' },
-  { name: 'blueprints/', blurb: 'OpenTofu / Terraform remote state backend' },
-  { name: 'forge/', blurb: 'sandboxed, isolated command execution' },
-  { name: 'workflows/', blurb: 'CI/CD pipeline orchestration & runs' },
+  { name: 'conductor/', blurb: 'API gateway · the single entry point' },
+  { name: 'registry/', blurb: 'service discovery · conductor routing table' },
+  { name: 'builder/', blurb: 'service control plane · deploys & enables the rest' },
 ];
 
 export function Setup() {
@@ -48,7 +50,10 @@ export function Setup() {
 
     if (signupAndLogin.fulfilled.match(result)) {
       dispatch(markInitialized());
-      navigate('/app/blueprints');
+      // Land in builder/ — the always-available control-plane core where the admin
+      // enables the rest of the platform. A fresh instance has no other service
+      // deployed yet, so any module page would just show a "not available" wall.
+      navigate('/app/builder');
       return;
     }
 
@@ -99,7 +104,7 @@ export function Setup() {
 
             {/* Core services orientation */}
             <div style={{ border: `1px solid ${T.border}`, background: T.cardHi, padding: '12px 14px', marginBottom: 18 }}>
-              <div style={{ fontSize: 10.5, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 9 }}>core services your admin will govern</div>
+              <div style={{ fontSize: 10.5, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 9 }}>control-plane core · always on, governed by your admin</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 18px' }}>
                 {CORE_SERVICES.map((s) => (
                   <div key={s.name} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12 }}>
@@ -110,6 +115,9 @@ export function Setup() {
                     </span>
                   </div>
                 ))}
+              </div>
+              <div style={{ fontSize: 10.5, color: T.faint, marginTop: 11, paddingTop: 10, borderTop: `1px solid ${T.border}`, lineHeight: 1.55 }}>
+                <span style={{ color: T.green }}>+</span> everything else — <span style={{ color: T.dim }}>forge, workflows, blueprints &amp; more</span> — is deployed and enabled on demand from <span style={{ color: T.textHi }}>builder/</span> once you're in.
               </div>
             </div>
 
