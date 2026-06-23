@@ -17,7 +17,7 @@
 - **Auth + RBAC + SSO** — ES256 JWT sessions, orgs, teams, and roles covering every service. Gatekeeper is also an OIDC provider, so it can be your SSO identity source.
 - **Unified API gateway** — every request enters through Conductor, which routes by service prefix and verifies permissions with Gatekeeper before forwarding. Services declare their routes, actions, and RBAC in the Registry.
 - **Modular by design** — Builder is the per-org control plane *and* the runtime deployer: enable a service for an org and Builder deploys + registers it at runtime, no chart edit. New capabilities ship as **modules** in their own repos, not as forks of the core.
-- **Cluster integrations** — drive your own clusters from the control plane through a single customer-deployed **outpost** that dials out over HTTPS (no inbound access, no control-plane cluster credentials). Integrations are pluggable modules, and pipelines can gate on their results (Outpost + Outpost Gateway).
+- **Cluster integrations + cross-cluster pipelines** — drive your own clusters from the control plane through **outposts** that dial out over HTTPS (no inbound access, no control-plane cluster credentials). One outpost per cluster means **pipelines unify across clusters** — a single run can act on your whole fleet, gating on the results. Run an outpost in the *same* cluster as CodeArmory for a single-cluster setup, or one per remote cluster to fan out (Outpost + Outpost Gateway).
 - **CLI-first** — every platform operation is available from `armory`. Create pipelines, trigger runs, manage runners, inspect logs — without opening a browser.
 
 ---
@@ -64,14 +64,15 @@ Every request enters through Conductor, which polls Registry for service manifes
     │ + deployer  │  ← enables & deploys modules at runtime
     └─────────────┘
 
-    Cluster integrations — the outpost dials out, no inbound access:
+    Cluster integrations — outposts dial out, no inbound access.
+    One per cluster, so pipelines unify across your whole fleet:
 
     ┌──────────────────┐
     │ Outpost Gateway  │  :8092 — enroll / commands / events backbone
     └────────┬─────────┘  commands ▲ / events ▼ (HTTPS)
     ┌────────┴─────────┐
-    │     Outpost      │  ← runs in your cluster
-    └──────────────────┘
+    │     Outpost      │  ← in each target cluster, or alongside
+    └──────────────────┘     CodeArmory itself for a single-cluster setup
 ```
 
 ---
@@ -187,7 +188,7 @@ Binaries for Linux, macOS, and Windows are attached to each [GitHub release](../
 | Hooks | 8087 | [Webhook receiver](docs/hooks/README.md) |
 | Builder | 8095 | [Org control plane + runtime service deployer](docs/builder/README.md) |
 | Outpost Gateway | 8092 | [Cluster integration backbone](docs/outpost-gateway/README.md) |
-| Outpost | — | [Customer-deployed cluster agent](docs/outpost/README.md) |
+| Outpost | — | [User-deployed cluster agent](docs/outpost/README.md) |
 | Portal | — | Web UI (React SPA + Express BFF) |
 | Armory CLI | — | [Command reference](docs/cli/README.md) |
 

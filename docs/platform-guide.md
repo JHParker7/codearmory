@@ -308,7 +308,7 @@ Hooks processes any webhook payload format that includes repository and branch i
 
 **Ports:** Outpost Gateway 8092. Outpost: no port (dials out).
 
-Some capabilities require acting *inside* a Kubernetes cluster. CodeArmory never reaches into a cluster from the control plane. Instead, a single customer-deployed **outpost** runs in (or against) the target cluster and **dials out** to the control plane. This means no inbound access to your cluster and no control-plane cluster credentials, and the same mechanism serves both self-hosted and SaaS. Integrations are pluggable modules loaded by the outpost.
+Some capabilities require acting *inside* a Kubernetes cluster. CodeArmory never reaches into a cluster from the control plane. Instead, a user-deployed **outpost** runs in (or against) each cluster and **dials out** to the control plane — no inbound access to your cluster and no control-plane cluster credentials. Run **one outpost per cluster** and a single pipeline can act across your whole fleet, so **pipelines unify across clusters**. For a single-cluster setup, run the outpost in the **same cluster as CodeArmory itself** (pointing at the in-cluster gateway); for many clusters, run one in each. Integrations are pluggable modules loaded by the outpost.
 
 ```
 your cluster                                     control plane
@@ -334,7 +334,7 @@ your cluster                                     control plane
      --set enrollmentToken=<token>
    ```
 
-   The chart grants least-privilege RBAC per module (see the [chart README](../infra/helm/outpost/README.md)).
+   The chart grants least-privilege RBAC per module (see the [chart README](../infra/helm/outpost/README.md)). For a **single-cluster setup**, install the outpost alongside CodeArmory and point `controlPlaneURL` at the in-cluster gateway service (e.g. `http://codearmory-outpost-gateway:8092`).
 3. The outpost's status moves to `connected` once it enrolls and heartbeats.
 
 Integrations are pluggable — adding the next one is a new outpost module plus a thin consumer service, nothing in the core. Full detail: [outpost/README.md](outpost/README.md).
