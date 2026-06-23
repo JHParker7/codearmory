@@ -1,0 +1,109 @@
+{
+  "registryName": "chaos",
+  "k8sName": "chaos",
+  "imageRepo": "chaos",
+  "port": 8090,
+  "forward_auth": true,
+  "description": "Chaos engineering experiments via outposts",
+  "registryAccount": false,
+  "infra": {},
+  "derivedSecrets": [
+    {
+      "envVar": "OUTPOST_INTERNAL_KEY",
+      "kind": "shared",
+      "name": "outpost-internal-key"
+    },
+    {
+      "envVar": "HOOKS_TRIGGER_KEY",
+      "kind": "shared",
+      "name": "hooks-trigger-key"
+    }
+  ],
+  "requiredConfig": [
+    "DATABASE_URL"
+  ],
+  "optionalConfig": [],
+  "secretConfig": [
+    "DATABASE_URL"
+  ],
+  "envExtras": {
+    "OUTPOST_GATEWAY_URL": "http://${PREFIX}-outpost-gateway:8092",
+    "HOOKS_URL": "http://${PREFIX}-hooks:8087"
+  },
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/experiments",
+      "action": "createExperiment",
+      "resource": "chaos/experiments"
+    },
+    {
+      "method": "GET",
+      "path": "/experiments",
+      "action": "listExperiment",
+      "resource": "chaos/experiments"
+    },
+    {
+      "method": "GET",
+      "path": "/experiments/{id}",
+      "action": "getExperiment",
+      "resource": "chaos/experiments/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/experiments/{id}",
+      "action": "deleteExperiment",
+      "resource": "chaos/experiments/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/experiment-types",
+      "action": "listExperimentType",
+      "resource": "chaos/experiment-types"
+    }
+  ],
+  "actions": [
+    {
+      "name": "chaos/run-experiment",
+      "method": "POST",
+      "path": "/experiments",
+      "async": {
+        "id_field": "experiment_id",
+        "poll_path": "/experiments/{id}",
+        "poll_interval_secs": 5,
+        "status_field": "status",
+        "success_states": [
+          "Pass"
+        ],
+        "failure_states": [
+          "Fail",
+          "Error"
+        ],
+        "cancel_states": [
+          "stopped"
+        ],
+        "output_field": "verdict",
+        "error_fields": [
+          "fail_step"
+        ]
+      }
+    }
+  ],
+  "default_grants": [
+    {
+      "grant_on": "user",
+      "actions": [
+        "createExperiment",
+        "listExperiment",
+        "getExperiment",
+        "deleteExperiment",
+        "listExperimentType"
+      ],
+      "resources": [
+        "{username}/chaos/experiments",
+        "{username}/chaos/experiments/*",
+        "{username}/chaos/experiment-types"
+      ]
+    }
+  ]
+}

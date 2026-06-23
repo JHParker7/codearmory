@@ -1,0 +1,163 @@
+{
+  "registryName": "workflows",
+  "k8sName": "workflows",
+  "imageRepo": "workflows",
+  "port": 8085,
+  "forward_auth": true,
+  "description": "CI/CD pipeline orchestration",
+  "registryAccount": true,
+  "infra": {},
+  "derivedSecrets": [
+    {
+      "envVar": "HOOKS_TRIGGER_KEY",
+      "kind": "shared",
+      "name": "hooks-trigger-key"
+    },
+    {
+      "envVar": "WORKFLOWS_TOKEN_KEY",
+      "kind": "private",
+      "name": "token-key"
+    }
+  ],
+  "requiredConfig": [
+    "DATABASE_URL"
+  ],
+  "optionalConfig": [],
+  "secretConfig": [
+    "DATABASE_URL"
+  ],
+  "envExtras": {
+    "REGISTRY_URL": "http://${PREFIX}-registry:8082"
+  },
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/steps",
+      "action": "createStep",
+      "resource": "workflows/steps"
+    },
+    {
+      "method": "GET",
+      "path": "/steps",
+      "action": "listStep",
+      "resource": "workflows/steps"
+    },
+    {
+      "method": "GET",
+      "path": "/steps/{id}",
+      "action": "getStep",
+      "resource": "workflows/steps/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/steps/{id}",
+      "action": "updateStep",
+      "resource": "workflows/steps/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/steps/{id}",
+      "action": "deleteStep",
+      "resource": "workflows/steps/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/pipelines",
+      "action": "createWorkflow",
+      "resource": "workflows/pipelines"
+    },
+    {
+      "method": "GET",
+      "path": "/pipelines",
+      "action": "listWorkflow",
+      "resource": "workflows/pipelines"
+    },
+    {
+      "method": "GET",
+      "path": "/pipelines/{id}",
+      "action": "getWorkflow",
+      "resource": "workflows/pipelines/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/pipelines/{id}",
+      "action": "updateWorkflow",
+      "resource": "workflows/pipelines/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/pipelines/{id}",
+      "action": "deleteWorkflow",
+      "resource": "workflows/pipelines/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/pipelines/{id}/runs",
+      "action": "triggerRun",
+      "resource": "workflows/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/runs",
+      "action": "listRun",
+      "resource": "workflows/runs"
+    },
+    {
+      "method": "GET",
+      "path": "/runs/{id}",
+      "action": "getRun",
+      "resource": "workflows/runs/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/runs/{id}",
+      "action": "cancelRun",
+      "resource": "workflows/runs/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/actions",
+      "action": "listAction",
+      "resource": "workflows/actions"
+    }
+  ],
+  "actions": [],
+  "default_grants": [
+    {
+      "grant_on": "user",
+      "actions": [
+        "createStep",
+        "listStep",
+        "getStep",
+        "updateStep",
+        "deleteStep",
+        "createWorkflow",
+        "listWorkflow",
+        "getWorkflow",
+        "updateWorkflow",
+        "deleteWorkflow",
+        "triggerRun",
+        "listRun",
+        "getRun",
+        "cancelRun"
+      ],
+      "resources": [
+        "{username}/workflows/steps",
+        "{username}/workflows/steps/*",
+        "{username}/workflows/pipelines",
+        "{username}/workflows/pipelines/*",
+        "{username}/workflows/runs",
+        "{username}/workflows/runs/*"
+      ]
+    },
+    {
+      "grant_on": "user",
+      "actions": [
+        "listAction"
+      ],
+      "resources": [
+        "{username}/workflows/actions"
+      ]
+    }
+  ]
+}

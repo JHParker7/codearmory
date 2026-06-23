@@ -1,0 +1,94 @@
+{
+  "registryName": "argo",
+  "k8sName": "argo",
+  "imageRepo": "argo",
+  "port": 8091,
+  "forward_auth": true,
+  "description": "Argo CD application sync via outposts",
+  "registryAccount": false,
+  "infra": {},
+  "derivedSecrets": [
+    {
+      "envVar": "OUTPOST_INTERNAL_KEY",
+      "kind": "shared",
+      "name": "outpost-internal-key"
+    }
+  ],
+  "requiredConfig": [
+    "DATABASE_URL"
+  ],
+  "optionalConfig": [],
+  "secretConfig": [
+    "DATABASE_URL"
+  ],
+  "envExtras": {
+    "OUTPOST_GATEWAY_URL": "http://${PREFIX}-outpost-gateway:8092"
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/apps",
+      "action": "listApp",
+      "resource": "argo/apps"
+    },
+    {
+      "method": "GET",
+      "path": "/apps/{name}",
+      "action": "getApp",
+      "resource": "argo/apps/{name}"
+    },
+    {
+      "method": "POST",
+      "path": "/apps/{name}/sync",
+      "action": "syncApp",
+      "resource": "argo/apps/{name}"
+    },
+    {
+      "method": "GET",
+      "path": "/syncs/{id}",
+      "action": "getSync",
+      "resource": "argo/syncs/{id}"
+    }
+  ],
+  "actions": [
+    {
+      "name": "argo/sync",
+      "method": "POST",
+      "path": "/apps/{name}/sync",
+      "async": {
+        "id_field": "sync_id",
+        "poll_path": "/syncs/{id}",
+        "poll_interval_secs": 5,
+        "status_field": "status",
+        "success_states": [
+          "Synced"
+        ],
+        "failure_states": [
+          "Failed"
+        ],
+        "cancel_states": [],
+        "output_field": "revision",
+        "error_fields": [
+          "message"
+        ]
+      }
+    }
+  ],
+  "default_grants": [
+    {
+      "grant_on": "user",
+      "actions": [
+        "listApp",
+        "getApp",
+        "syncApp",
+        "getSync"
+      ],
+      "resources": [
+        "{username}/argo/apps",
+        "{username}/argo/apps/*",
+        "{username}/argo/syncs",
+        "{username}/argo/syncs/*"
+      ]
+    }
+  ]
+}

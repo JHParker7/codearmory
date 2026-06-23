@@ -44,9 +44,14 @@ type OrgService struct {
 	// DBURLCiphertext is the admin-supplied per-service database URL, AES-256-GCM
 	// encrypted (AAD = service name) and never serialized. DBHost is a redacted
 	// host:port/db kept only for display.
-	DBURLCiphertext []byte    `json:"-"                 gorm:"column:db_url_ct"`
-	DBHost          string    `json:"-"                 gorm:"column:db_host;default:''"`
-	CreatedAt       time.Time `json:"created_at"        gorm:"column:created_at"`
+	DBURLCiphertext []byte `json:"-"                 gorm:"column:db_url_ct"`
+	DBHost          string `json:"-"                 gorm:"column:db_host;default:''"`
+	// SecretsCiphertext is the admin-supplied sensitive config (REDIS_URL,
+	// GITEA_ADMIN_TOKEN, REGISTRY_PASSWORD, …) as an AES-256-GCM-encrypted JSON map
+	// (AAD = service name), never serialized. Builder writes each entry into the
+	// service's Secret under its conventional key on provision.
+	SecretsCiphertext []byte    `json:"-"                 gorm:"column:secrets_ct"`
+	CreatedAt         time.Time `json:"created_at"        gorm:"column:created_at"`
 	UpdatedAt       time.Time `json:"updated_at"        gorm:"column:updated_at"`
 }
 
@@ -82,6 +87,10 @@ type setServiceRequest struct {
 	Port        int            `json:"port"`
 	Description string         `json:"description"`
 	DBUrl       string         `json:"db_url"`
+	// Secrets is admin-supplied sensitive config keyed by env var name (e.g.
+	// REDIS_URL, GITEA_ADMIN_TOKEN, REGISTRY_PASSWORD). Write-only: encrypted on
+	// receipt and never read back. Non-sensitive config goes in Config.
+	Secrets map[string]string `json:"secrets"`
 }
 
 // effectiveResponse is the internal disabled-set returned to the gatekeeper gate.

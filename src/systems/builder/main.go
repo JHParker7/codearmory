@@ -148,6 +148,7 @@ func main() {
 	}
 	initMetrics()
 	initSecretsEncryption()
+	initSecretDerivation()
 	httpClient = initHTTPClient()
 
 	if err := connect().AutoMigrate(&OrgService{}); err != nil {

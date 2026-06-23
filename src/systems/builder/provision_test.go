@@ -63,7 +63,7 @@ func TestProvision_CreatesIdentityAndSecret(t *testing.T) {
 	b := newTestBackend(t, rec, conductor)
 
 	ctx := context.Background()
-	if err := b.provision(ctx, "forge", "postgres://forge:pw@db:5432/forge"); err != nil {
+	if err := b.provision(ctx, "forge", "postgres://forge:pw@db:5432/forge", nil); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 
@@ -95,7 +95,7 @@ func TestProvision_CreatesIdentityAndSecret(t *testing.T) {
 	}
 
 	// Re-provisioning must reuse the existing key (no pod churn) and register again.
-	if err := b.provision(ctx, "forge", "postgres://forge:pw@db:5432/forge"); err != nil {
+	if err := b.provision(ctx, "forge", "postgres://forge:pw@db:5432/forge", nil); err != nil {
 		t.Fatalf("re-provision: %v", err)
 	}
 	sec2, _ := b.client.CoreV1().Secrets("codearmory").Get(ctx, "codearmory-forge", metav1.GetOptions{})
@@ -112,7 +112,7 @@ func TestDeprovision_DeletesManagedSecret(t *testing.T) {
 	rec := &registerRecorder{}
 	b := newTestBackend(t, rec)
 	ctx := context.Background()
-	if err := b.provision(ctx, "tickets", ""); err != nil {
+	if err := b.provision(ctx, "tickets", "", nil); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	if _, err := b.client.CoreV1().Secrets("codearmory").Get(ctx, "codearmory-tickets", metav1.GetOptions{}); err != nil {

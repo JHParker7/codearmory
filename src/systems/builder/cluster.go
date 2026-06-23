@@ -2,14 +2,21 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
@@ -40,10 +47,23 @@ const (
 	// image to shed drift or a compromised process. See stampRotation.
 	annotationRotatedAt = "codearmory.io/rotated-at"
 
+	// annotationSpecHash carries a hash of the desired spec builder last applied to a
+	// workload. A steady-state reconcile whose rendered spec matches the stored hash
+	// skips the Update entirely, so identical passes don't churn resourceVersions or
+	// generate needless apiserver/etcd writes. See applyDeployment.
+	annotationSpecHash = "codearmory.io/spec-hash"
+
 	// minReadySeconds requires a new pod to stay Ready before a rollout proceeds to the
 	// next, so a crash-looping image can't churn the whole set unnoticed.
 	minReadySeconds = 10
 )
+
+// specHash is a stable content hash of a rendered spec, used to skip no-op Updates.
+func specHash(v any) string {
+	b, _ := json.Marshal(v)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 // workloadSpec is the desired workload for one service. Image/Port are optional:
 // when empty the backend clones the platform service's existing base Deployment
@@ -55,6 +75,7 @@ type workloadSpec struct {
 	Port           int32             // explicit port; 0 => clone or known-port catalog
 	Env            map[string]string // config overrides applied on top of the base env
 	DBUrl          string            // decrypted admin-supplied database URL ("" if none)
+	Secrets        map[string]string // decrypted admin-supplied sensitive config (env-key → value)
 	Replicas       int32             // desired replicas; 0 => backend default (then 1)
 	RotateInterval time.Duration     // periodic rolling-restart cadence; 0 => backend default (then off)
 }
@@ -76,22 +97,6 @@ func (noopBackend) EnsureService(context.Context, workloadSpec) error { return n
 func (noopBackend) RemoveService(context.Context, string) error       { return nil }
 func (noopBackend) ListManaged(context.Context) ([]string, error)     { return nil, nil }
 
-// knownServicePorts lets the template fallback pick a container port for a
-// platform service when there is no base Deployment to clone the port from.
-var knownServicePorts = map[string]int32{
-	"forge":             8083,
-	"workflows":         8085,
-	"tickets":           8086,
-	"hooks":             8087,
-	"gitea_integration": 8088,
-	"containers":        8089,
-	"chaos":             8090,
-	"argo":              8091,
-	"outpost-gateway":   8092,
-	"blueprints":        8093,
-	"notifications":     8094,
-}
-
 type k8sBackend struct {
 	client    kubernetes.Interface
 	namespace string // instance namespace workloads are created in
@@ -100,11 +105,18 @@ type k8sBackend struct {
 	tag       string // image tag for the template fallback
 	prov      provisioningConfig
 
+	// secrets is the backend for reading/writing per-service secret bundles. Defaults
+	// to a k8s-Secret store; the seam lets a Vault-backed store swap in later. Nil in
+	// hand-built test backends — store() falls back to a k8s store over client/namespace.
+	secrets secretStore
+
 	// defaultReplicas is the replica floor applied to every managed workload that does
 	// not set its own (0 => 1). rotateInterval is the default periodic rolling-restart
 	// cadence (0 => off). Both are overridable per service via reserved config knobs.
 	defaultReplicas int32
 	rotateInterval  time.Duration
+	// imagePullSecrets are attached to every managed workload (private registries).
+	imagePullSecrets []string
 	// nowFn is the clock for rotation bucketing; overridden in tests.
 	nowFn func() time.Time
 }
@@ -134,10 +146,38 @@ func newK8sBackend(namespace, prefix, registry, tag string) (*k8sBackend, error)
 	if prefix == "" {
 		prefix = "codearmory"
 	}
-	return &k8sBackend{client: client, namespace: namespace, prefix: prefix, registry: registry, tag: tag, nowFn: time.Now}, nil
+	return &k8sBackend{
+		client:    client,
+		namespace: namespace,
+		prefix:    prefix,
+		registry:  registry,
+		tag:       tag,
+		nowFn:     time.Now,
+		secrets:   &k8sSecretStore{client: client, namespace: namespace},
+	}, nil
 }
 
-func (b *k8sBackend) name(service string) string { return b.prefix + "-" + service }
+// name is the cluster object name (Deployment/Service/Secret/PDB) for a service.
+// It uses the embedded def's K8sName so a registry name containing '_' (e.g.
+// "gitea_integration") maps to a valid DNS-1123 object name ("gitea-integration").
+// Labels/selectors keep the registry name (see labels/selector), so reconciliation
+// and identity stay keyed on the registry name.
+func (b *k8sBackend) name(service string) string {
+	k8s := service
+	if d, ok := embeddedServiceDef(service); ok {
+		k8s = d.K8sName
+	}
+	return b.prefix + "-" + k8s
+}
+
+// store returns the configured secret backend, falling back to a k8s store over the
+// backend's own client/namespace when unset (hand-built test backends).
+func (b *k8sBackend) store() secretStore {
+	if b.secrets != nil {
+		return b.secrets
+	}
+	return &k8sSecretStore{client: b.client, namespace: b.namespace}
+}
 
 func (b *k8sBackend) labels(service string) map[string]string {
 	return map[string]string{
@@ -162,15 +202,22 @@ func (b *k8sBackend) EnsureService(ctx context.Context, spec workloadSpec) error
 	// Provision the gatekeeper identity + Secret first so the workload it deploys
 	// can authenticate and connect — letting a service come online with no Helm change.
 	if b.provisioningOn() {
-		if err := b.provision(ctx, spec.Service, spec.DBUrl); err != nil {
+		if err := b.provision(ctx, spec.Service, spec.DBUrl, spec.Secrets); err != nil {
 			return fmt.Errorf("provision %s: %w", spec.Service, err)
 		}
+	}
+	// Stateless app infra (egress-proxy, forge RBAC) before the workload, so the pod has
+	// what it needs once it starts. Level-triggered: a transient failure retries next pass.
+	if err := b.ensureInfra(ctx, spec); err != nil {
+		return fmt.Errorf("ensure infra %s: %w", spec.Service, err)
 	}
 	dep, err := b.buildDeployment(ctx, spec)
 	if err != nil {
 		return err
 	}
-	if err := b.applyDeployment(ctx, dep); err != nil {
+	// A per-service replicas override is an exact target; the backend default is a
+	// floor that an admin/HPA scale-up may exceed.
+	if err := b.applyDeployment(ctx, dep, spec.Replicas <= 0); err != nil {
 		return fmt.Errorf("apply deployment %s: %w", dep.Name, err)
 	}
 	port := spec.Port
@@ -183,10 +230,33 @@ func (b *k8sBackend) EnsureService(ctx context.Context, spec workloadSpec) error
 	if err := b.applyPDB(ctx, spec.Service, b.replicasFor(spec)); err != nil {
 		return fmt.Errorf("apply poddisruptionbudget %s: %w", b.name(spec.Service), err)
 	}
+	// Register with the registry LAST, so conductor only learns the route once the
+	// Service/Deployment exist. Custom services with no embedded def are registered
+	// out-of-band, so they are skipped here.
+	if registerServicesOn() {
+		if def, ok := embeddedServiceDef(spec.Service); ok {
+			if def.RegistryAccount {
+				if err := ensureRegistryAccount(ctx, def.RegistryName, derivePrivateKey(def.RegistryName, "registry-service-key")); err != nil {
+					return fmt.Errorf("ensure registry account %s: %w", def.RegistryName, err)
+				}
+			}
+			if err := ensureRegistryService(ctx, def, b.prefix); err != nil {
+				return fmt.Errorf("register %s: %w", def.RegistryName, err)
+			}
+		}
+	}
 	return nil
 }
 
 func (b *k8sBackend) RemoveService(ctx context.Context, service string) error {
+	// Deregister from the registry FIRST so conductor stops routing before the workload
+	// disappears (avoids routing to a deleting pod). Best-effort: a failure is logged and
+	// corrected on the next reconcile rather than blocking teardown.
+	if registerServicesOn() {
+		if err := removeRegistryService(ctx, service); err != nil {
+			slog.WarnContext(ctx, "deregister service from registry failed", "service", service, "error", err)
+		}
+	}
 	name := b.name(service)
 	policy := metav1.DeletePropagationForeground
 	opts := metav1.DeleteOptions{PropagationPolicy: &policy}
@@ -199,6 +269,7 @@ func (b *k8sBackend) RemoveService(ctx context.Context, service string) error {
 	if err := b.client.PolicyV1().PodDisruptionBudgets(b.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete poddisruptionbudget %s: %w", name, err)
 	}
+	b.teardownInfra(ctx, service)
 	if b.provisioningOn() {
 		b.deprovision(ctx, service)
 	}
@@ -208,8 +279,10 @@ func (b *k8sBackend) RemoveService(ctx context.Context, service string) error {
 // ListManaged returns the service names of every builder-managed Deployment in the
 // namespace, so the reconciler can reclaim ones no longer desired.
 func (b *k8sBackend) ListManaged(ctx context.Context) ([]string, error) {
+	// Exclude infra workloads (labelled infra-of): they belong to a parent service and
+	// are torn down with it, not reconciled as top-level services in the desired diff.
 	list, err := b.client.AppsV1().Deployments(b.namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelManagedBy + "=" + managedByValue,
+		LabelSelector: labelManagedBy + "=" + managedByValue + ",!" + labelInfraOf,
 	})
 	if err != nil {
 		return nil, err
@@ -350,75 +423,139 @@ func (b *k8sBackend) containerPort(ctx context.Context, service string) int32 {
 			}
 		}
 	}
-	if p, ok := knownServicePorts[service]; ok {
-		return p
+	if d, ok := embeddedServiceDef(service); ok && d.Port != 0 {
+		return d.Port
 	}
 	return 8080
 }
 
-// templatePod renders the minimal pod for a service with no base to clone: the
-// image (explicit, or registry/service:tag) on its port, with the standard
-// gatekeeper/db wiring sourced from the conventional per-service secret.
+// templatePod fully expresses the pod for a service builder deploys. Once the chart is
+// core-only there is no base Deployment to clone, so this carries everything: the image
+// on its port, the full env (gatekeeper URL + the embedded def's static/inter-service
+// env, derived-secret refs, registry-account ref, and admin-secret refs), the security
+// context, probes, resources, image pull secrets, and (for forge) its ServiceAccount.
 func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
+	def, hasDef := embeddedServiceDef(spec.Service)
+
 	image := spec.Image
 	if image == "" {
-		image = fmt.Sprintf("%s/%s:%s", b.registry, spec.Service, b.tag)
+		repo := spec.Service
+		if hasDef {
+			repo = def.ImageRepo
+		}
+		image = fmt.Sprintf("%s/%s:%s", b.registry, repo, b.tag)
 	}
 	port := spec.Port
 	if port == 0 {
-		if p, ok := knownServicePorts[spec.Service]; ok {
-			port = p
-		} else {
+		switch {
+		case hasDef && def.Port != 0:
+			port = def.Port
+		default:
 			port = 8080
 		}
 	}
 	secretName := b.name(spec.Service)
+
+	// Assemble env into a map and emit it sorted, so repeated reconciles produce a
+	// byte-identical pod template and never churn the workload.
+	envByName := map[string]corev1.EnvVar{}
+	setVal := func(name, value string) { envByName[name] = corev1.EnvVar{Name: name, Value: value} }
+	setRef := func(name, secretKey string) {
+		envByName[name] = corev1.EnvVar{Name: name, ValueFrom: optionalSecretRef(secretName, secretKey)}
+	}
+	setVal("PORT", fmt.Sprintf("%d", port))
+	setVal("GATEKEEPER_URL", fmt.Sprintf("http://%s-gatekeeper:8081", b.prefix))
+	// Always-available identity/connection keys, wired as optional secret refs (absent
+	// keys are simply unset).
+	setRef("DATABASE_URL", "database-url")
+	setRef("GATEKEEPER_SERVICE_KEY", "gatekeeper-service-key")
+	setRef("CONDUCTOR_FORWARD_KEY", "conductor-forward-key")
+	if hasDef {
+		for k, v := range def.EnvExtras {
+			v = strings.ReplaceAll(v, "${PREFIX}", b.prefix)
+			v = strings.ReplaceAll(v, "${NAMESPACE}", b.namespace)
+			setVal(k, v)
+		}
+		for _, ds := range def.DerivedSecrets {
+			setRef(ds.EnvVar, ds.Name)
+		}
+		if def.RegistryAccount {
+			setRef("REGISTRY_SERVICE_KEY", "registry-service-key")
+		}
+		for _, key := range def.SecretConfig {
+			setRef(key, secretKeyForEnv(key))
+		}
+	}
+	names := make([]string, 0, len(envByName))
+	for n := range envByName {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	env := make([]corev1.EnvVar, 0, len(names))
+	for _, n := range names {
+		env = append(env, envByName[n])
+	}
+
 	runAsNonRoot := true
 	allowPriv := false
 	readOnly := true
-	env := []corev1.EnvVar{
-		{Name: "PORT", Value: fmt.Sprintf("%d", port)},
-		{Name: "GATEKEEPER_URL", Value: fmt.Sprintf("http://%s-gatekeeper:8081", b.prefix)},
-		{Name: "REGISTRY_URL", Value: fmt.Sprintf("http://%s-registry:8082", b.prefix)},
+	podSpec := corev1.PodSpec{
+		SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: &runAsNonRoot},
+		Containers: []corev1.Container{{
+			Name:  spec.Service,
+			Image: image,
+			Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: port, Protocol: corev1.ProtocolTCP}},
+			Env:   env,
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: &allowPriv,
+				ReadOnlyRootFilesystem:   &readOnly,
+				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			},
+			ReadinessProbe: tcpProbe(5, 10),
+			LivenessProbe:  tcpProbe(10, 15),
+			Resources:      defaultResources(),
+		}},
 	}
-	// Wire the conventional per-service secret keys as optional refs: whichever the
-	// service's existing Secret actually carries get set, the rest are skipped. The
-	// Secret is provisioned by the chart even for not-yet-deployed services, so a
-	// templated workload still authenticates. Service-specific plaintext env (e.g.
-	// forge's RUNTIME) comes from the admin's config (applied as overrides).
-	for envName, key := range templateSecretEnv {
-		env = append(env, corev1.EnvVar{Name: envName, ValueFrom: optionalSecretRef(secretName, key)})
+	for _, n := range b.imagePullSecrets {
+		podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, corev1.LocalObjectReference{Name: n})
+	}
+	// forge needs its ServiceAccount so it can create sandbox Jobs in the exec namespace.
+	if hasDef && def.Infra.ForgeExecRBAC {
+		automount := true
+		podSpec.ServiceAccountName = b.name(spec.Service)
+		podSpec.AutomountServiceAccountToken = &automount
 	}
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: b.labels(spec.Service)},
-		Spec: corev1.PodSpec{
-			SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: &runAsNonRoot},
-			Containers: []corev1.Container{{
-				Name:  spec.Service,
-				Image: image,
-				Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: port, Protocol: corev1.ProtocolTCP}},
-				Env:   env,
-				SecurityContext: &corev1.SecurityContext{
-					AllowPrivilegeEscalation: &allowPriv,
-					ReadOnlyRootFilesystem:   &readOnly,
-					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-				},
-			}},
-		},
+		Spec:       podSpec,
 	}
 }
 
-// templateSecretEnv maps env var names to the conventional per-service Secret keys
-// the chart provisions. All are wired as optional, so a service only receives the
-// keys its Secret actually holds.
-var templateSecretEnv = map[string]string{
-	"DATABASE_URL":           "database-url",
-	"GATEKEEPER_SERVICE_KEY": "gatekeeper-service-key",
-	"CONDUCTOR_FORWARD_KEY":  "conductor-forward-key",
-	"REDIS_URL":              "redis-url",
-	"REGISTRY_SERVICE_KEY":   "registry-service-key",
-	"HOOKS_TRIGGER_KEY":      "hooks-trigger-key",
-	"OUTPOST_INTERNAL_KEY":   "outpost-internal-key",
+// secretKeyForEnv maps an env var name to its conventional Secret key
+// (DATABASE_URL → database-url, GITEA_ADMIN_TOKEN → gitea-admin-token).
+func secretKeyForEnv(envVar string) string {
+	return strings.ToLower(strings.ReplaceAll(envVar, "_", "-"))
+}
+
+func tcpProbe(initialDelay, period int32) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("http")}},
+		InitialDelaySeconds: initialDelay,
+		PeriodSeconds:       period,
+	}
+}
+
+func defaultResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("50m"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse("256Mi"),
+		},
+	}
 }
 
 func optionalSecretRef(name, key string) *corev1.EnvVarSource {
@@ -438,7 +575,15 @@ func applyEnvOverrides(pt *corev1.PodTemplateSpec, env map[string]string) {
 		return
 	}
 	c := &pt.Spec.Containers[0]
-	for k, v := range env {
+	// Apply in sorted key order so newly-appended overrides land deterministically and
+	// repeated reconciles produce a byte-identical pod template (no churn).
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := env[k]
 		set := false
 		for i := range c.Env {
 			if c.Env[i].Name == k {
@@ -465,10 +610,19 @@ func mergeLabels(into, add map[string]string) map[string]string {
 
 // applyDeployment creates the Deployment, or updates the existing one's spec in
 // place (preserving identity/resourceVersion) so reconfigure rolls the pods.
-func (b *k8sBackend) applyDeployment(ctx context.Context, dep *appsv1.Deployment) error {
+//
+// replicaFloor marks the desired replica count as a floor rather than an exact
+// target: when true, an existing Deployment already scaled ABOVE the floor (by an
+// admin or an HPA) keeps its higher count, so reconcile never fights an upward
+// scale — it only ever raises a workload back up to the floor. When false (an
+// explicit per-service replicas override, or fixed-size infra), the count is
+// applied exactly. A reconcile whose rendered spec matches the stored spec-hash
+// annotation is a no-op and skips the Update.
+func (b *k8sBackend) applyDeployment(ctx context.Context, dep *appsv1.Deployment, replicaFloor bool) error {
 	api := b.client.AppsV1().Deployments(b.namespace)
 	existing, err := api.Get(ctx, dep.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		stampSpecHash(&dep.ObjectMeta, dep.Spec)
 		_, err = api.Create(ctx, dep, metav1.CreateOptions{})
 		return err
 	}
@@ -481,10 +635,28 @@ func (b *k8sBackend) applyDeployment(ctx context.Context, dep *appsv1.Deployment
 	if existing.Labels[labelManagedBy] != managedByValue {
 		return fmt.Errorf("refusing to overwrite Deployment %q owned by %q, not %s", dep.Name, existing.Labels[labelManagedBy], managedByValue)
 	}
+	// Preserve a higher externally-set replica count when the desired count is only a
+	// floor, so an admin/HPA scale-up survives the next reconcile.
+	if replicaFloor && existing.Spec.Replicas != nil && dep.Spec.Replicas != nil && *existing.Spec.Replicas > *dep.Spec.Replicas {
+		dep.Spec.Replicas = existing.Spec.Replicas
+	}
+	hash := specHash(dep.Spec)
+	if existing.Annotations[annotationSpecHash] == hash {
+		return nil // unchanged since the last apply — skip the no-op Update
+	}
 	existing.Labels = mergeLabels(existing.Labels, dep.Labels)
+	stampSpecHash(&existing.ObjectMeta, dep.Spec)
 	existing.Spec = dep.Spec
 	_, err = api.Update(ctx, existing, metav1.UpdateOptions{})
 	return err
+}
+
+// stampSpecHash records the spec-hash annotation on an object's metadata.
+func stampSpecHash(meta *metav1.ObjectMeta, spec any) {
+	if meta.Annotations == nil {
+		meta.Annotations = map[string]string{}
+	}
+	meta.Annotations[annotationSpecHash] = specHash(spec)
 }
 
 func (b *k8sBackend) applyService(ctx context.Context, service string, port int32) error {
