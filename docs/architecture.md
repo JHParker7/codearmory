@@ -5,44 +5,38 @@
 | Service | Port | Role |
 |---------|------|------|
 | [Gatekeeper](gatekeeper/architecture.md)             | 8081 | Authentication, session management, RBAC, OIDC provider |
-| Blueprints                                           | 8093 | Self-hosted Terraform HTTP backend (separate repo) |
 | [Conductor](conductor/architecture.md)               | 8080 | API gateway — identity check, RBAC, reverse proxy |
-| [Forge](forge/architecture.md)                       | 8083 | Sandboxed container execution |
 | [Registry](registry/architecture.md)                 | 8082 | Service catalogue polled by Conductor |
+| Builder                                              | 8095 | Org control plane + runtime deployer/registrar of optional service modules |
+| Portal                                               | —    | Web UI — React SPA + Express BFF proxying to Conductor |
+| [Forge](forge/architecture.md)                       | 8083 | Sandboxed container execution |
 | [Workflows](workflows/architecture.md)               | 8085 | CI/CD pipeline orchestrator |
-| Tickets                                              | 8086 | Org-scoped task tracker (separate repo) |
 | [Hooks](hooks/architecture.md)                       | 8087 | Webhook receiver and pipeline trigger |
-| Gitea Integration                                    | 8088 | Forgejo/Gitea repository and PR management (separate repo) |
-| Containers                                           | 8089 | OCI registry management proxy (separate repo) |
-| Chaos                                                | 8090 | Chaos-engineering control plane (outpost integration) (separate repo) |
-| Argo                                                 | 8091 | Argo CD sync control plane (outpost integration) (separate repo) |
 | [Outpost Gateway](outpost-gateway/README.md)         | 8092 | Outpost-facing connection point + event backbone |
-| [Outpost](outpost/README.md)                         | —    | Customer-deployed in-cluster agent (chaos/argo modules) |
-| Egress Proxy                                         | 3128 | Optional allowlist-enforcing HTTP CONNECT proxy for Forge (separate repo) |
-| MCP Server                                           | stdio | Local MCP server wrapping the full platform API (separate repo) |
+| [Outpost](outpost/README.md)                         | —    | Customer-deployed in-cluster agent (pluggable integration modules) |
 
-Services marked *(separate repo)* live in their own `codearmory-<svc>` repos and are deployed + registered at runtime by **builder**; the rest are core services in this monorepo.
+The platform is modular. The services above are the core that ships in this repo; additional capabilities are deployed and registered at runtime as **modules by Builder**.
 
 ## Service topology
 
 ```
 +------------------------------------------------------------------+
 |                       External traffic                           |
-+-------------------+---------------------+------------------------+
-|  REST API clients |  Terraform clients  |  Git / CI webhooks     |
-+-------------------+---------------------+------------------------+
-        |                    |                       |
-        | Bearer JWT         | Bearer or Basic       | POST /hooks
-        v                    v                       v
-+---------------+    +----------------+    +------------------+
-|   Conductor   |    |   Blueprints   |    |     Hooks        |
-|   :8080       |    |   :8093        |    |     :8087        |
-|   API gateway |    |   Terraform    |    |  Rule match      |
-|   RBAC proxy  |    |   state store  |    |  + dispatch      |
-+-------+-------+    +-------+--------+    +--------+---------+
-        |                    |                       |
-        | routes to          | check_permissions     | HMAC-signed trigger
-        |                    v                       v
++----------------------------------+-------------------------------+
+|        REST API clients          |     Git / CI webhooks         |
++----------------------------------+-------------------------------+
+        |                                       |
+        | Bearer JWT                            | POST /hooks
+        v                                       v
++---------------+                      +------------------+
+|   Conductor   |                      |     Hooks        |
+|   :8080       |                      |     :8087        |
+|   API gateway |                      |  Rule match      |
+|   RBAC proxy  |                      |  + dispatch      |
++-------+-------+                      +--------+---------+
+        |                                       |
+        | routes to                             | HMAC-signed trigger
+        |                                       v
   +-----+------+     +----------------+    +------------------+
   |            |     |   Gatekeeper   |    |   Workflows      |
   v            v     |   :8081        |    |   :8085          |
@@ -53,7 +47,7 @@ Gatekeeper  Registry |   Auth / RBAC  |    |   Worker pool    |
             | 30-second poll                        | HTTP steps
             v                                       v
       Conductor routing                  any registered service
-      table (in-memory)                 (Forge, Blueprints, ...)
+      table (in-memory)                 (Forge, modules, ...)
 
   All services call POST /check_permissions on Gatekeeper
   to verify the caller's Bearer JWT and action+resource pair.
@@ -63,7 +57,6 @@ Gatekeeper  Registry |   Auth / RBAC  |    |   Worker pool    |
   Shared infrastructure
     PostgreSQL  — one isolated database per service
     Redis       — Gatekeeper (permission cache, session store)
-                — Blueprints (state read cache)
     OTel        — traces, metrics, and logs from all services
 ```
 
@@ -88,7 +81,7 @@ Client --Bearer JWT--> Conductor
 
 Services receiving requests through Conductor get a signed `X-User-ID` header and do their own permission check via Gatekeeper. Conductor only verifies that the user exists; RBAC is delegated to each backend.
 
-### 2. Direct Gatekeeper auth (Blueprints, Forge, Hooks, Tickets, Workflows)
+### 2. Direct Gatekeeper auth (Forge, Hooks, Workflows)
 
 Each service calls `POST /check_permissions` on Gatekeeper, forwarding the caller's `Authorization: Bearer` token. Gatekeeper validates the JWT signature, evaluates the user's roles and permissions, and returns `{ authorized, user_id, org_id }`.
 
@@ -166,25 +159,25 @@ Git host / CI system
 
 ## Outpost integration framework
 
-Cluster integrations (chaos, argo) never reach into a customer cluster from the control plane. Exactly one customer-deployed **outpost** runs in (or against) the target cluster and dials out to the **outpost-gateway** over HTTPS. The gateway is a Postgres event backbone: a command queue and an event outbox, distinct from Conductor.
+Drive your own clusters from the control plane without granting it any inbound access or cluster credentials. Exactly one customer-deployed **outpost** runs in (or against) the target cluster and dials out to the **outpost-gateway** over HTTPS. The gateway is a Postgres event backbone: a command queue and an event outbox, distinct from Conductor. Integrations are pluggable modules loaded by the outpost.
 
 ```
  customer / self-hosted cluster                 control plane
  ┌─ outpost ───────────────┐   HTTPS    ┌─ outpost-gateway :8092 ─────────────┐
- │ modules:                │  outbound  │ enroll · long-poll commands ·       │
- │  chaos → litmus CRDs    │ ◄────────► │ ingest events (outpost-key auth)    │
- │  argo  → Argo CD Apps   │  long-poll └───────────┬─────────────────────────┘
- │ least-priv RBAC/module  │   + POST     Postgres backbone
+ │ pluggable modules       │  outbound  │ enroll · long-poll commands ·       │
+ │ (least-priv RBAC each)  │ ◄────────► │ ingest events (outpost-key auth)    │
+ │                         │  long-poll └───────────┬─────────────────────────┘
+ │                         │   + POST     Postgres backbone
  └─────────────────────────┘             outpost_commands  (queue, SKIP LOCKED)
                                           outpost_events    (outbox + dead-letter retry)
-                                                  │ dispatch by integration (HTTP, HMAC)
-                          user ─Conductor─►  Chaos :8090 · Argo :8091  ─► Workflows / Hooks / Portal
+                                                  │ dispatch to consumer (HTTP, HMAC)
+                          user ─Conductor─►  consumer service  ─► Workflows / Hooks / Portal
 ```
 
 - **Commands** (control → outpost): a consumer service enqueues `{outpost_id, integration, type, payload}` via the gateway's internal API (shared-key HMAC); the outpost long-polls with `SKIP LOCKED` claiming and routes each to the matching module.
-- **Events** (outpost → control): a module emits an event; the outpost POSTs it; the gateway outboxes it and the dispatcher delivers it to the integration's consumer (`/internal/events`, HMAC-signed) with dead-letter retry. Consumers dedupe by ID and correlate by a stable key (chaos: `experiment_id`; argo: `outpost_id`+`app_name`).
+- **Events** (outpost → control): a module emits an event; the outpost POSTs it; the gateway outboxes it and the dispatcher delivers it to the integration's consumer (`/internal/events`, HMAC-signed) with dead-letter retry. Consumers dedupe by ID and correlate by a stable key.
 
-The control plane holds **zero** cluster credentials; all Kubernetes/CRD/Argo code lives in the outpost's modules. Self-hosted and SaaS use the identical mechanism — the difference is only whether the outpost shares the cluster with the control plane. Adding an integration is one outpost module + one consumer service + manifest entries; the outpost core, gateway, and backbone are untouched. See [outpost/README.md](outpost/README.md).
+The control plane holds **zero** cluster credentials; all Kubernetes/CRD code lives in the outpost's modules. Self-hosted and SaaS use the identical mechanism — the difference is only whether the outpost shares the cluster with the control plane. Adding an integration is one outpost module + one consumer service + manifest entries; the outpost core, gateway, and backbone are untouched. See [outpost/README.md](outpost/README.md).
 
 ## Service-to-service trust
 
@@ -198,19 +191,15 @@ The control plane holds **zero** cluster credentials; all Kubernetes/CRD/Argo co
 
 ## Database
 
-Each service owns an isolated PostgreSQL database. Cross-service references (e.g. `workflow_id` in a ticket) are plain text — no cross-database FK constraints exist.
+Each service owns an isolated PostgreSQL database. Cross-service references (e.g. `workflow_id` in a run record) are plain text — no cross-database FK constraints exist.
 
 | Service | Database | Schema management |
 |---------|----------|-------------------|
 | Gatekeeper | `gatekeeper` | GORM AutoMigrate + idempotent FK constraints |
-| Blueprints | `blueprints` | Raw SQL `CREATE TABLE IF NOT EXISTS` |
 | Registry | `registry` | Raw SQL `CREATE TABLE IF NOT EXISTS` |
 | Forge | `forge` | Raw SQL `CREATE TABLE IF NOT EXISTS` |
 | Workflows | `workflows` | GORM AutoMigrate |
-| Tickets | `tickets` | GORM AutoMigrate |
 | Hooks | `hooks` | GORM AutoMigrate |
-| Gitea Integration | `gitea_integration` | GORM AutoMigrate |
-| Containers | — | Stateless — no local database |
 
 ## Observability
 
