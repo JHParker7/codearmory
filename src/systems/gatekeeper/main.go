@@ -60,8 +60,9 @@ func rateLimitMiddleware(endpoint string, limiterMap *sync.Map, maxAttempts int,
 	}
 }
 
-var loginLimiter sync.Map  // per-IP login attempt buckets
-var signupLimiter sync.Map // per-IP signup attempt buckets
+var loginLimiter sync.Map       // per-IP login attempt buckets
+var signupLimiter sync.Map      // per-IP signup attempt buckets
+var setupStatusLimiter sync.Map // per-IP setup-status attempt buckets
 
 func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
@@ -210,7 +211,7 @@ func main() {
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
-	mux.HandleFunc("GET /setup/status", handleSetupStatus)
+	mux.HandleFunc("GET /setup/status", rateLimitMiddleware("setup-status", &setupStatusLimiter, envInt("SETUP_STATUS_RATE_LIMIT", 60), envDuration("SETUP_STATUS_RATE_WINDOW", time.Minute), handleSetupStatus))
 	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, envInt("SIGNUP_RATE_LIMIT", 10), envDuration("SIGNUP_RATE_WINDOW", 10*time.Minute), handleSignup))
 	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleLogin))
 	mux.HandleFunc("POST /logout", handleLogout)
