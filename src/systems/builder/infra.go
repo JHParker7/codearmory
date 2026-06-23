@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -63,7 +64,22 @@ func (b *k8sBackend) infraSelector(component string) map[string]string {
 	}
 }
 
-// ensureInfra creates the stateless app infra a service's def declares.
+// egressProxyEnabled reports whether forge's egress proxy (and the NetworkPolicy that
+// confines exec traffic to it) should be deployed. It defaults to on; an operator turns
+// it off with EGRESS_PROXY_ENABLED=false in forge's config when the runtime provides its
+// own isolation — notably kata/Cloud Hypervisor, where each execution is a VM that filters
+// egress at the VM level and never uses the shared-network HTTP proxy.
+func egressProxyEnabled(spec workloadSpec) bool {
+	switch strings.ToLower(strings.TrimSpace(spec.Env["EGRESS_PROXY_ENABLED"])) {
+	case "false", "0", "no", "off":
+		return false
+	}
+	return true
+}
+
+// ensureInfra creates the stateless app infra a service's def declares. The egress proxy
+// and its NetworkPolicy are level-reconciled against egressProxyEnabled: disabling the
+// knob tears down any that a prior pass deployed (so toggling kata on cleans up).
 func (b *k8sBackend) ensureInfra(ctx context.Context, spec workloadSpec) error {
 	def, ok := embeddedServiceDef(spec.Service)
 	if !ok {
@@ -74,18 +90,27 @@ func (b *k8sBackend) ensureInfra(ctx context.Context, spec workloadSpec) error {
 			return fmt.Errorf("forge rbac: %w", err)
 		}
 	}
+	enableEgress := egressProxyEnabled(spec)
 	if def.Infra.NetworkPolicy {
-		if err := b.ensureForgeNetworkPolicy(ctx, spec); err != nil {
-			return fmt.Errorf("forge network policy: %w", err)
+		if enableEgress {
+			if err := b.ensureForgeNetworkPolicy(ctx, spec); err != nil {
+				return fmt.Errorf("forge network policy: %w", err)
+			}
+		} else {
+			b.deleteForgeNetworkPolicy(ctx, spec.Service, b.execNamespace(spec))
 		}
 	}
 	if def.Infra.EgressProxy {
-		domains := defaultEgressAllowedDomains
-		if v := spec.Env["PROXY_ALLOWED_DOMAINS"]; v != "" {
-			domains = v
-		}
-		if err := b.ensureEgressProxy(ctx, spec.Service, domains); err != nil {
-			return fmt.Errorf("egress proxy: %w", err)
+		if enableEgress {
+			domains := defaultEgressAllowedDomains
+			if v := spec.Env["PROXY_ALLOWED_DOMAINS"]; v != "" {
+				domains = v
+			}
+			if err := b.ensureEgressProxy(ctx, spec.Service, domains); err != nil {
+				return fmt.Errorf("egress proxy: %w", err)
+			}
+		} else {
+			b.deleteEgressProxy(ctx, spec.Service)
 		}
 	}
 	return nil
