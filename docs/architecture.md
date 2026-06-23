@@ -13,7 +13,7 @@
 | [Workflows](workflows/architecture.md)               | 8085 | CI/CD pipeline orchestrator |
 | [Hooks](hooks/architecture.md)                       | 8087 | Webhook receiver and pipeline trigger |
 | [Outpost Gateway](outpost-gateway/README.md)         | 8092 | Outpost-facing connection point + event backbone |
-| [Outpost](outpost/README.md)                         | —    | Customer-deployed in-cluster agent (pluggable integration modules) |
+| [Outpost](outpost/README.md)                         | —    | User-deployed in-cluster agent (pluggable integration modules) |
 
 The platform is modular. The services above are the core that ships in this repo; additional capabilities are deployed and registered at runtime as **modules by Builder**.
 
@@ -159,10 +159,10 @@ Git host / CI system
 
 ## Outpost integration framework
 
-Drive your own clusters from the control plane without granting it any inbound access or cluster credentials. Exactly one customer-deployed **outpost** runs in (or against) the target cluster and dials out to the **outpost-gateway** over HTTPS. The gateway is a Postgres event backbone: a command queue and an event outbox, distinct from Conductor. Integrations are pluggable modules loaded by the outpost.
+Drive your own clusters from the control plane without granting it any inbound access or cluster credentials. A user-deployed **outpost** runs in (or against) each target cluster and dials out to the **outpost-gateway** over HTTPS — one outpost per cluster, so a single pipeline can drive actions across your whole fleet and **pipelines unify across clusters**. For a single-cluster setup the outpost runs in the **same cluster as CodeArmory itself** (against the in-cluster gateway); for many clusters, run one in each. The gateway is a Postgres event backbone: a command queue and an event outbox, distinct from Conductor. Integrations are pluggable modules loaded by the outpost.
 
 ```
- customer / self-hosted cluster                 control plane
+ your cluster (co-located or remote)            control plane
  ┌─ outpost ───────────────┐   HTTPS    ┌─ outpost-gateway :8092 ─────────────┐
  │ pluggable modules       │  outbound  │ enroll · long-poll commands ·       │
  │ (least-priv RBAC each)  │ ◄────────► │ ingest events (outpost-key auth)    │
@@ -177,7 +177,7 @@ Drive your own clusters from the control plane without granting it any inbound a
 - **Commands** (control → outpost): a consumer service enqueues `{outpost_id, integration, type, payload}` via the gateway's internal API (shared-key HMAC); the outpost long-polls with `SKIP LOCKED` claiming and routes each to the matching module.
 - **Events** (outpost → control): a module emits an event; the outpost POSTs it; the gateway outboxes it and the dispatcher delivers it to the integration's consumer (`/internal/events`, HMAC-signed) with dead-letter retry. Consumers dedupe by ID and correlate by a stable key.
 
-The control plane holds **zero** cluster credentials; all Kubernetes/CRD code lives in the outpost's modules. Self-hosted and SaaS use the identical mechanism — the difference is only whether the outpost shares the cluster with the control plane. Adding an integration is one outpost module + one consumer service + manifest entries; the outpost core, gateway, and backbone are untouched. See [outpost/README.md](outpost/README.md).
+The control plane holds **zero** cluster credentials; all Kubernetes/CRD code lives in the outpost's modules. Single-cluster and multi-cluster setups use the identical mechanism — the difference is only whether the outpost shares the cluster with the control plane or runs in a remote one. Adding an integration is one outpost module + one consumer service + manifest entries; the outpost core, gateway, and backbone are untouched. See [outpost/README.md](outpost/README.md).
 
 ## Service-to-service trust
 

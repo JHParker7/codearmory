@@ -97,7 +97,7 @@ The Workflows service (`:8085`) executes pipelines by grouping steps into sequen
 Forge (`:8083`) runs user commands as isolated containers (Docker or Kubernetes Jobs) with dropped capabilities. When the egress proxy is enabled, exec traffic is confined to the **Egress Proxy** (`:3128`, a spun-off service that builder deploys as forge infra), which enforces a domain allowlist via `PROXY_ALLOWED_DOMAINS`: in Docker mode exec containers join the `forge-exec` internal network and route through it; in Kubernetes mode builder applies a NetworkPolicy restricting exec pods to it (plus DNS). The egress proxy is **optional** — set `EGRESS_PROXY_ENABLED=false` in forge's config for runtimes that isolate egress themselves (notably kata/Cloud Hypervisor VMs), and builder skips the proxy + NetworkPolicy and leaves `FORGE_EGRESS_PROXY` unset so forge falls back to direct/VM-level egress.
 
 ### Outpost integration framework
-Cluster integrations (chaos, argo) never touch a customer cluster from the control plane. A single customer-deployed **outpost** (`src/systems/outpost/`, the only Kubernetes/CRD code) runs in the target cluster and dials out to the **outpost-gateway** (`:8092`) over HTTPS — long-polling a Postgres command queue (`SKIP LOCKED`) and POSTing events into a Postgres outbox that a dispatcher delivers to consumer services (`/internal/events`, shared-key HMAC) with dead-letter retry. Each integration is one outpost **module** + one thin control-plane **consumer service** (`chaos` `:8090`, `argo` `:8091` — now spun off into their own repos and deployed by builder) that holds no cluster credentials. The internal command/event plane is authenticated by `OUTPOST_INTERNAL_KEY` (shared by the gateway and all consumers); outposts authenticate with per-outpost keys (bcrypt). The outpost ships via a separate chart at `infra/helm/outpost/`. Adding an integration touches neither the outpost core nor the gateway. See `docs/outpost/README.md`.
+Cluster integrations (chaos, argo) never touch a user's cluster from the control plane. A user-deployed **outpost** (`src/systems/outpost/`, the only Kubernetes/CRD code) runs in (or against) each target cluster — the same cluster as the control plane for a single-cluster setup, or one per remote cluster so pipelines can span clusters — and dials out to the **outpost-gateway** (`:8092`) over HTTPS — long-polling a Postgres command queue (`SKIP LOCKED`) and POSTing events into a Postgres outbox that a dispatcher delivers to consumer services (`/internal/events`, shared-key HMAC) with dead-letter retry. Each integration is one outpost **module** + one thin control-plane **consumer service** (`chaos` `:8090`, `argo` `:8091` — now spun off into their own repos and deployed by builder) that holds no cluster credentials. The internal command/event plane is authenticated by `OUTPOST_INTERNAL_KEY` (shared by the gateway and all consumers); outposts authenticate with per-outpost keys (bcrypt). The outpost ships via a separate chart at `infra/helm/outpost/`. Adding an integration touches neither the outpost core nor the gateway. See `docs/outpost/README.md`.
 
 ### MCP server
 The MCP server (spun off to its own `codearmory-mcp` repo) is a stdio-based MCP server, not an HTTP service — it is not deployed to Kubernetes. Users run it locally via `./codearmory-mcp` with `CODEARMORY_URL` pointing at a conductor endpoint. It wraps the full platform API (workflows, forge, hooks, tickets, containers) as MCP tools.
@@ -116,13 +116,13 @@ src/
     workflows/      Pipeline orchestrator — steps, runs, worker
     hooks/          Webhook receiver — rules, event matching, trigger
     outpost-gateway/ Outpost-facing connection point + Postgres event backbone
-    outpost/        Customer-deployed in-cluster agent (only K8s code)
+    outpost/        User-deployed in-cluster agent (only K8s code)
     portal/         Web app — React SPA + Express BFF (Node, not Go); proxies /api to conductor
 infra/
   local/            Docker Compose stack for local development
     registry-manifest.json   Service route/action/RBAC definitions
   helm/codearmory/  Production Helm chart (core services; builder deploys the rest)
-  helm/outpost/     Customer-installable chart for the outpost agent
+  helm/outpost/     User-installable chart for the outpost agent
 tests/              Python integration tests (pytest) per service
 docs/               Per-service READMEs and platform guide
 ```

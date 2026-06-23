@@ -5,7 +5,7 @@ info:
     Outpost-facing connection point for the integration framework, distinct from
     conductor. It enrolls outposts, hands out commands via long-poll, ingests
     events into a Postgres outbox, and dispatches them to integration consumer
-    services. Self-hosted and SaaS use the identical mechanism.
+    services. Single-cluster and multi-cluster setups use the identical mechanism.
 
     ## Auth surfaces
 
