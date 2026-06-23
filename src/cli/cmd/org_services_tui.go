@@ -64,6 +64,29 @@ func parseConfigJSON(s string) (map[string]any, error) {
 	return cfg, nil
 }
 
+// parseSecretsJSON parses the secrets textarea into a write-only env-key → value map
+// (e.g. REDIS_URL, GITEA_ADMIN_TOKEN). Blank input is nil (keep existing). Every value
+// must be a string.
+func parseSecretsJSON(s string) (map[string]string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(s), &raw); err != nil {
+		return nil, fmt.Errorf("must be a JSON object: %w", err)
+	}
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		sv, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("secret %q must be a string value", k)
+		}
+		out[k] = sv
+	}
+	return out, nil
+}
+
 // ── Views / forms ───────────────────────────────────────────────────────────
 
 type osvViewID int
@@ -478,6 +501,7 @@ func (m orgServicesModel) openConfigForm(rec osvRecord) (orgServicesModel, tea.C
 	fields = append(fields,
 		formTextarea("config", "Config (JSON)", "{\n  \"key\": \"value\"\n}"),
 		formPassword("db_url", "DB URL", "postgres://… (blank = keep current)"),
+		formTextarea("secrets", "Secrets (JSON, write-only · e.g. REDIS_URL, GITEA_ADMIN_TOKEN)", "blank = keep · {\n  \"REDIS_URL\": \"redis://…\"\n}"),
 	)
 
 	f, cmd := newTUIForm("Configure "+m.editTarget, fields...)
@@ -485,7 +509,7 @@ func (m orgServicesModel) openConfigForm(rec osvRecord) (orgServicesModel, tea.C
 	if v, ok := rec["db_configured"].(bool); ok && v {
 		dbState = "DB URL set (" + gkStr(rec, "db_host") + ")"
 	}
-	f.help = "Enable/disable + free-form JSON config. DB URL is write-only (" + dbState + ")."
+	f.help = "Enable/disable + free-form JSON config. DB URL and secrets are write-only (" + dbState + ")."
 	f.setValues(map[string]string{"config": osvConfigJSON(rec)})
 	m.form = f
 	m.view = osvViewForm
@@ -507,6 +531,7 @@ func (m orgServicesModel) openCustomForm() (orgServicesModel, tea.Cmd) {
 		formSelectDefault("enabled", "Enabled", []string{"true", "false"}, "true"),
 		formTextarea("config", "Config (JSON)", "{\n  \"key\": \"value\"\n}"),
 		formPassword("db_url", "DB URL", "postgres://… (optional)"),
+		formTextarea("secrets", "Secrets (JSON, write-only)", "{\n  \"REDIS_URL\": \"redis://…\"\n}"),
 	)
 	f.help = "Declare a service for this org. Phase 1 records the desired state; the Phase 2 controller deploys it."
 	m.form = f
@@ -547,6 +572,11 @@ func (m orgServicesModel) submitForm() (orgServicesModel, tea.Cmd) {
 		m.form.errMsg = "config: " + err.Error()
 		return m, nil
 	}
+	secrets, serr := parseSecretsJSON(m.form.value("secrets"))
+	if serr != nil {
+		m.form.errMsg = "secrets: " + serr.Error()
+		return m, nil
+	}
 
 	switch m.formKind {
 	case osvFormConfig:
@@ -567,6 +597,9 @@ func (m orgServicesModel) submitForm() (orgServicesModel, tea.Cmd) {
 		}
 		if db := strings.TrimSpace(m.form.value("db_url")); db != "" {
 			payload["db_url"] = db
+		}
+		if len(secrets) > 0 {
+			payload["secrets"] = secrets
 		}
 		m.form.errMsg = ""
 		return m, osvSet(m.scopeID, m.editTarget, payload)
@@ -598,6 +631,9 @@ func (m orgServicesModel) submitForm() (orgServicesModel, tea.Cmd) {
 		}
 		if db := strings.TrimSpace(m.form.value("db_url")); db != "" {
 			payload["db_url"] = db
+		}
+		if len(secrets) > 0 {
+			payload["secrets"] = secrets
 		}
 		m.form.errMsg = ""
 		return m, osvSet(m.scopeID, service, payload)
