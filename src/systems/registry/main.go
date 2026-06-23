@@ -391,6 +391,7 @@ func main() {
 	mux.HandleFunc("PUT /services/{id}/endpoints", handleUpdateServiceEndpoints)
 	mux.HandleFunc("GET /default-grants", handleListDefaultGrants)
 	mux.HandleFunc("GET /actions", handleListActions)
+	mux.HandleFunc("POST /service-accounts", handleUpsertServiceAccount)
 	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)
 
 	port := envOrDefault("PORT", "8084")
