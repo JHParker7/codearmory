@@ -17,13 +17,13 @@ Conductor is the public-facing API gateway.
     kubectl port-forward svc/{{ include "codearmory.fullname" . }}-conductor {{ .Values.conductor.port }}:{{ .Values.conductor.port }} -n {{ .Release.Namespace }}
 {{- end }}
 
-This chart deploys only the CORE services (gatekeeper, registry, conductor, builder,
-portal). Every other service (blueprints, forge, workflows, tickets, hooks, containers,
-notifications, outpost-gateway, chaos, argo, gitea) is enabled and deployed at runtime
-by the builder service — during first-run setup or later in settings. When you enable a
-non-core service you supply its connection config (db_url, redis_url, and any required
-credentials); builder registers it with the registry, provisions its secrets, and brings
-up its workload + infra.
+This chart deploys the CORE services (gatekeeper, registry, conductor, builder, portal,
+and the forge + workflows CI/CD pair — the minimal set needed to run pipelines out of the
+box). Every other service (blueprints, tickets, hooks, containers, notifications,
+outpost-gateway, chaos, argo, gitea) is enabled and deployed at runtime by the builder
+service — during first-run setup or later in settings. When you enable a non-core service
+you supply its connection config (db_url, redis_url, and any required credentials); builder
+registers it with the registry, provisions its secrets, and brings up its workload + infra.
 
 Service keys (gatekeeperServiceKey, conductorForwardKey, etc.) are auto-generated on
 first install and preserved across upgrades. No manual key generation is required.

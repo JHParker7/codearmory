@@ -290,6 +290,17 @@ Usage: {{- include "codearmory.initContainer.waitForRegistry" . | nindent 8 }}
 {{- end }}
 
 {{/*
+Forge service account name (used by the kubernetes runtime to manage sandbox Jobs).
+*/}}
+{{- define "codearmory.forge.serviceAccountName" -}}
+{{- if .Values.forge.serviceAccount.create }}
+{{- default (printf "%s-forge" (include "codearmory.fullname" .)) .Values.forge.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.forge.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
 Builder service account name (used by the reconciler to manage deployments).
 */}}
 {{- define "codearmory.builder.serviceAccountName" -}}

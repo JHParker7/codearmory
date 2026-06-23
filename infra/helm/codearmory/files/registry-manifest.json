@@ -451,6 +451,109 @@
     ]
   },
   {
+    "name": "forge",
+    "url": "http://forge:8083",
+    "description": "Sandboxed code execution",
+    "forward_auth": true,
+    "service_key": "forge-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/executions",               "action": "createExecution",   "resource": "forge/executions" },
+      { "method": "GET",    "path": "/executions",               "action": "listExecution",     "resource": "forge/executions" },
+      { "method": "GET",    "path": "/executions/{id}",          "action": "getExecution",      "resource": "forge/executions/{id}" },
+      { "method": "DELETE", "path": "/executions/{id}",          "action": "deleteExecution",   "resource": "forge/executions/{id}" },
+      { "method": "GET",    "path": "/images",                   "action": "listImage",         "resource": "forge/images" },
+      { "method": "GET",    "path": "/runner-classes",           "action": "listRunnerClass",   "resource": "forge/runner-classes" },
+      { "method": "POST",   "path": "/runner-classes",           "action": "createRunnerClass", "resource": "forge/runner-classes" },
+      { "method": "GET",    "path": "/runner-classes/{name}",    "action": "getRunnerClass",    "resource": "forge/runner-classes/{name}" },
+      { "method": "PUT",    "path": "/runner-classes/{name}",    "action": "updateRunnerClass", "resource": "forge/runner-classes/{name}" },
+      { "method": "DELETE", "path": "/runner-classes/{name}",    "action": "deleteRunnerClass", "resource": "forge/runner-classes/{name}" },
+      { "method": "GET",    "path": "/runtime-backends",         "action": "listRuntimeBackend",   "resource": "forge/runtime-backends" },
+      { "method": "POST",   "path": "/runtime-backends",         "action": "createRuntimeBackend", "resource": "forge/runtime-backends" },
+      { "method": "GET",    "path": "/runtime-backends/{name}",  "action": "getRuntimeBackend",    "resource": "forge/runtime-backends/{name}" },
+      { "method": "PUT",    "path": "/runtime-backends/{name}",  "action": "updateRuntimeBackend", "resource": "forge/runtime-backends/{name}" },
+      { "method": "DELETE", "path": "/runtime-backends/{name}",  "action": "deleteRuntimeBackend", "resource": "forge/runtime-backends/{name}" }
+    ],
+    "actions": [
+      {
+        "name": "forge/run",
+        "method": "POST",
+        "path": "/executions",
+        "body_transforms": [
+          { "from_key": "run", "to_key": "command", "wrap": ["sh", "-c"] }
+        ],
+        "async": {
+          "id_field": "execution_id",
+          "poll_path": "/executions/{id}",
+          "poll_interval_secs": 2,
+          "status_field": "status",
+          "success_states": ["completed"],
+          "failure_states": ["failed", "timed_out"],
+          "cancel_states": ["cancelled"],
+          "output_field": "stdout",
+          "error_fields": ["stderr"]
+        }
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createExecution", "listExecution", "getExecution", "deleteExecution"],
+        "resources": ["{username}/forge/executions", "{username}/forge/executions/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listRunnerClass", "getRunnerClass"],
+        "resources": ["{username}/forge/runner-classes", "{username}/forge/runner-classes/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listRuntimeBackend", "getRuntimeBackend"],
+        "resources": ["{username}/forge/runtime-backends", "{username}/forge/runtime-backends/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listImage"],
+        "resources": ["{username}/forge/images"]
+      }
+    ]
+  },
+  {
+    "name": "workflows",
+    "url": "http://workflows:8085",
+    "description": "CI/CD pipeline orchestration",
+    "forward_auth": true,
+    "service_key": "workflows-registry-local-secret",
+    "endpoints": [
+      { "method": "POST",   "path": "/steps",      "action": "createStep", "resource": "workflows/steps" },
+      { "method": "GET",    "path": "/steps",      "action": "listStep",   "resource": "workflows/steps" },
+      { "method": "GET",    "path": "/steps/{id}", "action": "getStep",    "resource": "workflows/steps/{id}" },
+      { "method": "PUT",    "path": "/steps/{id}", "action": "updateStep", "resource": "workflows/steps/{id}" },
+      { "method": "DELETE", "path": "/steps/{id}", "action": "deleteStep", "resource": "workflows/steps/{id}" },
+      { "method": "POST",   "path": "/pipelines",           "action": "createWorkflow", "resource": "workflows/pipelines" },
+      { "method": "GET",    "path": "/pipelines",           "action": "listWorkflow",   "resource": "workflows/pipelines" },
+      { "method": "GET",    "path": "/pipelines/{id}",      "action": "getWorkflow",    "resource": "workflows/pipelines/{id}" },
+      { "method": "PUT",    "path": "/pipelines/{id}",      "action": "updateWorkflow", "resource": "workflows/pipelines/{id}" },
+      { "method": "DELETE", "path": "/pipelines/{id}",      "action": "deleteWorkflow", "resource": "workflows/pipelines/{id}" },
+      { "method": "POST",   "path": "/pipelines/{id}/runs", "action": "triggerRun",     "resource": "workflows/runs" },
+      { "method": "GET",    "path": "/runs",                "action": "listRun",        "resource": "workflows/runs" },
+      { "method": "GET",    "path": "/runs/{id}",           "action": "getRun",         "resource": "workflows/runs/{id}" },
+      { "method": "DELETE", "path": "/runs/{id}",           "action": "cancelRun",      "resource": "workflows/runs/{id}" },
+      { "method": "GET",    "path": "/actions",             "action": "listAction",     "resource": "workflows/actions" }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": ["createStep", "listStep", "getStep", "updateStep", "deleteStep", "createWorkflow", "listWorkflow", "getWorkflow", "updateWorkflow", "deleteWorkflow", "triggerRun", "listRun", "getRun", "cancelRun"],
+        "resources": ["{username}/workflows/steps", "{username}/workflows/steps/*", "{username}/workflows/pipelines", "{username}/workflows/pipelines/*", "{username}/workflows/runs", "{username}/workflows/runs/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["listAction"],
+        "resources": ["{username}/workflows/actions"]
+      }
+    ]
+  },
+  {
     "name": "builder",
     "url": "http://builder:8095",
     "description": "Global service control plane (system admin only; manages the single global service baseline for the whole instance)",
