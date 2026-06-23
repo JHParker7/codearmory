@@ -29,8 +29,6 @@ jobs:
         include:
           - name: gatekeeper
             context: src/systems/gatekeeper
-          - name: blueprints
-            context: src/systems/blueprints
           - name: builder
             context: src/systems/builder
           - name: conductor
@@ -41,34 +39,16 @@ jobs:
             context: src/systems/registry
           - name: workflows
             context: src/systems/workflows
-          - name: tickets
-            context: src/systems/tickets
-          - name: notifications
-            context: src/systems/notifications
           - name: hooks
             context: src/systems/hooks
-          - name: egress-proxy
-            context: src/systems/egress-proxy
-          - name: containers
-            context: src/systems/containers
-          - name: gitea_integration
-            context: src/systems/gitea_integration
-          - name: mcp
-            context: src/systems/mcp
           - name: outpost-gateway
             context: src/systems/outpost-gateway
-          - name: chaos
-            context: src/systems/chaos
-          - name: argo
-            context: src/systems/argo
           - name: outpost
             context: src/systems/outpost
           - name: portal
             context: src/systems/portal
           - name: gatekeeper-tests
             context: tests/gatekeeper
-          - name: blueprints-tests
-            context: tests/blueprints
           - name: conductor-tests
             context: tests/conductor
           - name: forge-tests
@@ -77,18 +57,10 @@ jobs:
             context: tests/registry
           - name: workflows-tests
             context: tests/workflows
-          - name: tickets-tests
-            context: tests/tickets
           - name: hooks-tests
             context: tests/hooks
-          - name: gitea_integration-tests
-            context: tests/gitea_integration
           - name: outpost-gateway-tests
             context: tests/outpost-gateway
-          - name: chaos-tests
-            context: tests/chaos
-          - name: argo-tests
-            context: tests/argo
           - name: portal-tests
             context: tests/portal
           - name: portal-frontend-tests
