@@ -58,10 +58,14 @@ func (ts *tokenStore) swap(token, sessionID string) (oldSessionID string) {
 	return old
 }
 
-// rotationInterval returns a random duration in [30 min, 60 min).
-func rotationInterval() time.Duration {
+// rotationIntervalFn yields the run-token rotation period; a package var so tests
+// can shorten it. Default: a random duration in [30 min, 60 min).
+var rotationIntervalFn = func() time.Duration {
 	return 30*time.Minute + time.Duration(rand.Int63n(int64(30*time.Minute)))
 }
+
+// rotationInterval returns a random duration in [30 min, 60 min).
+func rotationInterval() time.Duration { return rotationIntervalFn() }
 
 // stepGroup is a set of steps that execute together (sequential = 1 step, parallel = N steps).
 type stepGroup struct {

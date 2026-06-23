@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -320,6 +321,60 @@ func main() {
 		defer shutdown(context.Background())
 	}
 
+	if err := run(ctx); err != nil {
+		slog.Error("fatal", "error", err)
+		stop()
+		os.Exit(1)
+	}
+}
+
+// buildClientTLSConfig builds the optional mTLS client-auth config from env,
+// returning an error instead of exiting so its branches are unit-testable.
+func buildClientTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{}
+	switch os.Getenv("TLS_CLIENT_AUTH") {
+	case "require":
+		caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+		if caFile == "" {
+			return nil, errors.New("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+		}
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read TLS_CLIENT_CA_FILE %q: %w", caFile, err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("TLS_CLIENT_CA_FILE %q contains no valid PEM certificates", caFile)
+		}
+		tlsCfg.ClientCAs = caPool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	case "request":
+		tlsCfg.ClientAuth = tls.RequestClientCert
+	}
+	return tlsCfg, nil
+}
+
+// buildMux registers all routes and returns the handler. Extracted from main so
+// the routing table is unit-testable without standing up a server.
+func buildMux() http.Handler {
+	mux := telemetry.NewMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
+	mux.HandleFunc("GET /system_health", handleSystemHealth)
+	mux.HandleFunc("GET /services", handleListServices)
+	mux.HandleFunc("POST /services", handleCreateService)
+	mux.HandleFunc("DELETE /services/{id}", handleDeleteService)
+	mux.HandleFunc("PUT /services/{id}/endpoints", handleUpdateServiceEndpoints)
+	mux.HandleFunc("GET /default-grants", handleListDefaultGrants)
+	mux.HandleFunc("GET /actions", handleListActions)
+	mux.HandleFunc("POST /service-accounts", handleUpsertServiceAccount)
+	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)
+	return mux
+}
+
+// run owns migrations, seeding, the manifest load, background tasks, and the
+// server lifecycle, returning an error instead of os.Exit-ing so it is testable.
+func run(ctx context.Context) error {
 	// Rename legacy PostgreSQL auto-named constraints to match GORM's naming
 	// convention. These are one-shot: silently ignored if already renamed or
 	// the table doesn't exist yet (fresh install).
@@ -340,8 +395,7 @@ func main() {
 		&ServiceAccountModel{},
 		&ServiceDefaultGrantModel{},
 	); err != nil {
-		slog.Error("failed to migrate database", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("migrate database: %w", err)
 	}
 	slog.Info("database initialized")
 
@@ -381,21 +435,8 @@ func main() {
 
 	startHealthCollector(ctx)
 
-	mux := telemetry.NewMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
-	mux.HandleFunc("GET /system_health", handleSystemHealth)
-	mux.HandleFunc("GET /services", handleListServices)
-	mux.HandleFunc("POST /services", handleCreateService)
-	mux.HandleFunc("DELETE /services/{id}", handleDeleteService)
-	mux.HandleFunc("PUT /services/{id}/endpoints", handleUpdateServiceEndpoints)
-	mux.HandleFunc("GET /default-grants", handleListDefaultGrants)
-	mux.HandleFunc("GET /actions", handleListActions)
-	mux.HandleFunc("POST /service-accounts", handleUpsertServiceAccount)
-	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)
-
 	port := envOrDefault("PORT", "8084")
-	wrapped := otelhttp.NewHandler(&logger{mux}, "registry",
+	wrapped := otelhttp.NewHandler(&logger{buildMux()}, "registry",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
 
@@ -411,32 +452,14 @@ func main() {
 	}
 
 	if certFile != "" && keyFile != "" {
-		tlsCfg := &tls.Config{}
-		switch os.Getenv("TLS_CLIENT_AUTH") {
-		case "require":
-			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
-			if caFile == "" {
-				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
-				os.Exit(1)
-			}
-			caCert, err := os.ReadFile(caFile)
-			if err != nil {
-				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
-				os.Exit(1)
-			}
-			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(caCert) {
-				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
-				os.Exit(1)
-			}
-			tlsCfg.ClientCAs = caPool
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		case "request":
-			tlsCfg.ClientAuth = tls.RequestClientCert
+		tlsCfg, err := buildClientTLSConfig()
+		if err != nil {
+			return fmt.Errorf("TLS client-auth config: %w", err)
 		}
 		srv.TLSConfig = tlsCfg
 	}
 
+	serveErr := make(chan error, 1)
 	go func() {
 		var err error
 		if certFile != "" && keyFile != "" {
@@ -447,17 +470,20 @@ func main() {
 			err = srv.ListenAndServe()
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
+			serveErr <- err
 		}
 	}()
 
-	<-ctx.Done()
-	stop()
+	select {
+	case err := <-serveErr:
+		return fmt.Errorf("server error: %w", err)
+	case <-ctx.Done():
+	}
 	slog.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown error", "error", err)
+		return fmt.Errorf("shutdown: %w", err)
 	}
+	return nil
 }
