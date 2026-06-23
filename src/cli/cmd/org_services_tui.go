@@ -12,17 +12,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The Org Services TUI is the admin screen for the builder service: it lets an
-// org admin enable, disable, configure, register and remove the services that are
-// available to their org. A null/"default" org is the baseline every org inherits;
-// the screen can target either the admin's own org or that default scope (switched
-// with [s]). Effective state comes from builder, which overlays the live service
-// catalog with the default baseline and the org's overrides, so the list shows
+// The Org Services TUI is the system-admin screen for the builder service: it lets
+// the admin enable, disable, configure, register and remove platform services for
+// the whole instance. There is no per-org scope — every change targets the single
+// global baseline (the literal id "default"). Effective state comes from builder,
+// which overlays the live service catalog with that baseline, so the list shows
 // every available service, whether it is on, and where that state comes from.
 //
-// Permission enforcement stays server-side: a user without the org-admin grant
-// (or who targets the default scope without platform-admin rights) still sees the
-// action but gets a clear 403 in the status line, matching the other admin TUIs.
+// Permission enforcement stays server-side: only the system admin holds the write
+// grant on builder/orgs/default, so a non-admin still sees the action but gets a
+// clear 403 in the status line, matching the other admin TUIs.
 
 // ── Records ─────────────────────────────────────────────────────────────────
 
@@ -113,9 +112,7 @@ type osvPending struct {
 // ── Messages ────────────────────────────────────────────────────────────────
 
 type osvRecordsMsg struct {
-	scopeMode string
-	scopeID   string
-	records   []osvRecord
+	records []osvRecord
 }
 type osvErrMsg struct{ err error }
 type osvActionMsg struct {
@@ -146,9 +143,6 @@ func osvRow(r osvRecord) table.Row {
 }
 
 type orgServicesModel struct {
-	scopeMode string // "org" (the admin's own org) | "default" (the baseline)
-	scopeID   string // resolved id used in PUT/DELETE paths ("default" or an org uuid)
-
 	view    osvViewID
 	loading bool
 	err     error
@@ -175,11 +169,10 @@ type orgServicesModel struct {
 
 func newOrgServicesModel() orgServicesModel {
 	m := orgServicesModel{
-		scopeMode: "org",
-		loading:   true,
-		width:     tuiDefaultWidth,
-		height:    tuiDefaultHeight,
-		vp:        viewport.New(tuiDefaultWidth-4, tuiDefaultHeight-9),
+		loading: true,
+		width:   tuiDefaultWidth,
+		height:  tuiDefaultHeight,
+		vp:      viewport.New(tuiDefaultWidth-4, tuiDefaultHeight-9),
 	}
 	t := table.New(table.WithFocused(true))
 	t.SetStyles(tuiTableStyles())
@@ -203,22 +196,12 @@ func (m *orgServicesModel) currentRecord() (osvRecord, bool) {
 
 // ── Fetch / mutate ──────────────────────────────────────────────────────────
 
-// osvScopePath resolves the path id for a scope mode. "org" resolves to the
-// caller's org id; a caller with no org (or the explicit "default" mode) targets
-// the default baseline scope, which they inherit.
-func osvScopePath(scopeMode string) string {
-	if scopeMode == "org" {
-		if oid, err := myFieldID("org_id"); err == nil && oid != "" {
-			return oid
-		}
-	}
-	return "default"
-}
-
-func osvFetch(scopeMode string) tea.Cmd {
+// Builder manages the single global baseline (the literal id "default"); there is
+// no per-org scope. Reads are granted to all users; only the system admin may
+// write, so a non-admin's toggles come back as a 403 status line.
+func osvFetch() tea.Cmd {
 	return func() tea.Msg {
-		id := osvScopePath(scopeMode)
-		data, err := doRequest("GET", "/builder/orgs/"+id+"/services", nil)
+		data, err := doRequest("GET", "/builder/services", nil)
 		if err != nil {
 			return osvErrMsg{err}
 		}
@@ -226,14 +209,14 @@ func osvFetch(scopeMode string) tea.Cmd {
 		if err := json.Unmarshal(data, &recs); err != nil {
 			return osvErrMsg{err}
 		}
-		return osvRecordsMsg{scopeMode: scopeMode, scopeID: id, records: recs}
+		return osvRecordsMsg{records: recs}
 	}
 }
 
-func osvSet(scopeID, service string, payload map[string]any) tea.Cmd {
+func osvSet(service string, payload map[string]any) tea.Cmd {
 	return func() tea.Msg {
 		body, _ := json.Marshal(payload)
-		if _, err := doRequest("PUT", "/builder/orgs/"+scopeID+"/services/"+service, body); err != nil {
+		if _, err := doRequest("PUT", "/builder/services/"+service, body); err != nil {
 			return osvFormErrMsg{err}
 		}
 		verb := "updated"
@@ -246,7 +229,7 @@ func osvSet(scopeID, service string, payload map[string]any) tea.Cmd {
 
 // osvToggle flips enabled for a record without a form, preserving its kind and
 // config so a quick on/off never drops the rest of the row's desired state.
-func osvToggle(scopeID string, rec osvRecord) tea.Cmd {
+func osvToggle(rec osvRecord) tea.Cmd {
 	payload := map[string]any{
 		"enabled": !osvBool(rec, "enabled"),
 		"kind":    gkStr(rec, "kind"),
@@ -262,16 +245,16 @@ func osvToggle(scopeID string, rec osvRecord) tea.Cmd {
 	service := gkStr(rec, "service")
 	return func() tea.Msg {
 		body, _ := json.Marshal(payload)
-		if _, err := doRequest("PUT", "/builder/orgs/"+scopeID+"/services/"+service, body); err != nil {
+		if _, err := doRequest("PUT", "/builder/services/"+service, body); err != nil {
 			return osvActionMsg{label: "toggle", err: err}
 		}
 		return osvActionMsg{label: "toggle"}
 	}
 }
 
-func osvDelete(scopeID, service string) tea.Cmd {
+func osvDelete(service string) tea.Cmd {
 	return func() tea.Msg {
-		if _, err := doRequest("DELETE", "/builder/orgs/"+scopeID+"/services/"+service, nil); err != nil {
+		if _, err := doRequest("DELETE", "/builder/services/"+service, nil); err != nil {
 			return osvActionMsg{label: "remove", err: err}
 		}
 		return osvActionMsg{label: "remove"}
@@ -280,7 +263,7 @@ func osvDelete(scopeID, service string) tea.Cmd {
 
 // ── Init / Update ───────────────────────────────────────────────────────────
 
-func (m orgServicesModel) Init() tea.Cmd { return osvFetch(m.scopeMode) }
+func (m orgServicesModel) Init() tea.Cmd { return osvFetch() }
 
 func (m orgServicesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -299,7 +282,6 @@ func (m orgServicesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case osvRecordsMsg:
 		m.loading = false
-		m.scopeID = msg.scopeID
 		m.records = msg.records
 		rows := make([]table.Row, len(msg.records))
 		for i, r := range msg.records {
@@ -317,7 +299,7 @@ func (m orgServicesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "✓ " + msg.label + "d"
 		m.statusErr = false
 		m.loading = true
-		return m, osvFetch(m.scopeMode)
+		return m, osvFetch()
 
 	case osvFormDoneMsg:
 		m.view = osvViewList
@@ -325,7 +307,7 @@ func (m orgServicesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = msg.status
 		m.statusErr = false
 		m.loading = true
-		return m, osvFetch(m.scopeMode)
+		return m, osvFetch()
 
 	case osvFormErrMsg:
 		m.form.errMsg = msg.err.Error()
@@ -333,7 +315,7 @@ func (m orgServicesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiAutoRefreshMsg:
 		if m.view == osvViewList {
-			return m, osvFetch(m.scopeMode)
+			return m, osvFetch()
 		}
 		return m, nil
 
@@ -347,7 +329,7 @@ func (m orgServicesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "r":
 				m.err = nil
 				m.loading = true
-				return m, osvFetch(m.scopeMode)
+				return m, osvFetch()
 			}
 			return m, nil
 		}
@@ -395,16 +377,6 @@ func (m orgServicesModel) keyList(msg tea.KeyMsg) (orgServicesModel, tea.Cmd) {
 		return m, osvGoHome
 	case "ctrl+c":
 		return m, tea.Quit
-	case "s":
-		// Switch scope between the admin's own org and the default baseline.
-		if m.scopeMode == "org" {
-			m.scopeMode = "default"
-		} else {
-			m.scopeMode = "org"
-		}
-		m.loading = true
-		m.status = ""
-		return m, osvFetch(m.scopeMode)
 	case "enter":
 		if rec, ok := m.currentRecord(); ok {
 			m.selLabel = gkStr(rec, "service")
@@ -421,7 +393,7 @@ func (m orgServicesModel) keyList(msg tea.KeyMsg) (orgServicesModel, tea.Cmd) {
 				m.statusErr = true
 				return m, nil
 			}
-			return m, osvToggle(m.scopeID, rec)
+			return m, osvToggle(rec)
 		}
 	case "e", "c":
 		if rec, ok := m.currentRecord(); ok {
@@ -444,15 +416,15 @@ func (m orgServicesModel) keyList(msg tea.KeyMsg) (orgServicesModel, tea.Cmd) {
 				return m, nil
 			}
 			m.pending = &osvPending{
-				prompt: fmt.Sprintf("Remove %q override for this scope? [y] confirm  [any] cancel", service),
-				run:    osvDelete(m.scopeID, service),
+				prompt: fmt.Sprintf("Remove %q from the global baseline? [y] confirm  [any] cancel", service),
+				run:    osvDelete(service),
 			}
 			return m, nil
 		}
 	case "r":
 		m.loading = true
 		m.status = ""
-		return m, osvFetch(m.scopeMode)
+		return m, osvFetch()
 	}
 
 	var cmd tea.Cmd
@@ -602,7 +574,7 @@ func (m orgServicesModel) submitForm() (orgServicesModel, tea.Cmd) {
 			payload["secrets"] = secrets
 		}
 		m.form.errMsg = ""
-		return m, osvSet(m.scopeID, m.editTarget, payload)
+		return m, osvSet(m.editTarget, payload)
 
 	case osvFormCustom:
 		service := strings.TrimSpace(m.form.value("service"))
@@ -636,7 +608,7 @@ func (m orgServicesModel) submitForm() (orgServicesModel, tea.Cmd) {
 			payload["secrets"] = secrets
 		}
 		m.form.errMsg = ""
-		return m, osvSet(m.scopeID, service, payload)
+		return m, osvSet(service, payload)
 	}
 	return m, nil
 }
@@ -658,16 +630,13 @@ func (m orgServicesModel) View() string {
 }
 
 func (m orgServicesModel) scopeLabel() string {
-	if m.scopeMode == "default" {
-		return "default baseline (inherited by all orgs)"
-	}
-	return "your org"
+	return "global baseline (whole instance)"
 }
 
 func (m orgServicesModel) listHelp() string {
 	parts := []string{
 		"[↑↓/jk] nav", "[space] toggle", "[c] configure", "[n] new custom",
-		"[D] remove", "[s] scope", "[enter] detail", "[r] refresh", "[esc] home",
+		"[D] remove", "[enter] detail", "[r] refresh", "[esc] home",
 	}
 	return strings.Join(parts, "  ")
 }

@@ -3,23 +3,20 @@ info:
   title: Builder
   version: 0.1.0
   description: >
-    Org-level service control plane. Org admins enable, disable, configure,
-    register and remove services for their org. A null/"default" org is the
-    baseline every org inherits. Phase 1 is the declarative desired-state store;
-    a reconciling controller (Phase 2) deploys enabled services into per-org
-    namespaces.
+    Global service control plane. The system admin enables, disables, configures,
+    registers and removes platform services for the whole instance via a single
+    global baseline — there is no per-org scope. Phase 1 is the declarative
+    desired-state store; a reconciling controller (Phase 2) deploys enabled
+    services into the cluster.
 servers:
   - url: /builder
 paths:
-  /orgs/{id}/services:
+  /services:
     get:
-      summary: List the effective service state for an org
+      summary: List the effective global service state
       description: >
-        Returns the live service catalog overlaid with the default-scope baseline
-        and the org's overrides. Use the literal id "default" to view/manage the
-        baseline (platform admins only).
-      parameters:
-        - { name: id, in: path, required: true, schema: { type: string }, description: "org id, or 'default'" }
+        Returns the live service catalog overlaid with the global baseline rows.
+        System admin only.
       responses:
         "200":
           description: Effective service list
@@ -29,11 +26,10 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/ServiceView" }
         "403": { description: Forbidden }
-  /orgs/{id}/services/{service}:
+  /services/{service}:
     get:
-      summary: Get the effective state of one service for an org
+      summary: Get the effective state of one service
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string } }
         - { name: service, in: path, required: true, schema: { type: string } }
       responses:
         "200":
@@ -42,9 +38,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ServiceView" }
     put:
-      summary: Enable/disable/configure a service for an org
+      summary: Enable/disable/configure a service globally
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string } }
         - { name: service, in: path, required: true, schema: { type: string } }
       requestBody:
         required: true
@@ -60,13 +55,12 @@ paths:
         "400": { description: Invalid request (e.g. core service, bad custom fields) }
         "403": { description: Forbidden }
     delete:
-      summary: Remove an org override (revert to the default baseline) or delete a custom service
+      summary: Remove a service baseline row (revert to catalog default) or delete a custom service
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string } }
         - { name: service, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: Removed }
-        "404": { description: No override configured }
+        "404": { description: No baseline row configured }
 components:
   schemas:
     ServiceView:

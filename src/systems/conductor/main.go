@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -145,6 +146,32 @@ func handleServicesHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response{Status: overall, Services: results})
 }
 
+// handleListServices returns the names of the services currently registered in
+// conductor's routing table (rebuilt from the registry). Unlike GET /health it
+// does NOT probe each backend — it is a cheap, public read of "what is routable
+// right now". Clients (the portal sidebar, the CLI hub) use it to surface only
+// services that are actually deployed, whether they registered from the manifest
+// at startup (core/compose/Helm) or were registered by builder at runtime when a
+// system admin enabled them. A service that builder later disables is unregistered
+// and drops out of this list on conductor's next refresh.
+func handleListServices(w http.ResponseWriter, r *http.Request) {
+	type svc struct {
+		Name        string `json:"name"`
+		Description string `json:"description,omitempty"`
+	}
+	routingMu.RLock()
+	out := make([]svc, 0, len(servicesMap))
+	for name, st := range servicesMap {
+		out = append(out, svc{Name: name, Description: st.description})
+	}
+	routingMu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(struct {
+		Services []svc `json:"services"`
+	}{Services: out}) //nolint:errcheck
+}
+
 func main() {
 	logLevel := slog.LevelInfo
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
@@ -229,6 +256,7 @@ func main() {
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /health", handleServicesHealth)
+	mux.HandleFunc("GET /services", handleListServices)
 	mux.HandleFunc("POST /internal/refresh", handleInternalRefresh)
 	mux.HandleFunc("GET /openapi.json", handleOpenAPISpec)
 	mux.HandleFunc("GET /docs", handleDocs)

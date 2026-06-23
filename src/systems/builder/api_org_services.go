@@ -16,30 +16,24 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// scopeFromPath maps the {id} path value to a storage org id. The literal
-// "default" addresses the baseline scope; anything else is a real org id.
-func scopeFromPath(id string) string {
-	if id == "default" || id == defaultOrgID {
-		return defaultOrgID
-	}
-	return id
-}
+// builderResource is the fixed RBAC resource every builder endpoint checks. It is
+// org-independent — builder manages one global baseline, and only the system admin
+// (whose wildcard grant matches anything) holds access; no per-org grant exists.
+const builderResource = "builder/orgs/default"
 
 func handleListOrgServices(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleListOrgServices")
 	defer span.End()
 
-	id := r.PathValue("id")
-	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listOrgServices", "builder/orgs/"+id); !ok {
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listOrgServices", builderResource); !ok {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	orgID := scopeFromPath(id)
 
-	views, err := buildEffectiveView(ctx, orgID)
+	views, err := buildEffectiveView(ctx)
 	if err != nil {
 		span.RecordError(err)
-		slog.ErrorContext(ctx, "list org services: db error", "org_id", orgID, "error", err)
+		slog.ErrorContext(ctx, "list services: db error", "error", err)
 		http.Error(w, "failed to list services", http.StatusInternalServerError)
 		return
 	}
@@ -52,15 +46,13 @@ func handleGetOrgService(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleGetOrgService")
 	defer span.End()
 
-	id := r.PathValue("id")
 	service := r.PathValue("service")
-	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getOrgService", "builder/orgs/"+id); !ok {
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getOrgService", builderResource); !ok {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	orgID := scopeFromPath(id)
 
-	view, err := effectiveView(ctx, orgID, service)
+	view, err := effectiveView(ctx, service)
 	if err != nil {
 		span.RecordError(err)
 		http.Error(w, "failed to get service", http.StatusInternalServerError)
@@ -114,14 +106,13 @@ func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleSetOrgService")
 	defer span.End()
 
-	id := r.PathValue("id")
 	service := strings.TrimSpace(r.PathValue("service"))
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "configureOrgService", "builder/orgs/"+id)
+	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "configureOrgService", builderResource)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	orgID := scopeFromPath(id)
+	orgID := defaultOrgID
 
 	if service == "" {
 		http.Error(w, "service name is required", http.StatusBadRequest)
@@ -249,7 +240,7 @@ func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 		reconcilerNudge()
 	}
 
-	view, err := effectiveView(ctx, orgID, service)
+	view, err := effectiveView(ctx, service)
 	if err != nil {
 		http.Error(w, "saved but failed to read back", http.StatusInternalServerError)
 		return
@@ -263,14 +254,13 @@ func handleDeleteOrgService(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleDeleteOrgService")
 	defer span.End()
 
-	id := r.PathValue("id")
 	service := r.PathValue("service")
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteOrgService", "builder/orgs/"+id)
+	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteOrgService", builderResource)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	orgID := scopeFromPath(id)
+	orgID := defaultOrgID
 
 	removed, err := deleteOrgService(ctx, orgID, service)
 	if err != nil {
@@ -279,20 +269,18 @@ func handleDeleteOrgService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !removed {
-		http.Error(w, "no override configured for that service", http.StatusNotFound)
+		http.Error(w, "no baseline row configured for that service", http.StatusNotFound)
 		return
 	}
-	slog.InfoContext(ctx, "org service override removed", "org_id", orgID, "service", service, "caller_id", userID)
-	if orgID == defaultOrgID {
-		reconcilerNudge()
-	}
+	slog.InfoContext(ctx, "service baseline removed", "service", service, "caller_id", userID)
+	reconcilerNudge()
 	span.SetStatus(codes.Ok, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // buildEffectiveView overlays the desired-state rows on the live service catalog
-// to produce the full effective list for a scope.
-func buildEffectiveView(ctx context.Context, orgID string) ([]serviceView, error) {
+// to produce the full effective list for the global baseline.
+func buildEffectiveView(ctx context.Context) ([]serviceView, error) {
 	views := map[string]*serviceView{}
 
 	// 0. Core control-plane services: always present, always on, never configurable.
@@ -315,28 +303,13 @@ func buildEffectiveView(ctx context.Context, orgID string) ([]serviceView, error
 		}
 	}
 
-	// 2. Apply the default-scope baseline.
+	// 2. Apply the global baseline rows.
 	defaults, err := listOrgServices(ctx, defaultOrgID)
 	if err != nil {
 		return nil, err
 	}
 	for _, d := range defaults {
 		applyRow(views, d, "default")
-	}
-
-	// 3. Apply this org's overrides (only when not viewing the default scope).
-	if orgID != defaultOrgID {
-		overrides, err := listOrgServices(ctx, orgID)
-		if err != nil {
-			return nil, err
-		}
-		for _, o := range overrides {
-			src := "override"
-			if o.Kind == kindCustom {
-				src = "custom"
-			}
-			applyRow(views, o, src)
-		}
 	}
 
 	out := make([]serviceView, 0, len(views))
@@ -388,8 +361,9 @@ func redactedDBHost(raw string) (string, error) {
 	return u.Host + u.Path, nil
 }
 
-// effectiveView resolves the effective state of a single service for a scope.
-func effectiveView(ctx context.Context, orgID, service string) (serviceView, error) {
+// effectiveView resolves the effective state of a single service on the global
+// baseline.
+func effectiveView(ctx context.Context, service string) (serviceView, error) {
 	if coreServices[service] {
 		return serviceView{Service: service, Enabled: true, Kind: kindPlatform, Source: "core", Core: true}, nil
 	}
@@ -399,17 +373,6 @@ func effectiveView(ctx context.Context, orgID, service string) (serviceView, err
 		applyRow(map[string]*serviceView{service: &v}, d, "default")
 	} else if !isNotFound(err) {
 		return serviceView{}, err
-	}
-	if orgID != defaultOrgID {
-		if o, err := getOrgService(ctx, orgID, service); err == nil {
-			src := "override"
-			if o.Kind == kindCustom {
-				src = "custom"
-			}
-			applyRow(map[string]*serviceView{service: &v}, o, src)
-		} else if !isNotFound(err) {
-			return serviceView{}, err
-		}
 	}
 	return v, nil
 }

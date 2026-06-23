@@ -66,11 +66,3 @@ func TestComputeDisabled_CoreNeverDisabled(t *testing.T) {
 	}
 }
 
-func TestScopeFromPath(t *testing.T) {
-	if got := scopeFromPath("default"); got != defaultOrgID {
-		t.Fatalf("scopeFromPath(default) = %q, want %q", got, defaultOrgID)
-	}
-	if got := scopeFromPath("org-123"); got != "org-123" {
-		t.Fatalf("scopeFromPath(org-123) = %q, want org-123", got)
-	}
-}

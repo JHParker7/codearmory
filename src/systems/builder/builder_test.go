@@ -38,12 +38,12 @@ func authorized(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1","org_id":"o1"}`)
 }
 
-// putReq builds a PUT /orgs/{id}/services/{service} request with path values set
-// and a Bearer token so CheckPermissions runs.
-func putReq(id, service, body string) *http.Request {
-	r := httptest.NewRequest(http.MethodPut, "/orgs/"+id+"/services/"+service, strings.NewReader(body))
+// putReq builds a PUT /services/{service} request with the service path value set
+// and a Bearer token so CheckPermissions runs. Builder is a single global baseline
+// — there is no org id in the path.
+func putReq(service, body string) *http.Request {
+	r := httptest.NewRequest(http.MethodPut, "/services/"+service, strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer tok")
-	r.SetPathValue("id", id)
 	r.SetPathValue("service", service)
 	return r
 }
@@ -51,8 +51,7 @@ func putReq(id, service, body string) *http.Request {
 // ── Auth gates ────────────────────────────────────────────────────────────────
 
 func TestHandleListOrgServices_Unauthorized(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/orgs/o1/services", nil)
-	r.SetPathValue("id", "o1")
+	r := httptest.NewRequest(http.MethodGet, "/services", nil)
 	w := httptest.NewRecorder()
 	handleListOrgServices(w, r)
 	if w.Code != http.StatusUnauthorized {
@@ -61,8 +60,7 @@ func TestHandleListOrgServices_Unauthorized(t *testing.T) {
 }
 
 func TestHandleSetOrgService_Unauthorized(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPut, "/orgs/o1/services/forge", strings.NewReader(`{"enabled":false}`))
-	r.SetPathValue("id", "o1")
+	r := httptest.NewRequest(http.MethodPut, "/services/forge", strings.NewReader(`{"enabled":false}`))
 	r.SetPathValue("service", "forge")
 	w := httptest.NewRecorder()
 	handleSetOrgService(w, r)
@@ -72,8 +70,7 @@ func TestHandleSetOrgService_Unauthorized(t *testing.T) {
 }
 
 func TestHandleDeleteOrgService_Unauthorized(t *testing.T) {
-	r := httptest.NewRequest(http.MethodDelete, "/orgs/o1/services/forge", nil)
-	r.SetPathValue("id", "o1")
+	r := httptest.NewRequest(http.MethodDelete, "/services/forge", nil)
 	r.SetPathValue("service", "forge")
 	w := httptest.NewRecorder()
 	handleDeleteOrgService(w, r)
@@ -87,7 +84,7 @@ func TestHandleDeleteOrgService_Unauthorized(t *testing.T) {
 func TestHandleSetOrgService_CoreRejected(t *testing.T) {
 	authorized(t)
 	w := httptest.NewRecorder()
-	handleSetOrgService(w, putReq("o1", "gatekeeper", `{"enabled":false}`))
+	handleSetOrgService(w, putReq("gatekeeper", `{"enabled":false}`))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400 for core service", w.Code)
 	}
@@ -96,7 +93,7 @@ func TestHandleSetOrgService_CoreRejected(t *testing.T) {
 func TestHandleSetOrgService_BadKind(t *testing.T) {
 	authorized(t)
 	w := httptest.NewRecorder()
-	handleSetOrgService(w, putReq("o1", "forge", `{"enabled":true,"kind":"bogus"}`))
+	handleSetOrgService(w, putReq("forge", `{"enabled":true,"kind":"bogus"}`))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400 for bad kind", w.Code)
 	}
@@ -105,7 +102,7 @@ func TestHandleSetOrgService_BadKind(t *testing.T) {
 func TestHandleSetOrgService_CustomMissingImage(t *testing.T) {
 	authorized(t)
 	w := httptest.NewRecorder()
-	handleSetOrgService(w, putReq("o1", "mysvc", `{"enabled":true,"kind":"custom","port":9000}`))
+	handleSetOrgService(w, putReq("mysvc", `{"enabled":true,"kind":"custom","port":9000}`))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400 for custom without image", w.Code)
 	}
@@ -114,7 +111,7 @@ func TestHandleSetOrgService_CustomMissingImage(t *testing.T) {
 func TestHandleSetOrgService_CustomBadPort(t *testing.T) {
 	authorized(t)
 	w := httptest.NewRecorder()
-	handleSetOrgService(w, putReq("o1", "mysvc", `{"enabled":true,"kind":"custom","image":"repo/x:1"}`))
+	handleSetOrgService(w, putReq("mysvc", `{"enabled":true,"kind":"custom","image":"repo/x:1"}`))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400 for custom without a valid port", w.Code)
 	}
@@ -123,7 +120,7 @@ func TestHandleSetOrgService_CustomBadPort(t *testing.T) {
 func TestHandleSetOrgService_InvalidJSON(t *testing.T) {
 	authorized(t)
 	w := httptest.NewRecorder()
-	handleSetOrgService(w, putReq("o1", "forge", `{not json`))
+	handleSetOrgService(w, putReq("forge", `{not json`))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400 for invalid body", w.Code)
 	}
@@ -132,7 +129,7 @@ func TestHandleSetOrgService_InvalidJSON(t *testing.T) {
 func TestHandleSetOrgService_Forbidden(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":false}`)
 	w := httptest.NewRecorder()
-	handleSetOrgService(w, putReq("o1", "forge", `{"enabled":false}`))
+	handleSetOrgService(w, putReq("forge", `{"enabled":false}`))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("got %d, want 403", w.Code)
 	}

@@ -799,3 +799,41 @@ func TestHandleInternalRefresh_ValidKey(t *testing.T) {
 		t.Fatalf("got %d, want 202 for valid key", w.Code)
 	}
 }
+
+// handleListServices is a cheap, public read of the live routing table used by the
+// portal sidebar and CLI hub to show only services that are actually registered.
+func TestHandleListServices_ReturnsRegisteredNamesSorted(t *testing.T) {
+	withServices(t, map[string]serviceState{
+		"forge":      {url: "http://forge", description: "exec"},
+		"gatekeeper": {url: "http://gk"},
+		"argo":       {url: "http://argo", description: "gitops"},
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "/services", nil)
+	w := httptest.NewRecorder()
+	handleListServices(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var body struct {
+		Services []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := make([]string, len(body.Services))
+	for i, s := range body.Services {
+		got[i] = s.Name
+	}
+	if want := "argo,forge,gatekeeper"; strings.Join(got, ",") != want {
+		t.Fatalf("names = %v, want sorted %q", got, want)
+	}
+	// forge sorts second; its description passes through, empty ones are omitted.
+	if body.Services[1].Description != "exec" {
+		t.Fatalf("forge description = %q, want \"exec\"", body.Services[1].Description)
+	}
+}

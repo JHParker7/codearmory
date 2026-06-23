@@ -3,15 +3,17 @@ import type { ReactNode } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector, useAppDispatch } from '../../store/hooks';
-import { hydrateServices, setDisabledServices } from '../../store/authSlice';
-import { listOrgServices, setOrgService, deleteOrgService } from '../../api/bff';
+import { hydrateRegisteredServices } from '../../store/authSlice';
+import { listServices, setService, deleteService } from '../../api/bff';
 import type { OrgService, SetOrgServiceBody } from '../../api/bff';
 
-// Builder is the per-org service control plane: admins toggle platform services
-// on/off, edit their free-form config, register custom services, and (platform
-// admins) edit the "default" baseline every org inherits. Core control-plane
-// services can never be configured. Access is enforced server-side — the sidebar
-// only links here when the caller holds builder:configureOrgService on its org.
+// Builder is the SYSTEM-ADMIN-only global service control plane: the admin toggles
+// platform services on/off for the whole instance, edits their free-form config,
+// and registers custom services — all against the single "default" baseline (no
+// per-org scope). Enabling a service deploys it; disabling tears it down. Core
+// control-plane services can never be configured. Access is enforced server-side —
+// the sidebar only links here for the system admin (builder:configureOrgService on
+// builder/orgs/default, which only the wildcard admin matches).
 
 const inputStyle = {
   background: 'transparent' as const,
@@ -30,14 +32,12 @@ const inputStyle = {
 // that flag rather than mirroring builder's coreServices set here.
 const isCore = (s: OrgService) => !!s.core;
 
-// A row is removable only when an actual override exists at the current scope:
-// at the org scope that means source override/custom; at the default scope the
-// baseline rows themselves (source default/custom) are the stored ones.
-function isDeletable(s: OrgService, scope: 'org' | 'default'): boolean {
+// A row is removable only when an actual stored baseline row exists for it — a
+// configured platform service (source "default") or a registered custom service
+// (source "custom"). Catalog defaults and core services are not removable.
+function isDeletable(s: OrgService): boolean {
   if (isCore(s)) return false;
-  return scope === 'default'
-    ? s.source === 'default' || s.source === 'custom'
-    : s.source === 'override' || s.source === 'custom';
+  return s.source === 'default' || s.source === 'custom';
 }
 
 // parseConfigText turns the textarea into a config object. Empty → undefined
@@ -91,10 +91,10 @@ const BLANK_FORM: FormState = { service: '', enabled: true, kind: 'custom', imag
 
 export function Builder() {
   const token = useAppSelector(s => s.auth.token)!;
-  const orgId = useAppSelector(s => s.auth.user?.org_id);
   const dispatch = useAppDispatch();
 
-  const [scope, setScope] = useState<'org' | 'default'>('org');
+  // Builder manages a single global baseline for the whole instance — there is no
+  // per-org scope. Every call hits the global /builder/services endpoint.
   const [services, setServices] = useState<OrgService[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -108,40 +108,30 @@ export function Builder() {
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const scopeId = scope === 'default' ? 'default' : orgId;
-
   const fetchServices = useCallback(async (): Promise<OrgService[] | null> => {
-    if (!scopeId) { setLoading(false); setServices([]); return null; }
     setLoading(true); setError(null);
     try {
-      const list = await listOrgServices(token, scopeId);
+      const list = await listServices(token);
       setServices(list);
       return list;
     } catch (e: unknown) {
       setError((e as Error).message); setServices([]); return null;
     } finally { setLoading(false); }
-  }, [token, scopeId]);
+  }, [token]);
 
   useEffect(() => { fetchServices(); }, [fetchServices]);
-  // Reset transient UI whenever the scope flips.
-  useEffect(() => { setSelected(null); setEditing(false); setCreating(false); setPendingDelete(null); }, [scope]);
   // Leaving a selection cancels any in-progress edit/confirm.
   useEffect(() => { setEditing(false); setPendingDelete(null); }, [selected]);
 
   const selectedSvc = services.find(s => s.service === selected) ?? null;
 
-  // After any mutation: reload this scope and refresh the sidebar's disabled set so a
-  // service turned off here disappears from the nav (and back when re-enabled). At the
-  // caller's own org scope the freshly-fetched list IS the sidebar's source, so reuse
-  // it directly; a default-scope edit changes every org's effective view, so re-derive
-  // the user's org from the server.
+  // After any mutation: reload the baseline list, then re-resolve the sidebar's
+  // routing table. Enabling a service makes builder deploy+register it; disabling
+  // tears it down+unregisters — both reach the sidebar once conductor refreshes,
+  // which this nudges by re-fetching.
   const afterMutation = async () => {
-    const list = await fetchServices();
-    if (scope === 'org' && list) {
-      dispatch(setDisabledServices(list.filter(s => !s.core && !s.enabled).map(s => s.service)));
-    } else {
-      dispatch(hydrateServices());
-    }
+    await fetchServices();
+    dispatch(hydrateRegisteredServices());
   };
 
   const toggle = async (svc: OrgService) => {
@@ -149,7 +139,7 @@ export function Builder() {
     if (svc.config && Object.keys(svc.config).length > 0) body.config = svc.config;
     if (svc.kind === 'custom') { body.image = svc.image; body.port = svc.port; body.description = svc.description; }
     setBusy(svc.service); setError(null);
-    try { await setOrgService(token, scopeId!, svc.service, body); await afterMutation(); }
+    try { await setService(token, svc.service, body); await afterMutation(); }
     catch (e: unknown) { setError((e as Error).message); }
     finally { setBusy(null); }
   };
@@ -157,7 +147,7 @@ export function Builder() {
   const remove = async (svc: OrgService) => {
     setBusy(svc.service); setError(null);
     try {
-      await deleteOrgService(token, scopeId!, svc.service);
+      await deleteService(token, svc.service);
       if (selected === svc.service) setSelected(null);
       setPendingDelete(null);
       await afterMutation();
@@ -215,7 +205,7 @@ export function Builder() {
 
     setSaving(true); setFormError(null);
     try {
-      await setOrgService(token, scopeId!, name, body);
+      await setService(token, name, body);
       setEditing(false); setCreating(false);
       setSelected(name);
       await afterMutation();
@@ -286,17 +276,9 @@ export function Builder() {
       <div style={{ padding: '16px 24px', borderBottom: `1px solid ${T.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
         <div>
           <div style={{ fontFamily: T.mono, fontSize: 16, fontWeight: 700, color: T.textHi }}>builder/</div>
-          <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginTop: 2 }}>per-org service control plane</div>
+          <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginTop: 2 }}>global service control plane</div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <div style={{ display: 'flex', gap: 6, marginRight: 4 }}>
-            {([['org', 'this org'], ['default', 'default baseline']] as const).map(([s, label]) => (
-              <button key={s} onClick={() => setScope(s)}
-                style={{ background: scope === s ? T.greenSoft : 'transparent', border: `1px solid ${scope === s ? T.green : T.border}`, color: scope === s ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
-                {label}
-              </button>
-            ))}
-          </div>
           <button onClick={startCreate}
             style={{ background: creating ? T.greenSoft : 'transparent', border: `1px solid ${creating ? T.green : T.border}`, color: creating ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
             + register custom
@@ -305,17 +287,9 @@ export function Builder() {
         </div>
       </div>
 
-      {scope === 'default' && (
-        <div style={{ padding: '8px 24px', borderBottom: `1px solid ${T.border}`, background: T.amberSoft, fontFamily: T.mono, fontSize: 11, color: T.amber }}>
-          editing the platform-wide baseline every org inherits — platform-admin only
-        </div>
-      )}
-
-      {scope === 'org' && (
-        <div style={{ padding: '8px 24px', borderBottom: `1px solid ${T.border}`, background: T.card, fontFamily: T.mono, fontSize: 11, color: T.faint }}>
-          this org's toggles control which services it sees · what is actually deployed (config, replicas, rotation, image/port) is governed by the default baseline
-        </div>
-      )}
+      <div style={{ padding: '8px 24px', borderBottom: `1px solid ${T.border}`, background: T.amberSoft, fontFamily: T.mono, fontSize: 11, color: T.amber }}>
+        editing the global service baseline for this instance — system-admin only · enabling a service deploys it, disabling tears it down
+      </div>
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* List */}
@@ -381,7 +355,7 @@ export function Builder() {
                       {editing ? '[ cancel ]' : '[ configure ]'}
                     </button>
                   )}
-                  {isDeletable(selectedSvc, scope) && (
+                  {isDeletable(selectedSvc) && (
                     pendingDelete === selectedSvc.service ? (
                       <>
                         <button onClick={() => remove(selectedSvc)} disabled={busy === selectedSvc.service}
@@ -395,7 +369,7 @@ export function Builder() {
                         style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}
                         onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
                         onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
-                        [ remove {scope === 'default' ? 'baseline' : 'override'} ]
+                        [ remove baseline ]
                       </button>
                     )
                   )}
