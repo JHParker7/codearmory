@@ -110,6 +110,11 @@ spec:
               value: {{ .Values.imageRegistry | quote }}
             - name: BUILDER_IMAGE_TAG
               value: {{ .Values.imageTag | quote }}
+            {{- if .Values.imagePullSecrets }}
+            # Attached to every builder-deployed (non-core) workload, for private registries.
+            - name: BUILDER_IMAGE_PULL_SECRETS
+              value: "{{- range $i, $s := .Values.imagePullSecrets }}{{ if $i }},{{ end }}{{ $s.name }}{{- end }}"
+            {{- end }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

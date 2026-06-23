@@ -48,7 +48,7 @@ gatekeeper:
   env:
     logLevel: info
     # Comma-separated list of service names permitted to register.
-    permittedServices: "gatekeeper,blueprints,forge,workflows,tickets,notifications,hooks,outpost-gateway,chaos,argo,builder"
+    permittedServices: "gatekeeper,registry,builder"
     # Comma-separated services allowed to resolve org secrets via the internal
     # lookup endpoint (deny-all when empty). Set to "containers,forge" to let the
     # container registry resolve per-org creds and forge resolve "secret:<name>"
@@ -122,10 +122,9 @@ registry:
       memory: 128Mi
   env:
     logLevel: info
-    # Auto-populated as "blueprints=http://<fullname>-blueprints:8093,forge=http://<fullname>-forge:8083,
-    # workflows=http://<fullname>-workflows:8085,tickets=http://<fullname>-tickets:8086,
-    # notifications=http://<fullname>-notifications:8094,hooks=http://<fullname>-hooks:8087"
-    # when left empty. Override to use custom service URLs.
+    # Optional comma-separated "name=url" pre-seed of service URLs. Non-core services
+    # register their own URLs with the registry at runtime (via builder), so this is
+    # normally left empty and used only to pre-seed extra/custom service URLs.
     services: ""
     otelEndpoint: ""
   secret:
@@ -139,6 +138,10 @@ registry:
     # Set explicitly only if you need additional service accounts beyond conductor and gatekeeper.
     serviceAccounts: ""
     # Comma-separated "name=key" pairs for admin service accounts (e.g. CI pipelines).
+    # The builder service is auto-added here as an admin account when builder.enabled
+    # is true, so its reconciler can register/update/remove non-core services in the
+    # registry at runtime (POST/PUT/DELETE /services). Admin accounts also satisfy read
+    # auth, so builder still fetches the live catalog.
     adminAccounts: ""
   tls:
     certSecret: ""     # Kubernetes TLS secret (tls.crt + tls.key) for server TLS
@@ -146,51 +149,6 @@ registry:
     caSecret: ""       # Secret containing ca.crt used to verify client certificates
     clientCertSecret: "" # TLS secret (tls.crt + tls.key) presented on outbound calls
     caBundle: ""       # Secret containing ca.crt used to verify outbound server certs
-
-# ── Blueprints ────────────────────────────────────────────────────────────────
-blueprints:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: blueprints
-    tag: ""
-  replicaCount: 1
-  port: 8093
-  resources:
-    requests:
-      cpu: 100m
-      memory: 64Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
-    databaseUrl: ""
-    # Redis URL. Auto-constructed from blueprints.redis when left empty.
-    # Override to use an external Redis instance.
-    redisUrl: ""
-    # 64-character hex string for AES-256-GCM encryption of Terraform state.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    encryptionKey: ""
-    # Must match the blueprints entry in gatekeeper.secret.gatekeeperServices.
-    gatekeeperServiceKey: ""
-  redis:
-    enabled: true
-    image:
-      repository: redis
-      tag: "7-alpine"
-    resources:
-      requests:
-        cpu: 50m
-        memory: 32Mi
-      limits:
-        cpu: 250m
-        memory: 128Mi
-    # Size of the in-memory tmpfs volume mounted at /data.
-    dataSizeLimit: 64Mi
 
 # ── Conductor ─────────────────────────────────────────────────────────────────
 conductor:
@@ -272,256 +230,6 @@ portal:
             pathType: Prefix
     tls: []
 
-# ── Forge ─────────────────────────────────────────────────────────────────────
-forge:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: forge
-    tag: ""
-  replicaCount: 1
-  port: 8083
-  resources:
-    requests:
-      cpu: 100m
-      memory: 64Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
-  env:
-    logLevel: info
-    # Container runtime: "kubernetes" (recommended) or "docker".
-    # When set to "docker", mount the Docker socket via forge.dockerSocket.
-    runtime: kubernetes
-    # Comma-separated list of container images forge is permitted to run.
-    allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25"
-    # Kubernetes namespace in which forge creates sandbox Jobs.
-    k8sNamespace: forge
-    # Optional RuntimeClass for stronger isolation (e.g. "gvisor").
-    k8sRuntimeClass: ""
-    # Resource limits applied to each sandbox container.
-    containerMemoryLimit: "256Mi"
-    containerCpuLimit: "500m"
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
-    databaseUrl: ""
-    # Must match conductor.secret.conductorForwardKey.
-    conductorForwardKey: ""
-    # Must match the forge entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    gatekeeperServiceKey: ""
-    # Proxmox VE API token for the proxmox runtime backend, in the form
-    # "USER@REALM!TOKENID=SECRET". Only used when forge.proxmox.enabled is true;
-    # referenced by a runtime backend via secret_refs {token: "PROXMOX_TOKEN"}.
-    proxmoxToken: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-  serviceAccount:
-    create: true
-    name: ""
-    annotations: {}
-  # Mount the Docker socket when forge.env.runtime is "docker".
-  dockerSocket:
-    enabled: false
-    path: /var/run/docker.sock
-  # Proxmox VM-per-job runtime backend. When enabled, the PROXMOX_TOKEN secret is
-  # mounted into forge so an admin can create a runtime backend of type "proxmox"
-  # (via POST /runtime-backends) that clones a throwaway VM per job. The backend's
-  # url/node/template_vmid/storage/bridge live in its API config, not here — this
-  # flag only gates whether the token secret is wired into the pod.
-  proxmox:
-    enabled: false
-
-# ── Workflows ─────────────────────────────────────────────────────────────────
-workflows:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: workflows
-    tag: ""
-  replicaCount: 1
-  port: 8085
-  resources:
-    requests:
-      cpu: 100m
-      memory: 64Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
-  env:
-    logLevel: info
-    # Comma-separated "name=url" pairs of services that workflow steps may call.
-    # Auto-populated as "forge=http://<fullname>-forge:8083,blueprints=http://<fullname>-blueprints:8093"
-    # when left empty. Override to add custom services or change URLs.
-    services: ""
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
-    databaseUrl: ""
-    # Must match the workflows entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    gatekeeperServiceKey: ""
-    # Shared HMAC secret with the hooks service for authenticating internal trigger requests.
-    # Auto-synced from hooks.secret.hooksTriggerKey on upgrades. Leave empty for auto-generation.
-    hooksTriggerKey: ""
-    # AES-256 key for encrypting run tokens at rest in the database.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    tokenKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Tickets ───────────────────────────────────────────────────────────────────
-tickets:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: tickets
-    tag: ""
-  replicaCount: 1
-  port: 8086
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
-    databaseUrl: ""
-    # Must match the tickets entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    gatekeeperServiceKey: ""
-    # Shared HMAC secret for emitting ticket lifecycle events to the hooks service.
-    # Synced from hooks.secret.hooksTriggerKey when hooks is enabled. Leave empty for auto-sync.
-    hooksTriggerKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Notifications ─────────────────────────────────────────────────────────────
-# Notification delivery via pluggable integrations (Slack, email, webhook).
-notifications:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: notifications
-    tag: ""
-  replicaCount: 1
-  port: 8094
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
-    databaseUrl: ""
-    # Must match the notifications entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    gatekeeperServiceKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Outpost Gateway ───────────────────────────────────────────────────────────
-# Outpost-facing connection point + Postgres event backbone for cluster
-# integrations (chaos, argo). Distinct from conductor.
-outpostGateway:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: outpost-gateway
-    tag: ""
-  replicaCount: 1
-  port: 8092
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  service:
-    # Set to LoadBalancer/NodePort (or front with an Ingress) to expose the
-    # gateway to outposts running outside the control-plane cluster (SaaS).
-    type: ClusterIP
-  secret:
-    databaseUrl: ""
-    # Must match the outpost-gateway entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades.
-    gatekeeperServiceKey: ""
-    # Shared HMAC secret across the gateway and every integration consumer
-    # (chaos, argo). Auto-generated and synced on first install.
-    outpostInternalKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Chaos ─────────────────────────────────────────────────────────────────────
-# Thin control plane for chaos experiments. Holds no cluster credentials; drives
-# an outpost via the outpost-gateway.
-chaos:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: chaos
-    tag: ""
-  replicaCount: 1
-  port: 8090
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    databaseUrl: ""
-    gatekeeperServiceKey: ""
-    # Shared with the outpost-gateway. Leave empty for auto-sync.
-    outpostInternalKey: ""
-    # Shared HMAC secret for emitting experiment events to the hooks service.
-    hooksTriggerKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
 # ── Builder ───────────────────────────────────────────────────────────────────
 # Org-level service control plane: org admins enable/disable/configure services
 # for their org. A null/"default" org is the baseline every org inherits.
@@ -590,178 +298,6 @@ builder:
     clientCertSecret: ""
     caBundle: ""
 
-# ── Argo ──────────────────────────────────────────────────────────────────────
-# Second integration (Argo CD app sync) proving the framework generalises.
-argo:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: argo
-    tag: ""
-  replicaCount: 1
-  port: 8091
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    databaseUrl: ""
-    gatekeeperServiceKey: ""
-    # Shared with the outpost-gateway. Leave empty for auto-sync.
-    outpostInternalKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Hooks ─────────────────────────────────────────────────────────────────────
-hooks:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: hooks
-    tag: ""
-  replicaCount: 1
-  port: 8087
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
-    databaseUrl: ""
-    # Must match the hooks entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    gatekeeperServiceKey: ""
-    # Shared HMAC secret with the workflows service for signing internal trigger requests.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    hooksTriggerKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Containers ────────────────────────────────────────────────────────────────
-containers:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: containers
-    tag: ""
-  replicaCount: 1
-  port: 8089
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # Base URL of your OCI/Docker registry, e.g. https://registry.example.com
-    # Required — containers will refuse to start without this.
-    registryUrl: ""
-    # Registry credentials (optional — omit for anonymous/token-based access).
-    registryUsername: ""
-    registryPassword: ""
-    # Must match the containers entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    gatekeeperServiceKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Egress Proxy ──────────────────────────────────────────────────────────────
-egressProxy:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: egress-proxy
-    tag: ""
-  replicaCount: 1
-  port: 3128
-  resources:
-    requests:
-      cpu: 25m
-      memory: 16Mi
-    limits:
-      cpu: 100m
-      memory: 64Mi
-  env:
-    # Comma-separated list of domains forge execution containers may reach.
-    # Exact hostnames or wildcard prefixes (*.github.com).
-    allowedDomains: "registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com"
-    # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
-    otelEndpoint: ""
-
-# ── Gitea integration ─────────────────────────────────────────────────────────
-giteaIntegration:
-  enabled: false
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: gitea_integration
-    tag: ""
-  replicaCount: 1
-  port: 8088
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
-    databaseUrl: ""
-    # Base URL of your Forgejo/Gitea instance, e.g. https://git.example.com
-    # Required when giteaIntegration.enabled is true.
-    giteaUrl: ""
-    # Admin API token for the Forgejo/Gitea instance.
-    # Required when giteaIntegration.enabled is true.
-    giteaAdminToken: ""
-    # Must match the gitea_integration entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    gatekeeperServiceKey: ""
-    # Shared key authenticating forge → /internal/clone-token (resolves
-    # "gitea:<owner>/<repo>" job secret_refs). The forge deployment reads this same
-    # secret, so the two always match. Auto-generated and preserved; leave empty.
-    # NOTE: when global.externalSecrets is true the chart does not create this
-    # Secret — your externally-managed "<release>-gitea-integration" Secret MUST
-    # include a "gitea-internal-key" entry, or both the gitea-integration and forge
-    # pods will fail to start (CreateContainerConfigError).
-    internalKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
 # ── Integration tests (helm test) ────────────────────────────────────────────
 # Run with: helm test <release>
 # Each suite maps to a test image built from tests/<suite>/Dockerfile.
@@ -774,12 +310,6 @@ tests:
       tag: ""
     # DATABASE_URL for post-test cleanup. Auto-constructed from postgresql when empty.
     databaseUrl: ""
-  blueprints:
-    # Also requires blueprints.enabled to be true.
-    enabled: true
-    image:
-      repository: test-blueprints
-      tag: ""
   conductor:
     enabled: true
     image:
@@ -788,54 +318,11 @@ tests:
     # DATABASE_URL for post-test cleanup (targets the gatekeeper db).
     # Auto-constructed from postgresql when empty.
     databaseUrl: ""
-  forge:
-    # Also requires forge.enabled to be true.
-    enabled: true
-    image:
-      repository: test-forge
-      tag: ""
   registry:
     enabled: true
     image:
       repository: test-registry
       tag: ""
-  workflows:
-    # Also requires workflows.enabled to be true.
-    enabled: true
-    image:
-      repository: test-workflows
-      tag: ""
-  tickets:
-    # Also requires tickets.enabled to be true.
-    enabled: true
-    image:
-      repository: test-tickets
-      tag: ""
-  hooks:
-    # Also requires hooks.enabled and workflows.enabled to be true.
-    enabled: true
-    image:
-      repository: test-hooks
-      tag: ""
-  outpostGateway:
-    # Also requires outpostGateway.enabled to be true.
-    enabled: true
-    image:
-      repository: test-outpost-gateway
-      tag: ""
-  chaos:
-    # Also requires chaos.enabled and outpostGateway.enabled to be true.
-    enabled: true
-    image:
-      repository: test-chaos
-      tag: ""
-  argo:
-    # Also requires argo.enabled and outpostGateway.enabled to be true.
-    enabled: true
-    image:
-      repository: test-argo
-      tag: ""
-
 # ── PostgreSQL (Bitnami subchart) ─────────────────────────────────────────────
 postgresql:
   enabled: true
@@ -851,16 +338,10 @@ postgresql:
   primary:
     initdb:
       scripts:
+        # Only the CORE service databases. Non-core services are deployed by builder
+        # with an admin-supplied db_url (HA Postgres / Neon / managed), so the bundled
+        # subchart never provisions their databases.
         init.sql: |
           CREATE DATABASE gatekeeper;
-          CREATE DATABASE blueprints;
-          CREATE DATABASE forge;
           CREATE DATABASE registry;
-          CREATE DATABASE workflows;
-          CREATE DATABASE tickets;
-          CREATE DATABASE notifications;
-          CREATE DATABASE hooks;
-          CREATE DATABASE gitea_integration;
-          CREATE DATABASE outpost_gateway;
-          CREATE DATABASE chaos;
-          CREATE DATABASE argo;
+          CREATE DATABASE builder;
