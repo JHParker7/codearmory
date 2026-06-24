@@ -267,7 +267,7 @@ export interface Workflow {
   created_by: string;
   org_id?: string | null;
   active: boolean;
-  steps: Array<{ step_id: string; parallel_group?: string | null }>;
+  steps: Array<{ step_id: string; parallel_group?: number | null }>;
   created_at: string;
   updated_at: string;
 }
@@ -695,7 +695,7 @@ export function listActions(token: string) {
 
 export function createWorkflow(
   token: string,
-  payload: { name: string; description?: string; steps: Array<{ step_id: string; parallel_group?: string }> },
+  payload: { name: string; description?: string; steps: Array<{ step_id: string; parallel_group?: number }> },
 ) {
   return req<Workflow>('POST', '/workflows/pipelines', token, payload);
 }
@@ -703,7 +703,7 @@ export function createWorkflow(
 export function updateWorkflow(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; steps: Array<{ step_id: string; parallel_group?: string }> }>,
+  payload: Partial<{ name: string; description: string; steps: Array<{ step_id: string; parallel_group?: number }> }>,
 ) {
   return req<Workflow>('PUT', `/workflows/pipelines/${id}`, token, payload);
 }
