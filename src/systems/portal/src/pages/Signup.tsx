@@ -35,7 +35,7 @@ export function Signup() {
     const result = await dispatch(signupAndLogin({ email, username, password }));
 
     if (signupAndLogin.fulfilled.match(result)) {
-      navigate('/app/blueprints');
+      navigate('/app');
       return;
     }
 
