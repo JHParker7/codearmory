@@ -15,6 +15,7 @@
       { "method": "GET",    "path": "/setup/status",                         "action": "setupStatus",       "resource": "gatekeeper/setup",            "public": true  },
       { "method": "POST",   "path": "/signup",                               "action": "signup",            "resource": "gatekeeper/users",            "public": true  },
       { "method": "POST",   "path": "/login",                                "action": "login",             "resource": "gatekeeper/users",            "public": true  },
+      { "method": "POST",   "path": "/check_permissions",                    "action": "checkPermissions",  "resource": "gatekeeper/permissions"       },
       { "method": "GET",    "path": "/users",                                "action": "listUser",          "resource": "gatekeeper/users"             },
       { "method": "GET",    "path": "/users/{id}",                           "action": "getUser",           "resource": "gatekeeper/users/{id}"        },
       { "method": "PUT",    "path": "/users/{id}",                           "action": "updateUser",        "resource": "gatekeeper/users/{id}"        },
@@ -82,6 +83,11 @@
         "grant_on": "user",
         "actions": ["enrollTOTP", "confirmTOTP", "getMFAStatus", "disableTOTP"],
         "resources": ["{username}/gatekeeper/mfa"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["checkPermissions"],
+        "resources": ["{username}/gatekeeper/permissions"]
       },
       {
         "grant_on": "org",

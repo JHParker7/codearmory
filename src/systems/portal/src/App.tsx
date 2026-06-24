@@ -37,7 +37,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
 function RedirectIfAuthed({ children }: { children: React.ReactNode }) {
   const { token } = useAppSelector(s => s.auth);
-  if (token) return <Navigate to="/app/blueprints" replace />;
+  if (token) return <Navigate to="/app" replace />;
   return <>{children}</>;
 }
 
@@ -46,7 +46,36 @@ function RedirectIfAuthed({ children }: { children: React.ReactNode }) {
 function RootRedirect() {
   const { token, status } = useAppSelector(s => s.auth);
   if (status === 'loading') return <Loading />;
-  return <Navigate to={token ? '/app/blueprints' : '/login'} replace />;
+  return <Navigate to={token ? '/app' : '/login'} replace />;
+}
+
+// Ordered list of service-backed modules, mirroring the sidebar order, used to
+// pick the landing page. blueprints (and the rest) are no longer always enabled,
+// so /app lands on the first module whose service is actually registered, falling
+// back to gatekeeper/ — a core page that is always present.
+const LANDING_MODULES: { path: string; service: string }[] = [
+  { path: 'blueprints', service: 'blueprints' },
+  { path: 'forge', service: 'forge' },
+  { path: 'workflows', service: 'workflows' },
+  { path: 'tickets', service: 'tickets' },
+  { path: 'hooks', service: 'hooks' },
+  { path: 'containers', service: 'containers' },
+  { path: 'gitea', service: 'gitea_integration' },
+  { path: 'outposts', service: 'outpost-gateway' },
+  { path: 'chaos', service: 'chaos' },
+  { path: 'argo', service: 'argo' },
+];
+
+// DefaultAppRoute resolves the /app index to a landing page. It waits for the
+// routing table to resolve, then redirects to the first available module; if the
+// table is unknown (null/fail-open) or empty it falls back to the always-present
+// gatekeeper/ page rather than a service that may be disabled.
+function DefaultAppRoute() {
+  const registered = useAppSelector(s => s.auth.registeredServices);
+  const resolved = useAppSelector(s => s.auth.servicesResolved);
+  if (!resolved) return <Loading />;
+  const first = registered ? LANDING_MODULES.find(m => registered.includes(m.service)) : undefined;
+  return <Navigate to={first ? first.path : 'gatekeeper'} replace />;
 }
 
 // SetupGate funnels the whole app to /setup until the instance has its first user.
@@ -72,7 +101,7 @@ export function App() {
           <Route path="/login" element={<RedirectIfAuthed><Login /></RedirectIfAuthed>} />
           <Route path="/signup" element={<RedirectIfAuthed><Signup /></RedirectIfAuthed>} />
           <Route path="/app" element={<RequireAuth><AppLayout /></RequireAuth>}>
-            <Route index element={<Navigate to="blueprints" replace />} />
+            <Route index element={<DefaultAppRoute />} />
             <Route path="blueprints" element={<Blueprints />} />
             <Route path="forge" element={<Forge />} />
             <Route path="workflows" element={<Workflows />} />

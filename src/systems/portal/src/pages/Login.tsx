@@ -27,7 +27,7 @@ export function Login() {
     setError('');
     const result = await dispatch(loginAndFetch({ email, password }));
     if (loginAndFetch.fulfilled.match(result)) {
-      navigate('/app/blueprints');
+      navigate('/app');
     } else {
       const payload = result.payload as { status?: number; message: string } | undefined;
       if (payload?.status === 401) setError('ERR · invalid credentials');
