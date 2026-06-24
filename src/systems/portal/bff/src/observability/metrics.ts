@@ -1,3 +1,9 @@
+/**
+ * Prometheus metrics for the BFF. The registry is exposed at `/metrics` (only
+ * when METRICS_ENABLED=true); default process metrics are collected under the
+ * same flag. The exported histograms/counters are recorded from the request
+ * logger, the proxy, and the state cache.
+ */
 import { Registry, collectDefaultMetrics, Histogram, Counter } from 'prom-client'
 
 export const registry = new Registry()

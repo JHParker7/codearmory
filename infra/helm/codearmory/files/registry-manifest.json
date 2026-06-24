@@ -197,6 +197,12 @@
       },
       {
         "method": "GET",
+        "path": "/permissions",
+        "action": "listPermission",
+        "resource": "gatekeeper/permissions"
+      },
+      {
+        "method": "GET",
         "path": "/permissions/{id}",
         "action": "getPermission",
         "resource": "gatekeeper/permissions/{id}"
@@ -317,6 +323,12 @@
       },
       {
         "method": "GET",
+        "path": "/permission-checks",
+        "action": "listPermissionCheck",
+        "resource": "gatekeeper/permission-checks"
+      },
+      {
+        "method": "GET",
         "path": "/service-permission-requests",
         "action": "listSPR",
         "resource": "gatekeeper/service-permission-requests"
@@ -408,6 +420,7 @@
           "listOrg",
           "listUser",
           "listRole",
+          "listPermission",
           "listInvite"
         ],
         "resources": [
@@ -415,6 +428,7 @@
           "{username}/gatekeeper/orgs",
           "{username}/gatekeeper/users",
           "{username}/gatekeeper/roles",
+          "{username}/gatekeeper/permissions",
           "{username}/gatekeeper/invites"
         ]
       },
@@ -491,6 +505,8 @@
     "actions": [
       {
         "name": "forge/run",
+        "summary": "Run a shell command in a sandboxed container",
+        "description": "Executes the step's `run` script inside an isolated Forge container (dropped capabilities, optional egress allowlist), polls the execution to completion, and returns its stdout as the step output. Use it for build, test, and deploy steps. The `run` input is wrapped as `sh -c <run>`; pass an image and resource limits via the step's other `with` keys.",
         "method": "POST",
         "path": "/executions",
         "body_transforms": [

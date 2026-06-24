@@ -1,3 +1,8 @@
+/**
+ * Containers page — browse the OCI registry: repos in a sidebar, and per-repo
+ * tags + image manifests (with layers) in a tabbed detail panel. supports
+ * deleting a manifest by digest when permitted. data via the bff.
+ */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { useAppSelector } from '../../store/hooks';
@@ -7,6 +12,7 @@ import { timeAgo } from '../../utils';
 
 type RepoTab = 'tags' | 'manifest';
 
+/** Container registry browser: repo list + tags/manifest tabs with layer detail and manifest delete. */
 export function Containers() {
   const token = useAppSelector(s => s.auth.token)!;
   const canDelete = useAppSelector(s => s.auth.permissions?.['containers:deleteManifest'] === true);
@@ -83,6 +89,7 @@ export function Containers() {
     }
   };
 
+  /** Format a byte count as a human-readable size (B/KB/MB), or — when null. */
   function formatSize(bytes: number | null | undefined): string {
     if (bytes == null) return '—';
     if (bytes < 1024) return `${bytes}B`;

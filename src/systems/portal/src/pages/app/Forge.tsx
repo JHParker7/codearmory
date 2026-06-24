@@ -1,15 +1,25 @@
+/**
+ * Forge page: sandboxed execution + runner-class admin. Two tabs — executions
+ * (run a one-off image+command and stream stdout/stderr) and runner classes (the
+ * admin cpu/memory/limits resource classes). Talks to the BFF (listExecutions /
+ * createExecution / listRunnerClasses / …); write actions on runner classes are
+ * gated by the forge:createRunnerClass permission.
+ */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { useAppSelector } from '../../store/hooks';
 import {
   listExecutions, getExecution, cancelExecution, createExecution,
   listRunnerClasses, createRunnerClass, updateRunnerClass, deleteRunnerClass,
+  listForgeImages,
 } from '../../api/bff';
 import type { Execution, RunnerClass } from '../../api/bff';
+import { ImageSelect } from '../../components/ImageSelect';
 import { timeAgo } from '../../utils';
 
 type ForgeTab = 'executions' | 'runner-classes';
 
+/** maps an execution status to a status tone (green=done, amber=in-flight, red=failed, dim=other). */
 function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   if (['completed', 'success'].includes(status)) return 'green';
   if (['running', 'in_progress', 'pending', 'queued'].includes(status)) return 'amber';
@@ -17,8 +27,121 @@ function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   return 'dim';
 }
 
+// ── Create-execution modal ────────────────────────────────────────────────────
+
+/** The fields needed to launch an execution — shared by the create modal and rerun. */
+type ExecutionInput = { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string };
+
+/**
+ * Centered modal for launching a one-off execution. Roomier than the old inline
+ * sidebar form: a multi-line command textarea and an image picker that filters the
+ * forge allowlist (ImageSelect). Forge only runs allowlisted images, so the picker
+ * is the source of truth for what can be launched. Submitting (and the optimistic
+ * list update) is delegated to onSubmit; it rejects on failure so the modal can
+ * surface the error and stay open.
+ */
+function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
+  token: string;
+  runnerClasses: RunnerClass[];
+  onClose: () => void;
+  onSubmit: (input: ExecutionInput) => Promise<void>;
+}) {
+  const [image, setImage] = useState('');
+  const [cmd, setCmd] = useState('');
+  const [envStr, setEnvStr] = useState('');
+  const [timeout, setTimeout_] = useState('');
+  const [runnerClass, setRunnerClass] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [imageOptions, setImageOptions] = useState<string[]>([]);
+
+  // The forge image allowlist drives the image picker. Best effort — an empty or
+  // failing response just leaves the picker with no suggestions to filter.
+  useEffect(() => {
+    listForgeImages(token).then(setImageOptions).catch(() => setImageOptions([]));
+  }, [token]);
+
+  const handleCreate = async () => {
+    if (!image.trim() || !cmd.trim()) return;
+    setSubmitting(true); setCreateError(null);
+    try {
+      const envPairs: Record<string, string> = {};
+      envStr.split('\n').forEach(line => {
+        const [k, ...rest] = line.split('=');
+        if (k?.trim()) envPairs[k.trim()] = rest.join('=').trim();
+      });
+      await onSubmit({
+        image: image.trim(),
+        command: cmd.trim().split(/\s+/),
+        env: Object.keys(envPairs).length > 0 ? envPairs : undefined,
+        timeout: timeout ? parseInt(timeout, 10) : undefined,
+        runner_class: runnerClass.trim() || undefined,
+      });
+    } catch (e: unknown) { setCreateError((e as Error).message); }
+    finally { setSubmitting(false); }
+  };
+
+  const canSubmit = !!image.trim() && !!cmd.trim() && !submitting;
+  const label = { fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 4, letterSpacing: 0.5 } as const;
+  const field = { width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '8px 10px', outline: 'none', boxSizing: 'border-box' } as const;
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: 640, maxWidth: '92vw', maxHeight: '90vh', overflow: 'auto', background: T.card, border: `1px solid ${T.borderHi}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 18px', borderBottom: `1px solid ${T.border}`, background: T.cardHi }}>
+          <span style={{ fontFamily: T.mono, fontSize: 12, color: T.dim }}><span style={{ color: T.green }}>$</span> new execution</span>
+          <button onClick={onClose} style={{ background: 'transparent', border: 0, color: T.faint, cursor: 'pointer', fontSize: 16 }}>×</button>
+        </div>
+
+        <div style={{ padding: '18px 20px 16px' }}>
+          {createError && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 11, marginBottom: 12 }}>{createError}</div>}
+
+          <div style={label}>IMAGE</div>
+          <div style={{ marginBottom: 14 }}>
+            <ImageSelect value={image} onChange={setImage} options={imageOptions} autoFocus />
+          </div>
+
+          <div style={label}>COMMAND <span style={{ color: T.faint, opacity: 0.7 }}>(split into arguments by whitespace)</span></div>
+          <textarea value={cmd} onChange={e => setCmd(e.target.value)} rows={5} placeholder={'echo hello world'}
+            style={{ ...field, resize: 'vertical', lineHeight: 1.5, marginBottom: 14 }} />
+
+          <div style={label}>ENV <span style={{ color: T.faint, opacity: 0.7 }}>(KEY=VALUE, one per line)</span></div>
+          <textarea value={envStr} onChange={e => setEnvStr(e.target.value)} rows={3} placeholder="FOO=bar"
+            style={{ ...field, resize: 'vertical', lineHeight: 1.5, marginBottom: 14 }} />
+
+          <div style={{ display: 'flex', gap: 12, marginBottom: 18 }}>
+            <div style={{ flex: 1 }}>
+              <div style={label}>TIMEOUT (s)</div>
+              <input value={timeout} onChange={e => setTimeout_(e.target.value)} placeholder="60" style={field} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={label}>RUNNER CLASS</div>
+              <select value={runnerClass} onChange={e => setRunnerClass(e.target.value)} style={field}>
+                <option value="">default</option>
+                {runnerClasses.filter(r => r.enabled).map(r => <option key={r.name} value={r.name}>{r.name}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button onClick={handleCreate} disabled={!canSubmit}
+              style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 13, fontWeight: 600, padding: '9px 0', cursor: canSubmit ? 'pointer' : 'default', letterSpacing: 0.4, opacity: canSubmit ? 1 : 0.6 }}>
+              {submitting ? '[ · · · ]' : '[ run ]'}
+            </button>
+            <button onClick={onClose}
+              style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '9px 16px', cursor: 'pointer' }}>
+              cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Executions tab ────────────────────────────────────────────────────────────
 
+/** Executions tab: left list of executions + a create button (opens the create modal), right pane streams the selected run's detail (status/exit/duration, command, stdout/stderr). Running rows can be cancelled. */
 function ExecutionsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [executions, setExecutions] = useState<Execution[]>([]);
@@ -29,13 +152,6 @@ function ExecutionsTab() {
   const [outputTab, setOutputTab] = useState<'stdout' | 'stderr'>('stdout');
 
   const [showCreate, setShowCreate] = useState(false);
-  const [image, setImage] = useState('');
-  const [cmd, setCmd] = useState('');
-  const [envStr, setEnvStr] = useState('');
-  const [timeout, setTimeout_] = useState('');
-  const [runnerClass, setRunnerClass] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
 
   const fetchExecutions = useCallback(async () => {
     setLoading(true); setError(null);
@@ -49,6 +165,9 @@ function ExecutionsTab() {
     listRunnerClasses(token).then(setRunnerClasses).catch(() => {});
   }, [fetchExecutions, token]);
 
+  const [rerunning, setRerunning] = useState(false);
+  const [rerunError, setRerunError] = useState<string | null>(null);
+
   const handleCancel = async (id: string) => {
     try {
       await cancelExecution(token, id);
@@ -56,28 +175,35 @@ function ExecutionsTab() {
     } catch (e: unknown) { setError((e as Error).message); }
   };
 
-  const handleCreate = async () => {
-    if (!image.trim() || !cmd.trim()) return;
-    setSubmitting(true); setCreateError(null);
+  // Launch an execution and optimistically prepend it. POST only returns the id, so
+  // synthesise a full row from the input; the 2s detail poll backfills the real
+  // record. Rejects on failure so the modal/rerun caller can show the error.
+  const submitExecution = useCallback(async (input: ExecutionInput) => {
+    const { execution_id } = await createExecution(token, input);
+    setExecutions(prev => [{
+      execution_id, user_id: '', image: input.image, command: input.command,
+      env: input.env ?? null, timeout: input.timeout ?? null,
+      runner_class: input.runner_class ?? null, status: 'pending',
+      exit_code: null, stdout: null, stderr: null,
+      created_at: new Date().toISOString(), started_at: null, ended_at: null,
+    }, ...prev]);
+    setShowCreate(false);
+    setSelected(execution_id);
+  }, [token]);
+
+  // Rerun reuses an existing execution's settings verbatim.
+  const handleRerun = async (exec: Execution) => {
+    setRerunning(true); setRerunError(null);
     try {
-      const envPairs: Record<string, string> = {};
-      envStr.split('\n').forEach(line => {
-        const [k, ...rest] = line.split('=');
-        if (k?.trim()) envPairs[k.trim()] = rest.join('=').trim();
+      await submitExecution({
+        image: exec.image,
+        command: exec.command,
+        env: exec.env && Object.keys(exec.env).length > 0 ? exec.env : undefined,
+        timeout: exec.timeout ?? undefined,
+        runner_class: exec.runner_class ?? undefined,
       });
-      const exec = await createExecution(token, {
-        image: image.trim(),
-        command: cmd.trim().split(/\s+/),
-        env: Object.keys(envPairs).length > 0 ? envPairs : undefined,
-        timeout: timeout ? parseInt(timeout, 10) : undefined,
-        runner_class: runnerClass.trim() || undefined,
-      });
-      setExecutions(prev => [exec, ...prev]);
-      setImage(''); setCmd(''); setEnvStr(''); setTimeout_(''); setRunnerClass('');
-      setShowCreate(false);
-      setSelected(exec.execution_id);
-    } catch (e: unknown) { setCreateError((e as Error).message); }
-    finally { setSubmitting(false); }
+    } catch (e: unknown) { setRerunError((e as Error).message); }
+    finally { setRerunning(false); }
   };
 
   const isRunning = (s: string) => ['running', 'in_progress', 'pending', 'queued'].includes(s);
@@ -87,6 +213,7 @@ function ExecutionsTab() {
   // it is still running so the output streams in (matching the TUI).
   const [selectedExec, setSelectedExec] = useState<Execution | null>(null);
   useEffect(() => {
+    setRerunError(null);
     if (!selected) { setSelectedExec(null); return; }
     let cancelled = false;
     // Seed metadata instantly from the list row, then load the full record.
@@ -124,40 +251,8 @@ function ExecutionsTab() {
         </div>
 
         {showCreate && (
-          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card, overflow: 'auto', maxHeight: 320 }}>
-            {createError && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{createError}</div>}
-            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, marginBottom: 3, letterSpacing: 0.5 }}>IMAGE</div>
-            <input value={image} onChange={e => setImage(e.target.value)} placeholder="ubuntu:22.04" autoFocus
-              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 }} />
-            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, marginBottom: 3, letterSpacing: 0.5 }}>COMMAND</div>
-            <input value={cmd} onChange={e => setCmd(e.target.value)} placeholder="echo hello world"
-              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 }} />
-            <div style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, marginBottom: 3, letterSpacing: 0.5 }}>ENV (KEY=VALUE, one per line)</div>
-            <textarea value={envStr} onChange={e => setEnvStr(e.target.value)} rows={2} placeholder="FOO=bar"
-              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', resize: 'none', boxSizing: 'border-box', marginBottom: 6 }} />
-            <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, marginBottom: 3, letterSpacing: 0.5 }}>TIMEOUT (s)</div>
-                <input value={timeout} onChange={e => setTimeout_(e.target.value)} placeholder="60"
-                  style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box' }} />
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, marginBottom: 3, letterSpacing: 0.5 }}>RUNNER CLASS</div>
-                <select value={runnerClass} onChange={e => setRunnerClass(e.target.value)}
-                  style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none' }}>
-                  <option value="">default</option>
-                  {runnerClasses.filter(r => r.enabled).map(r => <option key={r.name} value={r.name}>{r.name}</option>)}
-                </select>
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={handleCreate} disabled={!image.trim() || !cmd.trim() || submitting}
-                style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 10, fontWeight: 600, padding: '5px 0', cursor: 'pointer', opacity: (!image.trim() || !cmd.trim() || submitting) ? 0.6 : 1 }}>
-                {submitting ? '[ · · · ]' : '[ run ]'}
-              </button>
-              <button onClick={() => setShowCreate(false)} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '5px 8px', cursor: 'pointer' }}>✕</button>
-            </div>
-          </div>
+          <CreateExecutionModal token={token} runnerClasses={runnerClasses}
+            onClose={() => setShowCreate(false)} onSubmit={submitExecution} />
         )}
 
         <div style={{ flex: 1, overflow: 'auto' }}>
@@ -193,11 +288,20 @@ function ExecutionsTab() {
           <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
             <span style={{ color: T.green }}>$</span> armory forge{selectedExec ? ` · ${selectedExec.execution_id.slice(0, 8)}…` : ''}
           </div>
-          {selectedExec && isRunning(selectedExec.status) && (
-            <button onClick={() => handleCancel(selectedExec.execution_id)}
-              style={{ background: 'transparent', border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
-              [ ✕ cancel ]
-            </button>
+          {selectedExec && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {rerunError && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>{rerunError}</span>}
+              <button onClick={() => handleRerun(selectedExec)} disabled={rerunning}
+                style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: rerunning ? 'default' : 'pointer', opacity: rerunning ? 0.6 : 1 }}>
+                {rerunning ? '[ · · · ]' : '[ ↻ rerun ]'}
+              </button>
+              {isRunning(selectedExec.status) && (
+                <button onClick={() => handleCancel(selectedExec.execution_id)}
+                  style={{ background: 'transparent', border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+                  [ ✕ cancel ]
+                </button>
+              )}
+            </div>
           )}
         </div>
 
@@ -261,6 +365,7 @@ function ExecutionsTab() {
 
 // ── Runner Classes tab ────────────────────────────────────────────────────────
 
+/** Runner-classes admin tab: lists runner classes, with a create form + per-class enable toggle and delete (all write actions gated by forge:createRunnerClass). The form submits name/memory_mb/cpu_millicores/pids_limit/tmpfs_mb/enabled via createRunnerClass; toggle/delete go through updateRunnerClass/deleteRunnerClass. */
 function RunnerClassesTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const canWrite = useAppSelector(s => s.auth.permissions?.['forge:createRunnerClass'] === true);
@@ -432,6 +537,7 @@ function RunnerClassesTab() {
 
 // ── Forge page ────────────────────────────────────────────────────────────────
 
+/** Forge route: tabbed shell switching between the executions and runner-classes tabs. */
 export function Forge() {
   const [tab, setTab] = useState<ForgeTab>('executions');
 

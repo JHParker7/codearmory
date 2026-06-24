@@ -1,6 +1,8 @@
-// Theme system — palettes are applied as CSS custom properties on :root so the
-// whole app re-themes live. `T` references those vars, so components keep using
-// `T.green`, `T.bg`, … unchanged. The eight palettes mirror the armory TUI.
+/**
+ * Theme system — palettes are applied as CSS custom properties on :root so the
+ * whole app re-themes live. `T` references those vars, so components keep using
+ * `T.green`, `T.bg`, … unchanged. The eight palettes mirror the armory TUI.
+ */
 
 const MONO = '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace';
 
@@ -28,6 +30,7 @@ interface Spec {
   accent: string; amberTok: string; redTok: string; blue: string;
 }
 
+/** Expand a compact {@link Spec} into a full {@link Palette}, deriving the soft/faint accent tints from the accent oklch. */
 function palette(s: Spec): Palette {
   return {
     bg: s.bg, bgAlt: s.bgAlt, card: s.card, cardHi: s.cardHi,
@@ -114,6 +117,7 @@ const PALETTES: Record<string, Palette> = Object.fromEntries(SPECS.map(s => [s.n
 export const DEFAULT_THEME = 'cyber';
 const STORAGE_KEY = 'ca-theme';
 
+/** Return the persisted theme name if valid, else the default. Tolerates localStorage being unavailable. */
 export function getStoredTheme(): string {
   try {
     const t = localStorage.getItem(STORAGE_KEY);
@@ -122,6 +126,7 @@ export function getStoredTheme(): string {
   return DEFAULT_THEME;
 }
 
+/** Write the named palette's tokens onto :root as `--ca-*` CSS vars and persist the choice (falling back to the default for an unknown name). */
 export function applyTheme(name: string): void {
   const pal = PALETTES[name] ?? PALETTES[DEFAULT_THEME];
   const root = document.documentElement;
@@ -129,7 +134,7 @@ export function applyTheme(name: string): void {
   try { localStorage.setItem(STORAGE_KEY, PALETTES[name] ? name : DEFAULT_THEME); } catch { /* ignore */ }
 }
 
-// `T` resolves to live CSS vars; applyTheme() must run once before first paint.
+/** Styling token map components consume; each value resolves to a live CSS var, so applyTheme() must run once before first paint. */
 export const T = {
   bg: 'var(--ca-bg)',
   bgAlt: 'var(--ca-bgAlt)',

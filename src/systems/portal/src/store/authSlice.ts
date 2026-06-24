@@ -1,3 +1,10 @@
+/**
+ * Auth slice — the session source of truth for the SPA. Holds the JWT, decoded
+ * user id, hydrated user object, and two derived gating layers the UI reads:
+ * `permissions` (per-action allow map for admin nav) and `registeredServices`
+ * (which modules are routable). The token is mirrored to localStorage so a reload
+ * rehydrates the session; logout and an expired-session rejection both clear it.
+ */
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import { getUser, updateUser, login as apiLogin, signup as apiSignup, checkPermission, listRegisteredServices } from '../api/bff';
 import type { User, SignupPayload } from '../api/bff';
@@ -21,6 +28,7 @@ export interface AuthState {
   servicesResolved: boolean;
 }
 
+/** Seed the initial token/userId/status from a persisted JWT, discarding a token that can't be decoded into a user id. */
 function readStoredToken() {
   const token = localStorage.getItem(TOKEN_KEY);
   if (!token) return { token: null, userId: null, status: 'idle' as const };
@@ -45,7 +53,7 @@ const initialState: AuthState = {
 
 // ── Thunks ────────────────────────────────────────────────────────────────────
 
-// Called at startup when a stored token is found, to hydrate the user object.
+/** Hydrate the user object for a stored session at startup; rejects (clearing the token) if the session is gone. */
 export const hydrateUser = createAsyncThunk(
   'auth/hydrateUser',
   async (_, { getState, rejectWithValue }) => {
@@ -59,6 +67,7 @@ export const hydrateUser = createAsyncThunk(
   },
 );
 
+/** Log in with email/password, persist the returned token, and fetch the user in one round trip. Rejects with {status, message}. */
 export const loginAndFetch = createAsyncThunk(
   'auth/loginAndFetch',
   async ({ email, password }: { email: string; password: string }, { rejectWithValue }) => {
@@ -76,6 +85,11 @@ export const loginAndFetch = createAsyncThunk(
   },
 );
 
+/**
+ * Sign up, then immediately log in. If the account is created but the follow-up
+ * login or user-fetch fails, the distinct rejection status lets the caller tell
+ * "signup failed" from "created but couldn't sign you in" apart.
+ */
 export const signupAndLogin = createAsyncThunk(
   'auth/signupAndLogin',
   async (payload: SignupPayload, { rejectWithValue }) => {
@@ -105,8 +119,14 @@ export const signupAndLogin = createAsyncThunk(
   },
 );
 
+/**
+ * The (service, action, resource) probes whose results drive which admin/privileged
+ * UI affordances render. Each is checked once at login via {@link hydratePermissions}
+ * and cached in `state.permissions` under a `service:action` key.
+ */
 const PERMISSION_GATES = [
   { service: 'gatekeeper', action: 'listAuditLog',       resource: 'gatekeeper/audit-logs' },
+  { service: 'gatekeeper', action: 'listPermissionCheck', resource: 'gatekeeper/permission-checks' },
   { service: 'gatekeeper', action: 'listUser',            resource: 'gatekeeper/users' },
   { service: 'gatekeeper', action: 'listRole',            resource: 'gatekeeper/roles' },
   { service: 'gatekeeper', action: 'createPermission',    resource: 'gatekeeper/permissions' },
@@ -119,6 +139,7 @@ const PERMISSION_GATES = [
   { service: 'containers', action: 'deleteManifest',      resource: 'containers/repositories/*' },
 ] as const;
 
+/** Resolve every {@link PERMISSION_GATES} probe (plus the builder admin gate) into a `service:action → boolean` map; a failed check resolves to false. */
 export const hydratePermissions = createAsyncThunk(
   'auth/hydratePermissions',
   async (_, { getState }) => {
@@ -147,9 +168,11 @@ export const hydratePermissions = createAsyncThunk(
   },
 );
 
-// Resolves the set of services currently registered/routable in conductor, so the
-// sidebar can show only modules that are actually deployed. Returns null on any
-// error so the UI fails OPEN (shows everything) rather than hiding a live module.
+/**
+ * Resolve the set of services currently registered/routable in conductor, so the
+ * sidebar can show only modules that are actually deployed. Returns null on any
+ * error so the UI fails OPEN (shows everything) rather than hiding a live module.
+ */
 export const hydrateRegisteredServices = createAsyncThunk(
   'auth/hydrateRegisteredServices',
   async (_, { getState }) => {
@@ -164,6 +187,7 @@ export const hydrateRegisteredServices = createAsyncThunk(
   },
 );
 
+/** Persist edits to the current user's profile and replace the cached user on success. Rejects with the error message. */
 export const saveUser = createAsyncThunk(
   'auth/saveUser',
   async (
@@ -189,6 +213,7 @@ const authSlice = createSlice({
   name: 'auth',
   initialState,
   reducers: {
+    /** Clear the session and all derived state (token, user, permissions, services) and drop the persisted token. */
     logout(state) {
       localStorage.removeItem(TOKEN_KEY);
       state.token = null;

@@ -1,3 +1,8 @@
+/**
+ * `/login` page — terminal-styled email + password form that authenticates against
+ * the BFF via the `loginAndFetch` thunk, then navigates to `/app`. Surfaces any
+ * redirect message passed in router location state (e.g. "Account created. Please log in.").
+ */
 import { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { T } from '../theme';
@@ -5,6 +10,7 @@ import { Logo } from '../components/Logo';
 import { useAppDispatch } from '../store/hooks';
 import { loginAndFetch } from '../store/authSlice';
 
+/** Login page component: renders the credential form and dispatches loginAndFetch on submit, mapping 401s to an "invalid credentials" error. */
 export function Login() {
   const navigate = useNavigate();
   const location = useLocation();

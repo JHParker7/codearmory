@@ -448,3 +448,55 @@ func TestHandleListAuditLogs_Success(t *testing.T) {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 }
+
+// --- handleListPermissionChecks ---
+
+func TestHandleListPermissionChecks_Forbidden(t *testing.T) {
+	actor := createTestUser(t)
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/permission-checks", nil), actor.UserID)
+	w := httptest.NewRecorder()
+	handleListPermissionChecks(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestHandleListPermissionChecks_Success(t *testing.T) {
+	pc := PermissionsCheck{
+		PermissionsCheckID: uuid.New().String(),
+		Service:            "forge",
+		Action:             "createExecution",
+		Resource:           "alice/forge/executions",
+		UserID:             uuid.New().String(),
+		Granted:            false,
+	}
+	if err := pc.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Remove(context.Background()) })
+
+	actor := createAuthorizedUser(t, "listPermissionCheck", "gatekeeper/permission-checks")
+	// granted=false isolates denied checks (the actor's own authorized check is granted=true).
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/permission-checks?granted=false", nil), actor.UserID)
+	w := httptest.NewRecorder()
+	handleListPermissionChecks(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result []PermissionsCheck
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	found := false
+	for _, c := range result {
+		if c.PermissionsCheckID == pc.PermissionsCheckID {
+			found = true
+		}
+		if c.Granted {
+			t.Fatalf("granted=false filter returned a granted row: %s", c.PermissionsCheckID)
+		}
+	}
+	if !found {
+		t.Fatalf("created permission check %s not in list of %d", pc.PermissionsCheckID, len(result))
+	}
+}

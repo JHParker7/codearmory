@@ -64,6 +64,8 @@ type ServiceActionModel struct {
 	ActionID       string    `gorm:"column:action_id;primaryKey"`
 	ServiceID      string    `gorm:"column:service_id;not null;uniqueIndex:service_actions_service_id_name_key"`
 	Name           string    `gorm:"column:name;not null;uniqueIndex:service_actions_service_id_name_key"`
+	Summary        string    `gorm:"column:summary;not null;default:''"`
+	Description    string    `gorm:"column:description;not null;default:''"`
 	Method         string    `gorm:"column:method;not null"`
 	Path           string    `gorm:"column:path;not null"`
 	BodyTransforms []byte    `gorm:"column:body_transforms;type:jsonb"`
@@ -530,7 +532,7 @@ func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, err
 func listAllActions(ctx context.Context) ([]ServiceAction, error) {
 	sqlRows, err := connect().WithContext(ctx).Raw(`
 		SELECT sa.action_id, sa.service_id, s.name, s.url,
-		       sa.name, sa.method, sa.path,
+		       sa.name, sa.summary, sa.description, sa.method, sa.path,
 		       sa.body_transforms, sa.async_config,
 		       sa.active, sa.created_at, sa.updated_at,
 		       COALESCE(se.action, ''), COALESCE(se.resource, '')
@@ -555,7 +557,7 @@ func listAllActions(ctx context.Context) ([]ServiceAction, error) {
 		var bodyTransforms, asyncConfig []byte
 		if err := sqlRows.Scan(
 			&a.ActionID, &a.ServiceID, &a.ServiceName, &a.ServiceURL,
-			&a.Name, &a.Method, &a.Path,
+			&a.Name, &a.Summary, &a.Description, &a.Method, &a.Path,
 			&bodyTransforms, &asyncConfig,
 			&a.Active, &a.CreatedAt, &a.UpdatedAt,
 			&a.GkAction, &a.GkResource,
@@ -689,8 +691,8 @@ func replaceServiceManifest(ctx context.Context, id, url, description string,
 			continue
 		}
 		if err := tx.Exec(
-			`INSERT INTO service_actions (action_id, service_id, name, method, path, body_transforms, async_config) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			uuid.New().String(), id, a.Name, a.Method, a.Path,
+			`INSERT INTO service_actions (action_id, service_id, name, summary, description, method, path, body_transforms, async_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			uuid.New().String(), id, a.Name, a.Summary, a.Description, a.Method, a.Path,
 			jsonbBytes(a.BodyTransforms), jsonbBytes(a.Async)).Error; err != nil {
 			return err
 		}

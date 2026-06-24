@@ -1,15 +1,25 @@
+/**
+ * `/app` shell — the authenticated layout: sidebar (signed-in user, service/permission
+ * gated module nav, logout) plus the routed `<Outlet/>`. On mount it hydrates the user,
+ * permissions, and registered-services routing table from the BFF, and blocks the main
+ * pane when the active route's backing service isn't registered/routable in conductor.
+ */
 import { useEffect } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { T } from '../../theme';
 import { Logo } from '../../components/Logo';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { logout, hydrateUser, hydratePermissions, hydrateRegisteredServices } from '../../store/authSlice';
+import { shortId } from '../../utils';
+import { useOrgNames } from '../../hooks/useNames';
 
-// Maps each service-gated /app route segment to its backing platform service, so an
-// unavailable service's page is blocked on direct navigation/refresh — not just
-// hidden from the sidebar. Routes gated by permission (gatekeeper, builder, audit)
-// or the account section (settings) are intentionally absent: they are always
-// reachable when the user holds the permission.
+/**
+ * Maps each service-gated /app route segment to its backing platform service, so an
+ * unavailable service's page is blocked on direct navigation/refresh — not just
+ * hidden from the sidebar. The admin routes (gatekeeper, builder, audit) gated by
+ * permission, and the account section (settings), are intentionally absent: they are
+ * always reachable when the user holds the permission.
+ */
 const ROUTE_SERVICE: Record<string, string> = {
   blueprints: 'blueprints',
   forge: 'forge',
@@ -23,17 +33,21 @@ const ROUTE_SERVICE: Record<string, string> = {
   argo: 'argo',
 };
 
-// isUnavailable reports whether a service-backed module should be hidden/blocked:
-// true only once we hold a RESOLVED, non-null routing table that omits the service.
-// While the table is in flight or errored (registeredServices === null) it stays
-// false — the sidebar fails OPEN rather than flashing live modules away.
+/**
+ * isUnavailable reports whether a service-backed module should be hidden/blocked:
+ * true only once we hold a RESOLVED, non-null routing table that omits the service.
+ * While the table is in flight or errored (registeredServices === null) it stays
+ * false — the sidebar fails OPEN rather than flashing live modules away.
+ */
 function isUnavailable(service: string, registered: string[] | null): boolean {
   return registered !== null && !registered.includes(service);
 }
 
-// NavItem renders a sidebar link. When `service` is set, the item hides itself
-// unless that platform service is currently registered/routable in conductor —
-// so modules that aren't actually deployed never appear.
+/**
+ * NavItem renders a sidebar link. When `service` is set, the item hides itself
+ * unless that platform service is currently registered/routable in conductor —
+ * so modules that aren't actually deployed never appear.
+ */
 function NavItem({ to, label, badge, service }: { to: string; label: string; badge?: string; service?: string }) {
   const registeredServices = useAppSelector(s => s.auth.registeredServices);
   if (service && isUnavailable(service, registeredServices)) return null;
@@ -57,8 +71,11 @@ function NavItem({ to, label, badge, service }: { to: string; label: string; bad
   );
 }
 
+/** App shell component: renders the gated sidebar + routed Outlet, hydrates user/permissions/services on mount, and walls off the pane for unavailable services. */
 export function AppLayout() {
+  const token = useAppSelector(s => s.auth.token)!;
   const user = useAppSelector(s => s.auth.user);
+  const orgNames = useOrgNames(token);
   const permissions = useAppSelector(s => s.auth.permissions);
   const registeredServices = useAppSelector(s => s.auth.registeredServices);
   const servicesResolved = useAppSelector(s => s.auth.servicesResolved);
@@ -104,7 +121,7 @@ export function AppLayout() {
             <div style={{ fontSize: 11, color: T.faint, letterSpacing: 0.5, marginBottom: 4 }}>SIGNED IN AS</div>
             <div style={{ fontSize: 13, color: T.textHi, fontWeight: 600 }}>@{user.username}</div>
             <div style={{ fontSize: 11, color: T.dim, marginTop: 2 }}>{user.email}</div>
-            {user.org_id && <div style={{ fontSize: 10.5, color: T.faint, marginTop: 4 }}>org: {user.org_id.slice(0, 8)}…</div>}
+            {user.org_id && <div style={{ fontSize: 10.5, color: T.faint, marginTop: 4 }}>org: {orgNames[user.org_id] ?? shortId(user.org_id)}</div>}
           </div>
         )}
 
@@ -121,11 +138,13 @@ export function AppLayout() {
           <NavItem to="/app/outposts" label="outposts/" service="outpost-gateway" />
           <NavItem to="/app/chaos" label="chaos/" service="chaos" />
           <NavItem to="/app/argo" label="argo/" service="argo" />
-          <NavItem to="/app/gatekeeper" label="gatekeeper/" />
+          <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
+          <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase' }}>admin</div>
+          {permissions?.['builder:configureOrgService'] && <NavItem to="/app/builder" label="builder/" />}
           {permissions?.['gatekeeper:listAuditLog'] && <NavItem to="/app/audit" label="audit/" />}
+          <NavItem to="/app/gatekeeper" label="gatekeeper/" />
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
           <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase' }}>account</div>
-          {permissions?.['builder:configureOrgService'] && <NavItem to="/app/builder" label="builder/" />}
           <NavItem to="/app/settings" label="settings/" />
         </nav>
 

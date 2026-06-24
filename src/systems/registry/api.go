@@ -92,6 +92,8 @@ type ServiceAction struct {
 	ServiceName    string          `json:"service_name"`
 	ServiceURL     string          `json:"service_url"`
 	Name           string          `json:"name"`
+	Summary        string          `json:"summary,omitempty"`
+	Description    string          `json:"description,omitempty"`
 	Method         string          `json:"method"`
 	Path           string          `json:"path"`
 	BodyTransforms json.RawMessage `json:"body_transforms,omitempty"`

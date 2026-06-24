@@ -1,3 +1,9 @@
+/**
+ * Top-level router and route guards. Wraps every route in a SetupGate (first-run
+ * funnel), splits public auth pages from the authenticated `/app` shell, and maps
+ * each sidebar module to its page. The guards below decide where an unauthenticated,
+ * authenticated, or not-yet-bootstrapped visitor lands.
+ */
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAppSelector } from './store/hooks';
 import { Login } from './pages/Login';
@@ -20,6 +26,7 @@ import { Audit } from './pages/app/Audit';
 import { Settings } from './pages/app/Settings';
 import { T } from './theme';
 
+/** Full-screen terminal-styled loading splash shown while a route guard awaits an async check. */
 function Loading() {
   return (
     <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: T.bg, fontFamily: T.mono, color: T.faint, fontSize: 12 }}>
@@ -28,6 +35,7 @@ function Loading() {
   );
 }
 
+/** Route guard for the `/app` shell: shows Loading while the session resolves, else redirects to /login when unauthenticated. */
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { token, status } = useAppSelector(s => s.auth);
   if (status === 'loading') return <Loading />;
@@ -35,14 +43,19 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** Inverse guard for public auth pages (login/signup): bounces an already-authenticated visitor to /app. */
 function RedirectIfAuthed({ children }: { children: React.ReactNode }) {
   const { token } = useAppSelector(s => s.auth);
   if (token) return <Navigate to="/app" replace />;
   return <>{children}</>;
 }
 
-// The marketing home page now lives in its own deployment (portal-www). The app
-// root sends visitors to the dashboard if authed, otherwise to login.
+/**
+ * Resolves the `/` root: dashboard if authenticated, otherwise login.
+ *
+ * The marketing home page now lives in its own deployment (portal-www), so this
+ * root has no landing page of its own.
+ */
 function RootRedirect() {
   const { token, status } = useAppSelector(s => s.auth);
   if (status === 'loading') return <Loading />;
@@ -66,10 +79,12 @@ const LANDING_MODULES: { path: string; service: string }[] = [
   { path: 'argo', service: 'argo' },
 ];
 
-// DefaultAppRoute resolves the /app index to a landing page. It waits for the
-// routing table to resolve, then redirects to the first available module; if the
-// table is unknown (null/fail-open) or empty it falls back to the always-present
-// gatekeeper/ page rather than a service that may be disabled.
+/**
+ * Resolves the /app index to a landing page. Waits for the routing table to
+ * resolve, then redirects to the first available module; if the table is unknown
+ * (null/fail-open) or empty it falls back to the always-present gatekeeper/ page
+ * rather than a service that may be disabled.
+ */
 function DefaultAppRoute() {
   const registered = useAppSelector(s => s.auth.registeredServices);
   const resolved = useAppSelector(s => s.auth.servicesResolved);
@@ -78,10 +93,13 @@ function DefaultAppRoute() {
   return <Navigate to={first ? first.path : 'gatekeeper'} replace />;
 }
 
-// SetupGate funnels the whole app to /setup until the instance has its first user.
-// While the first-run check is unresolved (initialized === null) it shows the
-// loading screen so no page flashes before we know which way to route. Once the
-// instance is initialized, /setup is no longer reachable and redirects to login.
+/**
+ * Funnels the whole app to /setup until the instance has its first user.
+ *
+ * While the first-run check is unresolved (initialized === null) it shows the
+ * loading screen so no page flashes before we know which way to route. Once the
+ * instance is initialized, /setup is no longer reachable and redirects to login.
+ */
 function SetupGate({ children }: { children: React.ReactNode }) {
   const initialized = useAppSelector(s => s.setup.initialized);
   const { pathname } = useLocation();
@@ -91,6 +109,7 @@ function SetupGate({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** The app's full route tree: SetupGate → public auth pages + the guarded `/app` shell with one route per module. */
 export function App() {
   return (
     <BrowserRouter>

@@ -76,6 +76,18 @@ jobs:
       - name: Run forge unit tests
         run: cd src/systems/forge; go test .
 
+  egress-proxy-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run egress-proxy unit tests
+        run: cd src/systems/egress-proxy; go test .
+
   registry-unit-test:
     runs-on: ubuntu-latest
     steps:
@@ -143,6 +155,7 @@ jobs:
       - conductor-unit-test
       - cli-unit-test
       - forge-unit-test
+      - egress-proxy-unit-test
       - registry-unit-test
       - workflows-unit-test
       - hooks-unit-test
@@ -205,6 +218,8 @@ jobs:
             context: src/systems/conductor
           - name: forge
             context: src/systems/forge
+          - name: egress-proxy
+            context: src/systems/egress-proxy
           - name: registry
             context: src/systems/registry
           - name: workflows

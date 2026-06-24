@@ -1,11 +1,19 @@
+/**
+ * Hooks page — the webhook control plane: a "pipeline rules" tab (repo/event →
+ * workflow rules with ref filters and input mappings) and an "events" tab
+ * (received webhook deliveries with their matched triggers and payload). data
+ * via the bff.
+ */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector } from '../../store/hooks';
 import { listRules, deleteRule, listHookEvents } from '../../api/bff';
 import type { PipelineRule, HookEvent } from '../../api/bff';
-import { timeAgo } from '../../utils';
+import { timeAgo, shortId } from '../../utils';
+import { useWorkflowNames } from '../../hooks/useNames';
 
+/** Map an event/trigger status to a UI tone (delivered/success/triggered→green, pending/processing→amber, failed/error→red, else dim). */
 function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   if (['delivered', 'success', 'triggered'].includes(status)) return 'green';
   if (['pending', 'processing'].includes(status)) return 'amber';
@@ -13,8 +21,10 @@ function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   return 'dim';
 }
 
+/** Webhooks viewer: master/detail over pipeline rules and received events; supports deleting a rule. */
 export function Hooks() {
   const token = useAppSelector(s => s.auth.token)!;
+  const workflowNames = useWorkflowNames(token);
   const [tab, setTab] = useState<'rules' | 'events'>('rules');
 
   const [rules, setRules] = useState<PipelineRule[]>([]);
@@ -162,7 +172,7 @@ export function Hooks() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
                   {([
                     ['repo', selectedRuleData.repo],
-                    ['workflow', selectedRuleData.workflow_id.slice(0, 8) + '…'],
+                    ['workflow', workflowNames[selectedRuleData.workflow_id] ?? shortId(selectedRuleData.workflow_id)],
                   ] as [string, string][]).map(([k, v]) => (
                     <div key={k} style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px' }}>
                       <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 4, textTransform: 'uppercase' }}>{k}</div>
@@ -235,7 +245,7 @@ export function Hooks() {
                       {selectedEventData.triggers.map((trig, i) => (
                         <div key={trig.trigger_id} style={{ display: 'flex', alignItems: 'center', padding: '9px 12px', borderBottom: i < selectedEventData.triggers!.length - 1 ? `1px solid ${T.border}` : 'none', gap: 12, fontFamily: T.mono, fontSize: 11 }}>
                           <Pill tone={statusTone(trig.status)}>{trig.status}</Pill>
-                          <span style={{ color: T.dim, flex: 1 }}>{trig.workflow_id.slice(0, 8)}…</span>
+                          <span style={{ color: T.dim, flex: 1 }}>{workflowNames[trig.workflow_id] ?? shortId(trig.workflow_id)}</span>
                           {trig.run_id && <span style={{ color: T.faint }}>run: {trig.run_id.slice(0, 8)}…</span>}
                           {trig.error && <span style={{ color: T.red }}>{trig.error}</span>}
                         </div>

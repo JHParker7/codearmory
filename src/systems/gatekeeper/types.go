@@ -176,6 +176,7 @@ type AuditLog struct {
 	ActorType  string    `json:"actor_type"   gorm:"column:actor_type"` // "user" | "service"
 	Action     string    `json:"action"       gorm:"column:action"`     // e.g. "role.update"
 	ResourceID string    `json:"resource_id"  gorm:"column:resource_id"`
+	OrgID      *string   `json:"org_id"       gorm:"column:org_id"` // actor's org at the time of the action
 	Detail     string    `json:"detail"       gorm:"column:detail"`
 }
 

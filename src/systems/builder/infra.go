@@ -77,11 +77,17 @@ func (b *k8sBackend) infraSelector(component string) map[string]string {
 }
 
 // egressProxyEnabled reports whether forge's egress proxy (and the NetworkPolicy that
-// confines exec traffic to it) should be deployed. It defaults to on; an operator turns
-// it off with EGRESS_PROXY_ENABLED=false in forge's config when the runtime provides its
-// own isolation — notably kata/Cloud Hypervisor, where each execution is a VM that filters
-// egress at the VM level and never uses the shared-network HTTP proxy.
+// confines exec traffic to it) should be deployed. It defaults to on, and is off when
+// either is true:
+//   - the operator sets EGRESS_PROXY_ENABLED=false in forge's config; or
+//   - the runtime is kata: kata/Cloud Hypervisor runs each execution as a microVM that
+//     filters egress at the VM level and never uses the shared-network HTTP proxy, so the
+//     proxy + NetworkPolicy are moot. Selecting kata (RUNTIME=kata) thus implicitly skips
+//     the egress proxy, matching the chart's forge.kata.enabled behavior.
 func egressProxyEnabled(spec workloadSpec) bool {
+	if strings.EqualFold(strings.TrimSpace(spec.Env["RUNTIME"]), "kata") {
+		return false
+	}
 	switch strings.ToLower(strings.TrimSpace(spec.Env["EGRESS_PROXY_ENABLED"])) {
 	case "false", "0", "no", "off":
 		return false

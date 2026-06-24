@@ -1,5 +1,18 @@
+/**
+ * Typed client for the portal BFF. Every function is a thin wrapper over {@link req}
+ * that issues an HTTP call against `/api/*` (proxied to conductor) and returns the
+ * decoded JSON. Grouped by backing service (gatekeeper, workflows, forge, …); the
+ * interfaces mirror each service's response shape. The functions are intentionally
+ * terse — the section banner and the verb+path in each call are the documentation.
+ */
+
 const BASE = '/api';
 
+/**
+ * Core fetch helper: issues `method BASE+path` with optional bearer auth and JSON
+ * body, returns decoded JSON (or undefined for 204), and throws an Error with a
+ * `.status` property on any non-2xx so callers can branch on the HTTP code.
+ */
 async function req<T>(method: string, path: string, token?: string, body?: unknown): Promise<T> {
   const res = await fetch(BASE + path, {
     method,
@@ -56,9 +69,12 @@ export interface SetupStatus {
   initialized: boolean;
 }
 
-// Time-bounded so a hung upstream can't trap the SetupGate on the loading screen
-// forever (the app's entire render is gated on this resolving). On timeout the
-// fetch aborts and rejects, which checkSetup treats as a failed attempt.
+/**
+ * Fetch first-run setup status, time-bounded so a hung upstream can't trap the
+ * SetupGate on the loading screen forever (the app's entire render is gated on
+ * this resolving). On timeout the fetch aborts and rejects, which checkSetup
+ * treats as a failed attempt.
+ */
 export async function getSetupStatus(timeoutMs = 4000): Promise<SetupStatus> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -219,7 +235,7 @@ export interface SecretProvider {
   updated_at: string;
 }
 
-// Returns null when no provider row exists (org implicitly uses builtin).
+/** Fetch an org's secret-provider config, returning null when no provider row exists (org implicitly uses builtin). */
 export async function getSecretProvider(token: string, orgId: string): Promise<SecretProvider | null> {
   try {
     return await req<SecretProvider>('GET', `/gatekeeper/orgs/${orgId}/secret-provider`, token);
@@ -355,6 +371,11 @@ export function cancelExecution(token: string, id: string) {
 
 export function listRunnerClasses(token: string) {
   return req<RunnerClass[]>('GET', '/forge/runner-classes', token);
+}
+
+/** The forge image allowlist (deduped, sorted). Executions may only use these. */
+export function listForgeImages(token: string) {
+  return req<string[]>('GET', '/forge/images', token);
 }
 
 // ── Tickets ───────────────────────────────────────────────────────────────────
@@ -518,13 +539,13 @@ export function deleteWorkspaceState(token: string, path: string) {
 // ── Audit ─────────────────────────────────────────────────────────────────────
 
 export interface AuditLog {
-  audit_id: string;
+  audit_log_id: string;
   actor_id: string;
+  actor_type?: string | null; // "user" | "service"
   action: string;
   resource_id: string;
-  resource_type?: string | null;
-  org_id?: string | null;
-  meta?: Record<string, unknown> | null;
+  org_id?: string | null; // actor's org at the time of the action
+  detail?: string | null;
   created_at: string;
 }
 
@@ -542,6 +563,41 @@ export function listAuditLogs(
   return req<AuditLog[]>('GET', `/gatekeeper/audit-logs${qs ? '?' + qs : ''}`, token);
 }
 
+// ── Permission checks (access-decision audit log) ─────────────────────────────
+// One row per permission evaluation (granted or denied), across every service.
+// Admin-only — used to review access patterns and hunt suspicious usage. Unlike
+// the mutation audit log, `resource` is the full scoped resource path used in the
+// RBAC check, and `granted` records the decision.
+
+export interface PermissionCheck {
+  permissions_check_id: string;
+  service: string;
+  action: string;
+  resource: string;
+  user_id: string;
+  org_id?: string | null;
+  team_id?: string | null;
+  granted: boolean;
+  created_at: string;
+}
+
+export function listPermissionChecks(
+  token: string,
+  filters?: { user_id?: string; service?: string; action?: string; resource?: string; org_id?: string; granted?: boolean; limit?: number; offset?: number },
+) {
+  const q = new URLSearchParams();
+  if (filters?.user_id) q.set('user_id', filters.user_id);
+  if (filters?.service) q.set('service', filters.service);
+  if (filters?.action) q.set('action', filters.action);
+  if (filters?.resource) q.set('resource', filters.resource);
+  if (filters?.org_id) q.set('org_id', filters.org_id);
+  if (filters?.granted !== undefined) q.set('granted', String(filters.granted));
+  if (filters?.limit !== undefined) q.set('limit', String(filters.limit));
+  if (filters?.offset !== undefined) q.set('offset', String(filters.offset));
+  const qs = q.toString();
+  return req<PermissionCheck[]>('GET', `/gatekeeper/permission-checks${qs ? '?' + qs : ''}`, token);
+}
+
 // ── CI Steps ──────────────────────────────────────────────────────────────────
 
 export interface Step {
@@ -549,7 +605,7 @@ export interface Step {
   name: string;
   description?: string | null;
   action: string;
-  with?: Record<string, string> | null;
+  with?: Record<string, unknown> | null;
   timeout?: number | null;
   created_by: string;
   org_id?: string | null;
@@ -558,10 +614,50 @@ export interface Step {
   updated_at: string;
 }
 
+/** The gatekeeper permission triple an action requires to run. */
+export interface ActionPermission {
+  service: string;
+  action: string;
+  resource: string;
+}
+
+/** Rewrites a `with` key before the step payload is sent to the backend service. */
+export interface ActionBodyTransform {
+  from_key: string;
+  to_key: string;
+  wrap?: string[];
+}
+
+/** How a long-running action is polled to a terminal state. */
+export interface ActionAsyncConfig {
+  id_field: string;
+  poll_path: string;
+  poll_interval_secs: number;
+  status_field: string;
+  success_states?: string[];
+  failure_states?: string[];
+  cancel_states?: string[];
+  output_field?: string;
+  error_fields?: string[];
+}
+
+/**
+ * A callable action from the workflows catalog (mirrors the backend ActionDef).
+ * summary/description are human-facing metadata; the remaining fields are the
+ * action config — which backend service/route it hits, how the body is shaped,
+ * the required permission, and any async polling spec.
+ */
 export interface WorkflowAction {
   name: string;
+  summary?: string | null;
   description?: string | null;
-  inputs?: Record<string, unknown> | null;
+  service_name?: string;
+  service_url?: string;
+  method?: string;
+  path?: string;
+  body_transforms?: ActionBodyTransform[] | null;
+  async?: ActionAsyncConfig | null;
+  required_permission?: ActionPermission | null;
 }
 
 export function listSteps(token: string) {
@@ -574,7 +670,7 @@ export function getStep(token: string, id: string) {
 
 export function createStep(
   token: string,
-  payload: { name: string; description?: string; action: string; with?: Record<string, string>; timeout?: number },
+  payload: { name: string; description?: string; action: string; with?: Record<string, unknown>; timeout?: number },
 ) {
   return req<Step>('POST', '/workflows/steps', token, payload);
 }
@@ -582,7 +678,7 @@ export function createStep(
 export function updateStep(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; action: string; with: Record<string, string>; timeout: number }>,
+  payload: Partial<{ name: string; description: string; action: string; with: Record<string, unknown>; timeout: number }>,
 ) {
   return req<Step>('PUT', `/workflows/steps/${id}`, token, payload);
 }
@@ -614,11 +710,12 @@ export function updateWorkflow(
 
 // ── Forge — create execution, manage runner classes ───────────────────────────
 
+// Forge's POST /executions responds with only the new id — not a full Execution.
 export function createExecution(
   token: string,
   payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string },
 ) {
-  return req<Execution>('POST', '/forge/executions', token, payload);
+  return req<{ execution_id: string }>('POST', '/forge/executions', token, payload);
 }
 
 export function createRunnerClass(
@@ -1028,6 +1125,7 @@ export interface RegisteredService {
   description?: string;
 }
 
+/** Fetch conductor's live routing table (the services currently registered/routable), flattened to the bare array. */
 export async function listRegisteredServices(token: string): Promise<RegisteredService[]> {
   const res = await req<{ services: RegisteredService[] }>('GET', '/services', token);
   return res.services ?? [];

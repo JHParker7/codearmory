@@ -36,6 +36,7 @@
       { "method": "PUT",    "path": "/roles/{id}",                           "action": "updateRole",        "resource": "gatekeeper/roles/{id}"        },
       { "method": "DELETE", "path": "/roles/{id}",                           "action": "deleteRole",        "resource": "gatekeeper/roles/{id}"        },
       { "method": "POST",   "path": "/permissions",                          "action": "createPermission",  "resource": "gatekeeper/permissions"       },
+      { "method": "GET",    "path": "/permissions",                          "action": "listPermission",    "resource": "gatekeeper/permissions"       },
       { "method": "GET",    "path": "/permissions/{id}",                     "action": "getPermission",     "resource": "gatekeeper/permissions/{id}"  },
       { "method": "PUT",    "path": "/permissions/{id}",                     "action": "updatePermission",  "resource": "gatekeeper/permissions/{id}"  },
       { "method": "DELETE", "path": "/permissions/{id}",                     "action": "deletePermission",  "resource": "gatekeeper/permissions/{id}"  },
@@ -56,6 +57,7 @@
       { "method": "PUT",    "path": "/orgs/{id}/secret-provider",            "action": "updateSecretProvider",  "resource": "gatekeeper/orgs/{id}"                      },
       { "method": "DELETE", "path": "/orgs/{id}/secret-provider",            "action": "deleteSecretProvider",  "resource": "gatekeeper/orgs/{id}"                      },
       { "method": "GET",    "path": "/audit-logs",                           "action": "listAuditLog",          "resource": "gatekeeper/audit-logs"                     },
+      { "method": "GET",    "path": "/permission-checks",                    "action": "listPermissionCheck",   "resource": "gatekeeper/permission-checks"              },
       { "method": "GET",    "path": "/service-permission-requests",          "action": "listSPR",           "resource": "gatekeeper/service-permission-requests" },
       { "method": "GET",    "path": "/service-permission-requests/{id}",     "action": "getSPR",            "resource": "gatekeeper/service-permission-requests/{id}" },
       { "method": "POST",   "path": "/service-permission-requests/{id}/approve", "action": "approveSPR",   "resource": "gatekeeper/service-permission-requests/{id}" },
@@ -76,8 +78,8 @@
       },
       {
         "grant_on": "user",
-        "actions": ["listTeam", "listOrg", "listUser", "listRole", "listInvite"],
-        "resources": ["{username}/gatekeeper/teams", "{username}/gatekeeper/orgs", "{username}/gatekeeper/users", "{username}/gatekeeper/roles", "{username}/gatekeeper/invites"]
+        "actions": ["listTeam", "listOrg", "listUser", "listRole", "listPermission", "listInvite"],
+        "resources": ["{username}/gatekeeper/teams", "{username}/gatekeeper/orgs", "{username}/gatekeeper/users", "{username}/gatekeeper/roles", "{username}/gatekeeper/permissions", "{username}/gatekeeper/invites"]
       },
       {
         "grant_on": "user",
@@ -127,6 +129,8 @@
     "actions": [
       {
         "name": "forge/run",
+        "summary": "Run a shell command in a sandboxed container",
+        "description": "Executes the step's `run` script inside an isolated Forge container (dropped capabilities, optional egress allowlist), polls the execution to completion, and returns its stdout as the step output. Use it for build, test, and deploy steps. The `run` input is wrapped as `sh -c <run>`; pass an image and resource limits via the step's other `with` keys.",
         "method": "POST",
         "path": "/executions",
         "body_transforms": [

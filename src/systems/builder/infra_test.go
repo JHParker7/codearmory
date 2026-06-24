@@ -197,6 +197,29 @@ func TestEnsureInfra_EgressProxyDisabled(t *testing.T) {
 	}
 }
 
+func TestEnsureInfra_KataSkipsEgressProxy(t *testing.T) {
+	httpClient = initHTTPClient()
+	b := newTestBackend(t, &registerRecorder{})
+	ctx := context.Background()
+
+	// Selecting kata implicitly skips the egress proxy: kata VMs filter egress at the
+	// VM level, so the shared-network proxy + NetworkPolicy are moot.
+	spec := workloadSpec{Service: "forge", Env: map[string]string{"RUNTIME": "kata"}}
+	if err := b.ensureInfra(ctx, spec); err != nil {
+		t.Fatalf("ensureInfra: %v", err)
+	}
+	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err == nil {
+		t.Error("egress-proxy deployed despite RUNTIME=kata")
+	}
+	if _, err := b.client.NetworkingV1().NetworkPolicies("codearmory").Get(ctx, b.forgeNetworkPolicyName("forge"), metav1.GetOptions{}); err == nil {
+		t.Error("NetworkPolicy created despite RUNTIME=kata")
+	}
+	c := b.templatePod(spec).Spec.Containers[0]
+	if v, _ := envValue(c, "FORGE_EGRESS_PROXY"); v != "" {
+		t.Errorf("FORGE_EGRESS_PROXY = %q, want unset under kata", v)
+	}
+}
+
 func TestEnsureInfra_EgressProxyToggleOffCleansUp(t *testing.T) {
 	httpClient = initHTTPClient()
 	b := newTestBackend(t, &registerRecorder{})

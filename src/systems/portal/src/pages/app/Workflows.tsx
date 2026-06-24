@@ -1,16 +1,21 @@
-import { useState, useEffect, useCallback } from 'react';
+/** Workflows page — the CI/CD control surface, a tabbed view over pipelines, steps, and the action catalog. pipelines tab creates/triggers/cancels/deletes workflows and lists their runs; steps tab CRUDs reusable steps; actions tab browses the read-only action catalog. all data goes through the typed BFF client (listWorkflows/createStep/etc), never conductor directly. */
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import type { ReactNode, CSSProperties } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector } from '../../store/hooks';
 import {
   listWorkflows, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
-  createWorkflow, listSteps, createStep, deleteStep, listActions,
+  createWorkflow, listSteps, createStep, deleteStep, listActions, listForgeImages,
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
+import { ImageSelect } from '../../components/ImageSelect';
+import { schemaForAction, buildStepWith, WITH_KEY_PREFIX } from './stepSchema';
 import { timeAgo } from '../../utils';
 
 type MainTab = 'pipelines' | 'steps' | 'actions';
 
+/** maps a run status to a Pill tone — green=completed/success, amber=in-flight, red=failed, dim=otherwise. */
 function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   if (['completed', 'success'].includes(status)) return 'green';
   if (['running', 'in_progress', 'pending', 'queued'].includes(status)) return 'amber';
@@ -20,6 +25,7 @@ function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
 
 // ── Pipeline runs detail ──────────────────────────────────────────────────────
 
+/** Pipelines tab — left rail lists workflows with an inline create form (name/description/comma-separated step IDs); right panel shows the selected workflow's stats and recent runs, with trigger/cancel/delete controls. */
 function PipelinesTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -45,6 +51,7 @@ function PipelinesTab() {
 
   useEffect(() => { fetchWorkflows(); }, [fetchWorkflows]);
 
+  /** selects a workflow and loads its runs. */
   const selectWorkflow = useCallback(async (id: string) => {
     setSelected(id); setRunsLoading(true);
     try { setRuns(await listWorkflowRuns(token, id)); }
@@ -77,6 +84,7 @@ function PipelinesTab() {
     } catch (e: unknown) { setError((e as Error).message); }
   };
 
+  /** creates a workflow from the form, parsing comma-separated step IDs into step refs. */
   const handleCreate = async () => {
     if (!newName.trim()) return;
     setCreating(true); setCreateError(null);
@@ -227,14 +235,26 @@ function PipelinesTab() {
 
 // ── Steps tab ─────────────────────────────────────────────────────────────────
 
+/** shared input/select style for the create-step form. */
+const stepInputStyle: CSSProperties = { width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 };
+/** small uppercase label shown above each tailored `with` field. */
+const stepLabelStyle: CSSProperties = { display: 'block', fontFamily: T.mono, fontSize: 9, color: T.faint, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 3 };
+
+/** Steps tab — left rail lists reusable steps with an inline create form; right panel shows the selected step's action, timeout, and `with` inputs, with delete. */
 function StepsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [steps, setSteps] = useState<Step[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [actions, setActions] = useState<WorkflowAction[]>([]);
+  const [images, setImages] = useState<string[]>([]);
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState({ name: '', description: '', action: '', with: '', timeout: '' });
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [timeoutSecs, setTimeoutSecs] = useState('');
+  const [action, setAction] = useState('');
+  const [withVals, setWithVals] = useState<Record<string, string>>({});
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -247,26 +267,48 @@ function StepsTab() {
 
   useEffect(() => { fetchSteps(); }, [fetchSteps]);
 
+  // Load the action catalog once so the create form's Action field becomes a
+  // selector whose tailored `with` inputs change with the chosen action — mirroring
+  // the CLI TUI. Degrades to a free-text Action input if the catalog is unavailable.
+  useEffect(() => { listActions(token).then(setActions).catch(() => {}); }, [token]);
+
+  // Load the forge image allowlist so the forge/run image field is a picker (like
+  // the Forge run form). Best effort — degrades to free text if unavailable.
+  useEffect(() => { listForgeImages(token).then(setImages).catch(() => {}); }, [token]);
+
+  // The Action selector offers every catalog action plus the `http` escape hatch.
+  const actionOptions = useMemo(() => {
+    const names = actions.map(a => a.name);
+    return names.includes('http') ? names : [...names, 'http'];
+  }, [actions]);
+
+  // Default the Action to forge/run when the form opens. forge is core so the
+  // catalog always offers it; the selector renders the current value even if the
+  // catalog hasn't landed yet, so there's no broken intermediate state.
+  useEffect(() => {
+    if (showCreate && action === '') setAction('forge/run');
+  }, [showCreate, action]);
+
   const selectedStep = steps.find(s => s.step_id === selected);
 
+  const setWith = (key: string, val: string) => setWithVals(v => ({ ...v, [key]: val }));
+  const resetCreate = () => { setName(''); setDescription(''); setTimeoutSecs(''); setAction(''); setWithVals({}); setCreateError(null); };
+
+  /** creates a step, assembling the `with` map from the action's tailored schema fields. */
   const handleCreate = async () => {
-    if (!form.name.trim() || !form.action.trim()) return;
+    if (!name.trim() || !action.trim()) return;
     setCreating(true); setCreateError(null);
     try {
-      const withPairs: Record<string, string> = {};
-      form.with.split(',').forEach(pair => {
-        const [k, ...rest] = pair.split('=');
-        if (k?.trim()) withPairs[k.trim()] = rest.join('=').trim();
-      });
+      const withMap = buildStepWith(action, k => withVals[k] ?? '');
       const s = await createStep(token, {
-        name: form.name.trim(),
-        description: form.description.trim() || undefined,
-        action: form.action.trim(),
-        with: Object.keys(withPairs).length > 0 ? withPairs : undefined,
-        timeout: form.timeout ? parseInt(form.timeout, 10) : undefined,
+        name: name.trim(),
+        description: description.trim() || undefined,
+        action: action.trim(),
+        with: Object.keys(withMap).length > 0 ? withMap : undefined,
+        timeout: timeoutSecs ? parseInt(timeoutSecs, 10) : undefined,
       });
       setSteps(prev => [s, ...prev]);
-      setForm({ name: '', description: '', action: '', with: '', timeout: '' });
+      resetCreate();
       setShowCreate(false);
     } catch (e: unknown) { setCreateError((e as Error).message); }
     finally { setCreating(false); }
@@ -298,23 +340,54 @@ function StepsTab() {
         </div>
 
         {showCreate && (
-          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card, overflow: 'auto' }}>
+          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card, overflow: 'auto', maxHeight: '62vh' }}>
             {createError && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{createError}</div>}
-            {(['name', 'action', 'description'] as const).map(field => (
-              <input key={field} value={form[field]} onChange={e => setForm(f => ({ ...f, [field]: e.target.value }))}
-                placeholder={field} autoFocus={field === 'name'}
-                style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 }} />
-            ))}
-            <input value={form.with} onChange={e => setForm(f => ({ ...f, with: e.target.value }))} placeholder="with (key=val,key2=val2)"
-              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 }} />
-            <input value={form.timeout} onChange={e => setForm(f => ({ ...f, timeout: e.target.value }))} placeholder="timeout (seconds)"
-              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 }} />
+
+            <label style={stepLabelStyle}>name *</label>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="unit_tests" autoFocus style={stepInputStyle} />
+
+            <label style={stepLabelStyle}>action *</label>
+            {actionOptions.length > 0 ? (
+              <select value={action} onChange={e => { setAction(e.target.value); setCreateError(null); }} style={stepInputStyle}>
+                {action && !actionOptions.includes(action) && <option value={action}>{action}</option>}
+                {actionOptions.map(a => <option key={a} value={a}>{a}</option>)}
+              </select>
+            ) : (
+              <input value={action} onChange={e => setAction(e.target.value)} placeholder="forge/run" style={stepInputStyle} />
+            )}
+
+            {schemaForAction(action).map(f => {
+              const key = WITH_KEY_PREFIX + f.key;
+              const val = withVals[key] ?? '';
+              return (
+                <div key={key}>
+                  <label style={stepLabelStyle}>{f.label}{f.required ? ' *' : ''}</label>
+                  {f.catalog === 'image' && images.length > 0 ? (
+                    <div style={{ marginBottom: 6 }}>
+                      <ImageSelect value={val} onChange={v => setWith(key, v)} options={images} placeholder={f.placeholder} fontSize={11} />
+                    </div>
+                  ) : f.multiline ? (
+                    <textarea value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder}
+                      rows={f.key === 'run' ? 3 : 2} style={{ ...stepInputStyle, resize: 'vertical' }} />
+                  ) : (
+                    <input value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder} style={stepInputStyle} />
+                  )}
+                </div>
+              );
+            })}
+
+            <label style={stepLabelStyle}>timeout</label>
+            <input value={timeoutSecs} onChange={e => setTimeoutSecs(e.target.value)} placeholder="seconds (default 30)" style={stepInputStyle} />
+
+            <label style={stepLabelStyle}>description</label>
+            <input value={description} onChange={e => setDescription(e.target.value)} placeholder="optional" style={stepInputStyle} />
+
             <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={handleCreate} disabled={!form.name.trim() || !form.action.trim() || creating}
-                style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 10, fontWeight: 600, padding: '5px 0', cursor: 'pointer', opacity: (!form.name.trim() || !form.action.trim() || creating) ? 0.6 : 1 }}>
+              <button onClick={handleCreate} disabled={!name.trim() || !action.trim() || creating}
+                style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 10, fontWeight: 600, padding: '5px 0', cursor: 'pointer', opacity: (!name.trim() || !action.trim() || creating) ? 0.6 : 1 }}>
                 {creating ? '[ · · · ]' : '[ create ]'}
               </button>
-              <button onClick={() => setShowCreate(false)} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '5px 8px', cursor: 'pointer' }}>✕</button>
+              <button onClick={() => { setShowCreate(false); resetCreate(); }} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '5px 8px', cursor: 'pointer' }}>✕</button>
             </div>
           </div>
         )}
@@ -381,7 +454,7 @@ function StepsTab() {
                   {Object.entries(selectedStep.with).map(([k, v], i, arr) => (
                     <div key={k} style={{ display: 'flex', padding: '8px 14px', borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : 'none', fontFamily: T.mono, fontSize: 12, gap: 12 }}>
                       <span style={{ color: T.faint, width: 120, flexShrink: 0 }}>{k}</span>
-                      <span style={{ color: T.text }}>{v}</span>
+                      <span style={{ color: T.text, wordBreak: 'break-word' }}>{typeof v === 'string' ? v : JSON.stringify(v)}</span>
                     </div>
                   ))}
                 </div>
@@ -396,6 +469,22 @@ function StepsTab() {
 
 // ── Actions catalog tab ───────────────────────────────────────────────────────
 
+/** one label/value row inside a config card; value falls back to a dim placeholder when empty. */
+function ConfigRow({ label, value, last }: { label: string; value: ReactNode; last?: boolean }) {
+  return (
+    <div style={{ display: 'flex', padding: '9px 14px', borderBottom: last ? 'none' : `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 12, gap: 12 }}>
+      <span style={{ color: T.faint, width: 130, flexShrink: 0, textTransform: 'uppercase', letterSpacing: 0.5, fontSize: 10, paddingTop: 1 }}>{label}</span>
+      <span style={{ color: T.text, wordBreak: 'break-word' }}>{value}</span>
+    </div>
+  );
+}
+
+/** small uppercase section heading used above each config block. */
+function SectionLabel({ children }: { children: ReactNode }) {
+  return <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 8, marginTop: 20 }}>{children}</div>;
+}
+
+/** Actions tab — read-only browser of the action catalog; left rail lists action names + summaries, right panel shows the selected action's summary, description, and full config (route, service, required permission, body transforms, async polling). */
 function ActionsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [actions, setActions] = useState<WorkflowAction[]>([]);
@@ -407,7 +496,10 @@ function ActionsTab() {
     listActions(token).then(setActions).catch(e => setError((e as Error).message)).finally(() => setLoading(false));
   }, [token]);
 
-  const selectedAction = actions.find(a => a.name === selected);
+  const a = actions.find(x => x.name === selected);
+  const perm = a?.required_permission;
+  const transforms = a?.body_transforms ?? [];
+  const asyncCfg = a?.async;
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
@@ -418,35 +510,74 @@ function ActionsTab() {
         {loading ? <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
           : error ? <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 11, color: T.red }}>{error}</div>
           : actions.length === 0 ? <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint }}>→ no actions</div>
-          : actions.map(a => {
-            const isActive = selected === a.name;
+          : actions.map(act => {
+            const isActive = selected === act.name;
             return (
-              <button key={a.name} onClick={() => setSelected(a.name)}
+              <button key={act.name} onClick={() => setSelected(act.name)}
                 style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{a.name}</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{act.name}</div>
+                {act.summary && <div style={{ fontSize: 11, color: T.faint, marginTop: 2 }}>{act.summary}</div>}
               </button>
             );
           })}
       </div>
       <div style={{ flex: 1, overflow: 'auto' }}>
-        {!selectedAction ? (
+        {!a ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
             <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ select an action</div>
           </div>
         ) : (
           <div style={{ padding: '20px 24px' }}>
-            <div style={{ fontFamily: T.mono, fontSize: 18, fontWeight: 700, color: T.blue, marginBottom: 8 }}>{selectedAction.name}</div>
-            {selectedAction.description && <div style={{ fontFamily: T.mono, fontSize: 13, color: T.dim, marginBottom: 20 }}>{selectedAction.description}</div>}
-            {selectedAction.inputs && Object.keys(selectedAction.inputs).length > 0 && (
+            <div style={{ fontFamily: T.mono, fontSize: 18, fontWeight: 700, color: T.blue, marginBottom: a.summary ? 4 : 0 }}>{a.name}</div>
+            {a.summary && <div style={{ fontFamily: T.mono, fontSize: 13, color: T.dim }}>{a.summary}</div>}
+            {a.description && (
+              <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '12px 14px', fontFamily: T.mono, fontSize: 12.5, color: T.text, lineHeight: 1.5, marginTop: 16, whiteSpace: 'pre-wrap' }}>
+                {a.description}
+              </div>
+            )}
+
+            <SectionLabel>CONFIG</SectionLabel>
+            <div style={{ background: T.card, border: `1px solid ${T.border}`, overflow: 'hidden' }}>
+              {(a.method || a.path) && (
+                <ConfigRow label="route" value={
+                  <span><span style={{ color: T.green, fontWeight: 600 }}>{a.method}</span>{a.method && a.path ? ' ' : ''}<span style={{ color: T.textHi }}>{a.path}</span></span>
+                } />
+              )}
+              {a.service_name && <ConfigRow label="service" value={a.service_name} />}
+              <ConfigRow label="required perm" last value={
+                perm ? <span>{perm.service} · <span style={{ color: T.textHi }}>{perm.action}</span> · {perm.resource}</span>
+                     : <span style={{ color: T.faint }}>none</span>
+              } />
+            </div>
+
+            {transforms.length > 0 && (
               <>
-                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 8 }}>INPUTS</div>
+                <SectionLabel>BODY TRANSFORMS</SectionLabel>
                 <div style={{ background: T.card, border: `1px solid ${T.border}`, overflow: 'hidden' }}>
-                  {Object.entries(selectedAction.inputs).map(([k, v], i, arr) => (
-                    <div key={k} style={{ padding: '9px 14px', borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : 'none', fontFamily: T.mono, fontSize: 12 }}>
-                      <span style={{ color: T.textHi, fontWeight: 600 }}>{k}</span>
-                      {v !== null && v !== undefined && <span style={{ color: T.dim, marginLeft: 12 }}>{JSON.stringify(v)}</span>}
+                  {transforms.map((t, i) => (
+                    <div key={i} style={{ padding: '9px 14px', borderBottom: i < transforms.length - 1 ? `1px solid ${T.border}` : 'none', fontFamily: T.mono, fontSize: 12, color: T.text }}>
+                      <span style={{ color: T.faint }}>{t.from_key}</span>
+                      <span style={{ color: T.dim, margin: '0 8px' }}>→</span>
+                      <span style={{ color: T.textHi }}>{t.to_key}</span>
+                      {t.wrap && t.wrap.length > 0 && <span style={{ color: T.dim, marginLeft: 10 }}>wrap: [{t.wrap.join(', ')}]</span>}
                     </div>
                   ))}
+                </div>
+              </>
+            )}
+
+            {asyncCfg && (
+              <>
+                <SectionLabel>ASYNC POLLING</SectionLabel>
+                <div style={{ background: T.card, border: `1px solid ${T.border}`, overflow: 'hidden' }}>
+                  <ConfigRow label="poll" value={<span><span style={{ color: T.textHi }}>{asyncCfg.poll_path}</span> every {asyncCfg.poll_interval_secs}s</span>} />
+                  <ConfigRow label="id field" value={asyncCfg.id_field} />
+                  <ConfigRow label="status field" value={asyncCfg.status_field} />
+                  {asyncCfg.success_states && asyncCfg.success_states.length > 0 && <ConfigRow label="success" value={<span style={{ color: T.green }}>{asyncCfg.success_states.join(', ')}</span>} />}
+                  {asyncCfg.failure_states && asyncCfg.failure_states.length > 0 && <ConfigRow label="failure" value={<span style={{ color: T.red }}>{asyncCfg.failure_states.join(', ')}</span>} />}
+                  {asyncCfg.cancel_states && asyncCfg.cancel_states.length > 0 && <ConfigRow label="cancel" value={asyncCfg.cancel_states.join(', ')} />}
+                  {asyncCfg.output_field && <ConfigRow label="output field" value={asyncCfg.output_field} />}
+                  {asyncCfg.error_fields && asyncCfg.error_fields.length > 0 && <ConfigRow label="error fields" last value={asyncCfg.error_fields.join(', ')} />}
                 </div>
               </>
             )}
@@ -459,6 +590,7 @@ function ActionsTab() {
 
 // ── Workflows page ────────────────────────────────────────────────────────────
 
+/** Workflows route — top tab bar switching between the pipelines, steps, and actions tabs. */
 export function Workflows() {
   const [tab, setTab] = useState<MainTab>('pipelines');
 

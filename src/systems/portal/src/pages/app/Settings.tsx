@@ -1,3 +1,9 @@
+/**
+ * `/app/settings` page — the account/profile screen. Edits identity (email, username,
+ * optional name, password) via the `saveUser` thunk, shows read-only org/team/role
+ * membership, and hosts preference cards for theme selection and session inspect/revoke
+ * (all session calls go through the BFF client).
+ */
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { T, THEMES, applyTheme, getStoredTheme } from '../../theme';
@@ -7,13 +13,14 @@ import { getSession, deleteSession } from '../../api/bff';
 import type { Session } from '../../api/bff';
 import { decodeJwtPayload } from '../../utils';
 
+/** Pulls the session id out of the JWT payload, trying session_id/sid/jti in order; returns '' if none is a string. */
 function decodeSessionId(token: string): string {
   const p = decodeJwtPayload(token);
   const id = p?.session_id ?? p?.sid ?? p?.jti;
   return typeof id === 'string' ? id : '';
 }
 
-// Theme picker — applies live and persists to localStorage.
+/** Theme picker — applies live and persists to localStorage. */
 function ThemeCard() {
   const [theme, setTheme] = useState(getStoredTheme());
   const choose = (name: string) => { applyTheme(name); setTheme(name); };
@@ -37,7 +44,11 @@ function ThemeCard() {
   );
 }
 
-// Inspect or revoke a session by id (current session id is prefilled from the JWT).
+/**
+ * Inspect or revoke a session by id (current session id is prefilled from the JWT).
+ * Inspect/revoke hit the BFF; revoking your own current session dispatches logout so
+ * the UI signs out immediately.
+ */
 function SessionsCard({ token }: { token: string }) {
   const dispatch = useAppDispatch();
   const currentSessionId = decodeSessionId(token);
@@ -121,6 +132,7 @@ interface FieldProps {
   onBlur: () => void;
 }
 
+/** Labeled prompt-style text input with focus highlight and an optional right slot (e.g. show/hide toggle); a controlled field used across the settings form. */
 function Field({ name, label, value, onChange, type = 'text', placeholder, rightSlot, focused, onFocus, onBlur }: FieldProps) {
   const active = focused === name;
   return (
@@ -137,6 +149,7 @@ function Field({ name, label, value, onChange, type = 'text', placeholder, right
   );
 }
 
+/** Settings page component: renders the identity/name/password form (submits via saveUser), read-only membership info, and the theme + sessions preference cards. */
 export function Settings() {
   const dispatch = useAppDispatch();
   const { user, token, userId } = useAppSelector(s => s.auth);

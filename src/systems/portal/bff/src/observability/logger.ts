@@ -1,3 +1,7 @@
+/**
+ * Shared pino logger for the BFF. Level is set by LOG_LEVEL (default `info`);
+ * set LOG_PRETTY=true for human-readable single-line output in local dev.
+ */
 import pino from 'pino'
 
 const level = process.env.LOG_LEVEL ?? 'info'

@@ -35,6 +35,8 @@ jobs:
             context: src/systems/conductor
           - name: forge
             context: src/systems/forge
+          - name: egress-proxy
+            context: src/systems/egress-proxy
           - name: registry
             context: src/systems/registry
           - name: workflows

@@ -1,3 +1,9 @@
+/**
+ * Chaos page — chaos-experiment runner: lists experiments with their status and
+ * verdict (live-polling while any are in flight), and launches new ones against
+ * a chaos-enabled outpost's target workload. experiments run via the outpost;
+ * data via the bff.
+ */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { useAppSelector } from '../../store/hooks';
@@ -8,6 +14,7 @@ import {
 } from '../../api/bff';
 import { timeAgo } from '../../utils';
 
+/** Map an experiment status to a UI tone (Pass→green, pending/running→amber, Fail/Error→red, else dim). */
 function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   if (status === 'Pass') return 'green';
   if (status === 'pending' || status === 'running') return 'amber';
@@ -16,11 +23,13 @@ function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
 }
 const toneColor: Record<string, string> = { green: T.green, amber: T.amber, red: T.red, dim: T.faint };
 
+/** Small status dot colored by tone; pulses while in flight (amber). */
 function Dot({ status }: { status: string }) {
   const tone = statusTone(status);
   return <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', marginRight: 8, background: toneColor[tone], animation: tone === 'amber' ? 'pulse 1.5s ease-in-out infinite' : undefined }} />;
 }
 
+/** Chaos experiment runner: lists experiments (live-polling in-flight ones), launches new ones, and stops/deletes them. */
 export function Chaos() {
   const token = useAppSelector(s => s.auth.token)!;
   const [experiments, setExperiments] = useState<Experiment[]>([]);
@@ -101,6 +110,7 @@ export function Chaos() {
   );
 }
 
+/** Inline form for a new experiment; submits outpost + experiment type and target ns/label/kind via createExperiment. */
 function CreateForm({ token, types, outposts, onClose, onCreated }: {
   token: string; types: ExperimentType[]; outposts: Outpost[];
   onClose: () => void; onCreated: () => void;

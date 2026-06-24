@@ -3,6 +3,7 @@ import { T } from '../theme';
 
 type Tone = 'green' | 'amber' | 'dim' | 'red';
 
+/** Small uppercase status badge tinted by `tone` (green also shows a status dot); used for states like enabled/pending/error/disabled. */
 export function Pill({ children, tone = 'green' }: { children: ReactNode; tone?: Tone }) {
   const c = tone === 'green' ? T.green : tone === 'amber' ? T.amber : tone === 'red' ? T.red : T.dim;
   const bg = tone === 'green' ? T.greenSoft : tone === 'amber' ? T.amberSoft : tone === 'red' ? T.redSoft : 'transparent';

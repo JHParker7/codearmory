@@ -114,6 +114,37 @@ func (pc PermissionsCheck) Add(ctx context.Context) error {
 	return nil
 }
 
+// ListFiltered returns active permission-check audit rows matching the receiver's
+// non-zero filter fields (UserID/Service/Action/OrgID), optionally narrowed by grant
+// outcome and a resource substring, newest first. (Resource is matched as a substring
+// rather than via the receiver so callers can search scoped paths.)
+func (pc PermissionsCheck) ListFiltered(ctx context.Context, granted *bool, resourceLike string, limit, offset int) ([]db, error) {
+	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.permissions_check.list_filtered")
+	defer span.End()
+	var rows []PermissionsCheck
+	q := connectRead().WithContext(ctx).Where("active = ?", true).Where(pc).Order("created_at DESC")
+	if granted != nil {
+		q = q.Where("granted = ?", *granted)
+	}
+	if resourceLike != "" {
+		q = q.Where("resource LIKE ?", "%"+resourceLike+"%")
+	}
+	if limit > 0 {
+		q = q.Limit(limit).Offset(offset)
+	}
+	if err := q.Find(&rows).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	result := make([]db, len(rows))
+	for i, r := range rows {
+		result[i] = r
+	}
+	return result, nil
+}
+
 // Update saves all permissions check fields.
 func (pc PermissionsCheck) Update(ctx context.Context) error {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.permissions_check.update")

@@ -95,6 +95,20 @@ func liveCatalog(ctx context.Context) []catalogEntry {
 	return fresh
 }
 
+// liveServiceNames returns the set of non-core service names the registry currently
+// advertises. The registry is the source of truth for what conductor will route, so
+// builder uses it to mark a service live in the effective view even when builder has
+// no baseline row for it — e.g. forge/workflows, which the chart ships and registers
+// directly. Best-effort: an empty set on a registry blip degrades a live service to
+// default-OFF rather than failing the list.
+func liveServiceNames(ctx context.Context) map[string]bool {
+	set := map[string]bool{}
+	for _, e := range liveCatalog(ctx) {
+		set[e.Name] = true
+	}
+	return set
+}
+
 func fetchCatalog(ctx context.Context) ([]catalogEntry, error) {
 	if registryURL == "" || getRegistryKey == nil {
 		return nil, nil

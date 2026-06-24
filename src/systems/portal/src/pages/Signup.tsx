@@ -1,3 +1,9 @@
+/**
+ * `/signup` page — terminal-styled registration form (email, username, password,
+ * terms) that submits via the `signupAndLogin` thunk through the BFF, then lands the
+ * new user in `/app`. If the account is created but auto-login fails it redirects to
+ * /login instead. Used for self-serve registration on an already-initialized instance.
+ */
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { T } from '../theme';
@@ -7,6 +13,7 @@ import { useAppDispatch } from '../store/hooks';
 import { signupAndLogin } from '../store/authSlice';
 import { passwordScore } from '../utils';
 
+/** Signup page component: validates email/username/password-strength/terms, then dispatches signupAndLogin and routes to /app (or /login when auto-login fails). */
 export function Signup() {
   const navigate = useNavigate();
   const dispatch = useAppDispatch();

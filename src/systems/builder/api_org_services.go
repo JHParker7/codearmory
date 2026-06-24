@@ -326,27 +326,46 @@ func handleDeleteOrgService(w http.ResponseWriter, r *http.Request) {
 // buildEffectiveView overlays the desired-state rows on the live service catalog
 // to produce the full effective list for the global baseline.
 func buildEffectiveView(ctx context.Context) ([]serviceView, error) {
-	views := map[string]*serviceView{}
-
-	// 0. Core control-plane services: always present, always on, never configurable.
-	// The catalog (step 1) excludes them and their rows can't be written, so seeding
-	// them here is what puts them in the list — flagged Core so every consumer (the
-	// admin UI, the sidebar, the CLI hub) can trust that flag instead of re-hardcoding
-	// the set.
-	for name := range coreServices {
-		views[name] = &serviceView{Service: name, Enabled: true, Kind: kindPlatform, Source: "core", Core: true}
-	}
-
-	// 1. Seed from the registry catalog: every platform service, default-OFF.
-	for _, c := range serviceCatalog(ctx) {
-		views[c.Name] = newCatalogView(c)
-	}
-
-	// 2. Apply the global baseline rows.
 	defaults, err := listOrgServices(ctx, defaultOrgID)
 	if err != nil {
 		return nil, err
 	}
+	return mergeViews(serviceCatalog(ctx), liveServiceNames(ctx), defaults), nil
+}
+
+// mergeViews resolves the effective service list from its inputs. It is pure (no DB
+// or registry I/O) so the precedence — core → registry-live → catalog → baseline row
+// — is unit-tested directly. Precedence, low to high:
+//
+//	0. Core control-plane services: always present, always on, never configurable.
+//	   The catalog excludes them and their rows can't be written, so seeding them here
+//	   is what puts them in the list — flagged Core so every consumer (the admin UI,
+//	   the sidebar, the CLI hub) can trust that flag instead of re-hardcoding the set.
+//	1. Catalog services. Seeded ENABLED only when the registry — the source of truth
+//	   for what conductor routes — advertises them (live), otherwise OFF. This keeps
+//	   the view honest for services registered out-of-band with no builder baseline
+//	   row (e.g. forge/workflows, which the chart ships and registers directly)
+//	   instead of claiming they're disabled while they're live and routable.
+//	2. Baseline rows: the admin's explicit desired state, which overrides everything.
+func mergeViews(catalog []catalogEntry, live map[string]bool, defaults []OrgService) []serviceView {
+	views := map[string]*serviceView{}
+
+	for name := range coreServices {
+		views[name] = &serviceView{Service: name, Enabled: true, Kind: kindPlatform, Source: "core", Core: true}
+	}
+
+	for _, c := range catalog {
+		if coreServices[c.Name] {
+			continue
+		}
+		v := newCatalogView(c)
+		if live[c.Name] {
+			v.Enabled = true
+			v.Source = "registry"
+		}
+		views[c.Name] = v
+	}
+
 	for _, d := range defaults {
 		applyRow(views, d, "default")
 	}
@@ -356,16 +375,17 @@ func buildEffectiveView(ctx context.Context) ([]serviceView, error) {
 		out = append(out, *v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Service < out[j].Service })
-	return out, nil
+	return out
 }
 
 // newCatalogView builds the default view for a catalog (platform) service that has
-// no baseline row. It is default-OFF on purpose: a catalog service is only deployed
-// and registered once an admin enables it (a baseline row with Enabled=true, applied
-// by applyRow — that is also what the reconciler keys off in desiredWorkloads).
-// Seeding default-on would make the admin view claim every service is enabled while
-// nothing is actually deployed or routable, so the portal hides all their tabs — the
-// exact contradiction we avoid by defaulting to disabled.
+// no baseline row. It is default-OFF on purpose: a catalog service builder could
+// deploy is only enabled once an admin enables it (a baseline row with Enabled=true,
+// applied by applyRow — that is also what the reconciler keys off in desiredWorkloads)
+// OR once it actually appears in the registry's live list (mergeViews flips it on).
+// Seeding default-on unconditionally would make the admin view claim every service is
+// enabled while nothing is actually deployed or routable, so the portal hides all
+// their tabs — the exact contradiction we avoid by defaulting to disabled.
 func newCatalogView(c catalogEntry) *serviceView {
 	return &serviceView{
 		Service:     c.Name,
@@ -423,9 +443,15 @@ func effectiveView(ctx context.Context, service string) (serviceView, error) {
 	if coreServices[service] {
 		return serviceView{Service: service, Enabled: true, Kind: kindPlatform, Source: "core", Core: true}, nil
 	}
-	// Default-OFF: a catalog service is enabled only when its baseline row says so
-	// (applied below). See buildEffectiveView for why default-on would lie.
+	// Default-OFF, but the registry is the source of truth: if it advertises the
+	// service it is live/routable, so seed it enabled even without a baseline row
+	// (e.g. forge/workflows, registered directly by the chart). A baseline row, if
+	// present, overrides below. See mergeViews for the full precedence.
 	v := serviceView{Service: service, Enabled: false, Kind: kindPlatform, Source: "catalog"}
+	if liveServiceNames(ctx)[service] {
+		v.Enabled = true
+		v.Source = "registry"
+	}
 
 	if d, err := getOrgService(ctx, defaultOrgID, service); err == nil {
 		applyRow(map[string]*serviceView{service: &v}, d, "default")
