@@ -70,6 +70,12 @@
         "public": true
       },
       {
+        "method": "POST",
+        "path": "/check_permissions",
+        "action": "checkPermissions",
+        "resource": "gatekeeper/permissions"
+      },
+      {
         "method": "GET",
         "path": "/users",
         "action": "listUser",
@@ -422,6 +428,15 @@
         ],
         "resources": [
           "{username}/gatekeeper/mfa"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "checkPermissions"
+        ],
+        "resources": [
+          "{username}/gatekeeper/permissions"
         ]
       },
       {
