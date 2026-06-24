@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -75,6 +76,8 @@ type workloadSpec struct {
 	Port           int32             // explicit port; 0 => clone or known-port catalog
 	Env            map[string]string // config overrides applied on top of the base env
 	DBUrl          string            // decrypted admin-supplied database URL ("" if none)
+	DBBackend      string            // resolved db backend (manual|sql|cnpg|external); "" => manual
+	DBRef          *dbSecretRef      // foreign Secret the pod's DATABASE_URL reads from (cnpg/external)
 	Secrets        map[string]string // decrypted admin-supplied sensitive config (env-key → value)
 	Replicas       int32             // desired replicas; 0 => backend default (then 1)
 	RotateInterval time.Duration     // periodic rolling-restart cadence; 0 => backend default (then off)
@@ -99,11 +102,13 @@ func (noopBackend) ListManaged(context.Context) ([]string, error)     { return n
 
 type k8sBackend struct {
 	client    kubernetes.Interface
-	namespace string // instance namespace workloads are created in
-	prefix    string // release fullname prefix, e.g. "codearmory" → codearmory-forge
-	registry  string // image registry for the template fallback
-	tag       string // image tag for the template fallback
+	dynamic   dynamic.Interface // for CRDs (CNPG Database, ESO ExternalSecret); nil in tests without it
+	namespace string            // instance namespace workloads are created in
+	prefix    string            // release fullname prefix, e.g. "codearmory" → codearmory-forge
+	registry  string            // image registry for the template fallback
+	tag       string            // image tag for the template fallback
 	prov      provisioningConfig
+	dbcfg     dbConfig // database-backend configuration (which provider, its settings)
 
 	// secrets is the backend for reading/writing per-service secret bundles. Defaults
 	// to a k8s-Secret store; the seam lets a Vault-backed store swap in later. Nil in
@@ -140,6 +145,14 @@ func newK8sBackend(namespace, prefix, registry, tag string) (*k8sBackend, error)
 	if err != nil {
 		return nil, err
 	}
+	// Dynamic client for CRDs (CNPG Database, ESO ExternalSecret). A failure here is
+	// non-fatal: the typed-client backends still work; only the cnpg/external db
+	// backends need it (and degrade to passthrough when it is nil).
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		slog.Warn("dynamic client unavailable — cnpg/external db backends disabled", "error", err)
+		dyn = nil
+	}
 	if namespace == "" {
 		namespace = "default"
 	}
@@ -148,6 +161,7 @@ func newK8sBackend(namespace, prefix, registry, tag string) (*k8sBackend, error)
 	}
 	return &k8sBackend{
 		client:    client,
+		dynamic:   dyn,
 		namespace: namespace,
 		prefix:    prefix,
 		registry:  registry,
@@ -199,6 +213,25 @@ func (b *k8sBackend) selector(service string) map[string]string {
 }
 
 func (b *k8sBackend) EnsureService(ctx context.Context, spec workloadSpec) error {
+	// Resolve how this service obtains DATABASE_URL. For manual/sql this returns the
+	// stored URL unchanged (written into builder's own Secret below); for cnpg/external
+	// it ensures the operator/external-secrets resource and returns a foreign Secret
+	// reference, so builder writes no database-url and the pod reads the foreign Secret.
+	backend := spec.DBBackend
+	if backend == "" {
+		backend = dbBackendManual
+	}
+	res, err := b.dbProviderFor(backend).resolve(ctx, b, spec.Service, spec.DBUrl)
+	if err != nil {
+		return fmt.Errorf("resolve db for %s: %w", spec.Service, err)
+	}
+	if res.ref != nil {
+		spec.DBRef = res.ref
+		spec.DBUrl = "" // delivered via the foreign Secret, not builder's own
+	} else {
+		spec.DBUrl = res.inline
+	}
+
 	// Provision the gatekeeper identity + Secret first so the workload it deploys
 	// can authenticate and connect — letting a service come online with no Helm change.
 	if b.provisioningOn() {
@@ -270,6 +303,11 @@ func (b *k8sBackend) RemoveService(ctx context.Context, service string) error {
 		return fmt.Errorf("delete poddisruptionbudget %s: %w", name, err)
 	}
 	b.teardownInfra(ctx, service)
+	// Best-effort cleanup of provider-owned db resources (e.g. the ExternalSecret). This
+	// never drops a database or its data — destructive cleanup stays a deliberate admin
+	// action. The backend is resolved from the global default here (the torn-down row's
+	// per-service override is already gone), which is correct for the common case.
+	b.dbProviderFor(b.dbcfg.backendFor(nil)).teardown(ctx, b, service)
 	if b.provisioningOn() {
 		b.deprovision(ctx, service)
 	}
@@ -492,6 +530,11 @@ func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
 		for _, key := range def.SecretConfig {
 			setRef(key, secretKeyForEnv(key))
 		}
+	}
+	// Foreign-Secret backends (cnpg/external) deliver DATABASE_URL from a Secret builder
+	// does not own; override any builder-Secret ref set above so the pod reads it there.
+	if spec.DBRef != nil {
+		envByName["DATABASE_URL"] = corev1.EnvVar{Name: "DATABASE_URL", ValueFrom: optionalSecretRef(spec.DBRef.secretName, spec.DBRef.key)}
 	}
 	names := make([]string, 0, len(envByName))
 	for n := range envByName {

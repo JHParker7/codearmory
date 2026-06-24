@@ -87,6 +87,11 @@ type setServiceRequest struct {
 	Port        int            `json:"port"`
 	Description string         `json:"description"`
 	DBUrl       string         `json:"db_url"`
+	// MaintenanceDBUrl is used only by the sql db backend: a CREATEDB(/CREATEROLE)
+	// connection builder uses ONCE to provision the per-service database, then discards
+	// (it is never stored). Write-only; never read back. Empty falls back to the
+	// globally-configured BUILDER_DB_SQL_MAINTENANCE_URL.
+	MaintenanceDBUrl string `json:"maintenance_db_url"`
 	// Secrets is admin-supplied sensitive config keyed by env var name (e.g.
 	// REDIS_URL, GITEA_ADMIN_TOKEN, REGISTRY_PASSWORD). Write-only: encrypted on
 	// receipt and never read back. Non-sensitive config goes in Config.

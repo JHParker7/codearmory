@@ -73,7 +73,7 @@ func TestMissingRequiredConfig(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := missingRequiredConfig(tc.def, tc.req, tc.exist, tc.service)
+			got, err := missingRequiredConfig(tc.def, tc.req, tc.exist, tc.service, false)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
