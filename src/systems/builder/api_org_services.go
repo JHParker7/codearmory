@@ -292,15 +292,9 @@ func buildEffectiveView(ctx context.Context) ([]serviceView, error) {
 		views[name] = &serviceView{Service: name, Enabled: true, Kind: kindPlatform, Source: "core", Core: true}
 	}
 
-	// 1. Seed from the registry catalog: every platform service, default-on.
+	// 1. Seed from the registry catalog: every platform service, default-OFF.
 	for _, c := range serviceCatalog(ctx) {
-		views[c.Name] = &serviceView{
-			Service:     c.Name,
-			Enabled:     true,
-			Kind:        kindPlatform,
-			Source:      "catalog",
-			Description: c.Description,
-		}
+		views[c.Name] = newCatalogView(c)
 	}
 
 	// 2. Apply the global baseline rows.
@@ -318,6 +312,23 @@ func buildEffectiveView(ctx context.Context) ([]serviceView, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Service < out[j].Service })
 	return out, nil
+}
+
+// newCatalogView builds the default view for a catalog (platform) service that has
+// no baseline row. It is default-OFF on purpose: a catalog service is only deployed
+// and registered once an admin enables it (a baseline row with Enabled=true, applied
+// by applyRow — that is also what the reconciler keys off in desiredWorkloads).
+// Seeding default-on would make the admin view claim every service is enabled while
+// nothing is actually deployed or routable, so the portal hides all their tabs — the
+// exact contradiction we avoid by defaulting to disabled.
+func newCatalogView(c catalogEntry) *serviceView {
+	return &serviceView{
+		Service:     c.Name,
+		Enabled:     false,
+		Kind:        kindPlatform,
+		Source:      "catalog",
+		Description: c.Description,
+	}
 }
 
 func applyRow(views map[string]*serviceView, row OrgService, source string) {
@@ -367,7 +378,9 @@ func effectiveView(ctx context.Context, service string) (serviceView, error) {
 	if coreServices[service] {
 		return serviceView{Service: service, Enabled: true, Kind: kindPlatform, Source: "core", Core: true}, nil
 	}
-	v := serviceView{Service: service, Enabled: true, Kind: kindPlatform, Source: "catalog"}
+	// Default-OFF: a catalog service is enabled only when its baseline row says so
+	// (applied below). See buildEffectiveView for why default-on would lie.
+	v := serviceView{Service: service, Enabled: false, Kind: kindPlatform, Source: "catalog"}
 
 	if d, err := getOrgService(ctx, defaultOrgID, service); err == nil {
 		applyRow(map[string]*serviceView{service: &v}, d, "default")

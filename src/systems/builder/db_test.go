@@ -66,3 +66,27 @@ func TestComputeDisabled_CoreNeverDisabled(t *testing.T) {
 	}
 }
 
+// A catalog service with no baseline row must read DISABLED in the admin view: it is
+// not deployed or registered until an admin enables it, so claiming enabled-by-default
+// would contradict the (hidden) portal tab. Enabling/disabling rows then drive it.
+func TestCatalogView_DefaultDisabledThenRowDrives(t *testing.T) {
+	seed := newCatalogView(catalogEntry{Name: "blueprints", Description: "OpenTofu state"})
+	if seed.Enabled {
+		t.Fatalf("catalog seed for %q is enabled; want disabled by default", seed.Service)
+	}
+	if seed.Source != "catalog" || seed.Kind != kindPlatform {
+		t.Fatalf("catalog seed = %+v, want source=catalog kind=platform", seed)
+	}
+
+	views := map[string]*serviceView{"blueprints": seed}
+	applyRow(views, OrgService{ServiceName: "blueprints", Enabled: true, Kind: kindPlatform}, "default")
+	if !views["blueprints"].Enabled || views["blueprints"].Source != "default" {
+		t.Fatalf("after enabling row = %+v, want enabled from default", views["blueprints"])
+	}
+
+	applyRow(views, OrgService{ServiceName: "blueprints", Enabled: false, Kind: kindPlatform}, "default")
+	if views["blueprints"].Enabled {
+		t.Fatalf("after disabling row = %+v, want disabled", views["blueprints"])
+	}
+}
+
