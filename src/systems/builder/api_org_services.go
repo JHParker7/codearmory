@@ -69,12 +69,15 @@ func handleGetOrgService(w http.ResponseWriter, r *http.Request) {
 // now (req.Secrets) or previously stored (existing.SecretsCiphertext). Config is
 // replaced on each PUT, so only the request's config counts; db_url and secrets are
 // kept when not re-supplied, so the stored ones count.
-func missingRequiredConfig(def serviceDef, req setServiceRequest, existing OrgService, service string) ([]string, error) {
+// dbSatisfied marks DATABASE_URL satisfied regardless of a stored/supplied db_url: true
+// when a foreign-Secret backend (cnpg/external) provides it structurally, or the sql
+// backend just provisioned and stored a derived URL on the row being saved.
+func missingRequiredConfig(def serviceDef, req setServiceRequest, existing OrgService, service string, dbSatisfied bool) ([]string, error) {
 	satisfied := map[string]bool{}
 	for k := range req.Config {
 		satisfied[k] = true
 	}
-	if strings.TrimSpace(req.DBUrl) != "" || existing.DBURLCiphertext != nil {
+	if dbSatisfied || strings.TrimSpace(req.DBUrl) != "" || existing.DBURLCiphertext != nil {
 		satisfied["DATABASE_URL"] = true
 	}
 	if len(req.Secrets) > 0 {
@@ -200,16 +203,58 @@ func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 		row.SecretsCiphertext = ct
 	}
 
-	// Validation gate: enabling a platform service in the default scope makes builder
-	// deploy it, so its required connection config must be present (now or already
-	// stored). Org-scope toggles only flip the access gate (they inherit the default
-	// deployment), so they are not gated.
+	// Validation + provisioning gate: enabling a platform service in the default scope
+	// makes builder deploy it, so its database + required config must be in place. Org-
+	// scope toggles only flip the access gate (they inherit the default deployment), so
+	// they are not gated.
 	if enabled && kind == kindPlatform && orgID == defaultOrgID {
 		if def, ok := embeddedServiceDef(service); ok {
 			// Read from the primary so a db_url/secret stored in a prior request is
 			// seen (a lagging replica would falsely report it missing).
 			existing, _ := getOrgServicePrimary(ctx, orgID, service)
-			missing, err := missingRequiredConfig(def, req, existing, service)
+			backend := globalDBConfig.backendFor(req.Config)
+
+			// sql backend: provision the per-service database now (one-shot) and store
+			// the derived URL like a manual one, so the reconciler treats it as manual
+			// thereafter. Skipped when the admin supplied an explicit db_url this request,
+			// or a URL is already stored and no new maintenance URL is given.
+			if backend == dbBackendSQL && len(row.DBURLCiphertext) == 0 {
+				maint := strings.TrimSpace(req.MaintenanceDBUrl)
+				if maint == "" {
+					maint = globalDBConfig.sqlMaintenanceURL
+				}
+				if maint != "" || len(existing.DBURLCiphertext) == 0 {
+					if maint == "" {
+						http.Error(w, "sql db backend requires a maintenance_db_url (or BUILDER_DB_SQL_MAINTENANCE_URL)", http.StatusBadRequest)
+						return
+					}
+					if !secretsEncryptionEnabled() {
+						http.Error(w, "DB URL storage is disabled (BUILDER_SECRETS_KEY not set)", http.StatusServiceUnavailable)
+						return
+					}
+					derived, err := provisionSQLDatabase(ctx, maint, service, globalDBConfig)
+					if err != nil {
+						span.RecordError(err)
+						slog.ErrorContext(ctx, "sql db provisioning failed", "service", service, "error", err)
+						http.Error(w, "database provisioning failed: "+err.Error(), http.StatusBadGateway)
+						return
+					}
+					host, _ := redactedDBHost(derived)
+					ct, encErr := encryptSecret(derived, service)
+					if encErr != nil {
+						http.Error(w, "internal server error", http.StatusInternalServerError)
+						return
+					}
+					row.DBURLCiphertext = ct
+					row.DBHost = host
+					slog.InfoContext(ctx, "provisioned database for service", "service", service, "db_host", host, "caller_id", userID)
+				}
+			}
+
+			// cnpg/external deliver DATABASE_URL via an operator/external-secrets Secret,
+			// so it is satisfied structurally; sql satisfies it via the row just stored.
+			dbSatisfied := backendUsesForeignSecret(backend) || len(row.DBURLCiphertext) > 0
+			missing, err := missingRequiredConfig(def, req, existing, service, dbSatisfied)
 			if err != nil {
 				span.RecordError(err)
 				slog.ErrorContext(ctx, "validate required config", "org_id", orgID, "service", service, "error", err)

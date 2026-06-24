@@ -149,6 +149,10 @@ func main() {
 	initMetrics()
 	initSecretsEncryption()
 	initSecretDerivation()
+	globalDBConfig = loadDBConfig()
+	if globalDBConfig.backend != dbBackendManual {
+		slog.Info("database backend configured", "backend", globalDBConfig.backend)
+	}
 	httpClient = initHTTPClient()
 
 	if err := connect().AutoMigrate(&OrgService{}); err != nil {

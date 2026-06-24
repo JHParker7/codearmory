@@ -76,6 +76,7 @@ func startReconciler(ctx context.Context) {
 	if backend.provisioningOn() {
 		slog.InfoContext(ctx, "dynamic provisioning enabled (gatekeeper identity + secret)")
 	}
+	backend.dbcfg = globalDBConfig
 	// Availability defaults for managed workloads: a replica floor (≥2 to survive a
 	// pod loss) and an optional periodic rolling restart that restores pods to the
 	// image. Per-service config knobs override these.
@@ -261,6 +262,7 @@ func specFromRow(row OrgService) workloadSpec {
 		Env:            configToEnv(rest),
 		Replicas:       replicas,
 		RotateInterval: rotate,
+		DBBackend:      globalDBConfig.backendFor(row.Config),
 	}
 	if len(row.DBURLCiphertext) > 0 && secretsEncryptionEnabled() {
 		if dbURL, err := decryptSecret(row.DBURLCiphertext, row.ServiceName); err == nil {
@@ -284,6 +286,7 @@ func specFromRow(row OrgService) workloadSpec {
 const (
 	cfgReplicas       = "replicas"
 	cfgRotateInterval = "rotateInterval"
+	cfgDBBackend      = "dbBackend"
 )
 
 // extractDeployKnobs splits the reserved deployment knobs (replicas, rotateInterval)
@@ -303,6 +306,8 @@ func extractDeployKnobs(config map[string]any) (int32, time.Duration, map[string
 			replicas = parseReplicas(v)
 		case cfgRotateInterval:
 			rotate = parseRotateInterval(v)
+		case cfgDBBackend:
+			// selects the db backend (see dbConfig.backendFor); not a container env var
 		default:
 			rest[k] = v
 		}
