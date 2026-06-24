@@ -374,10 +374,13 @@ services:
       API_URL: http://gatekeeper:8081
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       GATEKEEPER_SERVICE_KEY: test-service:test-service-local-secret
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       gatekeeper:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     profiles: [test]
     restart: no

@@ -16,6 +16,28 @@ def connect() -> sa.Connection:
     return conn
 
 
+def bust_user_cache(user_id: str) -> None:
+    """Drop gatekeeper's cached user row after assigning role_id via raw SQL.
+
+    Fixtures that set users.role_id directly in the DB bypass gatekeeper's Redis
+    cache invalidation, leaving a stale gk:user:<id> holding the personal role
+    minted at signup. A later handleCreateOrg loads that stale row via the cache
+    and writes the whole row back, reverting role_id and orphaning the role we
+    assigned (so the wildcard grant is lost and permission checks 403). Deleting
+    the key forces gatekeeper to re-read the fresh role_id from the DB. No-op when
+    redis is unavailable (cache disabled -> no staleness to fix).
+    """
+    url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    try:
+        import redis  # imported lazily so the dep is only needed when caching is on
+
+        client = redis.from_url(url)
+        client.delete(f"gk:user:{user_id}")
+        client.close()
+    except Exception as e:  # best-effort: never fail a test on cache cleanup
+        print(f"bust_user_cache({user_id}) skipped: {e}")
+
+
 @pytest.fixture(scope="session")
 def base_url():
     return os.getenv("API_URL", "http://localhost:8080")
@@ -193,6 +215,10 @@ def admin_token(base_url):
     )
     conn.commit()
     conn.close()
+
+    # The raw-SQL role assignment above bypasses gatekeeper's cache invalidation;
+    # drop the stale cached user row so the new role_id is honoured.
+    bust_user_cache(user_id)
 
     login = requests.post(
         f"{base_url}/login", json={"email": email, "password": password}
