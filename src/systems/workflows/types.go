@@ -50,8 +50,12 @@ type BodyTransform struct {
 }
 
 // ActionDef is a callable workflow action loaded from the registry action catalog.
+// Summary/Description are human-facing catalog metadata surfaced in the portal and
+// CLI; they do not affect execution.
 type ActionDef struct {
 	Name               string          `json:"name"`
+	Summary            string          `json:"summary,omitempty"`
+	Description        string          `json:"description,omitempty"`
 	ServiceName        string          `json:"service_name"`
 	ServiceURL         string          `json:"service_url"`
 	Method             string          `json:"method"`

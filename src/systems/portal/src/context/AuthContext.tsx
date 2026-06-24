@@ -1,3 +1,11 @@
+/**
+ * React-context auth provider: a self-contained session holder (token in
+ * localStorage, derived user id, hydrated user) exposing login/logout/refresh.
+ *
+ * NOTE: the live app drives session state through the Redux {@link authSlice}
+ * and does not currently mount this provider — it is an unused, self-contained
+ * alternative. Keep it in sync with the slice or remove it if it stays dead.
+ */
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { getUser } from '../api/bff';
@@ -21,6 +29,7 @@ const Ctx = createContext<AuthCtx | null>(null);
 
 const TOKEN_KEY = 'ca_token';
 
+/** Context provider that loads the stored session on mount and supplies login/logout/refreshUser to descendants via {@link useAuth}. */
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({
     token: null,
@@ -80,6 +89,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/** Access the auth context; throws if called outside an {@link AuthProvider}. */
 export function useAuth() {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error('useAuth must be used inside AuthProvider');

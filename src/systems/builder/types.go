@@ -65,7 +65,7 @@ type serviceView struct {
 	Service     string         `json:"service"`
 	Enabled     bool           `json:"enabled"`
 	Kind        string         `json:"kind"`
-	Source      string         `json:"source"` // "default" | "override" | "custom" | "catalog"
+	Source      string         `json:"source"` // "core" | "default" | "override" | "custom" | "registry" | "catalog"
 	Config      map[string]any `json:"config,omitempty"`
 	Image       string         `json:"image,omitempty"`
 	Port        int            `json:"port,omitempty"`

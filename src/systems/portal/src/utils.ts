@@ -1,3 +1,15 @@
+/**
+ * Pure client-side helpers shared across the SPA: relative-time formatting,
+ * password-strength scoring for the signup/setup forms, JWT payload decoding
+ * (for UX only, never trust), and persistence of the blueprints workspace list.
+ */
+
+/** Compact fallback display for an unresolved id: first 8 chars + ellipsis. */
+export function shortId(id: string): string {
+  return `${id.slice(0, 8)}…`;
+}
+
+/** Format the elapsed time since an ISO timestamp as a compact `Ns`/`Nm`/`Nh`/`Nd` string. */
 export function timeAgo(iso: string, now = Date.now()): string {
   const diff = now - new Date(iso).getTime();
   const s = Math.floor(diff / 1000);
@@ -23,6 +35,7 @@ export interface PasswordScore {
   checks: PasswordChecks;
 }
 
+/** Score a password 0–5 against length/upper/lower/number/symbol checks, returning the score and the per-check booleans. */
 export function passwordScore(pw: string): PasswordScore {
   if (!pw) return { score: 0, checks: { len: false, upper: false, lower: false, num: false, sym: false } };
   const checks: PasswordChecks = {
@@ -35,8 +48,11 @@ export function passwordScore(pw: string): PasswordScore {
   return { score: Object.values(checks).filter(Boolean).length, checks };
 }
 
-// Decode a JWT's payload (base64url) without verifying the signature — for
-// client-side UX only (extracting sub/session_id); never a trust decision.
+/**
+ * Decode a JWT's payload (base64url) without verifying the signature — for
+ * client-side UX only (extracting sub/session_id); never a trust decision.
+ * Returns null on any malformed token.
+ */
 export function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
     return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
@@ -45,6 +61,7 @@ export function decodeJwtPayload(token: string): Record<string, unknown> | null 
   }
 }
 
+/** Extract the user id (`sub` claim) from a JWT, or null if absent/malformed. */
 export function decodeUserId(token: string): string | null {
   const payload = decodeJwtPayload(token);
   return typeof payload?.sub === 'string' ? payload.sub : null;
@@ -55,6 +72,7 @@ export interface WorkspaceEntry {
   label: string;
 }
 
+/** Parse the persisted workspace list from localStorage, returning [] on missing or malformed JSON. */
 export function parseStoredWorkspaces(raw: string): WorkspaceEntry[] {
   try {
     const data = JSON.parse(raw);

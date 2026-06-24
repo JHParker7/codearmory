@@ -267,11 +267,6 @@ forge:
     containerMemoryLimit: "256Mi"
     containerCpuLimit: "500m"
     otelEndpoint: ""
-    # Optional domain-allowlisting egress proxy URL for sandbox traffic. Empty by
-    # default: the egress proxy is a non-core service builder deploys as forge infra.
-    # Set this (e.g. http://<release>-egress-proxy:3128) once one is reachable, or
-    # leave empty for direct/VM-level egress.
-    egressProxyUrl: ""
   secret:
     # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
@@ -304,6 +299,42 @@ forge:
   # url/node/template_vmid/storage/bridge live in its API config, not here — this
   # flag only gates whether the token secret is wired into the pod.
   proxmox:
+    enabled: false
+  # Domain-allowlisting egress proxy for forge's sandbox traffic. Deployed by this
+  # chart and ENABLED BY DEFAULT: sandbox executions reach the internet only through
+  # this proxy, confined to allowedDomains. Automatically skipped when forge.kata.enabled
+  # is true (kata microVMs filter egress at the VM level, so the proxy is moot).
+  egressProxy:
+    enabled: true
+    image:
+      repository: egress-proxy
+      tag: ""
+    replicaCount: 1
+    # Override the egress URL wired into forge. Empty = the in-cluster proxy this chart
+    # deploys (http://<release>-forge-egress-proxy:3128).
+    url: ""
+    # Comma-separated allowlist of domains sandbox traffic may reach through the proxy.
+    allowedDomains: "registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com"
+    resources:
+      requests:
+        cpu: 50m
+        memory: 32Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+    # Enforce egress confinement with a NetworkPolicy on the sandbox Job pods so a
+    # malicious process cannot bypass the proxy and connect out directly. Only applies
+    # to the kubernetes runtime (where forge runs sandbox Jobs) and requires a
+    # NetworkPolicy-aware CNI; inert otherwise.
+    networkPolicy:
+      enabled: true
+  # Run sandbox jobs in hardware-isolated kata (Cloud Hypervisor) microVMs. When true:
+  #   - forge runs RUNTIME=kata (env.k8sRuntimeClass MUST be set to the VM-isolating
+  #     RuntimeClass, e.g. "kata", or the chart fails to render);
+  #   - the egress proxy + NetworkPolicy are skipped (the microVM filters egress itself);
+  #   - forge seeds its default runner classes privileged (root + writable rootfs), since
+  #     the VM — not the container — is the isolation boundary.
+  kata:
     enabled: false
 
 # ── Workflows ─────────────────────────────────────────────────────────────────

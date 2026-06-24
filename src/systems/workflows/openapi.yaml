@@ -596,6 +596,13 @@ components:
           type: string
           description: Unique action name used as the `action` field on a step
           example: forge/run
+        summary:
+          type: string
+          description: Short one-line human description of the action
+          example: Run a shell command in a sandboxed container
+        description:
+          type: string
+          description: Longer human description of what the action does and how to use it
         service_name:
           type: string
           description: Name of the service that handles this action

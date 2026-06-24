@@ -1,3 +1,9 @@
+/**
+ * OpenTelemetry tracing bootstrap for the BFF. Imported for its side effect
+ * first thing in index.ts: when OTEL_EXPORTER_OTLP_ENDPOINT is set it wires up
+ * an OTLP exporter, otherwise tracing is inert. Exports a no-op-safe `tracer`
+ * the proxy and state routes start spans on.
+ */
 import { trace } from '@opentelemetry/api'
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node'
 import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base'

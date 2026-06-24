@@ -1,0 +1,39 @@
+{{- if and .Values.forge.enabled .Values.forge.egressProxy.enabled .Values.forge.egressProxy.networkPolicy.enabled (eq .Values.forge.env.runtime "kubernetes") (not .Values.forge.kata.enabled) }}
+# Confines forge's sandbox Job pods (labelled app=forge) to DNS and the egress proxy
+# only, so untrusted user code cannot bypass the domain allowlist by connecting out
+# directly. Mirrors builder's forge-exec NetworkPolicy. Requires a NetworkPolicy-aware
+# CNI; inert otherwise. Created in the exec namespace (forge.env.k8sNamespace, default
+# the release namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "codearmory.fullname" . }}-forge-exec-egress
+  namespace: {{ .Values.forge.env.k8sNamespace | default .Release.Namespace }}
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: forge-egress-proxy
+spec:
+  podSelector:
+    matchLabels:
+      app: forge
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution (so the proxy's hostname resolves).
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The egress proxy in the release namespace — the only permitted egress path.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: forge-egress-proxy
+      ports:
+        - protocol: TCP
+          port: 3128
+{{- end }}

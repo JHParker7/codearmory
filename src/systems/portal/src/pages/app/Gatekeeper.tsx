@@ -1,3 +1,10 @@
+/**
+ * gatekeeper admin page — the auth/RBAC control surface. tabbed view over the
+ * gatekeeper entities: users, roles, permissions, secrets (+ per-org secret
+ * backend), teams, orgs, invites, and service-permission-requests. all data
+ * goes through the typed bff client (src/api/bff.ts), which proxies /api/* to
+ * conductor; tabs are gated on the caller's redux permissions.
+ */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
@@ -15,7 +22,8 @@ import {
   getOrg, getTeam,
 } from '../../api/bff';
 import type { User, Role, Permission, Secret, Org, Team, Invite, ServiceRequest, SecretProvider, SecretProviderName } from '../../api/bff';
-import { timeAgo } from '../../utils';
+import { timeAgo, shortId } from '../../utils';
+import { useUserNames } from '../../hooks/useNames';
 
 type Tab = 'users' | 'roles' | 'permissions' | 'secrets' | 'teams' | 'orgs' | 'invites' | 'service-requests';
 
@@ -35,6 +43,7 @@ const inputStyle = {
 
 // ── Users tab ─────────────────────────────────────────────────────────────────
 
+/** users tab: master/detail list of all users; the detail pane edits a user (email/username/name/password via updateUser) and deletes via deleteUser, and resolves the user's org/team names through getOrg/getTeam. */
 function UsersTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const currentUserId = useAppSelector(s => s.auth.user?.user_id);
@@ -200,6 +209,7 @@ function UsersTab() {
 
 // ── Roles tab ─────────────────────────────────────────────────────────────────
 
+/** roles tab: master/detail list of roles; create + inline-edit a role by supplying a comma-separated permission-id set (createRole/updateRole), deletes via deleteRole, and resolves the attached permissions against listPermissions for the detail view. */
 function RolesTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [roles, setRoles] = useState<Role[]>([]);
@@ -369,6 +379,7 @@ function RolesTab() {
 
 // ── Permissions tab ───────────────────────────────────────────────────────────
 
+/** permissions tab: master/detail list of permissions; create + inline-edit a permission's name/service/actions/resources (createPermission/updatePermission) and delete via deletePermission. */
 function PermissionsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [perms, setPerms] = useState<Permission[]>([]);
@@ -549,6 +560,7 @@ const PROVIDERS: { id: SecretProviderName; label: string; help: string }[] = [
   { id: 'aws_sm', label: 'aws_sm', help: 'AWS Secrets Manager.' },
 ];
 
+/** secret backend panel: shows/sets the caller's org's secret provider — picks builtin/vault/doppler/aws_sm and posts optional JSON config via setSecretProvider, or resets to builtin via deleteSecretProvider. */
 function SecretProviderPanel() {
   const token = useAppSelector(s => s.auth.token)!;
   const orgId = useAppSelector(s => s.auth.user?.org_id);
@@ -625,6 +637,7 @@ function SecretProviderPanel() {
 
 // ── Secrets tab ───────────────────────────────────────────────────────────────
 
+/** secrets tab: renders the secret-backend panel plus a flat list of secrets; create (createSecret), rotate the value in place (updateSecret), and delete (deleteSecret) — values are write-only, never displayed. */
 function SecretsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [secrets, setSecrets] = useState<Secret[]>([]);
@@ -759,6 +772,7 @@ function SecretsTab() {
 
 // ── Teams tab ─────────────────────────────────────────────────────────────────
 
+/** teams tab: master/detail list of teams; create (createTeam, optional role_id), rename (updateTeam), delete (deleteTeam), and invite a member by email (inviteToTeam) from the detail pane. */
 function TeamsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [teams, setTeams] = useState<Team[]>([]);
@@ -924,6 +938,7 @@ function TeamsTab() {
 
 // ── Orgs tab ──────────────────────────────────────────────────────────────────
 
+/** orgs tab: master/detail list of orgs; create (createOrg), rename (updateOrg), delete (deleteOrg), and invite a member by email (inviteToOrg) from the detail pane. */
 function OrgsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [orgs, setOrgs] = useState<Org[]>([]);
@@ -1091,6 +1106,7 @@ function OrgsTab() {
 
 // ── Invites tab ───────────────────────────────────────────────────────────────
 
+/** invites tab: flat list of invites with accept/decline (acceptInvite/declineInvite) on pending ones and delete (deleteInvite) on any. */
 function InvitesTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [invites, setInvites] = useState<Invite[]>([]);
@@ -1134,6 +1150,7 @@ function InvitesTab() {
     finally { setActing(null); }
   };
 
+  /** maps an invite status to a pill tone (accepted=green, pending=amber, declined=red, else dim). */
   function inviteTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
     if (status === 'accepted') return 'green';
     if (status === 'pending') return 'amber';
@@ -1185,8 +1202,10 @@ function InvitesTab() {
 
 // ── Service requests tab ──────────────────────────────────────────────────────
 
+/** service-requests tab: master/detail list of service-permission-requests (filterable by status); the detail pane shows the requested permissions and approves/declines pending ones via approveServiceRequest/declineServiceRequest. */
 function ServiceRequestsTab() {
   const token = useAppSelector(s => s.auth.token)!;
+  const userNames = useUserNames(token);
   const [requests, setRequests] = useState<ServiceRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1223,6 +1242,7 @@ function ServiceRequestsTab() {
     finally { setActing(null); }
   };
 
+  /** maps a service-request status to a pill tone (approved=green, pending=amber, declined=red, else dim). */
   function reqTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
     if (status === 'approved') return 'green';
     if (status === 'pending') return 'amber';
@@ -1274,7 +1294,7 @@ function ServiceRequestsTab() {
                   <span style={{ fontFamily: T.mono, fontSize: 18, fontWeight: 700, color: T.textHi }}>{selectedReq.service_name}</span>
                 </div>
                 <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
-                  requested by {selectedReq.requested_by.slice(0, 8)}… · {timeAgo(selectedReq.created_at)} ago
+                  requested by {userNames[selectedReq.requested_by] ?? shortId(selectedReq.requested_by)} · {timeAgo(selectedReq.created_at)} ago
                 </div>
               </div>
               {selectedReq.status === 'pending' && (
@@ -1312,6 +1332,7 @@ function ServiceRequestsTab() {
 
 // ── Gatekeeper page ───────────────────────────────────────────────────────────
 
+/** tab descriptors paired with the gatekeeper permission key each one requires to be shown. */
 const ALL_TABS: { id: Tab; label: string; permission: string }[] = [
   { id: 'users',            label: 'users',        permission: 'gatekeeper:listUser' },
   { id: 'roles',            label: 'roles',        permission: 'gatekeeper:listRole' },
@@ -1323,6 +1344,7 @@ const ALL_TABS: { id: Tab; label: string; permission: string }[] = [
   { id: 'service-requests', label: 'svc requests', permission: 'gatekeeper:listSPR' },
 ];
 
+/** gatekeeper admin page: renders the tab bar (filtered to the tabs the caller's redux permissions allow) and switches between the entity tabs, defaulting to the first visible one. */
 export function Gatekeeper() {
   const permissions = useAppSelector(s => s.auth.permissions);
   const visibleTabs = permissions

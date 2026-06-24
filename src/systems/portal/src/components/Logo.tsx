@@ -1,5 +1,6 @@
 import { T } from '../theme';
 
+/** The codearmory mark — a square-bracketed prompt glyph SVG, sized by `size` and tinted with the theme accent. */
 export function Logo({ size = 22 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 22 22" fill="none">

@@ -6,10 +6,47 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
 )
+
+func TestListPermissions_Success(t *testing.T) {
+	perm := Permissions{PermissionsID: uuid.New().String(), Service: "svc", Actions: []string{"read"}, Resources: []string{"res"}}
+	if err := perm.Add(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { perm.Remove(context.Background()) })
+	actor := createAuthorizedUser(t, "listPermission", "gatekeeper/permissions")
+
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/permissions", nil), actor.UserID)
+	w := httptest.NewRecorder()
+	handleListPermissions(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp []Permissions
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !slices.ContainsFunc(resp, func(p Permissions) bool { return p.PermissionsID == perm.PermissionsID }) {
+		t.Fatalf("created permission %s not in list of %d", perm.PermissionsID, len(resp))
+	}
+}
+
+func TestListPermissions_Forbidden(t *testing.T) {
+	actor := createTestUser(t)
+
+	r := withUserID(httptest.NewRequest(http.MethodGet, "/permissions", nil), actor.UserID)
+	w := httptest.NewRecorder()
+	handleListPermissions(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
 
 func TestCreatePermissions_Success(t *testing.T) {
 	actor := createAuthorizedUser(t, "createPermissions", "gatekeeper/permissions")

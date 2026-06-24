@@ -1,3 +1,12 @@
+/**
+ * Builder is the SYSTEM-ADMIN-only global service control plane: the admin toggles
+ * platform services on/off for the whole instance, edits their free-form config,
+ * and registers custom services — all against the single "default" baseline (no
+ * per-org scope). Enabling a service deploys it; disabling tears it down. Core
+ * control-plane services can never be configured. Access is enforced server-side —
+ * the sidebar only links here for the system admin (builder:configureOrgService on
+ * builder/orgs/default, which only the wildcard admin matches).
+ */
 import { useState, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { T } from '../../theme';
@@ -6,14 +15,6 @@ import { useAppSelector, useAppDispatch } from '../../store/hooks';
 import { hydrateRegisteredServices } from '../../store/authSlice';
 import { listServices, setService, deleteService } from '../../api/bff';
 import type { OrgService, SetOrgServiceBody } from '../../api/bff';
-
-// Builder is the SYSTEM-ADMIN-only global service control plane: the admin toggles
-// platform services on/off for the whole instance, edits their free-form config,
-// and registers custom services — all against the single "default" baseline (no
-// per-org scope). Enabling a service deploys it; disabling tears it down. Core
-// control-plane services can never be configured. Access is enforced server-side —
-// the sidebar only links here for the system admin (builder:configureOrgService on
-// builder/orgs/default, which only the wildcard admin matches).
 
 const inputStyle = {
   background: 'transparent' as const,
@@ -27,22 +28,28 @@ const inputStyle = {
   boxSizing: 'border-box' as const,
 };
 
-// Control-plane services that can never be toggled or configured. The server flags
-// these with `core` on every row (list and single-service reads alike), so we trust
-// that flag rather than mirroring builder's coreServices set here.
+/**
+ * Control-plane services that can never be toggled or configured. The server flags
+ * these with `core` on every row (list and single-service reads alike), so we trust
+ * that flag rather than mirroring builder's coreServices set here.
+ */
 const isCore = (s: OrgService) => !!s.core;
 
-// A row is removable only when an actual stored baseline row exists for it — a
-// configured platform service (source "default") or a registered custom service
-// (source "custom"). Catalog defaults and core services are not removable.
+/**
+ * A row is removable only when an actual stored baseline row exists for it — a
+ * configured platform service (source "default") or a registered custom service
+ * (source "custom"). Catalog defaults and core services are not removable.
+ */
 function isDeletable(s: OrgService): boolean {
   if (isCore(s)) return false;
   return s.source === 'default' || s.source === 'custom';
 }
 
-// parseConfigText turns the textarea into a config object. Empty → undefined
-// (config omitted). Throws on invalid JSON or a non-object so the caller can
-// surface the message.
+/**
+ * parseConfigText turns the textarea into a config object. Empty → undefined
+ * (config omitted). Throws on invalid JSON or a non-object so the caller can
+ * surface the message.
+ */
 function parseConfigText(text: string): Record<string, unknown> | undefined {
   const t = text.trim();
   if (!t) return undefined;
@@ -51,8 +58,10 @@ function parseConfigText(text: string): Record<string, unknown> | undefined {
   return v as Record<string, unknown>;
 }
 
-// parseSecretsText turns the secrets textarea into a write-only map of env-key → value.
-// Empty → undefined (keep existing). Every value must be a string.
+/**
+ * parseSecretsText turns the secrets textarea into a write-only map of env-key → value.
+ * Empty → undefined (keep existing). Every value must be a string.
+ */
 function parseSecretsText(text: string): Record<string, string> | undefined {
   const t = text.trim();
   if (!t) return undefined;
@@ -66,6 +75,7 @@ function parseSecretsText(text: string): Record<string, string> | undefined {
   return out;
 }
 
+/** labelled form field wrapper: renders an uppercase mono label above its children. */
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div style={{ marginBottom: 12 }}>
@@ -89,6 +99,7 @@ interface FormState {
 
 const BLANK_FORM: FormState = { service: '', enabled: true, kind: 'custom', image: '', port: '', description: '', config: '', db_url: '', secrets: '' };
 
+/** Builder route: system-admin global service control plane. Left list of every platform/custom/core service against the single "default" baseline; right pane shows detail with enable/disable, configure, and remove-baseline actions, plus the register/edit form (formBlock) that submits enabled/kind/image/port/config/db_url/secrets via setService. */
 export function Builder() {
   const token = useAppSelector(s => s.auth.token)!;
   const dispatch = useAppDispatch();
@@ -213,6 +224,7 @@ export function Builder() {
     finally { setSaving(false); }
   };
 
+  /** renders the register/edit form body (image/port for custom, config/db_url/secrets); its submit button calls submit(mode). */
   const formBlock = (mode: 'edit' | 'create') => {
     const custom = mode === 'create' || form.kind === 'custom';
     return (

@@ -1,5 +1,6 @@
 # Go build output
 src/systems/gatekeeper/gatekeeper
+src/systems/egress-proxy/egress-proxy
 src/systems/blueprints/blueprints
 src/systems/conductor/conductor
 src/systems/workflows/workflows

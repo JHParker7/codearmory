@@ -1,3 +1,9 @@
+/**
+ * BFF `/state/*` routes — the one place the SPA does not get a verbatim conductor
+ * passthrough. GET fetches blueprints workspace state and normalizes conductor's
+ * 200/204/423 branching into a single uniform {@link WorkspaceView} (cached per
+ * token); DELETE and other write methods proxy through and invalidate the cache.
+ */
 import { Router } from 'express';
 import { SpanStatusCode } from '@opentelemetry/api';
 import { CONDUCTOR_URL } from '../config.js';
@@ -10,18 +16,21 @@ import { proxyToUpstream } from '../proxy.js';
 
 export const stateRoutes = Router();
 
-// encodeWsPath rejects path-traversal and percent-encodes each segment of an
-// untrusted workspace path, preserving the username/workspace slash structure.
-// This stops a '../' segment from normalizing the request out of the
-// /blueprints/state/ prefix onto another conductor route (and mis-keying the
-// cache). Returns null when the path is malformed.
+/**
+ * Reject path-traversal and percent-encode each segment of an untrusted
+ * workspace path, preserving the username/workspace slash structure.
+ *
+ * This stops a '../' segment from normalizing the request out of the
+ * /blueprints/state/ prefix onto another conductor route (and mis-keying the
+ * cache). Returns null when the path is malformed.
+ */
 function encodeWsPath(wsPath: string): string | null {
   const segments = wsPath.split('/');
   if (segments.some((s) => s === '' || s === '.' || s === '..')) return null;
   return segments.map(encodeURIComponent).join('/');
 }
 
-// GET /state/* — fetch and normalize workspace state
+/** GET /state/* — fetch workspace state from conductor, normalize it to a WorkspaceView, and cache per token. */
 stateRoutes.get('/state/*', async (req, res) => {
   const safePath = encodeWsPath((req.params as Record<string, string>)[0]);
   if (safePath === null) {
@@ -89,7 +98,7 @@ stateRoutes.get('/state/*', async (req, res) => {
   }
 });
 
-// DELETE /state/* — pass through, conductor returns 204, then invalidate the cache
+/** DELETE /state/* — proxy the delete to conductor, then invalidate the cached view on success. */
 stateRoutes.delete('/state/*', async (req, res) => {
   const safePath = encodeWsPath((req.params as Record<string, string>)[0]);
   if (safePath === null) {
@@ -121,10 +130,12 @@ stateRoutes.delete('/state/*', async (req, res) => {
   }
 });
 
-// Writes to /state/* (POST/PUT/PATCH/LOCK/UNLOCK — terraform apply/lock) — GET and
-// DELETE are handled above; this catches the remaining methods. Proxy to conductor
-// and invalidate the cached view so a subsequent GET is write-coherent rather than
-// serving the pre-write state for the cache TTL.
+/**
+ * Writes to /state/* (POST/PUT/PATCH/LOCK/UNLOCK — terraform apply/lock). GET and
+ * DELETE are handled above; this catches the remaining methods. Proxy to conductor
+ * and invalidate the cached view so a subsequent GET is write-coherent rather than
+ * serving the pre-write state for the cache TTL.
+ */
 stateRoutes.all('/state/*', async (req, res) => {
   const safePath = encodeWsPath((req.params as Record<string, string>)[0]);
   if (safePath === null) {

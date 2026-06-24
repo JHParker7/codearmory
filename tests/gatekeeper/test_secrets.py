@@ -17,6 +17,8 @@ import pytest
 import requests
 import sqlalchemy as sa
 
+from conftest import bust_user_cache
+
 
 def _connect():
     url = os.getenv(
@@ -86,6 +88,11 @@ def secrets_admin(base_url):
     )
     conn.commit()
     conn.close()
+
+    # The raw-SQL role assignment bypasses gatekeeper's cache invalidation. Without
+    # this, the stale cached user row (the signup personal role) is written back by
+    # the POST /orgs below, reverting role_id and dropping the wildcard grant.
+    bust_user_cache(user_id)
 
     login = requests.post(f"{base_url}/login", json={"email": email, "password": password})
     assert login.status_code == 200, f"secrets_admin login failed: {login.text}"

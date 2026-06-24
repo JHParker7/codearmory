@@ -206,6 +206,8 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 
 type manifestActionEntry struct {
 	Name           string          `json:"name"`
+	Summary        string          `json:"summary,omitempty"`
+	Description    string          `json:"description,omitempty"`
 	Method         string          `json:"method"`
 	Path           string          `json:"path"`
 	BodyTransforms json.RawMessage `json:"body_transforms,omitempty"`

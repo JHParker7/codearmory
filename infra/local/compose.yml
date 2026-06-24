@@ -136,8 +136,8 @@ services:
   # which external hosts containers may contact.
 
   egress-proxy:
-    # Source spun out to the codearmory-egress-proxy repo; pulled as a published image.
-    image: ${EGRESS_PROXY_IMAGE:-ghcr.io/code-armory-app/egress-proxy:latest}
+    build:
+      context: ../../src/systems/egress-proxy
     environment:
       <<: *otel-env
       PROXY_ALLOWED_DOMAINS: ${FORGE_PROXY_ALLOWED_DOMAINS:-registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com}
@@ -374,10 +374,13 @@ services:
       API_URL: http://gatekeeper:8081
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       GATEKEEPER_SERVICE_KEY: test-service:test-service-local-secret
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       gatekeeper:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     profiles: [test]
     restart: no

@@ -1,10 +1,12 @@
+/**
+ * Shared terminal-styled form primitives for the auth/setup pages (Login, Signup,
+ * Setup). Kept here so the bootstrap setup flow reuses the exact same look without
+ * duplicating the field markup.
+ */
 import { useState } from 'react';
 import { T } from '../theme';
 
-// Shared terminal-styled form primitives for the auth/setup pages (Login, Signup,
-// Setup). Kept here so the bootstrap setup flow reuses the exact same look without
-// duplicating the field markup.
-
+/** Password-strength meter: a filled/empty bar plus the per-rule checklist, colored by {@link passwordScore}'s 0–5 score. */
 export function StrengthBar({ score, checks }: { score: number; checks: Record<string, boolean> }) {
   const total = 16;
   const filled = Math.round((score / 5) * total);
@@ -28,6 +30,11 @@ export function StrengthBar({ score, checks }: { score: number; checks: Record<s
   );
 }
 
+/**
+ * A single labelled `$ prompt ›` input styled as a shell prompt, with focus
+ * highlighting and an optional hint line and right-aligned slot (e.g. a show/hide
+ * toggle).
+ */
 export function PromptField({
   prompt, value, onChange, type = 'text', placeholder, hint, rightSlot,
 }: {

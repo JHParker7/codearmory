@@ -366,6 +366,7 @@ func buildMux() *http.ServeMux {
 	mux.Handle("DELETE /roles/{id}", mw(handleDeleteRole))
 
 	mux.Handle("POST /permissions", mw(handleCreatePermissions))
+	mux.Handle("GET /permissions", mw(handleListPermissions))
 	mux.Handle("GET /permissions/{id}", mw(handleGetPermissions))
 	mux.Handle("PUT /permissions/{id}", mw(handleUpdatePermissions))
 	mux.Handle("DELETE /permissions/{id}", mw(handleDeletePermissions))
@@ -382,6 +383,7 @@ func buildMux() *http.ServeMux {
 	mux.Handle("DELETE /invites/{id}", mw(handleDeleteInvite))
 
 	mux.Handle("GET /audit-logs", mw(handleListAuditLogs))
+	mux.Handle("GET /permission-checks", mw(handleListPermissionChecks))
 
 	// Secrets: user-authenticated CRUD (values write-only) + internal resolve for the workflow worker.
 	mux.Handle("POST /secrets", mw(handleCreateSecret))

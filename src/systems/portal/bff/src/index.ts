@@ -1,3 +1,11 @@
+/**
+ * Portal BFF entrypoint — the Express server that backs the React SPA.
+ *
+ * It does three jobs: serves the built SPA (in production), exposes an optional
+ * Prometheus `/metrics` endpoint, and proxies every `/api/*` request through to
+ * conductor (verbatim, except the normalized `/state/*` workspace routes). The
+ * SPA only ever talks to this server, never to conductor directly.
+ */
 import './observability/tracing.js';
 import express from 'express';
 import rateLimit from 'express-rate-limit';

@@ -1,3 +1,9 @@
+/**
+ * Argo page — Argo CD application dashboard: lists apps reported by argo-enabled
+ * outposts with their sync/health status, and triggers a sync (polling its
+ * progress until done). when an app hasn't reported its outpost yet, a manual
+ * outpost selector picks which one to sync through. data via the bff (outpost).
+ */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { useAppSelector } from '../../store/hooks';
@@ -7,12 +13,14 @@ import {
 } from '../../api/bff';
 import { timeAgo } from '../../utils';
 
+/** Map an Argo health status to a UI tone (Healthy→green, Progressing/Suspended→amber, Degraded/Missing→red, else dim). */
 function healthTone(h?: string): 'green' | 'amber' | 'red' | 'dim' {
   if (h === 'Healthy') return 'green';
   if (h === 'Progressing' || h === 'Suspended') return 'amber';
   if (h === 'Degraded' || h === 'Missing') return 'red';
   return 'dim';
 }
+/** Map an Argo sync status to a UI tone (Synced→green, OutOfSync→amber, else dim). */
 function syncTone(s?: string): 'green' | 'amber' | 'red' | 'dim' {
   if (s === 'Synced') return 'green';
   if (s === 'OutOfSync') return 'amber';
@@ -20,6 +28,7 @@ function syncTone(s?: string): 'green' | 'amber' | 'red' | 'dim' {
 }
 const toneColor: Record<string, string> = { green: T.green, amber: T.amber, red: T.red, dim: T.faint };
 
+/** Argo CD app dashboard: lists apps with sync/health, triggers + polls syncs, with a manual-outpost selector fallback. */
 export function Argo() {
   const token = useAppSelector(s => s.auth.token)!;
   const [apps, setApps] = useState<ArgoApp[]>([]);
@@ -45,6 +54,7 @@ export function Argo() {
 
   const argoOutposts = outposts.filter(o => (o.modules || '').split(',').includes('argo'));
 
+  /** Kick off a sync for an app (using its own or the manually-picked outpost) and start polling its progress. */
   const triggerSync = async (app: ArgoApp) => {
     try {
       const s = await syncArgoApp(token, app.name, app.outpost_id ? undefined : { outpost_id: manualOutpost });
@@ -53,6 +63,7 @@ export function Argo() {
     } catch (e: unknown) { setError((e as Error).message); }
   };
 
+  /** Poll a sync every 4s, updating its row, until it reaches Synced/Failed (then refresh) or errors. */
   const pollSync = (appName: string, syncId: string) => {
     const id = setInterval(async () => {
       try {

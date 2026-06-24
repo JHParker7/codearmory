@@ -1,3 +1,10 @@
+/**
+ * `/setup` page — first-run initialization. Creates the very first account on an
+ * empty instance (which Gatekeeper grants the bootstrap admin role), submits via the
+ * `signupAndLogin` thunk through the BFF, marks the instance initialized, and lands
+ * the new admin in `builder/`. Also shows an orientation panel of the always-on core
+ * services the admin will govern.
+ */
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { T } from '../theme';
@@ -8,11 +15,13 @@ import { signupAndLogin } from '../store/authSlice';
 import { markInitialized } from '../store/setupSlice';
 import { passwordScore } from '../utils';
 
-// The control-plane core that ships with every codearmory deployment and is always
-// on (it cannot be toggled off). Shown on first run so the operator knows what their
-// administrator account will govern. Every other capability — forge, workflows,
-// blueprints, and the rest — is deployed and registered at runtime via builder/, so
-// it is deliberately not listed here.
+/**
+ * The control-plane core that ships with every codearmory deployment and is always
+ * on (it cannot be toggled off). Shown on first run so the operator knows what their
+ * administrator account will govern. Every other capability — forge, workflows,
+ * blueprints, and the rest — is deployed and registered at runtime via builder/, so
+ * it is deliberately not listed here.
+ */
 const CORE_SERVICES: { name: string; blurb: string }[] = [
   { name: 'gatekeeper/', blurb: 'identity, RBAC, orgs & teams, sessions' },
   { name: 'conductor/', blurb: 'API gateway · the single entry point' },
@@ -20,6 +29,7 @@ const CORE_SERVICES: { name: string; blurb: string }[] = [
   { name: 'builder/', blurb: 'service control plane · deploys & enables the rest' },
 ];
 
+/** Setup page component: renders the admin-account form + core-services panel and, on submit, creates the bootstrap admin then routes to /app/builder. */
 export function Setup() {
   const navigate = useNavigate();
   const dispatch = useAppDispatch();

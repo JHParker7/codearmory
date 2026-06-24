@@ -1,3 +1,9 @@
+/**
+ * SPA entrypoint. Applies the persisted theme before first paint, kicks off the
+ * two startup checks the router gates on — first-run setup status and (if a
+ * stored session exists) user hydration — then mounts the app inside the Redux
+ * Provider.
+ */
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';

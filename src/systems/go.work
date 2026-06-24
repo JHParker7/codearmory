@@ -3,6 +3,7 @@ go 1.25.6
 use (
 	./builder
 	./conductor
+	./egress-proxy
 	./forge
 	./gatekeeper
 	./hooks

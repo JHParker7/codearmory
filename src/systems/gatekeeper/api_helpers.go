@@ -892,12 +892,21 @@ func validatePermissionIDs(ctx context.Context, ids []string, callerOrgID *strin
 // never propagate to the caller — a missing audit entry is better than a
 // failed request.
 func writeAudit(ctx context.Context, actorID, actorType, action, resourceID, detail string) {
+	// Stamp the actor's org so entries are filterable by org. Best-effort, and only
+	// for user actors — service actors are not org-scoped.
+	var orgID *string
+	if actorType == "user" {
+		if row, err := (User{UserID: actorID}).Get(ctx); err == nil {
+			orgID = row.(User).OrgID
+		}
+	}
 	entry := AuditLog{
 		AuditLogID: uuid.New().String(),
 		ActorID:    actorID,
 		ActorType:  actorType,
 		Action:     action,
 		ResourceID: resourceID,
+		OrgID:      orgID,
 		Detail:     detail,
 	}
 	if err := entry.Add(ctx); err != nil {

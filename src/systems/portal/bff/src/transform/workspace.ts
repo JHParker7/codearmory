@@ -1,3 +1,11 @@
+/**
+ * Maps raw conductor/terraform state responses into the uniform
+ * {@link WorkspaceView} the SPA consumes. Conductor answers a state GET three
+ * ways — 204 (empty), 423 (locked, with lock info), or 200 (the full tfstate);
+ * the three `from*` builders collapse those into one shape so the client never
+ * branches on HTTP status.
+ */
+
 interface TerraformResource {
   type: string;
   [k: string]: unknown;
@@ -47,10 +55,12 @@ export interface WorkspaceView {
   state: WorkspaceStateData | null;
 }
 
+/** Build the view for a workspace with no state yet (conductor 204). */
 export function fromEmpty(): WorkspaceView {
   return { isEmpty: true, locked: false, lock: null, state: null };
 }
 
+/** Build the view for a locked workspace (conductor 423), surfacing the lock holder/operation. */
 export function fromLocked(raw: LockInfo): WorkspaceView {
   return {
     isEmpty: false,
@@ -68,6 +78,7 @@ export function fromLocked(raw: LockInfo): WorkspaceView {
   };
 }
 
+/** Build the view for a populated workspace (conductor 200), tallying resources by type into a count summary. */
 export function fromState(raw: TerraformState): WorkspaceView {
   const resources = raw.resources ?? [];
   const counts: Record<string, number> = {};

@@ -1,11 +1,19 @@
+/**
+ * Tickets page — the ticket tracker: a list of tickets in a sidebar and a
+ * detail panel with description, linked workflow/run/execution refs, comments,
+ * and open/close + delete actions. create new tickets via a modal. data via
+ * the bff.
+ */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector } from '../../store/hooks';
 import { listTickets, createTicket, updateTicket, deleteTicket, addComment } from '../../api/bff';
 import type { Ticket } from '../../api/bff';
-import { timeAgo } from '../../utils';
+import { timeAgo, shortId } from '../../utils';
+import { useUserNames, useWorkflowNames } from '../../hooks/useNames';
 
+/** Map a ticket status to a UI tone (closed→green, open→amber, blocked→red, else dim). */
 function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   if (status === 'closed') return 'green';
   if (status === 'open') return 'amber';
@@ -13,12 +21,14 @@ function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   return 'dim';
 }
 
+/** Map a ticket priority to a theme color (high/critical→red, medium→amber, else dim). */
 function priorityColor(priority: string | null | undefined): string {
   if (priority === 'high' || priority === 'critical') return T.red;
   if (priority === 'medium') return T.amber;
   return T.dim;
 }
 
+/** Modal form for a new ticket; submits title/description/priority via createTicket and hands the created ticket back. */
 function CreateModal({ onCreated, onClose }: { onCreated: (t: Ticket) => void; onClose: () => void }) {
   const token = useAppSelector(s => s.auth.token)!;
   const [title, setTitle] = useState('');
@@ -82,8 +92,11 @@ function CreateModal({ onCreated, onClose }: { onCreated: (t: Ticket) => void; o
   );
 }
 
+/** Ticket tracker: sidebar list + detail panel with comments, status toggle, delete, and a create modal. */
 export function Tickets() {
   const token = useAppSelector(s => s.auth.token)!;
+  const userNames = useUserNames(token);
+  const workflowNames = useWorkflowNames(token);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -246,7 +259,7 @@ export function Tickets() {
 
               {(selectedTicket.workflow_id || selectedTicket.run_id || selectedTicket.forge_execution_id) && (
                 <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px', marginBottom: 20, fontFamily: T.mono, fontSize: 11 }}>
-                  {selectedTicket.workflow_id && <div><span style={{ color: T.faint }}>workflow  </span><span style={{ color: T.dim }}>{selectedTicket.workflow_id.slice(0, 8)}…</span></div>}
+                  {selectedTicket.workflow_id && <div><span style={{ color: T.faint }}>workflow  </span><span style={{ color: T.dim }}>{workflowNames[selectedTicket.workflow_id] ?? shortId(selectedTicket.workflow_id)}</span></div>}
                   {selectedTicket.run_id && <div><span style={{ color: T.faint }}>run       </span><span style={{ color: T.dim }}>{selectedTicket.run_id.slice(0, 8)}…</span></div>}
                   {selectedTicket.forge_execution_id && <div><span style={{ color: T.faint }}>execution </span><span style={{ color: T.dim }}>{selectedTicket.forge_execution_id.slice(0, 8)}…</span></div>}
                 </div>
@@ -260,7 +273,7 @@ export function Tickets() {
                 <div style={{ marginBottom: 16 }}>
                   {selectedTicket.comments.map(c => (
                     <div key={c.comment_id} style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px', marginBottom: 8 }}>
-                      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6 }}>{c.author_id.slice(0, 8)}… · {timeAgo(c.created_at)} ago</div>
+                      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6 }}>{userNames[c.author_id] ?? shortId(c.author_id)} · {timeAgo(c.created_at)} ago</div>
                       <div style={{ fontFamily: T.mono, fontSize: 12, color: T.text, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{c.body}</div>
                     </div>
                   ))}

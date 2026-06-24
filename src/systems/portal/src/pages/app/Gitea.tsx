@@ -1,3 +1,9 @@
+/**
+ * Gitea page: the gitea_integration git-hosting UI. Left list of repos (+ create
+ * form), right detail with branches/tags/commits/pulls tabs and a new-PR form, plus
+ * an account panel to link/unlink the user's Forgejo API token. All calls go through
+ * the BFF (listGiteaRepos / listBranches / createPull / linkGiteaAccount / …).
+ */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
@@ -12,6 +18,7 @@ import { timeAgo } from '../../utils';
 
 type RepoTab = 'branches' | 'tags' | 'commits' | 'pulls';
 
+/** maps a pull-request status to a status tone (merged=green, open=amber, closed/other=dim). */
 function prStatusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   if (status === 'merged') return 'green';
   if (status === 'open') return 'amber';
@@ -19,6 +26,7 @@ function prStatusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   return 'dim';
 }
 
+/** Forgejo account panel: shows the linked account (with unlink) or a token input that submits the API token via linkGiteaAccount; calls onLinked after link/unlink so repos refresh. */
 function AccountPanel({ onLinked }: { onLinked: () => void }) {
   const token = useAppSelector(s => s.auth.token)!;
   const [account, setAccount] = useState<GiteaAccount | null>(null);
@@ -95,6 +103,7 @@ function AccountPanel({ onLinked }: { onLinked: () => void }) {
   );
 }
 
+/** Gitea route: repo list + create form on the left, selected repo's branches/tags/commits/pulls tabs on the right with merge and a new-PR form (createPull). The empty state hosts the AccountPanel for linking a Forgejo token. */
 export function Gitea() {
   const token = useAppSelector(s => s.auth.token)!;
   const [repos, setRepos] = useState<GiteaRepo[]>([]);

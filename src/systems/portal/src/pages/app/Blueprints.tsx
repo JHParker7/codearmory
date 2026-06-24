@@ -1,3 +1,4 @@
+/** Blueprints page — tracks OpenTofu/Terraform workspaces by path and renders their backend state. left rail lists tracked workspaces (persisted in the workspaces redux slice), right panel fetches and shows the normalized state (locks, serial, resource types, outputs) for the selected one via the BFF GET /state/<path>. also exports the "coming soon" placeholder pages for the other app routes. */
 import { useState, useEffect } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
@@ -10,6 +11,7 @@ import type { WorkspaceEntry } from '../../utils';
 
 // ── Add workspace modal ───────────────────────────────────────────────────────
 
+/** Modal prompting for a workspace path (user-scoped username/workspace or org-scoped org/team/workspace); on add, dispatches addWorkspace to track it. */
 function AddWorkspaceModal({ onClose }: { onClose: () => void }) {
   const dispatch = useAppDispatch();
   const username = useAppSelector(s => s.auth.user?.username);
@@ -66,6 +68,7 @@ function AddWorkspaceModal({ onClose }: { onClose: () => void }) {
 
 // ── Workspace detail panel ────────────────────────────────────────────────────
 
+/** Renders the fetched state for one workspace — loading/error/empty branches, then lock banner, stat tiles (resources/serial/tf version/lineage), resource-type table and outputs; exposes refresh and remove-from-dashboard. */
 function WorkspaceDetailPanel({ entry, detail, onRefresh, onDelete }: {
   entry: WorkspaceEntry;
   detail: WorkspaceDetail;
@@ -203,6 +206,7 @@ function WorkspaceDetailPanel({ entry, detail, onRefresh, onDelete }: {
 
 // ── Blueprints page ───────────────────────────────────────────────────────────
 
+/** Blueprints route — left rail of tracked workspaces + add modal, right panel showing the selected workspace's state; auto-fetches on first select and supports refresh/remove. */
 export function Blueprints() {
   const dispatch = useAppDispatch();
   const token = useAppSelector(s => s.auth.token);
@@ -343,6 +347,7 @@ export function Blueprints() {
   );
 }
 
+/** Right-panel empty state shown when no workspace is selected; explains the path formats and offers an add-workspace button. */
 function EmptyState({ onAdd }: { onAdd: () => void }) {
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
@@ -365,6 +370,7 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
 
 // ── Placeholder pages ─────────────────────────────────────────────────────────
 
+/** Static "in development" placeholder for the forge route. */
 export function ForgePlaceholder() {
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
@@ -380,6 +386,7 @@ export function ForgePlaceholder() {
   );
 }
 
+/** Static "in development" placeholder for the workflows route. */
 export function WorkflowsPlaceholder() {
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
@@ -395,6 +402,7 @@ export function WorkflowsPlaceholder() {
   );
 }
 
+/** Static "in development" placeholder for the tickets route. */
 export function TicketsPlaceholder() {
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
@@ -410,6 +418,7 @@ export function TicketsPlaceholder() {
   );
 }
 
+/** Static "in development" placeholder for the hooks route. */
 export function HooksPlaceholder() {
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
@@ -425,6 +434,7 @@ export function HooksPlaceholder() {
   );
 }
 
+/** Static "in development" placeholder for the containers route. */
 export function ContainersPlaceholder() {
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
@@ -440,6 +450,7 @@ export function ContainersPlaceholder() {
   );
 }
 
+/** Static "in development" placeholder for the git/Forgejo integration route. */
 export function GiteaIntegrationPlaceholder() {
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
@@ -455,6 +466,7 @@ export function GiteaIntegrationPlaceholder() {
   );
 }
 
+/** Static "coming soon" placeholder for the gatekeeper/RBAC route. */
 export function GatekeeperPlaceholder() {
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
