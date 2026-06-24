@@ -67,7 +67,7 @@ components:
       type: object
       properties:
         service: { type: string }
-        enabled: { type: boolean }
+        enabled: { type: boolean, description: "false for a catalog service with no baseline row (deployed/registered only once enabled); core services are always true" }
         kind: { type: string, enum: [platform, custom] }
         source: { type: string, enum: [catalog, default, override, custom, core] }
         config: { type: object, additionalProperties: true }
