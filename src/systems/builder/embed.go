@@ -51,6 +51,12 @@ type svcInfra struct {
 	EgressProxy   bool `json:"egressProxy"`   // deploy forge's egress-proxy workload
 	NetworkPolicy bool `json:"networkPolicy"` // deploy a NetworkPolicy in the exec namespace
 	ForgeExecRBAC bool `json:"forgeExecRBAC"` // ensure SA+Role+RoleBinding in the forge exec namespace
+	// ManagedRedis: when the admin supplies no REDIS_URL, deploy a stateless in-cluster
+	// Redis and point the service at it. Supplying an external REDIS_URL opts out (and
+	// tears any builder-managed Redis back down). The store is ephemeral — fit for a
+	// cache, not durable state. REDIS_URL must stay in secretConfig (not requiredConfig)
+	// so the env is wired but enable is not blocked when it is absent.
+	ManagedRedis bool `json:"managedRedis"`
 }
 
 type derivedSecret struct {

@@ -6,7 +6,9 @@
   "forward_auth": true,
   "description": "OpenTofu/Terraform remote state storage",
   "registryAccount": false,
-  "infra": {},
+  "infra": {
+    "managedRedis": true
+  },
   "derivedSecrets": [
     {
       "envVar": "ENCRYPTION_KEY",
@@ -15,8 +17,7 @@
     }
   ],
   "requiredConfig": [
-    "DATABASE_URL",
-    "REDIS_URL"
+    "DATABASE_URL"
   ],
   "optionalConfig": [],
   "secretConfig": [

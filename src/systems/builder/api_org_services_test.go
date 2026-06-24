@@ -8,7 +8,7 @@ import (
 func TestMissingRequiredConfig(t *testing.T) {
 	withSecretsKey(t) // enable encryption so the existing-secrets branch can decrypt
 
-	blueprints, _ := embeddedServiceDef("blueprints") // requires DATABASE_URL + REDIS_URL
+	blueprints, _ := embeddedServiceDef("blueprints") // requires DATABASE_URL; REDIS_URL optional (managed when absent)
 	containers, _ := embeddedServiceDef("containers")  // requires REGISTRY_URL
 
 	storedRedis, err := encryptSecretsMap(map[string]string{"REDIS_URL": "redis://r:6379"}, "blueprints")
@@ -25,18 +25,21 @@ func TestMissingRequiredConfig(t *testing.T) {
 		want    []string
 	}{
 		{
-			name:    "blueprints missing both",
+			// REDIS_URL is no longer required — builder provisions an in-cluster Redis when
+			// it is absent — so only DATABASE_URL gates enable.
+			name:    "blueprints missing db only",
 			def:     blueprints,
 			req:     setServiceRequest{},
 			service: "blueprints",
-			want:    []string{"DATABASE_URL", "REDIS_URL"},
+			want:    []string{"DATABASE_URL"},
 		},
 		{
-			name:    "blueprints db only, redis missing",
+			// db_url supplied and no REDIS_URL: satisfied, since Redis is now managed.
+			name:    "blueprints db only is satisfied (redis managed)",
 			def:     blueprints,
 			req:     setServiceRequest{DBUrl: "postgres://b@db/b"},
 			service: "blueprints",
-			want:    []string{"REDIS_URL"},
+			want:    nil,
 		},
 		{
 			name:    "blueprints satisfied via db_url + secrets",

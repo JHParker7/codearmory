@@ -124,7 +124,15 @@ func (b *k8sBackend) ensureServiceSecret(ctx context.Context, service, gkKey, db
 			if envKey == "DATABASE_URL" {
 				continue
 			}
-			if _, supplied := secrets[envKey]; !supplied {
+			_, supplied := secrets[envKey]
+			// Managed Redis: with no external REDIS_URL supplied, builder points the
+			// service at the in-cluster store ensureManagedRedis deploys and keeps the
+			// key wired (rather than pruning it as a cleared admin secret).
+			if envKey == "REDIS_URL" && def.Infra.ManagedRedis && !supplied {
+				data["redis-url"] = []byte(b.managedRedisURL(service))
+				continue
+			}
+			if !supplied {
 				remove = append(remove, secretKeyForEnv(envKey))
 			}
 		}
