@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { getUser } from '../api/conductor';
-import type { User } from '../api/conductor';
+import { getUser } from '../api/bff';
+import type { User } from '../api/bff';
 import { decodeUserId } from '../utils';
 
 interface AuthState {

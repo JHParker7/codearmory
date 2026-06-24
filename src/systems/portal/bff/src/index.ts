@@ -9,7 +9,8 @@ import { registry, httpRequestDuration } from './observability/metrics.js';
 import { stateRoutes } from './routes/state.js';
 import { proxyToUpstream } from './proxy.js';
 
-export { CONDUCTOR_URL } from './config.js';
+import { CONDUCTOR_URL } from './config.js';
+export { CONDUCTOR_URL };
 const PORT = parseInt(process.env.PORT ?? '3001', 10);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -90,5 +91,5 @@ if (existsSync(publicDir)) {
 }
 
 app.listen(PORT, () => {
-  logger.info({ port: PORT, conductor: process.env.CONDUCTOR_URL ?? 'http://localhost:8082' }, 'portal-bff started');
+  logger.info({ port: PORT, conductor: CONDUCTOR_URL }, 'portal-bff started');
 });
