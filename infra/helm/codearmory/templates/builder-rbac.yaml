@@ -43,6 +43,22 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  {{- if or (eq .Values.builder.db.backend "cnpg") .Values.builder.db.cnpg.cluster }}
+  # cnpg db backend: create/read CloudNativePG Database CRs so builder can provision a
+  # service's database declaratively. Builder never edits or deletes the CR (teardown
+  # leaves data intact), so no update/delete — its only DB privilege is this RBAC grant.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["databases"]
+    verbs: ["get", "list", "watch", "create"]
+  {{- end }}
+  {{- if or (eq .Values.builder.db.backend "external") .Values.builder.db.external.storeRef }}
+  # external db backend: manage ExternalSecret CRs so the External Secrets Operator
+  # materializes the per-service db Secret. Builder holds only the reference; delete is
+  # for teardown of its own ExternalSecret (the remote store is never touched).
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -401,6 +401,57 @@ builder:
     # via a bucketed pod-template annotation, so it rolls once per interval, not every
     # reconcile. Empty disables it. Per-service override: the "rotateInterval" config key.
     rotateInterval: "30m"
+  # How builder-deployed (non-core) services obtain their DATABASE_URL. Selected
+  # globally; a service may override it with its "dbBackend" config key. The default
+  # (manual) is unchanged — the admin PUTs a per-service db_url that builder encrypts
+  # and stores. The other backends either provision the database (sql) or remove
+  # builder from credential custody entirely (cnpg/external). Backend-specific blocks
+  # are consulted only for the backend(s) in use. See docs/builder/db-provisioning.md.
+  db:
+    # manual | sql | cnpg | external
+    backend: manual
+    # sql: builder runs CREATE DATABASE/ROLE once at enable via a maintenance
+    # connection, then stores the derived URL like a manual one.
+    sql:
+      # CREATEDB/CREATEROLE maintenance URL for unattended re-provisioning. Leave
+      # empty for ephemeral mode (supplied per enable request, never persisted —
+      # recommended). When set it is written to the builder Secret as a crown-jewel
+      # credential. Honoured via secret key db-sql-maintenance-url.
+      maintenanceUrl: ""
+      # false = CREATEDB-only profile: reuse ownerRole instead of minting a
+      # per-service svc_<service> role (avoids the sharp CREATEROLE privilege).
+      createRole: true
+      # Owner role for the CREATEDB-only profile (createRole=false). Its password is
+      # the secret key db-sql-owner-password.
+      ownerRole: ""
+      ownerPassword: ""
+      # sslmode forced onto derived URLs (e.g. "require"). Empty = leave unset.
+      sslMode: ""
+    # cnpg: provision via the CloudNativePG operator's Database CR; DATABASE_URL
+    # points at an operator-owned Secret. Builder holds only k8s RBAC on the CR.
+    cnpg:
+      cluster: ""
+      # Namespace of the CNPG Cluster/Database CRs. Empty = the workload namespace.
+      namespace: ""
+      # Secret-name template for the connection credential; {cluster}/{service} expand.
+      credSecretTemplate: ""
+      # Key in that Secret holding the connection string.
+      credKey: "uri"
+    # external: builder creates an ExternalSecret (External Secrets Operator) pointing
+    # at a store path the admin populated (e.g. a Vault DB engine). ESO materializes
+    # the Secret; builder holds only the reference.
+    external:
+      storeRef: ""
+      # SecretStore | ClusterSecretStore
+      storeKind: SecretStore
+      # Remote path template; {service} expands (e.g. "codearmory/{service}/db").
+      pathTemplate: ""
+      # Property within the remote secret holding the URL. Empty = whole value.
+      property: ""
+      # ExternalSecret refreshInterval (e.g. "1h"). Empty = operator default.
+      refresh: ""
+      # ExternalSecret API version.
+      apiVersion: v1beta1
   secret:
     databaseUrl: ""
     gatekeeperServiceKey: ""
