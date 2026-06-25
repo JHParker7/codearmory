@@ -5,11 +5,13 @@ import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector } from '../../store/hooks';
 import {
-  listWorkflows, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
-  createWorkflow, listSteps, createStep, deleteStep, listActions, listForgeImages,
+  listWorkflows, deleteWorkflow, listWorkflowRuns, getRun, triggerWorkflow, cancelRun,
+  createWorkflow, updateWorkflow, listSteps, createStep, deleteStep, listActions, listForgeImages,
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
+import { PipelineCanvas } from './PipelineCanvas';
+import type { StepRef } from './pipelineGraph';
 import { schemaForAction, buildStepWith, WITH_KEY_PREFIX } from './stepSchema';
 import { timeAgo } from '../../utils';
 
@@ -23,9 +25,129 @@ function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   return 'dim';
 }
 
+/** Expanded detail for one run: per-step status, timing, and captured output.
+ * step_runs come from getRun (the runs list only carries summaries). */
+function RunSteps({ run }: { run: WorkflowRun }) {
+  const steps = (run.step_runs ?? []).slice().sort((a, b) => a.step_index - b.step_index);
+  return (
+    <div style={{ paddingTop: 8 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 8 }}>
+        triggered by {run.triggered_by ? run.triggered_by.slice(0, 8) + '…' : '—'}
+        {run.started_at ? ` · started ${timeAgo(run.started_at)} ago` : ''}
+        {run.ended_at ? ` · ended ${timeAgo(run.ended_at)} ago` : ''}
+      </div>
+      {steps.length === 0 ? (
+        <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>→ no step runs recorded yet</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {steps.map((sr, n) => (
+            <div key={sr.step_run_id} style={{ border: `1px solid ${T.border}`, background: T.card }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px' }}>
+                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, minWidth: 16 }}>{n + 1}.</span>
+                <Pill tone={statusTone(sr.status)}>{sr.status}</Pill>
+                <span style={{ fontFamily: T.mono, fontSize: 12, color: T.textHi, fontWeight: 600, flex: 1 }}>{sr.step_name}</span>
+                {sr.ended_at && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{timeAgo(sr.ended_at)} ago</span>}
+              </div>
+              {sr.output && (
+                <pre style={{ margin: 0, padding: '8px 10px', borderTop: `1px solid ${T.border}`, background: T.bg, color: T.dim, fontFamily: T.mono, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 240, overflow: 'auto' }}>{sr.output}</pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Pipeline builder overlay ──────────────────────────────────────────────────
+
+/** Full-surface pipeline builder: name/description plus the react-flow canvas.
+ * Used for both create (initial=null) and edit. The canvas reports the derived
+ * ordered-steps-with-parallel_group via onChange; save sends them to the API. */
+function PipelineBuilderOverlay({
+  token, initial, catalog, palette, onClose, onSaved,
+}: {
+  token: string;
+  initial: Workflow | null;
+  catalog: Record<string, Step>;
+  palette: Step[];
+  onClose: () => void;
+  onSaved: (wf: Workflow) => void;
+}) {
+  const [name, setName] = useState(initial?.name ?? '');
+  const [desc, setDesc] = useState(initial?.description ?? '');
+  const [steps, setSteps] = useState<StepRef[] | null>(
+    initial ? initial.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null })) : [],
+  );
+  const [graphError, setGraphError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const initialSteps = useMemo<StepRef[]>(
+    () => initial ? initial.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null })) : [],
+    [initial],
+  );
+
+  const onCanvasChange = useCallback((r: { steps: StepRef[] | null; error: string | null }) => {
+    setSteps(r.steps); setGraphError(r.error);
+  }, []);
+
+  const canSave = !!name.trim() && !!steps && !graphError && !saving;
+
+  const handleSave = async () => {
+    if (!name.trim() || !steps) return;
+    setSaving(true); setSaveError(null);
+    try {
+      const payload = {
+        name: name.trim(),
+        description: desc.trim() || undefined,
+        steps: steps.map(s => s.parallel_group == null
+          ? { step_id: s.step_id }
+          : { step_id: s.step_id, parallel_group: s.parallel_group }),
+      };
+      const wf = initial
+        ? await updateWorkflow(token, initial.workflow_id, payload)
+        : await createWorkflow(token, payload);
+      onSaved(wf);
+    } catch (e: unknown) { setSaveError((e as Error).message); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, zIndex: 30, background: T.bg, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, whiteSpace: 'nowrap' }}>
+          <span style={{ color: T.green }}>$</span> armory ci {initial ? 'edit' : 'new'}
+        </span>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="pipeline name" autoFocus
+          style={{ background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '5px 8px', outline: 'none', width: 200 }} />
+        <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="description (optional)"
+          style={{ flex: 1, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '5px 8px', outline: 'none' }} />
+        <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>✕ close</button>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, padding: 14 }}>
+        <PipelineCanvas editable initialSteps={initialSteps} catalog={catalog} palette={palette} onChange={onCanvasChange} />
+      </div>
+      <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
+          wire a step's bottom handle into another to sequence · steps on the same row run in parallel
+        </span>
+        <div style={{ flex: 1 }} />
+        {(graphError || saveError) && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>{graphError ?? saveError}</span>}
+        <button onClick={handleSave} disabled={!canSave}
+          style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, fontWeight: 600, padding: '6px 16px', cursor: canSave ? 'pointer' : 'not-allowed', opacity: canSave ? 1 : 0.5 }}>
+          {saving ? '[ · · · ]' : initial ? '[ save ]' : '[ create ]'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Pipeline runs detail ──────────────────────────────────────────────────────
 
-/** Pipelines tab — left rail lists workflows with an inline create form (name/description/comma-separated step IDs); right panel shows the selected workflow's stats and recent runs, with trigger/cancel/delete controls. */
+/** Pipelines tab — left rail lists workflows; "+" opens the visual builder. Right
+ * panel shows the selected workflow's stage graph, stats, and recent runs, with
+ * trigger/edit/delete controls. */
 function PipelinesTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -35,12 +157,14 @@ function PipelinesTab() {
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
   const [triggering, setTriggering] = useState(false);
-  const [showCreate, setShowCreate] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newDesc, setNewDesc] = useState('');
-  const [newStepIds, setNewStepIds] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  // Expanded run: openRunId is the clicked run; runDetail is its full record
+  // (with step_runs) fetched on demand via getRun.
+  const [openRunId, setOpenRunId] = useState<string | null>(null);
+  const [runDetail, setRunDetail] = useState<WorkflowRun | null>(null);
+  const [runDetailLoading, setRunDetailLoading] = useState(false);
+  // builder === null: closed; { wf: null }: create; { wf }: edit that workflow.
+  const [builder, setBuilder] = useState<{ wf: Workflow | null } | null>(null);
+  const [catalog, setCatalog] = useState<Step[]>([]);
 
   const fetchWorkflows = useCallback(async () => {
     setLoading(true); setError(null);
@@ -51,13 +175,29 @@ function PipelinesTab() {
 
   useEffect(() => { fetchWorkflows(); }, [fetchWorkflows]);
 
+  // Step catalog backs the builder palette and resolves step_id -> name/action
+  // labels on the graph. Best effort; the canvas falls back to truncated ids.
+  useEffect(() => { listSteps(token).then(setCatalog).catch(() => {}); }, [token]);
+  const catalogMap = useMemo(() => Object.fromEntries(catalog.map(s => [s.step_id, s])) as Record<string, Step>, [catalog]);
+
   /** selects a workflow and loads its runs. */
   const selectWorkflow = useCallback(async (id: string) => {
     setSelected(id); setRunsLoading(true);
+    setOpenRunId(null); setRunDetail(null);
     try { setRuns(await listWorkflowRuns(token, id)); }
     catch { setRuns([]); }
     finally { setRunsLoading(false); }
   }, [token]);
+
+  /** Toggles a run's expanded detail, fetching the full record (with step runs)
+   * on open — the runs list only carries summaries. */
+  const toggleRun = useCallback(async (runId: string) => {
+    if (openRunId === runId) { setOpenRunId(null); setRunDetail(null); return; }
+    setOpenRunId(runId); setRunDetail(null); setRunDetailLoading(true);
+    try { setRunDetail(await getRun(token, runId)); }
+    catch { setRunDetail(null); }
+    finally { setRunDetailLoading(false); }
+  }, [openRunId, token]);
 
   const handleTrigger = async () => {
     if (!selected) return;
@@ -84,54 +224,47 @@ function PipelinesTab() {
     } catch (e: unknown) { setError((e as Error).message); }
   };
 
-  /** creates a workflow from the form, parsing comma-separated step IDs into step refs. */
-  const handleCreate = async () => {
-    if (!newName.trim()) return;
-    setCreating(true); setCreateError(null);
-    try {
-      const steps = newStepIds.split(',').map(s => s.trim()).filter(Boolean).map(step_id => ({ step_id }));
-      const wf = await createWorkflow(token, { name: newName.trim(), description: newDesc.trim() || undefined, steps });
-      setWorkflows(prev => [wf, ...prev]);
-      setNewName(''); setNewDesc(''); setNewStepIds(''); setShowCreate(false);
-    } catch (e: unknown) { setCreateError((e as Error).message); }
-    finally { setCreating(false); }
+  const selectedWorkflow = workflows.find(w => w.workflow_id === selected);
+  // Stable per selected workflow so the read-only graph isn't re-seeded on every
+  // render (runs polling, trigger, etc. re-render this component frequently).
+  const detailSteps = useMemo<StepRef[]>(
+    () => selectedWorkflow ? selectedWorkflow.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null })) : [],
+    [selectedWorkflow],
+  );
+
+  /** Reflects a created/updated workflow into the list and selects it. */
+  const handleSaved = (wf: Workflow) => {
+    setWorkflows(prev => prev.some(w => w.workflow_id === wf.workflow_id)
+      ? prev.map(w => w.workflow_id === wf.workflow_id ? wf : w)
+      : [wf, ...prev]);
+    setBuilder(null);
+    selectWorkflow(wf.workflow_id);
   };
 
-  const selectedWorkflow = workflows.find(w => w.workflow_id === selected);
-
   return (
-    <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+    <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
+      {builder && (
+        <PipelineBuilderOverlay
+          token={token}
+          initial={builder.wf}
+          catalog={catalogMap}
+          palette={catalog}
+          onClose={() => setBuilder(null)}
+          onSaved={handleSaved}
+        />
+      )}
       {/* Left panel */}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.textHi }}>pipelines</span>
             <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={() => setShowCreate(v => !v)}
-                style={{ background: showCreate ? T.greenSoft : 'transparent', border: `1px solid ${showCreate ? T.green : T.border}`, color: showCreate ? T.green : T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>+</button>
+              <button onClick={() => setBuilder({ wf: null })} title="new pipeline"
+                style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>+</button>
               <button onClick={fetchWorkflows} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>↻</button>
             </div>
           </div>
         </div>
-
-        {showCreate && (
-          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card }}>
-            {createError && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{createError}</div>}
-            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="pipeline name" autoFocus
-              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 }} />
-            <input value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="description (optional)"
-              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 }} />
-            <input value={newStepIds} onChange={e => setNewStepIds(e.target.value)} placeholder="step IDs (comma-separated)"
-              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 }} />
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={handleCreate} disabled={!newName.trim() || creating}
-                style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 10, fontWeight: 600, padding: '5px 0', cursor: 'pointer', opacity: (!newName.trim() || creating) ? 0.6 : 1 }}>
-                {creating ? '[ · · · ]' : '[ create ]'}
-              </button>
-              <button onClick={() => setShowCreate(false)} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '5px 8px', cursor: 'pointer' }}>✕</button>
-            </div>
-          </div>
-        )}
 
         <div style={{ flex: 1, overflow: 'auto' }}>
           {loading ? (
@@ -168,6 +301,10 @@ function PipelinesTab() {
                 style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: triggering ? 'not-allowed' : 'pointer', opacity: triggering ? 0.7 : 1 }}>
                 {triggering ? '[ · · · ]' : '[ ▶ trigger ]'}
               </button>
+              <button onClick={() => setBuilder({ wf: selectedWorkflow })}
+                style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+                [ edit ]
+              </button>
               <button onClick={() => handleDeleteWorkflow(selectedWorkflow.workflow_id)}
                 style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}
                 onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
@@ -198,6 +335,14 @@ function PipelinesTab() {
                   {selectedWorkflow.description}
                 </div>
               )}
+              {selectedWorkflow.steps.length > 0 && (
+                <>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 8 }}>PIPELINE</div>
+                  <div style={{ height: 300, marginBottom: 20 }}>
+                    <PipelineCanvas initialSteps={detailSteps} catalog={catalogMap} height={300} />
+                  </div>
+                </>
+              )}
               <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 8 }}>RECENT RUNS</div>
               {runsLoading ? (
                 <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
@@ -209,16 +354,32 @@ function PipelinesTab() {
                 <div style={{ background: T.card, border: `1px solid ${T.border}`, overflow: 'hidden' }}>
                   {runs.slice(0, 20).map((run, i) => {
                     const isRunning = ['running', 'in_progress', 'pending', 'queued'].includes(run.status);
+                    const open = openRunId === run.run_id;
                     return (
-                      <div key={run.run_id} style={{ display: 'flex', alignItems: 'center', padding: '9px 12px', borderBottom: i < runs.length - 1 ? `1px solid ${T.border}` : 'none', gap: 12 }}>
-                        <Pill tone={statusTone(run.status)}>{run.status}</Pill>
-                        <span style={{ fontFamily: T.mono, fontSize: 11.5, color: T.dim, flex: 1 }}>{run.run_id.slice(0, 8)}…</span>
-                        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>{timeAgo(run.created_at)} ago</span>
-                        {isRunning && (
-                          <button onClick={() => handleCancel(run.run_id)}
-                            style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>
-                            [ cancel ]
-                          </button>
+                      <div key={run.run_id} style={{ borderBottom: i < Math.min(runs.length, 20) - 1 ? `1px solid ${T.border}` : 'none' }}>
+                        <div onClick={() => toggleRun(run.run_id)} title="show run details"
+                          style={{ display: 'flex', alignItems: 'center', padding: '9px 12px', gap: 12, cursor: 'pointer', background: open ? T.cardHi : 'transparent' }}>
+                          <span style={{ fontFamily: T.mono, fontSize: 10, color: open ? T.green : T.faint, width: 10 }}>{open ? '▾' : '▸'}</span>
+                          <Pill tone={statusTone(run.status)}>{run.status}</Pill>
+                          <span style={{ fontFamily: T.mono, fontSize: 11.5, color: T.dim, flex: 1 }}>{run.run_id.slice(0, 8)}…</span>
+                          <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>{timeAgo(run.created_at)} ago</span>
+                          {isRunning && (
+                            <button onClick={e => { e.stopPropagation(); handleCancel(run.run_id); }}
+                              style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>
+                              [ cancel ]
+                            </button>
+                          )}
+                        </div>
+                        {open && (
+                          <div style={{ padding: '4px 12px 12px', background: T.bg, borderTop: `1px solid ${T.border}` }}>
+                            {runDetailLoading ? (
+                              <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, padding: '8px 0', animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
+                            ) : !runDetail || runDetail.run_id !== run.run_id ? (
+                              <div style={{ fontFamily: T.mono, fontSize: 11, color: T.red, padding: '8px 0' }}>→ failed to load run details</div>
+                            ) : (
+                              <RunSteps run={runDetail} />
+                            )}
+                          </div>
                         )}
                       </div>
                     );

@@ -401,10 +401,10 @@ func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step St
 	} else if timeout > maxTimeout {
 		timeout = maxTimeout
 	}
-	stepCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
 
 	if step.Action == ActionHTTP {
+		stepCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+		defer cancel()
 		out, err := p.executeHTTP(stepCtx, store, with)
 		return stepResult{Output: out}, err
 	}
@@ -415,6 +415,21 @@ func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step St
 	if !ok {
 		return stepResult{}, fmt.Errorf("unknown action %q — register it in the service catalog or use the http escape hatch", step.Action)
 	}
+
+	// Async actions submit a job to a remote service (e.g. a forge execution)
+	// that polls to its own terminal state and enforces the job's own timeout.
+	// The step timeout clock starts here — before the remote job's container is
+	// even scheduled — so bounding the poll by it can expire on a job that
+	// actually succeeded (the "context deadline exceeded" on a forge run that
+	// forge reported completed). Give async steps the max budget and let the
+	// remote service terminate the job; synchronous catalog steps keep the step
+	// timeout. Each HTTP request is still bounded by httpClient's own timeout.
+	budget := timeout
+	if def.Async != nil {
+		budget = maxTimeout
+	}
+	stepCtx, cancel := context.WithTimeout(ctx, time.Duration(budget)*time.Second)
+	defer cancel()
 	return p.executeAction(stepCtx, store, def, with)
 }
 

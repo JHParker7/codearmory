@@ -10,6 +10,7 @@ import './observability/tracing.js';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { existsSync } from 'fs';
+import { createServer as createHttpServer } from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { logger } from './observability/logger.js';
@@ -86,18 +87,48 @@ api.all('*', async (req, res) => {
 
 app.use('/api', api);
 
-// ── Static files + SPA fallback ───────────────────────────────────────────────
-// In production the React build lands in ../public (next to dist/).
-// In dev there is no public/ — Vite handles static serving separately.
+// ── Serve the SPA on the same port as the API ─────────────────────────────────
+// One server, one port serves both the React app and /api. In production the
+// build lands in ../public and is served statically. In development there is no
+// public/ — Vite runs in middleware mode so the same server serves the app with
+// HMR (its websocket attaches to this http server, so HMR shares the port too).
+// The API router is mounted above, so /api always wins over the SPA catch-all.
 
 const publicDir = path.join(__dirname, '..', 'public');
-if (existsSync(publicDir)) {
-  app.use(express.static(publicDir));
-  app.get('*', spaFallbackLimiter, (_req, res) => {
-    res.sendFile(path.join(publicDir, 'index.html'));
+const httpServer = createHttpServer(app);
+
+async function start() {
+  if (existsSync(publicDir)) {
+    app.use(express.static(publicDir));
+    app.get('*', spaFallbackLimiter, (_req, res) => {
+      res.sendFile(path.join(publicDir, 'index.html'));
+    });
+  } else {
+    // Vite dev server in middleware mode, rooted at the portal SPA (../..,
+    // alongside vite.config.ts). Its server.proxy is unused here — /api is served
+    // by this Express app directly, not proxied across ports.
+    //
+    // vite is a devDependency of the portal (the parent), not of the BFF's prod
+    // image; this branch only runs in dev (no public/), where it resolves from
+    // the portal's node_modules. The specifier is held in a variable so the
+    // production tsc build — which has no vite — doesn't try to type-resolve it.
+    const viteModule = 'vite';
+    const { createServer: createViteServer } = await import(viteModule);
+    const vite = await createViteServer({
+      root: path.join(__dirname, '..', '..'),
+      server: { middlewareMode: true, hmr: { server: httpServer } },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+    logger.info('vite middleware mounted — SPA + API served on a single port');
+  }
+
+  httpServer.listen(PORT, () => {
+    logger.info({ port: PORT, conductor: CONDUCTOR_URL }, 'portal-bff started');
   });
 }
 
-app.listen(PORT, () => {
-  logger.info({ port: PORT, conductor: CONDUCTOR_URL }, 'portal-bff started');
+start().catch((err) => {
+  logger.error({ err }, 'portal-bff failed to start');
+  process.exit(1);
 });
