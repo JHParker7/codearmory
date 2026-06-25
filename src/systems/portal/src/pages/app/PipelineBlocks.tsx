@@ -24,6 +24,7 @@ import type { DragEndEvent, DragStartEvent, CollisionDetection } from '@dnd-kit/
 import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { T } from '../../theme';
+import { useViewport, clamp } from '../../hooks/useViewport';
 import type { Step } from '../../api/bff';
 import { Block, StepRef, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
 
@@ -126,6 +127,8 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   const [dragging, setDragging] = useState(false);
   const seq = useRef(0);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+  const { width } = useViewport();
+  const paletteW = clamp(Math.round(width * 0.2), 200, 300); // step palette scales with the screen
 
   useEffect(() => { setBlocks(blocksFromSteps(initialSteps)); setParallelMode(false); setParallelOpen(false); }, [initialSteps]);
   useEffect(() => { if (editable && onChange) onChange(stepsFromBlocks(blocks)); }, [blocks, editable, onChange]);
@@ -259,7 +262,7 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   return (
     <div style={{ display: 'flex', height: height ?? '100%', minHeight: 200, border: `1px solid ${T.border}`, background: T.bg }}>
       {editable && (
-        <div style={{ width: 280, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
+        <div style={{ width: paletteW, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
           <div style={{ padding: '12px 16px', fontFamily: T.mono, fontSize: 11, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', borderBottom: `1px solid ${T.border}` }}>
             blocks · click to add
           </div>

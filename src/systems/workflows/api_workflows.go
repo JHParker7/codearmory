@@ -20,6 +20,15 @@ import (
 	"gorm.io/gorm"
 )
 
+// workflowRolePermsVersion is the version of the permission-derivation logic
+// below. The scoped run role is provisioned once at workflow create/update and
+// reused for every run, so a change here would otherwise never reach workflows
+// created earlier. Bump it whenever collectWorkflowPermissions changes what it
+// grants; handleTriggerRun re-provisions any workflow whose stored role predates
+// the current version. v1 added the async-poll read grant (getExecution) that
+// stops forge steps from hanging at "running".
+const workflowRolePermsVersion = 1
+
 // collectWorkflowPermissions returns the deduplicated set of gatekeeper
 // permissions declared by the workflow's step actions in the current catalog.
 func collectWorkflowPermissions(steps []WorkflowStep) []PermissionSpec {
@@ -267,6 +276,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	// Provision a scoped service role before persisting so the role_id is stored atomically.
 	wf.RoleID = provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps)
+	wf.RolePermsVersion = workflowRolePermsVersion
 
 	if err := wf.Add(ctx); err != nil {
 		span.RecordError(err)
@@ -450,6 +460,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	// Re-provision the role with the updated step set.
 	existing.RoleID = provisionWorkflowRole(ctx, id, userID, orgID, newSteps)
+	existing.RolePermsVersion = workflowRolePermsVersion
 
 	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)

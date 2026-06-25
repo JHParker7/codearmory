@@ -120,3 +120,43 @@ func TestHandleCreateWorkflowRole_BadRequests(t *testing.T) {
 		t.Fatalf("non-workflows got %d, want 403", w2.Code)
 	}
 }
+
+// An org-less owner (and a caller that passes an empty org_id) must produce a
+// role whose OrgID is NULL, not a dangling empty-string pointer — the latter
+// violates fk_roles_org on Postgres, fails the whole creation, and silently
+// drops the run back to the user's full permissions. The role must be created.
+func TestHandleCreateWorkflowRole_OrglessOwnerStoresNilOrg(t *testing.T) {
+	key := seedNamedSvc(t, "workflows")
+	owner := seedTestUser(t) // seedTestUser leaves OrgID nil
+	wfID := uuid.NewString()
+
+	body, _ := json.Marshal(map[string]any{
+		"workflow_id": wfID,
+		"user_id":     owner.UserID,
+		"org_id":      "", // the trigger: a caller-supplied empty org id
+		"permissions": []map[string]string{
+			{"service": "forge", "action": "createExecution", "resource": "forge/executions"},
+		},
+	})
+	r := httptest.NewRequest(http.MethodPost, "/internal/workflow-roles", bytes.NewReader(body))
+	r.Header.Set("X-Service-Key", "workflows:"+key)
+	w := httptest.NewRecorder()
+	handleCreateWorkflowRole(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create workflow role got %d, want 201: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	json.Unmarshal(w.Body.Bytes(), &resp) //nolint:errcheck
+	if resp["role_id"] == "" {
+		t.Fatal("expected role_id in response")
+	}
+	t.Cleanup(func() { gormDB.Unscoped().Where("role_id = ?", resp["role_id"]).Delete(&Role{}) }) //nolint:errcheck
+
+	var role Role
+	if err := gormDB.Where("role_id = ?", resp["role_id"]).First(&role).Error; err != nil {
+		t.Fatalf("load created role: %v", err)
+	}
+	if role.OrgID != nil {
+		t.Errorf("org-less owner: role OrgID = %q, want nil (must not store a dangling empty org)", *role.OrgID)
+	}
+}

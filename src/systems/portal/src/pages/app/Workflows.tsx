@@ -1,11 +1,12 @@
 /** Workflows page — the CI/CD control surface, a tabbed view over pipelines, steps, and the action catalog. pipelines tab creates/triggers/cancels/deletes workflows and lists their runs; steps tab CRUDs reusable steps; actions tab browses the read-only action catalog. all data goes through the typed BFF client (listWorkflows/createStep/etc), never conductor directly. */
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { ReactNode, CSSProperties } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector } from '../../store/hooks';
 import {
-  listWorkflows, deleteWorkflow, listWorkflowRuns, getRun, triggerWorkflow, cancelRun,
+  listWorkflows, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
   createWorkflow, updateWorkflow, listSteps, createStep, deleteStep, listActions, listForgeImages,
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
@@ -13,51 +14,12 @@ import { ImageSelect } from '../../components/ImageSelect';
 import { PipelineBlocks } from './PipelineBlocks';
 import type { StepRef } from './pipelineGraph';
 import { schemaForAction, buildStepWith, WITH_KEY_PREFIX } from './stepSchema';
-import { timeAgo } from '../../utils';
+import { timeAgo, statusTone, isRunActive, fmtDuration } from '../../utils';
 
 type MainTab = 'pipelines' | 'steps' | 'actions';
 
-/** maps a run status to a Pill tone — green=completed/success, amber=in-flight, red=failed, dim=otherwise. */
-function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
-  if (['completed', 'success'].includes(status)) return 'green';
-  if (['running', 'in_progress', 'pending', 'queued'].includes(status)) return 'amber';
-  if (['failed', 'error'].includes(status)) return 'red';
-  return 'dim';
-}
-
-/** Expanded detail for one run: per-step status, timing, and captured output.
- * step_runs come from getRun (the runs list only carries summaries). */
-function RunSteps({ run }: { run: WorkflowRun }) {
-  const steps = (run.step_runs ?? []).slice().sort((a, b) => a.step_index - b.step_index);
-  return (
-    <div style={{ paddingTop: 8 }}>
-      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 8 }}>
-        triggered by {run.triggered_by ? run.triggered_by.slice(0, 8) + '…' : '—'}
-        {run.started_at ? ` · started ${timeAgo(run.started_at)} ago` : ''}
-        {run.ended_at ? ` · ended ${timeAgo(run.ended_at)} ago` : ''}
-      </div>
-      {steps.length === 0 ? (
-        <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>→ no step runs recorded yet</div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {steps.map((sr, n) => (
-            <div key={sr.step_run_id} style={{ border: `1px solid ${T.border}`, background: T.card }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px' }}>
-                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, minWidth: 16 }}>{n + 1}.</span>
-                <Pill tone={statusTone(sr.status)}>{sr.status}</Pill>
-                <span style={{ fontFamily: T.mono, fontSize: 12, color: T.textHi, fontWeight: 600, flex: 1 }}>{sr.step_name}</span>
-                {sr.ended_at && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{timeAgo(sr.ended_at)} ago</span>}
-              </div>
-              {sr.output && (
-                <pre style={{ margin: 0, padding: '8px 10px', borderTop: `1px solid ${T.border}`, background: T.bg, color: T.dim, fontFamily: T.mono, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 240, overflow: 'auto' }}>{sr.output}</pre>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+// Run status helpers (statusTone / isRunActive / fmtDuration) live in ../../utils
+// so the run page (RunView) shares them. Clicking a run navigates to that page.
 
 // ── Pipeline builder overlay ──────────────────────────────────────────────────
 
@@ -145,6 +107,7 @@ function PipelineBuilderOverlay({
  * trigger/edit/delete controls. */
 function PipelinesTab() {
   const token = useAppSelector(s => s.auth.token)!;
+  const navigate = useNavigate();
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -152,11 +115,6 @@ function PipelinesTab() {
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
   const [triggering, setTriggering] = useState(false);
-  // Expanded run: openRunId is the clicked run; runDetail is its full record
-  // (with step_runs) fetched on demand via getRun.
-  const [openRunId, setOpenRunId] = useState<string | null>(null);
-  const [runDetail, setRunDetail] = useState<WorkflowRun | null>(null);
-  const [runDetailLoading, setRunDetailLoading] = useState(false);
   // builder === null: closed; { wf: null }: create; { wf }: edit that workflow.
   const [builder, setBuilder] = useState<{ wf: Workflow | null } | null>(null);
   const [catalog, setCatalog] = useState<Step[]>([]);
@@ -175,24 +133,24 @@ function PipelinesTab() {
   useEffect(() => { listSteps(token).then(setCatalog).catch(() => {}); }, [token]);
   const catalogMap = useMemo(() => Object.fromEntries(catalog.map(s => [s.step_id, s])) as Record<string, Step>, [catalog]);
 
+  // Live-refresh the runs list while any run is in flight, so statuses/durations
+  // update without a manual refresh. The full per-run detail lives on the run page.
+  const liveRun = runs.some(r => isRunActive(r.status));
+  useEffect(() => {
+    if (!selected || !liveRun) return;
+    const id = setInterval(async () => {
+      try { setRuns(await listWorkflowRuns(token, selected)); } catch { /* keep last good */ }
+    }, 2500);
+    return () => clearInterval(id);
+  }, [selected, liveRun, token]);
+
   /** selects a workflow and loads its runs. */
   const selectWorkflow = useCallback(async (id: string) => {
     setSelected(id); setRunsLoading(true);
-    setOpenRunId(null); setRunDetail(null);
     try { setRuns(await listWorkflowRuns(token, id)); }
     catch { setRuns([]); }
     finally { setRunsLoading(false); }
   }, [token]);
-
-  /** Toggles a run's expanded detail, fetching the full record (with step runs)
-   * on open — the runs list only carries summaries. */
-  const toggleRun = useCallback(async (runId: string) => {
-    if (openRunId === runId) { setOpenRunId(null); setRunDetail(null); return; }
-    setOpenRunId(runId); setRunDetail(null); setRunDetailLoading(true);
-    try { setRunDetail(await getRun(token, runId)); }
-    catch { setRunDetail(null); }
-    finally { setRunDetailLoading(false); }
-  }, [openRunId, token]);
 
   const handleTrigger = async () => {
     if (!selected) return;
@@ -200,6 +158,7 @@ function PipelinesTab() {
     try {
       const run = await triggerWorkflow(token, selected);
       setRuns(prev => [run, ...prev]);
+      navigate(`/app/workflows/runs/${run.run_id}`); // straight to the new run's live page
     } catch (e: unknown) { setError((e as Error).message); }
     finally { setTriggering(false); }
   };
@@ -348,34 +307,24 @@ function PipelinesTab() {
               ) : (
                 <div style={{ background: T.card, border: `1px solid ${T.border}`, overflow: 'hidden' }}>
                   {runs.slice(0, 20).map((run, i) => {
-                    const isRunning = ['running', 'in_progress', 'pending', 'queued'].includes(run.status);
-                    const open = openRunId === run.run_id;
+                    const isRunning = isRunActive(run.status);
+                    const dur = run.started_at ? fmtDuration(run.started_at, run.ended_at) : '';
                     return (
-                      <div key={run.run_id} style={{ borderBottom: i < Math.min(runs.length, 20) - 1 ? `1px solid ${T.border}` : 'none' }}>
-                        <div onClick={() => toggleRun(run.run_id)} title="show run details"
-                          style={{ display: 'flex', alignItems: 'center', padding: '9px 12px', gap: 12, cursor: 'pointer', background: open ? T.cardHi : 'transparent' }}>
-                          <span style={{ fontFamily: T.mono, fontSize: 10, color: open ? T.green : T.faint, width: 10 }}>{open ? '▾' : '▸'}</span>
-                          <Pill tone={statusTone(run.status)}>{run.status}</Pill>
-                          <span style={{ fontFamily: T.mono, fontSize: 11.5, color: T.dim, flex: 1 }}>{run.run_id.slice(0, 8)}…</span>
-                          <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>{timeAgo(run.created_at)} ago</span>
-                          {isRunning && (
-                            <button onClick={e => { e.stopPropagation(); handleCancel(run.run_id); }}
-                              style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>
-                              [ cancel ]
-                            </button>
-                          )}
-                        </div>
-                        {open && (
-                          <div style={{ padding: '4px 12px 12px', background: T.bg, borderTop: `1px solid ${T.border}` }}>
-                            {runDetailLoading ? (
-                              <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, padding: '8px 0', animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
-                            ) : !runDetail || runDetail.run_id !== run.run_id ? (
-                              <div style={{ fontFamily: T.mono, fontSize: 11, color: T.red, padding: '8px 0' }}>→ failed to load run details</div>
-                            ) : (
-                              <RunSteps run={runDetail} />
-                            )}
-                          </div>
+                      <div key={run.run_id} onClick={() => navigate(`/app/workflows/runs/${run.run_id}`)} title="open run (live pipeline + logs)"
+                        style={{ display: 'flex', alignItems: 'center', padding: '9px 12px', gap: 12, cursor: 'pointer', borderBottom: i < Math.min(runs.length, 20) - 1 ? `1px solid ${T.border}` : 'none' }}
+                        onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = T.cardHi; }}
+                        onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}>
+                        <Pill tone={statusTone(run.status)}>{run.status}</Pill>
+                        <span style={{ fontFamily: T.mono, fontSize: 11.5, color: T.dim, flex: 1 }}>{run.run_id.slice(0, 8)}…</span>
+                        {dur && <span style={{ fontFamily: T.mono, fontSize: 10.5, color: isRunning ? T.amber : T.faint }}>{isRunning ? '⟳ ' : ''}{dur}</span>}
+                        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>{timeAgo(run.created_at)} ago</span>
+                        {isRunning && (
+                          <button onClick={e => { e.stopPropagation(); handleCancel(run.run_id); }}
+                            style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>
+                            [ cancel ]
+                          </button>
                         )}
+                        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>→</span>
                       </div>
                     );
                   })}

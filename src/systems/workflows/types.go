@@ -116,6 +116,12 @@ type Workflow struct {
 	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
 	Project     string            `json:"project,omitempty" gorm:"column:project;default:''"`
 	RoleID      string            `json:"role_id,omitempty" gorm:"column:role_id;default:''"`
+	// RolePermsVersion records which version of collectWorkflowPermissions built
+	// RoleID. The role is provisioned once and reused across runs, so when the
+	// derivation logic changes (constant bumped) a workflow with an older version
+	// re-provisions on its next trigger — see handleTriggerRun. Default 0 means
+	// "pre-versioning"; AutoMigrate backfills existing rows to 0.
+	RolePermsVersion int          `json:"-"            gorm:"column:role_perms_version;default:0"`
 	Active      bool              `json:"active"       gorm:"column:active;default:true"`
 	CreatedAt   time.Time         `json:"created_at"   gorm:"column:created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"   gorm:"column:updated_at"`

@@ -14,6 +14,7 @@ import { Blueprints } from './pages/app/Blueprints';
 import { Gatekeeper } from './pages/app/Gatekeeper';
 import { Builder } from './pages/app/Builder';
 import { Workflows } from './pages/app/Workflows';
+import { RunView } from './pages/app/RunView';
 import { Forge } from './pages/app/Forge';
 import { Tickets } from './pages/app/Tickets';
 import { Hooks } from './pages/app/Hooks';
@@ -124,6 +125,7 @@ export function App() {
             <Route path="blueprints" element={<Blueprints />} />
             <Route path="forge" element={<Forge />} />
             <Route path="workflows" element={<Workflows />} />
+            <Route path="workflows/runs/:runId" element={<RunView />} />
             <Route path="tickets" element={<Tickets />} />
             <Route path="hooks" element={<Hooks />} />
             <Route path="containers" element={<Containers />} />

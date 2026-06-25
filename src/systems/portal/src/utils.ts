@@ -9,6 +9,31 @@ export function shortId(id: string): string {
   return `${id.slice(0, 8)}…`;
 }
 
+/** Run/step statuses that are still in flight (not terminal). */
+export const RUN_ACTIVE = ['running', 'in_progress', 'pending', 'queued'];
+/** Whether a run/step status is still in flight. */
+export const isRunActive = (status: string): boolean => RUN_ACTIVE.includes(status);
+
+/** Map a run/step status to a small badge tone (green=done, amber=in-flight, red=failed). */
+export function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
+  if (['completed', 'success'].includes(status)) return 'green';
+  if (isRunActive(status)) return 'amber';
+  if (['failed', 'error'].includes(status)) return 'red';
+  return 'dim';
+}
+
+/** Compact human duration between two ISO timestamps; start→now when not ended. */
+export function fmtDuration(startISO?: string | null, endISO?: string | null): string {
+  if (!startISO) return '';
+  const start = new Date(startISO).getTime();
+  const end = endISO ? new Date(endISO).getTime() : Date.now();
+  const s = Math.max(0, Math.round((end - start) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
 /** Format the elapsed time since an ISO timestamp as a compact `Ns`/`Nm`/`Nh`/`Nd` string. */
 export function timeAgo(iso: string, now = Date.now()): string {
   const diff = now - new Date(iso).getTime();
