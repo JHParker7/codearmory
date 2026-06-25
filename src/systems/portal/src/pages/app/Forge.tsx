@@ -5,19 +5,33 @@
  * createExecution / listRunnerClasses / …); write actions on runner classes are
  * gated by the forge:createRunnerClass permission.
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type CSSProperties } from 'react';
 import { T } from '../../theme';
 import { useAppSelector } from '../../store/hooks';
 import {
   listExecutions, getExecution, cancelExecution, createExecution,
   listRunnerClasses, createRunnerClass, updateRunnerClass, deleteRunnerClass,
-  listForgeImages,
+  listForgeImages, listRuntimeBackends,
 } from '../../api/bff';
-import type { Execution, RunnerClass } from '../../api/bff';
+import type { Execution, RunnerClass, RuntimeBackend } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
 import { timeAgo } from '../../utils';
 
 type ForgeTab = 'executions' | 'runner-classes';
+
+// VM-isolated backends (kata microVMs, proxmox VMs) put the isolation boundary at
+// the VM, not the container — the only place `privileged` is meaningful. Used to
+// tint the runtime badge so a kata/VM class is distinguishable at a glance.
+const VM_ISOLATED = new Set(['kata', 'proxmox']);
+
+/** Badge style for a runner class's runtime type — VM-isolated types stand out green. */
+function runtimeBadge(type: string): CSSProperties {
+  const c = VM_ISOLATED.has(type) ? T.green : T.dim;
+  return { fontSize: 9, color: c, border: `1px solid ${c}`, padding: '0 4px', letterSpacing: 0.3, textTransform: 'uppercase' };
+}
+
+/** Badge for a privileged runner class — amber, since it relaxes the sandbox. */
+const privBadge: CSSProperties = { fontSize: 9, color: T.amber, border: `1px solid ${T.amber}`, padding: '0 4px', letterSpacing: 0.3, textTransform: 'uppercase' };
 
 /** maps an execution status to a status tone (green=done, amber=in-flight, red=failed, dim=other). */
 function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
@@ -370,6 +384,7 @@ function RunnerClassesTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const canWrite = useAppSelector(s => s.auth.permissions?.['forge:createRunnerClass'] === true);
   const [classes, setClasses] = useState<RunnerClass[]>([]);
+  const [backends, setBackends] = useState<RuntimeBackend[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -386,9 +401,17 @@ function RunnerClassesTab() {
     finally { setLoading(false); }
   }, [token]);
 
-  useEffect(() => { fetchClasses(); }, [fetchClasses]);
+  useEffect(() => {
+    fetchClasses();
+    // Best-effort: resolves each class's backend name to its runtime type (kata vs
+    // not). A missing list (no permission / older forge) just hides the runtime tag.
+    listRuntimeBackends(token).then(setBackends).catch(() => {});
+  }, [fetchClasses, token]);
 
   const selectedClass = classes.find(c => c.name === selected);
+  // A class's backend defaults to "default" (the backend seeded from RUNTIME).
+  const runtimeOf = (rc: RunnerClass) => backends.find(b => b.name === (rc.backend || 'default'))?.type;
+  const selectedRuntime = selectedClass ? runtimeOf(selectedClass) : undefined;
 
   const handleCreate = async () => {
     if (!form.name.trim() || !form.memory_mb || !form.cpu_millicores) return;
@@ -473,11 +496,14 @@ function RunnerClassesTab() {
             <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint }}>→ no runner classes</div>
           ) : classes.map(rc => {
             const isActive = selected === rc.name;
+            const rt = runtimeOf(rc);
             return (
               <button key={rc.name} onClick={() => setSelected(rc.name)}
                 style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 13, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{rc.name}</span>
+                  {rt && <span style={runtimeBadge(rt)}>{rt}</span>}
+                  {rc.privileged && <span style={privBadge}>priv</span>}
                   {!rc.enabled && <span style={{ fontSize: 9, color: T.faint, border: `1px solid ${T.faint}`, padding: '0 4px' }}>disabled</span>}
                 </div>
                 <div style={{ fontSize: 10, color: T.faint, marginTop: 2 }}>{rc.memory_mb}MB · {rc.cpu_millicores}m</div>
@@ -517,14 +543,22 @@ function RunnerClassesTab() {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
               {([
+                // Runtime (kata vs not) + privileged lead, since they define the isolation
+                // model; VM-isolated runtimes show green, a privileged class shows amber.
+                ['runtime', selectedRuntime ?? (selectedClass.backend || 'default'),
+                  selectedRuntime && VM_ISOLATED.has(selectedRuntime) ? T.green : undefined],
+                ['privileged', selectedClass.privileged ? 'yes' : 'no',
+                  selectedClass.privileged ? T.amber : undefined],
+                ['backend', selectedClass.backend || 'default'],
                 ['memory', `${selectedClass.memory_mb} MB`],
                 ['cpu', `${selectedClass.cpu_millicores}m`],
                 ...(selectedClass.pids_limit != null ? [['pids limit', String(selectedClass.pids_limit)] as [string, string]] : []),
                 ...(selectedClass.tmpfs_mb != null ? [['tmpfs', `${selectedClass.tmpfs_mb} MB`] as [string, string]] : []),
-              ] as [string, string][]).map(([k, v]) => (
+                ...(selectedClass.disk_gb != null ? [['disk', `${selectedClass.disk_gb} GB`] as [string, string]] : []),
+              ] as [string, string, (string | undefined)?][]).map(([k, v, color]) => (
                 <div key={k} style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px' }}>
                   <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 4, textTransform: 'uppercase' }}>{k}</div>
-                  <div style={{ fontFamily: T.mono, fontSize: 15, color: T.textHi, fontWeight: 700 }}>{v}</div>
+                  <div style={{ fontFamily: T.mono, fontSize: 15, color: color ?? T.textHi, fontWeight: 700 }}>{v}</div>
                 </div>
               ))}
             </div>
