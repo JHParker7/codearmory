@@ -10,7 +10,7 @@ import {
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
-import { PipelineCanvas } from './PipelineCanvas';
+import { PipelineBlocks } from './PipelineBlocks';
 import type { StepRef } from './pipelineGraph';
 import { schemaForAction, buildStepWith, WITH_KEY_PREFIX } from './stepSchema';
 import { timeAgo } from '../../utils';
@@ -61,9 +61,9 @@ function RunSteps({ run }: { run: WorkflowRun }) {
 
 // ── Pipeline builder overlay ──────────────────────────────────────────────────
 
-/** Full-surface pipeline builder: name/description plus the react-flow canvas.
- * Used for both create (initial=null) and edit. The canvas reports the derived
- * ordered-steps-with-parallel_group via onChange; save sends them to the API. */
+/** Full-surface pipeline builder: name/description plus the Scratch-style block
+ * builder. Used for both create (initial=null) and edit. The builder reports the
+ * derived ordered-steps-with-parallel_group via onChange; save sends them to the API. */
 function PipelineBuilderOverlay({
   token, initial, catalog, palette, onClose, onSaved,
 }: {
@@ -76,10 +76,9 @@ function PipelineBuilderOverlay({
 }) {
   const [name, setName] = useState(initial?.name ?? '');
   const [desc, setDesc] = useState(initial?.description ?? '');
-  const [steps, setSteps] = useState<StepRef[] | null>(
+  const [steps, setSteps] = useState<StepRef[]>(
     initial ? initial.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null })) : [],
   );
-  const [graphError, setGraphError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -88,14 +87,10 @@ function PipelineBuilderOverlay({
     [initial],
   );
 
-  const onCanvasChange = useCallback((r: { steps: StepRef[] | null; error: string | null }) => {
-    setSteps(r.steps); setGraphError(r.error);
-  }, []);
-
-  const canSave = !!name.trim() && !!steps && !graphError && !saving;
+  const canSave = !!name.trim() && !saving;
 
   const handleSave = async () => {
-    if (!name.trim() || !steps) return;
+    if (!name.trim()) return;
     setSaving(true); setSaveError(null);
     try {
       const payload = {
@@ -126,14 +121,14 @@ function PipelineBuilderOverlay({
         <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>✕ close</button>
       </div>
       <div style={{ flex: 1, minHeight: 0, padding: 14 }}>
-        <PipelineCanvas editable initialSteps={initialSteps} catalog={catalog} palette={palette} onChange={onCanvasChange} />
+        <PipelineBlocks editable initialSteps={initialSteps} catalog={catalog} palette={palette} onChange={setSteps} />
       </div>
       <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-          wire a step's bottom handle into another to sequence · steps on the same row run in parallel
+          drag a block onto a drop-gap to sequence it · drop it onto a parallel block's step to join that group · ∥ also toggles a block in/out of parallel
         </span>
         <div style={{ flex: 1 }} />
-        {(graphError || saveError) && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>{graphError ?? saveError}</span>}
+        {saveError && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>{saveError}</span>}
         <button onClick={handleSave} disabled={!canSave}
           style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, fontWeight: 600, padding: '6px 16px', cursor: canSave ? 'pointer' : 'not-allowed', opacity: canSave ? 1 : 0.5 }}>
           {saving ? '[ · · · ]' : initial ? '[ save ]' : '[ create ]'}
@@ -339,7 +334,7 @@ function PipelinesTab() {
                 <>
                   <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 8 }}>PIPELINE</div>
                   <div style={{ height: 300, marginBottom: 20 }}>
-                    <PipelineCanvas initialSteps={detailSteps} catalog={catalogMap} height={300} />
+                    <PipelineBlocks initialSteps={detailSteps} catalog={catalogMap} height={300} />
                   </div>
                 </>
               )}

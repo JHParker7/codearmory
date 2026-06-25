@@ -35,6 +35,32 @@ func TestCollectWorkflowPermissions(t *testing.T) {
 	}
 }
 
+// An async action must also grant the poll (read) permission, or the run's scoped
+// role can submit the job but not read its status — every poll 403s and the step
+// hangs to the timeout instead of completing.
+func TestCollectWorkflowPermissions_AsyncGrantsPollPermission(t *testing.T) {
+	withCatalog(t, map[string]ActionDef{
+		"forge/run": {
+			Name:               "forge/run",
+			RequiredPermission: &PermissionSpec{Service: "forge", Action: "createExecution", Resource: "forge/executions"},
+			Async:              &AsyncConfig{PollPath: "/executions/{id}"},
+		},
+	})
+	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Action: "forge/run"}}})
+	var hasCreate, hasPoll bool
+	for _, p := range perms {
+		if p.Service == "forge" && p.Action == "createExecution" && p.Resource == "forge/executions" {
+			hasCreate = true
+		}
+		if p.Service == "forge" && p.Action == "getExecution" && p.Resource == "forge/executions/*" {
+			hasPoll = true
+		}
+	}
+	if !hasCreate || !hasPoll {
+		t.Fatalf("perms = %+v, want createExecution (submit) + getExecution on forge/executions/* (poll)", perms)
+	}
+}
+
 func TestProvisionAndDeleteWorkflowRole_Success(t *testing.T) {
 	withCatalog(t, map[string]ActionDef{
 		"forge/run": {Name: "forge/run", RequiredPermission: &PermissionSpec{Service: "forge", Action: "createExecution", Resource: "forge/executions"}},

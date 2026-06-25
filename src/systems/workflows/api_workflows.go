@@ -46,6 +46,27 @@ func collectWorkflowPermissions(steps []WorkflowStep) []PermissionSpec {
 			Action:   p.Action,
 			Resource: p.Resource,
 		})
+
+		// Async actions submit a job and then POLL it to a terminal state (forge:
+		// POST /executions then GET /executions/{id}). The scoped run role grants
+		// only the submit permission above, so every poll is 403 and the step never
+		// observes completion — it hangs to the timeout. Also grant the read
+		// permission for the submitted item. The submit permission is a "create"
+		// (createExecution/createSync/…) and the poll reads the same resource, so
+		// the read is its "get" counterpart on the item resource; the owner already
+		// holds it for jobs they create (gatekeeper drops it otherwise).
+		if def.Async != nil && strings.HasPrefix(p.Action, "create") {
+			pollSpec := PermissionSpec{
+				Service:  p.Service,
+				Action:   "get" + strings.TrimPrefix(p.Action, "create"),
+				Resource: strings.TrimRight(p.Resource, "/") + "/*",
+			}
+			pollKey := pollSpec.Service + ":" + pollSpec.Action + ":" + pollSpec.Resource
+			if _, dup := seen[pollKey]; !dup {
+				seen[pollKey] = struct{}{}
+				out = append(out, pollSpec)
+			}
+		}
 	}
 	return out
 }
