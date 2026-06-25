@@ -1191,7 +1191,7 @@ func TestNotifyService_RequestCreationFailure(t *testing.T) {
 
 func TestStartNotificationTicker_StopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	startNotificationTicker(ctx)
+	startNotificationTicker(ctx, "")
 	cancel() // The goroutine selects on ctx.Done() and returns; no assertion needed beyond no panic.
 	time.Sleep(20 * time.Millisecond)
 }
