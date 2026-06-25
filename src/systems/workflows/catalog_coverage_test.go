@@ -55,6 +55,53 @@ func TestRefreshCatalog_SkipsWithoutConfig(t *testing.T) {
 	refreshCatalog(context.Background()) // must be a no-op, not panic
 }
 
+// A transient empty response from the registry (mid-restart / still ingesting)
+// must not wipe a populated catalog — otherwise forge/run vanishes from running
+// workflows until the next 5-minute poll.
+func TestRefreshCatalog_EmptyResponseKeepsExistingCatalog(t *testing.T) {
+	actionCatalogMu.Lock()
+	origCatalog := actionCatalog
+	actionCatalogMu.Unlock()
+	serviceURLsMu.Lock()
+	origURLs, origNames, origHosts := serviceURLs, catalogServiceNames, hostToService
+	serviceURLsMu.Unlock()
+	t.Cleanup(func() {
+		actionCatalogMu.Lock()
+		actionCatalog = origCatalog
+		actionCatalogMu.Unlock()
+		serviceURLsMu.Lock()
+		serviceURLs, catalogServiceNames, hostToService = origURLs, origNames, origHosts
+		serviceURLsMu.Unlock()
+	})
+
+	body := `[{"name":"forge/run","service_name":"forge","service_url":"http://forge:8083","method":"POST","path":"/executions","gk_service":"forge","gk_action":"createExecution","gk_resource":"forge/executions"}]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body)) //nolint:errcheck
+	}))
+	defer srv.Close()
+	t.Setenv("REGISTRY_URL", srv.URL)
+	t.Setenv("REGISTRY_SERVICE_KEY", "k")
+
+	// First refresh populates the catalog.
+	refreshCatalog(context.Background())
+	if catalogSize() == 0 {
+		t.Fatal("catalog should be populated after the first refresh")
+	}
+
+	// A subsequent empty response must be ignored, not applied.
+	body = `[]`
+	refreshCatalog(context.Background())
+
+	actionCatalogMu.RLock()
+	_, ok := actionCatalog["forge/run"]
+	n := len(actionCatalog)
+	actionCatalogMu.RUnlock()
+	if !ok {
+		t.Fatalf("empty registry response wiped the catalog (size now %d); forge/run must be retained", n)
+	}
+}
+
 func TestExecuteAction_Sync(t *testing.T) {
 	pool := &WorkerPool{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
