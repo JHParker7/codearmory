@@ -150,6 +150,34 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		req.Inputs = map[string]string{}
 	}
 
+	// Heal a stale scoped role. The run role is provisioned once at create/update
+	// and reused for every run, so a workflow created before a change to the
+	// permission-derivation logic keeps a role missing newer permissions — e.g.
+	// the async-poll read grant — and every run hangs polling a forbidden status.
+	// Re-provision (using the workflow owner/org, not the triggerer) when the
+	// stored role predates the current derivation version. Only commit the bump
+	// when we have a usable role or the workflow legitimately needs none, so a
+	// transient gatekeeper error retries next trigger instead of locking in an
+	// empty role.
+	if wf.RolePermsVersion < workflowRolePermsVersion {
+		oldRole := wf.RoleID
+		newRole := provisionWorkflowRole(ctx, wf.WorkflowID, wf.CreatedBy, wf.OrgID, wf.Steps)
+		if newRole != "" || len(collectWorkflowPermissions(wf.Steps)) == 0 {
+			wf.RoleID = newRole
+			wf.RolePermsVersion = workflowRolePermsVersion
+			if err := wf.Update(ctx); err != nil {
+				slog.WarnContext(ctx, "trigger run: persist re-provisioned role", "workflow_id", wf.WorkflowID, "error", err)
+			} else {
+				slog.InfoContext(ctx, "trigger run: healed stale workflow role", "workflow_id", wf.WorkflowID, "role_id", newRole)
+				if oldRole != "" && oldRole != newRole {
+					deleteWorkflowRole(ctx, oldRole)
+				}
+			}
+		} else {
+			slog.WarnContext(ctx, "trigger run: role re-provision returned empty, using existing role", "workflow_id", wf.WorkflowID)
+		}
+	}
+
 	runToken, sessionID, err := createRunToken(ctx, userID, wf.RoleID)
 	if err != nil {
 		span.RecordError(err)

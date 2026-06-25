@@ -258,9 +258,16 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 	// request resource to at run time. Storing the raw resource would never match
 	// the scoped resource conductor sends for a run step (e.g. "alice/forge/...").
 	var ownerUsername, ownerOrgName string
+	// ownerOrgID is the authoritative org for the scoped role/permissions. Trusting
+	// the caller-supplied req.OrgID verbatim violates fk_roles_org when it's empty
+	// (org-less users) or stale, which makes the whole creation 500 and silently
+	// drops the run back to the user's full permissions. Resolve it from the owner
+	// instead; a nil pointer stores NULL (valid) rather than a dangling "".
+	var ownerOrgID *string
 	if userRow, err := (User{UserID: req.UserID}).Get(ctx); err == nil {
 		owner := userRow.(User)
 		ownerUsername = owner.Username
+		ownerOrgID = owner.OrgID
 		if owner.OrgID != nil {
 			if orgRow, err2 := (Org{OrgID: *owner.OrgID}).Get(ctx); err2 == nil {
 				ownerOrgName = orgRow.(Org).OrgName
@@ -284,7 +291,6 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = p.Service + "." + p.Action
 		}
-		orgID := req.OrgID
 		perm := Permissions{
 			PermissionsID: uuid.New().String(),
 			Name:          "workflow:" + req.WorkflowID + ":" + name,
@@ -292,7 +298,7 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 			Actions:       []string{p.Action},
 			Resources:     []string{scopeResource(p.Resource, ownerUsername, ownerOrgName)},
 			OwnerID:       req.UserID,
-			OrgID:         &orgID,
+			OrgID:         ownerOrgID,
 			Active:        true,
 		}
 		if err := perm.Add(ctx); err != nil {
@@ -303,12 +309,11 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 		permIDs = append(permIDs, perm.PermissionsID)
 	}
 
-	orgID := req.OrgID
 	role := Role{
 		RoleID:         uuid.New().String(),
 		Name:           "workflow:" + req.WorkflowID,
 		OwnerID:        req.UserID,
-		OrgID:          &orgID,
+		OrgID:          ownerOrgID,
 		PermissionsIDs: permIDs,
 		Active:         true,
 	}
