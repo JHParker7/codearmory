@@ -93,6 +93,27 @@ def test_failed_step_surfaces_forge_error_message(bearer):
     requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf}", headers=bearer)
 
 
+def test_step_timeout_is_enforced_by_forge(bearer):
+    # A 5s step timeout must be forwarded to forge: a 20s sleep is killed at ~5s
+    # (run fails), not allowed to run to forge's 30s default (which would let the
+    # sleep finish and the run complete).
+    s = requests.post(f"{WORKFLOWS_URL}/steps", headers=bearer, json={
+        "name": f"to-{uuid.uuid4().hex[:8]}", "action": "forge/run",
+        "with": {"run": "sleep 20", "image": "alpine:3.19"}, "timeout": 5,
+    })
+    assert s.status_code == 201, s.text
+    sid = s.json()["step_id"]
+    wf = make_pipeline(bearer, [{"step_id": sid}])
+    run_id = trigger(bearer, wf)
+    t0 = time.time()
+    result = poll_run(bearer, run_id, timeout=60)
+    elapsed = time.time() - t0
+    assert result["status"] == "failed", f"expected failed (timed out), got {result['status']} after {elapsed:.0f}s"
+    assert elapsed < 25, f"step ran {elapsed:.0f}s — the 5s timeout was not forwarded to forge"
+    requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf}", headers=bearer)
+    requests.delete(f"{WORKFLOWS_URL}/steps/{sid}", headers=bearer)
+
+
 def test_parallel_group_runs_all_steps(bearer):
     s1 = make_step(bearer, "http", {"service": "gatekeeper", "method": "GET", "path": "/healthz", "expected_status": 200})
     s2 = make_step(bearer, "http", {"service": "gatekeeper", "method": "GET", "path": "/healthz", "expected_status": 200})

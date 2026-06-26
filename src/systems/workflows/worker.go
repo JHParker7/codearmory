@@ -427,6 +427,16 @@ func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step St
 	budget := timeout
 	if def.Async != nil {
 		budget = maxTimeout
+		// The remote job enforces its own timeout (e.g. forge kills the container at
+		// `timeout` seconds), so forward the step's timeout in the request body —
+		// otherwise the service falls back to its own default (forge: 30s) and a
+		// longer step is killed early. Respect an explicit with.timeout if present.
+		if with == nil {
+			with = map[string]any{}
+		}
+		if _, ok := with["timeout"]; !ok {
+			with["timeout"] = timeout
+		}
 	}
 	stepCtx, cancel := context.WithTimeout(ctx, time.Duration(budget)*time.Second)
 	defer cancel()
