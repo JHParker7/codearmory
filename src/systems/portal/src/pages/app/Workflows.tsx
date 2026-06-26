@@ -6,7 +6,7 @@ import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector } from '../../store/hooks';
 import {
-  listWorkflows, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
+  listWorkflows, getWorkflow, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
   createWorkflow, updateWorkflow, listSteps, createStep, updateStep, deleteStep, listActions, listForgeImages,
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
@@ -147,6 +147,12 @@ function PipelinesTab() {
   /** selects a workflow and loads its runs. */
   const selectWorkflow = useCallback(async (id: string) => {
     setSelected(id); setRunsLoading(true);
+    // List responses omit step details (steps: []), so the detail graph and the
+    // edit builder would be blank off the list entry. Fetch the full workflow and
+    // merge it into the list so both see the real steps.
+    getWorkflow(token, id)
+      .then(full => setWorkflows(prev => prev.map(w => w.workflow_id === id ? full : w)))
+      .catch(() => { /* keep the list entry on a transient error */ });
     try { setRuns(await listWorkflowRuns(token, id)); }
     catch { setRuns([]); }
     finally { setRunsLoading(false); }
@@ -255,7 +261,14 @@ function PipelinesTab() {
                 style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: triggering ? 'not-allowed' : 'pointer', opacity: triggering ? 0.7 : 1 }}>
                 {triggering ? '[ · · · ]' : '[ ▶ trigger ]'}
               </button>
-              <button onClick={() => setBuilder({ wf: selectedWorkflow })}
+              <button onClick={async () => {
+                // Open the builder with the workflow's steps even if the select-time
+                // fetch hasn't landed yet (list entries carry steps: []).
+                const wf = selectedWorkflow.steps?.length
+                  ? selectedWorkflow
+                  : await getWorkflow(token, selectedWorkflow.workflow_id).catch(() => selectedWorkflow);
+                setBuilder({ wf });
+              }}
                 style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
                 [ edit ]
               </button>
