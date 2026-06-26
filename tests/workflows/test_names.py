@@ -122,6 +122,32 @@ def test_invalid_step_name_rejected(bearer):
     assert r.status_code == 400, f"expected 400, got {r.status_code}: {r.text}"
 
 
+def test_step_rename_conflict_and_charset(bearer):
+    n1 = f"sr-a-{uuid.uuid4().hex[:8]}"
+    n2 = f"sr-b-{uuid.uuid4().hex[:8]}"
+
+    def body(name):
+        return {"name": name, "action": "http", "with": HTTP_STEP_WITH, "timeout": 10}
+
+    a = requests.post(f"{WORKFLOWS_URL}/steps", headers=bearer, json=body(n1))
+    b = requests.post(f"{WORKFLOWS_URL}/steps", headers=bearer, json=body(n2))
+    assert a.status_code == 201 and b.status_code == 201, f"{a.text} / {b.text}"
+    a_id, b_id = a.json()["step_id"], b.json()["step_id"]
+    try:
+        # Renaming B to A's name conflicts.
+        clash = requests.put(f"{WORKFLOWS_URL}/steps/{b_id}", headers=bearer, json=body(n1))
+        assert clash.status_code == 409, f"expected 409, got {clash.status_code}: {clash.text}"
+        # Keeping B's own name is allowed.
+        same = requests.put(f"{WORKFLOWS_URL}/steps/{b_id}", headers=bearer, json=body(n2))
+        assert same.status_code == 200, same.text
+        # Renaming B to an invalid name is rejected.
+        bad = requests.put(f"{WORKFLOWS_URL}/steps/{b_id}", headers=bearer, json=body("bad name"))
+        assert bad.status_code == 400, f"expected 400, got {bad.status_code}: {bad.text}"
+    finally:
+        requests.delete(f"{WORKFLOWS_URL}/steps/{a_id}", headers=bearer)
+        requests.delete(f"{WORKFLOWS_URL}/steps/{b_id}", headers=bearer)
+
+
 # ── Runs namespaced under the workflow name ─────────────────────────────────
 
 def test_run_namespaced_under_workflow_name(bearer, healthz_step_id):
@@ -144,5 +170,8 @@ def test_run_namespaced_under_workflow_name(bearer, healthz_step_id):
         # A run fetched under the WRONG workflow ref is not found.
         wrong = requests.get(f"{WORKFLOWS_URL}/pipelines/some-other-name/runs/{run_id}", headers=bearer)
         assert wrong.status_code == 404, f"expected 404 for mismatched workflow ref, got {wrong.status_code}"
+        # Cancelling under the wrong workflow ref is likewise not found (nested cross-check).
+        wrong_cancel = requests.delete(f"{WORKFLOWS_URL}/pipelines/some-other-name/runs/{run_id}", headers=bearer)
+        assert wrong_cancel.status_code == 404, f"expected 404 for mismatched cancel ref, got {wrong_cancel.status_code}"
     finally:
         requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf_id}", headers=bearer)

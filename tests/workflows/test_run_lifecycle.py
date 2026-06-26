@@ -61,6 +61,23 @@ def test_failing_step_marks_run_failed(bearer):
     requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf}", headers=bearer)
 
 
+def test_failed_step_surfaces_captured_output(bearer):
+    # A forge step that prints to stdout then exits non-zero: the failed run must
+    # surface the captured output (not just the "exit code: N" summary).
+    marker = f"BUILD_LOG_{uuid.uuid4().hex[:8]}"
+    step = make_step(bearer, "forge/run", {"run": f"echo {marker}; exit 1", "image": "alpine:3.19"})
+    wf = make_pipeline(bearer, [{"step_id": step}])
+    run_id = trigger(bearer, wf)
+    result = poll_run(bearer, run_id, timeout=90)
+    assert result["status"] == "failed", f"expected failed, got {result['status']}"
+    step_runs = result.get("step_runs") or []
+    assert step_runs, f"no step runs recorded: {result}"
+    output = step_runs[0].get("output") or ""
+    assert marker in output, f"captured stdout marker missing from step output: {output!r}"
+    assert "exit code" in output.lower(), f"exit-code summary missing from step output: {output!r}"
+    requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf}", headers=bearer)
+
+
 def test_parallel_group_runs_all_steps(bearer):
     s1 = make_step(bearer, "http", {"service": "gatekeeper", "method": "GET", "path": "/healthz", "expected_status": 200})
     s2 = make_step(bearer, "http", {"service": "gatekeeper", "method": "GET", "path": "/healthz", "expected_status": 200})

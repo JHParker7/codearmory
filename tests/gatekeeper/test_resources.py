@@ -951,6 +951,35 @@ class TestRole:
             f"{base_url}/roles/{role_id}", headers=bearer(admin_token["token"])
         )
 
+    def test_create_and_update_with_name(self, base_url, admin_token):
+        name = f"ci-deployer-{rand_id()}"
+        resp = requests.post(
+            f"{base_url}/roles",
+            json={"name": name, "permissions_ids": []},
+            headers=bearer(admin_token["token"]),
+        )
+        assert resp.status_code == 201, resp.text
+        role = resp.json()
+        assert role.get("name") == name, f"create did not persist name: {role}"
+        role_id = role["role_id"]
+        try:
+            got = requests.get(
+                f"{base_url}/roles/{role_id}", headers=bearer(admin_token["token"])
+            )
+            assert got.json().get("name") == name, f"get did not return name: {got.json()}"
+            new_name = f"ci-runner-{rand_id()}"
+            upd = requests.put(
+                f"{base_url}/roles/{role_id}",
+                json={"name": new_name, "permissions_ids": []},
+                headers=bearer(admin_token["token"]),
+            )
+            assert upd.status_code == 200, upd.text
+            assert upd.json().get("name") == new_name, f"update did not change name: {upd.json()}"
+        finally:
+            requests.delete(
+                f"{base_url}/roles/{role_id}", headers=bearer(admin_token["token"])
+            )
+
     def test_get_returns_200(self, base_url, admin_token, role):
         resp = requests.get(
             f"{base_url}/roles/{role['role_id']}", headers=bearer(admin_token["token"])
