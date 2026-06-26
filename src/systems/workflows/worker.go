@@ -212,10 +212,10 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			res, stepErr := p.executeStep(runCtx, store, ws.Step, substContext{inputs: inputs, outputs: visible})
 			if stepErr != nil {
 				if errors.Is(stepErr, context.Canceled) {
-					p.finishStepRun(stepRunID, StatusCancelled, strPtr(stepErr.Error()), res.MemoryUsedMB, res.MemoryLimitMB)
+					p.finishStepRun(stepRunID, StatusCancelled, strPtr(failureOutput(res.Output, stepErr)), res.MemoryUsedMB, res.MemoryLimitMB)
 					finalStatus = StatusCancelled
 				} else {
-					p.finishStepRun(stepRunID, StatusFailed, strPtr(stepErr.Error()), res.MemoryUsedMB, res.MemoryLimitMB)
+					p.finishStepRun(stepRunID, StatusFailed, strPtr(failureOutput(res.Output, stepErr)), res.MemoryUsedMB, res.MemoryLimitMB)
 					finalStatus = StatusFailed
 				}
 				break
@@ -290,7 +290,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 					status = StatusFailed
 					finalStatus = StatusFailed
 				}
-				p.finishStepRun(r.stepRunID, status, strPtr(r.err.Error()), r.usedMB, r.limitMB)
+				p.finishStepRun(r.stepRunID, status, strPtr(failureOutput(r.output, r.err)), r.usedMB, r.limitMB)
 				slog.WarnContext(ctx, "worker: parallel step failed", "run_id", runID, "step", r.stepIdx, "action", r.action)
 				groupFailed = true
 			} else {
@@ -728,3 +728,16 @@ func (p *WorkerPool) failRun(runID, sessionID string) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// failureOutput combines a failed (or cancelled) step's captured output — forge
+// stdout/stderr, an HTTP response body, etc. — with its error summary, so the run
+// view surfaces the real failure detail instead of only "<action> failed (exit
+// code: N)". Both share the single response_body column; the error trails the
+// captured output as a footer (and stands alone when the step produced none).
+func failureOutput(output string, err error) string {
+	msg := err.Error()
+	if output = strings.TrimRight(output, "\n"); output == "" {
+		return msg
+	}
+	return output + "\n\n" + msg
+}

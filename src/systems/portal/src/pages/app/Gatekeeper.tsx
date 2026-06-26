@@ -5,7 +5,7 @@
  * goes through the typed bff client (src/api/bff.ts), which proxies /api/* to
  * conductor; tabs are gated on the caller's redux permissions.
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector } from '../../store/hooks';
@@ -41,6 +41,13 @@ const inputStyle = {
   boxSizing: 'border-box' as const,
 };
 
+// roleLabel is the human-facing name for a role — its name when set, otherwise a
+// short slice of the UUID. A raw role_id (a UUID) means nothing to an admin, so
+// every place a role is shown or chosen renders this instead.
+function roleLabel(role: Role): string {
+  return role.name?.trim() || `${shortId(role.role_id)} (unnamed)`;
+}
+
 // ── Users tab ─────────────────────────────────────────────────────────────────
 
 /** users tab: master/detail list of all users; the detail pane edits a user (email/username/name/password via updateUser) and deletes via deleteUser, and resolves the user's org/team names through getOrg/getTeam. */
@@ -53,6 +60,7 @@ function UsersTab() {
   const [selected, setSelected] = useState<string | null>(null);
   const [org, setOrg] = useState<Org | null>(null);
   const [team, setTeam] = useState<Team | null>(null);
+  const [roles, setRoles] = useState<Role[]>([]);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ email: '', username: '', firstname: '', lastname: '', password: '' });
   const [saving, setSaving] = useState(false);
@@ -65,8 +73,11 @@ function UsersTab() {
   }, [token]);
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
+  // Resolve a user's role_id to a name in the detail pane. Best effort.
+  useEffect(() => { listRoles(token).then(setRoles).catch(() => {}); }, [token]);
 
   const selectedUser = users.find(u => u.user_id === selected);
+  const roleById = useMemo(() => new Map(roles.map(r => [r.role_id, r])), [roles]);
 
   useEffect(() => {
     setEditing(false);
@@ -197,7 +208,7 @@ function UsersTab() {
               <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '12px 16px', fontFamily: T.mono, fontSize: 12 }}>
                 {org && <div style={{ marginBottom: 4 }}><span style={{ color: T.faint }}>org   </span><span style={{ color: T.text }}>{org.org_name}</span></div>}
                 {team && <div style={{ marginBottom: 4 }}><span style={{ color: T.faint }}>team  </span><span style={{ color: T.text }}>{team.team_name}</span></div>}
-                {selectedUser.role_id && <div><span style={{ color: T.faint }}>role  </span><span style={{ color: T.dim }}>{selectedUser.role_id.slice(0, 8)}…</span></div>}
+                {selectedUser.role_id && <div><span style={{ color: T.faint }}>role  </span><span style={{ color: T.dim }}>{(() => { const r = roleById.get(selectedUser.role_id); return r ? roleLabel(r) : shortId(selectedUser.role_id); })()}</span></div>}
               </div>
             )}
           </div>
@@ -218,9 +229,11 @@ function RolesTab() {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState('');
   const [newPermIds, setNewPermIds] = useState('');
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState('');
   const [editPermIds, setEditPermIds] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
 
@@ -238,13 +251,13 @@ function RolesTab() {
 
   const selectedRole = roles.find(r => r.role_id === selected);
 
-  const startEdit = (r: Role) => { setEditPermIds(r.permissions_ids.join(', ')); setError(null); setEditing(true); };
+  const startEdit = (r: Role) => { setEditName(r.name ?? ''); setEditPermIds(r.permissions_ids.join(', ')); setError(null); setEditing(true); };
 
   const handleUpdate = async (id: string) => {
     const ids = editPermIds.split(',').map(s => s.trim()).filter(Boolean);
     setSavingEdit(true); setError(null);
     try {
-      const updated = await updateRole(token, id, { permissions_ids: ids });
+      const updated = await updateRole(token, id, { name: editName.trim(), permissions_ids: ids });
       setRoles(prev => prev.map(r => r.role_id === id ? updated : r));
       setEditing(false);
     } catch (e: unknown) { setError((e as Error).message); }
@@ -258,9 +271,9 @@ function RolesTab() {
     const ids = newPermIds.split(',').map(s => s.trim()).filter(Boolean);
     setCreating(true); setError(null);
     try {
-      const role = await createRole(token, { permissions_ids: ids });
+      const role = await createRole(token, { name: newName.trim() || undefined, permissions_ids: ids });
       setRoles(prev => [role, ...prev]);
-      setNewPermIds(''); setShowCreate(false);
+      setNewName(''); setNewPermIds(''); setShowCreate(false);
     } catch (e: unknown) { setError((e as Error).message); }
     finally { setCreating(false); }
   };
@@ -287,6 +300,8 @@ function RolesTab() {
         {showCreate && (
           <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card }}>
             {error && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{error}</div>}
+            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="role name (e.g. ci-deployer)" autoFocus
+              style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }} />
             <input value={newPermIds} onChange={e => setNewPermIds(e.target.value)} placeholder="permission IDs (comma-separated)"
               style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }} />
             <div style={{ display: 'flex', gap: 6 }}>
@@ -305,7 +320,7 @@ function RolesTab() {
             return (
               <button key={role.role_id} onClick={() => setSelected(role.role_id)}
                 style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{role.role_id.slice(0, 8)}…</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{roleLabel(role)}</div>
                 <div style={{ fontSize: 11, color: T.faint, marginTop: 2 }}>{role.permissions_ids.length} permission{role.permissions_ids.length !== 1 ? 's' : ''}</div>
               </button>
             );
@@ -320,7 +335,8 @@ function RolesTab() {
           <div style={{ padding: '20px 24px' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 }}>
               <div>
-                <div style={{ fontFamily: T.mono, fontSize: 16, fontWeight: 700, color: T.textHi }}>{selectedRole.role_id}</div>
+                <div style={{ fontFamily: T.mono, fontSize: 16, fontWeight: 700, color: T.textHi }}>{roleLabel(selectedRole)}</div>
+                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginTop: 2 }}>{selectedRole.role_id}</div>
                 <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginTop: 2 }}>
                   updated {timeAgo(selectedRole.updated_at)} ago ·{' '}
                   {selectedRole.active ? <span style={{ color: T.green }}>active</span> : <span style={{ color: T.red }}>inactive</span>}
@@ -341,6 +357,9 @@ function RolesTab() {
             </div>
             {editing && (
               <div style={{ background: T.card, border: `1px solid ${T.borderHi}`, padding: '14px 16px', marginBottom: 16 }}>
+                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 8, letterSpacing: 0.5 }}>NAME</div>
+                <input value={editName} onChange={e => setEditName(e.target.value)} placeholder="role name (e.g. ci-deployer)"
+                  style={{ ...inputStyle, background: T.cardHi, marginBottom: 12 }} />
                 <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 8, letterSpacing: 0.5 }}>PERMISSION IDS · comma-separated</div>
                 <textarea value={editPermIds} onChange={e => setEditPermIds(e.target.value)} rows={3}
                   style={{ ...inputStyle, background: T.cardHi, resize: 'vertical', marginBottom: 10 }} />
@@ -776,6 +795,7 @@ function SecretsTab() {
 function TeamsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [teams, setTeams] = useState<Team[]>([]);
+  const [roles, setRoles] = useState<Role[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -798,9 +818,13 @@ function TeamsTab() {
   }, [token]);
 
   useEffect(() => { fetchTeams(); }, [fetchTeams]);
+  // Roles back the create form's role picker and resolve a team's role_id to a
+  // name in the detail pane. Best effort — the picker degrades to "no roles".
+  useEffect(() => { listRoles(token).then(setRoles).catch(() => {}); }, [token]);
   useEffect(() => { setEditing(false); }, [selected]);
 
   const selectedTeam = teams.find(t => t.team_id === selected);
+  const roleById = useMemo(() => new Map(roles.map(r => [r.role_id, r])), [roles]);
 
   const handleRename = async (id: string) => {
     if (!editName.trim()) return;
@@ -858,7 +882,10 @@ function TeamsTab() {
           <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card }}>
             {error && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{error}</div>}
             <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="team name" autoFocus style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }} />
-            <input value={newRoleId} onChange={e => setNewRoleId(e.target.value)} placeholder="role ID (optional)" style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }} />
+            <select value={newRoleId} onChange={e => setNewRoleId(e.target.value)} style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }}>
+              <option value="">no role</option>
+              {roles.map(r => <option key={r.role_id} value={r.role_id}>{roleLabel(r)}</option>)}
+            </select>
             <div style={{ display: 'flex', gap: 6 }}>
               <button onClick={handleCreate} disabled={!newName.trim() || creating}
                 style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 10, fontWeight: 600, padding: '5px 0', cursor: 'pointer', opacity: (!newName.trim() || creating) ? 0.6 : 1 }}>
@@ -892,7 +919,7 @@ function TeamsTab() {
               <div>
                 <div style={{ fontFamily: T.mono, fontSize: 20, fontWeight: 700, color: T.textHi, marginBottom: 4 }}>{selectedTeam.team_name}</div>
                 <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>updated {timeAgo(selectedTeam.updated_at)} ago</div>
-                {selectedTeam.role_id && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, marginTop: 2 }}>role: {selectedTeam.role_id.slice(0, 8)}…</div>}
+                {selectedTeam.role_id && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, marginTop: 2 }}>role: {(() => { const r = roleById.get(selectedTeam.role_id); return r ? roleLabel(r) : shortId(selectedTeam.role_id); })()}</div>}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button onClick={() => { if (editing) { setEditing(false); } else { setEditName(selectedTeam.team_name); setError(null); setEditing(true); } }}

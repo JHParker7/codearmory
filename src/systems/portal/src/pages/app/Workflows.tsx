@@ -7,13 +7,13 @@ import { Pill } from '../../components/Pill';
 import { useAppSelector } from '../../store/hooks';
 import {
   listWorkflows, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
-  createWorkflow, updateWorkflow, listSteps, createStep, deleteStep, listActions, listForgeImages,
+  createWorkflow, updateWorkflow, listSteps, createStep, updateStep, deleteStep, listActions, listForgeImages,
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
 import { PipelineBlocks } from './PipelineBlocks';
 import type { StepRef } from './pipelineGraph';
-import { schemaForAction, buildStepWith, WITH_KEY_PREFIX } from './stepSchema';
+import { schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX } from './stepSchema';
 import { timeAgo, statusTone, isRunActive, fmtDuration } from '../../utils';
 
 type MainTab = 'pipelines' | 'steps' | 'actions';
@@ -362,6 +362,8 @@ function StepsTab() {
   const [withVals, setWithVals] = useState<Record<string, string>>({});
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  // null = the form (when open) creates a new step; a step_id = it edits that step.
+  const [editId, setEditId] = useState<string | null>(null);
 
   const fetchSteps = useCallback(async () => {
     setLoading(true); setError(null);
@@ -397,22 +399,51 @@ function StepsTab() {
   const selectedStep = steps.find(s => s.step_id === selected);
 
   const setWith = (key: string, val: string) => setWithVals(v => ({ ...v, [key]: val }));
-  const resetCreate = () => { setName(''); setDescription(''); setTimeoutSecs(''); setAction(''); setWithVals({}); setCreateError(null); };
+  const resetCreate = () => { setName(''); setDescription(''); setTimeoutSecs(''); setAction(''); setWithVals({}); setCreateError(null); setEditId(null); };
 
-  /** creates a step, assembling the `with` map from the action's tailored schema fields. */
-  const handleCreate = async () => {
+  // Toggle the form open in create mode (clearing any in-progress edit), or close
+  // it if it's already open for a create.
+  const openCreate = () => {
+    if (showCreate && editId === null) { setShowCreate(false); resetCreate(); return; }
+    resetCreate();
+    setShowCreate(true);
+  };
+
+  // Load an existing step into the form and open it in edit mode. formValsFromWith
+  // is the inverse of buildStepWith, so the tailored `with` inputs prefill.
+  const startEdit = (s: Step) => {
+    setEditId(s.step_id);
+    setName(s.name);
+    setDescription(s.description ?? '');
+    setTimeoutSecs(s.timeout != null ? String(s.timeout) : '');
+    setAction(s.action);
+    setWithVals(formValsFromWith(s.action, s.with ?? {}));
+    setCreateError(null);
+    setShowCreate(true);
+  };
+
+  /** Creates or (when editId is set) updates a step, assembling the `with` map from
+   *  the action's tailored schema fields. The backend update is a full replace, so
+   *  the payload is identical for both — only the endpoint differs. */
+  const handleSubmit = async () => {
     if (!name.trim() || !action.trim()) return;
     setCreating(true); setCreateError(null);
     try {
       const withMap = buildStepWith(action, k => withVals[k] ?? '');
-      const s = await createStep(token, {
+      const payload = {
         name: name.trim(),
         description: description.trim() || undefined,
         action: action.trim(),
         with: Object.keys(withMap).length > 0 ? withMap : undefined,
         timeout: timeoutSecs ? parseInt(timeoutSecs, 10) : undefined,
-      });
-      setSteps(prev => [s, ...prev]);
+      };
+      if (editId) {
+        const updated = await updateStep(token, editId, payload);
+        setSteps(prev => prev.map(s => s.step_id === editId ? updated : s));
+      } else {
+        const s = await createStep(token, payload);
+        setSteps(prev => [s, ...prev]);
+      }
       resetCreate();
       setShowCreate(false);
     } catch (e: unknown) { setCreateError((e as Error).message); }
@@ -434,7 +465,7 @@ function StepsTab() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.textHi }}>steps</span>
             <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={() => setShowCreate(v => !v)}
+              <button onClick={openCreate} title="new step"
                 style={{ background: showCreate ? T.greenSoft : 'transparent', border: `1px solid ${showCreate ? T.green : T.border}`, color: showCreate ? T.green : T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>+</button>
               <button onClick={fetchSteps} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>↻</button>
             </div>
@@ -446,6 +477,7 @@ function StepsTab() {
 
         {showCreate && (
           <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card, overflow: 'auto', maxHeight: '62vh' }}>
+            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 8 }}>{editId ? 'edit step' : 'new step'}</div>
             {createError && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{createError}</div>}
 
             <label style={stepLabelStyle}>name *</label>
@@ -488,9 +520,9 @@ function StepsTab() {
             <input value={description} onChange={e => setDescription(e.target.value)} placeholder="optional" style={stepInputStyle} />
 
             <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={handleCreate} disabled={!name.trim() || !action.trim() || creating}
+              <button onClick={handleSubmit} disabled={!name.trim() || !action.trim() || creating}
                 style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 10, fontWeight: 600, padding: '5px 0', cursor: 'pointer', opacity: (!name.trim() || !action.trim() || creating) ? 0.6 : 1 }}>
-                {creating ? '[ · · · ]' : '[ create ]'}
+                {creating ? '[ · · · ]' : editId ? '[ save ]' : '[ create ]'}
               </button>
               <button onClick={() => { setShowCreate(false); resetCreate(); }} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '5px 8px', cursor: 'pointer' }}>✕</button>
             </div>
@@ -531,12 +563,18 @@ function StepsTab() {
                 {selectedStep.description && <div style={{ fontFamily: T.mono, fontSize: 12, color: T.dim, marginTop: 4 }}>{selectedStep.description}</div>}
                 <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginTop: 4 }}>updated {timeAgo(selectedStep.updated_at)} ago</div>
               </div>
-              <button onClick={() => handleDelete(selectedStep.step_id)}
-                style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}
-                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
-                [ delete ]
-              </button>
+              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                <button onClick={() => startEdit(selectedStep)}
+                  style={{ background: editId === selectedStep.step_id ? T.greenSoft : 'transparent', border: `1px solid ${editId === selectedStep.step_id ? T.green : T.border}`, color: editId === selectedStep.step_id ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+                  [ edit ]
+                </button>
+                <button onClick={() => handleDelete(selectedStep.step_id)}
+                  style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
+                  [ delete ]
+                </button>
+              </div>
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>

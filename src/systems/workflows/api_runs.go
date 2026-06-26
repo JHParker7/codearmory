@@ -103,7 +103,10 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	workflowID := r.PathValue("id")
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "triggerRun", "workflows/runs")
+	// Run resources are namespaced under the workflow ref so access can be granted
+	// per workflow (e.g. trigger runs of "deploy-prod"). The default grant
+	// {username}/workflows/runs/* still covers it.
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "triggerRun", "workflows/runs/"+workflowID)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -114,7 +117,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	wf, err := getWorkflow(ctx, workflowID)
+	wf, err := resolveWorkflowRef(ctx, workflowID, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -260,12 +263,38 @@ func handleListRuns(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(runs) //nolint:errcheck
 }
 
+// runRefAndResource extracts the run id and its RBAC resource from either the
+// flat route (/runs/{id}) or the workflow-namespaced route
+// (/pipelines/{id}/runs/{run_id}). On the nested route {id} is the workflow ref,
+// so the resource is workflows/runs/<workflow_ref>/<run_id>; on the flat route it
+// is the un-namespaced workflows/runs/<run_id>. nestedWorkflowRef is "" for the
+// flat route.
+func runRefAndResource(r *http.Request) (runID, resource, nestedWorkflowRef string) {
+	if rid := r.PathValue("run_id"); rid != "" {
+		ref := r.PathValue("id")
+		return rid, "workflows/runs/" + ref + "/" + rid, ref
+	}
+	id := r.PathValue("id")
+	return id, "workflows/runs/" + id, ""
+}
+
+// runMatchesWorkflowRef confirms a run belongs to the workflow named by a nested
+// route's {id} ref, so /pipelines/deploy-prod/runs/<id> can't surface a run from
+// a different workflow. A no-op on the flat route (ref == "").
+func runMatchesWorkflowRef(ctx context.Context, ref string, run WorkflowRun, userID, orgID string) bool {
+	if ref == "" {
+		return true
+	}
+	wf, err := resolveWorkflowRef(ctx, ref, userID, orgID)
+	return err == nil && wf.WorkflowID == run.WorkflowID
+}
+
 func handleGetRun(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("workflows").Start(r.Context(), "handleGetRun")
 	defer span.End()
 
-	id := r.PathValue("id")
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRun", "workflows/runs/"+id)
+	id, resource, wfRef := runRefAndResource(r)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getRun", resource)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -289,7 +318,7 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get run", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessRun(run, userID, orgID) {
+	if !canAccessRun(run, userID, orgID) || !runMatchesWorkflowRef(ctx, wfRef, run, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "run not found", http.StatusNotFound)
 		return
@@ -315,8 +344,8 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 		ctx, span := otel.Tracer("workflows").Start(r.Context(), "handleCancelRun")
 		defer span.End()
 
-		id := r.PathValue("id")
-		userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "cancelRun", "workflows/runs/"+id)
+		id, resource, wfRef := runRefAndResource(r)
+		userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "cancelRun", resource)
 		if !ok {
 			span.SetStatus(codes.Ok, "")
 			return
@@ -340,7 +369,7 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 			http.Error(w, "failed to get run", http.StatusInternalServerError)
 			return
 		}
-		if !canAccessRun(run, userID, orgID) {
+		if !canAccessRun(run, userID, orgID) || !runMatchesWorkflowRef(ctx, wfRef, run, userID, orgID) {
 			span.SetStatus(codes.Ok, "")
 			http.Error(w, "run not found", http.StatusNotFound)
 			return

@@ -437,6 +437,11 @@ func buildMux(workers *WorkerPool) http.Handler {
 	mux.HandleFunc("GET /runs", handleListRuns)
 	mux.HandleFunc("GET /runs/{id}", handleGetRun)
 	mux.HandleFunc("DELETE /runs/{id}", handleCancelRun(workers))
+	// Workflow-namespaced run routes: the run resource becomes
+	// workflows/runs/<workflow_ref>/<run_id> so access can be granted per workflow.
+	// The flat /runs/{id} routes above stay for back-compat.
+	mux.HandleFunc("GET /pipelines/{id}/runs/{run_id}", handleGetRun)
+	mux.HandleFunc("DELETE /pipelines/{id}/runs/{run_id}", handleCancelRun(workers))
 	return mux
 }
 
@@ -463,6 +468,23 @@ func run(ctx context.Context) error {
 	}
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project ON workflows (project) WHERE project <> ''`).Error; err != nil {
 		slog.Warn("failed to create workflows project index", "error", err)
+	}
+	// Workflow/step names are resource identifiers (a name addresses the row in the
+	// URL and RBAC resource), so they must be unique within their visibility scope:
+	// per creator for personal rows (org_id='') and per org for shared rows. These
+	// partial unique indexes are the hard backstop; workflowNameExists/
+	// stepNameConflict are the user-facing guards. Best-effort: a fresh DB always
+	// gets them; on a DB with pre-existing duplicates the index is skipped (logged)
+	// and the app-level guard still prevents new collisions.
+	for _, idx := range []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_workflows_user_name ON workflows (created_by, name) WHERE active AND org_id=''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_workflows_org_name ON workflows (org_id, name) WHERE active AND org_id<>''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_steps_user_name ON steps (created_by, name) WHERE active AND org_id=''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_steps_org_name ON steps (org_id, name) WHERE active AND org_id<>''`,
+	} {
+		if err := connect().Exec(idx).Error; err != nil {
+			slog.Warn("failed to create unique name index (pre-existing duplicates?); app-level guard still enforces uniqueness", "index", idx, "error", err)
+		}
 	}
 	slog.Info("database initialized")
 

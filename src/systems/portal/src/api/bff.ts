@@ -167,6 +167,7 @@ export function getTeam(token: string, id: string) {
 
 export interface Role {
   role_id: string;
+  name?: string;
   permissions_ids: string[];
   org_id?: string | null;
   owner_id: string;
@@ -982,11 +983,11 @@ export function deletePermission(token: string, id: string) {
 
 // ── Roles extended ────────────────────────────────────────────────────────────
 
-export function createRole(token: string, payload: { permissions_ids: string[] }) {
+export function createRole(token: string, payload: { name?: string; permissions_ids: string[] }) {
   return req<Role>('POST', '/gatekeeper/roles', token, payload);
 }
 
-export function updateRole(token: string, id: string, payload: { permissions_ids: string[] }) {
+export function updateRole(token: string, id: string, payload: { name?: string; permissions_ids: string[] }) {
   return req<Role>('PUT', `/gatekeeper/roles/${id}`, token, payload);
 }
 

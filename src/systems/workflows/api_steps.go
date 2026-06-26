@@ -77,6 +77,10 @@ func handleCreateStep(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
+	if msg := validateResourceName(req.Name); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
 
 	// Name must be unique per user/org.
 	exists, err := stepNameExists(ctx, req.Name, userID, orgID)
@@ -173,7 +177,7 @@ func handleGetStep(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	s, err := getStep(ctx, id)
+	s, err := resolveStepRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -212,7 +216,7 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	existing, err := getStep(ctx, id)
+	existing, err := resolveStepRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -240,6 +244,26 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
+	// Validate the name charset only on an actual rename, so editing a step whose
+	// name predates this rule (e.g. legacy spaces) isn't blocked unless it's changed.
+	if req.Name != existing.Name {
+		if msg := validateResourceName(req.Name); msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
+			return
+		}
+	}
+	// A rename must not collide with another of the caller's steps (the name is a
+	// resource identifier); keeping its own name is allowed (excludes existing.StepID).
+	if conflict, cerr := stepNameConflict(ctx, req.Name, existing.StepID, userID, orgID); cerr != nil {
+		span.RecordError(cerr)
+		span.SetStatus(codes.Error, "db error")
+		http.Error(w, "failed to update step", http.StatusInternalServerError)
+		return
+	} else if conflict {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "a step with that name already exists", http.StatusConflict)
+		return
+	}
 
 	timeout := req.Timeout
 	if timeout == 0 {
@@ -260,7 +284,7 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s, err := getStep(ctx, id)
+	s, err := getStep(ctx, existing.StepID)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db fetch after update failed")
@@ -269,7 +293,7 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.InfoContext(ctx, "step updated", "step_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "step updated", "step_id", existing.StepID, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s) //nolint:errcheck
 }
@@ -290,7 +314,7 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	s, err := getStep(ctx, id)
+	s, err := resolveStepRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
