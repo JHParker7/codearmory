@@ -116,6 +116,44 @@ export function schemaForAction(action: string): StepField[] {
   ];
 }
 
+/**
+ * Inverse of buildStepWith: turns a stored `with` map back into the form's
+ * prefixed string field values, so an existing step can be loaded into the
+ * create/edit form. Typed fields are serialised to the text shape their input
+ * expects (env → "K=V K2=V2", int/json/other non-strings → JSON, strings as-is);
+ * any keys not covered by a typed field are collected into the advanced With
+ * JSON field. Round-trips with buildStepWith for every action schema.
+ */
+export function formValsFromWith(action: string, withMap: Record<string, unknown>): Record<string, string> {
+  const vals: Record<string, string> = {};
+  const fields = schemaForAction(action);
+  const typedKeys = new Set<string>();
+
+  for (const f of fields) {
+    if (f.key === RAW_WITH_KEY) continue;
+    typedKeys.add(f.key);
+    if (!(f.key in withMap)) continue;
+    const v = withMap[f.key];
+    if (f.kind === 'env' && v && typeof v === 'object' && !Array.isArray(v)) {
+      vals[WITH_KEY_PREFIX + f.key] = Object.entries(v as Record<string, unknown>)
+        .map(([k, val]) => `${k}=${val}`).join(' ');
+    } else {
+      vals[WITH_KEY_PREFIX + f.key] = typeof v === 'string' ? v : JSON.stringify(v);
+    }
+  }
+
+  // Keys the typed fields didn't claim go into the advanced With JSON field, the
+  // same escape hatch buildStepWith reads them back from.
+  const leftover: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(withMap)) {
+    if (!typedKeys.has(k)) leftover[k] = v;
+  }
+  if (fields.some(f => f.key === RAW_WITH_KEY) && Object.keys(leftover).length > 0) {
+    vals[WITH_KEY_PREFIX + RAW_WITH_KEY] = JSON.stringify(leftover, null, 2);
+  }
+  return vals;
+}
+
 /** Splits a whitespace-separated KEY=VALUE token string into a map. */
 function parseEnvTokens(s: string, label: string): Record<string, string> {
   const env: Record<string, string> = {};
