@@ -5,6 +5,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import { listContainerRepos, listImageTags, getManifest, deleteManifest } from '../../api/bff';
 import type { ContainerRepo, ImageTag, ImageManifest } from '../../api/bff';
@@ -75,8 +76,12 @@ export function Containers() {
     }
   }, [token, selected]);
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDeleteManifest = async (digest: string) => {
     if (!selected) return;
+    const tagName = tags.find(t => t.digest === digest)?.name;
+    if (!(await confirm({ message: `Delete image ${selected.name}${tagName ? `:${tagName}` : ''}? This removes the manifest from the registry.` }))) return;
     setDeleting(digest);
     try {
       await deleteManifest(token, selected.namespace, selected.name, digest);
@@ -99,6 +104,7 @@ export function Containers() {
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
+      {confirmEl}
       {/* Repo list */}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>

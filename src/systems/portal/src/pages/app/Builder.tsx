@@ -11,6 +11,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector, useAppDispatch } from '../../store/hooks';
 import { hydrateRegisteredServices } from '../../store/authSlice';
 import { listServices, setService, deleteService } from '../../api/bff';
@@ -111,7 +112,7 @@ export function Builder() {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [confirm, confirmEl] = useConfirm();
 
   const [editing, setEditing] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -132,7 +133,7 @@ export function Builder() {
 
   useEffect(() => { fetchServices(); }, [fetchServices]);
   // Leaving a selection cancels any in-progress edit/confirm.
-  useEffect(() => { setEditing(false); setPendingDelete(null); }, [selected]);
+  useEffect(() => { setEditing(false); }, [selected]);
 
   const selectedSvc = services.find(s => s.service === selected) ?? null;
 
@@ -156,11 +157,11 @@ export function Builder() {
   };
 
   const remove = async (svc: OrgService) => {
+    if (!(await confirm({ message: `Remove the ${svc.service} baseline? The service will be deregistered and undeployed.`, confirmLabel: 'remove baseline' }))) return;
     setBusy(svc.service); setError(null);
     try {
       await deleteService(token, svc.service);
       if (selected === svc.service) setSelected(null);
-      setPendingDelete(null);
       await afterMutation();
     } catch (e: unknown) { setError((e as Error).message); }
     finally { setBusy(null); }
@@ -284,6 +285,7 @@ export function Builder() {
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {confirmEl}
       {/* Header */}
       <div style={{ padding: '16px 24px', borderBottom: `1px solid ${T.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
         <div>
@@ -368,22 +370,12 @@ export function Builder() {
                     </button>
                   )}
                   {isDeletable(selectedSvc) && (
-                    pendingDelete === selectedSvc.service ? (
-                      <>
-                        <button onClick={() => remove(selectedSvc)} disabled={busy === selectedSvc.service}
-                          style={{ background: T.redSoft, border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
-                          {busy === selectedSvc.service ? '[ · · · ]' : '[ confirm remove ]'}
-                        </button>
-                        <button onClick={() => setPendingDelete(null)} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>✕</button>
-                      </>
-                    ) : (
-                      <button onClick={() => setPendingDelete(selectedSvc.service)}
-                        style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}
-                        onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
-                        onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
-                        [ remove baseline ]
-                      </button>
-                    )
+                    <button onClick={() => remove(selectedSvc)} disabled={busy === selectedSvc.service}
+                      style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}
+                      onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
+                      onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
+                      {busy === selectedSvc.service ? '[ · · · ]' : '[ remove baseline ]'}
+                    </button>
                   )}
                 </div>
               </div>

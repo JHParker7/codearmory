@@ -7,6 +7,7 @@
  */
 import { useState, useEffect, useCallback, type CSSProperties } from 'react';
 import { T } from '../../theme';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   listExecutions, getExecution, cancelExecution, createExecution,
@@ -474,7 +475,10 @@ function RunnerClassesTab() {
     finally { setEditingEnabled(null); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (name: string) => {
+    if (!(await confirm({ message: `Delete runner class ${name}? Executions configured to use it will fall back to the default.` }))) return;
     try {
       await deleteRunnerClass(token, name);
       setClasses(prev => prev.filter(c => c.name !== name));
@@ -484,6 +488,7 @@ function RunnerClassesTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>

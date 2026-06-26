@@ -8,6 +8,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   listUsers, updateUser, deleteUser,
@@ -109,7 +110,11 @@ function UsersTab() {
     finally { setSaving(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const name = users.find(u => u.user_id === id)?.username;
+    if (!(await confirm({ message: `Delete user @${name ?? id}? This permanently removes the account and cannot be undone.` }))) return;
     try {
       await deleteUser(token, id);
       setUsers(prev => prev.filter(u => u.user_id !== id));
@@ -119,6 +124,7 @@ function UsersTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{users.length > 0 ? `${users.length} user${users.length !== 1 ? 's' : ''}` : ''}</span>
@@ -278,7 +284,11 @@ function RolesTab() {
     finally { setCreating(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const r = roles.find(x => x.role_id === id);
+    if (!(await confirm({ message: `Delete role ${r ? roleLabel(r) : id}? Users assigned this role will lose its permissions.` }))) return;
     try {
       await deleteRole(token, id);
       setRoles(prev => prev.filter(r => r.role_id !== id));
@@ -288,6 +298,7 @@ function RolesTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{roles.length > 0 ? `${roles.length} role${roles.length !== 1 ? 's' : ''}` : ''}</span>
@@ -462,7 +473,11 @@ function PermissionsTab() {
     finally { setCreating(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const name = perms.find(p => p.permissions_id === id)?.name;
+    if (!(await confirm({ message: `Delete permission ${name ?? id}? Roles referencing it will lose these grants.` }))) return;
     try {
       await deletePermission(token, id);
       setPerms(prev => prev.filter(p => p.permissions_id !== id));
@@ -472,6 +487,7 @@ function PermissionsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{perms.length > 0 ? `${perms.length} permission${perms.length !== 1 ? 's' : ''}` : ''}</span>
@@ -590,6 +606,7 @@ function SecretProviderPanel() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [confirm, confirmEl] = useConfirm();
 
   const load = useCallback(async () => {
     if (!orgId) { setLoading(false); return; }
@@ -606,6 +623,8 @@ function SecretProviderPanel() {
 
   const apply = async () => {
     if (!orgId) return;
+    if (choice === 'builtin' && current !== 'builtin'
+      && !(await confirm({ message: `Reset the secret backend from ${current} to builtin? The ${current} configuration is removed and secrets are served from the platform database.`, confirmLabel: 'reset to builtin' }))) return;
     setSaving(true); setError(null); setNotice(null);
     try {
       let cfg: Record<string, unknown> | undefined;
@@ -625,6 +644,7 @@ function SecretProviderPanel() {
 
   return (
     <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '16px', marginBottom: 20 }}>
+      {confirmEl}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
         <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1 }}>SECRET BACKEND</div>
         {loading ? <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>· · ·</span>
@@ -702,7 +722,11 @@ function SecretsTab() {
     finally { setCreating(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const name = secrets.find(s => s.secret_id === id)?.name;
+    if (!(await confirm({ message: `Delete secret ${name ?? id}? Services relying on it will lose access.` }))) return;
     setDeletingId(id);
     try {
       await deleteSecret(token, id);
@@ -713,6 +737,7 @@ function SecretsTab() {
 
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
+      {confirmEl}
       <SecretProviderPanel />
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1 }}>SECRETS · {secrets.length}</div>
@@ -848,7 +873,11 @@ function TeamsTab() {
     finally { setCreating(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const name = teams.find(t => t.team_id === id)?.team_name;
+    if (!(await confirm({ message: `Delete team ${name ?? id}? Its memberships will be removed.` }))) return;
     try {
       await deleteTeam(token, id);
       setTeams(prev => prev.filter(t => t.team_id !== id));
@@ -869,6 +898,7 @@ function TeamsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{teams.length > 0 ? `${teams.length} team${teams.length !== 1 ? 's' : ''}` : ''}</span>
@@ -1016,7 +1046,11 @@ function OrgsTab() {
     finally { setSavingEdit(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const name = orgs.find(o => o.org_id === id)?.org_name;
+    if (!(await confirm({ message: `Delete org ${name ?? id}? This removes the organization and its scoped resources.` }))) return;
     try {
       await deleteOrg(token, id);
       setOrgs(prev => prev.filter(o => o.org_id !== id));
@@ -1037,6 +1071,7 @@ function OrgsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{orgs.length > 0 ? `${orgs.length} org${orgs.length !== 1 ? 's' : ''}` : ''}</span>
@@ -1168,7 +1203,11 @@ function InvitesTab() {
     finally { setActing(null); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const email = invites.find(i => i.invite_id === id)?.email;
+    if (!(await confirm({ message: `Delete invite for ${email ?? id}? The invitation link will stop working.` }))) return;
     setActing(id);
     try {
       await deleteInvite(token, id);
@@ -1187,6 +1226,7 @@ function InvitesTab() {
 
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
+      {confirmEl}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1 }}>INVITES · {invites.length}</div>
         <button onClick={fetchInvites} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>↻</button>

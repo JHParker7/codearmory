@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   getGiteaAccount, linkGiteaAccount, unlinkGiteaAccount,
@@ -192,7 +193,10 @@ export function Gitea() {
     }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDeleteRepo = async (repo: GiteaRepo) => {
+    if (!(await confirm({ message: `Delete repository ${repo.full_name}? This permanently removes the repo and all its history.` }))) return;
     try {
       await deleteGiteaRepo(token, repo.owner, repo.name);
       setRepos(prev => prev.filter(r => r.full_name !== repo.full_name));
@@ -231,6 +235,7 @@ export function Gitea() {
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
+      {confirmEl}
       {/* Repo list */}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>

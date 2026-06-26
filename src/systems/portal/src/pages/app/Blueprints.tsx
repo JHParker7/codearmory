@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { fetchWorkspace, addWorkspace, removeWorkspace, setSelected } from '../../store/workspacesSlice';
 import type { WorkspaceDetail } from '../../store/workspacesSlice';
@@ -75,7 +76,7 @@ function WorkspaceDetailPanel({ entry, detail, onRefresh, onDelete }: {
   onRefresh: () => void;
   onDelete: () => void;
 }) {
-  const [confirming, setConfirming] = useState(false);
+  const [confirm, confirmEl] = useConfirm();
   const { data, status, error, lastFetched } = detail;
 
   if (status === 'loading') {
@@ -120,19 +121,11 @@ function WorkspaceDetailPanel({ entry, detail, onRefresh, onDelete }: {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {data.locked ? <Pill tone="amber">locked · {data.lock!.who.split('@')[0]}</Pill> : !data.isEmpty ? <Pill tone="green">unlocked</Pill> : null}
           <button onClick={onRefresh} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer', letterSpacing: 0.3 }}>[ refresh ]</button>
-          <button onClick={() => setConfirming(true)} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer', letterSpacing: 0.3 }}>[ remove ]</button>
+          <button onClick={async () => { if (await confirm({ message: `Remove /state/${entry.path} from your dashboard? This only removes the bookmark — your Terraform state is not deleted.`, confirmLabel: 'remove' })) onDelete(); }} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer', letterSpacing: 0.3 }}>[ remove ]</button>
         </div>
       </div>
 
-      {confirming && (
-        <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '12px 16px', marginBottom: 16, fontFamily: T.mono, fontSize: 12, color: T.red, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span>remove this workspace from your dashboard?</span>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={onDelete} style={{ background: T.red, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, padding: '4px 10px', cursor: 'pointer' }}>[ confirm ]</button>
-            <button onClick={() => setConfirming(false)} style={{ background: 'transparent', border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, padding: '4px 10px', cursor: 'pointer' }}>[ cancel ]</button>
-          </div>
-        </div>
-      )}
+      {confirmEl}
 
       {/* Lock info */}
       {data.locked && data.lock && (

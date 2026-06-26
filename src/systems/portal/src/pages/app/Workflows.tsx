@@ -4,6 +4,7 @@ import type { ReactNode, CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   listWorkflows, getWorkflow, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
@@ -176,7 +177,11 @@ function PipelinesTab() {
     } catch (e: unknown) { setError((e as Error).message); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDeleteWorkflow = async (id: string) => {
+    const name = workflows.find(w => w.workflow_id === id)?.name;
+    if (!(await confirm({ message: `Delete pipeline ${name ?? id}? Its steps and run history will be removed.` }))) return;
     try {
       await deleteWorkflow(token, id);
       setWorkflows(prev => prev.filter(w => w.workflow_id !== id));
@@ -203,6 +208,7 @@ function PipelinesTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
+      {confirmEl}
       {builder && (
         <PipelineBuilderOverlay
           token={token}
@@ -463,7 +469,11 @@ function StepsTab() {
     finally { setCreating(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const name = steps.find(s => s.step_id === id)?.name;
+    if (!(await confirm({ message: `Delete step ${name ?? id}? Pipelines referencing it may break.` }))) return;
     try {
       await deleteStep(token, id);
       setSteps(prev => prev.filter(s => s.step_id !== id));
@@ -473,6 +483,7 @@ function StepsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
