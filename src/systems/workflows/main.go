@@ -157,12 +157,35 @@ func initServices() {
 	slog.Info("services registered", "count", len(serviceURLs))
 }
 
+// catalogSize reports how many actions are currently loaded.
+func catalogSize() int {
+	actionCatalogMu.RLock()
+	defer actionCatalogMu.RUnlock()
+	return len(actionCatalog)
+}
+
 // startCatalogPoller fetches the action catalog from the registry immediately
 // and then refreshes it every 5 minutes so newly registered services are picked
-// up without restarting workflows.
+// up without restarting workflows. Right after a co-deploy the registry may still
+// be ingesting its manifest, so the first poll can come back empty — fast-retry
+// until the catalog first populates (capped) rather than leaving forge/run missing
+// until the 5-minute tick, then settle into the steady cadence.
 func startCatalogPoller(ctx context.Context) {
 	refreshCatalog(ctx)
 	go func() {
+		backoff := 3 * time.Second
+		deadline := time.Now().Add(2 * time.Minute)
+		for catalogSize() == 0 && time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			refreshCatalog(ctx)
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+		}
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -228,6 +251,14 @@ func refreshCatalog(ctx context.Context) {
 			}
 		}
 		newCatalog[def.Name] = def
+	}
+
+	// A transient empty response (registry mid-restart or still ingesting its
+	// manifest) must not wipe a good catalog — that would make forge/run vanish
+	// from running workflows until the next poll. Keep what we already have.
+	if len(newCatalog) == 0 && catalogSize() > 0 {
+		slog.WarnContext(ctx, "catalog refresh: registry returned 0 actions; keeping existing catalog", "existing", catalogSize())
+		return
 	}
 
 	actionCatalogMu.Lock()

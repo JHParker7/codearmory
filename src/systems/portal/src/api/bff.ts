@@ -354,6 +354,18 @@ export interface RunnerClass {
   cpu_millicores: number;
   pids_limit?: number | null;
   tmpfs_mb?: number | null;
+  disk_gb?: number | null;
+  /** Name of the RuntimeBackend this class runs on (resolve to its type for kata vs not). */
+  backend?: string;
+  enabled: boolean;
+  /** Root + writable rootfs + privilege escalation; only meaningful on VM-isolated backends. */
+  privileged?: boolean;
+}
+
+/** Admin runtime target. `type` is the runtime implementation: docker | kubernetes | proxmox | kata. */
+export interface RuntimeBackend {
+  name: string;
+  type: string;
   enabled: boolean;
 }
 
@@ -371,6 +383,10 @@ export function cancelExecution(token: string, id: string) {
 
 export function listRunnerClasses(token: string) {
   return req<RunnerClass[]>('GET', '/forge/runner-classes', token);
+}
+
+export function listRuntimeBackends(token: string) {
+  return req<RuntimeBackend[]>('GET', '/forge/runtime-backends', token);
 }
 
 /** The forge image allowlist (deduped, sorted). Executions may only use these. */

@@ -253,6 +253,43 @@ func loadManifest(ctx context.Context, path string) {
 	}
 }
 
+// reconcileManifest re-ingests any manifest service that has gone missing from
+// the registry DB. loadManifest runs only at startup, so if the database is
+// cleared without the registry being restarted — a redeploy that doesn't roll
+// the registry, or a manual DB wipe — the catalog would stay empty (forge/run
+// vanishes from workflows) until a manual restart. Running this on the ticker
+// lets a wiped DB self-heal. Returns the names it re-ingested.
+func reconcileManifest(ctx context.Context, path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.WarnContext(ctx, "manifest reconcile: read file", "path", path, "error", err)
+		return nil
+	}
+	var entries []manifestEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		slog.WarnContext(ctx, "manifest reconcile: parse JSON", "error", err)
+		return nil
+	}
+	var healed []string
+	for _, e := range entries {
+		var n int64
+		if err := connect().WithContext(ctx).
+			Raw(`SELECT count(1) FROM services WHERE name = ? AND active = true`, e.Name).
+			Scan(&n).Error; err != nil {
+			slog.WarnContext(ctx, "manifest reconcile: db check failed", "service", e.Name, "error", err)
+			return healed // DB trouble — don't thrash; retry next tick
+		}
+		if n == 0 {
+			loadManifestEntry(ctx, e)
+			healed = append(healed, e.Name)
+		}
+	}
+	if len(healed) > 0 {
+		slog.WarnContext(ctx, "manifest reconcile: re-ingested services missing from registry DB", "services", healed)
+	}
+	return healed
+}
+
 func notifyService(ctx context.Context, name, target, key string) {
 	if target == "" || key == "" {
 		return
@@ -288,8 +325,34 @@ func notifyWorkflows(ctx context.Context) {
 		os.Getenv("WORKFLOWS_NOTIFY_KEY"))
 }
 
-func startNotificationTicker(ctx context.Context) {
+func startNotificationTicker(ctx context.Context, manifestPath string) {
 	go func() {
+		// Fast initial reconcile: on a fresh install the registry can ingest the
+		// manifest while the DB is still provisioning, leaving manifest services
+		// (e.g. forge → forge/run) missing with no retry until the 5-minute tick.
+		// Re-check with backoff until everything is present, healing within seconds
+		// instead of leaving the catalog empty. A healthy boot converges on the
+		// first pass (nothing missing) so there's no steady-state cost.
+		if manifestPath != "" {
+			backoff := 3 * time.Second
+			deadline := time.Now().Add(2 * time.Minute)
+			for time.Now().Before(deadline) {
+				if healed := reconcileManifest(ctx, manifestPath); len(healed) == 0 {
+					break // nothing missing — converged
+				}
+				notifyConductor(ctx)
+				notifyWorkflows(ctx)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < 30*time.Second {
+					backoff *= 2
+				}
+			}
+		}
+
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -297,6 +360,11 @@ func startNotificationTicker(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// Heal a wiped/drifted DB before re-notifying, so a cleared DB
+				// repopulates without needing a registry restart.
+				if manifestPath != "" {
+					reconcileManifest(ctx, manifestPath)
+				}
 				notifyConductor(ctx)
 				notifyWorkflows(ctx)
 			}
@@ -429,7 +497,7 @@ func run(ctx context.Context) error {
 		notifyWorkflows(ctx)
 	}
 
-	startNotificationTicker(ctx)
+	startNotificationTicker(ctx, os.Getenv("MANIFEST_FILE"))
 
 	// Register Registry itself as a Gatekeeper service account so its identity rotates.
 	registry.StartKeyRotation(ctx, gatekeeperURL, "registry",

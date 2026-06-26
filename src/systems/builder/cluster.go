@@ -212,7 +212,35 @@ func (b *k8sBackend) selector(service string) map[string]string {
 	}
 }
 
+// externallyManaged reports whether service's Deployment already exists and is owned
+// by something other than builder (e.g. the Helm chart, managed-by=Helm). When it is,
+// builder must manage only the service's config/catalog state and never deploy, mutate,
+// or tear down the workload — the chart owns it. Returns the foreign owner for logging.
+func (b *k8sBackend) externallyManaged(ctx context.Context, service string) (bool, string, error) {
+	dep, err := b.client.AppsV1().Deployments(b.namespace).Get(ctx, b.name(service), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	owner := dep.Labels[labelManagedBy]
+	return owner != managedByValue, owner, nil
+}
+
 func (b *k8sBackend) EnsureService(ctx context.Context, spec workloadSpec) error {
+	// If the workload is already deployed by something else — the Helm chart owns forge,
+	// workflows, etc. — builder keeps managing the service's config/catalog but must not
+	// deploy, provision, register over, or otherwise touch the k8s objects the chart owns.
+	// Skip the whole workload path: applyDeployment/applyService would refuse to overwrite
+	// it anyway, and provisioning a duplicate identity or re-registering its route is churn.
+	if ext, owner, err := b.externallyManaged(ctx, spec.Service); err != nil {
+		return fmt.Errorf("check ownership of %s: %w", spec.Service, err)
+	} else if ext {
+		slog.InfoContext(ctx, "service workload is externally managed; builder manages config only, not the deployment", "service", spec.Service, "managed_by", owner)
+		return nil
+	}
+
 	// Resolve how this service obtains DATABASE_URL. For manual/sql this returns the
 	// stored URL unchanged (written into builder's own Secret below); for cnpg/external
 	// it ensures the operator/external-secrets resource and returns a foreign Secret
