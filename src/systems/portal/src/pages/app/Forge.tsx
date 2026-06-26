@@ -41,6 +41,19 @@ function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   return 'dim';
 }
 
+/**
+ * Renders a stored command argv back into the script the user typed. We submit
+ * commands wrapped as ["sh","-c", <script>] (see handleCreate), so unwrap that
+ * form to show the original — multi-line and without the sh -c scaffolding.
+ * Anything not in that shape (legacy argv-style executions) joins with spaces.
+ */
+function displayCommand(command: string[]): string {
+  if (command.length === 3 && (command[0] === 'sh' || command[0] === '/bin/sh') && command[1] === '-c') {
+    return command[2];
+  }
+  return command.join(' ');
+}
+
 // ── Create-execution modal ────────────────────────────────────────────────────
 
 /** The fields needed to launch an execution — shared by the create modal and rerun. */
@@ -86,7 +99,12 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
       });
       await onSubmit({
         image: image.trim(),
-        command: cmd.trim().split(/\s+/),
+        // Wrap in `sh -c` so the textarea runs as a shell script — multi-line
+        // scripts, pipes, and && work, matching the forge/run pipeline action
+        // (registry-manifest wrap:["sh","-c"]) and the CLI's --run flag. Forge
+        // executes command[] via execve with no shell, so without this a
+        // multi-line command is tokenised on whitespace into a broken argv.
+        command: ['sh', '-c', cmd.trim()],
         env: Object.keys(envPairs).length > 0 ? envPairs : undefined,
         timeout: timeout ? parseInt(timeout, 10) : undefined,
         runner_class: runnerClass.trim() || undefined,
@@ -115,8 +133,8 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
             <ImageSelect value={image} onChange={setImage} options={imageOptions} autoFocus />
           </div>
 
-          <div style={label}>COMMAND <span style={{ color: T.faint, opacity: 0.7 }}>(split into arguments by whitespace)</span></div>
-          <textarea value={cmd} onChange={e => setCmd(e.target.value)} rows={5} placeholder={'echo hello world'}
+          <div style={label}>COMMAND <span style={{ color: T.faint, opacity: 0.7 }}>(runs via sh -c · multi-line ok)</span></div>
+          <textarea value={cmd} onChange={e => setCmd(e.target.value)} rows={5} placeholder={'echo hello\necho world'}
             style={{ ...field, resize: 'vertical', lineHeight: 1.5, marginBottom: 14 }} />
 
           <div style={label}>ENV <span style={{ color: T.faint, opacity: 0.7 }}>(KEY=VALUE, one per line)</span></div>
@@ -178,6 +196,17 @@ function ExecutionsTab() {
     fetchExecutions();
     listRunnerClasses(token).then(setRunnerClasses).catch(() => {});
   }, [fetchExecutions, token]);
+
+  // Auto-refresh the run list every 5s so each row's status (pending → running →
+  // succeeded/failed) updates without a manual reload. Silent on purpose: it
+  // refreshes the list in place rather than calling fetchExecutions, so it never
+  // toggles the loading spinner or clobbers an error with a transient blip.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      listExecutions(token).then(setExecutions).catch(() => { /* keep last-known list */ });
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [token]);
 
   const [rerunning, setRerunning] = useState(false);
   const [rerunError, setRerunError] = useState<string | null>(null);
@@ -343,7 +372,11 @@ function ExecutionsTab() {
               </div>
 
               <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px', marginBottom: 20, fontFamily: T.mono, fontSize: 12, color: T.text }}>
-                <span style={{ color: T.faint }}>$ </span>{selectedExec.command.join(' ')}
+                {displayCommand(selectedExec.command).split('\n').map((line, i) => (
+                  <div key={i} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    <span style={{ color: T.faint }}>$ </span>{line}
+                  </div>
+                ))}
               </div>
 
               {selectedExec.runner_class && (
