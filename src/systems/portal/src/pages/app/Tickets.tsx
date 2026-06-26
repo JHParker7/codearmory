@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import { listTickets, createTicket, updateTicket, deleteTicket, addComment } from '../../api/bff';
 import type { Ticket } from '../../api/bff';
@@ -132,8 +133,11 @@ export function Tickets() {
     }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async () => {
     if (!selectedTicket) return;
+    if (!(await confirm({ message: `Delete ticket "${selectedTicket.title}"? This cannot be undone.` }))) return;
     try {
       await deleteTicket(token, selectedTicket.ticket_id);
       setTickets(prev => prev.filter(t => t.ticket_id !== selectedTicket.ticket_id));
@@ -161,6 +165,7 @@ export function Tickets() {
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
+      {confirmEl}
       {/* Left panel */}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>

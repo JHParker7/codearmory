@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import { listRules, deleteRule, listHookEvents } from '../../api/bff';
 import type { PipelineRule, HookEvent } from '../../api/bff';
@@ -69,7 +70,11 @@ export function Hooks() {
     if (tab === 'events' && !eventsFetched) fetchEvents();
   }, [tab, eventsFetched, fetchEvents]);
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDeleteRule = async (id: string) => {
+    const name = rules.find(r => r.rule_id === id)?.name;
+    if (!(await confirm({ message: `Delete webhook rule ${name ?? id}? Matching events will no longer trigger.` }))) return;
     try {
       await deleteRule(token, id);
       setRules(prev => prev.filter(r => r.rule_id !== id));
@@ -84,6 +89,7 @@ export function Hooks() {
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden', flexDirection: 'column' }}>
+      {confirmEl}
       {/* Tab bar */}
       <div style={{ display: 'flex', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, flexShrink: 0 }}>
         {(['rules', 'events'] as const).map(t => (

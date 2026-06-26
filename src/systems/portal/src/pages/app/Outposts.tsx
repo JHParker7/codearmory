@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   listOutposts, createOutpost, deleteOutpost,
@@ -45,6 +46,7 @@ export function Outposts() {
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [created, setCreated] = useState<CreateOutpostResponse | null>(null);
+  const [confirm, confirmEl] = useConfirm();
 
   const fetchOutposts = useCallback(async () => {
     setLoading(true); setError(null);
@@ -57,6 +59,7 @@ export function Outposts() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt }}>
         <div style={{ fontFamily: T.mono, color: T.textHi, fontSize: 13 }}>$ armory outposts</div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -84,7 +87,7 @@ export function Outposts() {
                 </div>
                 <div style={{ fontFamily: T.mono, color: T.faint, fontSize: 10.5, marginTop: 2 }}>{o.outpost_id}</div>
               </div>
-              <button onClick={async () => { if (confirm(`Delete outpost ${o.name}?`)) { await deleteOutpost(token, o.outpost_id); fetchOutposts(); } }}
+              <button onClick={async () => { if (await confirm({ message: `Delete outpost ${o.name}? The agent will lose its registration and stop receiving commands.` })) { await deleteOutpost(token, o.outpost_id); fetchOutposts(); } }}
                 style={{ ...btnStyle, color: T.dim }}>delete</button>
             </div>
           ))}

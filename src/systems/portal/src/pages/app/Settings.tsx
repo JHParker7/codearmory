@@ -7,6 +7,7 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { T, THEMES, applyTheme, getStoredTheme } from '../../theme';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { saveUser, logout } from '../../store/authSlice';
 import { getSession, deleteSession } from '../../api/bff';
@@ -57,6 +58,7 @@ function SessionsCard({ token }: { token: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [msg, setMsg] = useState('');
+  const [confirm, confirmEl] = useConfirm();
 
   const inspect = async () => {
     if (!id.trim()) return;
@@ -67,6 +69,8 @@ function SessionsCard({ token }: { token: string }) {
   };
   const revoke = async () => {
     if (!id.trim()) return;
+    const own = id.trim() === currentSessionId;
+    if (!(await confirm({ message: `Revoke session ${id.trim()}?${own ? ' This is your current session — you will be signed out immediately.' : ''}`, confirmLabel: 'revoke' }))) return;
     setBusy(true); setError(''); setMsg('');
     try {
       await deleteSession(token, id.trim());
@@ -82,6 +86,7 @@ function SessionsCard({ token }: { token: string }) {
 
   return (
     <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '20px 22px', marginBottom: 20 }}>
+      {confirmEl}
       <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 6 }}>SESSIONS</div>
       <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginBottom: 12 }}>inspect or revoke a session by id · revoking your current session signs you out</div>
       {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>ERR · {error}</div>}

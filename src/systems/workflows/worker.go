@@ -427,6 +427,16 @@ func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step St
 	budget := timeout
 	if def.Async != nil {
 		budget = maxTimeout
+		// The remote job enforces its own timeout (e.g. forge kills the container at
+		// `timeout` seconds), so forward the step's timeout in the request body —
+		// otherwise the service falls back to its own default (forge: 30s) and a
+		// longer step is killed early. Respect an explicit with.timeout if present.
+		if with == nil {
+			with = map[string]any{}
+		}
+		if _, ok := with["timeout"]; !ok {
+			with["timeout"] = timeout
+		}
 	}
 	stepCtx, cancel := context.WithTimeout(ctx, time.Duration(budget)*time.Second)
 	defer cancel()
@@ -581,24 +591,32 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 		}
 		for _, s := range def.Async.FailureStates {
 			if status == s {
-				var parts []string
+				out := ""
 				if def.Async.OutputField != "" {
 					if v, ok := result[def.Async.OutputField]; ok {
-						if sv, ok := v.(string); ok && sv != "" {
-							parts = append(parts, sv)
-						}
+						out, _ = v.(string)
 					}
 				}
+				// Collect the action's own failure reason from its error fields (e.g.
+				// forge's stderr, or its "command not found" diagnostic).
+				var errDetails []string
 				for _, f := range def.Async.ErrorFields {
 					if v, ok := result[f]; ok {
 						if sv, ok := v.(string); ok && sv != "" {
-							parts = append(parts, sv)
+							errDetails = append(errDetails, sv)
 						}
 					}
 				}
 				exitCode := result["exit_code"]
-				return stepResult{Output: strings.Join(parts, "\n"), MemoryUsedMB: used, MemoryLimitMB: limit},
-					fmt.Errorf("%s %s (exit code: %v)", def.Name, status, exitCode)
+				// Surface the action's reported reason as the step error so the run
+				// shows the same message the backing service did (e.g. forge: command
+				// "sh" not found …). Fall back to the generic exit-code summary only
+				// when the action reported no detail. failureOutput keeps any stdout.
+				err := fmt.Errorf("%s %s (exit code: %v)", def.Name, status, exitCode)
+				if detail := strings.TrimSpace(strings.Join(errDetails, "\n")); detail != "" {
+					err = fmt.Errorf("%s %s: %s", def.Name, status, detail)
+				}
+				return stepResult{Output: out, MemoryUsedMB: used, MemoryLimitMB: limit}, err
 			}
 		}
 		for _, s := range def.Async.CancelStates {

@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   listExperiments, createExperiment, deleteExperiment, listExperimentTypes,
@@ -38,6 +39,7 @@ export function Chaos() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [confirm, confirmEl] = useConfirm();
 
   const fetchAll = useCallback(async () => {
     setError(null);
@@ -64,6 +66,7 @@ export function Chaos() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt }}>
         <div style={{ fontFamily: T.mono, color: T.textHi, fontSize: 13 }}>$ armory chaos</div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -98,7 +101,14 @@ export function Chaos() {
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
                 <span style={{ fontFamily: T.mono, color: T.faint, fontSize: 10.5 }}>{e.experiment_id}</span>
-                <button onClick={async () => { await deleteExperiment(token, e.experiment_id); fetchAll(); }} style={{ ...btnStyle, color: T.dim }}>
+                <button onClick={async () => {
+                    const inFlight = e.status === 'pending' || e.status === 'running';
+                    const msg = inFlight
+                      ? `Stop and remove the running ${e.experiment_type} experiment on ${e.target_app_label}?`
+                      : `Delete the ${e.experiment_type} experiment on ${e.target_app_label}?`;
+                    if (!(await confirm({ message: msg, confirmLabel: inFlight ? 'stop' : 'delete' }))) return;
+                    await deleteExperiment(token, e.experiment_id); fetchAll();
+                  }} style={{ ...btnStyle, color: T.dim }}>
                   {e.status === 'pending' || e.status === 'running' ? 'stop' : 'delete'}
                 </button>
               </div>

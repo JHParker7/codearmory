@@ -4,9 +4,10 @@ import type { ReactNode, CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
-  listWorkflows, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
+  listWorkflows, getWorkflow, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
   createWorkflow, updateWorkflow, listSteps, createStep, updateStep, deleteStep, listActions, listForgeImages,
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
@@ -147,6 +148,12 @@ function PipelinesTab() {
   /** selects a workflow and loads its runs. */
   const selectWorkflow = useCallback(async (id: string) => {
     setSelected(id); setRunsLoading(true);
+    // List responses omit step details (steps: []), so the detail graph and the
+    // edit builder would be blank off the list entry. Fetch the full workflow and
+    // merge it into the list so both see the real steps.
+    getWorkflow(token, id)
+      .then(full => setWorkflows(prev => prev.map(w => w.workflow_id === id ? full : w)))
+      .catch(() => { /* keep the list entry on a transient error */ });
     try { setRuns(await listWorkflowRuns(token, id)); }
     catch { setRuns([]); }
     finally { setRunsLoading(false); }
@@ -170,7 +177,11 @@ function PipelinesTab() {
     } catch (e: unknown) { setError((e as Error).message); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDeleteWorkflow = async (id: string) => {
+    const name = workflows.find(w => w.workflow_id === id)?.name;
+    if (!(await confirm({ message: `Delete pipeline ${name ?? id}? Its steps and run history will be removed.` }))) return;
     try {
       await deleteWorkflow(token, id);
       setWorkflows(prev => prev.filter(w => w.workflow_id !== id));
@@ -197,6 +208,7 @@ function PipelinesTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
+      {confirmEl}
       {builder && (
         <PipelineBuilderOverlay
           token={token}
@@ -255,7 +267,14 @@ function PipelinesTab() {
                 style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: triggering ? 'not-allowed' : 'pointer', opacity: triggering ? 0.7 : 1 }}>
                 {triggering ? '[ · · · ]' : '[ ▶ trigger ]'}
               </button>
-              <button onClick={() => setBuilder({ wf: selectedWorkflow })}
+              <button onClick={async () => {
+                // Open the builder with the workflow's steps even if the select-time
+                // fetch hasn't landed yet (list entries carry steps: []).
+                const wf = selectedWorkflow.steps?.length
+                  ? selectedWorkflow
+                  : await getWorkflow(token, selectedWorkflow.workflow_id).catch(() => selectedWorkflow);
+                setBuilder({ wf });
+              }}
                 style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
                 [ edit ]
               </button>
@@ -450,7 +469,11 @@ function StepsTab() {
     finally { setCreating(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const name = steps.find(s => s.step_id === id)?.name;
+    if (!(await confirm({ message: `Delete step ${name ?? id}? Pipelines referencing it may break.` }))) return;
     try {
       await deleteStep(token, id);
       setSteps(prev => prev.filter(s => s.step_id !== id));
@@ -460,6 +483,7 @@ function StepsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
