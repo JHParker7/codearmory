@@ -255,6 +255,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A workflow with that name already exists
+          content:
+            text/plain:
+              schema:
+                type: string
 
     get:
       summary: List workflows

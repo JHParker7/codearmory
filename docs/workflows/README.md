@@ -21,7 +21,7 @@ step C  ──┘──────►   [ref B, ref C]         ◄── workfl
 ## How it works
 
 ```
-Caller → POST /workflows/{id}/runs
+Caller → POST /pipelines/{ref}/runs
          │
          ▼
    workflow_runs (status=pending) in PostgreSQL
@@ -182,15 +182,42 @@ docker run -p 8085:8085 \
 
 All endpoints require `Authorization: Bearer <token>` verified by Gatekeeper, except `/healthz` and the internal endpoints.
 
+### Resource identity: names, not UUIDs
+
+Pipelines and steps are addressed by their **name** as well as their id. A `{id}`
+path segment is resolved as the caller's unique **name** first, falling back to the
+UUID — so `GET /pipelines/deploy-prod` and `GET /pipelines/<uuid>` both work, and
+the conductor-enforced RBAC resource becomes the readable, exact
+`<owner>/workflows/pipelines/deploy-prod` (the owner — `<username>` or
+`org/<org_name>` — stays the isolation boundary). This lets an admin grant access
+to one named pipeline instead of a `…/pipelines/*` wildcard.
+
+Because the name is an identifier:
+
+- **Unique per owner.** Creating or renaming a pipeline/step to a name another of
+  the caller's pipelines/steps already uses returns **409 Conflict**.
+- **Restricted charset.** A name must match `^[A-Za-z0-9._-]{1,100}$` (no spaces
+  or `/`, so it is always a single URL/resource segment); otherwise **400**. On
+  update the charset is only re-checked when the name actually changes, so editing
+  a legacy-named row isn't blocked unless you rename it.
+- **Owner-scoped resolution.** A name only resolves to rows the caller owns or
+  shares via their org, so one user's `deploy-prod` never resolves another's.
+
+Runs are **namespaced under their workflow**: the run resource is
+`workflows/runs/<workflow_ref>/<run_id>`, reachable via the nested routes below
+(the flat `/runs/{id}` routes remain for back-compat).
+
 ### Steps
+
+`{ref}` is a step **name** (unique per owner) or its UUID.
 
 | Method | Path | Permission | Description |
 |--------|------|------------|-------------|
-| `POST` | `/steps` | `createStep` on `workflows/steps` | Create a step |
+| `POST` | `/steps` | `createStep` on `workflows/steps` | Create a step (409 on duplicate name) |
 | `GET` | `/steps` | `listStep` on `workflows/steps` | List accessible steps |
-| `GET` | `/steps/{id}` | `getStep` on `workflows/steps/{id}` | Get a step |
-| `PUT` | `/steps/{id}` | `updateStep` on `workflows/steps/{id}` | Update a step |
-| `DELETE` | `/steps/{id}` | `deleteStep` on `workflows/steps/{id}` | Soft-delete a step |
+| `GET` | `/steps/{ref}` | `getStep` on `workflows/steps/{ref}` | Get a step |
+| `PUT` | `/steps/{ref}` | `updateStep` on `workflows/steps/{ref}` | Update a step |
+| `DELETE` | `/steps/{ref}` | `deleteStep` on `workflows/steps/{ref}` | Soft-delete a step |
 
 ### Actions
 
@@ -198,31 +225,40 @@ All endpoints require `Authorization: Bearer <token>` verified by Gatekeeper, ex
 |--------|------|------------|-------------|
 | `GET` | `/actions` | `listAction` on `workflows/actions` | List the in-memory action catalog |
 
-### Workflows
+### Workflows (pipelines)
+
+`{ref}` is a pipeline **name** (unique per owner) or its UUID. Create/update return
+**409** on a duplicate name and **400** on an invalid name (see *Resource identity*).
 
 | Method | Path | Permission | Description |
 |--------|------|------------|-------------|
-| `POST` | `/workflows` | `createWorkflow` on `workflows/workflows` | Create a workflow |
-| `GET` | `/workflows` | `listWorkflow` on `workflows/workflows` | List accessible workflows |
-| `GET` | `/workflows/{id}` | `getWorkflow` on `workflows/workflows/{id}` | Get a workflow with enriched step definitions |
-| `PUT` | `/workflows/{id}` | `updateWorkflow` on `workflows/workflows/{id}` | Replace a workflow's name, description, and step list |
-| `DELETE` | `/workflows/{id}` | `deleteWorkflow` on `workflows/workflows/{id}` | Soft-delete a workflow |
+| `POST` | `/pipelines` | `createWorkflow` on `workflows/pipelines` | Create a workflow |
+| `GET` | `/pipelines` | `listWorkflow` on `workflows/pipelines` | List accessible workflows |
+| `GET` | `/pipelines/{ref}` | `getWorkflow` on `workflows/pipelines/{ref}` | Get a workflow with enriched step definitions |
+| `PUT` | `/pipelines/{ref}` | `updateWorkflow` on `workflows/pipelines/{ref}` | Replace a workflow's name, description, and step list |
+| `DELETE` | `/pipelines/{ref}` | `deleteWorkflow` on `workflows/pipelines/{ref}` | Soft-delete a workflow |
 
 ### Runs
 
+Runs are namespaced under their workflow: the resource is
+`workflows/runs/<workflow_ref>/<run_id>`. The flat `/runs/{id}` routes are kept for
+back-compat (un-namespaced resource).
+
 | Method | Path | Permission | Description |
 |--------|------|------------|-------------|
-| `POST` | `/workflows/{id}/runs` | `triggerRun` on `workflows/runs` | Trigger a run |
+| `POST` | `/pipelines/{ref}/runs` | `triggerRun` on `workflows/runs/{ref}` | Trigger a run of pipeline `{ref}` |
+| `GET` | `/pipelines/{ref}/runs/{run_id}` | `getRun` on `workflows/runs/{ref}/{run_id}` | Get a run (namespaced) with step results |
+| `DELETE` | `/pipelines/{ref}/runs/{run_id}` | `cancelRun` on `workflows/runs/{ref}/{run_id}` | Cancel a run (namespaced) |
 | `GET` | `/runs` | `listRun` on `workflows/runs` | List accessible runs |
-| `GET` | `/runs/{id}` | `getRun` on `workflows/runs/{id}` | Get a run with step results |
-| `DELETE` | `/runs/{id}` | `cancelRun` on `workflows/runs/{id}` | Cancel a pending or running run |
+| `GET` | `/runs/{id}` | `getRun` on `workflows/runs/{id}` | Get a run with step results (flat) |
+| `DELETE` | `/runs/{id}` | `cancelRun` on `workflows/runs/{id}` | Cancel a pending or running run (flat) |
 
 ### Internal endpoints (service-to-service)
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/internal/workflows/{id}/runs` | HMAC | Trigger a run (hooks service only) |
-| `GET` | `/internal/workflows/{id}` | HMAC | Get `org_id` for a workflow (hooks ownership check) |
+| `POST` | `/internal/pipelines/{id}/runs` | HMAC | Trigger a run (hooks service only) |
+| `GET` | `/internal/pipelines/{id}` | HMAC | Get `org_id` for a workflow (hooks ownership check) |
 | `GET` | `/internal/runs/{id}` | HMAC | Get current run status (GitHub App polling) |
 
 Internal endpoints use `X-Hooks-Token` (HMAC-SHA256 signed with `HOOKS_TRIGGER_KEY`) and `X-Hooks-Timestamp` headers instead of Bearer auth.
@@ -263,7 +299,7 @@ curl -X POST http://localhost:8085/steps \
   }'
 ```
 
-Step name must be unique per user/org. `timeout` defaults to 30, maximum 3600.
+Step name must be unique per user/org and match `^[A-Za-z0-9._-]{1,100}$` (it doubles as the step's resource identifier — see *Resource identity*). A duplicate name returns 409, an invalid name 400. `timeout` defaults to 30, maximum 3600.
 
 ### Step object
 
@@ -296,7 +332,7 @@ curl "http://localhost:8085/steps?name=forge" -H "Authorization: Bearer <token>"
 ### Create a workflow
 
 ```bash
-curl -X POST http://localhost:8085/workflows \
+curl -X POST http://localhost:8085/pipelines \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -327,7 +363,7 @@ Step 3 (no group)          → runs after both group-1 steps finish
 
 ### Workflow object
 
-When reading a single workflow (`GET /workflows/{id}`), the response enriches each step ref with the full step definition:
+When reading a single workflow (`GET /pipelines/{ref}`), the response enriches each step ref with the full step definition:
 
 ```json
 {
@@ -384,13 +420,14 @@ The catalog refreshes every 5 minutes. Requires `REGISTRY_URL` and `REGISTRY_SER
 ### Trigger a run
 
 ```bash
-curl -X POST http://localhost:8085/workflows/{id}/runs \
+# {ref} is the pipeline name or its UUID
+curl -X POST http://localhost:8085/pipelines/deploy-prod/runs \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"inputs": {"VERSION": "v1.2.3", "ENV": "staging"}}'
 ```
 
-Returns `202 Accepted` with the created run (status `pending`). Poll `GET /runs/{id}` for completion.
+Returns `202 Accepted` with the created run (status `pending`). Poll for completion via the namespaced `GET /pipelines/deploy-prod/runs/{run_id}` or the flat `GET /runs/{run_id}`.
 
 ### Run object
 
