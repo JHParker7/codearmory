@@ -78,6 +78,21 @@ def test_failed_step_surfaces_captured_output(bearer):
     requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf}", headers=bearer)
 
 
+def test_failed_step_surfaces_forge_error_message(bearer):
+    # exit 127 with no stderr makes forge synthesize a "command not found"
+    # diagnostic; the run must surface forge's actual message, not just the generic
+    # "forge/run failed (exit code: 127)" summary.
+    step = make_step(bearer, "forge/run", {"run": "exit 127", "image": "alpine:3.19"})
+    wf = make_pipeline(bearer, [{"step_id": step}])
+    run_id = trigger(bearer, wf)
+    result = poll_run(bearer, run_id, timeout=90)
+    assert result["status"] == "failed", f"expected failed, got {result['status']}"
+    output = ((result.get("step_runs") or [{}])[0].get("output") or "").lower()
+    assert "not found" in output, f"forge diagnostic missing from step output: {output!r}"
+    assert "127" in output, f"exit code missing from step output: {output!r}"
+    requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf}", headers=bearer)
+
+
 def test_parallel_group_runs_all_steps(bearer):
     s1 = make_step(bearer, "http", {"service": "gatekeeper", "method": "GET", "path": "/healthz", "expected_status": 200})
     s2 = make_step(bearer, "http", {"service": "gatekeeper", "method": "GET", "path": "/healthz", "expected_status": 200})
