@@ -94,7 +94,7 @@
       "method": "POST",
       "path": "/pipelines/{id}/runs",
       "action": "triggerRun",
-      "resource": "workflows/runs"
+      "resource": "workflows/runs/{id}"
     },
     {
       "method": "GET",
@@ -113,6 +113,18 @@
       "path": "/runs/{id}",
       "action": "cancelRun",
       "resource": "workflows/runs/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/pipelines/{id}/runs/{run_id}",
+      "action": "getRun",
+      "resource": "workflows/runs/{id}/{run_id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/pipelines/{id}/runs/{run_id}",
+      "action": "cancelRun",
+      "resource": "workflows/runs/{id}/{run_id}"
     },
     {
       "method": "GET",

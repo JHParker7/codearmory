@@ -223,6 +223,10 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
+	if msg := validateResourceName(req.Name); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
 	if len(req.Steps) == 0 {
 		http.Error(w, "at least one step is required", http.StatusBadRequest)
 		return
@@ -240,6 +244,18 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("step %d: parallel_group must be non-negative", i), http.StatusBadRequest)
 			return
 		}
+	}
+
+	// Name is the workflow's resource identifier, so it must be unique per caller.
+	if exists, cerr := workflowNameExists(ctx, req.Name, userID, orgID); cerr != nil {
+		span.RecordError(cerr)
+		span.SetStatus(codes.Error, "db error")
+		http.Error(w, "failed to create workflow", http.StatusInternalServerError)
+		return
+	} else if exists {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "a workflow with that name already exists", http.StatusConflict)
+		return
 	}
 
 	// Validate all referenced steps exist and are accessible.
@@ -343,7 +359,7 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	wf, err := getWorkflow(ctx, id)
+	wf, err := resolveWorkflowRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -383,7 +399,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	existing, err := getWorkflow(ctx, id)
+	existing, err := resolveWorkflowRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -409,6 +425,26 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" {
 		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	// Validate the name charset only on an actual rename, so editing a workflow whose
+	// name predates this rule isn't blocked unless the name itself is changed.
+	if req.Name != existing.Name {
+		if msg := validateResourceName(req.Name); msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
+			return
+		}
+	}
+	// A rename must not collide with another of the caller's workflows; keeping its
+	// own name is allowed (excludes existing.WorkflowID).
+	if conflict, cerr := workflowNameConflict(ctx, req.Name, existing.WorkflowID, userID, orgID); cerr != nil {
+		span.RecordError(cerr)
+		span.SetStatus(codes.Error, "db error")
+		http.Error(w, "failed to update workflow", http.StatusInternalServerError)
+		return
+	} else if conflict {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "a workflow with that name already exists", http.StatusConflict)
 		return
 	}
 	if len(req.Steps) == 0 {
@@ -459,13 +495,13 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing.UpdatedAt = time.Now().UTC()
 
 	// Re-provision the role with the updated step set.
-	existing.RoleID = provisionWorkflowRole(ctx, id, userID, orgID, newSteps)
+	existing.RoleID = provisionWorkflowRole(ctx, existing.WorkflowID, userID, orgID, newSteps)
 	existing.RolePermsVersion = workflowRolePermsVersion
 
 	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.ErrorContext(ctx, "update workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update workflow: db error", "workflow_id", existing.WorkflowID, "user_id", userID, "error", err)
 		deleteWorkflowRole(ctx, existing.RoleID)
 		http.Error(w, "failed to update workflow", http.StatusInternalServerError)
 		return
@@ -474,7 +510,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	deleteWorkflowRole(ctx, oldRoleID)
 
 	span.SetStatus(codes.Ok, "")
-	slog.InfoContext(ctx, "workflow updated", "workflow_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "workflow updated", "workflow_id", existing.WorkflowID, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(existing) //nolint:errcheck
 }
@@ -495,7 +531,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	wf, err := getWorkflow(ctx, id)
+	wf, err := resolveWorkflowRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -518,13 +554,13 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err := wf.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.ErrorContext(ctx, "delete workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete workflow: db error", "workflow_id", wf.WorkflowID, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete workflow", http.StatusInternalServerError)
 		return
 	}
 	deleteWorkflowRole(ctx, roleID)
 
 	span.SetStatus(codes.Ok, "")
-	slog.InfoContext(ctx, "workflow deleted", "workflow_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "workflow deleted", "workflow_id", wf.WorkflowID, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
 }

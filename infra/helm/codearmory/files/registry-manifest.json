@@ -565,10 +565,12 @@
       { "method": "GET",    "path": "/pipelines/{id}",      "action": "getWorkflow",    "resource": "workflows/pipelines/{id}" },
       { "method": "PUT",    "path": "/pipelines/{id}",      "action": "updateWorkflow", "resource": "workflows/pipelines/{id}" },
       { "method": "DELETE", "path": "/pipelines/{id}",      "action": "deleteWorkflow", "resource": "workflows/pipelines/{id}" },
-      { "method": "POST",   "path": "/pipelines/{id}/runs", "action": "triggerRun",     "resource": "workflows/runs" },
+      { "method": "POST",   "path": "/pipelines/{id}/runs", "action": "triggerRun",     "resource": "workflows/runs/{id}" },
       { "method": "GET",    "path": "/runs",                "action": "listRun",        "resource": "workflows/runs" },
       { "method": "GET",    "path": "/runs/{id}",           "action": "getRun",         "resource": "workflows/runs/{id}" },
       { "method": "DELETE", "path": "/runs/{id}",           "action": "cancelRun",      "resource": "workflows/runs/{id}" },
+      { "method": "GET",    "path": "/pipelines/{id}/runs/{run_id}", "action": "getRun",    "resource": "workflows/runs/{id}/{run_id}" },
+      { "method": "DELETE", "path": "/pipelines/{id}/runs/{run_id}", "action": "cancelRun", "resource": "workflows/runs/{id}/{run_id}" },
       { "method": "GET",    "path": "/actions",             "action": "listAction",     "resource": "workflows/actions" }
     ],
     "default_grants": [
