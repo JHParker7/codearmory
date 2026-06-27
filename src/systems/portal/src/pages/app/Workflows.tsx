@@ -627,25 +627,46 @@ function StepsTab() {
               <input value={action} onChange={e => setAction(e.target.value)} placeholder="forge/run" style={stepInputStyle} />
             )}
 
-            {schemaForAction(action).map(f => {
-              const key = WITH_KEY_PREFIX + f.key;
-              const val = withVals[key] ?? '';
+            {(() => {
+              const fields = schemaForAction(action);
+              const renderField = (f: ReturnType<typeof schemaForAction>[number]) => {
+                const key = WITH_KEY_PREFIX + f.key;
+                const val = withVals[key] ?? '';
+                return (
+                  <div key={key}>
+                    <label style={stepLabelStyle}>{f.label}{f.required ? ' *' : ''}</label>
+                    {f.catalog === 'image' && images.length > 0 ? (
+                      <div style={{ marginBottom: 6 }}>
+                        <ImageSelect value={val} onChange={v => setWith(key, v)} options={images} placeholder={f.placeholder} fontSize={11} />
+                      </div>
+                    ) : f.multiline ? (
+                      <textarea value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder}
+                        rows={f.key === 'run' ? 3 : 2} style={{ ...stepInputStyle, resize: 'vertical' }} />
+                    ) : (
+                      <input value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder} style={stepInputStyle} />
+                    )}
+                  </div>
+                );
+              };
+              const inputs = fields.filter(f => !f.output);
+              const outputs = fields.filter(f => f.output);
               return (
-                <div key={key}>
-                  <label style={stepLabelStyle}>{f.label}{f.required ? ' *' : ''}</label>
-                  {f.catalog === 'image' && images.length > 0 ? (
-                    <div style={{ marginBottom: 6 }}>
-                      <ImageSelect value={val} onChange={v => setWith(key, v)} options={images} placeholder={f.placeholder} fontSize={11} />
-                    </div>
-                  ) : f.multiline ? (
-                    <textarea value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder}
-                      rows={f.key === 'run' ? 3 : 2} style={{ ...stepInputStyle, resize: 'vertical' }} />
-                  ) : (
-                    <input value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder} style={stepInputStyle} />
+                <>
+                  {inputs.map(renderField)}
+                  {outputs.length > 0 && (
+                    <>
+                      <div style={{ height: 1, background: T.border, margin: '10px 0 8px' }} />
+                      <label style={stepLabelStyle}>outputs</label>
+                      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, lineHeight: 1.4 }}>
+                        env vars captured from the run as this step's output (read by later steps as
+                        {' '}<span style={{ color: T.dim }}>{'${steps.<step>.output.VAR}'}</span>) — leave empty to output stdout
+                      </div>
+                      {outputs.map(renderField)}
+                    </>
                   )}
-                </div>
+                </>
               );
-            })}
+            })()}
 
             <label style={stepLabelStyle}>timeout</label>
             <input value={timeoutSecs} onChange={e => setTimeoutSecs(e.target.value)} placeholder="seconds (default 30)" style={stepInputStyle} />

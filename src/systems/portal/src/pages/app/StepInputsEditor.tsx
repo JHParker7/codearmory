@@ -10,6 +10,10 @@ import { T } from '../../theme';
 
 export type UpstreamOutput = { name: string; outputEnv: string[] };
 
+// Step-defining `with` keys that are configured on the step definition (Steps tab),
+// not wired per-occurrence in the pipeline builder.
+const DEFINING = new Set(['image', 'run']);
+
 const stop = (e: React.PointerEvent) => e.stopPropagation();
 const fieldStyle: React.CSSProperties = {
   flex: 1, minWidth: 0, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text,
@@ -49,7 +53,9 @@ export function StepInputsEditor({ defWith, override, upstream, onChange }: {
     onChange(next);
   };
 
-  const stringKeys = Object.keys(eff).filter((k) => k !== 'env' && typeof eff[k] === 'string');
+  // The image and the run command define what the step IS — they belong to the step
+  // definition (Steps tab), not per-occurrence wiring; so they're not editable here.
+  const stringKeys = Object.keys(eff).filter((k) => k !== 'env' && !DEFINING.has(k) && typeof eff[k] === 'string');
   const env = (eff.env && typeof eff.env === 'object' && !Array.isArray(eff.env)) ? eff.env as Record<string, unknown> : null;
   const setEnv = (next: Record<string, unknown>) => setKey('env', next);
 
