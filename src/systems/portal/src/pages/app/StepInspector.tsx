@@ -50,6 +50,10 @@ export function StepInspector({ step, action }: { step: Step | null; action?: Wo
   const entries = Object.entries(withMap);
   const refs = collectRefs(withMap);
   const outRef = `\${steps.${step.name}.output}`;
+  // A forge/run step can capture named env vars as its output instead of stdout.
+  const outputEnv = Array.isArray(withMap.output_env)
+    ? (withMap.output_env as unknown[]).filter((x): x is string => typeof x === 'string')
+    : [];
   const outputDesc = action?.async?.output_field
     ? `the ${action.async.output_field} of the ${action.name} result`
     : 'this step’s output (response body / command output)';
@@ -91,10 +95,21 @@ export function StepInspector({ step, action }: { step: Step | null; action?: Wo
       )}
 
       <div style={sectionLabel}>output</div>
-      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 5 }}>reference {outputDesc} in a later step:</div>
-      <CopyRef text={outRef} />
-      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, margin: '6px 0 4px' }}>or a JSON field of it:</div>
-      <div style={code}>{`\${steps.${step.name}.output.<field>}`}</div>
+      {outputEnv.length > 0 ? (
+        <>
+          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 5 }}>captures these env vars (instead of stdout) — reference each in a later step:</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {outputEnv.map((k) => <CopyRef key={k} text={`\${steps.${step.name}.output.${k}}`} />)}
+          </div>
+        </>
+      ) : (
+        <>
+          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 5 }}>reference {outputDesc} in a later step:</div>
+          <CopyRef text={outRef} />
+          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, margin: '6px 0 4px' }}>or a JSON field of it:</div>
+          <div style={code}>{`\${steps.${step.name}.output.<field>}`}</div>
+        </>
+      )}
     </div>
   );
 }

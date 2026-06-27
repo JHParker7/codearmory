@@ -54,6 +54,7 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
     { key: 'image', label: 'Image', placeholder: 'ubuntu:22.04 (required)', required: true, catalog: 'image' },
     { key: 'run', label: 'Run', placeholder: 'go test ./...', required: true, multiline: true },
     { key: 'env', label: 'Env', placeholder: 'KEY=VALUE KEY2=${steps.build.output}', kind: 'env' },
+    { key: 'output_env', label: 'Output env', placeholder: 'BUILD_ID, VERSION (capture these vars as the output instead of stdout)', kind: 'list' },
     { key: 'runner_class', label: 'Runner', placeholder: 'runner class (optional, default standard)' },
   ],
   'tickets/create': [
