@@ -34,9 +34,10 @@ export interface PipelineBlocksProps {
   editable?: boolean;
   palette?: Step[];
   onChange?: (steps: StepRef[]) => void;
-  // Reports the step_id of the selected block (null for a gate or no selection),
-  // so the builder can show that step's inputs/output in an inspector panel.
-  onInspect?: (stepId: string | null) => void;
+  // Reports the step_id and effective (occurrence) name of the selected block (null
+  // step for a gate or no selection), so the builder can show that step's
+  // inputs/output — referenced by the occurrence name — in an inspector panel.
+  onInspect?: (stepId: string | null, name?: string) => void;
   height?: number | string;
 }
 
@@ -81,6 +82,7 @@ interface BlockCardProps {
   isGate: boolean;
   selected: boolean;
   onSelect: () => void;
+  onRename: (uid: string, name: string | undefined) => void;
   onToggleParallel: (uid: string) => void;
   onSetMatrix: (uid: string, matrix: MatrixConfig | null) => void;
   onSetApproval: (uid: string, gate: ApprovalGate) => void;
@@ -121,7 +123,7 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
   );
 }
 
-function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, onSelect, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
+function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, onSelect, onRename, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
   const leftBar = isGate ? T.blue : block.matrix ? T.amber : inParallel ? T.green : T.dim;
   const style: React.CSSProperties = {
@@ -153,9 +155,20 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
     <div ref={setNodeRef} style={style} {...(editable ? attributes : {})} {...(editable ? listeners : {})}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         {editable && <span style={{ color: T.faint, fontSize: 13, lineHeight: 1 }}>⠿</span>}
-        <div onClick={onSelect} style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} title="click to inspect this step's inputs and output">
-          <div style={{ fontSize: 12.5, fontWeight: 700, color: isGate ? T.blue : isMatrix ? T.amber : T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{prefix}{label}</div>
-          <div style={{ fontSize: 10, color: T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{isMatrix ? ' · matrix fan-out' : ''}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+            {prefix && <span style={{ fontSize: 12.5, color: isGate ? T.blue : T.amber }}>{prefix.trim()}</span>}
+            {editable && !isGate ? (
+              <input value={block.name ?? label}
+                onChange={(e) => { const v = e.target.value.replace(/[^A-Za-z0-9._-]/g, ''); onRename(block.uid, v === '' ? undefined : v); }}
+                onFocus={onSelect} onPointerDown={stop}
+                title="name this step (overrides the step's name; referenced as ${steps.<name>.output})"
+                style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', borderBottom: `1px dashed ${selected ? T.dim : 'transparent'}`, color: isMatrix ? T.amber : T.textHi, fontFamily: T.mono, fontSize: 12.5, fontWeight: 700, padding: '1px 0', outline: 'none' }} />
+            ) : (
+              <span onClick={onSelect} style={{ cursor: 'pointer', fontSize: 12.5, fontWeight: 700, color: isGate ? T.blue : T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+            )}
+          </div>
+          <div onClick={onSelect} style={{ fontSize: 10, color: T.faint, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{isMatrix ? ' · matrix fan-out' : ''}</div>
         </div>
         {editable && canLink && !isGate && !isMatrix && (
           <button onPointerDown={stop} onClick={() => onToggleParallel(block.uid)}
@@ -243,10 +256,10 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     });
   }, []);
 
-  // Select a block and report its step (null for a gate) so the inspector updates.
+  // Select a block and report its step + occurrence name so the inspector updates.
   const select = useCallback((b: Block) => {
     setSelectedUid(b.uid);
-    onInspect?.(b.approval ? null : b.stepId);
+    onInspect?.(b.approval ? null : b.stepId, b.name);
   }, [onInspect]);
 
   const addStep = useCallback((s: Step) => {
@@ -276,6 +289,15 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   const setApproval = useCallback((uid: string, approval: ApprovalGate) => {
     setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, approval } : b)));
   }, []);
+  const setName = useCallback((uid: string, name: string | undefined) => {
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, name } : b)));
+    // Keep the inspector's output reference (${steps.<name>.output}) in sync as the
+    // selected block is renamed.
+    if (selectedUid === uid) {
+      const b = blocks.find((x) => x.uid === uid);
+      onInspect?.(b?.approval ? null : (b?.stepId ?? null), name);
+    }
+  }, [selectedUid, blocks, onInspect]);
   // An approval gate is always its own sequential block (no step, no parallel).
   const addGate = useCallback(() => {
     const uid = `add${seq.current++}`;
@@ -303,7 +325,7 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     return (
       <BlockCard key={b.uid} block={b} label={label} action={action} editable={editable}
         canLink={(indexOf.get(b.uid) ?? 0) > 0} inParallel={inParallel} isGate={isGate}
-        selected={selectedUid === b.uid} onSelect={() => select(b)}
+        selected={selectedUid === b.uid} onSelect={() => select(b)} onRename={setName}
         onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onSetApproval={setApproval} onRemove={remove} />
     );
   };

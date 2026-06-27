@@ -351,6 +351,13 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 // reference to a stored step (with an optional parallel group or matrix). Returns
 // a user-facing message or "".
 func validateStepRefShape(i int, ref WorkflowStepRef) string {
+	// A per-occurrence name (if given) becomes a ${steps.<name>.output} key, so it
+	// must be a clean single-segment name like a step name.
+	if ref.Name != "" {
+		if msg := validateResourceName(ref.Name); msg != "" {
+			return fmt.Sprintf("step %d: name %s", i, msg)
+		}
+	}
 	if ref.Approval != nil {
 		if ref.StepID != "" {
 			return fmt.Sprintf("step %d: cannot be both a step reference and an approval gate", i)

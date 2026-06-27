@@ -38,7 +38,7 @@ function CopyRef({ text }: { text: string }) {
   );
 }
 
-export function StepInspector({ step, action }: { step: Step | null; action?: WorkflowAction }) {
+export function StepInspector({ step, action, name }: { step: Step | null; action?: WorkflowAction; name?: string }) {
   if (!step) {
     return (
       <div style={{ flex: 1, overflow: 'auto', padding: 14, fontFamily: T.mono, fontSize: 12, color: T.faint }}>
@@ -49,7 +49,9 @@ export function StepInspector({ step, action }: { step: Step | null; action?: Wo
   const withMap = (step.with ?? {}) as Record<string, unknown>;
   const entries = Object.entries(withMap);
   const refs = collectRefs(withMap);
-  const outRef = `\${steps.${step.name}.output}`;
+  // Output is referenced by this occurrence's name (the per-step override if set).
+  const refName = name || step.name;
+  const outRef = `\${steps.${refName}.output}`;
   // A forge/run step can capture named env vars as its output instead of stdout.
   const outputEnv = Array.isArray(withMap.output_env)
     ? (withMap.output_env as unknown[]).filter((x): x is string => typeof x === 'string')
@@ -99,7 +101,7 @@ export function StepInspector({ step, action }: { step: Step | null; action?: Wo
         <>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 5 }}>captures these env vars (instead of stdout) — reference each in a later step:</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {outputEnv.map((k) => <CopyRef key={k} text={`\${steps.${step.name}.output.${k}}`} />)}
+            {outputEnv.map((k) => <CopyRef key={k} text={`\${steps.${refName}.output.${k}}`} />)}
           </div>
         </>
       ) : (
@@ -107,7 +109,7 @@ export function StepInspector({ step, action }: { step: Step | null; action?: Wo
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 5 }}>reference {outputDesc} in a later step:</div>
           <CopyRef text={outRef} />
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, margin: '6px 0 4px' }}>or a JSON field of it:</div>
-          <div style={code}>{`\${steps.${step.name}.output.<field>}`}</div>
+          <div style={code}>{`\${steps.${refName}.output.<field>}`}</div>
         </>
       )}
     </div>

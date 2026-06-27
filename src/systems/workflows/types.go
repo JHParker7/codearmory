@@ -137,7 +137,12 @@ type ApprovalGate struct {
 // gate is always solo. Stored as part of the workflow's `steps` JSON column, so no
 // field needs its own DB column.
 type WorkflowStepRef struct {
-	StepID        string        `json:"step_id,omitempty"`
+	StepID string `json:"step_id,omitempty"`
+	// Name optionally overrides the display/reference name for THIS occurrence of the
+	// step, so the same step can appear more than once with distinct names and each
+	// is referenced unambiguously as ${steps.<name>.output}. Empty = use the step
+	// definition's own name (or "approval" for a gate).
+	Name          string        `json:"name,omitempty"`
 	ParallelGroup *int          `json:"parallel_group,omitempty"`
 	Matrix        *MatrixConfig `json:"matrix,omitempty"`
 	Approval      *ApprovalGate `json:"approval,omitempty"`

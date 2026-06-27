@@ -41,8 +41,17 @@ function PipelineBuilderOverlay({
   onSaved: (wf: Workflow) => void;
 }) {
   const initialStepRefs = useMemo<StepRef[]>(
-    () => initial ? initial.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null, matrix: s.matrix ?? null, approval: s.approval ?? null })) : [],
-    [initial],
+    () => initial ? initial.steps.map(s => ({
+      step_id: s.step_id,
+      // The GET returns the effective name; keep it as an override only when it
+      // actually differs from the step definition's name (so unchanged steps still
+      // track definition renames, and the JSON/payload stay clean).
+      name: (!s.approval && s.name && s.step_id && s.name !== catalog[s.step_id]?.name) ? s.name : undefined,
+      parallel_group: s.parallel_group ?? null,
+      matrix: s.matrix ?? null,
+      approval: s.approval ?? null,
+    })) : [],
+    [initial, catalog],
   );
 
   const [name, setName] = useState(initial?.name ?? '');
@@ -66,15 +75,23 @@ function PipelineBuilderOverlay({
   // live JSON config. Selecting a step in the builder switches to the inspector.
   const [rightTab, setRightTab] = useState<'inspector' | 'json'>('json');
   const [inspectId, setInspectId] = useState<string | null>(null);
+  const [inspectName, setInspectName] = useState<string | undefined>(undefined);
   const [actions, setActions] = useState<WorkflowAction[]>([]);
   useEffect(() => { listActions(token).then(setActions).catch(() => {}); }, [token]);
   const actionsByName = useMemo(() => Object.fromEntries(actions.map(a => [a.name, a])), [actions]);
-  const onInspect = useCallback((stepId: string | null) => {
+  const onInspect = useCallback((stepId: string | null, name?: string) => {
     setInspectId(stepId);
+    setInspectName(name);
     setRightTab('inspector');
   }, []);
 
-  const canonicalJson = useMemo(() => configToJson(name, desc, steps), [name, desc, steps]);
+  // Drop a per-occurrence name that just equals the step definition's name, so only
+  // real overrides are saved/shown (and definition renames keep propagating).
+  const cleanedSteps = useMemo(
+    () => steps.map(s => (s.name && s.step_id && s.name === catalog[s.step_id]?.name) ? { ...s, name: undefined } : s),
+    [steps, catalog],
+  );
+  const canonicalJson = useMemo(() => configToJson(name, desc, cleanedSteps), [name, desc, cleanedSteps]);
 
   // Reflect builder/name/description changes into the JSON panel, unless the user
   // is actively editing the JSON (their text is authoritative then).
@@ -111,7 +128,7 @@ function PipelineBuilderOverlay({
       const payload = {
         name: name.trim(),
         description: desc.trim() || undefined,
-        steps: stepsToPayload(steps),
+        steps: stepsToPayload(cleanedSteps),
       };
       const wf = initial
         ? await updateWorkflow(token, initial.workflow_id, payload)
@@ -152,7 +169,7 @@ function PipelineBuilderOverlay({
           </div>
           <div style={{ flex: 1, minHeight: 0, border: `1px solid ${T.border}`, background: T.bg, display: 'flex', flexDirection: 'column' }}>
             {rightTab === 'inspector' ? (
-              <StepInspector step={inspectId ? (catalog[inspectId] ?? null) : null} action={inspectId && catalog[inspectId] ? actionsByName[catalog[inspectId].action] : undefined} />
+              <StepInspector step={inspectId ? (catalog[inspectId] ?? null) : null} name={inspectName} action={inspectId && catalog[inspectId] ? actionsByName[catalog[inspectId].action] : undefined} />
             ) : (
               <>
                 <textarea value={jsonDraft} spellCheck={false}

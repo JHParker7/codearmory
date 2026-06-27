@@ -531,6 +531,40 @@ func TestExecuteAction_EmptyOutputMapFallsBackToStdout(t *testing.T) {
 	}
 }
 
+// A step ref's per-occurrence name overrides the definition name: the step run
+// records it and a later step references that occurrence's output by it.
+func TestExecuteRun_PerOccurrenceNameOverride(t *testing.T) {
+	requireDB(t)
+	stubGatekeeperRouting(t, "tu", "to")
+	fakeService(t, "pon0", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("OK")) }) //nolint:errcheck
+	paths := recordingService(t, "pon1")
+	s0 := seedHTTPStep(t, "tu", "to", "pon0", "/produce")
+	s1 := seedHTTPStep(t, "tu", "to", "pon1", "/got/${steps.build-prod.output}")
+	wf := createWorkflowWith(t, []map[string]any{
+		{"step_id": s0.StepID, "name": "build-prod"},
+		{"step_id": s1.StepID},
+	})
+
+	got := runOnce(t, wf)
+	if got.Status != StatusCompleted {
+		t.Fatalf("status = %q, want completed", got.Status)
+	}
+	srs, _ := getStepRuns(context.Background(), got.RunID)
+	named := false
+	for _, sr := range srs {
+		if sr.StepIndex == 0 && sr.StepName == "build-prod" {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("step 0 run name not overridden to build-prod: %+v", srs)
+	}
+	// The downstream step resolved ${steps.build-prod.output} to step 0's body.
+	if len(*paths) != 1 || (*paths)[0] != "/got/OK" {
+		t.Errorf("downstream path = %v, want [/got/OK]", *paths)
+	}
+}
+
 func TestRebuildResumeState(t *testing.T) {
 	requireDB(t)
 	runID := uuid.New().String()

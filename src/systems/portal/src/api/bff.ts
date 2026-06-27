@@ -278,6 +278,10 @@ export interface ApprovalGate {
 
 export interface WorkflowStepRef {
   step_id?: string;
+  // Per-occurrence name override (so a reused step can have distinct names). On a
+  // GET it is the effective name; on save send it only when it differs from the
+  // step definition's name.
+  name?: string;
   parallel_group?: number | null;
   matrix?: MatrixConfig | null;
   approval?: ApprovalGate | null;

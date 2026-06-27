@@ -187,6 +187,34 @@ describe('config ⇄ JSON (live editable panel)', () => {
   });
 });
 
+describe('per-occurrence step name', () => {
+  it('round-trips a named step through blocks and back', () => {
+    const steps: StepRef[] = [
+      { step_id: 'build', parallel_group: null, name: 'build-prod' },
+      { step_id: 'build', parallel_group: null }, // same step, no override
+    ];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[0].name).to.equal('build-prod');
+    expect(blocks[1].name).to.equal(undefined);
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { step_id: 'build', parallel_group: null, name: 'build-prod' },
+      { step_id: 'build', parallel_group: null },
+    ]);
+  });
+
+  it('stepsToPayload and configToJson include a name only when set', () => {
+    expect(stepsToPayload([{ step_id: 'a', parallel_group: null, name: 'deploy' }]))
+      .to.deep.equal([{ step_id: 'a', name: 'deploy' }]);
+    expect(JSON.parse(configToJson('p', '', [{ step_id: 'a', parallel_group: null, name: 'deploy' }])).steps)
+      .to.deep.equal([{ step_id: 'a', name: 'deploy' }]);
+  });
+
+  it('parseConfig reads a step name', () => {
+    const parsed = parseConfig('{"name":"p","steps":[{"step_id":"a","name":"deploy"}]}');
+    expect(parsed.steps).to.deep.equal([{ step_id: 'a', parallel_group: null, name: 'deploy' }]);
+  });
+});
+
 describe('inline approval gates', () => {
   it('round-trips a gate through blocks (no step_id) and back', () => {
     const steps: StepRef[] = [
