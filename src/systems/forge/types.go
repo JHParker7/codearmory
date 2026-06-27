@@ -45,10 +45,17 @@ type Execution struct {
 	// "gitea:<owner>/<repo>" (a minted Forgejo clone URL). Only the references are
 	// stored here; the resolved values are never persisted or logged.
 	SecretRefs map[string]string `gorm:"column:secret_refs;type:jsonb;not null;default:'{}';serializer:json" json:"secret_refs,omitempty"`
-	Status     string            `gorm:"column:status;not null;default:pending"                  json:"status"`
-	ExitCode   *int              `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
-	Stdout     *string           `gorm:"column:stdout"                                           json:"stdout,omitempty"`
-	Stderr     *string           `gorm:"column:stderr"                                           json:"stderr,omitempty"`
+	// OutputEnv lists environment variable NAMES to capture from the command's shell
+	// after it runs (so a script's exported/computed values become the execution's
+	// structured output). Outputs holds the captured NAME→value map, returned in the
+	// poll response so callers (e.g. workflows) can surface it as the step output
+	// instead of raw stdout. Capture works for shell (`-c`) commands; see worker.go.
+	OutputEnv []string          `gorm:"column:output_env;type:jsonb;not null;default:'[]';serializer:json" json:"output_env,omitempty"`
+	Outputs   map[string]string `gorm:"column:outputs;type:jsonb;not null;default:'{}';serializer:json"     json:"outputs,omitempty"`
+	Status    string            `gorm:"column:status;not null;default:pending"                  json:"status"`
+	ExitCode  *int              `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
+	Stdout    *string           `gorm:"column:stdout"                                           json:"stdout,omitempty"`
+	Stderr    *string           `gorm:"column:stderr"                                           json:"stderr,omitempty"`
 	// MemoryUsedMB is the peak memory the run's container consumed, captured
 	// best-effort from the runtime (k8s metrics-server / docker stats). It is NULL
 	// when metrics are unavailable — most often a very short job a metrics-server
@@ -115,6 +122,9 @@ type submitRequest struct {
 	Timeout     int64             `json:"timeout"`
 	RunnerClass string            `json:"runner_class"`
 	Project     string            `json:"project"`
+	// OutputEnv names env vars to capture from the command's shell as structured
+	// output (see Execution.OutputEnv).
+	OutputEnv []string `json:"output_env"`
 	// SecretRefs maps a target env var NAME to a credential reference. Supported
 	// schemes: "secret:<name>" resolves a gatekeeper org secret (e.g. a git SSH
 	// deploy key or token for GitHub/Bitbucket); "gitea:<owner>/<repo>" mints a
@@ -130,6 +140,9 @@ type RunResult struct {
 	Stdout   string
 	Stderr   string
 	ExitCode *int
+	// Outputs is the captured OutputEnv NAME→value map, parsed out of stdout after
+	// the run (nil when none were requested or the emit never ran).
+	Outputs map[string]string
 	// MemoryUsedMB is the peak container memory in MB, nil when the runtime could
 	// not measure it. MemoryLimitMB is the runner class's memory ceiling.
 	MemoryUsedMB  *int64

@@ -477,6 +477,60 @@ func TestInlineApprovalGate_ValidationRejectsBadShapes(t *testing.T) {
 	}
 }
 
+// An async action whose poll response carries a non-empty map at OutputMapField
+// uses that map (JSON-encoded) as the step output, so ${steps.NAME.output.KEY}
+// resolves — this is how a forge/run step surfaces captured output_env vars.
+func TestExecuteAction_OutputMapFieldBecomesOutput(t *testing.T) {
+	srv := fakeService(t, "forgeom", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			w.Write([]byte(`{"execution_id":"e1"}`)) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"completed","stdout":"build log","outputs":{"BUILD_ID":"42","VERSION":"1.0"}}`)) //nolint:errcheck
+	})
+	def := ActionDef{
+		Name: "forge/run", ServiceURL: srv.URL, Method: http.MethodPost, Path: "/executions",
+		Async: &AsyncConfig{IDField: "execution_id", PollPath: "/executions/{id}", PollIntervalSecs: 1,
+			StatusField: "status", SuccessStates: []string{"completed"}, OutputField: "stdout", OutputMapField: "outputs"},
+	}
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"image": "alpine"})
+	if err != nil {
+		t.Fatalf("executeAction: %v", err)
+	}
+	var got map[string]string
+	if jerr := json.Unmarshal([]byte(res.Output), &got); jerr != nil {
+		t.Fatalf("output is not the captured JSON map: %q (%v)", res.Output, jerr)
+	}
+	if got["BUILD_ID"] != "42" || got["VERSION"] != "1.0" {
+		t.Errorf("captured outputs = %v", got)
+	}
+}
+
+// With no captured outputs, the step output falls back to stdout (OutputField).
+func TestExecuteAction_EmptyOutputMapFallsBackToStdout(t *testing.T) {
+	srv := fakeService(t, "forgeom2", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Write([]byte(`{"execution_id":"e1"}`)) //nolint:errcheck
+			return
+		}
+		w.Write([]byte(`{"status":"completed","stdout":"hello","outputs":{}}`)) //nolint:errcheck
+	})
+	def := ActionDef{
+		Name: "forge/run", ServiceURL: srv.URL, Method: http.MethodPost, Path: "/executions",
+		Async: &AsyncConfig{IDField: "execution_id", PollPath: "/executions/{id}", PollIntervalSecs: 1,
+			StatusField: "status", SuccessStates: []string{"completed"}, OutputField: "stdout", OutputMapField: "outputs"},
+	}
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{})
+	if err != nil {
+		t.Fatalf("executeAction: %v", err)
+	}
+	if res.Output != "hello" {
+		t.Errorf("expected fallback to stdout, got %q", res.Output)
+	}
+}
+
 func TestRebuildResumeState(t *testing.T) {
 	requireDB(t)
 	runID := uuid.New().String()

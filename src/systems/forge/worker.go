@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -169,6 +171,13 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	// crashing the worker — see R5 in the design.
 	var result RunResult
 	var runErr error
+	// Capture requested output env vars: wrap the command so it emits them after a
+	// unique marker, then split them back out of stdout once the run finishes.
+	marker := ""
+	if len(exec.OutputEnv) > 0 {
+		marker = "__forge_output_" + uuid.NewString() + "__"
+		exec.Command = wrapOutputEnv(exec.Command, exec.OutputEnv, marker)
+	}
 	rt, gerr := p.registry.Get(ctx, exec.Backend)
 	if gerr != nil {
 		runErr = fmt.Errorf("runtime backend %q: %w", exec.Backend, gerr)
@@ -195,6 +204,9 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 				exec.Env = merged // local copy only; Complete() never writes env back
 			}
 			result, runErr = rt.Run(runCtx, exec)
+			if marker != "" && runErr == nil {
+				result.Stdout, result.Outputs = parseOutputEnv(result.Stdout, exec.OutputEnv, marker)
+			}
 		}
 	}
 
@@ -221,4 +233,53 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	if err := exec.Complete(ctx, status, result); err != nil {
 		slog.ErrorContext(ctx, "worker: update execution result", "execution_id", exec.ExecutionID, "error", err)
 	}
+}
+
+// wrapOutputEnv appends a trailer to a `[<shell> -c <script>]` command so that,
+// after the user's script runs in the SAME shell (so exported/computed vars are
+// visible), it prints each requested var as `NAME=value` after a unique marker
+// line. The worker then splits these back out of stdout (parseOutputEnv). A
+// non-`-c` command is returned unchanged — capture needs a shell trailer. Names
+// are validated POSIX identifiers, so they are safe to inject into the loop list.
+func wrapOutputEnv(cmd, names []string, marker string) []string {
+	if len(cmd) < 3 || cmd[1] != "-c" || len(names) == 0 {
+		return cmd
+	}
+	var b strings.Builder
+	b.WriteString(cmd[2])
+	b.WriteString("\nprintf '\\n%s\\n' '" + marker + "'\n")
+	// One printf per name, expanding "$NAME" in the same shell so both exported and
+	// plain shell vars the script set are captured (an unset var emits empty). Names
+	// are validated POSIX identifiers, so the literal $NAME can't inject.
+	for _, n := range names {
+		b.WriteString("printf '%s=%s\\n' '" + n + "' \"$" + n + "\"\n")
+	}
+	out := append([]string(nil), cmd...)
+	out[2] = b.String()
+	return out
+}
+
+// parseOutputEnv splits captured stdout at the marker emitted by wrapOutputEnv:
+// everything before is the real stdout; the `NAME=value` lines after it become the
+// captured map (restricted to the requested names). A missing marker (the script
+// failed before the trailer ran) yields the stdout unchanged and no captures.
+func parseOutputEnv(stdout string, names []string, marker string) (string, map[string]string) {
+	before, after, found := strings.Cut(stdout, "\n"+marker+"\n")
+	if !found {
+		return stdout, nil
+	}
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(after, "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok && want[k] {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	return before, out
 }

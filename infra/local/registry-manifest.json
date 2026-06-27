@@ -145,6 +145,7 @@
           "failure_states": ["failed", "timed_out"],
           "cancel_states": ["cancelled"],
           "output_field": "stdout",
+          "output_map_field": "outputs",
           "error_fields": ["stderr"]
         }
       }

@@ -48,7 +48,12 @@ type AsyncConfig struct {
 	FailureStates    []string `json:"failure_states"`
 	CancelStates     []string `json:"cancel_states"`
 	OutputField      string   `json:"output_field"`
-	ErrorFields      []string `json:"error_fields"`
+	// OutputMapField names a response field holding an object (e.g. forge's captured
+	// output_env map). When present and non-empty in the poll response, that object
+	// — JSON-encoded — becomes the step output instead of OutputField, so a later
+	// step can reference an individual key via ${steps.NAME.output.KEY}.
+	OutputMapField string   `json:"output_map_field,omitempty"`
+	ErrorFields    []string `json:"error_fields"`
 }
 
 // BodyTransform rewrites a With key before the payload is sent to the service.
