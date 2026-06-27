@@ -1,0 +1,100 @@
+/**
+ * Step inspector — shown in the pipeline builder's right panel when a step is
+ * selected. It surfaces, for the chosen step, the things you need to wire it into
+ * a pipeline: what it does (action + summary), its example **inputs** (the `with`
+ * config, with ${...} references highlighted and listed), and how to consume its
+ * **output** in a later step (`${steps.<name>.output}`). It is read-only — editing
+ * happens in the Steps tab and the JSON panel.
+ */
+import { T } from '../../theme';
+import type { Step, WorkflowAction } from '../../api/bff';
+import { collectRefs } from './pipelineGraph';
+
+const sectionLabel: React.CSSProperties = {
+  fontFamily: T.mono, fontSize: 9, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', margin: '12px 0 6px',
+};
+const code: React.CSSProperties = {
+  fontFamily: T.mono, fontSize: 11, color: T.text, background: T.cardHi, border: `1px solid ${T.border}`, padding: '2px 5px', wordBreak: 'break-all',
+};
+
+/** Renders a string with ${...} references tinted so wired inputs stand out. */
+function withValue(v: unknown) {
+  const s = typeof v === 'string' ? v : JSON.stringify(v);
+  const parts = s.split(/(\$\{[^}]+\})/g);
+  return (
+    <span style={{ fontFamily: T.mono, fontSize: 11, color: T.text, wordBreak: 'break-all' }}>
+      {parts.map((p, i) => p.startsWith('${')
+        ? <span key={i} style={{ color: T.amber }}>{p}</span>
+        : <span key={i}>{p}</span>)}
+    </span>
+  );
+}
+
+function CopyRef({ text }: { text: string }) {
+  return (
+    <button onClick={() => { navigator.clipboard?.writeText(text).catch(() => {}); }}
+      title="copy reference"
+      style={{ ...code, cursor: 'pointer', textAlign: 'left', display: 'block', width: '100%' }}>{text} <span style={{ color: T.faint }}>⧉</span></button>
+  );
+}
+
+export function StepInspector({ step, action }: { step: Step | null; action?: WorkflowAction }) {
+  if (!step) {
+    return (
+      <div style={{ flex: 1, overflow: 'auto', padding: 14, fontFamily: T.mono, fontSize: 12, color: T.faint }}>
+        → select a step in the pipeline to see its inputs and output
+      </div>
+    );
+  }
+  const withMap = (step.with ?? {}) as Record<string, unknown>;
+  const entries = Object.entries(withMap);
+  const refs = collectRefs(withMap);
+  const outRef = `\${steps.${step.name}.output}`;
+  const outputDesc = action?.async?.output_field
+    ? `the ${action.async.output_field} of the ${action.name} result`
+    : 'this step’s output (response body / command output)';
+
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>{step.name}</div>
+      <div style={{ fontFamily: T.mono, fontSize: 11, color: T.blue, marginTop: 2 }}>{step.action}</div>
+      {(step.description || action?.summary) && (
+        <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, marginTop: 6, lineHeight: 1.5 }}>{step.description || action?.summary}</div>
+      )}
+
+      <div style={sectionLabel}>inputs (with)</div>
+      {entries.length === 0 ? (
+        <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>no configured inputs</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          {entries.map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
+              <span style={{ fontFamily: T.mono, fontSize: 11, color: T.green, flexShrink: 0 }}>{k}:</span>
+              {withValue(v)}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {(refs.inputs.length > 0 || refs.steps.length > 0) && (
+        <>
+          <div style={sectionLabel}>consumes</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {refs.inputs.map((n) => (
+              <div key={`i-${n}`} style={{ fontFamily: T.mono, fontSize: 11, color: T.text }}>• run input <span style={{ color: T.amber }}>{n}</span></div>
+            ))}
+            {refs.steps.map((n) => (
+              <div key={`s-${n}`} style={{ fontFamily: T.mono, fontSize: 11, color: T.text }}>• output of step <span style={{ color: T.amber }}>{n}</span></div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <div style={sectionLabel}>output</div>
+      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 5 }}>reference {outputDesc} in a later step:</div>
+      <CopyRef text={outRef} />
+      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, margin: '6px 0 4px' }}>or a JSON field of it:</div>
+      <div style={code}>{`\${steps.${step.name}.output.<field>}`}</div>
+    </div>
+  );
+}

@@ -13,6 +13,7 @@ import {
 import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
 import { PipelineBlocks } from './PipelineBlocks';
+import { StepInspector } from './StepInspector';
 import type { StepRef } from './pipelineGraph';
 import { stepsToPayload, configToJson, parseConfig } from './pipelineGraph';
 import { schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX } from './stepSchema';
@@ -60,6 +61,18 @@ function PipelineBuilderOverlay({
   const [jsonDraft, setJsonDraft] = useState(() => configToJson(initial?.name ?? '', initial?.description ?? '', initialStepRefs));
   const [jsonError, setJsonError] = useState<string | null>(null);
   const jsonFocused = useRef(false);
+
+  // Right-panel tabs: a step inspector (inputs/output of the selected step) and the
+  // live JSON config. Selecting a step in the builder switches to the inspector.
+  const [rightTab, setRightTab] = useState<'inspector' | 'json'>('json');
+  const [inspectId, setInspectId] = useState<string | null>(null);
+  const [actions, setActions] = useState<WorkflowAction[]>([]);
+  useEffect(() => { listActions(token).then(setActions).catch(() => {}); }, [token]);
+  const actionsByName = useMemo(() => Object.fromEntries(actions.map(a => [a.name, a])), [actions]);
+  const onInspect = useCallback((stepId: string | null) => {
+    setInspectId(stepId);
+    setRightTab('inspector');
+  }, []);
 
   const canonicalJson = useMemo(() => configToJson(name, desc, steps), [name, desc, steps]);
 
@@ -122,29 +135,42 @@ function PipelineBuilderOverlay({
       </div>
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 7px 14px 14px' }}>
-          <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} onChange={setSteps} />
+          <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} onChange={setSteps} onInspect={onInspect} />
         </div>
-        {/* Live, editable JSON config — mirrors the builder and edits flow back. */}
+        {/* Right panel: step inspector (inputs/output of the selected step) +
+            live, editable JSON config, as tabs. */}
         <div style={{ width: 'min(42%, 560px)', minWidth: 300, flexShrink: 0, padding: '14px 14px 14px 7px', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: `1px solid ${T.border}`, borderBottom: 'none', background: T.bgAlt }}>
-            <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>pipeline.json</span>
-            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.faint }}>live · editable</span>
+          <div style={{ display: 'flex', alignItems: 'stretch', border: `1px solid ${T.border}`, borderBottom: 'none', background: T.bgAlt }}>
+            {(['inspector', 'json'] as const).map(tab => (
+              <button key={tab} onClick={() => setRightTab(tab)}
+                style={{ background: rightTab === tab ? T.bg : 'transparent', border: 'none', borderRight: `1px solid ${T.border}`, color: rightTab === tab ? T.textHi : T.faint, fontFamily: T.mono, fontSize: 10, letterSpacing: 1, textTransform: 'uppercase', padding: '8px 14px', cursor: 'pointer' }}>
+                {tab === 'inspector' ? 'step' : 'pipeline.json'}
+              </button>
+            ))}
             <div style={{ flex: 1 }} />
-            <span style={{ fontFamily: T.mono, fontSize: 9, color: jsonError ? T.red : T.green }}>{jsonError ? '✗ invalid' : '✓ in sync'}</span>
+            {rightTab === 'json' && <span style={{ alignSelf: 'center', padding: '0 12px', fontFamily: T.mono, fontSize: 9, color: jsonError ? T.red : T.green }}>{jsonError ? '✗ invalid' : '✓ in sync'}</span>}
           </div>
-          <textarea value={jsonDraft} spellCheck={false}
-            onChange={e => applyJson(e.target.value)}
-            onFocus={() => { jsonFocused.current = true; }}
-            onBlur={() => { jsonFocused.current = false; if (!jsonError) setJsonDraft(canonicalJson); }}
-            style={{ flex: 1, minHeight: 0, resize: 'none', background: T.bg, border: `1px solid ${jsonError ? T.red : T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, lineHeight: 1.5, padding: 12, outline: 'none', whiteSpace: 'pre', overflow: 'auto', tabSize: 2 }} />
-          <div style={{ minHeight: 16, padding: '4px 2px', fontFamily: T.mono, fontSize: 10, color: jsonError ? T.red : T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {jsonError ? `✗ ${jsonError}` : 'edit step_id / parallel_group / matrix here, or drag blocks — both stay in sync'}
+          <div style={{ flex: 1, minHeight: 0, border: `1px solid ${T.border}`, background: T.bg, display: 'flex', flexDirection: 'column' }}>
+            {rightTab === 'inspector' ? (
+              <StepInspector step={inspectId ? (catalog[inspectId] ?? null) : null} action={inspectId && catalog[inspectId] ? actionsByName[catalog[inspectId].action] : undefined} />
+            ) : (
+              <>
+                <textarea value={jsonDraft} spellCheck={false}
+                  onChange={e => applyJson(e.target.value)}
+                  onFocus={() => { jsonFocused.current = true; }}
+                  onBlur={() => { jsonFocused.current = false; if (!jsonError) setJsonDraft(canonicalJson); }}
+                  style={{ flex: 1, minHeight: 0, resize: 'none', background: T.bg, border: 'none', color: T.text, fontFamily: T.mono, fontSize: 12, lineHeight: 1.5, padding: 12, outline: 'none', whiteSpace: 'pre', overflow: 'auto', tabSize: 2 }} />
+                <div style={{ minHeight: 16, padding: '4px 10px', borderTop: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 10, color: jsonError ? T.red : T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {jsonError ? `✗ ${jsonError}` : 'edit here or drag blocks — both stay in sync'}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
       <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-          drag onto a gap to sequence · drop onto a parallel block to group · ∥ toggles parallel · ⊞ matrix fans a step out over a list of values
+          palette: ∥ parallel · ⊞ matrix · ⏸ approval gate · click a step to inspect its inputs &amp; output · drag to reorder
         </span>
         <div style={{ flex: 1 }} />
         {saveError && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>{saveError}</span>}

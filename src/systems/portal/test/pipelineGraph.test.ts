@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import {
   stagesFromSteps, blocksFromSteps, stepsFromBlocks, stagesOf, StepRef, Block,
-  stepsToPayload, configToJson, parseConfig,
+  stepsToPayload, configToJson, parseConfig, collectRefs,
 } from '../src/pages/app/pipelineGraph.ts';
 
 describe('stagesFromSteps', () => {
@@ -215,5 +215,29 @@ describe('inline approval gates', () => {
   it('parseConfig accepts a gate with no step_id', () => {
     const parsed = parseConfig('{"name":"p","steps":[{"approval":{"message":"hold"}}]}');
     expect(parsed.steps).to.deep.equal([{ parallel_group: null, approval: { message: 'hold' } }]);
+  });
+});
+
+describe('collectRefs (step inspector)', () => {
+  it('extracts run inputs (named + bare) and upstream step outputs, ignoring matrix', () => {
+    const refs = collectRefs({
+      image: 'ubuntu',
+      run: 'deploy ${inputs.env} to ${matrix.region}',
+      url: '${steps.build.output.url}',
+      bare: '${TOKEN}',
+      nested: { a: ['${steps.lint.output}'] },
+    });
+    expect(refs.inputs).to.have.members(['env', 'TOKEN']);
+    expect(refs.steps).to.have.members(['build', 'lint']);
+  });
+
+  it('returns empty lists when there are no references', () => {
+    expect(collectRefs({ a: 'plain text', b: 3, c: true })).to.deep.equal({ inputs: [], steps: [] });
+  });
+
+  it('dedupes repeated references', () => {
+    const refs = collectRefs({ a: '${steps.x.output} ${steps.x.output}', b: '${inputs.y}', c: '${y}' });
+    expect(refs.steps).to.deep.equal(['x']);
+    expect(refs.inputs).to.have.members(['y']);
   });
 });

@@ -34,6 +34,9 @@ export interface PipelineBlocksProps {
   editable?: boolean;
   palette?: Step[];
   onChange?: (steps: StepRef[]) => void;
+  // Reports the step_id of the selected block (null for a gate or no selection),
+  // so the builder can show that step's inputs/output in an inspector panel.
+  onInspect?: (stepId: string | null) => void;
   height?: number | string;
 }
 
@@ -76,6 +79,8 @@ interface BlockCardProps {
   canLink: boolean;
   inParallel: boolean;
   isGate: boolean;
+  selected: boolean;
+  onSelect: () => void;
   onToggleParallel: (uid: string) => void;
   onSetMatrix: (uid: string, matrix: MatrixConfig | null) => void;
   onSetApproval: (uid: string, gate: ApprovalGate) => void;
@@ -116,7 +121,7 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
   );
 }
 
-function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
+function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, onSelect, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
   const leftBar = isGate ? T.blue : block.matrix ? T.amber : inParallel ? T.green : T.dim;
   const style: React.CSSProperties = {
@@ -130,7 +135,8 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
     marginBottom: inParallel ? 0 : 4,
     flex: inParallel ? '1 1 160px' : undefined,
     minWidth: inParallel ? 0 : undefined,
-    background: inParallel ? T.bgAlt : T.card, border: `1px solid ${isDragging ? T.green : T.border}`,
+    background: selected ? T.cardHi : inParallel ? T.bgAlt : T.card,
+    border: `1px solid ${isDragging ? T.green : selected ? T.textHi : T.border}`,
     borderLeft: `3px solid ${leftBar}`,
     padding: '8px 10px', fontFamily: T.mono,
     cursor: editable ? 'grab' : 'default', touchAction: editable ? 'none' : undefined, userSelect: 'none',
@@ -147,7 +153,7 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
     <div ref={setNodeRef} style={style} {...(editable ? attributes : {})} {...(editable ? listeners : {})}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         {editable && <span style={{ color: T.faint, fontSize: 13, lineHeight: 1 }}>⠿</span>}
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div onClick={onSelect} style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} title="click to inspect this step's inputs and output">
           <div style={{ fontSize: 12.5, fontWeight: 700, color: isGate ? T.blue : isMatrix ? T.amber : T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{prefix}{label}</div>
           <div style={{ fontSize: 10, color: T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{isMatrix ? ' · matrix fan-out' : ''}</div>
         </div>
@@ -169,19 +175,20 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
   );
 }
 
-export function PipelineBlocks({ initialSteps, catalog, editable = false, palette = [], onChange, height }: PipelineBlocksProps) {
+export function PipelineBlocks({ initialSteps, catalog, editable = false, palette = [], onChange, onInspect, height }: PipelineBlocksProps) {
   const [blocks, setBlocks] = useState<Block[]>(() => blocksFromSteps(initialSteps));
   const [parallelMode, setParallelMode] = useState(false);
   const [parallelOpen, setParallelOpen] = useState(false);
   // matrixMode: the next step clicked from the palette becomes a matrix fan-out.
   const [matrixMode, setMatrixMode] = useState(false);
+  const [selectedUid, setSelectedUid] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const seq = useRef(0);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
   const { width } = useViewport();
   const paletteW = clamp(Math.round(width * 0.2), 200, 300); // step palette scales with the screen
 
-  useEffect(() => { setBlocks(blocksFromSteps(initialSteps)); setParallelMode(false); setParallelOpen(false); setMatrixMode(false); }, [initialSteps]);
+  useEffect(() => { setBlocks(blocksFromSteps(initialSteps)); setParallelMode(false); setParallelOpen(false); setMatrixMode(false); setSelectedUid(null); }, [initialSteps]);
   useEffect(() => { if (editable && onChange) onChange(stepsFromBlocks(blocks)); }, [blocks, editable, onChange]);
 
   const onDragStart = useCallback((e: DragStartEvent) => { void e; setDragging(true); }, []);
@@ -236,17 +243,26 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     });
   }, []);
 
+  // Select a block and report its step (null for a gate) so the inspector updates.
+  const select = useCallback((b: Block) => {
+    setSelectedUid(b.uid);
+    onInspect?.(b.approval ? null : b.stepId);
+  }, [onInspect]);
+
   const addStep = useCallback((s: Step) => {
     // In matrix mode the clicked step becomes a solo matrix fan-out (one block,
     // then the mode ends — a matrix wraps a single step).
+    const uid = `add${seq.current++}`;
     if (matrixMode) {
-      setBlocks((bs) => [...bs, { uid: `add${seq.current++}`, stepId: s.step_id, parallelWithPrev: false, matrix: { var: '', values: [] } }]);
+      setBlocks((bs) => [...bs, { uid, stepId: s.step_id, parallelWithPrev: false, matrix: { var: '', values: [] } }]);
       setMatrixMode(false);
-      return;
+    } else {
+      setBlocks((bs) => [...bs, { uid, stepId: s.step_id, parallelWithPrev: parallelMode && parallelOpen }]);
+      if (parallelMode) setParallelOpen(true);
     }
-    setBlocks((bs) => [...bs, { uid: `add${seq.current++}`, stepId: s.step_id, parallelWithPrev: parallelMode && parallelOpen }]);
-    if (parallelMode) setParallelOpen(true);
-  }, [parallelMode, parallelOpen, matrixMode]);
+    setSelectedUid(uid);
+    onInspect?.(s.step_id); // show the freshly-added step's inputs/output
+  }, [parallelMode, parallelOpen, matrixMode, onInspect]);
 
   const toggleParallelMode = useCallback(() => { setParallelMode((m) => !m); setParallelOpen(false); setMatrixMode(false); }, []);
   const toggleMatrixMode = useCallback(() => { setMatrixMode((m) => !m); setParallelMode(false); setParallelOpen(false); }, []);
@@ -262,10 +278,16 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   }, []);
   // An approval gate is always its own sequential block (no step, no parallel).
   const addGate = useCallback(() => {
-    setBlocks((bs) => [...bs, { uid: `add${seq.current++}`, stepId: '', parallelWithPrev: false, approval: { message: '' } }]);
+    const uid = `add${seq.current++}`;
+    setBlocks((bs) => [...bs, { uid, stepId: '', parallelWithPrev: false, approval: { message: '' } }]);
     setParallelMode(false); setParallelOpen(false); setMatrixMode(false);
-  }, []);
-  const remove = useCallback((uid: string) => { setBlocks((bs) => bs.filter((b) => b.uid !== uid)); }, []);
+    setSelectedUid(uid);
+    onInspect?.(null); // a gate has no step to inspect; its config is on the card
+  }, [onInspect]);
+  const remove = useCallback((uid: string) => {
+    setBlocks((bs) => bs.filter((b) => b.uid !== uid));
+    if (selectedUid === uid) { setSelectedUid(null); onInspect?.(null); }
+  }, [selectedUid, onInspect]);
 
   const ids = useMemo(() => blocks.map((b) => b.uid), [blocks]);
   const stages = useMemo(() => stagesOf(blocks), [blocks]);
@@ -281,6 +303,7 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     return (
       <BlockCard key={b.uid} block={b} label={label} action={action} editable={editable}
         canLink={(indexOf.get(b.uid) ?? 0) > 0} inParallel={inParallel} isGate={isGate}
+        selected={selectedUid === b.uid} onSelect={() => select(b)}
         onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onSetApproval={setApproval} onRemove={remove} />
     );
   };

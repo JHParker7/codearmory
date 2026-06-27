@@ -144,6 +144,38 @@ export function stepsToPayload(steps: StepRef[]): StepRef[] {
   });
 }
 
+/** Scans a step's `with` config for the ${...} references it consumes, so the
+ * builder can show what a step pulls in: run inputs (`${inputs.X}` / bare `${X}`)
+ * and upstream step outputs (`${steps.Y.output...}`). Matrix bindings are ignored
+ * (they are supplied per-execution, not wired by the user). Recurses into nested
+ * maps and arrays; returns deduped, order-preserved name lists. */
+export function collectRefs(withMap: Record<string, unknown>): { inputs: string[]; steps: string[] } {
+  const inputs = new Set<string>();
+  const steps = new Set<string>();
+  const walk = (v: unknown): void => {
+    if (typeof v === 'string') {
+      for (const m of v.matchAll(/\$\{([^}]+)\}/g)) {
+        const expr = m[1].trim();
+        if (expr.startsWith('steps.')) {
+          const rest = expr.slice('steps.'.length);
+          const dot = rest.indexOf('.output');
+          if (dot > 0) steps.add(rest.slice(0, dot));
+        } else if (expr.startsWith('inputs.')) {
+          inputs.add(expr.slice('inputs.'.length));
+        } else if (!expr.startsWith('matrix.')) {
+          inputs.add(expr); // bare ${NAME} resolves to a run input
+        }
+      }
+    } else if (Array.isArray(v)) {
+      v.forEach(walk);
+    } else if (v && typeof v === 'object') {
+      Object.values(v as Record<string, unknown>).forEach(walk);
+    }
+  };
+  walk(withMap);
+  return { inputs: [...inputs], steps: [...steps] };
+}
+
 /** Renders the pipeline as the canonical config JSON (the saved payload).
  * description is omitted when empty. */
 export function configToJson(name: string, description: string, steps: StepRef[]): string {
