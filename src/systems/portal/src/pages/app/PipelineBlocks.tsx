@@ -137,22 +137,21 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
   };
   const stop = (e: React.PointerEvent) => e.stopPropagation();
   // Matrix fan-out applies only to a solo, non-gate step; it is mutually exclusive
-  // with a parallel group, so the toggle/editor are hidden in a parallel stage.
-  const showMatrix = editable && !inParallel && !isGate;
+  // A matrix block fans a single step out over a list; it can't also be parallel,
+  // so its editor is hidden inside a parallel stage. Matrix is created from the
+  // palette ("⊞ matrix block"), not a per-card toggle.
+  const isMatrix = !!block.matrix;
+  const showMatrix = editable && isMatrix && !inParallel && !isGate;
+  const prefix = isGate ? '⏸ ' : isMatrix ? '⊞ ' : '';
   return (
     <div ref={setNodeRef} style={style} {...(editable ? attributes : {})} {...(editable ? listeners : {})}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         {editable && <span style={{ color: T.faint, fontSize: 13, lineHeight: 1 }}>⠿</span>}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 700, color: isGate ? T.blue : T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{isGate ? '⏸ ' : ''}{label}</div>
-          <div style={{ fontSize: 10, color: T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{block.matrix ? ' · ⊞ matrix' : ''}</div>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: isGate ? T.blue : isMatrix ? T.amber : T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{prefix}{label}</div>
+          <div style={{ fontSize: 10, color: T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{isMatrix ? ' · matrix fan-out' : ''}</div>
         </div>
-        {showMatrix && (
-          <button onPointerDown={stop} onClick={() => onSetMatrix(block.uid, block.matrix ? null : { var: '', values: [] })}
-            title={block.matrix ? 'remove matrix fan-out' : 'fan this step out over a list of values'}
-            style={{ background: block.matrix ? T.amberSoft : 'transparent', border: `1px solid ${block.matrix ? T.amber : T.border}`, color: block.matrix ? T.amber : T.dim, fontFamily: T.mono, fontSize: 10, fontWeight: 600, lineHeight: 1, padding: '4px 7px', cursor: 'pointer', whiteSpace: 'nowrap' }}>⊞ matrix</button>
-        )}
-        {editable && canLink && !isGate && (
+        {editable && canLink && !isGate && !isMatrix && (
           <button onPointerDown={stop} onClick={() => onToggleParallel(block.uid)}
             title={inParallel ? 'make sequential (run after the stage above)' : 'run in parallel with the stage above'}
             style={{ background: inParallel ? T.greenSoft : 'transparent', border: `1px solid ${inParallel ? T.green : T.border}`, color: inParallel ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>∥</button>
@@ -174,13 +173,15 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   const [blocks, setBlocks] = useState<Block[]>(() => blocksFromSteps(initialSteps));
   const [parallelMode, setParallelMode] = useState(false);
   const [parallelOpen, setParallelOpen] = useState(false);
+  // matrixMode: the next step clicked from the palette becomes a matrix fan-out.
+  const [matrixMode, setMatrixMode] = useState(false);
   const [dragging, setDragging] = useState(false);
   const seq = useRef(0);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
   const { width } = useViewport();
   const paletteW = clamp(Math.round(width * 0.2), 200, 300); // step palette scales with the screen
 
-  useEffect(() => { setBlocks(blocksFromSteps(initialSteps)); setParallelMode(false); setParallelOpen(false); }, [initialSteps]);
+  useEffect(() => { setBlocks(blocksFromSteps(initialSteps)); setParallelMode(false); setParallelOpen(false); setMatrixMode(false); }, [initialSteps]);
   useEffect(() => { if (editable && onChange) onChange(stepsFromBlocks(blocks)); }, [blocks, editable, onChange]);
 
   const onDragStart = useCallback((e: DragStartEvent) => { void e; setDragging(true); }, []);
@@ -236,11 +237,19 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   }, []);
 
   const addStep = useCallback((s: Step) => {
+    // In matrix mode the clicked step becomes a solo matrix fan-out (one block,
+    // then the mode ends — a matrix wraps a single step).
+    if (matrixMode) {
+      setBlocks((bs) => [...bs, { uid: `add${seq.current++}`, stepId: s.step_id, parallelWithPrev: false, matrix: { var: '', values: [] } }]);
+      setMatrixMode(false);
+      return;
+    }
     setBlocks((bs) => [...bs, { uid: `add${seq.current++}`, stepId: s.step_id, parallelWithPrev: parallelMode && parallelOpen }]);
     if (parallelMode) setParallelOpen(true);
-  }, [parallelMode, parallelOpen]);
+  }, [parallelMode, parallelOpen, matrixMode]);
 
-  const toggleParallelMode = useCallback(() => { setParallelMode((m) => !m); setParallelOpen(false); }, []);
+  const toggleParallelMode = useCallback(() => { setParallelMode((m) => !m); setParallelOpen(false); setMatrixMode(false); }, []);
+  const toggleMatrixMode = useCallback(() => { setMatrixMode((m) => !m); setParallelMode(false); setParallelOpen(false); }, []);
   const toggleParallel = useCallback((uid: string) => {
     // Joining a parallel group drops any matrix (the two are mutually exclusive).
     setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, parallelWithPrev: !b.parallelWithPrev, matrix: b.parallelWithPrev ? b.matrix : null } : b)));
@@ -254,7 +263,7 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   // An approval gate is always its own sequential block (no step, no parallel).
   const addGate = useCallback(() => {
     setBlocks((bs) => [...bs, { uid: `add${seq.current++}`, stepId: '', parallelWithPrev: false, approval: { message: '' } }]);
-    setParallelMode(false); setParallelOpen(false);
+    setParallelMode(false); setParallelOpen(false); setMatrixMode(false);
   }, []);
   const remove = useCallback((uid: string) => { setBlocks((bs) => bs.filter((b) => b.uid !== uid)); }, []);
 
@@ -337,6 +346,14 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
             <div style={{ fontSize: 14, fontWeight: 700 }}>∥ parallel block</div>
             <div style={{ fontSize: 11, color: parallelMode ? T.green : T.faint, marginTop: 2 }}>
               {parallelMode ? 'active — add steps, click to finish' : 'run the next steps together'}
+            </div>
+          </button>
+          <button onClick={toggleMatrixMode}
+            title="fan a step out over a list of values — click this, then click a step to wrap"
+            style={{ width: '100%', textAlign: 'left', padding: '12px 16px', background: matrixMode ? T.amberSoft : 'transparent', border: 'none', borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${T.amber}`, fontFamily: T.mono, cursor: 'pointer', color: matrixMode ? T.amber : T.text }}>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>⊞ matrix block</div>
+            <div style={{ fontSize: 11, color: matrixMode ? T.amber : T.faint, marginTop: 2 }}>
+              {matrixMode ? 'active — click a step to fan out' : 'run one step per value in a list'}
             </div>
           </button>
           <button onClick={addGate}
