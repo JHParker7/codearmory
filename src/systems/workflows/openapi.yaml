@@ -29,7 +29,9 @@ info:
       `POST /runs/{id}/approve` (resume) or `POST /runs/{id}/reject` (fail).
       Optional `with.message` is the prompt shown to approvers; optional
       `with.approvers` is a username allow-list (anyone with `approveRun`
-      permission may decide when it is empty).
+      permission may decide when it is empty). A gate can also be declared
+      **inline** on a step ref via `approval: {message, approvers}` (no step_id) —
+      no reusable step required; see WorkflowStepRef.
     - Any other string (e.g. `"forge/run"`, `"tickets/create"`) — looked up in
       the action catalog loaded from the registry. `with` fields are
       action-specific.
@@ -835,19 +837,37 @@ components:
             Exactly one of values or values_from is required.
           example: ${inputs.regions}
 
+    ApprovalGate:
+      type: object
+      description: |
+        An inline manual-approval gate declared directly on a pipeline step ref —
+        no separate step is needed. The run pauses at this position in
+        `awaiting_approval` until an authorized user approves or rejects it.
+      properties:
+        message:
+          type: string
+          description: Prompt shown to approvers
+          example: Approve deploy to prod?
+        approvers:
+          type: array
+          description: Optional username allow-list (empty = anyone with approveRun permission)
+          items:
+            type: string
+          example: ["alice", "bob"]
+
     WorkflowStepRef:
       type: object
       description: |
-        A reference to a step within a workflow. Steps sharing the same
-        non-null `parallel_group` integer execute concurrently; a `matrix` fans
-        the step out over a list of values. The two are mutually exclusive.
-      required:
-        - step_id
+        A position in a workflow, which is EITHER a reference to a stored step
+        (`step_id`) OR an inline `approval` gate. A step ref may additionally
+        carry a `parallel_group` (steps sharing a non-null value run concurrently)
+        or a `matrix` (fans the step out over a list); the two are mutually
+        exclusive, and an approval gate is always solo.
       properties:
         step_id:
           type: string
           format: uuid
-          description: ID of the step to execute
+          description: ID of the step to execute (omit for an approval gate)
         parallel_group:
           type: integer
           nullable: true
@@ -859,6 +879,10 @@ components:
         matrix:
           allOf:
             - $ref: '#/components/schemas/MatrixConfig'
+          nullable: true
+        approval:
+          allOf:
+            - $ref: '#/components/schemas/ApprovalGate'
           nullable: true
 
     WorkflowStep:
@@ -873,6 +897,10 @@ components:
             matrix:
               allOf:
                 - $ref: '#/components/schemas/MatrixConfig'
+              nullable: true
+            approval:
+              allOf:
+                - $ref: '#/components/schemas/ApprovalGate'
               nullable: true
 
     Workflow:

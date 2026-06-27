@@ -115,24 +115,38 @@ type MatrixConfig struct {
 	ValuesFrom string   `json:"values_from,omitempty"`
 }
 
-// WorkflowStepRef records how a step is used within a specific workflow:
-// which step and, optionally, which parallel execution group it belongs to, or a
-// matrix that fans the step out over a list. ParallelGroup and Matrix are mutually
-// exclusive. Steps sharing the same non-nil ParallelGroup execute concurrently;
-// the run waits for all steps in a group before advancing. Stored as part of the
-// workflow's `steps` JSON column, so neither field needs its own DB column.
+// ApprovalGate is an inline manual-approval pause declared directly on a pipeline
+// step ref — no separate Step row is required. When a ref carries one (and no
+// StepID), the run pauses at that position in StatusAwaitingApproval until an
+// authorized user approves or rejects it. Message is shown to approvers; Approvers
+// is an optional username allow-list. (Equivalent to a step with Action=approval,
+// but the gate lives on the pipeline, not as a reusable step.)
+type ApprovalGate struct {
+	Message   string   `json:"message,omitempty"`
+	Approvers []string `json:"approvers,omitempty"`
+}
+
+// WorkflowStepRef records how a step is used within a specific workflow. A ref is
+// EITHER a reference to a stored step (StepID) OR an inline Approval gate. A step
+// ref may additionally carry a parallel group or a matrix (mutually exclusive); a
+// gate is always solo. Stored as part of the workflow's `steps` JSON column, so no
+// field needs its own DB column.
 type WorkflowStepRef struct {
-	StepID        string        `json:"step_id"`
+	StepID        string        `json:"step_id,omitempty"`
 	ParallelGroup *int          `json:"parallel_group,omitempty"`
 	Matrix        *MatrixConfig `json:"matrix,omitempty"`
+	Approval      *ApprovalGate `json:"approval,omitempty"`
 }
 
 // WorkflowStep enriches a WorkflowStepRef with the full Step definition.
-// It is assembled at request/execution time and never stored in the DB.
+// It is assembled at request/execution time and never stored in the DB. For an
+// inline approval gate the Step is synthesised (Action=approval) and Approval
+// carries the gate config back out so the editor can round-trip it.
 type WorkflowStep struct {
 	Step
 	ParallelGroup *int          `json:"parallel_group,omitempty"`
 	Matrix        *MatrixConfig `json:"matrix,omitempty"`
+	Approval      *ApprovalGate `json:"approval,omitempty"`
 }
 
 // Workflow is a named, ordered pipeline of step references.

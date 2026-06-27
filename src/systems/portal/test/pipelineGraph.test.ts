@@ -186,3 +186,34 @@ describe('config ⇄ JSON (live editable panel)', () => {
     expect(() => parseConfig('{"steps": [{"parallel_group": 0}]}')).to.throw('step_id');
   });
 });
+
+describe('inline approval gates', () => {
+  it('round-trips a gate through blocks (no step_id) and back', () => {
+    const steps: StepRef[] = [
+      { step_id: 'build', parallel_group: null },
+      { parallel_group: null, approval: { message: 'deploy?', approvers: ['alice'] } },
+    ];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[1].approval).to.deep.equal({ message: 'deploy?', approvers: ['alice'] });
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { step_id: 'build', parallel_group: null },
+      { approval: { message: 'deploy?', approvers: ['alice'] } },
+    ]);
+  });
+
+  it('stepsToPayload emits a gate as just {approval}', () => {
+    expect(stepsToPayload([{ parallel_group: null, approval: { message: 'ok?' } }]))
+      .to.deep.equal([{ approval: { message: 'ok?' } }]);
+  });
+
+  it('configToJson/parseConfig round-trip a gate', () => {
+    const steps: StepRef[] = [{ parallel_group: null, approval: { message: 'go?', approvers: ['a', 'b'] } }];
+    const parsed = parseConfig(configToJson('p', '', steps));
+    expect(parsed.steps).to.deep.equal([{ parallel_group: null, approval: { message: 'go?', approvers: ['a', 'b'] } }]);
+  });
+
+  it('parseConfig accepts a gate with no step_id', () => {
+    const parsed = parseConfig('{"name":"p","steps":[{"approval":{"message":"hold"}}]}');
+    expect(parsed.steps).to.deep.equal([{ parallel_group: null, approval: { message: 'hold' } }]);
+  });
+});

@@ -26,7 +26,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { T } from '../../theme';
 import { useViewport, clamp } from '../../hooks/useViewport';
 import type { Step } from '../../api/bff';
-import { Block, StepRef, MatrixConfig, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
+import { Block, StepRef, MatrixConfig, ApprovalGate, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
 
 export interface PipelineBlocksProps {
   initialSteps: StepRef[];
@@ -75,9 +75,26 @@ interface BlockCardProps {
   editable: boolean;
   canLink: boolean;
   inParallel: boolean;
+  isGate: boolean;
   onToggleParallel: (uid: string) => void;
   onSetMatrix: (uid: string, matrix: MatrixConfig | null) => void;
+  onSetApproval: (uid: string, gate: ApprovalGate) => void;
   onRemove: (uid: string) => void;
+}
+
+/** Inline editor for an approval gate's prompt and optional approver allow-list. */
+function GateEditor({ uid, gate, onSetApproval }: { uid: string; gate: ApprovalGate; onSetApproval: (uid: string, g: ApprovalGate) => void }) {
+  const stop = (e: React.PointerEvent) => e.stopPropagation();
+  const field: React.CSSProperties = { background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '4px 6px', outline: 'none' };
+  return (
+    <div onPointerDown={stop} style={{ marginTop: 6, padding: 8, background: T.bg, border: `1px dashed ${T.border}`, borderLeft: `3px solid ${T.blue}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.blue, letterSpacing: 1, textTransform: 'uppercase' }}>⏸ pauses until approved</div>
+      <input value={gate.message ?? ''} placeholder="message shown to approvers (e.g. deploy to prod?)" onPointerDown={stop}
+        onChange={(e) => onSetApproval(uid, { ...gate, message: e.target.value })} style={field} />
+      <input value={(gate.approvers ?? []).join(', ')} placeholder="approvers (usernames, comma-separated; empty = anyone with permission)" onPointerDown={stop}
+        onChange={(e) => onSetApproval(uid, { ...gate, approvers: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) })} style={field} />
+    </div>
+  );
 }
 
 /** Inline matrix editor shown under a solo block. Fans the step out over a list:
@@ -99,8 +116,9 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
   );
 }
 
-function BlockCard({ block, label, action, editable, canLink, inParallel, onToggleParallel, onSetMatrix, onRemove }: BlockCardProps) {
+function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
+  const leftBar = isGate ? T.blue : block.matrix ? T.amber : inParallel ? T.green : T.dim;
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -113,40 +131,41 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, onTogg
     flex: inParallel ? '1 1 160px' : undefined,
     minWidth: inParallel ? 0 : undefined,
     background: inParallel ? T.bgAlt : T.card, border: `1px solid ${isDragging ? T.green : T.border}`,
-    borderLeft: `3px solid ${block.matrix ? T.amber : inParallel ? T.green : T.dim}`,
+    borderLeft: `3px solid ${leftBar}`,
     padding: '8px 10px', fontFamily: T.mono,
     cursor: editable ? 'grab' : 'default', touchAction: editable ? 'none' : undefined, userSelect: 'none',
   };
   const stop = (e: React.PointerEvent) => e.stopPropagation();
-  // Matrix fan-out applies only to a solo step; it is mutually exclusive with a
-  // parallel group, so the toggle and editor are hidden inside a parallel stage.
-  const showMatrix = editable && !inParallel;
+  // Matrix fan-out applies only to a solo, non-gate step; it is mutually exclusive
+  // with a parallel group, so the toggle/editor are hidden in a parallel stage.
+  const showMatrix = editable && !inParallel && !isGate;
   return (
     <div ref={setNodeRef} style={style} {...(editable ? attributes : {})} {...(editable ? listeners : {})}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         {editable && <span style={{ color: T.faint, fontSize: 13, lineHeight: 1 }}>⠿</span>}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 700, color: T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: isGate ? T.blue : T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{isGate ? '⏸ ' : ''}{label}</div>
           <div style={{ fontSize: 10, color: T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{block.matrix ? ' · ⊞ matrix' : ''}</div>
         </div>
         {showMatrix && (
           <button onPointerDown={stop} onClick={() => onSetMatrix(block.uid, block.matrix ? null : { var: '', values: [] })}
             title={block.matrix ? 'remove matrix fan-out' : 'fan this step out over a list of values'}
-            style={{ background: block.matrix ? T.amberSoft : 'transparent', border: `1px solid ${block.matrix ? T.amber : T.border}`, color: block.matrix ? T.amber : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>⊞</button>
+            style={{ background: block.matrix ? T.amberSoft : 'transparent', border: `1px solid ${block.matrix ? T.amber : T.border}`, color: block.matrix ? T.amber : T.dim, fontFamily: T.mono, fontSize: 10, fontWeight: 600, lineHeight: 1, padding: '4px 7px', cursor: 'pointer', whiteSpace: 'nowrap' }}>⊞ matrix</button>
         )}
-        {editable && canLink && (
+        {editable && canLink && !isGate && (
           <button onPointerDown={stop} onClick={() => onToggleParallel(block.uid)}
             title={inParallel ? 'make sequential (run after the stage above)' : 'run in parallel with the stage above'}
             style={{ background: inParallel ? T.greenSoft : 'transparent', border: `1px solid ${inParallel ? T.green : T.border}`, color: inParallel ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>∥</button>
         )}
         {editable && (
-          <button onPointerDown={stop} onClick={() => onRemove(block.uid)} title="remove step"
+          <button onPointerDown={stop} onClick={() => onRemove(block.uid)} title={isGate ? 'remove gate' : 'remove step'}
             style={{ background: 'transparent', border: 'none', color: T.faint, cursor: 'pointer', fontFamily: T.mono, fontSize: 12, lineHeight: 1, padding: 0 }}
             onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
             onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = T.faint; }}>✕</button>
         )}
       </div>
       {showMatrix && block.matrix && <MatrixEditor uid={block.uid} matrix={block.matrix} onSetMatrix={onSetMatrix} />}
+      {editable && isGate && block.approval && <GateEditor uid={block.uid} gate={block.approval} onSetApproval={onSetApproval} />}
     </div>
   );
 }
@@ -200,7 +219,8 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
       // just reorders there.
       if (overId === String(active.id)) return bs;
       const overStage = stagesOf(rest).find((st) => st.some((b) => b.uid === overId));
-      if (overStage && overStage.length > 1) {
+      // A gate can never be parallel, so it never joins a parallel container.
+      if (overStage && overStage.length > 1 && !item.approval) {
         const lastIdx = rest.findIndex((b) => b.uid === overStage[overStage.length - 1].uid);
         item.parallelWithPrev = true;
         item.matrix = null; // joining a parallel group drops the matrix (exclusive)
@@ -228,6 +248,14 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   const setMatrix = useCallback((uid: string, matrix: MatrixConfig | null) => {
     setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, matrix } : b)));
   }, []);
+  const setApproval = useCallback((uid: string, approval: ApprovalGate) => {
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, approval } : b)));
+  }, []);
+  // An approval gate is always its own sequential block (no step, no parallel).
+  const addGate = useCallback(() => {
+    setBlocks((bs) => [...bs, { uid: `add${seq.current++}`, stepId: '', parallelWithPrev: false, approval: { message: '' } }]);
+    setParallelMode(false); setParallelOpen(false);
+  }, []);
   const remove = useCallback((uid: string) => { setBlocks((bs) => bs.filter((b) => b.uid !== uid)); }, []);
 
   const ids = useMemo(() => blocks.map((b) => b.uid), [blocks]);
@@ -239,11 +267,12 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   }, [blocks]);
 
   const card = (b: Block, inParallel: boolean) => {
-    const { label, action } = labelFor(catalog, b.stepId);
+    const isGate = !!b.approval;
+    const { label, action } = isGate ? { label: 'approval gate', action: 'manual approval' } : labelFor(catalog, b.stepId);
     return (
       <BlockCard key={b.uid} block={b} label={label} action={action} editable={editable}
-        canLink={(indexOf.get(b.uid) ?? 0) > 0} inParallel={inParallel}
-        onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onRemove={remove} />
+        canLink={(indexOf.get(b.uid) ?? 0) > 0} inParallel={inParallel} isGate={isGate}
+        onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onSetApproval={setApproval} onRemove={remove} />
     );
   };
 
@@ -309,6 +338,12 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
             <div style={{ fontSize: 11, color: parallelMode ? T.green : T.faint, marginTop: 2 }}>
               {parallelMode ? 'active — add steps, click to finish' : 'run the next steps together'}
             </div>
+          </button>
+          <button onClick={addGate}
+            title="add a manual-approval gate — the run pauses here until approved (no step needed)"
+            style={{ width: '100%', textAlign: 'left', padding: '12px 16px', background: 'transparent', border: 'none', borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${T.blue}`, fontFamily: T.mono, cursor: 'pointer', color: T.text }}>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>⏸ approval gate</div>
+            <div style={{ fontSize: 11, color: T.faint, marginTop: 2 }}>pause for manual approval</div>
           </button>
           {palette.length === 0 ? (
             <div style={{ padding: '14px 16px', fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ no steps yet — create one in the Steps tab</div>
