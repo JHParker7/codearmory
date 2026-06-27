@@ -565,6 +565,30 @@ func TestExecuteRun_PerOccurrenceNameOverride(t *testing.T) {
 	}
 }
 
+// A per-occurrence With override wires a step's input to an earlier step's output
+// without editing the shared step definition.
+func TestExecuteRun_PerOccurrenceWithOverride(t *testing.T) {
+	requireDB(t)
+	stubGatekeeperRouting(t, "tu", "to")
+	fakeService(t, "wo0", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("X")) }) //nolint:errcheck
+	paths := recordingService(t, "wo1")
+	s0 := seedHTTPStep(t, "tu", "to", "wo0", "/produce")
+	s1 := seedHTTPStep(t, "tu", "to", "wo1", "/default") // default path, overridden below
+	wf := createWorkflowWith(t, []map[string]any{
+		{"step_id": s0.StepID, "name": "build"},
+		{"step_id": s1.StepID, "with": map[string]any{"path": "/wired/${steps.build.output}"}},
+	})
+
+	got := runOnce(t, wf)
+	if got.Status != StatusCompleted {
+		t.Fatalf("status = %q, want completed", got.Status)
+	}
+	// The override path won and the wired ${steps.build.output} resolved to "X".
+	if len(*paths) != 1 || (*paths)[0] != "/wired/X" {
+		t.Errorf("override+wiring not applied, paths = %v, want [/wired/X]", *paths)
+	}
+}
+
 func TestRebuildResumeState(t *testing.T) {
 	requireDB(t)
 	runID := uuid.New().String()

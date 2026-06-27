@@ -27,6 +27,7 @@ import { T } from '../../theme';
 import { useViewport, clamp } from '../../hooks/useViewport';
 import type { Step } from '../../api/bff';
 import { Block, StepRef, MatrixConfig, ApprovalGate, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
+import { StepInputsEditor, UpstreamOutput } from './StepInputsEditor';
 
 export interface PipelineBlocksProps {
   initialSteps: StepRef[];
@@ -81,8 +82,11 @@ interface BlockCardProps {
   inParallel: boolean;
   isGate: boolean;
   selected: boolean;
+  defWith: Record<string, unknown>;
+  upstream: UpstreamOutput[];
   onSelect: () => void;
   onRename: (uid: string, name: string | undefined) => void;
+  onSetWith: (uid: string, override: Record<string, unknown>) => void;
   onToggleParallel: (uid: string) => void;
   onSetMatrix: (uid: string, matrix: MatrixConfig | null) => void;
   onSetApproval: (uid: string, gate: ApprovalGate) => void;
@@ -123,7 +127,7 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
   );
 }
 
-function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, onSelect, onRename, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
+function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, onSelect, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
   const leftBar = isGate ? T.blue : block.matrix ? T.amber : inParallel ? T.green : T.dim;
   const style: React.CSSProperties = {
@@ -184,6 +188,10 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
       </div>
       {showMatrix && block.matrix && <MatrixEditor uid={block.uid} matrix={block.matrix} onSetMatrix={onSetMatrix} />}
       {editable && isGate && block.approval && <GateEditor uid={block.uid} gate={block.approval} onSetApproval={onSetApproval} />}
+      {editable && !isGate && selected && (
+        <StepInputsEditor defWith={defWith} override={block.with ?? {}} upstream={upstream}
+          onChange={(o) => onSetWith(block.uid, o)} />
+      )}
     </div>
   );
 }
@@ -289,6 +297,9 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   const setApproval = useCallback((uid: string, approval: ApprovalGate) => {
     setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, approval } : b)));
   }, []);
+  const setWith = useCallback((uid: string, override: Record<string, unknown>) => {
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, with: Object.keys(override).length > 0 ? override : undefined } : b)));
+  }, []);
   const setName = useCallback((uid: string, name: string | undefined) => {
     setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, name } : b)));
     // Keep the inspector's output reference (${steps.<name>.output}) in sync as the
@@ -319,13 +330,35 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     return m;
   }, [blocks]);
 
+  // Outputs of steps in stages BEFORE this block — what its inputs can be wired to.
+  const upstreamFor = (uid: string): UpstreamOutput[] => {
+    const st = stagesOf(blocks);
+    const stageIdx = st.findIndex((stage) => stage.some((b) => b.uid === uid));
+    if (stageIdx <= 0) return [];
+    const out: UpstreamOutput[] = [];
+    for (let i = 0; i < stageIdx; i++) {
+      for (const b of st[i]) {
+        if (b.approval) continue;
+        const def = catalog[b.stepId];
+        const nm = b.name || def?.name;
+        if (!nm) continue;
+        const dw = (def?.with ?? {}) as Record<string, unknown>;
+        const oe = Array.isArray(dw.output_env) ? (dw.output_env as unknown[]).filter((x): x is string => typeof x === 'string') : [];
+        out.push({ name: nm, outputEnv: oe });
+      }
+    }
+    return out;
+  };
+
   const card = (b: Block, inParallel: boolean) => {
     const isGate = !!b.approval;
     const { label, action } = isGate ? { label: 'approval gate', action: 'manual approval' } : labelFor(catalog, b.stepId);
     return (
       <BlockCard key={b.uid} block={b} label={label} action={action} editable={editable}
         canLink={(indexOf.get(b.uid) ?? 0) > 0} inParallel={inParallel} isGate={isGate}
-        selected={selectedUid === b.uid} onSelect={() => select(b)} onRename={setName}
+        selected={selectedUid === b.uid} defWith={(catalog[b.stepId]?.with ?? {}) as Record<string, unknown>}
+        upstream={selectedUid === b.uid ? upstreamFor(b.uid) : []}
+        onSelect={() => select(b)} onRename={setName} onSetWith={setWith}
         onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onSetApproval={setApproval} onRemove={remove} />
     );
   };

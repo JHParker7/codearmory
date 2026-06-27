@@ -142,10 +142,16 @@ type WorkflowStepRef struct {
 	// step, so the same step can appear more than once with distinct names and each
 	// is referenced unambiguously as ${steps.<name>.output}. Empty = use the step
 	// definition's own name (or "approval" for a gate).
-	Name          string        `json:"name,omitempty"`
-	ParallelGroup *int          `json:"parallel_group,omitempty"`
-	Matrix        *MatrixConfig `json:"matrix,omitempty"`
-	Approval      *ApprovalGate `json:"approval,omitempty"`
+	Name string `json:"name,omitempty"`
+	// With holds per-occurrence overrides for the step's With config, merged over the
+	// step definition's With at run time (these keys win). This is how a pipeline
+	// wires a step's inputs to earlier steps' outputs — e.g. With:{"env":{"TARGET":
+	// "${steps.build.output}"}} — without editing the shared step. The values support
+	// the same ${...} substitution as any With value.
+	With          map[string]any `json:"with,omitempty"`
+	ParallelGroup *int           `json:"parallel_group,omitempty"`
+	Matrix        *MatrixConfig  `json:"matrix,omitempty"`
+	Approval      *ApprovalGate  `json:"approval,omitempty"`
 }
 
 // WorkflowStep enriches a WorkflowStepRef with the full Step definition.

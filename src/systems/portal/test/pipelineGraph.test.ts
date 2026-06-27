@@ -215,6 +215,30 @@ describe('per-occurrence step name', () => {
   });
 });
 
+describe('per-occurrence with override (input wiring)', () => {
+  it('round-trips a with override through blocks and config JSON', () => {
+    const steps: StepRef[] = [
+      { step_id: 'deploy', parallel_group: null, with: { env: { TARGET: '${steps.build.output}' } } },
+    ];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[0].with).to.deep.equal({ env: { TARGET: '${steps.build.output}' } });
+    expect(stepsFromBlocks(blocks)).to.deep.equal(steps);
+    expect(JSON.parse(configToJson('p', '', steps)).steps).to.deep.equal([
+      { step_id: 'deploy', with: { env: { TARGET: '${steps.build.output}' } } },
+    ]);
+  });
+
+  it('drops an empty with override', () => {
+    expect(stepsToPayload([{ step_id: 'a', parallel_group: null, with: {} }]))
+      .to.deep.equal([{ step_id: 'a' }]);
+  });
+
+  it('parseConfig reads a with override', () => {
+    const parsed = parseConfig('{"name":"p","steps":[{"step_id":"a","with":{"image":"x"}}]}');
+    expect(parsed.steps).to.deep.equal([{ step_id: 'a', parallel_group: null, with: { image: 'x' } }]);
+  });
+});
+
 describe('inline approval gates', () => {
   it('round-trips a gate through blocks (no step_id) and back', () => {
     const steps: StepRef[] = [

@@ -41,16 +41,25 @@ function PipelineBuilderOverlay({
   onSaved: (wf: Workflow) => void;
 }) {
   const initialStepRefs = useMemo<StepRef[]>(
-    () => initial ? initial.steps.map(s => ({
-      step_id: s.step_id,
-      // The GET returns the effective name; keep it as an override only when it
-      // actually differs from the step definition's name (so unchanged steps still
-      // track definition renames, and the JSON/payload stay clean).
-      name: (!s.approval && s.name && s.step_id && s.name !== catalog[s.step_id]?.name) ? s.name : undefined,
-      parallel_group: s.parallel_group ?? null,
-      matrix: s.matrix ?? null,
-      approval: s.approval ?? null,
-    })) : [],
+    () => initial ? initial.steps.map(s => {
+      // The GET returns the effective (merged) name/with; recover the raw overrides
+      // by keeping only what differs from the step definition, so unchanged steps
+      // still track definition edits and the JSON/payload stay minimal.
+      const def = (s.step_id ? (catalog[s.step_id]?.with ?? {}) : {}) as Record<string, unknown>;
+      const merged = (s.with ?? {}) as Record<string, unknown>;
+      const wo: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(merged)) {
+        if (JSON.stringify(v) !== JSON.stringify(def[k])) wo[k] = v;
+      }
+      return {
+        step_id: s.step_id,
+        name: (!s.approval && s.name && s.step_id && s.name !== catalog[s.step_id]?.name) ? s.name : undefined,
+        with: Object.keys(wo).length ? wo : undefined,
+        parallel_group: s.parallel_group ?? null,
+        matrix: s.matrix ?? null,
+        approval: s.approval ?? null,
+      };
+    }) : [],
     [initial, catalog],
   );
 
