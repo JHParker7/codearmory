@@ -477,6 +477,118 @@ func TestInlineApprovalGate_ValidationRejectsBadShapes(t *testing.T) {
 	}
 }
 
+// An async action whose poll response carries a non-empty map at OutputMapField
+// uses that map (JSON-encoded) as the step output, so ${steps.NAME.output.KEY}
+// resolves — this is how a forge/run step surfaces captured output_env vars.
+func TestExecuteAction_OutputMapFieldBecomesOutput(t *testing.T) {
+	srv := fakeService(t, "forgeom", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			w.Write([]byte(`{"execution_id":"e1"}`)) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"completed","stdout":"build log","outputs":{"BUILD_ID":"42","VERSION":"1.0"}}`)) //nolint:errcheck
+	})
+	def := ActionDef{
+		Name: "forge/run", ServiceURL: srv.URL, Method: http.MethodPost, Path: "/executions",
+		Async: &AsyncConfig{IDField: "execution_id", PollPath: "/executions/{id}", PollIntervalSecs: 1,
+			StatusField: "status", SuccessStates: []string{"completed"}, OutputField: "stdout", OutputMapField: "outputs"},
+	}
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"image": "alpine"})
+	if err != nil {
+		t.Fatalf("executeAction: %v", err)
+	}
+	var got map[string]string
+	if jerr := json.Unmarshal([]byte(res.Output), &got); jerr != nil {
+		t.Fatalf("output is not the captured JSON map: %q (%v)", res.Output, jerr)
+	}
+	if got["BUILD_ID"] != "42" || got["VERSION"] != "1.0" {
+		t.Errorf("captured outputs = %v", got)
+	}
+}
+
+// With no captured outputs, the step output falls back to stdout (OutputField).
+func TestExecuteAction_EmptyOutputMapFallsBackToStdout(t *testing.T) {
+	srv := fakeService(t, "forgeom2", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Write([]byte(`{"execution_id":"e1"}`)) //nolint:errcheck
+			return
+		}
+		w.Write([]byte(`{"status":"completed","stdout":"hello","outputs":{}}`)) //nolint:errcheck
+	})
+	def := ActionDef{
+		Name: "forge/run", ServiceURL: srv.URL, Method: http.MethodPost, Path: "/executions",
+		Async: &AsyncConfig{IDField: "execution_id", PollPath: "/executions/{id}", PollIntervalSecs: 1,
+			StatusField: "status", SuccessStates: []string{"completed"}, OutputField: "stdout", OutputMapField: "outputs"},
+	}
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{})
+	if err != nil {
+		t.Fatalf("executeAction: %v", err)
+	}
+	if res.Output != "hello" {
+		t.Errorf("expected fallback to stdout, got %q", res.Output)
+	}
+}
+
+// A step ref's per-occurrence name overrides the definition name: the step run
+// records it and a later step references that occurrence's output by it.
+func TestExecuteRun_PerOccurrenceNameOverride(t *testing.T) {
+	requireDB(t)
+	stubGatekeeperRouting(t, "tu", "to")
+	fakeService(t, "pon0", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("OK")) }) //nolint:errcheck
+	paths := recordingService(t, "pon1")
+	s0 := seedHTTPStep(t, "tu", "to", "pon0", "/produce")
+	s1 := seedHTTPStep(t, "tu", "to", "pon1", "/got/${steps.build-prod.output}")
+	wf := createWorkflowWith(t, []map[string]any{
+		{"step_id": s0.StepID, "name": "build-prod"},
+		{"step_id": s1.StepID},
+	})
+
+	got := runOnce(t, wf)
+	if got.Status != StatusCompleted {
+		t.Fatalf("status = %q, want completed", got.Status)
+	}
+	srs, _ := getStepRuns(context.Background(), got.RunID)
+	named := false
+	for _, sr := range srs {
+		if sr.StepIndex == 0 && sr.StepName == "build-prod" {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("step 0 run name not overridden to build-prod: %+v", srs)
+	}
+	// The downstream step resolved ${steps.build-prod.output} to step 0's body.
+	if len(*paths) != 1 || (*paths)[0] != "/got/OK" {
+		t.Errorf("downstream path = %v, want [/got/OK]", *paths)
+	}
+}
+
+// A per-occurrence With override wires a step's input to an earlier step's output
+// without editing the shared step definition.
+func TestExecuteRun_PerOccurrenceWithOverride(t *testing.T) {
+	requireDB(t)
+	stubGatekeeperRouting(t, "tu", "to")
+	fakeService(t, "wo0", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("X")) }) //nolint:errcheck
+	paths := recordingService(t, "wo1")
+	s0 := seedHTTPStep(t, "tu", "to", "wo0", "/produce")
+	s1 := seedHTTPStep(t, "tu", "to", "wo1", "/default") // default path, overridden below
+	wf := createWorkflowWith(t, []map[string]any{
+		{"step_id": s0.StepID, "name": "build"},
+		{"step_id": s1.StepID, "with": map[string]any{"path": "/wired/${steps.build.output}"}},
+	})
+
+	got := runOnce(t, wf)
+	if got.Status != StatusCompleted {
+		t.Fatalf("status = %q, want completed", got.Status)
+	}
+	// The override path won and the wired ${steps.build.output} resolved to "X".
+	if len(*paths) != 1 || (*paths)[0] != "/wired/X" {
+		t.Errorf("override+wiring not applied, paths = %v, want [/wired/X]", *paths)
+	}
+}
+
 func TestRebuildResumeState(t *testing.T) {
 	requireDB(t)
 	runID := uuid.New().String()

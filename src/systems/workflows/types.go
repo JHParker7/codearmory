@@ -48,7 +48,12 @@ type AsyncConfig struct {
 	FailureStates    []string `json:"failure_states"`
 	CancelStates     []string `json:"cancel_states"`
 	OutputField      string   `json:"output_field"`
-	ErrorFields      []string `json:"error_fields"`
+	// OutputMapField names a response field holding an object (e.g. forge's captured
+	// output_env map). When present and non-empty in the poll response, that object
+	// — JSON-encoded — becomes the step output instead of OutputField, so a later
+	// step can reference an individual key via ${steps.NAME.output.KEY}.
+	OutputMapField string   `json:"output_map_field,omitempty"`
+	ErrorFields    []string `json:"error_fields"`
 }
 
 // BodyTransform rewrites a With key before the payload is sent to the service.
@@ -132,10 +137,21 @@ type ApprovalGate struct {
 // gate is always solo. Stored as part of the workflow's `steps` JSON column, so no
 // field needs its own DB column.
 type WorkflowStepRef struct {
-	StepID        string        `json:"step_id,omitempty"`
-	ParallelGroup *int          `json:"parallel_group,omitempty"`
-	Matrix        *MatrixConfig `json:"matrix,omitempty"`
-	Approval      *ApprovalGate `json:"approval,omitempty"`
+	StepID string `json:"step_id,omitempty"`
+	// Name optionally overrides the display/reference name for THIS occurrence of the
+	// step, so the same step can appear more than once with distinct names and each
+	// is referenced unambiguously as ${steps.<name>.output}. Empty = use the step
+	// definition's own name (or "approval" for a gate).
+	Name string `json:"name,omitempty"`
+	// With holds per-occurrence overrides for the step's With config, merged over the
+	// step definition's With at run time (these keys win). This is how a pipeline
+	// wires a step's inputs to earlier steps' outputs — e.g. With:{"env":{"TARGET":
+	// "${steps.build.output}"}} — without editing the shared step. The values support
+	// the same ${...} substitution as any With value.
+	With          map[string]any `json:"with,omitempty"`
+	ParallelGroup *int           `json:"parallel_group,omitempty"`
+	Matrix        *MatrixConfig  `json:"matrix,omitempty"`
+	Approval      *ApprovalGate  `json:"approval,omitempty"`
 }
 
 // WorkflowStep enriches a WorkflowStepRef with the full Step definition.

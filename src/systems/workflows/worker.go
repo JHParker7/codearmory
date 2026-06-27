@@ -780,7 +780,16 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 		for _, s := range def.Async.SuccessStates {
 			if status == s {
 				out := ""
-				if def.Async.OutputField != "" {
+				// A non-empty map field (e.g. forge's captured output_env) becomes the
+				// structured step output, so later steps can read ${...output.KEY}.
+				if def.Async.OutputMapField != "" {
+					if m, ok := result[def.Async.OutputMapField].(map[string]any); ok && len(m) > 0 {
+						if b, mErr := json.Marshal(m); mErr == nil {
+							out = string(b)
+						}
+					}
+				}
+				if out == "" && def.Async.OutputField != "" {
 					if v, ok := result[def.Async.OutputField]; ok {
 						out, _ = v.(string)
 					}

@@ -13,6 +13,7 @@ import {
 import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
 import { PipelineBlocks } from './PipelineBlocks';
+import { StepInspector } from './StepInspector';
 import type { StepRef } from './pipelineGraph';
 import { stepsToPayload, configToJson, parseConfig } from './pipelineGraph';
 import { schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX } from './stepSchema';
@@ -40,8 +41,26 @@ function PipelineBuilderOverlay({
   onSaved: (wf: Workflow) => void;
 }) {
   const initialStepRefs = useMemo<StepRef[]>(
-    () => initial ? initial.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null, matrix: s.matrix ?? null, approval: s.approval ?? null })) : [],
-    [initial],
+    () => initial ? initial.steps.map(s => {
+      // The GET returns the effective (merged) name/with; recover the raw overrides
+      // by keeping only what differs from the step definition, so unchanged steps
+      // still track definition edits and the JSON/payload stay minimal.
+      const def = (s.step_id ? (catalog[s.step_id]?.with ?? {}) : {}) as Record<string, unknown>;
+      const merged = (s.with ?? {}) as Record<string, unknown>;
+      const wo: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(merged)) {
+        if (JSON.stringify(v) !== JSON.stringify(def[k])) wo[k] = v;
+      }
+      return {
+        step_id: s.step_id,
+        name: (!s.approval && s.name && s.step_id && s.name !== catalog[s.step_id]?.name) ? s.name : undefined,
+        with: Object.keys(wo).length ? wo : undefined,
+        parallel_group: s.parallel_group ?? null,
+        matrix: s.matrix ?? null,
+        approval: s.approval ?? null,
+      };
+    }) : [],
+    [initial, catalog],
   );
 
   const [name, setName] = useState(initial?.name ?? '');
@@ -61,7 +80,27 @@ function PipelineBuilderOverlay({
   const [jsonError, setJsonError] = useState<string | null>(null);
   const jsonFocused = useRef(false);
 
-  const canonicalJson = useMemo(() => configToJson(name, desc, steps), [name, desc, steps]);
+  // Right-panel tabs: a step inspector (inputs/output of the selected step) and the
+  // live JSON config. Selecting a step in the builder switches to the inspector.
+  const [rightTab, setRightTab] = useState<'inspector' | 'json'>('json');
+  const [inspectId, setInspectId] = useState<string | null>(null);
+  const [inspectName, setInspectName] = useState<string | undefined>(undefined);
+  const [actions, setActions] = useState<WorkflowAction[]>([]);
+  useEffect(() => { listActions(token).then(setActions).catch(() => {}); }, [token]);
+  const actionsByName = useMemo(() => Object.fromEntries(actions.map(a => [a.name, a])), [actions]);
+  const onInspect = useCallback((stepId: string | null, name?: string) => {
+    setInspectId(stepId);
+    setInspectName(name);
+    setRightTab('inspector');
+  }, []);
+
+  // Drop a per-occurrence name that just equals the step definition's name, so only
+  // real overrides are saved/shown (and definition renames keep propagating).
+  const cleanedSteps = useMemo(
+    () => steps.map(s => (s.name && s.step_id && s.name === catalog[s.step_id]?.name) ? { ...s, name: undefined } : s),
+    [steps, catalog],
+  );
+  const canonicalJson = useMemo(() => configToJson(name, desc, cleanedSteps), [name, desc, cleanedSteps]);
 
   // Reflect builder/name/description changes into the JSON panel, unless the user
   // is actively editing the JSON (their text is authoritative then).
@@ -98,7 +137,7 @@ function PipelineBuilderOverlay({
       const payload = {
         name: name.trim(),
         description: desc.trim() || undefined,
-        steps: stepsToPayload(steps),
+        steps: stepsToPayload(cleanedSteps),
       };
       const wf = initial
         ? await updateWorkflow(token, initial.workflow_id, payload)
@@ -122,29 +161,42 @@ function PipelineBuilderOverlay({
       </div>
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 7px 14px 14px' }}>
-          <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} onChange={setSteps} />
+          <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} onChange={setSteps} onInspect={onInspect} />
         </div>
-        {/* Live, editable JSON config — mirrors the builder and edits flow back. */}
+        {/* Right panel: step inspector (inputs/output of the selected step) +
+            live, editable JSON config, as tabs. */}
         <div style={{ width: 'min(42%, 560px)', minWidth: 300, flexShrink: 0, padding: '14px 14px 14px 7px', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: `1px solid ${T.border}`, borderBottom: 'none', background: T.bgAlt }}>
-            <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>pipeline.json</span>
-            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.faint }}>live · editable</span>
+          <div style={{ display: 'flex', alignItems: 'stretch', border: `1px solid ${T.border}`, borderBottom: 'none', background: T.bgAlt }}>
+            {(['inspector', 'json'] as const).map(tab => (
+              <button key={tab} onClick={() => setRightTab(tab)}
+                style={{ background: rightTab === tab ? T.bg : 'transparent', border: 'none', borderRight: `1px solid ${T.border}`, color: rightTab === tab ? T.textHi : T.faint, fontFamily: T.mono, fontSize: 10, letterSpacing: 1, textTransform: 'uppercase', padding: '8px 14px', cursor: 'pointer' }}>
+                {tab === 'inspector' ? 'step' : 'pipeline.json'}
+              </button>
+            ))}
             <div style={{ flex: 1 }} />
-            <span style={{ fontFamily: T.mono, fontSize: 9, color: jsonError ? T.red : T.green }}>{jsonError ? '✗ invalid' : '✓ in sync'}</span>
+            {rightTab === 'json' && <span style={{ alignSelf: 'center', padding: '0 12px', fontFamily: T.mono, fontSize: 9, color: jsonError ? T.red : T.green }}>{jsonError ? '✗ invalid' : '✓ in sync'}</span>}
           </div>
-          <textarea value={jsonDraft} spellCheck={false}
-            onChange={e => applyJson(e.target.value)}
-            onFocus={() => { jsonFocused.current = true; }}
-            onBlur={() => { jsonFocused.current = false; if (!jsonError) setJsonDraft(canonicalJson); }}
-            style={{ flex: 1, minHeight: 0, resize: 'none', background: T.bg, border: `1px solid ${jsonError ? T.red : T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, lineHeight: 1.5, padding: 12, outline: 'none', whiteSpace: 'pre', overflow: 'auto', tabSize: 2 }} />
-          <div style={{ minHeight: 16, padding: '4px 2px', fontFamily: T.mono, fontSize: 10, color: jsonError ? T.red : T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {jsonError ? `✗ ${jsonError}` : 'edit step_id / parallel_group / matrix here, or drag blocks — both stay in sync'}
+          <div style={{ flex: 1, minHeight: 0, border: `1px solid ${T.border}`, background: T.bg, display: 'flex', flexDirection: 'column' }}>
+            {rightTab === 'inspector' ? (
+              <StepInspector step={inspectId ? (catalog[inspectId] ?? null) : null} name={inspectName} action={inspectId && catalog[inspectId] ? actionsByName[catalog[inspectId].action] : undefined} />
+            ) : (
+              <>
+                <textarea value={jsonDraft} spellCheck={false}
+                  onChange={e => applyJson(e.target.value)}
+                  onFocus={() => { jsonFocused.current = true; }}
+                  onBlur={() => { jsonFocused.current = false; if (!jsonError) setJsonDraft(canonicalJson); }}
+                  style={{ flex: 1, minHeight: 0, resize: 'none', background: T.bg, border: 'none', color: T.text, fontFamily: T.mono, fontSize: 12, lineHeight: 1.5, padding: 12, outline: 'none', whiteSpace: 'pre', overflow: 'auto', tabSize: 2 }} />
+                <div style={{ minHeight: 16, padding: '4px 10px', borderTop: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 10, color: jsonError ? T.red : T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {jsonError ? `✗ ${jsonError}` : 'edit here or drag blocks — both stay in sync'}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
       <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-          drag onto a gap to sequence · drop onto a parallel block to group · ∥ toggles parallel · ⊞ matrix fans a step out over a list of values
+          palette: ∥ parallel · ⊞ matrix · ⏸ approval gate · click a step to inspect its inputs &amp; output · drag to reorder
         </span>
         <div style={{ flex: 1 }} />
         {saveError && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>{saveError}</span>}
@@ -575,25 +627,46 @@ function StepsTab() {
               <input value={action} onChange={e => setAction(e.target.value)} placeholder="forge/run" style={stepInputStyle} />
             )}
 
-            {schemaForAction(action).map(f => {
-              const key = WITH_KEY_PREFIX + f.key;
-              const val = withVals[key] ?? '';
+            {(() => {
+              const fields = schemaForAction(action);
+              const renderField = (f: ReturnType<typeof schemaForAction>[number]) => {
+                const key = WITH_KEY_PREFIX + f.key;
+                const val = withVals[key] ?? '';
+                return (
+                  <div key={key}>
+                    <label style={stepLabelStyle}>{f.label}{f.required ? ' *' : ''}</label>
+                    {f.catalog === 'image' && images.length > 0 ? (
+                      <div style={{ marginBottom: 6 }}>
+                        <ImageSelect value={val} onChange={v => setWith(key, v)} options={images} placeholder={f.placeholder} fontSize={11} />
+                      </div>
+                    ) : f.multiline ? (
+                      <textarea value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder}
+                        rows={f.key === 'run' ? 3 : 2} style={{ ...stepInputStyle, resize: 'vertical' }} />
+                    ) : (
+                      <input value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder} style={stepInputStyle} />
+                    )}
+                  </div>
+                );
+              };
+              const inputs = fields.filter(f => !f.output);
+              const outputs = fields.filter(f => f.output);
               return (
-                <div key={key}>
-                  <label style={stepLabelStyle}>{f.label}{f.required ? ' *' : ''}</label>
-                  {f.catalog === 'image' && images.length > 0 ? (
-                    <div style={{ marginBottom: 6 }}>
-                      <ImageSelect value={val} onChange={v => setWith(key, v)} options={images} placeholder={f.placeholder} fontSize={11} />
-                    </div>
-                  ) : f.multiline ? (
-                    <textarea value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder}
-                      rows={f.key === 'run' ? 3 : 2} style={{ ...stepInputStyle, resize: 'vertical' }} />
-                  ) : (
-                    <input value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder} style={stepInputStyle} />
+                <>
+                  {inputs.map(renderField)}
+                  {outputs.length > 0 && (
+                    <>
+                      <div style={{ height: 1, background: T.border, margin: '10px 0 8px' }} />
+                      <label style={stepLabelStyle}>outputs</label>
+                      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, lineHeight: 1.4 }}>
+                        env vars captured from the run as this step's output (read by later steps as
+                        {' '}<span style={{ color: T.dim }}>{'${steps.<step>.output.VAR}'}</span>) — leave empty to output stdout
+                      </div>
+                      {outputs.map(renderField)}
+                    </>
                   )}
-                </div>
+                </>
               );
-            })}
+            })()}
 
             <label style={stepLabelStyle}>timeout</label>
             <input value={timeoutSecs} onChange={e => setTimeoutSecs(e.target.value)} placeholder="seconds (default 30)" style={stepInputStyle} />

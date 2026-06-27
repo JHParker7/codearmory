@@ -42,6 +42,9 @@ export interface StepField {
   kind?: StepFieldKind;
   multiline?: boolean;
   catalog?: StepFieldCatalog;
+  /** Marks a field that configures the step's OUTPUT (not an input), so the form
+   * groups it under a separate "outputs" section. */
+  output?: boolean;
 }
 
 /**
@@ -55,6 +58,7 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
     { key: 'run', label: 'Run', placeholder: 'go test ./...', required: true, multiline: true },
     { key: 'env', label: 'Env', placeholder: 'KEY=VALUE KEY2=${steps.build.output}', kind: 'env' },
     { key: 'runner_class', label: 'Runner', placeholder: 'runner class (optional, default standard)' },
+    { key: 'output_env', label: 'Output variables', placeholder: 'BUILD_ID, VERSION', kind: 'list', output: true },
   ],
   'tickets/create': [
     { key: 'title', label: 'Title', placeholder: 'Build failed: ${steps.build.output}', required: true },

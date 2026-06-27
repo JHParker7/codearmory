@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import {
   stagesFromSteps, blocksFromSteps, stepsFromBlocks, stagesOf, StepRef, Block,
-  stepsToPayload, configToJson, parseConfig,
+  stepsToPayload, configToJson, parseConfig, collectRefs,
 } from '../src/pages/app/pipelineGraph.ts';
 
 describe('stagesFromSteps', () => {
@@ -187,6 +187,58 @@ describe('config ⇄ JSON (live editable panel)', () => {
   });
 });
 
+describe('per-occurrence step name', () => {
+  it('round-trips a named step through blocks and back', () => {
+    const steps: StepRef[] = [
+      { step_id: 'build', parallel_group: null, name: 'build-prod' },
+      { step_id: 'build', parallel_group: null }, // same step, no override
+    ];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[0].name).to.equal('build-prod');
+    expect(blocks[1].name).to.equal(undefined);
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { step_id: 'build', parallel_group: null, name: 'build-prod' },
+      { step_id: 'build', parallel_group: null },
+    ]);
+  });
+
+  it('stepsToPayload and configToJson include a name only when set', () => {
+    expect(stepsToPayload([{ step_id: 'a', parallel_group: null, name: 'deploy' }]))
+      .to.deep.equal([{ step_id: 'a', name: 'deploy' }]);
+    expect(JSON.parse(configToJson('p', '', [{ step_id: 'a', parallel_group: null, name: 'deploy' }])).steps)
+      .to.deep.equal([{ step_id: 'a', name: 'deploy' }]);
+  });
+
+  it('parseConfig reads a step name', () => {
+    const parsed = parseConfig('{"name":"p","steps":[{"step_id":"a","name":"deploy"}]}');
+    expect(parsed.steps).to.deep.equal([{ step_id: 'a', parallel_group: null, name: 'deploy' }]);
+  });
+});
+
+describe('per-occurrence with override (input wiring)', () => {
+  it('round-trips a with override through blocks and config JSON', () => {
+    const steps: StepRef[] = [
+      { step_id: 'deploy', parallel_group: null, with: { env: { TARGET: '${steps.build.output}' } } },
+    ];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[0].with).to.deep.equal({ env: { TARGET: '${steps.build.output}' } });
+    expect(stepsFromBlocks(blocks)).to.deep.equal(steps);
+    expect(JSON.parse(configToJson('p', '', steps)).steps).to.deep.equal([
+      { step_id: 'deploy', with: { env: { TARGET: '${steps.build.output}' } } },
+    ]);
+  });
+
+  it('drops an empty with override', () => {
+    expect(stepsToPayload([{ step_id: 'a', parallel_group: null, with: {} }]))
+      .to.deep.equal([{ step_id: 'a' }]);
+  });
+
+  it('parseConfig reads a with override', () => {
+    const parsed = parseConfig('{"name":"p","steps":[{"step_id":"a","with":{"image":"x"}}]}');
+    expect(parsed.steps).to.deep.equal([{ step_id: 'a', parallel_group: null, with: { image: 'x' } }]);
+  });
+});
+
 describe('inline approval gates', () => {
   it('round-trips a gate through blocks (no step_id) and back', () => {
     const steps: StepRef[] = [
@@ -215,5 +267,29 @@ describe('inline approval gates', () => {
   it('parseConfig accepts a gate with no step_id', () => {
     const parsed = parseConfig('{"name":"p","steps":[{"approval":{"message":"hold"}}]}');
     expect(parsed.steps).to.deep.equal([{ parallel_group: null, approval: { message: 'hold' } }]);
+  });
+});
+
+describe('collectRefs (step inspector)', () => {
+  it('extracts run inputs (named + bare) and upstream step outputs, ignoring matrix', () => {
+    const refs = collectRefs({
+      image: 'ubuntu',
+      run: 'deploy ${inputs.env} to ${matrix.region}',
+      url: '${steps.build.output.url}',
+      bare: '${TOKEN}',
+      nested: { a: ['${steps.lint.output}'] },
+    });
+    expect(refs.inputs).to.have.members(['env', 'TOKEN']);
+    expect(refs.steps).to.have.members(['build', 'lint']);
+  });
+
+  it('returns empty lists when there are no references', () => {
+    expect(collectRefs({ a: 'plain text', b: 3, c: true })).to.deep.equal({ inputs: [], steps: [] });
+  });
+
+  it('dedupes repeated references', () => {
+    const refs = collectRefs({ a: '${steps.x.output} ${steps.x.output}', b: '${inputs.y}', c: '${y}' });
+    expect(refs.steps).to.deep.equal(['x']);
+    expect(refs.inputs).to.have.members(['y']);
   });
 });

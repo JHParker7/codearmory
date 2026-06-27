@@ -127,10 +127,12 @@ export function AppLayout() {
 
         {/* Nav */}
         <nav style={{ flex: 1, padding: '8px 0', overflowY: 'auto' }}>
+          <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase' }}>tools</div>
+          <NavItem to="/app/workflows" label="workflows/" service="workflows" />
+          <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
           <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase' }}>modules</div>
           <NavItem to="/app/blueprints" label="blueprints/" service="blueprints" />
           <NavItem to="/app/forge" label="forge/" service="forge" />
-          <NavItem to="/app/workflows" label="workflows/" service="workflows" />
           <NavItem to="/app/tickets" label="tickets/" service="tickets" />
           <NavItem to="/app/hooks" label="hooks/" service="hooks" />
           <NavItem to="/app/containers" label="containers/" service="containers" />

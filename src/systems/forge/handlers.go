@@ -48,6 +48,23 @@ func validateEnvKeys(env map[string]string) error {
 	return nil
 }
 
+// maxOutputEnv caps how many env vars an execution may capture as output.
+const maxOutputEnv = 32
+
+// validateOutputEnv checks the output_env names are valid POSIX identifiers (they
+// are injected into the capture shell loop) and bounds the count.
+func validateOutputEnv(names []string) error {
+	if len(names) > maxOutputEnv {
+		return fmt.Errorf("output_env: at most %d variables may be captured", maxOutputEnv)
+	}
+	for _, k := range names {
+		if !envKeyRe.MatchString(k) {
+			return fmt.Errorf("invalid output_env name %q: must match [A-Za-z_][A-Za-z0-9_]*", k)
+		}
+	}
+	return nil
+}
+
 // allowedImages is nil when ALLOWED_IMAGES is not configured → deny all submissions.
 // allowedImageList is the same set, deduplicated and sorted, served by GET /images
 // so clients (e.g. the CLI's forge TUI) can offer the permitted images for selection.
@@ -226,6 +243,10 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := validateOutputEnv(req.OutputEnv); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if req.SecretRefs == nil {
 		req.SecretRefs = map[string]string{}
 	}
@@ -268,6 +289,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		OrgID:       orgID,
 		Project:     req.Project,
 		SecretRefs:  req.SecretRefs,
+		OutputEnv:   req.OutputEnv,
 		Status:      StatusPending,
 	}
 	if err := exec.Add(ctx); err != nil {

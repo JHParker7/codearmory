@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"os"
 	"sync"
 	"time"
@@ -365,12 +366,31 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 	result := make([]WorkflowStep, 0, len(refs))
 	for _, ref := range refs {
 		if ref.Approval != nil {
-			result = append(result, synthesiseApprovalStep(ref))
+			ws := synthesiseApprovalStep(ref)
+			if ref.Name != "" {
+				ws.Name = ref.Name
+			}
+			result = append(result, ws)
 			continue
 		}
 		s, ok := byID[ref.StepID]
 		if !ok {
 			continue
+		}
+		// A per-occurrence name overrides the step definition's name for this use,
+		// so the worker records it as the step-run name and the ${steps.<name>.output}
+		// key — s is a local copy, so other occurrences are unaffected.
+		if ref.Name != "" {
+			s.Name = ref.Name
+		}
+		// Per-occurrence With overrides (e.g. an input wired to ${steps.X.output})
+		// are merged over the step's own With, ref keys winning. The merge is into a
+		// fresh map so the shared step definition is never mutated.
+		if len(ref.With) > 0 {
+			merged := make(map[string]any, len(s.With)+len(ref.With))
+			maps.Copy(merged, s.With)
+			maps.Copy(merged, ref.With)
+			s.With = merged
 		}
 		result = append(result, WorkflowStep{Step: s, ParallelGroup: ref.ParallelGroup, Matrix: ref.Matrix})
 	}

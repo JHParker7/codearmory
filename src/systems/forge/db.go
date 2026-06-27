@@ -175,12 +175,17 @@ func (e Execution) Complete(_ context.Context, status string, result RunResult) 
 		attribute.String("execution.id", e.ExecutionID),
 		attribute.String("status", status),
 	)
+	outputs := result.Outputs
+	if outputs == nil {
+		outputs = map[string]string{}
+	}
+	outputsJSON, _ := json.Marshal(outputs)
 	if err := connect().WithContext(context.Background()).Exec(`
 		UPDATE executions
-		SET status = ?, exit_code = ?, stdout = ?, stderr = ?,
+		SET status = ?, exit_code = ?, stdout = ?, stderr = ?, outputs = ?,
 		    memory_used_mb = ?, memory_limit_mb = ?, ended_at = now()
 		WHERE execution_id = ?`,
-		status, result.ExitCode, result.Stdout, result.Stderr,
+		status, result.ExitCode, result.Stdout, result.Stderr, string(outputsJSON),
 		result.MemoryUsedMB, result.MemoryLimitMB, e.ExecutionID,
 	).Error; err != nil {
 		span.RecordError(err)

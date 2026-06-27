@@ -38,6 +38,11 @@ export interface ApprovalGate {
  * reference to a stored step (step_id) OR an inline approval gate. */
 export interface StepRef {
   step_id?: string;
+  /** Per-occurrence name override; empty/absent = use the step definition's name. */
+  name?: string;
+  /** Per-occurrence overrides for the step's `with` config (merged over the step's
+   * own with at run time) — how a pipeline wires a step's inputs to upstream outputs. */
+  with?: Record<string, unknown>;
   parallel_group?: number | null;
   matrix?: MatrixConfig | null;
   approval?: ApprovalGate | null;
@@ -52,6 +57,10 @@ export interface Block {
   uid: string;
   stepId: string;
   parallelWithPrev: boolean;
+  /** Per-occurrence name override (undefined = use the step definition's name). */
+  name?: string;
+  /** Per-occurrence `with` overrides (input wiring). undefined/empty = none. */
+  with?: Record<string, unknown>;
   matrix?: MatrixConfig | null;
   approval?: ApprovalGate | null;
 }
@@ -86,7 +95,7 @@ export function blocksFromSteps(steps: StepRef[]): Block[] {
   let i = 0;
   for (const stage of stagesFromSteps(steps)) {
     stage.forEach((stepId, idx) => {
-      blocks.push({ uid: `b${i}`, stepId, parallelWithPrev: idx > 0, matrix: steps[i]?.matrix ?? null, approval: steps[i]?.approval ?? null });
+      blocks.push({ uid: `b${i}`, stepId, parallelWithPrev: idx > 0, name: steps[i]?.name || undefined, with: steps[i]?.with, matrix: steps[i]?.matrix ?? null, approval: steps[i]?.approval ?? null });
       i++;
     });
   }
@@ -111,17 +120,23 @@ export function stagesOf(blocks: Block[]): Block[][] {
 export function stepsFromBlocks(blocks: Block[]): StepRef[] {
   const out: StepRef[] = [];
   let group = 0;
+  const withExtras = (b: Block, ref: StepRef): StepRef => {
+    const r = { ...ref };
+    if (b.name) r.name = b.name;
+    if (b.with && Object.keys(b.with).length > 0) r.with = b.with;
+    return r;
+  };
   for (const stage of stagesOf(blocks)) {
     if (stage.length > 1) {
       const g = group++;
       // A gate can never be parallel, so it stays a solo gate even if grouped.
-      for (const b of stage) out.push(b.approval ? { approval: b.approval } : { step_id: b.stepId, parallel_group: g });
+      for (const b of stage) out.push(withExtras(b, b.approval ? { approval: b.approval } : { step_id: b.stepId, parallel_group: g }));
     } else {
       const b = stage[0];
-      if (b.approval) { out.push({ approval: b.approval }); continue; }
+      if (b.approval) { out.push(withExtras(b, { approval: b.approval })); continue; }
       const ref: StepRef = { step_id: b.stepId, parallel_group: null };
       if (b.matrix && b.matrix.var.trim()) ref.matrix = b.matrix;
-      out.push(ref);
+      out.push(withExtras(b, ref));
     }
   }
   return out;
@@ -137,11 +152,47 @@ export function stepsFromBlocks(blocks: Block[]): StepRef[] {
  * bare {step_id}. */
 export function stepsToPayload(steps: StepRef[]): StepRef[] {
   return steps.map((s) => {
-    if (s.approval) return { approval: s.approval };
-    if (s.parallel_group != null) return { step_id: s.step_id, parallel_group: s.parallel_group };
-    if (s.matrix && s.matrix.var.trim()) return { step_id: s.step_id, matrix: s.matrix };
-    return { step_id: s.step_id };
+    let ref: StepRef;
+    if (s.approval) ref = { approval: s.approval };
+    else if (s.parallel_group != null) ref = { step_id: s.step_id, parallel_group: s.parallel_group };
+    else if (s.matrix && s.matrix.var.trim()) ref = { step_id: s.step_id, matrix: s.matrix };
+    else ref = { step_id: s.step_id };
+    if (s.name) ref.name = s.name;
+    if (s.with && Object.keys(s.with).length > 0) ref.with = s.with;
+    return ref;
   });
+}
+
+/** Scans a step's `with` config for the ${...} references it consumes, so the
+ * builder can show what a step pulls in: run inputs (`${inputs.X}` / bare `${X}`)
+ * and upstream step outputs (`${steps.Y.output...}`). Matrix bindings are ignored
+ * (they are supplied per-execution, not wired by the user). Recurses into nested
+ * maps and arrays; returns deduped, order-preserved name lists. */
+export function collectRefs(withMap: Record<string, unknown>): { inputs: string[]; steps: string[] } {
+  const inputs = new Set<string>();
+  const steps = new Set<string>();
+  const walk = (v: unknown): void => {
+    if (typeof v === 'string') {
+      for (const m of v.matchAll(/\$\{([^}]+)\}/g)) {
+        const expr = m[1].trim();
+        if (expr.startsWith('steps.')) {
+          const rest = expr.slice('steps.'.length);
+          const dot = rest.indexOf('.output');
+          if (dot > 0) steps.add(rest.slice(0, dot));
+        } else if (expr.startsWith('inputs.')) {
+          inputs.add(expr.slice('inputs.'.length));
+        } else if (!expr.startsWith('matrix.')) {
+          inputs.add(expr); // bare ${NAME} resolves to a run input
+        }
+      }
+    } else if (Array.isArray(v)) {
+      v.forEach(walk);
+    } else if (v && typeof v === 'object') {
+      Object.values(v as Record<string, unknown>).forEach(walk);
+    }
+  };
+  walk(withMap);
+  return { inputs: [...inputs], steps: [...steps] };
 }
 
 /** Renders the pipeline as the canonical config JSON (the saved payload).
@@ -164,16 +215,20 @@ export function parseConfig(raw: string): { name: string; description: string; s
   const steps: StepRef[] = rawSteps.map((s, i) => {
     if (!s || typeof s !== 'object' || Array.isArray(s)) throw new Error(`steps[${i}]: must be an object`);
     const so = s as Record<string, unknown>;
+    const name = typeof so.name === 'string' && so.name ? so.name : undefined;
+    const withOverride = (so.with && typeof so.with === 'object' && !Array.isArray(so.with)) ? so.with as Record<string, unknown> : undefined;
     // An inline approval gate has no step_id.
     if (so.approval && typeof so.approval === 'object' && !Array.isArray(so.approval)) {
       const a = so.approval as Record<string, unknown>;
       const gate: ApprovalGate = {};
       if (typeof a.message === 'string') gate.message = a.message;
       if (Array.isArray(a.approvers)) gate.approvers = a.approvers.filter((x): x is string => typeof x === 'string');
-      return { parallel_group: null, approval: gate };
+      return { parallel_group: null, approval: gate, ...(name ? { name } : {}) };
     }
     if (typeof so.step_id !== 'string' || !so.step_id) throw new Error(`steps[${i}]: a "step_id" string or an "approval" gate is required`);
     const ref: StepRef = { step_id: so.step_id, parallel_group: typeof so.parallel_group === 'number' ? so.parallel_group : null };
+    if (name) ref.name = name;
+    if (withOverride && Object.keys(withOverride).length > 0) ref.with = withOverride;
     if (so.matrix && typeof so.matrix === 'object' && !Array.isArray(so.matrix)) ref.matrix = so.matrix as MatrixConfig;
     return ref;
   });

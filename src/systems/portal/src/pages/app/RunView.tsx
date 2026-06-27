@@ -43,8 +43,8 @@ function buildStages(workflow: Workflow | null, stepRuns: WorkflowStepRun[], cat
       const g = s.parallel_group ?? null;
       const sr = byIndex.get(i);
       const label = s.approval
-        ? 'approval gate'
-        : (catalog[s.step_id ?? '']?.name ?? sr?.step_name ?? (s.step_id ?? '').slice(0, 8) + '…');
+        ? (s.name || 'approval gate')
+        : (s.name ?? catalog[s.step_id ?? '']?.name ?? sr?.step_name ?? (s.step_id ?? '').slice(0, 8) + '…');
       const step: RunStep = { index: i, label, sr };
       if (g !== null && g === prev) stages[stages.length - 1].push(step);
       else stages.push([step]);
