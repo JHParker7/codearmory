@@ -26,11 +26,19 @@ type matrixConfig struct {
 	ValuesFrom string   `json:"values_from,omitempty"`
 }
 
+// approvalGate is an inline manual-approval pause on a pipeline step ref — no
+// separate step is needed. A ref carries either a step_id or an approval gate.
+type approvalGate struct {
+	Message   string   `json:"message,omitempty"`
+	Approvers []string `json:"approvers,omitempty"`
+}
+
 // workflowStepRef is the per-step payload inside a create/update workflow request.
 type workflowStepRef struct {
-	StepID        string        `json:"step_id"`
+	StepID        string        `json:"step_id,omitempty"`
 	ParallelGroup *int          `json:"parallel_group,omitempty"`
 	Matrix        *matrixConfig `json:"matrix,omitempty"`
+	Approval      *approvalGate `json:"approval,omitempty"`
 }
 
 // pipelineFile is the JSON file format for -f pipeline creation.

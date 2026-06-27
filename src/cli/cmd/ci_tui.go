@@ -133,6 +133,7 @@ type tuiWorkflowStep struct {
 	Action        string        `json:"action"`
 	ParallelGroup *int          `json:"parallel_group"`
 	Matrix        *matrixConfig `json:"matrix,omitempty"`
+	Approval      *approvalGate `json:"approval,omitempty"`
 }
 
 // tuiPipelineDef is the subset of a pipeline (GET /pipelines/{id}) the run-detail

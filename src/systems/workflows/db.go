@@ -339,26 +339,35 @@ func listWorkflows(ctx context.Context, userID, orgID, projectFilter string) ([]
 	return wfs, nil
 }
 
-// enrichStepRefs looks up the full Step definition for each ref and assembles
-// WorkflowStep objects. Deleted steps are omitted.
+// enrichStepRefs looks up the full Step definition for each step ref and assembles
+// WorkflowStep objects; inline approval gates are synthesised in place (no Step
+// lookup). Refs whose stored step was deleted are omitted.
 func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep, error) {
 	if len(refs) == 0 {
 		return []WorkflowStep{}, nil
 	}
-	ids := make([]string, len(refs))
-	for i, r := range refs {
-		ids[i] = r.StepID
+	ids := make([]string, 0, len(refs))
+	for _, r := range refs {
+		if r.Approval == nil && r.StepID != "" {
+			ids = append(ids, r.StepID)
+		}
 	}
-	var dbSteps []Step
-	if err := connectRead().WithContext(ctx).Where("step_id IN ? AND active=?", ids, true).Find(&dbSteps).Error; err != nil {
-		return nil, err
-	}
-	byID := make(map[string]Step, len(dbSteps))
-	for _, s := range dbSteps {
-		byID[s.StepID] = s
+	byID := make(map[string]Step, len(ids))
+	if len(ids) > 0 {
+		var dbSteps []Step
+		if err := connectRead().WithContext(ctx).Where("step_id IN ? AND active=?", ids, true).Find(&dbSteps).Error; err != nil {
+			return nil, err
+		}
+		for _, s := range dbSteps {
+			byID[s.StepID] = s
+		}
 	}
 	result := make([]WorkflowStep, 0, len(refs))
 	for _, ref := range refs {
+		if ref.Approval != nil {
+			result = append(result, synthesiseApprovalStep(ref))
+			continue
+		}
 		s, ok := byID[ref.StepID]
 		if !ok {
 			continue
@@ -366,6 +375,24 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 		result = append(result, WorkflowStep{Step: s, ParallelGroup: ref.ParallelGroup, Matrix: ref.Matrix})
 	}
 	return result, nil
+}
+
+// synthesiseApprovalStep builds the WorkflowStep for an inline approval gate: a
+// virtual step with Action=approval whose With carries the gate's message and
+// approver allow-list, so the worker and approval API treat it exactly like an
+// approval step without one existing in the steps table.
+func synthesiseApprovalStep(ref WorkflowStepRef) WorkflowStep {
+	with := map[string]any{}
+	if ref.Approval.Message != "" {
+		with["message"] = ref.Approval.Message
+	}
+	if len(ref.Approval.Approvers) > 0 {
+		with["approvers"] = ref.Approval.Approvers
+	}
+	return WorkflowStep{
+		Step:     Step{Name: "approval", Action: ActionApproval, With: with},
+		Approval: ref.Approval,
+	}
 }
 
 // ── WorkflowRun ───────────────────────────────────────────────────────────────

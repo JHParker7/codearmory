@@ -419,6 +419,64 @@ func TestApprovalStepRejectedByMatrixValidation(t *testing.T) {
 	}
 }
 
+// An inline approval gate (no step row) pauses and resumes just like an
+// approval-action step.
+func TestExecuteRun_InlineApprovalGatePauses(t *testing.T) {
+	requireDB(t)
+	stubGatekeeperRouting(t, "tu", "to")
+	fakeService(t, "igsvc", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	s0 := seedHTTPStep(t, "tu", "to", "igsvc", "/a")
+	wf := createWorkflowWith(t, []map[string]any{
+		{"step_id": s0.StepID},
+		{"approval": map[string]any{"message": "deploy to prod?"}},
+	})
+
+	got := runOnce(t, wf)
+	if got.Status != StatusAwaitingApproval {
+		t.Fatalf("status = %q, want awaiting_approval", got.Status)
+	}
+	srs, _ := getStepRuns(context.Background(), got.RunID)
+	var gate *WorkflowStepRun
+	for i := range srs {
+		if srs[i].StepIndex == 1 {
+			gate = &srs[i]
+		}
+	}
+	if gate == nil || gate.Status != StatusAwaitingApproval || gate.Output == nil || *gate.Output != "deploy to prod?" {
+		t.Fatalf("gate step run = %+v", gate)
+	}
+
+	r := authReq(http.MethodPost, "/runs/"+got.RunID+"/approve", nil)
+	r.SetPathValue("id", got.RunID)
+	w := httptest.NewRecorder()
+	handleApproveRun(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("approve got %d: %s", w.Code, w.Body.String())
+	}
+	if resumed := resumeRun(t, got.RunID, wf.WorkflowID); resumed.Status != StatusCompleted {
+		t.Fatalf("resumed run status = %q, want completed", resumed.Status)
+	}
+}
+
+func TestInlineApprovalGate_ValidationRejectsBadShapes(t *testing.T) {
+	requireDB(t)
+	stubGatekeeperRouting(t, "tu", "to")
+	s0 := seedHTTPStep(t, "tu", "to", "vsvc", "/a")
+	cases := []map[string]any{
+		{"approval": map[string]any{"message": "x"}, "step_id": s0.StepID},                                          // both gate and step ref
+		{"approval": map[string]any{"message": "x"}, "parallel_group": 0},                                           // gate in a parallel group
+		{"approval": map[string]any{"message": "x"}, "matrix": map[string]any{"var": "v", "values": []string{"a"}}}, // gate with a matrix
+	}
+	for i, step := range cases {
+		body, _ := json.Marshal(map[string]any{"name": "wf-" + uuid.New().String(), "steps": []map[string]any{step}})
+		w := httptest.NewRecorder()
+		handleCreateWorkflow(w, authReq(http.MethodPost, "/pipelines", body))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("case %d: got %d, want 400: %s", i, w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestRebuildResumeState(t *testing.T) {
 	requireDB(t)
 	runID := uuid.New().String()
