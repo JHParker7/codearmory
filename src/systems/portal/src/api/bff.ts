@@ -269,10 +269,18 @@ export interface MatrixConfig {
   values_from?: string;
 }
 
+/** An inline manual-approval gate on a pipeline step ref — pauses the run with no
+ * separate Step row. A ref carries either a step_id or an approval gate. */
+export interface ApprovalGate {
+  message?: string;
+  approvers?: string[];
+}
+
 export interface WorkflowStepRef {
-  step_id: string;
+  step_id?: string;
   parallel_group?: number | null;
   matrix?: MatrixConfig | null;
+  approval?: ApprovalGate | null;
 }
 
 export interface Workflow {

@@ -27,22 +27,33 @@ export interface MatrixConfig {
   values_from?: string;
 }
 
-/** A pipeline step reference as the workflows API stores/accepts it. */
+/** An inline manual-approval gate: a pipeline pause point that needs no Step row.
+ * A ref with an approval has no step_id and is always solo (no group/matrix). */
+export interface ApprovalGate {
+  message?: string;
+  approvers?: string[];
+}
+
+/** A pipeline step reference as the workflows API stores/accepts it — EITHER a
+ * reference to a stored step (step_id) OR an inline approval gate. */
 export interface StepRef {
-  step_id: string;
+  step_id?: string;
   parallel_group?: number | null;
   matrix?: MatrixConfig | null;
+  approval?: ApprovalGate | null;
 }
 
 /** One step occurrence in the builder. `parallelWithPrev` links it into the same
  * stage as the block above (they run concurrently). The first block is always a
  * stage start, so its flag is forced false. `uid` is unique per occurrence so the
- * same step can appear more than once. `matrix` fans a solo block out over a list. */
+ * same step can appear more than once. `matrix` fans a solo block out over a list;
+ * `approval` makes the block an inline manual-approval gate (no stepId). */
 export interface Block {
   uid: string;
   stepId: string;
   parallelWithPrev: boolean;
   matrix?: MatrixConfig | null;
+  approval?: ApprovalGate | null;
 }
 
 /**
@@ -55,10 +66,11 @@ export function stagesFromSteps(steps: StepRef[]): string[][] {
   let prevGroup: number | null | undefined = undefined;
   for (const s of steps) {
     const g = s.parallel_group ?? null;
+    const id = s.step_id ?? ''; // inline gates have no step_id
     if (g !== null && g === prevGroup) {
-      stages[stages.length - 1].push(s.step_id);
+      stages[stages.length - 1].push(id);
     } else {
-      stages.push([s.step_id]);
+      stages.push([id]);
     }
     prevGroup = g;
   }
@@ -74,7 +86,7 @@ export function blocksFromSteps(steps: StepRef[]): Block[] {
   let i = 0;
   for (const stage of stagesFromSteps(steps)) {
     stage.forEach((stepId, idx) => {
-      blocks.push({ uid: `b${i}`, stepId, parallelWithPrev: idx > 0, matrix: steps[i]?.matrix ?? null });
+      blocks.push({ uid: `b${i}`, stepId, parallelWithPrev: idx > 0, matrix: steps[i]?.matrix ?? null, approval: steps[i]?.approval ?? null });
       i++;
     });
   }
@@ -102,9 +114,11 @@ export function stepsFromBlocks(blocks: Block[]): StepRef[] {
   for (const stage of stagesOf(blocks)) {
     if (stage.length > 1) {
       const g = group++;
-      for (const b of stage) out.push({ step_id: b.stepId, parallel_group: g });
+      // A gate can never be parallel, so it stays a solo gate even if grouped.
+      for (const b of stage) out.push(b.approval ? { approval: b.approval } : { step_id: b.stepId, parallel_group: g });
     } else {
       const b = stage[0];
+      if (b.approval) { out.push({ approval: b.approval }); continue; }
       const ref: StepRef = { step_id: b.stepId, parallel_group: null };
       if (b.matrix && b.matrix.var.trim()) ref.matrix = b.matrix;
       out.push(ref);
@@ -123,6 +137,7 @@ export function stepsFromBlocks(blocks: Block[]): StepRef[] {
  * bare {step_id}. */
 export function stepsToPayload(steps: StepRef[]): StepRef[] {
   return steps.map((s) => {
+    if (s.approval) return { approval: s.approval };
     if (s.parallel_group != null) return { step_id: s.step_id, parallel_group: s.parallel_group };
     if (s.matrix && s.matrix.var.trim()) return { step_id: s.step_id, matrix: s.matrix };
     return { step_id: s.step_id };
@@ -149,7 +164,15 @@ export function parseConfig(raw: string): { name: string; description: string; s
   const steps: StepRef[] = rawSteps.map((s, i) => {
     if (!s || typeof s !== 'object' || Array.isArray(s)) throw new Error(`steps[${i}]: must be an object`);
     const so = s as Record<string, unknown>;
-    if (typeof so.step_id !== 'string' || !so.step_id) throw new Error(`steps[${i}]: a "step_id" string is required`);
+    // An inline approval gate has no step_id.
+    if (so.approval && typeof so.approval === 'object' && !Array.isArray(so.approval)) {
+      const a = so.approval as Record<string, unknown>;
+      const gate: ApprovalGate = {};
+      if (typeof a.message === 'string') gate.message = a.message;
+      if (Array.isArray(a.approvers)) gate.approvers = a.approvers.filter((x): x is string => typeof x === 'string');
+      return { parallel_group: null, approval: gate };
+    }
+    if (typeof so.step_id !== 'string' || !so.step_id) throw new Error(`steps[${i}]: a "step_id" string or an "approval" gate is required`);
     const ref: StepRef = { step_id: so.step_id, parallel_group: typeof so.parallel_group === 'number' ? so.parallel_group : null };
     if (so.matrix && typeof so.matrix === 'object' && !Array.isArray(so.matrix)) ref.matrix = so.matrix as MatrixConfig;
     return ref;

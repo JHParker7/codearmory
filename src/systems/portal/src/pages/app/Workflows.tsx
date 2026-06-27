@@ -40,7 +40,7 @@ function PipelineBuilderOverlay({
   onSaved: (wf: Workflow) => void;
 }) {
   const initialStepRefs = useMemo<StepRef[]>(
-    () => initial ? initial.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null, matrix: s.matrix ?? null })) : [],
+    () => initial ? initial.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null, matrix: s.matrix ?? null, approval: s.approval ?? null })) : [],
     [initial],
   );
 
@@ -144,7 +144,7 @@ function PipelineBuilderOverlay({
       </div>
       <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-          drag a block onto a drop-gap to sequence it · drop it onto a parallel block's step to join that group · ∥ also toggles a block in/out of parallel
+          drag onto a gap to sequence · drop onto a parallel block to group · ∥ toggles parallel · ⊞ matrix fans a step out over a list of values
         </span>
         <div style={{ flex: 1 }} />
         {saveError && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>{saveError}</span>}
@@ -249,7 +249,7 @@ function PipelinesTab() {
   // Stable per selected workflow so the read-only graph isn't re-seeded on every
   // render (runs polling, trigger, etc. re-render this component frequently).
   const detailSteps = useMemo<StepRef[]>(
-    () => selectedWorkflow ? selectedWorkflow.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null, matrix: s.matrix ?? null })) : [],
+    () => selectedWorkflow ? selectedWorkflow.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null, matrix: s.matrix ?? null, approval: s.approval ?? null })) : [],
     [selectedWorkflow],
   );
 
@@ -459,10 +459,11 @@ function StepsTab() {
   useEffect(() => { listForgeImages(token).then(setImages).catch(() => {}); }, [token]);
 
   // The Action selector offers every catalog action plus the built-in `http`
-  // escape hatch and `approval` gate (neither is a registry catalog action).
+  // escape hatch. Manual approval is added directly in the pipeline builder as an
+  // inline gate, so it is intentionally not a step action here.
   const actionOptions = useMemo(() => {
     const names = actions.map(a => a.name);
-    return [...names, ...['http', 'approval'].filter(b => !names.includes(b))];
+    return names.includes('http') ? names : [...names, 'http'];
   }, [actions]);
 
   // Default the Action to forge/run when the form opens. forge is core so the
