@@ -193,14 +193,18 @@
       { "method": "GET",    "path": "/runs",                "action": "listRun",        "resource": "workflows/runs" },
       { "method": "GET",    "path": "/runs/{id}",           "action": "getRun",         "resource": "workflows/runs/{id}" },
       { "method": "DELETE", "path": "/runs/{id}",           "action": "cancelRun",      "resource": "workflows/runs/{id}" },
+      { "method": "POST",   "path": "/runs/{id}/approve",   "action": "approveRun",     "resource": "workflows/runs/{id}" },
+      { "method": "POST",   "path": "/runs/{id}/reject",    "action": "approveRun",     "resource": "workflows/runs/{id}" },
       { "method": "GET",    "path": "/pipelines/{id}/runs/{run_id}", "action": "getRun",    "resource": "workflows/runs/{id}/{run_id}" },
       { "method": "DELETE", "path": "/pipelines/{id}/runs/{run_id}", "action": "cancelRun", "resource": "workflows/runs/{id}/{run_id}" },
+      { "method": "POST",   "path": "/pipelines/{id}/runs/{run_id}/approve", "action": "approveRun", "resource": "workflows/runs/{id}/{run_id}" },
+      { "method": "POST",   "path": "/pipelines/{id}/runs/{run_id}/reject",  "action": "approveRun", "resource": "workflows/runs/{id}/{run_id}" },
       { "method": "GET",    "path": "/actions",             "action": "listAction",     "resource": "workflows/actions" }
     ],
     "default_grants": [
       {
         "grant_on": "user",
-        "actions": ["createStep", "listStep", "getStep", "updateStep", "deleteStep", "createWorkflow", "listWorkflow", "getWorkflow", "updateWorkflow", "deleteWorkflow", "triggerRun", "listRun", "getRun", "cancelRun"],
+        "actions": ["createStep", "listStep", "getStep", "updateStep", "deleteStep", "createWorkflow", "listWorkflow", "getWorkflow", "updateWorkflow", "deleteWorkflow", "triggerRun", "listRun", "getRun", "cancelRun", "approveRun"],
         "resources": ["{username}/workflows/steps", "{username}/workflows/steps/*", "{username}/workflows/pipelines", "{username}/workflows/pipelines/*", "{username}/workflows/runs", "{username}/workflows/runs/*"]
       },
       {

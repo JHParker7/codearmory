@@ -18,10 +18,19 @@ type stepDef struct {
 	Name   string `json:"name"`
 }
 
+// matrixConfig fans a step out into one execution per value in a list, binding
+// ${matrix.<var>} per execution. Mutually exclusive with parallel_group.
+type matrixConfig struct {
+	Var        string   `json:"var"`
+	Values     []string `json:"values,omitempty"`
+	ValuesFrom string   `json:"values_from,omitempty"`
+}
+
 // workflowStepRef is the per-step payload inside a create/update workflow request.
 type workflowStepRef struct {
-	StepID        string `json:"step_id"`
-	ParallelGroup *int   `json:"parallel_group,omitempty"`
+	StepID        string        `json:"step_id"`
+	ParallelGroup *int          `json:"parallel_group,omitempty"`
+	Matrix        *matrixConfig `json:"matrix,omitempty"`
 }
 
 // pipelineFile is the JSON file format for -f pipeline creation.
@@ -132,6 +141,8 @@ var ciUpdateCmd = &cobra.Command{Use: "update", Short: "Update a pipeline resour
 var ciDeleteCmd = &cobra.Command{Use: "delete", Short: "Delete a pipeline resource"}
 var ciRunCmd = &cobra.Command{Use: "run", Short: "Trigger a pipeline run"}
 var ciCancelCmd = &cobra.Command{Use: "cancel", Short: "Cancel a pipeline run"}
+var ciApproveCmd = &cobra.Command{Use: "approve", Short: "Approve a pipeline run paused on a manual gate"}
+var ciRejectCmd = &cobra.Command{Use: "reject", Short: "Reject a pipeline run paused on a manual gate"}
 
 func init() {
 	// ── armory pipelines create step ─────────────────────────────────────────────────
@@ -612,10 +623,29 @@ JSON file (-f) — uses step IDs directly:
 
 	ciCancelCmd.AddCommand(&cobra.Command{
 		Use:   "run <id>",
-		Short: "Cancel a pending or running pipeline run",
+		Short: "Cancel a pending, running, or awaiting-approval pipeline run",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return apiCall("DELETE", "/workflows/runs/"+args[0], nil)
+		},
+	})
+
+	// ── armory pipelines approve/reject run ──────────────────────────────────────────
+
+	ciApproveCmd.AddCommand(&cobra.Command{
+		Use:   "run <id>",
+		Short: "Approve a run paused on a manual-approval gate, resuming it",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return apiCall("POST", "/workflows/runs/"+args[0]+"/approve", nil)
+		},
+	})
+	ciRejectCmd.AddCommand(&cobra.Command{
+		Use:   "run <id>",
+		Short: "Reject a run paused on a manual-approval gate, failing it",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return apiCall("POST", "/workflows/runs/"+args[0]+"/reject", nil)
 		},
 	})
 
@@ -690,7 +720,7 @@ Supply a value for each ${...} reference the step uses with --input:
 	testStepCmd.Flags().StringArrayVar(&testStepInputs, "input", nil, "Test value for a ${ref}, as ref=value (repeatable)")
 	ciTestCmd.AddCommand(testStepCmd)
 
-	ciCmd.AddCommand(ciCreateCmd, ciListCmd, ciGetCmd, ciUpdateCmd, ciDeleteCmd, ciRunCmd, ciCancelCmd, ciTestCmd, ciTUICmd, stepsTUICmd)
+	ciCmd.AddCommand(ciCreateCmd, ciListCmd, ciGetCmd, ciUpdateCmd, ciDeleteCmd, ciRunCmd, ciCancelCmd, ciApproveCmd, ciRejectCmd, ciTestCmd, ciTUICmd, stepsTUICmd)
 	// The workflows module (ci command + the CI/Pipelines and Steps home
 	// screens) is registered in ci_tui.go.
 }

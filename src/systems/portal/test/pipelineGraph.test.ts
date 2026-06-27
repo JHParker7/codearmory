@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 import {
   stagesFromSteps, blocksFromSteps, stepsFromBlocks, stagesOf, StepRef, Block,
+  stepsToPayload, configToJson, parseConfig,
 } from '../src/pages/app/pipelineGraph.ts';
 
 describe('stagesFromSteps', () => {
@@ -104,5 +105,84 @@ describe('stepsFromBlocks', () => {
       { step_id: 'build', parallel_group: null },
       { step_id: 'build', parallel_group: null },
     ]);
+  });
+});
+
+describe('matrix round-trip', () => {
+  it('carries a solo step matrix through blocks and back', () => {
+    const steps: StepRef[] = [
+      { step_id: 'build', parallel_group: null },
+      { step_id: 'deploy', parallel_group: null, matrix: { var: 'region', values: ['us', 'eu'] } },
+    ];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[1].matrix).to.deep.equal({ var: 'region', values: ['us', 'eu'] });
+    expect(stepsFromBlocks(blocks)).to.deep.equal(steps);
+  });
+
+  it('drops an incomplete matrix (no var) on serialize', () => {
+    const out = stepsFromBlocks([
+      { uid: 'b0', stepId: 'a', parallelWithPrev: false, matrix: { var: '  ', values: ['x'] } },
+    ]);
+    expect(out).to.deep.equal([{ step_id: 'a', parallel_group: null }]);
+  });
+
+  it('carries a values_from matrix', () => {
+    const steps: StepRef[] = [
+      { step_id: 'fan', parallel_group: null, matrix: { var: 'r', values_from: '${inputs.regions}' } },
+    ];
+    expect(stepsFromBlocks(blocksFromSteps(steps))).to.deep.equal(steps);
+  });
+});
+
+describe('config ⇄ JSON (live editable panel)', () => {
+  it('stepsToPayload emits group / matrix / bare shapes and drops an empty-var matrix', () => {
+    const steps: StepRef[] = [
+      { step_id: 'a', parallel_group: 0 },
+      { step_id: 'b', parallel_group: null, matrix: { var: 'region', values: ['us'] } },
+      { step_id: 'c', parallel_group: null, matrix: { var: '  ', values: ['x'] } },
+      { step_id: 'd', parallel_group: null },
+    ];
+    expect(stepsToPayload(steps)).to.deep.equal([
+      { step_id: 'a', parallel_group: 0 },
+      { step_id: 'b', matrix: { var: 'region', values: ['us'] } },
+      { step_id: 'c' },
+      { step_id: 'd' },
+    ]);
+  });
+
+  it('configToJson omits an empty description and pretty-prints the payload', () => {
+    const json = configToJson('deploy', '', [{ step_id: 'a', parallel_group: null }]);
+    expect(JSON.parse(json)).to.deep.equal({ name: 'deploy', steps: [{ step_id: 'a' }] });
+    expect(json).to.contain('\n'); // pretty-printed
+    const withDesc = JSON.parse(configToJson('deploy', 'ship it', []));
+    expect(withDesc).to.deep.equal({ name: 'deploy', description: 'ship it', steps: [] });
+  });
+
+  it('parseConfig round-trips configToJson (name, description, parallel + matrix steps)', () => {
+    const steps: StepRef[] = [
+      { step_id: 'build', parallel_group: null },
+      { step_id: 'lint', parallel_group: 0 },
+      { step_id: 'deploy', parallel_group: null, matrix: { var: 'r', values: ['us', 'eu'] } },
+    ];
+    const parsed = parseConfig(configToJson('pipe', 'desc', steps));
+    expect(parsed.name).to.equal('pipe');
+    expect(parsed.description).to.equal('desc');
+    expect(parsed.steps).to.deep.equal([
+      { step_id: 'build', parallel_group: null },
+      { step_id: 'lint', parallel_group: 0 },
+      { step_id: 'deploy', parallel_group: null, matrix: { var: 'r', values: ['us', 'eu'] } },
+    ]);
+  });
+
+  it('parseConfig defaults missing name/description and a missing steps array', () => {
+    const parsed = parseConfig('{}');
+    expect(parsed).to.deep.equal({ name: '', description: '', steps: [] });
+  });
+
+  it('parseConfig rejects malformed input with a user-facing message', () => {
+    expect(() => parseConfig('{ not json')).to.throw();
+    expect(() => parseConfig('[]')).to.throw('JSON object');
+    expect(() => parseConfig('{"steps": "nope"}')).to.throw('array');
+    expect(() => parseConfig('{"steps": [{"parallel_group": 0}]}')).to.throw('step_id');
   });
 });

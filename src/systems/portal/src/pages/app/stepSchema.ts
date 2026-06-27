@@ -18,8 +18,9 @@ export const WITH_KEY_PREFIX = 'with.';
 /** RAW_WITH_KEY is the key of the optional/advanced free-form With JSON field. */
 export const RAW_WITH_KEY = '__raw';
 
-/** Controls how a schema field's text value is parsed into the with map. */
-export type StepFieldKind = 'text' | 'int' | 'env' | 'json';
+/** Controls how a schema field's text value is parsed into the with map.
+ * `list` splits a comma-separated string into a string array. */
+export type StepFieldKind = 'text' | 'int' | 'env' | 'json' | 'list';
 
 /**
  * Names a catalog that backs a field with a picker instead of free text. Only
@@ -88,6 +89,11 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
     { key: 'workspace', label: 'Workspace', placeholder: 'workspace name (optional)' },
     { key: 'ttl_secs', label: 'TTL secs', placeholder: '14400 (optional)', kind: 'int' },
   ],
+  // Built-in manual-approval gate: pauses the run until approved/rejected.
+  'approval': [
+    { key: 'message', label: 'Message', placeholder: 'Approve deploy to prod? (shown to approvers)', multiline: true },
+    { key: 'approvers', label: 'Approvers', placeholder: 'alice, bob (usernames; empty = anyone with permission)', kind: 'list' },
+  ],
 };
 
 /**
@@ -137,6 +143,8 @@ export function formValsFromWith(action: string, withMap: Record<string, unknown
     if (f.kind === 'env' && v && typeof v === 'object' && !Array.isArray(v)) {
       vals[WITH_KEY_PREFIX + f.key] = Object.entries(v as Record<string, unknown>)
         .map(([k, val]) => `${k}=${val}`).join(' ');
+    } else if (f.kind === 'list' && Array.isArray(v)) {
+      vals[WITH_KEY_PREFIX + f.key] = (v as unknown[]).map(String).join(', ');
     } else {
       vals[WITH_KEY_PREFIX + f.key] = typeof v === 'string' ? v : JSON.stringify(v);
     }
@@ -210,6 +218,9 @@ export function buildStepWith(action: string, valueOf: (key: string) => string):
       }
       case 'env':
         withMap[f.key] = parseEnvTokens(raw, f.label);
+        break;
+      case 'list':
+        withMap[f.key] = raw.split(',').map(s => s.trim()).filter(Boolean);
         break;
       default: // text
         withMap[f.key] = raw;

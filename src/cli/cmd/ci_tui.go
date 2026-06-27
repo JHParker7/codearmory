@@ -60,11 +60,12 @@ func buildCITUIStyles() {
 	tuiDiagArrowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
 
 	tuiStatusColors = map[string]lipgloss.Color{
-		"completed": lipgloss.Color(activeTheme.Accent),
-		"running":   lipgloss.Color(activeTheme.Warning),
-		"pending":   lipgloss.Color(activeTheme.Muted),
-		"failed":    lipgloss.Color(activeTheme.Danger),
-		"cancelled": lipgloss.Color(activeTheme.Muted),
+		"completed":         lipgloss.Color(activeTheme.Accent),
+		"running":           lipgloss.Color(activeTheme.Warning),
+		"pending":           lipgloss.Color(activeTheme.Muted),
+		"awaiting_approval": lipgloss.Color(activeTheme.Warning),
+		"failed":            lipgloss.Color(activeTheme.Danger),
+		"cancelled":         lipgloss.Color(activeTheme.Muted),
 	}
 }
 
@@ -73,6 +74,13 @@ func tuiColorStatus(s string) string {
 		return lipgloss.NewStyle().Foreground(c).Render(s)
 	}
 	return s
+}
+
+// tuiRunStatusActive reports whether a run status is non-terminal, so the UI keeps
+// refreshing it and offers cancel. `awaiting_approval` is paused on a manual gate
+// but still in flight — its remaining steps run once it is approved.
+func tuiRunStatusActive(s string) bool {
+	return s == "running" || s == "pending" || s == "awaiting_approval"
 }
 
 // ── API types ─────────────────────────────────────────────────────────────────
@@ -120,9 +128,11 @@ type tuiRunFull struct {
 // concurrently. The run record carries no grouping, so the run-detail view
 // derives it from the definition (see tuiAnnotateParallelGroups).
 type tuiWorkflowStep struct {
-	StepID        string `json:"step_id"`
-	Name          string `json:"name"`
-	ParallelGroup *int   `json:"parallel_group"`
+	StepID        string        `json:"step_id"`
+	Name          string        `json:"name"`
+	Action        string        `json:"action"`
+	ParallelGroup *int          `json:"parallel_group"`
+	Matrix        *matrixConfig `json:"matrix,omitempty"`
 }
 
 // tuiPipelineDef is the subset of a pipeline (GET /pipelines/{id}) the run-detail
@@ -333,12 +343,13 @@ func tuiFetchRuns(workflowID string) tea.Cmd {
 	}
 }
 
-// tuiRunActionMsg is the outcome of a run action (cancel). cancelled identifies
-// the run so the runs list can report it; a non-nil err surfaces as a status
-// line instead of being silently swallowed.
+// tuiRunActionMsg is the outcome of a run action (cancel/approve/reject). runID
+// identifies the affected run; verb is the present-tense action for status lines;
+// a non-nil err surfaces as a status line instead of being silently swallowed.
 type tuiRunActionMsg struct {
-	cancelled string
-	err       error
+	runID string
+	verb  string
+	err   error
 }
 
 // tuiCancelRun cancels a run via the API. It runs as a cmd (not a blocking call
@@ -346,9 +357,29 @@ type tuiRunActionMsg struct {
 func tuiCancelRun(runID string) tea.Cmd {
 	return func() tea.Msg {
 		if _, err := doRequest("DELETE", "/workflows/runs/"+runID, nil); err != nil {
-			return tuiRunActionMsg{err: err}
+			return tuiRunActionMsg{runID: runID, verb: "cancel", err: err}
 		}
-		return tuiRunActionMsg{cancelled: runID}
+		return tuiRunActionMsg{runID: runID, verb: "cancel"}
+	}
+}
+
+// tuiApproveRun resumes a run paused on a manual-approval gate; tuiRejectRun fails
+// it. Both POST to the run's decision endpoint and report success/failure.
+func tuiApproveRun(runID string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := doRequest("POST", "/workflows/runs/"+runID+"/approve", nil); err != nil {
+			return tuiRunActionMsg{runID: runID, verb: "approve", err: err}
+		}
+		return tuiRunActionMsg{runID: runID, verb: "approve"}
+	}
+}
+
+func tuiRejectRun(runID string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := doRequest("POST", "/workflows/runs/"+runID+"/reject", nil); err != nil {
+			return tuiRunActionMsg{runID: runID, verb: "reject", err: err}
+		}
+		return tuiRunActionMsg{runID: runID, verb: "reject"}
 	}
 }
 
@@ -441,7 +472,7 @@ func (m tuiModel) tuiEnsureRunDiagram(refreshActive bool) tea.Cmd {
 	}
 	r := m.runs[i]
 	_, ok := m.runDetails[r.RunID]
-	active := r.Status == "running" || r.Status == "pending"
+	active := tuiRunStatusActive(r.Status)
 	if ok && !(refreshActive && active) {
 		return nil
 	}
@@ -510,8 +541,9 @@ func tuiFillPendingSteps(r *tuiRunFull, def []tuiWorkflowStep) {
 	// Only an in-flight run has steps genuinely still ahead of it. For a run that
 	// has already finished (completed/failed/cancelled), steps it never reached will
 	// never run, so synthesising "pending" rows for them would misrepresent
-	// never-to-run steps as still queued.
-	if r.Status != "running" && r.Status != "pending" {
+	// never-to-run steps as still queued. A run paused awaiting approval still has
+	// its remaining steps ahead, so it counts as in-flight here.
+	if !tuiRunStatusActive(r.Status) {
 		return
 	}
 	seen := make(map[int]bool, len(r.StepRuns))
@@ -675,11 +707,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiRunActionMsg:
 		if msg.err != nil {
-			m.runStatus = "✗ cancel failed: " + msg.err.Error()
+			m.runStatus = "✗ " + msg.verb + " failed: " + msg.err.Error()
 			m.runStatusErr = true
 			return m, nil
 		}
-		m.runStatus = "✓ cancelled " + tuiShortID(msg.cancelled)
+		past := map[string]string{"cancel": "cancelled", "approve": "approved", "reject": "rejected"}[msg.verb]
+		if past == "" {
+			past = msg.verb + "ed"
+		}
+		m.runStatus = "✓ " + past + " " + tuiShortID(msg.runID)
 		m.runStatusErr = false
 		// Return to the runs list and refresh so the new status shows.
 		m.view = tuiViewRuns
@@ -1052,7 +1088,7 @@ func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		i := m.rTable.Cursor()
 		if i < len(m.runs) {
 			r := m.runs[i]
-			if r.Status == "pending" || r.Status == "running" {
+			if tuiRunStatusActive(r.Status) {
 				m.runStatus = "cancelling " + tuiShortID(r.RunID) + "…"
 				m.runStatusErr = false
 				return m, tuiCancelRun(r.RunID)
@@ -1086,6 +1122,18 @@ func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	return m, cmd
 }
 
+// tuiRunDetailState returns the watched run's id and current status, preferring
+// the freshly-fetched detail over the (possibly stale) list selection.
+func (m tuiModel) tuiRunDetailState() (runID, status string) {
+	if m.runFull != nil {
+		return m.runFull.RunID, m.runFull.Status
+	}
+	if m.selRun != nil {
+		return m.selRun.RunID, m.selRun.Status
+	}
+	return "", ""
+}
+
 func (m tuiModel) tuiKeyRunDetail(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
@@ -1094,11 +1142,28 @@ func (m tuiModel) tuiKeyRunDetail(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		m.view = tuiViewRuns
 		return m, nil
 	case "c":
-		// Cancel the run being watched, if it is still in progress.
-		if m.selRun != nil && (m.selRun.Status == "pending" || m.selRun.Status == "running") {
-			m.runStatus = "cancelling " + tuiShortID(m.selRun.RunID) + "…"
+		// Cancel the run being watched, if it is still in a cancellable state
+		// (pending, running, or paused awaiting approval).
+		if rid, st := m.tuiRunDetailState(); rid != "" && (st == "pending" || st == "running" || st == "awaiting_approval") {
+			m.runStatus = "cancelling " + tuiShortID(rid) + "…"
 			m.runStatusErr = false
-			return m, tuiCancelRun(m.selRun.RunID)
+			return m, tuiCancelRun(rid)
+		}
+		return m, nil
+	case "a":
+		// Approve a run paused on a manual-approval gate, resuming it.
+		if rid, st := m.tuiRunDetailState(); rid != "" && st == "awaiting_approval" {
+			m.runStatus = "approving " + tuiShortID(rid) + "…"
+			m.runStatusErr = false
+			return m, tuiApproveRun(rid)
+		}
+		return m, nil
+	case "d":
+		// Reject (deny) a run paused on a manual-approval gate, failing it.
+		if rid, st := m.tuiRunDetailState(); rid != "" && st == "awaiting_approval" {
+			m.runStatus = "rejecting " + tuiShortID(rid) + "…"
+			m.runStatusErr = false
+			return m, tuiRejectRun(rid)
 		}
 		return m, nil
 	case "enter":
@@ -1259,7 +1324,12 @@ func (m tuiModel) tuiRunDiagramPanel() string {
 
 func (m tuiModel) tuiViewRunDetail() string {
 	title := tuiTitleStyle.Render("Run Detail")
-	help := tuiHelp("[↑↓/jk] navigate  [enter] output  [r] refresh  [esc] back", m.width)
+	keys := "[↑↓/jk] navigate  [enter] output  [r] refresh  [esc] back"
+	if m.runFull != nil && m.runFull.Status == "awaiting_approval" {
+		// Surface the gate decision keys only when there is something to decide.
+		keys = "[a] approve  [d] reject  " + keys
+	}
+	help := tuiHelp(keys, m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -1268,8 +1338,11 @@ func (m tuiModel) tuiViewRunDetail() string {
 	}
 	d := m.runFull
 	live := ""
-	if d.Status == "running" || d.Status == "pending" {
+	switch d.Status {
+	case "running", "pending":
 		live = "  " + tuiMetaStyle.Render("(auto-refreshing)")
+	case "awaiting_approval":
+		live = "  " + tuiMetaStyle.Render("(awaiting approval — [a] approve  [d] reject)")
 	}
 	meta := fmt.Sprintf("run %s  status: %s  triggered: %s",
 		tuiShortID(d.RunID),
@@ -1368,7 +1441,16 @@ func tuiPipelineStages(steps []tuiWorkflowStep) [][]string {
 		}
 		names := make([]string, 0, j-i)
 		for _, s := range steps[i:j] {
-			names = append(names, s.Name)
+			// Mark a matrix fan-out and a manual-approval gate so the flow reads at
+			// a glance which steps branch over a list or pause for a decision.
+			switch {
+			case s.Matrix != nil:
+				names = append(names, s.Name+" ⊞")
+			case s.Action == "approval":
+				names = append(names, s.Name+" ⏸")
+			default:
+				names = append(names, s.Name)
+			}
 		}
 		stages = append(stages, names)
 		i = j

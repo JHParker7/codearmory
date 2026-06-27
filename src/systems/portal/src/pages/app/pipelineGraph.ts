@@ -18,20 +18,31 @@
  * mocha without the UI; the block component adapts these shapes.
  */
 
+/** Fans a step out into one execution per value in a list, binding
+ * ${matrix.<var>} per execution. Mutually exclusive with parallel_group. Mirrors
+ * the workflows API MatrixConfig; kept local so this module stays UI/library-free. */
+export interface MatrixConfig {
+  var: string;
+  values?: string[];
+  values_from?: string;
+}
+
 /** A pipeline step reference as the workflows API stores/accepts it. */
 export interface StepRef {
   step_id: string;
   parallel_group?: number | null;
+  matrix?: MatrixConfig | null;
 }
 
 /** One step occurrence in the builder. `parallelWithPrev` links it into the same
  * stage as the block above (they run concurrently). The first block is always a
  * stage start, so its flag is forced false. `uid` is unique per occurrence so the
- * same step can appear more than once. */
+ * same step can appear more than once. `matrix` fans a solo block out over a list. */
 export interface Block {
   uid: string;
   stepId: string;
   parallelWithPrev: boolean;
+  matrix?: MatrixConfig | null;
 }
 
 /**
@@ -55,13 +66,16 @@ export function stagesFromSteps(steps: StepRef[]): string[][] {
 }
 
 /** Stored steps -> builder blocks. The first block of each stage starts the stage
- * (parallelWithPrev=false); any further blocks in a parallel stage link upward. */
+ * (parallelWithPrev=false); any further blocks in a parallel stage link upward.
+ * Block order matches the input order 1:1, so each block carries its step's matrix
+ * by position (matrix only ever appears on solo, non-parallel steps). */
 export function blocksFromSteps(steps: StepRef[]): Block[] {
   const blocks: Block[] = [];
   let i = 0;
   for (const stage of stagesFromSteps(steps)) {
     stage.forEach((stepId, idx) => {
-      blocks.push({ uid: `b${i++}`, stepId, parallelWithPrev: idx > 0 });
+      blocks.push({ uid: `b${i}`, stepId, parallelWithPrev: idx > 0, matrix: steps[i]?.matrix ?? null });
+      i++;
     });
   }
   return blocks;
@@ -79,7 +93,9 @@ export function stagesOf(blocks: Block[]): Block[][] {
 }
 
 /** Builder blocks -> ordered steps with parallel_group. Each stage band of >1
- * block gets a shared group; a solo block gets null. Order follows the blocks. */
+ * block gets a shared group; a solo block gets null. Order follows the blocks. A
+ * solo block's matrix (mutually exclusive with parallel_group) is carried through
+ * when it names a var, so an incomplete in-progress matrix is dropped silently. */
 export function stepsFromBlocks(blocks: Block[]): StepRef[] {
   const out: StepRef[] = [];
   let group = 0;
@@ -88,8 +104,59 @@ export function stepsFromBlocks(blocks: Block[]): StepRef[] {
       const g = group++;
       for (const b of stage) out.push({ step_id: b.stepId, parallel_group: g });
     } else {
-      out.push({ step_id: stage[0].stepId, parallel_group: null });
+      const b = stage[0];
+      const ref: StepRef = { step_id: b.stepId, parallel_group: null };
+      if (b.matrix && b.matrix.var.trim()) ref.matrix = b.matrix;
+      out.push(ref);
     }
   }
   return out;
+}
+
+// ── Pipeline config ⇄ JSON ──────────────────────────────────────────────────────
+// The editor's right-hand panel shows the pipeline as the exact create/update API
+// payload and lets it be edited back. These pure helpers are the bridge, shared by
+// the panel and the save path so what you see is what is saved.
+
+/** Maps builder StepRefs to the API's step payload shape: a parallel step keeps its
+ * group; a solo step keeps a matrix only when it names a var; everything else is a
+ * bare {step_id}. */
+export function stepsToPayload(steps: StepRef[]): StepRef[] {
+  return steps.map((s) => {
+    if (s.parallel_group != null) return { step_id: s.step_id, parallel_group: s.parallel_group };
+    if (s.matrix && s.matrix.var.trim()) return { step_id: s.step_id, matrix: s.matrix };
+    return { step_id: s.step_id };
+  });
+}
+
+/** Renders the pipeline as the canonical config JSON (the saved payload).
+ * description is omitted when empty. */
+export function configToJson(name: string, description: string, steps: StepRef[]): string {
+  const obj: Record<string, unknown> = { name };
+  if (description) obj.description = description;
+  obj.steps = stepsToPayload(steps);
+  return JSON.stringify(obj, null, 2);
+}
+
+/** Parses an edited config JSON back into builder state, throwing a user-facing
+ * Error on malformed JSON or an unexpected shape so the panel can surface it. */
+export function parseConfig(raw: string): { name: string; description: string; steps: StepRef[] } {
+  const obj: unknown = JSON.parse(raw);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('config must be a JSON object');
+  const o = obj as Record<string, unknown>;
+  const rawSteps = o.steps ?? [];
+  if (!Array.isArray(rawSteps)) throw new Error('"steps" must be an array');
+  const steps: StepRef[] = rawSteps.map((s, i) => {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) throw new Error(`steps[${i}]: must be an object`);
+    const so = s as Record<string, unknown>;
+    if (typeof so.step_id !== 'string' || !so.step_id) throw new Error(`steps[${i}]: a "step_id" string is required`);
+    const ref: StepRef = { step_id: so.step_id, parallel_group: typeof so.parallel_group === 'number' ? so.parallel_group : null };
+    if (so.matrix && typeof so.matrix === 'object' && !Array.isArray(so.matrix)) ref.matrix = so.matrix as MatrixConfig;
+    return ref;
+  });
+  return {
+    name: typeof o.name === 'string' ? o.name : '',
+    description: typeof o.description === 'string' ? o.description : '',
+    steps,
+  };
 }

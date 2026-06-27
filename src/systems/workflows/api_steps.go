@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -345,6 +346,47 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// validateStepRefShape checks a single step reference's structural invariants
+// (step_id, parallel group, matrix) without touching the database. Returns a
+// user-facing message or "".
+func validateStepRefShape(i int, ref WorkflowStepRef) string {
+	if ref.StepID == "" {
+		return fmt.Sprintf("step %d: step_id is required", i)
+	}
+	if ref.ParallelGroup != nil && *ref.ParallelGroup < 0 {
+		return fmt.Sprintf("step %d: parallel_group must be non-negative", i)
+	}
+	if ref.Matrix != nil {
+		if ref.ParallelGroup != nil {
+			return fmt.Sprintf("step %d: matrix and parallel_group are mutually exclusive", i)
+		}
+		if msg := validateMatrix(ref.Matrix); msg != "" {
+			return fmt.Sprintf("step %d: %s", i, msg)
+		}
+	}
+	return ""
+}
+
+// validateMatrix checks a matrix config: a var name usable as a ${matrix.<var>}
+// key, and exactly one source of values (a literal list or a values_from ref).
+func validateMatrix(m *MatrixConfig) string {
+	if m.Var == "" {
+		return "matrix.var is required"
+	}
+	if strings.ContainsAny(m.Var, " \t\n\r${}") {
+		return "matrix.var must not contain whitespace or ${} characters"
+	}
+	hasValues := len(m.Values) > 0
+	hasFrom := strings.TrimSpace(m.ValuesFrom) != ""
+	if hasValues == hasFrom {
+		return "matrix requires exactly one of values or values_from"
+	}
+	if hasValues && len(m.Values) > maxMatrixValues {
+		return fmt.Sprintf("matrix has %d values, exceeding the limit of %d", len(m.Values), maxMatrixValues)
+	}
+	return ""
+}
+
 // validateStepRefs confirms every referenced step exists and is accessible to the caller.
 func validateStepRefs(ctx context.Context, refs []WorkflowStepRef, userID, orgID string, w http.ResponseWriter) error {
 	if len(refs) == 0 {
@@ -373,6 +415,13 @@ func validateStepRefs(ctx context.Context, refs []WorkflowStepRef, userID, orgID
 		if !canAccessStep(s, userID, orgID) {
 			err := fmt.Errorf("step %d: step %q not found", i, ref.StepID)
 			http.Error(w, err.Error(), http.StatusNotFound)
+			return err
+		}
+		// A manual-approval gate is a single pause point, not a fan-out, so a matrix
+		// over it is meaningless — reject it rather than spawn N parallel gates.
+		if ref.Matrix != nil && s.Action == ActionApproval {
+			err := fmt.Errorf("step %d: an approval step cannot use a matrix", i)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return err
 		}
 	}

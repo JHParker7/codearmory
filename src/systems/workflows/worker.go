@@ -188,7 +188,10 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	// can interpolate ${steps.NAME.output...} into their With values. Only outputs
 	// from prior groups are visible to a group, so each group is handed a snapshot
 	// taken before it starts — never the live map (which the result loop mutates).
-	stepOutputs := map[string]string{}
+	// On resume (a run re-dequeued after an approval pause) it is seeded from the
+	// already-completed step runs, and `completed` holds their indices so finished
+	// groups are skipped rather than re-executed.
+	stepOutputs, completed := rebuildResumeState(runCtx, runID, workflow.Steps)
 
 	finalStatus := StatusCompleted
 	for _, group := range groupSteps(workflow.Steps) {
@@ -196,120 +199,83 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			finalStatus = StatusCancelled
 			break
 		}
+		// Skip any group that already finished on an earlier attempt (resume).
+		if groupComplete(group, completed) {
+			continue
+		}
 
 		(WorkflowRun{RunID: runID}).SetCurrentStep(runCtx, group.indices[0])
 		visible := snapshotOutputs(stepOutputs)
 
-		if len(group.steps) == 1 {
+		// Manual-approval gate: a single approval step pauses the run until an
+		// authorized user approves (run → pending, resumes here) or rejects it
+		// (run → failed). Return without completing or revoking the token; the
+		// approval API re-mints a fresh run token before re-queueing the run.
+		if len(group.steps) == 1 && group.steps[0].Action == ActionApproval {
+			// If the run was cancelled just before the gate, take the normal cancel
+			// path (which revokes the token) rather than pausing on a dead run.
+			if runCtx.Err() != nil {
+				finalStatus = StatusCancelled
+				break
+			}
 			ws := group.steps[0]
 			i := group.indices[0]
+			msg := substitute(withString(ws.With, "message"), substContext{inputs: inputs, outputs: visible})
 			stepRunID := uuid.New().String()
-			if err := p.startStepRun(runID, stepRunID, i, ws.Name); err != nil {
-				slog.ErrorContext(ctx, "worker: start step run", "run_id", runID, "step", i, "error", err)
+			if err := p.startApprovalStepRun(runID, stepRunID, i, ws.Name, msg); err != nil {
+				slog.ErrorContext(ctx, "worker: start approval step run", "run_id", runID, "step", i, "error", err)
 				finalStatus = StatusFailed
 				break
 			}
-			res, stepErr := p.executeStep(runCtx, store, ws.Step, substContext{inputs: inputs, outputs: visible})
-			if stepErr != nil {
-				if errors.Is(stepErr, context.Canceled) {
-					p.finishStepRun(stepRunID, StatusCancelled, strPtr(failureOutput(res.Output, stepErr)), res.MemoryUsedMB, res.MemoryLimitMB)
-					finalStatus = StatusCancelled
-				} else {
-					p.finishStepRun(stepRunID, StatusFailed, strPtr(failureOutput(res.Output, stepErr)), res.MemoryUsedMB, res.MemoryLimitMB)
-					finalStatus = StatusFailed
-				}
+			if err := (WorkflowRun{RunID: runID}).PauseForApproval(runCtx, i); err != nil {
+				slog.ErrorContext(ctx, "worker: pause for approval", "run_id", runID, "step", i, "error", err)
+				finalStatus = StatusFailed
 				break
 			}
-			meterStepsCompleted.Add(ctx, 1, metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("status", StatusCompleted),
-			))
-			p.finishStepRun(stepRunID, StatusCompleted, strPtr(res.Output), res.MemoryUsedMB, res.MemoryLimitMB)
-			stepOutputs[ws.Name] = res.Output
-			slog.InfoContext(ctx, "worker: step completed", "run_id", runID, "step", i, "action", ws.Action)
+			slog.InfoContext(ctx, "worker: run paused awaiting approval", "run_id", runID, "step", i)
+			return
+		}
+
+		// Expand the group into the concrete executions to run: one task for a
+		// sequential step, one per member for a parallel group, or one per value
+		// for a matrix step.
+		tasks, aggregateName, terr := buildGroupTasks(group, substContext{inputs: inputs, outputs: visible})
+		if terr != nil {
+			if sid := uuid.New().String(); p.startStepRun(runID, sid, group.indices[0], group.steps[0].Name) == nil {
+				p.finishStepRun(sid, StatusFailed, strPtr(terr.Error()), nil, nil)
+			}
+			slog.WarnContext(ctx, "worker: matrix expansion failed", "run_id", runID, "step", group.indices[0], "error", terr)
+			finalStatus = StatusFailed
+			break
+		}
+		if len(tasks) == 0 {
+			// An empty matrix (its source list resolved to nothing) runs no
+			// executions; publish an empty aggregate so downstream refs resolve.
+			if aggregateName != "" {
+				stepOutputs[aggregateName] = "[]"
+			}
+			slog.WarnContext(ctx, "worker: matrix produced no values, skipping step", "run_id", runID, "step", group.indices[0])
 			continue
 		}
 
-		// Parallel group.
-		type parallelResult struct {
-			stepRunID string
-			name      string
-			action    string
-			stepIdx   int
-			output    string
-			usedMB    *int64
-			limitMB   *int64
-			err       error
-		}
-
-		stepRunIDs := make([]string, len(group.steps))
-		for j, ws := range group.steps {
-			sid := uuid.New().String()
-			stepRunIDs[j] = sid
-			if err := p.startStepRun(runID, sid, group.indices[j], ws.Name); err != nil {
-				slog.ErrorContext(ctx, "worker: start parallel step run", "run_id", runID, "step", group.indices[j], "error", err)
+		results, status := p.runTaskGroup(runCtx, store, runID, workflowID, tasks, inputs, visible)
+		if status != StatusCompleted {
+			if status == StatusCancelled && finalStatus == StatusCompleted {
+				finalStatus = StatusCancelled
+			} else if status == StatusFailed {
 				finalStatus = StatusFailed
-				break
 			}
-		}
-		if finalStatus != StatusCompleted {
 			break
 		}
-
-		results := make(chan parallelResult, len(group.steps))
-		// sem is a counting semaphore: acquire by sending, release by receiving.
-		// The select allows a cancelled context to bypass the semaphore so the
-		// goroutine can exit immediately rather than blocking on a full channel.
-		sem := make(chan struct{}, maxParallelSteps)
-		for j, ws := range group.steps {
-			go func(j int, ws WorkflowStep) {
-				select {
-				case sem <- struct{}{}: // acquire
-				case <-runCtx.Done():
-					results <- parallelResult{stepRunID: stepRunIDs[j], name: ws.Name, action: ws.Action, stepIdx: group.indices[j], err: context.Canceled}
-					return
-				}
-				defer func() { <-sem }() // release
-				res, err := p.executeStep(runCtx, store, ws.Step, substContext{inputs: inputs, outputs: visible})
-				results <- parallelResult{stepRunIDs[j], ws.Name, ws.Action, group.indices[j], res.Output, res.MemoryUsedMB, res.MemoryLimitMB, err}
-			}(j, ws)
-		}
-
-		groupFailed := false
-		groupOutputs := make(map[string]string, len(group.steps))
-		for range group.steps {
-			r := <-results
-			if r.err != nil {
-				var status string
-				if errors.Is(r.err, context.Canceled) {
-					status = StatusCancelled
-					if finalStatus == StatusCompleted {
-						finalStatus = StatusCancelled
-					}
-				} else {
-					status = StatusFailed
-					finalStatus = StatusFailed
-				}
-				p.finishStepRun(r.stepRunID, status, strPtr(failureOutput(r.output, r.err)), r.usedMB, r.limitMB)
-				slog.WarnContext(ctx, "worker: parallel step failed", "run_id", runID, "step", r.stepIdx, "action", r.action)
-				groupFailed = true
-			} else {
-				meterStepsCompleted.Add(ctx, 1, metric.WithAttributes(
-					attribute.String("workflow.id", workflowID),
-					attribute.String("status", StatusCompleted),
-				))
-				p.finishStepRun(r.stepRunID, StatusCompleted, strPtr(r.output), r.usedMB, r.limitMB)
-				groupOutputs[r.name] = r.output
-				slog.InfoContext(ctx, "worker: parallel step completed", "run_id", runID, "step", r.stepIdx, "action", r.action)
+		// Publish outputs only after the whole group succeeds, so the next group
+		// can reference them. A matrix step's per-value executions combine into one
+		// JSON-array output under the base step name; other groups publish by name.
+		if aggregateName != "" {
+			stepOutputs[aggregateName] = aggregateTaskOutputs(results)
+		} else {
+			for _, r := range results {
+				stepOutputs[r.name] = r.output
 			}
-		}
-		if groupFailed {
-			break
-		}
-		// Publish the group's outputs only after it fully succeeds, so the next
-		// group can reference them (the live map is never read concurrently).
-		for name, out := range groupOutputs {
-			stepOutputs[name] = out
 		}
 	}
 
@@ -320,6 +286,239 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	(WorkflowRun{RunID: runID}).Complete(context.Background(), finalStatus)
 	revokeRunToken(context.Background(), store.getSessionID())
 	slog.InfoContext(ctx, "worker: run finished", "run_id", runID, "status", finalStatus)
+}
+
+// stepTask is one concrete execution within a group: a sequential step, one
+// member of a parallel group, or one value of a matrix fan-out. matrix holds the
+// per-execution ${matrix.<var>} binding (nil for non-matrix tasks).
+type stepTask struct {
+	step      Step
+	stepIndex int
+	name      string
+	matrix    map[string]string
+}
+
+// taskResult is the outcome of one stepTask, keyed back to its position so the
+// caller can aggregate matrix outputs in their original value order.
+type taskResult struct {
+	name    string
+	output  string
+	usedMB  *int64
+	limitMB *int64
+	err     error
+	idx     int
+}
+
+// rebuildResumeState seeds the run's step-output map and completed-index set from
+// step runs that finished on an earlier attempt. It only matters when a run is
+// re-dequeued after an approval pause — a crashed run is reaped by recoverStuckRuns
+// and never resumed, so partially-finished groups never reach here. A matrix step's
+// already-completed executions are recombined into its JSON-array output.
+func rebuildResumeState(ctx context.Context, runID string, steps []WorkflowStep) (outputs map[string]string, completed map[int]bool) {
+	outputs = map[string]string{}
+	completed = map[int]bool{}
+	stepRuns, err := getStepRuns(ctx, runID)
+	if err != nil || len(stepRuns) == 0 {
+		return outputs, completed
+	}
+	byIndex := map[int][]WorkflowStepRun{}
+	for _, sr := range stepRuns {
+		if sr.Status == StatusCompleted {
+			byIndex[sr.StepIndex] = append(byIndex[sr.StepIndex], sr)
+		}
+	}
+	for idx, runs := range byIndex {
+		completed[idx] = true
+		if idx < 0 || idx >= len(steps) {
+			continue
+		}
+		name := steps[idx].Name
+		if steps[idx].Matrix != nil {
+			outs := make([]string, 0, len(runs))
+			for _, r := range runs {
+				outs = append(outs, derefStr(r.Output))
+			}
+			b, _ := json.Marshal(outs)
+			outputs[name] = string(b)
+		} else if len(runs) > 0 {
+			outputs[name] = derefStr(runs[0].Output)
+		}
+	}
+	return outputs, completed
+}
+
+// groupComplete reports whether every step index in the group already finished on
+// an earlier attempt, so a resumed run skips it.
+func groupComplete(group stepGroup, completed map[int]bool) bool {
+	for _, idx := range group.indices {
+		if !completed[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+// buildGroupTasks expands a step group into the executions to run. A matrix step
+// (always its own single-step group) fans out one task per resolved value, and
+// aggregateName names the step whose per-value outputs combine into one output.
+// A plain sequential step yields one task; a parallel group one task per member.
+func buildGroupTasks(group stepGroup, sc substContext) (tasks []stepTask, aggregateName string, err error) {
+	if len(group.steps) == 1 && group.steps[0].Matrix != nil {
+		ws := group.steps[0]
+		values, verr := resolveMatrixValues(ws.Matrix, sc)
+		if verr != nil {
+			return nil, "", verr
+		}
+		for _, val := range values {
+			tasks = append(tasks, stepTask{
+				step:      ws.Step,
+				stepIndex: group.indices[0],
+				name:      matrixTaskName(ws.Name, ws.Matrix.Var, val),
+				matrix:    map[string]string{ws.Matrix.Var: val},
+			})
+		}
+		return tasks, ws.Name, nil
+	}
+	for j, ws := range group.steps {
+		tasks = append(tasks, stepTask{step: ws.Step, stepIndex: group.indices[j], name: ws.Name})
+	}
+	return tasks, "", nil
+}
+
+// resolveMatrixValues produces the matrix's value list at run time, resolving any
+// ${...} references first. ValuesFrom pulls the list from a reference yielding a
+// JSON array or comma-separated string; otherwise each literal Value is resolved.
+func resolveMatrixValues(m *MatrixConfig, sc substContext) ([]string, error) {
+	var values []string
+	if m.ValuesFrom != "" {
+		values = parseMatrixList(substitute(m.ValuesFrom, sc))
+	} else {
+		values = make([]string, 0, len(m.Values))
+		for _, v := range m.Values {
+			values = append(values, substitute(v, sc))
+		}
+	}
+	if len(values) > maxMatrixValues {
+		return nil, fmt.Errorf("matrix expands to %d values, exceeding the limit of %d", len(values), maxMatrixValues)
+	}
+	return values, nil
+}
+
+// parseMatrixList interprets a resolved values_from string as either a JSON array
+// (of strings or scalars) or a comma-separated list. Empty entries are dropped.
+func parseMatrixList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if strings.HasPrefix(raw, "[") {
+		var arr []any
+		if err := json.Unmarshal([]byte(raw), &arr); err == nil {
+			out := make([]string, 0, len(arr))
+			for _, v := range arr {
+				if s := jsonScalar(v); s != "" {
+					out = append(out, s)
+				}
+			}
+			return out
+		}
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func matrixTaskName(base, varName, val string) string {
+	return fmt.Sprintf("%s [%s=%s]", base, varName, val)
+}
+
+// aggregateTaskOutputs combines a matrix step's per-value outputs into one
+// JSON-array string, preserving the matrix value order so ${steps.NAME.output}
+// returns ["out0","out1",...].
+func aggregateTaskOutputs(results []taskResult) string {
+	outs := make([]string, len(results))
+	for _, r := range results {
+		outs[r.idx] = r.output
+	}
+	b, _ := json.Marshal(outs)
+	return string(b)
+}
+
+// runTaskGroup executes every task in a group concurrently (capped by
+// maxParallelSteps), records each as a step run, and returns the per-task results
+// in task order plus the group's overall status (Completed unless any task failed
+// or was cancelled). A single task still runs through this path so the matrix,
+// parallel, and sequential cases share one code path.
+func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID, workflowID string, tasks []stepTask, inputs, visible map[string]string) ([]taskResult, string) {
+	results := make([]taskResult, len(tasks))
+	stepRunIDs := make([]string, len(tasks))
+	for k, t := range tasks {
+		sid := uuid.New().String()
+		stepRunIDs[k] = sid
+		if err := p.startStepRun(runID, sid, t.stepIndex, t.name); err != nil {
+			slog.ErrorContext(ctx, "worker: start step run", "run_id", runID, "step", t.stepIndex, "error", err)
+			return results, StatusFailed
+		}
+	}
+
+	resCh := make(chan taskResult, len(tasks))
+	// sem is a counting semaphore: acquire by sending, release by receiving. The
+	// select lets a cancelled context bypass the semaphore so the goroutine exits
+	// immediately rather than blocking on a full channel.
+	sem := make(chan struct{}, maxParallelSteps)
+	for k, t := range tasks {
+		go func(k int, t stepTask) {
+			select {
+			case sem <- struct{}{}: // acquire
+			case <-ctx.Done():
+				resCh <- taskResult{name: t.name, idx: k, err: context.Canceled}
+				return
+			}
+			defer func() { <-sem }() // release
+			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix})
+			resCh <- taskResult{name: t.name, output: res.Output, usedMB: res.MemoryUsedMB, limitMB: res.MemoryLimitMB, err: err, idx: k}
+		}(k, t)
+	}
+
+	status := StatusCompleted
+	for range tasks {
+		r := <-resCh
+		results[r.idx] = r
+		sid := stepRunIDs[r.idx]
+		if r.err != nil {
+			st := StatusFailed
+			if errors.Is(r.err, context.Canceled) {
+				st = StatusCancelled
+				if status == StatusCompleted {
+					status = StatusCancelled
+				}
+			} else {
+				status = StatusFailed
+			}
+			p.finishStepRun(sid, st, strPtr(failureOutput(r.output, r.err)), r.usedMB, r.limitMB)
+			slog.WarnContext(ctx, "worker: step failed", "run_id", runID, "step", tasks[r.idx].stepIndex, "name", r.name)
+		} else {
+			meterStepsCompleted.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("workflow.id", workflowID),
+				attribute.String("status", StatusCompleted),
+			))
+			p.finishStepRun(sid, StatusCompleted, strPtr(r.output), r.usedMB, r.limitMB)
+			slog.InfoContext(ctx, "worker: step completed", "run_id", runID, "step", tasks[r.idx].stepIndex, "name", r.name)
+		}
+	}
+	return results, status
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // rotateToken runs until ctx is cancelled, rotating the run credential every
@@ -733,6 +932,13 @@ func snapshotOutputs(m map[string]string) map[string]string {
 
 func (p *WorkerPool) startStepRun(runID, stepRunID string, index int, name string) error {
 	return (WorkflowStepRun{StepRunID: stepRunID, RunID: runID, StepIndex: index, StepName: name}).Add(context.Background())
+}
+
+// startApprovalStepRun records an approval gate paused for a human decision. The
+// substituted approval message (if any) is stored as the step's output so the run
+// view can show what is being approved.
+func (p *WorkerPool) startApprovalStepRun(runID, stepRunID string, index int, name, message string) error {
+	return (WorkflowStepRun{StepRunID: stepRunID, RunID: runID, StepIndex: index, StepName: name}).AddAwaitingApproval(message)
 }
 
 func (p *WorkerPool) finishStepRun(stepRunID, status string, output *string, usedMB, limitMB *int64) {

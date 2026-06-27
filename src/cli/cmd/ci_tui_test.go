@@ -1542,8 +1542,8 @@ func TestTUICancelRun_Success(t *testing.T) {
 	setupCLI(t, srv)
 	msg := tuiCancelRun("run-1")()
 	a, ok := msg.(tuiRunActionMsg)
-	if !ok || a.err != nil || a.cancelled != "run-1" {
-		t.Fatalf("msg = %#v, want cancelled run-1", msg)
+	if !ok || a.err != nil || a.runID != "run-1" || a.verb != "cancel" {
+		t.Fatalf("msg = %#v, want cancel run-1", msg)
 	}
 	if rec.Method != "DELETE" || rec.Path != "/workflows/runs/run-1" {
 		t.Errorf("request = %s %s, want DELETE /workflows/runs/run-1", rec.Method, rec.Path)
@@ -1555,6 +1555,63 @@ func TestTUICancelRun_Error(t *testing.T) {
 	setupCLI(t, srv)
 	if a, ok := tuiCancelRun("run-1")().(tuiRunActionMsg); !ok || a.err == nil {
 		t.Error("a failed cancel should return tuiRunActionMsg with an error")
+	}
+}
+
+func TestTUIApproveRun_Success(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{}`)
+	setupCLI(t, srv)
+	a, ok := tuiApproveRun("run-1")().(tuiRunActionMsg)
+	if !ok || a.err != nil || a.runID != "run-1" || a.verb != "approve" {
+		t.Fatalf("msg = %#v, want approve run-1", a)
+	}
+	if rec.Method != "POST" || rec.Path != "/workflows/runs/run-1/approve" {
+		t.Errorf("request = %s %s, want POST /workflows/runs/run-1/approve", rec.Method, rec.Path)
+	}
+}
+
+func TestTUIRejectRun_Success(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{}`)
+	setupCLI(t, srv)
+	a, ok := tuiRejectRun("run-1")().(tuiRunActionMsg)
+	if !ok || a.err != nil || a.verb != "reject" {
+		t.Fatalf("msg = %#v, want reject", a)
+	}
+	if rec.Method != "POST" || rec.Path != "/workflows/runs/run-1/reject" {
+		t.Errorf("request = %s %s, want POST /workflows/runs/run-1/reject", rec.Method, rec.Path)
+	}
+}
+
+func TestTUIApproveRun_Error(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusConflict, `not awaiting approval`)
+	setupCLI(t, srv)
+	if a, ok := tuiApproveRun("run-1")().(tuiRunActionMsg); !ok || a.err == nil {
+		t.Error("a failed approve should return tuiRunActionMsg with an error")
+	}
+}
+
+// The approve/reject keys only act on a run that is paused awaiting approval.
+func TestTUIRunDetail_ApproveOnlyWhenAwaiting(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusOK, `{}`)
+	setupCLI(t, srv)
+
+	awaiting := newTUIModel()
+	awaiting.view = tuiViewRunDetail
+	awaiting.runFull = &tuiRunFull{tuiRun: tuiRun{RunID: "run-1", Status: "awaiting_approval"}}
+	_, cmd := awaiting.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if cmd == nil {
+		t.Fatal("a on an awaiting_approval run should emit an approve cmd")
+	}
+	if msg, ok := cmd().(tuiRunActionMsg); !ok || msg.verb != "approve" {
+		t.Errorf("a cmd returned %#v, want an approve action", cmd())
+	}
+
+	running := newTUIModel()
+	running.view = tuiViewRunDetail
+	running.runFull = &tuiRunFull{tuiRun: tuiRun{RunID: "run-2", Status: "running"}}
+	_, cmd2 := running.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if cmd2 != nil {
+		t.Error("a on a running run must not approve")
 	}
 }
 
@@ -1596,7 +1653,7 @@ func TestTUIRunActionMsg_ErrorSetsStatus(t *testing.T) {
 func TestTUIRunActionMsg_SuccessRefetches(t *testing.T) {
 	srv, _ := recordingServer(t, http.StatusOK, `[]`)
 	setupCLI(t, srv)
-	upd, cmd := newTUIModel().Update(tuiRunActionMsg{cancelled: "run-1"})
+	upd, cmd := newTUIModel().Update(tuiRunActionMsg{runID: "run-1", verb: "cancel"})
 	m := upd.(tuiModel)
 	if m.runStatusErr || !strings.Contains(m.runStatus, "cancelled") {
 		t.Errorf("success should set a non-error status (got %q)", m.runStatus)

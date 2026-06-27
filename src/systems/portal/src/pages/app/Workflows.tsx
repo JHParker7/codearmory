@@ -1,5 +1,5 @@
 /** Workflows page — the CI/CD control surface, a tabbed view over pipelines, steps, and the action catalog. pipelines tab creates/triggers/cancels/deletes workflows and lists their runs; steps tab CRUDs reusable steps; actions tab browses the read-only action catalog. all data goes through the typed BFF client (listWorkflows/createStep/etc), never conductor directly. */
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { ReactNode, CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
@@ -14,6 +14,7 @@ import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff'
 import { ImageSelect } from '../../components/ImageSelect';
 import { PipelineBlocks } from './PipelineBlocks';
 import type { StepRef } from './pipelineGraph';
+import { stepsToPayload, configToJson, parseConfig } from './pipelineGraph';
 import { schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX } from './stepSchema';
 import { timeAgo, statusTone, isRunActive, fmtDuration } from '../../utils';
 
@@ -25,8 +26,9 @@ type MainTab = 'pipelines' | 'steps' | 'actions';
 // ── Pipeline builder overlay ──────────────────────────────────────────────────
 
 /** Full-surface pipeline builder: name/description plus the Scratch-style block
- * builder. Used for both create (initial=null) and edit. The builder reports the
- * derived ordered-steps-with-parallel_group via onChange; save sends them to the API. */
+ * builder, beside a live, editable JSON config of the pipeline. Used for both
+ * create (initial=null) and edit. The visual builder and the JSON panel are
+ * two-way synced; save sends the same config to the API. */
 function PipelineBuilderOverlay({
   token, initial, catalog, palette, onClose, onSaved,
 }: {
@@ -37,20 +39,57 @@ function PipelineBuilderOverlay({
   onClose: () => void;
   onSaved: (wf: Workflow) => void;
 }) {
-  const [name, setName] = useState(initial?.name ?? '');
-  const [desc, setDesc] = useState(initial?.description ?? '');
-  const [steps, setSteps] = useState<StepRef[]>(
-    initial ? initial.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null })) : [],
-  );
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  const initialSteps = useMemo<StepRef[]>(
-    () => initial ? initial.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null })) : [],
+  const initialStepRefs = useMemo<StepRef[]>(
+    () => initial ? initial.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null, matrix: s.matrix ?? null })) : [],
     [initial],
   );
 
-  const canSave = !!name.trim() && !saving;
+  const [name, setName] = useState(initial?.name ?? '');
+  const [desc, setDesc] = useState(initial?.description ?? '');
+  // `steps` is the live source of truth (mirrored from the visual builder via
+  // onChange and from applying JSON edits); `builderSeed` is what re-seeds the
+  // block builder — it changes only on a JSON apply, never on the builder's own
+  // edits, so dragging blocks doesn't reset them.
+  const [steps, setSteps] = useState<StepRef[]>(initialStepRefs);
+  const [builderSeed, setBuilderSeed] = useState<StepRef[]>(initialStepRefs);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Live, editable JSON mirror. The textarea drives `jsonDraft`; while the user is
+  // typing in it (jsonFocused) builder-side updates don't overwrite their text.
+  const [jsonDraft, setJsonDraft] = useState(() => configToJson(initial?.name ?? '', initial?.description ?? '', initialStepRefs));
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  const jsonFocused = useRef(false);
+
+  const canonicalJson = useMemo(() => configToJson(name, desc, steps), [name, desc, steps]);
+
+  // Reflect builder/name/description changes into the JSON panel, unless the user
+  // is actively editing the JSON (their text is authoritative then).
+  useEffect(() => {
+    if (jsonFocused.current) return;
+    setJsonDraft(canonicalJson);
+    setJsonError(null);
+  }, [canonicalJson]);
+
+  // Apply a JSON edit back into the builder. On valid parse, name/description sync
+  // immediately and the builder is re-seeded only when the steps actually changed
+  // (so editing the name in JSON doesn't reset block state). Invalid JSON surfaces
+  // an inline error and leaves the builder untouched.
+  const applyJson = useCallback((raw: string) => {
+    setJsonDraft(raw);
+    let parsed: { name: string; description: string; steps: StepRef[] };
+    try { parsed = parseConfig(raw); }
+    catch (e: unknown) { setJsonError((e as Error).message); return; }
+    setJsonError(null);
+    setName(parsed.name);
+    setDesc(parsed.description);
+    if (configToJson('', '', parsed.steps) !== configToJson('', '', builderSeed)) {
+      setBuilderSeed(parsed.steps);
+      setSteps(parsed.steps);
+    }
+  }, [builderSeed]);
+
+  const canSave = !!name.trim() && !saving && !jsonError;
 
   const handleSave = async () => {
     if (!name.trim()) return;
@@ -59,9 +98,7 @@ function PipelineBuilderOverlay({
       const payload = {
         name: name.trim(),
         description: desc.trim() || undefined,
-        steps: steps.map(s => s.parallel_group == null
-          ? { step_id: s.step_id }
-          : { step_id: s.step_id, parallel_group: s.parallel_group }),
+        steps: stepsToPayload(steps),
       };
       const wf = initial
         ? await updateWorkflow(token, initial.workflow_id, payload)
@@ -83,8 +120,27 @@ function PipelineBuilderOverlay({
           style={{ flex: 1, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '5px 8px', outline: 'none' }} />
         <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>✕ close</button>
       </div>
-      <div style={{ flex: 1, minHeight: 0, padding: 14 }}>
-        <PipelineBlocks editable initialSteps={initialSteps} catalog={catalog} palette={palette} onChange={setSteps} />
+      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+        <div style={{ flex: 1, minWidth: 0, padding: '14px 7px 14px 14px' }}>
+          <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} onChange={setSteps} />
+        </div>
+        {/* Live, editable JSON config — mirrors the builder and edits flow back. */}
+        <div style={{ width: 'min(42%, 560px)', minWidth: 300, flexShrink: 0, padding: '14px 14px 14px 7px', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: `1px solid ${T.border}`, borderBottom: 'none', background: T.bgAlt }}>
+            <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>pipeline.json</span>
+            <span style={{ fontFamily: T.mono, fontSize: 9, color: T.faint }}>live · editable</span>
+            <div style={{ flex: 1 }} />
+            <span style={{ fontFamily: T.mono, fontSize: 9, color: jsonError ? T.red : T.green }}>{jsonError ? '✗ invalid' : '✓ in sync'}</span>
+          </div>
+          <textarea value={jsonDraft} spellCheck={false}
+            onChange={e => applyJson(e.target.value)}
+            onFocus={() => { jsonFocused.current = true; }}
+            onBlur={() => { jsonFocused.current = false; if (!jsonError) setJsonDraft(canonicalJson); }}
+            style={{ flex: 1, minHeight: 0, resize: 'none', background: T.bg, border: `1px solid ${jsonError ? T.red : T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, lineHeight: 1.5, padding: 12, outline: 'none', whiteSpace: 'pre', overflow: 'auto', tabSize: 2 }} />
+          <div style={{ minHeight: 16, padding: '4px 2px', fontFamily: T.mono, fontSize: 10, color: jsonError ? T.red : T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {jsonError ? `✗ ${jsonError}` : 'edit step_id / parallel_group / matrix here, or drag blocks — both stay in sync'}
+          </div>
+        </div>
       </div>
       <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
@@ -193,7 +249,7 @@ function PipelinesTab() {
   // Stable per selected workflow so the read-only graph isn't re-seeded on every
   // render (runs polling, trigger, etc. re-render this component frequently).
   const detailSteps = useMemo<StepRef[]>(
-    () => selectedWorkflow ? selectedWorkflow.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null })) : [],
+    () => selectedWorkflow ? selectedWorkflow.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null, matrix: s.matrix ?? null })) : [],
     [selectedWorkflow],
   );
 
@@ -402,10 +458,11 @@ function StepsTab() {
   // the Forge run form). Best effort — degrades to free text if unavailable.
   useEffect(() => { listForgeImages(token).then(setImages).catch(() => {}); }, [token]);
 
-  // The Action selector offers every catalog action plus the `http` escape hatch.
+  // The Action selector offers every catalog action plus the built-in `http`
+  // escape hatch and `approval` gate (neither is a registry catalog action).
   const actionOptions = useMemo(() => {
     const names = actions.map(a => a.name);
-    return names.includes('http') ? names : [...names, 'http'];
+    return [...names, ...['http', 'approval'].filter(b => !names.includes(b))];
   }, [actions]);
 
   // Default the Action to forge/run when the form opens. forge is core so the

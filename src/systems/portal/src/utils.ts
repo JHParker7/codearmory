@@ -9,8 +9,10 @@ export function shortId(id: string): string {
   return `${id.slice(0, 8)}…`;
 }
 
-/** Run/step statuses that are still in flight (not terminal). */
-export const RUN_ACTIVE = ['running', 'in_progress', 'pending', 'queued'];
+/** Run/step statuses that are still in flight (not terminal). `awaiting_approval`
+ * is paused on a manual-approval gate — non-terminal, so it keeps live-refreshing
+ * and renders amber until it is approved or rejected. */
+export const RUN_ACTIVE = ['running', 'in_progress', 'pending', 'queued', 'awaiting_approval'];
 /** Whether a run/step status is still in flight. */
 export const isRunActive = (status: string): boolean => RUN_ACTIVE.includes(status);
 

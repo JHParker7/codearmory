@@ -11,7 +11,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector } from '../../store/hooks';
-import { getRun, getWorkflow, listSteps, cancelRun } from '../../api/bff';
+import { getRun, getWorkflow, listSteps, cancelRun, approveRun, rejectRun } from '../../api/bff';
 import type { WorkflowRun, Workflow, WorkflowStepRun, Step } from '../../api/bff';
 import { statusTone, isRunActive, fmtDuration, timeAgo } from '../../utils';
 import { useViewport, clamp } from '../../hooks/useViewport';
@@ -74,6 +74,7 @@ export function RunView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
+  const [deciding, setDeciding] = useState(false);
 
   // Initial load: the run, its workflow (best-effort — may be deleted), and the
   // step catalog for labels.
@@ -128,6 +129,28 @@ export function RunView() {
     catch (e: unknown) { setError((e as Error).message); }
   }, [run, token]);
 
+  // Resume a run paused on a manual-approval gate. The response carries the new
+  // status; live-refresh then continues to stream the resumed steps.
+  const handleApprove = useCallback(async () => {
+    if (!run) return;
+    setDeciding(true); setError(null);
+    try { setRun(await approveRun(token, run.run_id)); }
+    catch (e: unknown) { setError((e as Error).message); }
+    finally { setDeciding(false); }
+  }, [run, token]);
+
+  // Reject fails the run, so prompt for an optional reason (recorded in the gate's
+  // audit line). A cancelled prompt aborts the decision.
+  const handleReject = useCallback(async () => {
+    if (!run) return;
+    const comment = window.prompt('Reason for rejecting this run? (optional)');
+    if (comment === null) return;
+    setDeciding(true); setError(null);
+    try { setRun(await rejectRun(token, run.run_id, comment || undefined)); }
+    catch (e: unknown) { setError((e as Error).message); }
+    finally { setDeciding(false); }
+  }, [run, token]);
+
   const backBtn = (
     <button onClick={() => navigate('/app/workflows')}
       style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>
@@ -156,6 +179,18 @@ export function RunView() {
           {run.started_at ? ` · started ${timeAgo(run.started_at)} ago` : ''}
         </span>
         <div style={{ flex: 1 }} />
+        {run.status === 'awaiting_approval' && (
+          <>
+            <button onClick={handleApprove} disabled={deciding}
+              style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, fontWeight: 700, padding: '5px 12px', cursor: deciding ? 'default' : 'pointer', opacity: deciding ? 0.5 : 1 }}>
+              [ ✓ approve ]
+            </button>
+            <button onClick={handleReject} disabled={deciding}
+              style={{ background: 'transparent', border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 700, padding: '5px 12px', cursor: deciding ? 'default' : 'pointer', opacity: deciding ? 0.5 : 1 }}>
+              [ ✗ reject ]
+            </button>
+          </>
+        )}
         {isRunActive(run.status) && (
           <button onClick={handleCancel}
             style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
