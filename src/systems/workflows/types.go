@@ -15,7 +15,17 @@ const (
 	StatusCompleted = "completed"
 	StatusFailed    = "failed"
 	StatusCancelled = "cancelled"
+	// StatusAwaitingApproval is a non-terminal, resumable state: a run paused on a
+	// manual-approval step. It is excluded from Dequeue (only 'pending' is claimed)
+	// and from stuck-run recovery (only 'running' is reaped), so a paused run
+	// survives a worker restart untouched until someone approves or rejects it.
+	StatusAwaitingApproval = "awaiting_approval"
 )
+
+// ActionApproval is a built-in gate action (like ActionHTTP it is not a registry
+// catalog action). A step with this action pauses the run in StatusAwaitingApproval
+// until an authorized user approves or rejects it via the run approval API.
+const ActionApproval = "approval"
 
 const (
 	maxBodyBytes    = 64 * 1024
@@ -87,20 +97,42 @@ type Step struct {
 
 func (Step) TableName() string { return "steps" }
 
+// maxMatrixValues caps how many executions a single matrix step may fan out to,
+// so a runaway input list can't spawn an unbounded number of step runs.
+const maxMatrixValues = 50
+
+// MatrixConfig fans a single step out into one execution per value in a list.
+// Each execution runs the same step with ${matrix.<Var>} (and the generic
+// ${matrix.value}) bound to that value, so the same With template targets a
+// different input each time. The list is either the literal Values or, when
+// ValuesFrom is set, resolved at run time from a ${...} reference that yields a
+// JSON array or a comma-separated string (e.g. "${inputs.regions}"). Matrix
+// executions run concurrently (capped by maxParallelSteps) and the step's
+// aggregated output is the JSON array of each execution's output.
+type MatrixConfig struct {
+	Var        string   `json:"var"`
+	Values     []string `json:"values,omitempty"`
+	ValuesFrom string   `json:"values_from,omitempty"`
+}
+
 // WorkflowStepRef records how a step is used within a specific workflow:
-// which step and, optionally, which parallel execution group it belongs to.
-// Steps sharing the same non-nil ParallelGroup execute concurrently; the run
-// waits for all steps in a group before advancing.
+// which step and, optionally, which parallel execution group it belongs to, or a
+// matrix that fans the step out over a list. ParallelGroup and Matrix are mutually
+// exclusive. Steps sharing the same non-nil ParallelGroup execute concurrently;
+// the run waits for all steps in a group before advancing. Stored as part of the
+// workflow's `steps` JSON column, so neither field needs its own DB column.
 type WorkflowStepRef struct {
-	StepID        string `json:"step_id"`
-	ParallelGroup *int   `json:"parallel_group,omitempty"`
+	StepID        string        `json:"step_id"`
+	ParallelGroup *int          `json:"parallel_group,omitempty"`
+	Matrix        *MatrixConfig `json:"matrix,omitempty"`
 }
 
 // WorkflowStep enriches a WorkflowStepRef with the full Step definition.
 // It is assembled at request/execution time and never stored in the DB.
 type WorkflowStep struct {
 	Step
-	ParallelGroup *int `json:"parallel_group,omitempty"`
+	ParallelGroup *int          `json:"parallel_group,omitempty"`
+	Matrix        *MatrixConfig `json:"matrix,omitempty"`
 }
 
 // Workflow is a named, ordered pipeline of step references.
@@ -109,24 +141,24 @@ type WorkflowStep struct {
 // RoleID is the gatekeeper role provisioned at creation time; it scopes run
 // tokens to only the permissions the workflow's steps actually require.
 type Workflow struct {
-	WorkflowID  string            `json:"workflow_id"  gorm:"column:workflow_id;primaryKey"`
-	Name        string            `json:"name"         gorm:"column:name"`
-	Description string            `json:"description"  gorm:"column:description;default:''"`
-	CreatedBy   string            `json:"created_by"   gorm:"column:created_by"`
-	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
-	Project     string            `json:"project,omitempty" gorm:"column:project;default:''"`
-	RoleID      string            `json:"role_id,omitempty" gorm:"column:role_id;default:''"`
+	WorkflowID  string `json:"workflow_id"  gorm:"column:workflow_id;primaryKey"`
+	Name        string `json:"name"         gorm:"column:name"`
+	Description string `json:"description"  gorm:"column:description;default:''"`
+	CreatedBy   string `json:"created_by"   gorm:"column:created_by"`
+	OrgID       string `json:"org_id"       gorm:"column:org_id;default:''"`
+	Project     string `json:"project,omitempty" gorm:"column:project;default:''"`
+	RoleID      string `json:"role_id,omitempty" gorm:"column:role_id;default:''"`
 	// RolePermsVersion records which version of collectWorkflowPermissions built
 	// RoleID. The role is provisioned once and reused across runs, so when the
 	// derivation logic changes (constant bumped) a workflow with an older version
 	// re-provisions on its next trigger — see handleTriggerRun. Default 0 means
 	// "pre-versioning"; AutoMigrate backfills existing rows to 0.
-	RolePermsVersion int          `json:"-"            gorm:"column:role_perms_version;default:0"`
-	Active      bool              `json:"active"       gorm:"column:active;default:true"`
-	CreatedAt   time.Time         `json:"created_at"   gorm:"column:created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"   gorm:"column:updated_at"`
-	StepRefs    []WorkflowStepRef `json:"-"            gorm:"column:steps;serializer:json"`
-	Steps       []WorkflowStep    `json:"steps"        gorm:"-"`
+	RolePermsVersion int               `json:"-"            gorm:"column:role_perms_version;default:0"`
+	Active           bool              `json:"active"       gorm:"column:active;default:true"`
+	CreatedAt        time.Time         `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"   gorm:"column:updated_at"`
+	StepRefs         []WorkflowStepRef `json:"-"            gorm:"column:steps;serializer:json"`
+	Steps            []WorkflowStep    `json:"steps"        gorm:"-"`
 }
 
 func (Workflow) TableName() string { return "workflows" }

@@ -25,10 +25,11 @@ import (
 type substContext struct {
 	inputs  map[string]string // run-level inputs, by name
 	outputs map[string]string // earlier step outputs, by step name
+	matrix  map[string]string // matrix bindings for this execution, by var name
 }
 
 func (sc substContext) empty() bool {
-	return len(sc.inputs) == 0 && len(sc.outputs) == 0
+	return len(sc.inputs) == 0 && len(sc.outputs) == 0 && len(sc.matrix) == 0
 }
 
 var refPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
@@ -72,6 +73,19 @@ func (sc substContext) resolve(expr string) (string, bool) {
 	if key, ok := strings.CutPrefix(expr, "inputs."); ok {
 		v, ok := sc.inputs[key]
 		return v, ok
+	}
+	// ${matrix.<var>} resolves to this execution's matrix binding; ${matrix.value}
+	// is a generic alias for the bound value regardless of the var name.
+	if key, ok := strings.CutPrefix(expr, "matrix."); ok {
+		if v, ok := sc.matrix[key]; ok {
+			return v, true
+		}
+		if key == "value" && len(sc.matrix) == 1 {
+			for _, v := range sc.matrix {
+				return v, true
+			}
+		}
+		return "", false
 	}
 	// Bare ${NAME} resolves to a run input (backward compatible).
 	v, ok := sc.inputs[expr]

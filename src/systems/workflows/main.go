@@ -27,19 +27,19 @@ import (
 )
 
 var (
-	gatekeeperClient *gk.Client
-	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
-	gatekeeperKey    func() string // current workflows service key, updated by key rotation
-	hooksTriggerKey  = os.Getenv("HOOKS_TRIGGER_KEY")
+	gatekeeperClient  *gk.Client
+	gatekeeperURL     = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	gatekeeperKey     func() string // current workflows service key, updated by key rotation
+	hooksTriggerKey   = os.Getenv("HOOKS_TRIGGER_KEY")
 	registryNotifyKey = os.Getenv("WORKFLOWS_NOTIFY_KEY")
 
 	// serviceURLs maps registered service names to their base URLs.
 	// Seeded at startup from SERVICES env var and updated every 5 min from the registry.
-	serviceURLsMu      sync.RWMutex
-	serviceURLs        = map[string]string{}
+	serviceURLsMu sync.RWMutex
+	serviceURLs   = map[string]string{}
 	// hostToService is the reverse of serviceURLs: hostname → service name.
 	// Used by peerServiceTransport to stamp peer.service on OTel CLIENT spans.
-	hostToService      = map[string]string{}
+	hostToService = map[string]string{}
 	// catalogServiceNames tracks which names in serviceURLs came from the registry
 	// catalog (vs. env-seeded). Used to evict stale entries on each refresh.
 	catalogServiceNames = map[string]bool{}
@@ -437,11 +437,15 @@ func buildMux(workers *WorkerPool) http.Handler {
 	mux.HandleFunc("GET /runs", handleListRuns)
 	mux.HandleFunc("GET /runs/{id}", handleGetRun)
 	mux.HandleFunc("DELETE /runs/{id}", handleCancelRun(workers))
+	mux.HandleFunc("POST /runs/{id}/approve", handleApproveRun)
+	mux.HandleFunc("POST /runs/{id}/reject", handleRejectRun)
 	// Workflow-namespaced run routes: the run resource becomes
 	// workflows/runs/<workflow_ref>/<run_id> so access can be granted per workflow.
 	// The flat /runs/{id} routes above stay for back-compat.
 	mux.HandleFunc("GET /pipelines/{id}/runs/{run_id}", handleGetRun)
 	mux.HandleFunc("DELETE /pipelines/{id}/runs/{run_id}", handleCancelRun(workers))
+	mux.HandleFunc("POST /pipelines/{id}/runs/{run_id}/approve", handleApproveRun)
+	mux.HandleFunc("POST /pipelines/{id}/runs/{run_id}/reject", handleRejectRun)
 	return mux
 }
 

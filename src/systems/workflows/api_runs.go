@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -339,6 +340,188 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(run) //nolint:errcheck
 }
 
+type approvalDecisionRequest struct {
+	// Comment is an optional note recorded in the gate's audit line.
+	Comment string `json:"comment"`
+}
+
+// handleApproveRun resumes a run paused on a manual-approval gate.
+func handleApproveRun(w http.ResponseWriter, r *http.Request) { approvalDecision(w, r, true) }
+
+// handleRejectRun fails a run paused on a manual-approval gate.
+func handleRejectRun(w http.ResponseWriter, r *http.Request) { approvalDecision(w, r, false) }
+
+// approvalDecision is the shared approve/reject path. Both require the same
+// approveRun permission (anyone who may approve may also reject) and act only on a
+// run currently in awaiting_approval. On approve the run's token is re-minted —
+// a long pause may have outlived the original — and the run is re-queued (→
+// pending) so a worker resumes it where it paused; on reject the run is failed.
+func approvalDecision(w http.ResponseWriter, r *http.Request, approve bool) {
+	ctx, span := otel.Tracer("workflows").Start(r.Context(), "approvalDecision")
+	defer span.End()
+
+	id, resource, wfRef := runRefAndResource(r)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "approveRun", resource)
+	if !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	span.AddEvent("permission.granted")
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("org.id", orgID),
+		attribute.Bool("approval.approve", approve),
+	)
+
+	run, err := getRun(ctx, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "run not found", http.StatusNotFound)
+			return
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
+		slog.ErrorContext(ctx, "approval: get run", "run_id", id, "user_id", userID, "error", err)
+		http.Error(w, "failed to get run", http.StatusInternalServerError)
+		return
+	}
+	if !canAccessRun(run, userID, orgID) || !runMatchesWorkflowRef(ctx, wfRef, run, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+	if run.Status != StatusAwaitingApproval {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "run is not awaiting approval", http.StatusConflict)
+		return
+	}
+
+	sr, err := approvalStepRun(ctx, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "run is not awaiting approval", http.StatusConflict)
+			return
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
+		http.Error(w, "failed to load approval gate", http.StatusInternalServerError)
+		return
+	}
+
+	// The workflow supplies the scoped run role (needed to re-mint the token) and
+	// the gate step's optional approver allow-list.
+	wf, err := getWorkflow(ctx, run.WorkflowID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "cannot decide: workflow no longer exists", http.StatusConflict)
+			return
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
+		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
+		return
+	}
+	if sr.StepIndex >= 0 && sr.StepIndex < len(wf.Steps) {
+		if approvers := withStrings(wf.Steps[sr.StepIndex].With, "approvers"); len(approvers) > 0 && !slices.Contains(approvers, userID) {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "you are not an approver for this step", http.StatusForbidden)
+			return
+		}
+	}
+
+	var req approvalDecisionRequest
+	if r.ContentLength != 0 {
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+	}
+	verb := "approved"
+	if !approve {
+		verb = "rejected"
+	}
+	decision := verb + " by " + userID
+	if c := strings.TrimSpace(req.Comment); c != "" {
+		decision += ": " + c
+	}
+
+	if !approve {
+		if err := rejectAfterApproval(ctx, id, sr.StepRunID, decision); err != nil {
+			if errors.Is(err, errRunNotAwaiting) {
+				http.Error(w, "run is not awaiting approval", http.StatusConflict)
+				return
+			}
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "db error")
+			slog.ErrorContext(ctx, "approval: reject run", "run_id", id, "user_id", userID, "error", err)
+			http.Error(w, "failed to reject run", http.StatusInternalServerError)
+			return
+		}
+		revokeRunToken(context.Background(), run.RunSessionID)
+		span.SetStatus(codes.Ok, "")
+		slog.InfoContext(ctx, "workflow run rejected", "run_id", id, "user_id", userID)
+		writeRunWithSteps(ctx, w, id)
+		return
+	}
+
+	// Re-mint the run token before resuming so a pause longer than the token TTL
+	// can't resume on an expired credential. Attribute it to the original
+	// triggerer (not the approver) with the workflow's scoped role.
+	newToken, newSID, err := createRunToken(ctx, run.TriggeredBy, wf.RoleID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "run token creation failed")
+		slog.ErrorContext(ctx, "approval: create run token", "run_id", id, "error", err)
+		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
+		return
+	}
+	encNew, err := encryptToken(newToken)
+	if err != nil {
+		revokeRunToken(context.Background(), newSID)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "run token encryption failed")
+		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
+		return
+	}
+	if err := (WorkflowRun{RunID: id}).UpdateToken(ctx, encNew, newSID); err != nil {
+		revokeRunToken(context.Background(), newSID)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db update failed")
+		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
+		return
+	}
+	if err := resumeAfterApproval(ctx, id, sr.StepRunID, decision); err != nil {
+		revokeRunToken(context.Background(), newSID)
+		if errors.Is(err, errRunNotAwaiting) {
+			http.Error(w, "run is not awaiting approval", http.StatusConflict)
+			return
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
+		slog.ErrorContext(ctx, "approval: resume run", "run_id", id, "user_id", userID, "error", err)
+		http.Error(w, "failed to approve run", http.StatusInternalServerError)
+		return
+	}
+	// The new token is live and the run re-queued; retire the old session.
+	revokeRunToken(context.Background(), run.RunSessionID)
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "workflow run approved", "run_id", id, "user_id", userID)
+	writeRunWithSteps(ctx, w, id)
+}
+
+// writeRunWithSteps responds with the run and its step runs after a decision, so
+// the caller immediately sees the new status and the recorded gate outcome.
+func writeRunWithSteps(ctx context.Context, w http.ResponseWriter, id string) {
+	run, err := getRun(ctx, id)
+	if err != nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	run.StepRuns, _ = getStepRuns(ctx, id)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(run) //nolint:errcheck
+}
+
 func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("workflows").Start(r.Context(), "handleCancelRun")
@@ -392,6 +575,11 @@ func handleCancelRun(pool *WorkerPool) http.HandlerFunc {
 		// authoritative cancellation. This is best-effort — the worker may have
 		// already finished before the signal arrives.
 		pool.Cancel(id)
+		// A paused (awaiting_approval) run has no live worker to revoke its run
+		// token on exit, so do it here; for pending/running runs the worker does.
+		if run.Status == StatusAwaitingApproval {
+			revokeRunToken(context.Background(), run.RunSessionID)
+		}
 
 		span.SetStatus(codes.Ok, "")
 		slog.InfoContext(ctx, "workflow run cancelled", "run_id", id, "user_id", userID)

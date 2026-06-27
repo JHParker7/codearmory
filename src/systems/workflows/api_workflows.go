@@ -236,12 +236,8 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i, ref := range req.Steps {
-		if ref.StepID == "" {
-			http.Error(w, fmt.Sprintf("step %d: step_id is required", i), http.StatusBadRequest)
-			return
-		}
-		if ref.ParallelGroup != nil && *ref.ParallelGroup < 0 {
-			http.Error(w, fmt.Sprintf("step %d: parallel_group must be non-negative", i), http.StatusBadRequest)
+		if msg := validateStepRefShape(i, ref); msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
 			return
 		}
 	}
@@ -456,12 +452,8 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i, ref := range req.Steps {
-		if ref.StepID == "" {
-			http.Error(w, fmt.Sprintf("step %d: step_id is required", i), http.StatusBadRequest)
-			return
-		}
-		if ref.ParallelGroup != nil && *ref.ParallelGroup < 0 {
-			http.Error(w, fmt.Sprintf("step %d: parallel_group must be non-negative", i), http.StatusBadRequest)
+		if msg := validateStepRefShape(i, ref); msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
 			return
 		}
 	}
