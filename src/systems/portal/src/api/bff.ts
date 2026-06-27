@@ -261,6 +261,20 @@ export function deleteSecretProvider(token: string, orgId: string) {
 
 // ── Workflows ─────────────────────────────────────────────────────────────────
 
+/** Fans a step out into one execution per value in a list, binding
+ * ${matrix.<var>} per execution. Mutually exclusive with parallel_group. */
+export interface MatrixConfig {
+  var: string;
+  values?: string[];
+  values_from?: string;
+}
+
+export interface WorkflowStepRef {
+  step_id: string;
+  parallel_group?: number | null;
+  matrix?: MatrixConfig | null;
+}
+
 export interface Workflow {
   workflow_id: string;
   name: string;
@@ -268,7 +282,7 @@ export interface Workflow {
   created_by: string;
   org_id?: string | null;
   active: boolean;
-  steps: Array<{ step_id: string; parallel_group?: number | null }>;
+  steps: WorkflowStepRef[];
   created_at: string;
   updated_at: string;
 }
@@ -328,6 +342,16 @@ export function getRun(token: string, id: string) {
 
 export function cancelRun(token: string, id: string) {
   return req<void>('DELETE', `/workflows/runs/${id}`, token);
+}
+
+/** Approve a run paused on a manual-approval gate, resuming it. */
+export function approveRun(token: string, id: string, comment?: string) {
+  return req<WorkflowRun>('POST', `/workflows/runs/${id}/approve`, token, comment ? { comment } : {});
+}
+
+/** Reject a run paused on a manual-approval gate, failing it. */
+export function rejectRun(token: string, id: string, comment?: string) {
+  return req<WorkflowRun>('POST', `/workflows/runs/${id}/reject`, token, comment ? { comment } : {});
 }
 
 // ── Forge ─────────────────────────────────────────────────────────────────────
@@ -712,7 +736,7 @@ export function listActions(token: string) {
 
 export function createWorkflow(
   token: string,
-  payload: { name: string; description?: string; steps: Array<{ step_id: string; parallel_group?: number }> },
+  payload: { name: string; description?: string; steps: WorkflowStepRef[] },
 ) {
   return req<Workflow>('POST', '/workflows/pipelines', token, payload);
 }
@@ -720,7 +744,7 @@ export function createWorkflow(
 export function updateWorkflow(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; steps: Array<{ step_id: string; parallel_group?: number }> }>,
+  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[] }>,
 ) {
   return req<Workflow>('PUT', `/workflows/pipelines/${id}`, token, payload);
 }

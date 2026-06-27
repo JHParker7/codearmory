@@ -26,7 +26,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { T } from '../../theme';
 import { useViewport, clamp } from '../../hooks/useViewport';
 import type { Step } from '../../api/bff';
-import { Block, StepRef, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
+import { Block, StepRef, MatrixConfig, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
 
 export interface PipelineBlocksProps {
   initialSteps: StepRef[];
@@ -76,46 +76,77 @@ interface BlockCardProps {
   canLink: boolean;
   inParallel: boolean;
   onToggleParallel: (uid: string) => void;
+  onSetMatrix: (uid: string, matrix: MatrixConfig | null) => void;
   onRemove: (uid: string) => void;
 }
 
-function BlockCard({ block, label, action, editable, canLink, inParallel, onToggleParallel, onRemove }: BlockCardProps) {
+/** Inline matrix editor shown under a solo block. Fans the step out over a list:
+ * a comma-separated literal list, or a ${...} reference resolved at run time.
+ * Typing in one source clears the other (the backend accepts exactly one). */
+function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: MatrixConfig; onSetMatrix: (uid: string, m: MatrixConfig | null) => void }) {
+  const stop = (e: React.PointerEvent) => e.stopPropagation();
+  const field: React.CSSProperties = { background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '4px 6px', outline: 'none' };
+  return (
+    <div onPointerDown={stop} style={{ marginTop: 6, padding: 8, background: T.bg, border: `1px dashed ${T.border}`, borderLeft: `3px solid ${T.amber}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.amber, letterSpacing: 1, textTransform: 'uppercase' }}>⊞ matrix · one run per value</div>
+      <input value={matrix.var} placeholder="var (e.g. region) → ${matrix.region}" onPointerDown={stop}
+        onChange={(e) => onSetMatrix(uid, { ...matrix, var: e.target.value })} style={field} />
+      <input value={(matrix.values ?? []).join(', ')} placeholder="values, comma-separated (a, b, c)" onPointerDown={stop}
+        onChange={(e) => onSetMatrix(uid, { ...matrix, values: e.target.value.split(',').map((v) => v.trim()).filter(Boolean), values_from: undefined })} style={field} />
+      <input value={matrix.values_from ?? ''} placeholder="or values from a reference (${inputs.regions})" onPointerDown={stop}
+        onChange={(e) => onSetMatrix(uid, { ...matrix, values_from: e.target.value, values: e.target.value ? [] : matrix.values })} style={field} />
+    </div>
+  );
+}
+
+function BlockCard({ block, label, action, editable, canLink, inParallel, onToggleParallel, onSetMatrix, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.6 : 1,
     zIndex: isDragging ? 5 : undefined,
-    display: 'flex', alignItems: 'center', gap: 10,
+    display: 'flex', flexDirection: 'column', gap: 6,
     // In a parallel stage the cards sit side by side in a flex row; otherwise each
     // is a full-width row in the vertical sequence.
     marginBottom: inParallel ? 0 : 4,
     flex: inParallel ? '1 1 160px' : undefined,
     minWidth: inParallel ? 0 : undefined,
     background: inParallel ? T.bgAlt : T.card, border: `1px solid ${isDragging ? T.green : T.border}`,
-    borderLeft: `3px solid ${inParallel ? T.green : T.dim}`,
+    borderLeft: `3px solid ${block.matrix ? T.amber : inParallel ? T.green : T.dim}`,
     padding: '8px 10px', fontFamily: T.mono,
     cursor: editable ? 'grab' : 'default', touchAction: editable ? 'none' : undefined, userSelect: 'none',
   };
   const stop = (e: React.PointerEvent) => e.stopPropagation();
+  // Matrix fan-out applies only to a solo step; it is mutually exclusive with a
+  // parallel group, so the toggle and editor are hidden inside a parallel stage.
+  const showMatrix = editable && !inParallel;
   return (
     <div ref={setNodeRef} style={style} {...(editable ? attributes : {})} {...(editable ? listeners : {})}>
-      {editable && <span style={{ color: T.faint, fontSize: 13, lineHeight: 1 }}>⠿</span>}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12.5, fontWeight: 700, color: T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
-        <div style={{ fontSize: 10, color: T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {editable && <span style={{ color: T.faint, fontSize: 13, lineHeight: 1 }}>⠿</span>}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
+          <div style={{ fontSize: 10, color: T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{block.matrix ? ' · ⊞ matrix' : ''}</div>
+        </div>
+        {showMatrix && (
+          <button onPointerDown={stop} onClick={() => onSetMatrix(block.uid, block.matrix ? null : { var: '', values: [] })}
+            title={block.matrix ? 'remove matrix fan-out' : 'fan this step out over a list of values'}
+            style={{ background: block.matrix ? T.amberSoft : 'transparent', border: `1px solid ${block.matrix ? T.amber : T.border}`, color: block.matrix ? T.amber : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>⊞</button>
+        )}
+        {editable && canLink && (
+          <button onPointerDown={stop} onClick={() => onToggleParallel(block.uid)}
+            title={inParallel ? 'make sequential (run after the stage above)' : 'run in parallel with the stage above'}
+            style={{ background: inParallel ? T.greenSoft : 'transparent', border: `1px solid ${inParallel ? T.green : T.border}`, color: inParallel ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>∥</button>
+        )}
+        {editable && (
+          <button onPointerDown={stop} onClick={() => onRemove(block.uid)} title="remove step"
+            style={{ background: 'transparent', border: 'none', color: T.faint, cursor: 'pointer', fontFamily: T.mono, fontSize: 12, lineHeight: 1, padding: 0 }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = T.faint; }}>✕</button>
+        )}
       </div>
-      {editable && canLink && (
-        <button onPointerDown={stop} onClick={() => onToggleParallel(block.uid)}
-          title={inParallel ? 'make sequential (run after the stage above)' : 'run in parallel with the stage above'}
-          style={{ background: inParallel ? T.greenSoft : 'transparent', border: `1px solid ${inParallel ? T.green : T.border}`, color: inParallel ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>∥</button>
-      )}
-      {editable && (
-        <button onPointerDown={stop} onClick={() => onRemove(block.uid)} title="remove step"
-          style={{ background: 'transparent', border: 'none', color: T.faint, cursor: 'pointer', fontFamily: T.mono, fontSize: 12, lineHeight: 1, padding: 0 }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = T.faint; }}>✕</button>
-      )}
+      {showMatrix && block.matrix && <MatrixEditor uid={block.uid} matrix={block.matrix} onSetMatrix={onSetMatrix} />}
     </div>
   );
 }
@@ -172,6 +203,7 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
       if (overStage && overStage.length > 1) {
         const lastIdx = rest.findIndex((b) => b.uid === overStage[overStage.length - 1].uid);
         item.parallelWithPrev = true;
+        item.matrix = null; // joining a parallel group drops the matrix (exclusive)
         rest.splice(lastIdx + 1, 0, item);
         return normalize(rest);
       }
@@ -190,7 +222,11 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
 
   const toggleParallelMode = useCallback(() => { setParallelMode((m) => !m); setParallelOpen(false); }, []);
   const toggleParallel = useCallback((uid: string) => {
-    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, parallelWithPrev: !b.parallelWithPrev } : b)));
+    // Joining a parallel group drops any matrix (the two are mutually exclusive).
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, parallelWithPrev: !b.parallelWithPrev, matrix: b.parallelWithPrev ? b.matrix : null } : b)));
+  }, []);
+  const setMatrix = useCallback((uid: string, matrix: MatrixConfig | null) => {
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, matrix } : b)));
   }, []);
   const remove = useCallback((uid: string) => { setBlocks((bs) => bs.filter((b) => b.uid !== uid)); }, []);
 
@@ -207,7 +243,7 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     return (
       <BlockCard key={b.uid} block={b} label={label} action={action} editable={editable}
         canLink={(indexOf.get(b.uid) ?? 0) > 0} inParallel={inParallel}
-        onToggleParallel={toggleParallel} onRemove={remove} />
+        onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onRemove={remove} />
     );
   };
 
