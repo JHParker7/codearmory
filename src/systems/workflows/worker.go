@@ -780,16 +780,19 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 		for _, s := range def.Async.SuccessStates {
 			if status == s {
 				out := ""
-				// A non-empty map field (e.g. forge's captured output_env) becomes the
-				// structured step output, so later steps can read ${...output.KEY}.
+				// When the action declares a structured output map (e.g. forge's
+				// captured output_env), the SUCCESS output comes ONLY from that map so
+				// later steps read ${...output.KEY}. Raw stdout is never a consumable
+				// step output for these actions — an empty map means no output. (The
+				// FAILURE path below still uses OutputField, so a failed step can surface
+				// its stdout for debugging.)
 				if def.Async.OutputMapField != "" {
 					if m, ok := result[def.Async.OutputMapField].(map[string]any); ok && len(m) > 0 {
 						if b, mErr := json.Marshal(m); mErr == nil {
 							out = string(b)
 						}
 					}
-				}
-				if out == "" && def.Async.OutputField != "" {
+				} else if def.Async.OutputField != "" {
 					if v, ok := result[def.Async.OutputField]; ok {
 						out, _ = v.(string)
 					}

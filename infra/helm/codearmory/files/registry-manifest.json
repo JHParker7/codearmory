@@ -506,7 +506,7 @@
       {
         "name": "forge/run",
         "summary": "Run a shell command in a sandboxed container",
-        "description": "Executes the step's `run` script inside an isolated Forge container (dropped capabilities, optional egress allowlist), polls the execution to completion, and returns its stdout as the step output. Use it for build, test, and deploy steps. The `run` input is wrapped as `sh -c <run>`; pass an image and resource limits via the step's other `with` keys.",
+        "description": "Executes the step's `run` script inside an isolated Forge container (dropped capabilities, optional egress allowlist) and polls the execution to completion. The step output is the values captured via `output_env` (none by default — stdout is not a step output); a failed run still surfaces its stdout for debugging. Use it for build, test, and deploy steps. The `run` input is wrapped as `sh -c <run>`; pass an image and resource limits via the step's other `with` keys.",
         "method": "POST",
         "path": "/executions",
         "body_transforms": [

@@ -49,9 +49,11 @@ type AsyncConfig struct {
 	CancelStates     []string `json:"cancel_states"`
 	OutputField      string   `json:"output_field"`
 	// OutputMapField names a response field holding an object (e.g. forge's captured
-	// output_env map). When present and non-empty in the poll response, that object
-	// — JSON-encoded — becomes the step output instead of OutputField, so a later
-	// step can reference an individual key via ${steps.NAME.output.KEY}.
+	// output_env map). When set, it is the ONLY source of the SUCCESS step output:
+	// that object — JSON-encoded — becomes the output (so a later step can reference a
+	// key via ${steps.NAME.output.KEY}), and OutputField is NOT used as a stdout
+	// fallback (an empty/absent map means the step has no output). OutputField still
+	// applies on the failure path, so a failed step can surface its stdout.
 	OutputMapField string   `json:"output_map_field,omitempty"`
 	ErrorFields    []string `json:"error_fields"`
 }

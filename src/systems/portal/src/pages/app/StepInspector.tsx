@@ -52,13 +52,15 @@ export function StepInspector({ step, action, name }: { step: Step | null; actio
   // Output is referenced by this occurrence's name (the per-step override if set).
   const refName = name || step.name;
   const outRef = `\${steps.${refName}.output}`;
-  // A forge/run step can capture named env vars as its output instead of stdout.
+  // An action with output_map_field (forge/run) outputs ONLY the env vars it
+  // captures via output_env — stdout is never the step output.
+  const envOutput = !!action?.async?.output_map_field;
   const outputEnv = Array.isArray(withMap.output_env)
     ? (withMap.output_env as unknown[]).filter((x): x is string => typeof x === 'string')
     : [];
   const outputDesc = action?.async?.output_field
     ? `the ${action.async.output_field} of the ${action.name} result`
-    : 'this step’s output (response body / command output)';
+    : 'this step’s output (the action result)';
 
   return (
     <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
@@ -97,13 +99,17 @@ export function StepInspector({ step, action, name }: { step: Step | null; actio
       )}
 
       <div style={sectionLabel}>output</div>
-      {outputEnv.length > 0 ? (
-        <>
-          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 5 }}>captures these env vars (instead of stdout) — reference each in a later step:</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {outputEnv.map((k) => <CopyRef key={k} text={`\${steps.${refName}.output.${k}}`} />)}
-          </div>
-        </>
+      {envOutput ? (
+        outputEnv.length > 0 ? (
+          <>
+            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 5 }}>captures these env vars as this step’s output — reference each in a later step:</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {outputEnv.map((k) => <CopyRef key={k} text={`\${steps.${refName}.output.${k}}`} />)}
+            </div>
+          </>
+        ) : (
+          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 5 }}>this step produces no output — add output variables in the Steps tab to capture values for later steps.</div>
+        )
       ) : (
         <>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 5 }}>reference {outputDesc} in a later step:</div>
