@@ -3,8 +3,9 @@
  * pipeline builder. It overrides the step's `with` config for THIS occurrence only
  * (merged over the step definition at run time) and — the point of it — lets each
  * input be wired to an earlier step's output via the ⚯ dropdown, which inserts a
- * ${steps.<name>.output[.KEY]} reference. Only keys that differ from the step
- * definition are kept, so the override stays minimal.
+ * ${steps.<name>.output[.KEY]} reference (for a forge step that's the env vars it
+ * captures via output_env — stdout is never a step output). Only keys that differ
+ * from the step definition are kept, so the override stays minimal.
  */
 import { T } from '../../theme';
 

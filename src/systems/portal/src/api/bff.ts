@@ -694,6 +694,9 @@ export interface ActionAsyncConfig {
   failure_states?: string[];
   cancel_states?: string[];
   output_field?: string;
+  /** A response field holding an object that becomes the step's success output
+   * (e.g. forge's captured output_env map). When set, stdout is never the output. */
+  output_map_field?: string;
   error_fields?: string[];
 }
 

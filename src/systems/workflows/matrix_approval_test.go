@@ -508,8 +508,9 @@ func TestExecuteAction_OutputMapFieldBecomesOutput(t *testing.T) {
 	}
 }
 
-// With no captured outputs, the step output falls back to stdout (OutputField).
-func TestExecuteAction_EmptyOutputMapFallsBackToStdout(t *testing.T) {
+// When an action declares OutputMapField, stdout is never the success output: with
+// no captured outputs the step output is empty (it does NOT fall back to stdout).
+func TestExecuteAction_EmptyOutputMapYieldsNoOutput(t *testing.T) {
 	srv := fakeService(t, "forgeom2", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			w.Write([]byte(`{"execution_id":"e1"}`)) //nolint:errcheck
@@ -526,8 +527,8 @@ func TestExecuteAction_EmptyOutputMapFallsBackToStdout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
-	if res.Output != "hello" {
-		t.Errorf("expected fallback to stdout, got %q", res.Output)
+	if res.Output != "" {
+		t.Errorf("expected no output (stdout is not a success output), got %q", res.Output)
 	}
 }
 

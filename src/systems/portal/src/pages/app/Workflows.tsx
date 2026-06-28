@@ -652,14 +652,24 @@ function StepsTab() {
               const outputs = fields.filter(f => f.output);
               return (
                 <>
-                  {inputs.map(renderField)}
+                  {inputs.length > 0 && (
+                    <>
+                      <div style={{ height: 1, background: T.border, margin: '10px 0 8px' }} />
+                      <label style={stepLabelStyle}>inputs</label>
+                      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, lineHeight: 1.4 }}>
+                        the action's <span style={{ color: T.dim }}>with</span> configuration — a value can reference an earlier step's output as
+                        {' '}<span style={{ color: T.dim }}>{'${steps.<step>.output.VAR}'}</span>
+                      </div>
+                      {inputs.map(renderField)}
+                    </>
+                  )}
                   {outputs.length > 0 && (
                     <>
                       <div style={{ height: 1, background: T.border, margin: '10px 0 8px' }} />
                       <label style={stepLabelStyle}>outputs</label>
                       <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, lineHeight: 1.4 }}>
                         env vars captured from the run as this step's output (read by later steps as
-                        {' '}<span style={{ color: T.dim }}>{'${steps.<step>.output.VAR}'}</span>) — leave empty to output stdout
+                        {' '}<span style={{ color: T.dim }}>{'${steps.<step>.output.VAR}'}</span>) — without any, the step produces no output (stdout is not a step output)
                       </div>
                       {outputs.map(renderField)}
                     </>
@@ -874,7 +884,8 @@ function ActionsTab() {
                   {asyncCfg.success_states && asyncCfg.success_states.length > 0 && <ConfigRow label="success" value={<span style={{ color: T.green }}>{asyncCfg.success_states.join(', ')}</span>} />}
                   {asyncCfg.failure_states && asyncCfg.failure_states.length > 0 && <ConfigRow label="failure" value={<span style={{ color: T.red }}>{asyncCfg.failure_states.join(', ')}</span>} />}
                   {asyncCfg.cancel_states && asyncCfg.cancel_states.length > 0 && <ConfigRow label="cancel" value={asyncCfg.cancel_states.join(', ')} />}
-                  {asyncCfg.output_field && <ConfigRow label="output field" value={asyncCfg.output_field} />}
+                  {asyncCfg.output_map_field && <ConfigRow label="output" value={asyncCfg.output_map_field} />}
+                  {asyncCfg.output_field && <ConfigRow label={asyncCfg.output_map_field ? 'failure output' : 'output field'} value={asyncCfg.output_field} />}
                   {asyncCfg.error_fields && asyncCfg.error_fields.length > 0 && <ConfigRow label="error fields" last value={asyncCfg.error_fields.join(', ')} />}
                 </div>
               </>

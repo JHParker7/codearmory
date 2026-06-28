@@ -161,6 +161,7 @@
         "cancel_states": [
           "cancelled"
         ],
+        "output_map_field": "outputs",
         "output_field": "stdout",
         "error_fields": [
           "stderr"
