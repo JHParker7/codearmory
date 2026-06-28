@@ -45,6 +45,12 @@ export interface StepField {
   /** Marks a field that configures the step's OUTPUT (not an input), so the form
    * groups it under a separate "outputs" section. */
   output?: boolean;
+  /** Marks a "config" field that defines what the step IS (e.g. forge's image and
+   * run command) rather than a wireable input. Config fields are set on the step
+   * definition and are NOT wired per-occurrence in the pipeline builder. Fields
+   * with neither `config` nor `output` are INPUTS: parameters the pipeline supplies
+   * (the value set here is the default), grouped under the form's "inputs" section. */
+  config?: boolean;
 }
 
 /**
@@ -54,14 +60,14 @@ export interface StepField {
  */
 export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
   'forge/run': [
-    { key: 'image', label: 'Image', placeholder: 'ubuntu:22.04 (required)', required: true, catalog: 'image' },
-    { key: 'run', label: 'Run', placeholder: 'go test ./...', required: true, multiline: true },
-    { key: 'env', label: 'Env', placeholder: 'KEY=VALUE KEY2=${steps.build.output}', kind: 'env' },
-    { key: 'runner_class', label: 'Runner', placeholder: 'runner class (optional, default standard)' },
+    { key: 'image', label: 'Image', placeholder: 'ubuntu:22.04 (required)', required: true, catalog: 'image', config: true },
+    { key: 'run', label: 'Run', placeholder: 'go test ./...', required: true, multiline: true, config: true },
+    { key: 'runner_class', label: 'Runner', placeholder: 'runner class (optional, default standard)', config: true },
+    { key: 'env', label: 'Input variables', placeholder: 'REPO_URL= BRANCH=main', kind: 'env' },
     { key: 'output_env', label: 'Output variables', placeholder: 'BUILD_ID, VERSION', kind: 'list', output: true },
   ],
   'tickets/create': [
-    { key: 'title', label: 'Title', placeholder: 'Build failed: ${steps.build.output}', required: true },
+    { key: 'title', label: 'Title', placeholder: 'Build failed', required: true },
     { key: 'description', label: 'Description', placeholder: 'ticket body (optional)' },
     { key: 'priority', label: 'Priority', placeholder: 'low|medium|high|critical (optional)' },
     { key: 'status', label: 'Status', placeholder: 'open|in_progress|resolved|closed (optional)' },

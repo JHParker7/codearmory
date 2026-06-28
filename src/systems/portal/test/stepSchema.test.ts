@@ -21,7 +21,7 @@ describe('schemaKey', () => {
 describe('schemaForAction', () => {
   it('returns the tailored fields plus a trailing advanced With for a known action', () => {
     const fields = schemaForAction('forge/run');
-    expect(fields.map(f => f.key)).to.deep.equal(['image', 'run', 'env', 'runner_class', 'output_env', RAW_WITH_KEY]);
+    expect(fields.map(f => f.key)).to.deep.equal(['image', 'run', 'runner_class', 'env', 'output_env', RAW_WITH_KEY]);
     expect(fields[fields.length - 1].kind).to.equal('json');
     expect(fields[fields.length - 1].required).to.not.equal(true);
   });

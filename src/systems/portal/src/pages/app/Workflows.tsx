@@ -16,7 +16,7 @@ import { PipelineBlocks } from './PipelineBlocks';
 import { StepInspector } from './StepInspector';
 import type { StepRef } from './pipelineGraph';
 import { stepsToPayload, configToJson, parseConfig } from './pipelineGraph';
-import { schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX } from './stepSchema';
+import { schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX, RAW_WITH_KEY } from './stepSchema';
 import { timeAgo, statusTone, isRunActive, fmtDuration } from '../../utils';
 
 type MainTab = 'pipelines' | 'steps' | 'actions';
@@ -648,32 +648,30 @@ function StepsTab() {
                   </div>
                 );
               };
-              const inputs = fields.filter(f => !f.output);
+              // A reusable step declares an interface, grouped into three sections:
+              // config (what the step IS — set once on the definition), inputs (the
+              // params a pipeline supplies; the value set here is the default), and
+              // outputs (what later steps can read). Wiring between steps is NOT done
+              // here — it lives in the pipeline builder. The advanced With field (if
+              // any) is the escape hatch and trails the rest.
+              const config = fields.filter(f => f.config);
+              const advanced = fields.filter(f => f.key === RAW_WITH_KEY);
               const outputs = fields.filter(f => f.output);
+              const inputs = fields.filter(f => !f.config && !f.output && f.key !== RAW_WITH_KEY);
+              const section = (label: string, help: React.ReactNode, fs: typeof fields) => fs.length > 0 && (
+                <>
+                  <div style={{ height: 1, background: T.border, margin: '10px 0 8px' }} />
+                  <label style={stepLabelStyle}>{label}</label>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, lineHeight: 1.4 }}>{help}</div>
+                  {fs.map(renderField)}
+                </>
+              );
               return (
                 <>
-                  {inputs.length > 0 && (
-                    <>
-                      <div style={{ height: 1, background: T.border, margin: '10px 0 8px' }} />
-                      <label style={stepLabelStyle}>inputs</label>
-                      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, lineHeight: 1.4 }}>
-                        the action's <span style={{ color: T.dim }}>with</span> configuration — a value can reference an earlier step's output as
-                        {' '}<span style={{ color: T.dim }}>{'${steps.<step>.output.VAR}'}</span>
-                      </div>
-                      {inputs.map(renderField)}
-                    </>
-                  )}
-                  {outputs.length > 0 && (
-                    <>
-                      <div style={{ height: 1, background: T.border, margin: '10px 0 8px' }} />
-                      <label style={stepLabelStyle}>outputs</label>
-                      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, lineHeight: 1.4 }}>
-                        env vars captured from the run as this step's output (read by later steps as
-                        {' '}<span style={{ color: T.dim }}>{'${steps.<step>.output.VAR}'}</span>) — without any, the step produces no output (stdout is not a step output)
-                      </div>
-                      {outputs.map(renderField)}
-                    </>
-                  )}
+                  {section('config', 'what this step runs — fixed by the step definition, the same in every pipeline', config)}
+                  {section('inputs', <>values the pipeline supplies — what you set here is the <span style={{ color: T.dim }}>default</span>; connect an input to another step's output in the pipeline builder</>, inputs)}
+                  {section('outputs', <>values this step produces for later steps (read as <span style={{ color: T.dim }}>{'${steps.<step>.output.VAR}'}</span>) — without any, the step produces no output (stdout is not a step output)</>, outputs)}
+                  {advanced.map(renderField)}
                 </>
               );
             })()}

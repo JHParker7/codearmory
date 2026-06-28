@@ -8,12 +8,21 @@
  * from the step definition are kept, so the override stays minimal.
  */
 import { T } from '../../theme';
+import { schemaForAction } from './stepSchema';
 
 export type UpstreamOutput = { name: string; outputEnv: string[] };
 
-// Step-defining `with` keys that are configured on the step definition (Steps tab),
-// not wired per-occurrence in the pipeline builder.
-const DEFINING = new Set(['image', 'run']);
+// The `with` keys that are NOT wired per-occurrence: an action's "config" fields
+// (what the step IS — e.g. forge's image/run/runner) and its "output" declarations.
+// Everything else is an input the pipeline connects here. Derived from the action
+// schema so it stays in sync with the Steps form's config/inputs/outputs split.
+function nonInputKeys(action: string): Set<string> {
+  const keys = new Set<string>();
+  for (const f of schemaForAction(action)) {
+    if (f.config || f.output) keys.add(f.key);
+  }
+  return keys;
+}
 
 const stop = (e: React.PointerEvent) => e.stopPropagation();
 const fieldStyle: React.CSSProperties = {
@@ -33,7 +42,8 @@ function WireSelect({ refs, onPick }: { refs: string[]; onPick: (ref: string) =>
   );
 }
 
-export function StepInputsEditor({ defWith, override, upstream, onChange }: {
+export function StepInputsEditor({ action, defWith, override, upstream, onChange }: {
+  action: string;
   defWith: Record<string, unknown>;
   override: Record<string, unknown>;
   upstream: UpstreamOutput[];
@@ -54,9 +64,11 @@ export function StepInputsEditor({ defWith, override, upstream, onChange }: {
     onChange(next);
   };
 
-  // The image and the run command define what the step IS — they belong to the step
-  // definition (Steps tab), not per-occurrence wiring; so they're not editable here.
-  const stringKeys = Object.keys(eff).filter((k) => k !== 'env' && !DEFINING.has(k) && typeof eff[k] === 'string');
+  // Config fields (image/run/runner) and outputs define what the step IS — they
+  // belong to the step definition, not per-occurrence wiring; so they're not
+  // editable here. Everything else is an input the pipeline connects.
+  const nonInput = nonInputKeys(action);
+  const stringKeys = Object.keys(eff).filter((k) => k !== 'env' && !nonInput.has(k) && typeof eff[k] === 'string');
   const env = (eff.env && typeof eff.env === 'object' && !Array.isArray(eff.env)) ? eff.env as Record<string, unknown> : null;
   const setEnv = (next: Record<string, unknown>) => setKey('env', next);
 
