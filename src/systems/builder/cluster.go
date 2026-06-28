@@ -539,9 +539,9 @@ func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
 	if hasDef {
 		egressOn := egressProxyEnabled(spec)
 		for k, v := range def.EnvExtras {
-			// When the egress proxy is disabled (e.g. kata), don't point forge at a
-			// proxy that isn't deployed — leave FORGE_EGRESS_PROXY unset so the runtime
-			// falls back to direct/VM-level egress.
+			// When the egress proxy is disabled (e.g. kata, but NOT gvisor, which keeps
+			// it), don't point forge at a proxy that isn't deployed — leave
+			// FORGE_EGRESS_PROXY unset so the runtime falls back to direct/VM-level egress.
 			if k == "FORGE_EGRESS_PROXY" && !egressOn {
 				continue
 			}

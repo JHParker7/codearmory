@@ -1,8 +1,9 @@
 {{- if and .Values.forge.enabled .Values.forge.egressProxy.enabled (not .Values.forge.kata.enabled) }}
 # Domain-allowlisting egress proxy for forge's sandbox traffic. Enabled by default;
-# skipped under forge.kata.enabled (kata microVMs filter egress at the VM level). The
-# forge-egress NetworkPolicy (forge-egress-networkpolicy.yaml) confines sandbox Job pods
-# to this proxy so the allowlist cannot be bypassed.
+# skipped under forge.kata.enabled (kata microVMs filter egress at the VM level), but
+# KEPT under forge.gvisor.enabled (gVisor is a kernel sandbox, not a network boundary).
+# The forge-egress NetworkPolicy (forge-egress-networkpolicy.yaml) confines sandbox Job
+# pods to this proxy so the allowlist cannot be bypassed.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

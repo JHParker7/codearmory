@@ -84,6 +84,12 @@ func TestValidateRuntimeBackendBody(t *testing.T) {
 	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "kata", Config: map[string]string{"runtime_class": "kata-qemu"}}); err != nil {
 		t.Errorf("kata with a runtime_class should be valid: %v", err)
 	}
+	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "gvisor"}); err == nil {
+		t.Error("gvisor without a runtime_class should be rejected (it would silently run as runc, no gVisor sandbox)")
+	}
+	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "gvisor", Config: map[string]string{"runtime_class": "gvisor"}}); err != nil {
+		t.Errorf("gvisor with a runtime_class should be valid: %v", err)
+	}
 	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: ""}); err == nil {
 		t.Error("empty type should be rejected")
 	}

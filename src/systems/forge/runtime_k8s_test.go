@@ -75,7 +75,7 @@ func TestBuildJob_NonRootSecurityContext(t *testing.T) {
 // class with Privileged runs the job as root with a writable rootfs and privilege
 // escalation allowed so package managers work — the microVM is the boundary.
 func TestBuildJob_PrivilegedKata(t *testing.T) {
-	r := &KubernetesRuntime{namespace: "forge", vmIsolated: true}
+	r := &KubernetesRuntime{namespace: "forge", kernelIsolated: true}
 	spec := stdRunnerSpec()
 	spec.Privileged = true
 	exec := Execution{ExecutionID: "exec-1", Image: "ubuntu:22.04", Command: []string{"apt-get", "update"}, TimeoutSecs: 30}
@@ -111,7 +111,7 @@ func TestBuildJob_PrivilegedKata(t *testing.T) {
 // MUST stay fully locked down — root in a shared-kernel container is an escape
 // risk, so the flag is dropped at runtime regardless of what the class requests.
 func TestBuildJob_PrivilegedIgnoredWithoutVMIsolation(t *testing.T) {
-	r := &KubernetesRuntime{namespace: "forge", vmIsolated: false}
+	r := &KubernetesRuntime{namespace: "forge", kernelIsolated: false}
 	spec := stdRunnerSpec()
 	spec.Privileged = true
 	exec := Execution{ExecutionID: "exec-1", Image: "ubuntu:22.04", Command: []string{"apt-get", "update"}, TimeoutSecs: 30}

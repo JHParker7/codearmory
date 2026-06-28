@@ -350,6 +350,42 @@ func TestForgeRuntimesModel_SubmitRuntimeBackend_ParsesConfig(t *testing.T) {
 	}
 }
 
+// A gvisor backend submits the same shape as kata (type + runtime_class config) —
+// it is the kernel-isolated, no-KVM alternative selectable from the same form.
+func TestForgeRuntimesModel_SubmitRuntimeBackend_Gvisor(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusCreated, `{"name":"gvisor-prod"}`)
+	setupCLI(t, srv)
+
+	m := newForgeRuntimesModel()
+	m.section = frRuntimeBackends
+	m, _ = m.openForm("create", nil)
+	m.form.setValues(map[string]string{
+		"name":    "gvisor-prod",
+		"type":    "gvisor",
+		"enabled": "true",
+		"config":  "runtime_class=gvisor",
+	})
+	_, cmd := m.submitForm()
+	if cmd == nil {
+		t.Fatal("submit should emit a request cmd")
+	}
+	cmd()
+	if rec.Method != "POST" || rec.Path != "/forge/runtime-backends" {
+		t.Errorf("request = %s %s, want POST /forge/runtime-backends", rec.Method, rec.Path)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body, &got); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if got["type"] != "gvisor" {
+		t.Errorf("type = %v, want gvisor", got["type"])
+	}
+	cfg, _ := got["config"].(map[string]any)
+	if cfg["runtime_class"] != "gvisor" {
+		t.Errorf("config.runtime_class = %v, want gvisor", cfg["runtime_class"])
+	}
+}
+
 func TestForgeRuntimesModel_SubmitRuntimeBackend_BadConfigLine(t *testing.T) {
 	m := newForgeRuntimesModel()
 	m.section = frRuntimeBackends

@@ -44,7 +44,9 @@ const (
 	annotationExecNamespace = "codearmory.io/exec-namespace"
 
 	// defaultEgressAllowedDomains mirrors the chart's egress-proxy allowlist. An admin
-	// overrides it with PROXY_ALLOWED_DOMAINS in forge's config.
+	// overrides it with PROXY_ALLOWED_DOMAINS in forge's config — set it to "*" for
+	// public-only mode (any public host allowed; the proxy's IP guard still blocks
+	// private/internal/metadata addresses).
 	defaultEgressAllowedDomains = "registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com"
 )
 
@@ -84,6 +86,10 @@ func (b *k8sBackend) infraSelector(component string) map[string]string {
 //     filters egress at the VM level and never uses the shared-network HTTP proxy, so the
 //     proxy + NetworkPolicy are moot. Selecting kata (RUNTIME=kata) thus implicitly skips
 //     the egress proxy, matching the chart's forge.kata.enabled behavior.
+//
+// RUNTIME=gvisor does NOT skip it: gVisor is a kernel sandbox (its Sentry contains the
+// job's syscalls), not a network boundary, so exec traffic still needs the proxy +
+// NetworkPolicy — it falls through to the default-on path below, matching the chart.
 func egressProxyEnabled(spec workloadSpec) bool {
 	if strings.EqualFold(strings.TrimSpace(spec.Env["RUNTIME"]), "kata") {
 		return false

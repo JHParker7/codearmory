@@ -52,10 +52,18 @@ spec:
             - name: LOG_LEVEL
               value: {{ .Values.forge.env.logLevel | quote }}
             - name: RUNTIME
+              {{- if and .Values.forge.kata.enabled .Values.forge.gvisor.enabled }}
+              {{- fail "forge.kata.enabled and forge.gvisor.enabled are mutually exclusive — enable only one" }}
+              {{- end }}
               {{- if .Values.forge.kata.enabled }}
               # kata: the Kubernetes runtime pinned to a VM-isolating RuntimeClass
               # (env.k8sRuntimeClass). Each sandbox Job runs in a Cloud Hypervisor microVM.
               value: "kata"
+              {{- else if .Values.forge.gvisor.enabled }}
+              # gvisor: the Kubernetes runtime pinned to a gVisor RuntimeClass
+              # (env.k8sRuntimeClass). Each sandbox Job runs under the gVisor userspace
+              # kernel (the Sentry) — no hardware virtualization (/dev/kvm) required.
+              value: "gvisor"
               {{- else }}
               value: {{ .Values.forge.env.runtime | quote }}
               {{- end }}
@@ -63,12 +71,18 @@ spec:
               value: {{ .Values.forge.env.allowedImages | quote }}
             - name: GATEKEEPER_URL
               value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
-            {{- if or (eq .Values.forge.env.runtime "kubernetes") .Values.forge.kata.enabled }}
+            {{- if or (eq .Values.forge.env.runtime "kubernetes") .Values.forge.kata.enabled .Values.forge.gvisor.enabled }}
             - name: K8S_NAMESPACE
               value: {{ .Values.forge.env.k8sNamespace | default .Release.Namespace | quote }}
             {{- if .Values.forge.kata.enabled }}
             {{- if not .Values.forge.env.k8sRuntimeClass }}
             {{- fail "forge.kata.enabled=true requires forge.env.k8sRuntimeClass to name the VM-isolating RuntimeClass (e.g. \"kata\")" }}
+            {{- end }}
+            - name: K8S_RUNTIME_CLASS
+              value: {{ .Values.forge.env.k8sRuntimeClass | quote }}
+            {{- else if .Values.forge.gvisor.enabled }}
+            {{- if not .Values.forge.env.k8sRuntimeClass }}
+            {{- fail "forge.gvisor.enabled=true requires forge.env.k8sRuntimeClass to name the gVisor RuntimeClass (e.g. \"gvisor\")" }}
             {{- end }}
             - name: K8S_RUNTIME_CLASS
               value: {{ .Values.forge.env.k8sRuntimeClass | quote }}
@@ -85,7 +99,8 @@ spec:
             {{- if and .Values.forge.egressProxy.enabled (not .Values.forge.kata.enabled) }}
             # Domain-allowlisting egress proxy for sandbox traffic — deployed by this
             # chart (forge-egress-proxy.yaml) and enabled by default. Skipped under kata,
-            # whose microVMs filter egress at the VM level.
+            # whose microVMs filter egress at the VM level; KEPT under gvisor, which is a
+            # kernel sandbox, not a network boundary, so it still needs the proxy.
             - name: FORGE_EGRESS_PROXY
               value: {{ .Values.forge.egressProxy.url | default (printf "http://%s-forge-egress-proxy:3128" (include "codearmory.fullname" .)) | quote }}
             {{- end }}
