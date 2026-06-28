@@ -690,7 +690,7 @@ components:
           example: proxmox-prod
         type:
           type: string
-          enum: [docker, kubernetes, proxmox, kata]
+          enum: [docker, kubernetes, proxmox, kata, gvisor]
           description: Runtime implementation this backend selects.
           example: proxmox
         enabled:
@@ -707,8 +707,10 @@ components:
             `boot_disk` (disk id to resize, default `scsi0`), `vlan`,
             `clone_mode` (`linked`|`full`), `egress_proxy`, `tls_insecure`,
             `ca_file`. For kata: `runtime_class` (required, the Kubernetes
-            RuntimeClass, e.g. `kata-qemu`). kubernetes accepts an optional
-            `runtime_class` (else K8S_RUNTIME_CLASS). docker reads env instead.
+            RuntimeClass, e.g. `kata-qemu`). For gvisor: `runtime_class`
+            (required, the gVisor RuntimeClass, e.g. `gvisor` — no /dev/kvm
+            needed). kubernetes accepts an optional `runtime_class` (else
+            K8S_RUNTIME_CLASS). docker reads env instead.
           example:
             url: https://pve:8006/api2/json
             node: pve
@@ -743,7 +745,7 @@ components:
           example: proxmox-prod
         type:
           type: string
-          enum: [docker, kubernetes, proxmox, kata]
+          enum: [docker, kubernetes, proxmox, kata, gvisor]
           example: proxmox
         enabled:
           type: boolean

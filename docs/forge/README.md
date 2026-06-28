@@ -26,10 +26,11 @@ Forge calls Gatekeeper directly to verify the Bearer token on every request. It 
 
 ## Runtime backends
 
-The runtime that runs a job is selected per-execution. Admins define **runtime backends** (`/runtime-backends`, admin-only CRUD; users get read-only list/get) of type `docker`, `kubernetes`, `proxmox`, or `kata`, and point a runner class at one via its `backend` field. The execution snapshots the class's backend at submit time. A `default` backend is seeded from the legacy `RUNTIME` env, so a single-runtime deployment needs no change.
+The runtime that runs a job is selected per-execution. Admins define **runtime backends** (`/runtime-backends`, admin-only CRUD; users get read-only list/get) of type `docker`, `kubernetes`, `proxmox`, `kata`, or `gvisor`, and point a runner class at one via its `backend` field. The execution snapshots the class's backend at submit time. A `default` backend is seeded from the legacy `RUNTIME` env, so a single-runtime deployment needs no change.
 
 - **docker / kubernetes** — container-level sandbox (read-only rootfs, dropped caps, egress proxy). Best for untrusted code.
 - **kata** — the kubernetes runtime pinned to a Kata Containers `RuntimeClass`, so each job runs in a lightweight VM (a real kernel, hardware-virtualization boundary) while keeping the same Job lifecycle and container hardening. Stronger isolation than a plain container with no new runtime to operate. See [kata.md](kata.md).
+- **gvisor** — the kubernetes runtime pinned to a gVisor (`runsc`) `RuntimeClass`, so each job runs under a userspace kernel (the Sentry) that intercepts its syscalls. Kernel-level isolation comparable to kata but with **no hardware virtualization** — the choice when nodes lack nested virt / `/dev/kvm`. Keeps the egress proxy (gVisor is not a network boundary). See [gvisor.md](gvisor.md).
 - **proxmox** — a throwaway VM per job with full root and a real Docker daemon, for CI work that needs `apt`/`docker build`. See [proxmox.md](proxmox.md).
 
 ## Requirements
@@ -90,6 +91,8 @@ The recommended setup:
 
 Execution containers are then isolated to the `forge-exec` network (no direct internet) but can reach the allowlisted domains through the proxy. The compose file at `infra/local/compose.yml` ships a ready-to-use configuration.
 
+**Public-only mode (`PROXY_ALLOWED_DOMAINS=*`).** When a workload needs broad outbound access that's impractical to enumerate as domains — e.g. all of AWS — set the allowlist to the single value `*`. This passes the **hostname** check for any host, but the proxy's dial-time **IP guard always still applies**: it refuses any host that resolves to a loopback, private (RFC1918), link-local (incl. the `169.254.169.254` cloud-metadata IP), multicast, or unspecified address. The result is "public internet only" — runners can reach any public destination but never cluster-internal services or cloud metadata. This is the secure way to grant wide egress without dropping the proxy entirely (which is what selecting **kata** does). The IP guard is enforced on every request regardless of the allowlist, so `*` is not "allow everything," only "allow everything *public*". The allowlist is process-wide (one proxy), so it applies to all runners — there is no per-runner-class egress policy.
+
 **Default allowed domains** (overridable via `FORGE_PROXY_ALLOWED_DOMAINS` in compose):
 
 | Domain | Purpose |
@@ -128,7 +131,7 @@ These three classes are seeded automatically on startup if absent. Operators can
 
 ### Privileged classes (root for package managers)
 
-A runner class may set `privileged: true` to run jobs as **root with a writable root filesystem** and privilege escalation allowed, so package managers (`apt`/`pacman`/`dnf`) and other root operations work. This is honoured **only on VM-isolated backends** (`kata`, `proxmox`), where the microVM — not the container — is the isolation boundary. The API rejects `privileged` on shared-kernel container backends (`docker`/`kubernetes`) with `400`, and forge drops the flag at runtime if it ever reaches one (root + writable rootfs in a shared-kernel container is a host-escape risk). See [kata.md](kata.md#privileged-jobs-root--package-managers).
+A runner class may set `privileged: true` to run jobs as **root with a writable root filesystem** and privilege escalation allowed, so package managers (`apt`/`pacman`/`dnf`) and other root operations work. This is honoured **only on kernel-isolated backends** (`kata`, `proxmox`, `gvisor`), where a guest or userspace kernel — not the host kernel — contains the job's root. The API rejects `privileged` on shared-kernel container backends (`docker`/`kubernetes`) with `400`, and forge drops the flag at runtime if it ever reaches one (root + writable rootfs in a shared-kernel container is a host-escape risk). See [kata.md](kata.md#privileged-jobs-root--package-managers).
 
 ### Selecting a runner class
 

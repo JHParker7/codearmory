@@ -619,9 +619,9 @@ components:
           description: |
             Run the job as root with a writable root filesystem and privilege
             escalation allowed, so package managers (apt/pacman/dnf) work. Honoured
-            ONLY by VM-isolated backends (kata, proxmox); ignored on shared-kernel
-            container backends (docker/kubernetes), which always run the
-            locked-down non-root sandbox.
+            ONLY by kernel-isolated backends (kata, proxmox, gvisor); ignored on
+            shared-kernel container backends (docker/kubernetes), which always run
+            the locked-down non-root sandbox.
           example: false
 
     RunnerClassBody:
@@ -679,9 +679,9 @@ components:
           type: boolean
           description: |
             Run the job as root with a writable root filesystem (apt/pacman/dnf).
-            Only valid when `backend` is a VM-isolated backend (kata or proxmox) —
-            the API returns `400` if set on any shared-kernel (docker/kubernetes)
-            backend. Defaults to false.
+            Only valid when `backend` is a kernel-isolated backend (kata, proxmox,
+            or gvisor) — the API returns `400` if set on any shared-kernel
+            (docker/kubernetes) backend. Defaults to false.
           example: false
 
     RuntimeBackend:
@@ -693,10 +693,12 @@ components:
           example: proxmox-prod
         type:
           type: string
-          enum: [docker, kubernetes, proxmox, kata]
+          enum: [docker, kubernetes, proxmox, kata, gvisor]
           description: |
             Runtime implementation this backend selects. `kata` is the Kubernetes
-            runtime pinned to a VM-isolating RuntimeClass.
+            runtime pinned to a VM-isolating RuntimeClass; `gvisor` pins a gVisor
+            (runsc) RuntimeClass whose userspace kernel sandboxes the job without
+            any hardware virtualization.
           example: proxmox
         enabled:
           type: boolean

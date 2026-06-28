@@ -303,7 +303,9 @@ forge:
   # Domain-allowlisting egress proxy for forge's sandbox traffic. Deployed by this
   # chart and ENABLED BY DEFAULT: sandbox executions reach the internet only through
   # this proxy, confined to allowedDomains. Automatically skipped when forge.kata.enabled
-  # is true (kata microVMs filter egress at the VM level, so the proxy is moot).
+  # is true (kata microVMs filter egress at the VM level, so the proxy is moot). NOT
+  # skipped under forge.gvisor.enabled: gVisor is a kernel sandbox, not a network
+  # boundary, so it still needs the proxy + NetworkPolicy to confine egress.
   egressProxy:
     enabled: true
     image:
@@ -314,6 +316,11 @@ forge:
     # deploys (http://<release>-forge-egress-proxy:3128).
     url: ""
     # Comma-separated allowlist of domains sandbox traffic may reach through the proxy.
+    # An exact host ("github.com") or a "*.example.com" subdomain wildcard. The single
+    # value "*" is the public-only sentinel: it allows ANY public host without listing
+    # domains (e.g. to reach all of AWS) while the proxy's IP guard still blocks
+    # loopback/private/link-local/cloud-metadata addresses — so runners get the public
+    # internet but never cluster-internal services. Empty = block all egress.
     allowedDomains: "registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com"
     resources:
       requests:
@@ -334,7 +341,20 @@ forge:
   #   - the egress proxy + NetworkPolicy are skipped (the microVM filters egress itself);
   #   - forge seeds its default runner classes privileged (root + writable rootfs), since
   #     the VM — not the container — is the isolation boundary.
+  # Mutually exclusive with forge.gvisor.enabled.
   kata:
+    enabled: false
+  # Run sandbox jobs under gVisor (handler "runsc"): a userspace kernel (the Sentry)
+  # intercepts each job's syscalls, giving strong isolation WITHOUT any hardware
+  # virtualization — choose it over kata when nodes lack nested virt / /dev/kvm. When true:
+  #   - forge runs RUNTIME=gvisor (env.k8sRuntimeClass MUST be set to the gVisor
+  #     RuntimeClass, e.g. "gvisor", or the chart fails to render);
+  #   - the egress proxy + NetworkPolicy are KEPT (gVisor is a kernel boundary, not a
+  #     network one, so it does not confine egress on its own);
+  #   - forge seeds its default runner classes privileged (root + writable rootfs), since
+  #     the gVisor Sentry — not the host kernel — contains the job's root.
+  # Mutually exclusive with forge.kata.enabled.
+  gvisor:
     enabled: false
 
 # ── Workflows ─────────────────────────────────────────────────────────────────

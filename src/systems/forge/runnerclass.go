@@ -14,13 +14,14 @@ var defaultRunnerClasses = []RunnerClass{
 }
 
 // defaultRunnersPrivileged reports whether the seeded default runner classes should
-// run privileged. True exactly when the "default" backend is VM-isolated (RUNTIME=kata
-// or proxmox): there the microVM/VM — not the container — is the isolation boundary, so
-// root + writable rootfs is safe and lets package managers (apt/pacman/dnf) work. On a
-// shared-kernel default backend (docker/kubernetes) privileged would be a host-kernel
-// escape, so the defaults stay locked-down.
+// run privileged. True exactly when the "default" backend is kernel-isolated
+// (RUNTIME=kata, proxmox or gvisor): there a guest/userspace kernel — not the shared
+// host kernel — is the boundary, so root + writable rootfs is safe and lets package
+// managers (apt/pacman/dnf) work. On a shared-kernel default backend
+// (docker/kubernetes) privileged would be a host-kernel escape, so the defaults stay
+// locked-down.
 func defaultRunnersPrivileged() bool {
-	return isVMIsolatedBackendType(defaultRuntimeType())
+	return isKernelIsolatedBackendType(defaultRuntimeType())
 }
 
 // migrateAndSeedRunnerClasses creates the runner_classes table and seeds the default

@@ -1,4 +1,4 @@
-{{- if and .Values.forge.enabled .Values.forge.egressProxy.enabled .Values.forge.egressProxy.networkPolicy.enabled (eq .Values.forge.env.runtime "kubernetes") (not .Values.forge.kata.enabled) }}
+{{- if and .Values.forge.enabled .Values.forge.egressProxy.enabled .Values.forge.egressProxy.networkPolicy.enabled (or (eq .Values.forge.env.runtime "kubernetes") .Values.forge.gvisor.enabled) (not .Values.forge.kata.enabled) }}
 # Confines forge's sandbox Job pods (labelled app=forge) to DNS and the egress proxy
 # only, so untrusted user code cannot bypass the domain allowlist by connecting out
 # directly. Mirrors builder's forge-exec NetworkPolicy. Requires a NetworkPolicy-aware

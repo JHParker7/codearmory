@@ -26,20 +26,22 @@ import (
 // Jobs are created in K8S_NAMESPACE (default: forge) and deleted immediately
 // after the result is collected. An optional RuntimeClass — set per-backend via
 // the "runtime_class" config key, or process-wide via K8S_RUNTIME_CLASS — runs
-// jobs under a sandboxed runtime such as gVisor or Kata Containers. The "kata"
-// backend type wires this same runtime with a required RuntimeClass, moving the
-// isolation boundary to a lightweight VM. Resource limits are determined
-// per-execution by the runner class stored in the database.
+// jobs under a sandboxed runtime such as gVisor or Kata Containers. The "kata" and
+// "gvisor" backend types wire this same runtime with a required RuntimeClass, moving
+// the isolation boundary to a lightweight VM (kata) or a userspace kernel (gvisor).
+// Resource limits are determined per-execution by the runner class stored in the
+// database.
 type KubernetesRuntime struct {
 	client       kubernetes.Interface
 	namespace    string
 	runtimeClass *string
-	// vmIsolated is true only for the "kata" backend: the pod runs inside a
-	// hardware-virtualized microVM, so a runner class may opt into running the job
-	// as root (RunnerClass.Privileged). It is false for the plain "kubernetes"
-	// backend (shared host kernel), where privileged is ignored and the
-	// locked-down sandbox is always applied.
-	vmIsolated bool
+	// kernelIsolated is true for backends that give the job its OWN kernel: "kata"
+	// (a hardware-virtualized microVM) and "gvisor" (the gVisor userspace kernel /
+	// Sentry). There a runner class may opt into running the job as root
+	// (RunnerClass.Privileged), since root is contained away from the host kernel. It
+	// is false for the plain "kubernetes" backend (shared host kernel), where
+	// privileged is ignored and the locked-down sandbox is always applied.
+	kernelIsolated bool
 	// podMemoryMB returns a pod's current memory usage in MB from the
 	// metrics.k8s.io API, with ok=false when metrics are unavailable (no
 	// metrics-server installed, or the pod has not been scraped yet — common for
@@ -51,14 +53,15 @@ type KubernetesRuntime struct {
 // k8sKeyRuntimeClass is the backend config key naming the Kubernetes RuntimeClass
 // to run jobs under. Optional for the "kubernetes" type (falls back to the
 // K8S_RUNTIME_CLASS env var, then the cluster's default runtime); required for the
-// "kata" type, which exists precisely to pin a VM-isolating RuntimeClass.
+// "kata" and "gvisor" types, which exist precisely to pin a sandboxing RuntimeClass.
 const k8sKeyRuntimeClass = "runtime_class"
 
 // newKubernetesRuntime builds a Kubernetes runtime. configRuntimeClass is the
 // backend's per-backend RuntimeClass (the "runtime_class" config key); see
 // resolveRuntimeClass for how it combines with the legacy K8S_RUNTIME_CLASS env.
-// vmIsolated is true only for the kata backend, gating the privileged-job opt-in.
-func newKubernetesRuntime(configRuntimeClass string, vmIsolated bool) (*KubernetesRuntime, error) {
+// kernelIsolated is true for the kata and gvisor backends, gating the privileged-job
+// opt-in.
+func newKubernetesRuntime(configRuntimeClass string, kernelIsolated bool) (*KubernetesRuntime, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		kubeconfig := os.Getenv("KUBECONFIG")
@@ -77,10 +80,10 @@ func newKubernetesRuntime(configRuntimeClass string, vmIsolated bool) (*Kubernet
 	}
 
 	rt := &KubernetesRuntime{
-		client:       client,
-		namespace:    envOrDefault("K8S_NAMESPACE", "forge"),
-		runtimeClass: resolveRuntimeClass(configRuntimeClass),
-		vmIsolated:   vmIsolated,
+		client:         client,
+		namespace:      envOrDefault("K8S_NAMESPACE", "forge"),
+		runtimeClass:   resolveRuntimeClass(configRuntimeClass),
+		kernelIsolated: kernelIsolated,
 	}
 	rt.podMemoryMB = rt.fetchPodMemoryMB
 	return rt, nil
@@ -132,7 +135,7 @@ func parsePodMetricsMemoryMB(raw []byte) (int64, bool) {
 	return totalBytes / bytesPerMiB, true
 }
 
-// resolveRuntimeClass picks the RuntimeClass pointer for a kubernetes/kata
+// resolveRuntimeClass picks the RuntimeClass pointer for a kubernetes/kata/gvisor
 // backend: an explicit per-backend config value wins; otherwise the process-wide
 // K8S_RUNTIME_CLASS env var (legacy single-runtime deployments) is used; a nil
 // result means the cluster's default runtime (typically runc).
@@ -205,10 +208,11 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 	}
 
-	// privileged is honoured only on a VM-isolated (kata) backend: the microVM is
-	// the boundary, so root in the guest is safe. On a shared-kernel container
-	// backend the flag is dropped and the locked-down sandbox always applies.
-	privileged := spec.Privileged && r.vmIsolated
+	// privileged is honoured only on a kernel-isolated backend (kata's microVM or
+	// gvisor's Sentry): there root in the job is contained away from the host kernel,
+	// so it is safe. On a shared-kernel container backend the flag is dropped and the
+	// locked-down sandbox always applies.
+	privileged := spec.Privileged && r.kernelIsolated
 	podSC, containerSC := podSecurityContexts(privileged)
 
 	return &batchv1.Job{

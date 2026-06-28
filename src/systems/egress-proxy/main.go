@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +41,15 @@ func parseAllowlist(s string) allowlist {
 
 func (al allowlist) permits(host string) bool {
 	for _, pattern := range al {
+		// "*" alone is the public-only sentinel: any hostname passes the NAME check.
+		// This is NOT "allow everything" — the IP guard (safeDialContext →
+		// isDisallowedIP) still runs at dial time on every request, so the proxy will
+		// reach any PUBLIC address but never a loopback/private/link-local/metadata
+		// one. It lets an operator grant broad outbound access (e.g. all of AWS)
+		// without enumerating domains, while keeping SSRF/internal access blocked.
+		if pattern == "*" {
+			return true
+		}
 		if pattern == host {
 			return true
 		}
@@ -49,6 +59,12 @@ func (al allowlist) permits(host string) bool {
 		}
 	}
 	return false
+}
+
+// allowsAll reports whether the allowlist is in public-only mode (the "*" sentinel).
+// Even then the dial-time IP guard still blocks private/internal/metadata addresses.
+func (al allowlist) allowsAll() bool {
+	return slices.Contains(al, "*")
 }
 
 // hopByHop headers must not be forwarded between proxy and upstream.
@@ -277,8 +293,11 @@ func main() {
 	}
 
 	al := parseAllowlist(os.Getenv("PROXY_ALLOWED_DOMAINS"))
-	if len(al) == 0 {
+	switch {
+	case len(al) == 0:
 		slog.Warn("PROXY_ALLOWED_DOMAINS is not set — all proxy requests will be blocked")
+	case al.allowsAll():
+		slog.Warn("PROXY_ALLOWED_DOMAINS=* — public-only mode: any PUBLIC host is allowed; private/internal/metadata addresses stay blocked by the IP guard")
 	}
 
 	port := "3128"
@@ -292,7 +311,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	slog.Info("egress proxy listening", "port", port, "allowed_domains", len(al))
+	slog.Info("egress proxy listening", "port", port, "allowed_domains", len(al), "public_only", al.allowsAll())
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

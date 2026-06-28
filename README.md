@@ -12,7 +12,7 @@
 ## What's inside
 
 - **CI/CD pipelines** — sequence steps into runs as sequential/parallel batches; run inputs and prior-step outputs are substituted at execution time, and stuck runs are recovered on restart (Workflows).
-- **Sandboxed runners** — run commands in isolated containers (Docker or Kubernetes Jobs) with dropped capabilities, configurable resource tiers (runner classes), and pluggable runtime backends — including kata/Cloud-Hypervisor VMs — with optional egress allowlisting (Forge).
+- **Sandboxed runners** — run commands in isolated containers (Docker or Kubernetes Jobs) with dropped capabilities, configurable resource tiers (runner classes), and pluggable runtime backends — including kata/Cloud-Hypervisor VMs and gVisor userspace-kernel sandboxes (no `/dev/kvm` needed) — with optional egress allowlisting (Forge).
 - **Git webhook triggers** — receive pushes and PRs from GitHub, GitLab, or Forgejo/Gitea and map them to pipeline runs with at-least-once delivery (Hooks).
 - **Auth + RBAC + SSO** — ES256 JWT sessions, orgs, teams, and roles covering every service. Gatekeeper is also an OIDC provider, so it can be your SSO identity source.
 - **Unified API gateway** — every request enters through Conductor, which routes by service prefix and verifies permissions with Gatekeeper before forwarding. Services declare their routes, actions, and RBAC in the Registry.

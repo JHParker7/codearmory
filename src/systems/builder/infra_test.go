@@ -220,6 +220,29 @@ func TestEnsureInfra_KataSkipsEgressProxy(t *testing.T) {
 	}
 }
 
+func TestEnsureInfra_GvisorKeepsEgressProxy(t *testing.T) {
+	httpClient = initHTTPClient()
+	b := newTestBackend(t, &registerRecorder{})
+	ctx := context.Background()
+
+	// Unlike kata, gVisor is a kernel sandbox, not a network boundary: it does NOT
+	// confine egress, so RUNTIME=gvisor must KEEP the egress proxy + NetworkPolicy.
+	spec := workloadSpec{Service: "forge", Env: map[string]string{"RUNTIME": "gvisor"}}
+	if err := b.ensureInfra(ctx, spec); err != nil {
+		t.Fatalf("ensureInfra: %v", err)
+	}
+	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err != nil {
+		t.Errorf("egress-proxy not deployed under RUNTIME=gvisor: %v", err)
+	}
+	if _, err := b.client.NetworkingV1().NetworkPolicies("codearmory").Get(ctx, b.forgeNetworkPolicyName("forge"), metav1.GetOptions{}); err != nil {
+		t.Errorf("NetworkPolicy not created under RUNTIME=gvisor: %v", err)
+	}
+	c := b.templatePod(spec).Spec.Containers[0]
+	if v, _ := envValue(c, "FORGE_EGRESS_PROXY"); v == "" {
+		t.Error("FORGE_EGRESS_PROXY unset under gvisor, want it pointed at the proxy")
+	}
+}
+
 func TestEnsureInfra_EgressProxyToggleOffCleansUp(t *testing.T) {
 	httpClient = initHTTPClient()
 	b := newTestBackend(t, &registerRecorder{})
