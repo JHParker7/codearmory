@@ -189,7 +189,7 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
       {showMatrix && block.matrix && <MatrixEditor uid={block.uid} matrix={block.matrix} onSetMatrix={onSetMatrix} />}
       {editable && isGate && block.approval && <GateEditor uid={block.uid} gate={block.approval} onSetApproval={onSetApproval} />}
       {editable && !isGate && selected && (
-        <StepInputsEditor defWith={defWith} override={block.with ?? {}} upstream={upstream}
+        <StepInputsEditor action={action} defWith={defWith} override={block.with ?? {}} upstream={upstream}
           onChange={(o) => onSetWith(block.uid, o)} />
       )}
     </div>
