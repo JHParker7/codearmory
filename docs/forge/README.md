@@ -91,9 +91,9 @@ The recommended setup:
 
 Execution containers are then isolated to the `forge-exec` network (no direct internet) but can reach the allowlisted domains through the proxy. The compose file at `infra/local/compose.yml` ships a ready-to-use configuration.
 
-**Public-only mode (`PROXY_ALLOWED_DOMAINS=*`).** When a workload needs broad outbound access that's impractical to enumerate as domains — e.g. all of AWS — set the allowlist to the single value `*`. This passes the **hostname** check for any host, but the proxy's dial-time **IP guard always still applies**: it refuses any host that resolves to a loopback, private (RFC1918), link-local (incl. the `169.254.169.254` cloud-metadata IP), multicast, or unspecified address. The result is "public internet only" — runners can reach any public destination but never cluster-internal services or cloud metadata. This is the secure way to grant wide egress without dropping the proxy entirely (which is what selecting **kata** does). The IP guard is enforced on every request regardless of the allowlist, so `*` is not "allow everything," only "allow everything *public*". The allowlist is process-wide (one proxy), so it applies to all runners — there is no per-runner-class egress policy.
+**Public-only mode is the default (`PROXY_ALLOWED_DOMAINS=*`).** Out of the box the allowlist is the single value `*`, so a workload that needs broad outbound access (e.g. all of AWS) works without enumerating domains. `*` passes the **hostname** check for any host, but the proxy's dial-time **IP guard always still applies**: it refuses any host that resolves to a loopback, private (RFC1918), link-local (incl. the `169.254.169.254` cloud-metadata IP), multicast, or unspecified address. The result is "public internet only" — runners reach any public destination but never cluster-internal services or cloud metadata. The IP guard is enforced on every request regardless of the allowlist, so `*` is not "allow everything," only "allow everything *public*". The allowlist is process-wide (one proxy), so it applies to all runners — there is no per-runner-class egress policy.
 
-**Default allowed domains** (overridable via `FORGE_PROXY_ALLOWED_DOMAINS` in compose):
+**Restricting to a domain allowlist (optional).** For a tighter posture, set `forge.egressProxy.allowedDomains` (Helm) / `FORGE_PROXY_ALLOWED_DOMAINS` (compose) / `PROXY_ALLOWED_DOMAINS` (forge config) to a comma-separated list of exact hosts and `*.example.com` subdomain wildcards. A reasonable build/CI starting point:
 
 | Domain | Purpose |
 |--------|---------|
@@ -104,6 +104,8 @@ Execution containers are then isolated to the `forge-exec` network (no direct in
 | `registry.npmjs.org` | npm packages |
 | `pypi.org`, `files.pythonhosted.org` | Python packages |
 | `proxy.golang.org`, `sum.golang.org`, `storage.googleapis.com` | Go modules |
+
+Setting it to empty blocks all egress.
 
 ### Kubernetes runtime variables
 

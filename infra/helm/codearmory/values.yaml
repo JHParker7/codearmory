@@ -315,13 +315,15 @@ forge:
     # Override the egress URL wired into forge. Empty = the in-cluster proxy this chart
     # deploys (http://<release>-forge-egress-proxy:3128).
     url: ""
-    # Comma-separated allowlist of domains sandbox traffic may reach through the proxy.
-    # An exact host ("github.com") or a "*.example.com" subdomain wildcard. The single
-    # value "*" is the public-only sentinel: it allows ANY public host without listing
-    # domains (e.g. to reach all of AWS) while the proxy's IP guard still blocks
-    # loopback/private/link-local/cloud-metadata addresses — so runners get the public
-    # internet but never cluster-internal services. Empty = block all egress.
-    allowedDomains: "registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com"
+    # Egress policy for sandbox traffic through the proxy. Default is "*", the
+    # public-only sentinel: runners may reach ANY public host, while the proxy's IP
+    # guard still blocks loopback/private/link-local/cloud-metadata addresses — so they
+    # get the public internet but never cluster-internal services. To restrict instead,
+    # set a comma-separated allowlist of exact hosts ("github.com") and "*.example.com"
+    # subdomain wildcards (e.g.
+    # "registry.terraform.io,github.com,*.github.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org").
+    # Empty = block all egress.
+    allowedDomains: "*"
     resources:
       requests:
         cpu: 50m
