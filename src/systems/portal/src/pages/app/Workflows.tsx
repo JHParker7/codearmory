@@ -12,6 +12,7 @@ import {
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
+import { ResizeHandle, useResizableWidth } from '../../components/ResizeHandle';
 import { PipelineBlocks } from './PipelineBlocks';
 import { StepInspector } from './StepInspector';
 import type { StepRef } from './pipelineGraph';
@@ -54,7 +55,10 @@ function PipelineBuilderOverlay({
       return {
         step_id: s.step_id,
         name: (!s.approval && s.name && s.step_id && s.name !== catalog[s.step_id]?.name) ? s.name : undefined,
-        with: Object.keys(wo).length ? wo : undefined,
+        // An approval gate has no step definition to override, so it never carries a
+        // per-occurrence `with`; without this the synthesised gate's message/approvers
+        // (returned in `with` by the GET) would leak in as a spurious override.
+        with: (!s.approval && Object.keys(wo).length) ? wo : undefined,
         parallel_group: s.parallel_group ?? null,
         matrix: s.matrix ?? null,
         approval: s.approval ?? null,
@@ -73,6 +77,9 @@ function PipelineBuilderOverlay({
   const [builderSeed, setBuilderSeed] = useState<StepRef[]>(initialStepRefs);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Tag a brand-new pipeline with the active project (workspace) so it isn't
+  // immediately hidden by that filter. Only on create — an edit must not re-tag.
+  const project = useAppSelector(s => s.project.current);
 
   // Live, editable JSON mirror. The textarea drives `jsonDraft`; while the user is
   // typing in it (jsonFocused) builder-side updates don't overwrite their text.
@@ -83,6 +90,19 @@ function PipelineBuilderOverlay({
   // Right-panel tabs: a step inspector (inputs/output of the selected step) and the
   // live JSON config. Selecting a step in the builder switches to the inspector.
   const [rightTab, setRightTab] = useState<'inspector' | 'json'>('json');
+  // Draggable split between the visual builder and the right (inspector/JSON) pane.
+  // Width is in px, persisted so the layout survives reopening the builder; the
+  // divider clamps it so neither pane collapses below a usable minimum.
+  const splitRow = useRef<HTMLDivElement>(null);
+  const [rightW, setRightW] = useState(() => {
+    const v = Number(localStorage.getItem('ci.builder.rightW'));
+    return v >= 280 ? v : 480;
+  });
+  useEffect(() => { localStorage.setItem('ci.builder.rightW', String(rightW)); }, [rightW]);
+  const onSplitResize = useCallback((dx: number) => setRightW(w => {
+    const total = splitRow.current?.offsetWidth ?? window.innerWidth;
+    return Math.max(280, Math.min(w - dx, total - 360));
+  }), []);
   const [inspectId, setInspectId] = useState<string | null>(null);
   const [inspectName, setInspectName] = useState<string | undefined>(undefined);
   const [actions, setActions] = useState<WorkflowAction[]>([]);
@@ -141,7 +161,7 @@ function PipelineBuilderOverlay({
       };
       const wf = initial
         ? await updateWorkflow(token, initial.workflow_id, payload)
-        : await createWorkflow(token, payload);
+        : await createWorkflow(token, { ...payload, project: project ?? undefined });
       onSaved(wf);
     } catch (e: unknown) { setSaveError((e as Error).message); }
     finally { setSaving(false); }
@@ -159,13 +179,15 @@ function PipelineBuilderOverlay({
           style={{ flex: 1, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '5px 8px', outline: 'none' }} />
         <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>✕ close</button>
       </div>
-      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <div style={{ flex: 1, minWidth: 0, padding: '14px 7px 14px 14px' }}>
+      <div ref={splitRow} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+        <div style={{ flex: 1, minWidth: 0, padding: '14px 3px 14px 14px' }}>
           <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} onChange={setSteps} onInspect={onInspect} />
         </div>
+        {/* Drag to rebalance the builder vs. inspector/JSON panes. */}
+        <ResizeHandle onResize={onSplitResize} />
         {/* Right panel: step inspector (inputs/output of the selected step) +
             live, editable JSON config, as tabs. */}
-        <div style={{ width: 'min(42%, 560px)', minWidth: 300, flexShrink: 0, padding: '14px 14px 14px 7px', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div style={{ width: rightW, minWidth: 280, flexShrink: 0, padding: '14px 14px 14px 3px', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div style={{ display: 'flex', alignItems: 'stretch', border: `1px solid ${T.border}`, borderBottom: 'none', background: T.bgAlt }}>
             {(['inspector', 'json'] as const).map(tab => (
               <button key={tab} onClick={() => setRightTab(tab)}
@@ -227,13 +249,17 @@ function PipelinesTab() {
   // builder === null: closed; { wf: null }: create; { wf }: edit that workflow.
   const [builder, setBuilder] = useState<{ wf: Workflow | null } | null>(null);
   const [catalog, setCatalog] = useState<Step[]>([]);
+  const [railW, railHandle] = useResizableWidth('rail.workflows.pipelines', 260, { min: 200, max: 480 });
+  // Current-project view filter — refetch whenever it changes so the list tracks
+  // the sidebar switcher.
+  const project = useAppSelector(s => s.project.current);
 
   const fetchWorkflows = useCallback(async () => {
     setLoading(true); setError(null);
-    try { setWorkflows(await listWorkflows(token)); }
+    try { setWorkflows(await listWorkflows(token, project ?? undefined)); }
     catch (e: unknown) { setError((e as Error).message); }
     finally { setLoading(false); }
-  }, [token]);
+  }, [token, project]);
 
   useEffect(() => { fetchWorkflows(); }, [fetchWorkflows]);
 
@@ -328,7 +354,7 @@ function PipelinesTab() {
         />
       )}
       {/* Left panel */}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.textHi }}>pipelines</span>
@@ -357,12 +383,15 @@ function PipelinesTab() {
                   {wf.steps.length} step{wf.steps.length !== 1 ? 's' : ''} ·{' '}
                   {wf.active ? <span style={{ color: T.green }}>active</span> : <span style={{ color: T.dim }}>inactive</span>}
                 </div>
+                {/* Show the project tag only when unfiltered — under a filter every row shares it. */}
+                {!project && wf.project && <div style={{ fontSize: 10, color: T.green, marginTop: 3 }}>◆ {wf.project}</div>}
               </button>
             );
           })}
         </div>
       </div>
 
+      {railHandle}
       {/* Right panel */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -491,6 +520,7 @@ function StepsTab() {
   const [createError, setCreateError] = useState<string | null>(null);
   // null = the form (when open) creates a new step; a step_id = it edits that step.
   const [editId, setEditId] = useState<string | null>(null);
+  const [railW, railHandle] = useResizableWidth('rail.workflows.steps', 260, { min: 200, max: 480 });
 
   const fetchSteps = useCallback(async () => {
     setLoading(true); setError(null);
@@ -594,7 +624,7 @@ function StepsTab() {
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
       {confirmEl}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.textHi }}>steps</span>
@@ -712,6 +742,7 @@ function StepsTab() {
         </div>
       </div>
 
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedStep ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -797,6 +828,7 @@ function ActionsTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [railW, railHandle] = useResizableWidth('rail.workflows.actions', 260, { min: 200, max: 480 });
 
   useEffect(() => {
     listActions(token).then(setActions).catch(e => setError((e as Error).message)).finally(() => setLoading(false));
@@ -809,7 +841,7 @@ function ActionsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.textHi }}>action catalog</span>
         </div>
@@ -827,6 +859,7 @@ function ActionsTab() {
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!a ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>

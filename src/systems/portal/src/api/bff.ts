@@ -30,6 +30,16 @@ async function req<T>(method: string, path: string, token?: string, body?: unkno
   return res.json() as Promise<T>;
 }
 
+/**
+ * Append a `project=<label>` view filter to a path's query string (choosing `?`
+ * or `&` by what the path already carries), or return it unchanged when no
+ * project is active. Mirrors the CLI's appendProjectParam.
+ */
+function withProject(path: string, project?: string): string {
+  if (!project) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}project=${encodeURIComponent(project)}`;
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 export interface SignupPayload {
@@ -294,6 +304,8 @@ export interface Workflow {
   workflow_id: string;
   name: string;
   description?: string | null;
+  /** Free-text project (workspace) label this pipeline is tagged with — a view filter, not a permission. */
+  project?: string;
   created_by: string;
   org_id?: string | null;
   active: boolean;
@@ -327,8 +339,8 @@ export interface WorkflowRun {
   ended_at?: string | null;
 }
 
-export function listWorkflows(token: string) {
-  return req<Workflow[]>('GET', '/workflows/pipelines', token);
+export function listWorkflows(token: string, project?: string) {
+  return req<Workflow[]>('GET', withProject('/workflows/pipelines', project), token);
 }
 
 export function getWorkflow(token: string, id: string) {
@@ -379,6 +391,8 @@ export interface Execution {
   env?: Record<string, string> | null;
   timeout?: number | null;
   runner_class?: string | null;
+  /** Free-text project (workspace) label this execution is tagged with. */
+  project?: string;
   status: string;
   exit_code?: number | null;
   stdout?: string | null;
@@ -409,8 +423,8 @@ export interface RuntimeBackend {
   enabled: boolean;
 }
 
-export function listExecutions(token: string) {
-  return req<Execution[]>('GET', '/forge/executions', token);
+export function listExecutions(token: string, project?: string) {
+  return req<Execution[]>('GET', withProject('/forge/executions', project), token);
 }
 
 export function getExecution(token: string, id: string) {
@@ -451,6 +465,8 @@ export interface Ticket {
   description?: string | null;
   status: string;
   priority?: string | null;
+  /** Free-text project (workspace) label this ticket is tagged with. */
+  project?: string;
   created_by: string;
   org_id?: string | null;
   assignee_id?: string | null;
@@ -462,15 +478,15 @@ export interface Ticket {
   updated_at: string;
 }
 
-export function listTickets(token: string) {
-  return req<Ticket[]>('GET', '/tickets/tickets', token);
+export function listTickets(token: string, project?: string) {
+  return req<Ticket[]>('GET', withProject('/tickets/tickets', project), token);
 }
 
 export function getTicket(token: string, id: string) {
   return req<Ticket>('GET', `/tickets/tickets/${id}`, token);
 }
 
-export function createTicket(token: string, payload: { title: string; description?: string; priority?: string }) {
+export function createTicket(token: string, payload: { title: string; description?: string; priority?: string; project?: string }) {
   return req<Ticket>('POST', '/tickets/tickets', token, payload);
 }
 
@@ -754,7 +770,7 @@ export function listActions(token: string) {
 
 export function createWorkflow(
   token: string,
-  payload: { name: string; description?: string; steps: WorkflowStepRef[] },
+  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[] },
 ) {
   return req<Workflow>('POST', '/workflows/pipelines', token, payload);
 }
@@ -772,7 +788,7 @@ export function updateWorkflow(
 // Forge's POST /executions responds with only the new id — not a full Execution.
 export function createExecution(
   token: string,
-  payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string },
+  payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; project?: string },
 ) {
   return req<{ execution_id: string }>('POST', '/forge/executions', token, payload);
 }
@@ -857,6 +873,8 @@ export interface GiteaRepo {
   description?: string | null;
   private: boolean;
   default_branch?: string | null;
+  /** Free-text project (workspace) label this repo is tagged with. */
+  project?: string;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -902,8 +920,13 @@ export function unlinkGiteaAccount(token: string) {
   return req<void>('DELETE', '/gitea_integration/account', token);
 }
 
-export function listGiteaRepos(token: string) {
-  return req<GiteaRepo[]>('GET', '/gitea_integration/repos', token);
+export function listGiteaRepos(token: string, project?: string) {
+  return req<GiteaRepo[]>('GET', withProject('/gitea_integration/repos', project), token);
+}
+
+/** Assign a repo to a project (pass an empty string to clear it). Mirrors the CLI's `armory repos project`. */
+export function setGiteaRepoProject(token: string, owner: string, name: string, project: string) {
+  return req<GiteaRepo>('PUT', `/gitea_integration/repos/${owner}/${name}/project`, token, { project });
 }
 
 export function createGiteaRepo(token: string, payload: { name: string; description?: string; private?: boolean }) {
@@ -1320,4 +1343,32 @@ export function syncArgoApp(token: string, name: string, payload?: { outpost_id?
 
 export function getArgoSync(token: string, id: string) {
   return req<ArgoSync>('GET', `/argo/syncs/${id}`, token);
+}
+
+// ── Projects (workspaces) ─────────────────────────────────────────────────────
+// A project is a free-text label attached to pipelines, executions, tickets and
+// repos — a view filter, not a permission boundary. There is no project registry
+// endpoint: the in-use labels are derived by scanning those resources' lists.
+
+/**
+ * Aggregate the distinct, sorted project labels currently in use across the
+ * caller's pipelines, executions, tickets and repos — the source list for the
+ * project switcher. Best-effort: an endpoint the user can't reach (or that
+ * errors) is skipped, never fatal, mirroring the CLI's fetchKnownProjects.
+ */
+export async function fetchProjectLabels(token: string): Promise<string[]> {
+  const settled = await Promise.allSettled<{ project?: string }[]>([
+    listWorkflows(token),
+    listExecutions(token),
+    listTickets(token),
+    listGiteaRepos(token),
+  ]);
+  const labels = new Set<string>();
+  for (const r of settled) {
+    if (r.status !== 'fulfilled') continue;
+    for (const item of r.value) {
+      if (item.project) labels.add(item.project);
+    }
+  }
+  return [...labels].sort();
 }

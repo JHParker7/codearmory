@@ -9,6 +9,7 @@
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { T } from '../../theme';
+import { useResizableWidth } from '../../components/ResizeHandle';
 import { useAppSelector } from '../../store/hooks';
 import { listAuditLogs, listPermissionChecks } from '../../api/bff';
 import type { AuditLog, PermissionCheck } from '../../api/bff';
@@ -151,6 +152,7 @@ function MutationsView() {
 
   const selectedLog = logs.find(l => l.audit_log_id === selected);
   const selectedResourceName = selectedLog ? resourceName(selectedLog) : undefined;
+  const [railW, railHandle] = useResizableWidth('rail.audit.mutations', 320, { min: 240, max: 560 });
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden', flexDirection: 'column' }}>
@@ -180,7 +182,7 @@ function MutationsView() {
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {/* Log list */}
-        <div style={{ width: 320, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
+        <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
           {loading ? (
             <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
           ) : error ? (
@@ -206,6 +208,7 @@ function MutationsView() {
             );
           })}
         </div>
+        {railHandle}
 
         {/* Detail */}
         <div style={{ flex: 1, overflow: 'auto' }}>
@@ -295,6 +298,7 @@ function AccessChecksView() {
 
   const userLabel = (id: string) => userNames[id] ?? id;
   const selectedCheck = checks.find(c => c.permissions_check_id === selected);
+  const [railW, railHandle] = useResizableWidth('rail.audit.access', 340, { min: 240, max: 560 });
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden', flexDirection: 'column' }}>
@@ -330,7 +334,7 @@ function AccessChecksView() {
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {/* Check list */}
-        <div style={{ width: 340, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
+        <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
           {loading ? (
             <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
           ) : error ? (
@@ -358,6 +362,7 @@ function AccessChecksView() {
             );
           })}
         </div>
+        {railHandle}
 
         {/* Detail */}
         <div style={{ flex: 1, overflow: 'auto' }}>

@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
+import { useResizableWidth } from '../../components/ResizeHandle';
 import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
@@ -32,6 +33,8 @@ function priorityColor(priority: string | null | undefined): string {
 /** Modal form for a new ticket; submits title/description/priority via createTicket and hands the created ticket back. */
 function CreateModal({ onCreated, onClose }: { onCreated: (t: Ticket) => void; onClose: () => void }) {
   const token = useAppSelector(s => s.auth.token)!;
+  // Tag the new ticket with the active project (workspace) so the current filter keeps it visible.
+  const project = useAppSelector(s => s.project.current);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState('medium');
@@ -43,7 +46,7 @@ function CreateModal({ onCreated, onClose }: { onCreated: (t: Ticket) => void; o
     setSubmitting(true);
     setError(null);
     try {
-      onCreated(await createTicket(token, { title: title.trim(), description: description.trim() || undefined, priority }));
+      onCreated(await createTicket(token, { title: title.trim(), description: description.trim() || undefined, priority, project: project ?? undefined }));
     } catch (e: unknown) {
       setError((e as Error).message);
       setSubmitting(false);
@@ -96,6 +99,8 @@ function CreateModal({ onCreated, onClose }: { onCreated: (t: Ticket) => void; o
 /** Ticket tracker: sidebar list + detail panel with comments, status toggle, delete, and a create modal. */
 export function Tickets() {
   const token = useAppSelector(s => s.auth.token)!;
+  // Current-project view filter from the sidebar switcher; refetch on change.
+  const project = useAppSelector(s => s.project.current);
   const userNames = useUserNames(token);
   const workflowNames = useWorkflowNames(token);
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -110,13 +115,13 @@ export function Tickets() {
     setLoading(true);
     setError(null);
     try {
-      setTickets(await listTickets(token));
+      setTickets(await listTickets(token, project ?? undefined));
     } catch (e: unknown) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, project]);
 
   useEffect(() => { fetchTickets(); }, [fetchTickets]);
 
@@ -134,6 +139,7 @@ export function Tickets() {
   };
 
   const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.tickets.main', 260, { min: 200, max: 480 });
 
   const handleDelete = async () => {
     if (!selectedTicket) return;
@@ -167,7 +173,7 @@ export function Tickets() {
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       {confirmEl}
       {/* Left panel */}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>tickets/</span>
@@ -203,11 +209,14 @@ export function Tickets() {
                   <span style={{ fontSize: 13, fontWeight: 600, color: isActive ? T.textHi : T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ticket.title}</span>
                 </div>
                 <div style={{ fontSize: 11, color: T.faint, paddingLeft: 16 }}>{ticket.status} · {timeAgo(ticket.updated_at)} ago</div>
+                {/* Project tag shown only when unfiltered. */}
+                {!project && ticket.project && <div style={{ fontSize: 10, color: T.green, paddingLeft: 16, marginTop: 2 }}>◆ {ticket.project}</div>}
               </button>
             );
           })}
         </div>
       </div>
+      {railHandle}
 
       {/* Right panel */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

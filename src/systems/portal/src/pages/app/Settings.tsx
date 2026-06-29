@@ -164,6 +164,7 @@ export function Settings() {
   const [firstname, setFirstname] = useState(user?.firstname ?? '');
   const [lastname, setLastname] = useState(user?.lastname ?? '');
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
   const [showPw, setShowPw] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -174,6 +175,10 @@ export function Settings() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (password && password !== confirm) {
+      setError('passwords do not match');
+      return;
+    }
     setSaving(true);
     setError('');
     setSaved(false);
@@ -191,6 +196,7 @@ export function Settings() {
     if (saveUser.fulfilled.match(result)) {
       setSaved(true);
       setPassword('');
+      setConfirm('');
       setTimeout(() => setSaved(false), 3000);
     } else {
       setError((result.payload as string) ?? 'update failed');
@@ -241,6 +247,10 @@ export function Settings() {
               </button>
             }
           />
+          <Field name="confirm" label="confirm new password" value={confirm} onChange={setConfirm} type={showPw ? 'text' : 'password'} placeholder="••••••••" focused={focused} onFocus={setFocused} onBlur={() => setFocused(null)} />
+          {confirm && password !== confirm && (
+            <div style={{ fontFamily: T.mono, fontSize: 11, color: T.red, marginTop: -8 }}>✗ passwords do not match</div>
+          )}
         </div>
 
         {/* Org & team info (read-only) */}

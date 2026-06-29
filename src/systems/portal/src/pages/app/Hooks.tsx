@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
+import { useResizableWidth } from '../../components/ResizeHandle';
 import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
@@ -71,6 +72,7 @@ export function Hooks() {
   }, [tab, eventsFetched, fetchEvents]);
 
   const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.hooks.main', 260, { min: 200, max: 480 });
 
   const handleDeleteRule = async (id: string) => {
     const name = rules.find(r => r.rule_id === id)?.name;
@@ -108,7 +110,7 @@ export function Hooks() {
       {/* Content */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {/* Left list */}
-        <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
+        <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
           {tab === 'rules' ? (
             rulesLoading ? (
               <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
@@ -152,6 +154,7 @@ export function Hooks() {
             })
           )}
         </div>
+        {railHandle}
 
         {/* Right detail */}
         <div style={{ flex: 1, overflow: 'auto' }}>

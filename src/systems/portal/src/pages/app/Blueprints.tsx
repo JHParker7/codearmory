@@ -1,6 +1,7 @@
 /** Blueprints page — tracks OpenTofu/Terraform workspaces by path and renders their backend state. left rail lists tracked workspaces (persisted in the workspaces redux slice), right panel fetches and shows the normalized state (locks, serial, resource types, outputs) for the selected one via the BFF GET /state/<path>. also exports the "coming soon" placeholder pages for the other app routes. */
 import { useState, useEffect } from 'react';
 import { T } from '../../theme';
+import { useResizableWidth } from '../../components/ResizeHandle';
 import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -233,10 +234,12 @@ export function Blueprints() {
     dispatch(removeWorkspace(selected));
   };
 
+  const [railW, railHandle] = useResizableWidth('rail.blueprints.main', 260, { min: 200, max: 480 });
+
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       {/* Left panel */}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>blueprints/</span>
@@ -304,6 +307,7 @@ export function Blueprints() {
           </div>
         </div>
       </div>
+      {railHandle}
 
       {/* Right panel */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

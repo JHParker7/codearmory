@@ -16,6 +16,7 @@ import {
 } from '../../api/bff';
 import type { Execution, RunnerClass, RuntimeBackend } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
+import { useResizableWidth } from '../../components/ResizeHandle';
 import { timeAgo } from '../../utils';
 
 type ForgeTab = 'executions' | 'runner-classes';
@@ -177,6 +178,9 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
 /** Executions tab: left list of executions + a create button (opens the create modal), right pane streams the selected run's detail (status/exit/duration, command, stdout/stderr). Running rows can be cancelled. */
 function ExecutionsTab() {
   const token = useAppSelector(s => s.auth.token)!;
+  // Current-project view filter from the sidebar switcher: filters the list and
+  // tags new executions so they stay visible under the active filter.
+  const project = useAppSelector(s => s.project.current);
   const [executions, setExecutions] = useState<Execution[]>([]);
   const [runnerClasses, setRunnerClasses] = useState<RunnerClass[]>([]);
   const [loading, setLoading] = useState(true);
@@ -188,10 +192,10 @@ function ExecutionsTab() {
 
   const fetchExecutions = useCallback(async () => {
     setLoading(true); setError(null);
-    try { setExecutions(await listExecutions(token)); }
+    try { setExecutions(await listExecutions(token, project ?? undefined)); }
     catch (e: unknown) { setError((e as Error).message); }
     finally { setLoading(false); }
-  }, [token]);
+  }, [token, project]);
 
   useEffect(() => {
     fetchExecutions();
@@ -204,10 +208,10 @@ function ExecutionsTab() {
   // toggles the loading spinner or clobbers an error with a transient blip.
   useEffect(() => {
     const timer = setInterval(() => {
-      listExecutions(token).then(setExecutions).catch(() => { /* keep last-known list */ });
+      listExecutions(token, project ?? undefined).then(setExecutions).catch(() => { /* keep last-known list */ });
     }, 5000);
     return () => clearInterval(timer);
-  }, [token]);
+  }, [token, project]);
 
   const [rerunning, setRerunning] = useState(false);
   const [rerunError, setRerunError] = useState<string | null>(null);
@@ -223,17 +227,17 @@ function ExecutionsTab() {
   // synthesise a full row from the input; the 2s detail poll backfills the real
   // record. Rejects on failure so the modal/rerun caller can show the error.
   const submitExecution = useCallback(async (input: ExecutionInput) => {
-    const { execution_id } = await createExecution(token, input);
+    const { execution_id } = await createExecution(token, { ...input, project: project ?? undefined });
     setExecutions(prev => [{
       execution_id, user_id: '', image: input.image, command: input.command,
       env: input.env ?? null, timeout: input.timeout ?? null,
-      runner_class: input.runner_class ?? null, status: 'pending',
+      runner_class: input.runner_class ?? null, project: project ?? undefined, status: 'pending',
       exit_code: null, stdout: null, stderr: null,
       created_at: new Date().toISOString(), started_at: null, ended_at: null,
     }, ...prev]);
     setShowCreate(false);
     setSelected(execution_id);
-  }, [token]);
+  }, [token, project]);
 
   // Rerun reuses an existing execution's settings verbatim.
   const handleRerun = async (exec: Execution) => {
@@ -276,10 +280,12 @@ function ExecutionsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, token]);
 
+  const [railW, railHandle] = useResizableWidth('rail.forge.executions', 260, { min: 200, max: 480 });
+
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
       {/* Left panel */}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.textHi }}>executions</span>
@@ -320,11 +326,14 @@ function ExecutionsTab() {
                   </span>
                 </div>
                 <div style={{ fontSize: 11, color: T.faint, marginTop: 3, paddingLeft: 14 }}>{timeAgo(exec.created_at)} ago</div>
+                {/* Project tag shown only when unfiltered. */}
+                {!project && exec.project && <div style={{ fontSize: 10, color: T.green, marginTop: 2, paddingLeft: 14 }}>◆ {exec.project}</div>}
               </button>
             );
           })}
         </div>
       </div>
+      {railHandle}
 
       {/* Right panel */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -486,10 +495,12 @@ function RunnerClassesTab() {
     } catch (e: unknown) { setError((e as Error).message); }
   };
 
+  const [railW, railHandle] = useResizableWidth('rail.forge.runner-classes', 260, { min: 200, max: 480 });
+
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
       {confirmEl}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.textHi }}>runner classes</span>
@@ -550,6 +561,7 @@ function RunnerClassesTab() {
           })}
         </div>
       </div>
+      {railHandle}
 
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedClass ? (

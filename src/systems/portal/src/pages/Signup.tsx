@@ -21,15 +21,18 @@ export function Signup() {
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
   const [showPw, setShowPw] = useState(false);
   const [terms, setTerms] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   const { score, checks } = passwordScore(password);
+  const passwordsMatch = password === confirm;
   const formValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
     && /^[a-zA-Z0-9_-]{1,64}$/.test(username)
     && score >= 3
+    && passwordsMatch
     && terms
     && !submitting;
 
@@ -106,6 +109,12 @@ export function Signup() {
                 }
               />
               <StrengthBar score={score} checks={checks} />
+
+              <PromptField prompt="password --confirm" value={confirm} onChange={setConfirm} type={showPw ? 'text' : 'password'} placeholder="••••••••••••"
+                hint={confirm && passwordsMatch ? '✓ passwords match' : 're-enter the password above to confirm.'} />
+              {confirm && !passwordsMatch && (
+                <div style={{ fontSize: 11, color: T.red, fontFamily: T.mono, marginTop: -12, marginBottom: 16, letterSpacing: 0.2 }}>✗ passwords do not match</div>
+              )}
 
               <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 18, cursor: 'pointer', fontSize: 12, color: T.dim, lineHeight: 1.5 }} onClick={() => setTerms((t) => !t)}>
                 <span style={{ color: T.green, fontFamily: T.mono, marginTop: 0 }}>{terms ? '[x]' : '[ ]'}</span>
