@@ -158,11 +158,12 @@ func handleListServices(w http.ResponseWriter, r *http.Request) {
 	type svc struct {
 		Name        string `json:"name"`
 		Description string `json:"description,omitempty"`
+		UIPath      string `json:"ui_path,omitempty"`
 	}
 	routingMu.RLock()
 	out := make([]svc, 0, len(servicesMap))
 	for name, st := range servicesMap {
-		out = append(out, svc{Name: name, Description: st.description})
+		out = append(out, svc{Name: name, Description: st.description, UIPath: st.uiPath})
 	}
 	routingMu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

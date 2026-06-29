@@ -23,7 +23,6 @@ import { useOrgNames } from '../../hooks/useNames';
  * always reachable when the user holds the permission.
  */
 const ROUTE_SERVICE: Record<string, string> = {
-  blueprints: 'blueprints',
   forge: 'forge',
   workflows: 'workflows',
   tickets: 'tickets',
@@ -31,9 +30,17 @@ const ROUTE_SERVICE: Record<string, string> = {
   containers: 'containers',
   gitea: 'gitea_integration',
   outposts: 'outpost-gateway',
-  chaos: 'chaos',
-  argo: 'argo',
 };
+
+// Services with a first-class bundled page. Any OTHER registered service that
+// advertises a ui_path is rendered generically via <ServiceFrame> (an iframe of
+// its embedded mini-portal), so a non-core service appears with zero portal
+// changes. Bundled pages always out-rank the dynamic iframe route. Admin/account
+// services (gatekeeper, builder) are bundled and never iframe-hosted.
+const BUNDLED_SERVICES = new Set<string>([
+  'forge', 'workflows', 'hooks', 'gatekeeper', 'builder',
+  'tickets', 'gitea_integration', 'containers', 'outpost-gateway',
+]);
 
 /**
  * isUnavailable reports whether a service-backed module should be hidden/blocked:
@@ -184,6 +191,7 @@ export function AppLayout() {
   const orgNames = useOrgNames(token);
   const permissions = useAppSelector(s => s.auth.permissions);
   const registeredServices = useAppSelector(s => s.auth.registeredServices);
+  const serviceUiPaths = useAppSelector(s => s.auth.serviceUiPaths);
   const servicesResolved = useAppSelector(s => s.auth.servicesResolved);
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
@@ -198,6 +206,13 @@ export function AppLayout() {
   const activeService = ROUTE_SERVICE[activeSegment];
   // Fail open while the routing table is unresolved (null), mirroring the sidebar.
   const serviceUnavailable = !!activeService && isUnavailable(activeService, registeredServices);
+
+  // Registered services that ship a mini-portal but have no bundled page get a
+  // generic iframe nav entry — so a non-core service shows up with zero portal
+  // changes. ServiceFrame handles availability/loading for the routed pane.
+  const iframeServices = (registeredServices ?? [])
+    .filter(s => serviceUiPaths[s] && !BUNDLED_SERVICES.has(s))
+    .sort();
 
   useEffect(() => {
     if (!user) dispatch(hydrateUser());
@@ -261,15 +276,18 @@ export function AppLayout() {
           <NavItem to="/app/workflows" label="workflows/" service="workflows" collapsed={navCollapsed} icon="workflows" />
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
           {!navCollapsed && <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase' }}>modules</div>}
-          <NavItem to="/app/blueprints" label="blueprints/" service="blueprints" collapsed={navCollapsed} icon="blueprints" />
           <NavItem to="/app/forge" label="forge/" service="forge" collapsed={navCollapsed} icon="forge" />
           <NavItem to="/app/tickets" label="tickets/" service="tickets" collapsed={navCollapsed} icon="tickets" />
           <NavItem to="/app/hooks" label="hooks/" service="hooks" collapsed={navCollapsed} icon="hooks" />
           <NavItem to="/app/containers" label="containers/" service="containers" collapsed={navCollapsed} icon="containers" />
           <NavItem to="/app/gitea" label="git/" service="gitea_integration" collapsed={navCollapsed} icon="git" />
           <NavItem to="/app/outposts" label="outposts/" service="outpost-gateway" collapsed={navCollapsed} icon="outposts" />
-          <NavItem to="/app/chaos" label="chaos/" service="chaos" collapsed={navCollapsed} icon="chaos" />
-          <NavItem to="/app/argo" label="argo/" service="argo" collapsed={navCollapsed} icon="argo" />
+          {/* Generic iframe-hosted services (blueprints, chaos, argo, and any future
+              non-core service that advertises a ui_path) — discovered at runtime,
+              no per-service code. */}
+          {iframeServices.map(svc => (
+            <NavItem key={svc} to={`/app/${svc}`} label={`${svc}/`} service={svc} collapsed={navCollapsed} />
+          ))}
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
           {!navCollapsed && <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase' }}>admin</div>}
           {permissions?.['builder:configureOrgService'] && <NavItem to="/app/builder" label="builder/" collapsed={navCollapsed} icon="builder" />}

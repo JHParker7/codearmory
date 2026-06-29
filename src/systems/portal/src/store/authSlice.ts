@@ -25,6 +25,9 @@ export interface AuthState {
   // (error or in flight); combined with servicesResolved this fails OPEN — a
   // module is hidden only once we hold a resolved, non-null list that omits it.
   registeredServices: string[] | null;
+  // name → ui_path for registered services that advertise an embedded mini-portal.
+  // Drives the shell's iframe nav/routes; empty for services that ship no UI.
+  serviceUiPaths: Record<string, string>;
   servicesResolved: boolean;
 }
 
@@ -48,6 +51,7 @@ const initialState: AuthState = {
   error: null,
   permissions: null,
   registeredServices: null,
+  serviceUiPaths: {},
   servicesResolved: false,
 };
 
@@ -180,7 +184,11 @@ export const hydrateRegisteredServices = createAsyncThunk(
     if (!token) return null;
     try {
       const services = await listRegisteredServices(token);
-      return services.map(s => s.name);
+      const uiPaths: Record<string, string> = {};
+      for (const s of services) {
+        if (s.ui_path) uiPaths[s.name] = s.ui_path;
+      }
+      return { names: services.map(s => s.name), uiPaths };
     } catch {
       return null;
     }
@@ -223,6 +231,7 @@ const authSlice = createSlice({
       state.error = null;
       state.permissions = null;
       state.registeredServices = null;
+      state.serviceUiPaths = {};
       state.servicesResolved = false;
     },
   },
@@ -279,8 +288,10 @@ const authSlice = createSlice({
       })
       .addCase(hydrateRegisteredServices.fulfilled, (state, action) => {
         // Resolved (success or handled error). A null payload (error) leaves the
-        // sidebar failing open; a non-null list lets it hide unregistered modules.
-        state.registeredServices = action.payload;
+        // sidebar failing open; a non-null list lets it hide unregistered modules
+        // and render an iframe nav entry for each service advertising a ui_path.
+        state.registeredServices = action.payload ? action.payload.names : null;
+        state.serviceUiPaths = action.payload ? action.payload.uiPaths : {};
         state.servicesResolved = true;
       });
   },

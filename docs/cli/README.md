@@ -256,28 +256,6 @@ Custom statuses, priorities, and timescales that the board and ticket forms use.
 `armory tickets board` opens the kanban board directly (the same screen as the
 no-argument `armory tickets`).
 
-### `notifications`
-
-Manage notification channels and send notifications. `armory notifications` opens the Notifications TUI.
-
-**Channels**
-
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `notifications providers` | | List available provider types and their config fields |
-| `notifications channels list` | | List channels |
-| `notifications channels get <channel-id>` | | Get a channel |
-| `notifications channels create` | `--name`, `--type <slack\|email\|webhook>`, `--config KEY=VALUE` (repeatable), `--enabled` | Create a channel |
-| `notifications channels delete <channel-id>` | | Delete a channel |
-| `notifications channels test <channel-id>` | `--subject`, `--body` | Send a test notification through a channel |
-
-**Sending**
-
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `notifications send` | `--body` (required), `--subject`, `--channel <id>` (repeatable; default: all enabled) | Send a notification to one or more channels |
-| `notifications list` | `--status <pending\|sent\|failed>` | List recent delivery records |
-
 ### `secrets`
 
 Manage encrypted secrets and the org's external secret provider. `armory secrets` opens the Secrets TUI. Secret values are never returned by the API — `list` shows names only.
@@ -335,29 +313,6 @@ Browse the OCI registry. `armory containers` opens the Containers TUI.
 | `containers list tags <namespace/image>` | List tags for an image |
 | `containers get manifest <namespace/image> <reference>` | Get an image manifest by tag or digest |
 | `containers delete manifest <namespace/image> <digest>` | Delete a manifest by digest (`sha256:…`) |
-
-### `chaos`
-
-Run chaos-engineering experiments against a connected cluster through an outpost. `armory chaos` opens the Chaos TUI.
-
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `chaos types` | | List available experiment types |
-| `chaos list` | | List experiments |
-| `chaos create` | `--outpost` (required), `--type` (required), `--namespace` (required), `--label` (required), `--kind` (default `deployment`), `--param KEY=VALUE` (repeatable) | Start an experiment |
-| `chaos get <id>` | | Get an experiment |
-| `chaos delete <id>` | | Delete an experiment |
-
-### `argo`
-
-Manage Argo CD applications and syncs through an outpost. `armory argo` opens the Argo TUI.
-
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `argo list` | | List Argo CD applications |
-| `argo get <name>` | | Get an application |
-| `argo sync <name>` | `--revision <git-ref>` (default: app's latest), `--outpost <id>` (default: the app's reported outpost) | Trigger a sync |
-| `argo sync-status <sync-id>` | | Get the status of a sync operation |
 
 ### `theme`
 

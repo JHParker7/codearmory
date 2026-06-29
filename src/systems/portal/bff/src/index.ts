@@ -16,6 +16,7 @@ import { fileURLToPath } from 'url';
 import { logger } from './observability/logger.js';
 import { registry, httpRequestDuration } from './observability/metrics.js';
 import { stateRoutes } from './routes/state.js';
+import { uiRoutes } from './routes/ui.js';
 import { proxyToUpstream } from './proxy.js';
 
 import { CONDUCTOR_URL } from './config.js';
@@ -74,6 +75,9 @@ if (process.env.METRICS_ENABLED === 'true') {
 
 const api = express.Router();
 api.use(stateRoutes);
+// Service mini-portal assets (HTML/JS/CSS) — must precede the JSON passthrough,
+// which would otherwise force application/json onto these responses.
+api.use(uiRoutes);
 api.all('*', async (req, res) => {
   try {
     // req.url (not req.path) so the query string is preserved — conductor needs

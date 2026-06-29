@@ -16,14 +16,14 @@ func viewsByName(vs []serviceView) map[string]serviceView {
 // disabled when builder seeds every catalog service default-OFF.
 func TestMergeViews_RegistryLiveMarksEnabled(t *testing.T) {
 	catalog := []catalogEntry{
-		{Name: "containers", Description: "Container registry"},
+		{Name: "chaos", Description: "Chaos experiments"},
 		{Name: "notifications", Description: "Notifications"},
 		{Name: "blueprints", Description: "IaC state"},
 	}
-	live := map[string]bool{"containers": true, "notifications": true} // registered out-of-band
-	views := viewsByName(mergeViews(catalog, live, nil))               // no builder baseline rows
+	live := map[string]bool{"chaos": true, "notifications": true} // registered out-of-band
+	views := viewsByName(mergeViews(catalog, live, nil))          // no builder baseline rows
 
-	for _, name := range []string{"containers", "notifications"} {
+	for _, name := range []string{"chaos", "notifications"} {
 		v := views[name]
 		if !v.Enabled {
 			t.Errorf("%s: enabled = false, want true (live in registry)", name)
@@ -51,16 +51,16 @@ func TestMergeViews_RegistryLiveMarksEnabled(t *testing.T) {
 // An explicit baseline row is the admin's desired state and overrides the registry-live
 // signal in both directions.
 func TestMergeViews_BaselineRowOverridesRegistryLive(t *testing.T) {
-	catalog := []catalogEntry{{Name: "containers"}, {Name: "blueprints"}}
-	live := map[string]bool{"containers": true}
+	catalog := []catalogEntry{{Name: "chaos"}, {Name: "blueprints"}}
+	live := map[string]bool{"chaos": true}
 
 	views := viewsByName(mergeViews(catalog, live, []OrgService{
-		{ServiceName: "containers", Enabled: false}, // admin disables a live service
-		{ServiceName: "blueprints", Enabled: true},  // admin enables one not yet live
+		{ServiceName: "chaos", Enabled: false},     // admin disables a live service
+		{ServiceName: "blueprints", Enabled: true}, // admin enables one not yet live
 	}))
 
-	if f := views["containers"]; f.Enabled || f.Source != "default" {
-		t.Errorf("containers = {enabled:%v source:%q}, want {false default}", f.Enabled, f.Source)
+	if f := views["chaos"]; f.Enabled || f.Source != "default" {
+		t.Errorf("chaos = {enabled:%v source:%q}, want {false default}", f.Enabled, f.Source)
 	}
 	if b := views["blueprints"]; !b.Enabled || b.Source != "default" {
 		t.Errorf("blueprints = {enabled:%v source:%q}, want {true default}", b.Enabled, b.Source)
