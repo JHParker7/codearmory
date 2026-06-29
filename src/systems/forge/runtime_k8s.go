@@ -74,6 +74,16 @@ func newKubernetesRuntime(configRuntimeClass string, kernelIsolated bool) (*Kube
 		}
 	}
 
+	// client-go defaults to QPS=5/Burst=10 — far too low for a job-polling
+	// controller. waitAndCollect fires ~3 apiserver calls (job Get + pod List +
+	// metrics) every 2s per running job, so a handful of concurrent executions
+	// saturate the client-side limiter and Get calls fail with "client rate
+	// limiter Wait ... would exceed context deadline". Raise the ceiling
+	// (env-overridable) so polling scales with concurrency; the apiserver's own
+	// API Priority & Fairness is the real backstop.
+	cfg.QPS = float32(envFloatOrDefault("FORGE_K8S_QPS", 50))
+	cfg.Burst = envIntOrDefault("FORGE_K8S_BURST", 100)
+
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, err
