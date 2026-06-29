@@ -126,6 +126,31 @@ func TestEnsureRegistryService_RegistersWhenAbsent(t *testing.T) {
 	}
 }
 
+// A service that declares a mini-portal ui_path must carry it in the create body so
+// the registry stores it and conductor advertises it via GET /services (the portal
+// shell then renders an iframe). blueprints is the canonical ui_path-bearing def.
+func TestEnsureRegistryService_SendsUIPath(t *testing.T) {
+	stub := &stubRegistry{listBody: "[]"}
+	useStubRegistry(t, stub)
+	def, _ := embeddedServiceDef("blueprints")
+	if def.UIPath != "/ui" {
+		t.Fatalf("blueprints def ui_path = %q, want /ui", def.UIPath)
+	}
+
+	if err := ensureRegistryService(context.Background(), def, "codearmory"); err != nil {
+		t.Fatalf("ensureRegistryService: %v", err)
+	}
+	for _, c := range stub.calls() {
+		if c.method == http.MethodPost && c.path == "/services" {
+			if c.body["ui_path"] != "/ui" {
+				t.Errorf("POST ui_path = %v, want /ui", c.body["ui_path"])
+			}
+			return
+		}
+	}
+	t.Fatal("no POST /services recorded")
+}
+
 func TestEnsureRegistryService_NoChurnWhenActive(t *testing.T) {
 	// Already active with endpoints → only the lookup GET, no POST/PUT.
 	stub := &stubRegistry{listBody: `[{"service_id":"svc-1","name":"chaos","endpoints":[{"method":"GET","path":"/x"}]}]`}

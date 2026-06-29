@@ -67,7 +67,7 @@ func TestDBMethods_BrokenDB(t *testing.T) {
 	}
 	mustErr("upsertServiceAccount", upsertServiceAccount(ctx, ServiceAccountModel{AccountID: "x", Name: "n"}))
 	mustErr("rotateServiceKeyDB", rotateServiceKeyDB(ctx, "n", "hash"))
-	mustErr("reactivateServiceByName", reactivateServiceByName(ctx, "n", "http://x", "", false, "", false))
+	mustErr("reactivateServiceByName", reactivateServiceByName(ctx, "n", "http://x", "", "", false, "", false))
 	mustErr("upsertServiceModelByName", upsertServiceModelByName(ctx, ServiceModel{ServiceID: "x", Name: "n", URL: "http://x"}))
 	if _, err := listServicesWithEndpoints(ctx); err == nil {
 		t.Error("listServicesWithEndpoints: expected error")

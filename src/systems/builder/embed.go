@@ -30,6 +30,10 @@ type serviceDef struct {
 	Port        int32  `json:"port"`
 	ForwardAuth bool   `json:"forward_auth"`
 	Description string `json:"description"`
+	// UIPath, when set (e.g. "/ui"), is the path the service serves its embedded
+	// mini-portal on; registered with the service so conductor advertises it via
+	// GET /services and the portal shell renders it in an iframe.
+	UIPath string `json:"ui_path"`
 	// RegistryAccount: the service also needs a registry READ account to pull from the
 	// registry (e.g. workflows → GET /actions). Builder ensures the account + a derived
 	// REGISTRY_SERVICE_KEY when true.
