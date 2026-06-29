@@ -448,7 +448,7 @@ git:
     repository: git
     tag: ""
   replicaCount: 1
-  port: 8093
+  port: 8096
   resources:
     requests:
       cpu: 50m

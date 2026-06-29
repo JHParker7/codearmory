@@ -16,7 +16,7 @@ A user links a backend once (a GitHub App, a GitLab OAuth client, a Forgejo admi
 ```
 Client (Bearer JWT)
   │
-  └── POST /credentials {repo_url} ───────────────► Git :8093
+  └── POST /credentials {repo_url} ───────────────► Git :8096
         │  1. Verify token via Gatekeeper /check_permissions (forward_auth)
         │  2. deriveHost(repo_url) → look up the caller's backend for that host
         │  3. Mint (app/oauth/admin) or broker (pat/token/basic) a credential
@@ -66,7 +66,7 @@ Backend reads (`GET /backends`, `GET /backends/{id}`) return a secret-free proje
 | `GATEKEEPER_SERVICE_KEY` | — | Shared service key registered with Gatekeeper. Required for service-to-service authentication in production. |
 | `GIT_ENCRYPTION_KEY` | — | **Required.** Passphrase used to derive the AES-256 key that encrypts credential material at rest. The service exits on startup if unset. |
 | `GIT_INTERNAL_KEY` | — | Shared key (`X-Internal-Key`) that authenticates Forge/Workflows calls to `POST /internal/clone-token`. When unset, the internal endpoint rejects all requests. |
-| `PORT` | `8093` | Port the server listens on |
+| `PORT` | `8096` | Port the server listens on |
 | `OTEL_SERVICE_NAME` | `git` | Service name reported in traces and metrics |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTel Collector HTTP endpoint. Omit to disable telemetry. |
 | `LOG_LEVEL` | `info` | Set to `debug` for verbose output. |

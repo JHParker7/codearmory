@@ -744,7 +744,7 @@
   },
   {
     "name": "git",
-    "url": "http://git:8093",
+    "url": "http://git:8096",
     "description": "Git credential broker — mints short-lived clone credentials for linked backends (GitHub, GitLab, Forgejo, generic)",
     "forward_auth": true,
     "service_key": "git-registry-local-secret",

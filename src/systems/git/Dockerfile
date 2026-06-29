@@ -14,5 +14,5 @@ WORKDIR /home/svc/
 COPY --from=builder /src/git/git .
 RUN chown svc:svc ./git
 USER 100:101
-EXPOSE 8093
+EXPOSE 8096
 CMD ["./git"]

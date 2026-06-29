@@ -169,7 +169,7 @@ services:
       # credentials via the core git broker, and "gitea:<owner>/<repo>" via the
       # optional gitea-integration service. The *_INTERNAL_KEY values must match the
       # corresponding service.
-      GIT_INTERNAL_URL: http://git:8093
+      GIT_INTERNAL_URL: http://git:8096
       GIT_INTERNAL_KEY: forge-git-internal-local-secret
       GITEA_INTERNAL_URL: http://gitea-integration:8088
       GITEA_INTERNAL_KEY: forge-gitea-internal-local-secret
@@ -572,7 +572,7 @@ services:
       # GIT_INTERNAL_KEY.
       GIT_INTERNAL_KEY: forge-git-internal-local-secret
     ports:
-      - "8093:8093"
+      - "8096:8096"
     depends_on:
       postgres:
         condition: service_healthy

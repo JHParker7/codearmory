@@ -180,7 +180,7 @@ func main() {
 	// shared GIT_INTERNAL_KEY HMAC rather than conductor.
 	mux.HandleFunc("POST /internal/clone-token", handleInternalCloneToken)
 
-	port := envOrDefault("PORT", "8093")
+	port := envOrDefault("PORT", "8096")
 	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{mux}), "git",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
