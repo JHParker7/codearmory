@@ -41,7 +41,8 @@ type Execution struct {
 	Project string `gorm:"column:project;not null;default:''" json:"project,omitempty"`
 	// SecretRefs maps a target env var NAME to a credential reference resolved at
 	// dispatch and injected into the runtime env — never into the persisted env.
-	// Reference schemes: "secret:<name>" (gatekeeper org secret) and
+	// Reference schemes: "secret:<name>" (gatekeeper org secret),
+	// "git:<repo-url>" (broker-minted clone URL for any linked backend), and
 	// "gitea:<owner>/<repo>" (a minted Forgejo clone URL). Only the references are
 	// stored here; the resolved values are never persisted or logged.
 	SecretRefs map[string]string `gorm:"column:secret_refs;type:jsonb;not null;default:'{}';serializer:json" json:"secret_refs,omitempty"`
@@ -127,9 +128,10 @@ type submitRequest struct {
 	OutputEnv []string `json:"output_env"`
 	// SecretRefs maps a target env var NAME to a credential reference. Supported
 	// schemes: "secret:<name>" resolves a gatekeeper org secret (e.g. a git SSH
-	// deploy key or token for GitHub/Bitbucket); "gitea:<owner>/<repo>" mints a
-	// short-lived Forgejo clone URL. Resolved at dispatch, injected into the
-	// runtime env, and never persisted.
+	// deploy key or token for GitHub/Bitbucket); "git:<repo-url>" asks the core git
+	// credential-broker to mint clone credentials for the URL's backend;
+	// "gitea:<owner>/<repo>" mints a short-lived Forgejo clone URL. Resolved at
+	// dispatch, injected into the runtime env, and never persisted.
 	SecretRefs map[string]string `json:"secret_refs"`
 }
 

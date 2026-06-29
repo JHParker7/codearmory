@@ -11,12 +11,16 @@ func TestParseCredentialRef(t *testing.T) {
 	}{
 		{"secret:github-deploy-key", "secret", "github-deploy-key", false},
 		{"gitea:acme/widgets", "gitea", "acme/widgets", false},
+		{"git:https://github.com/acme/widgets.git", "git", "https://github.com/acme/widgets.git", false},
+		{"git:http://git.internal/team/app.git", "git", "http://git.internal/team/app.git", false},
 		{"secret:", "", "", true},
 		{"", "", "", true},
 		{"bogus:x", "", "", true},
 		{"gitea:acme", "", "", true},               // missing repo
 		{"gitea:acme/widgets/extra", "", "", true}, // too many segments
 		{"gitea:/widgets", "", "", true},           // empty owner
+		{"git:ssh://git@host/a/b", "", "", true},   // non-http(s) url
+		{"git:not-a-url", "", "", true},            // no scheme/host
 	}
 	for _, c := range cases {
 		scheme, arg, err := parseCredentialRef(c.ref)
@@ -46,6 +50,7 @@ func TestValidateSecretRefs(t *testing.T) {
 	}{
 		{"secret with org", map[string]string{"GIT_SSH_KEY": "secret:k"}, nil, "org1", false},
 		{"gitea needs no org", map[string]string{"REPO_URL": "gitea:acme/widgets"}, nil, "", false},
+		{"git needs no org", map[string]string{"REPO_URL": "git:https://github.com/acme/widgets.git"}, nil, "", false},
 		{"secret without org", map[string]string{"X": "secret:k"}, nil, "", true},
 		{"invalid target key", map[string]string{"1BAD": "gitea:a/b"}, nil, "", true},
 		{"blocked target key", map[string]string{"LD_PRELOAD": "gitea:a/b"}, nil, "", true},

@@ -6,6 +6,7 @@ CREATE DATABASE workflows;
 CREATE DATABASE tickets;
 CREATE DATABASE notifications;
 CREATE DATABASE hooks;
+CREATE DATABASE git;
 CREATE DATABASE gitea_integration;
 CREATE DATABASE outpost_gateway;
 CREATE DATABASE chaos;

@@ -70,7 +70,7 @@ services:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: forge=forge-local-secret,workflows=workflows-local-secret,hooks=hooks-local-secret,outpost-gateway=outpost-gateway-local-secret,builder=builder-local-secret,tickets=tickets-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
+      GATEKEEPER_SERVICES: forge=forge-local-secret,workflows=workflows-local-secret,hooks=hooks-local-secret,outpost-gateway=outpost-gateway-local-secret,builder=builder-local-secret,tickets=tickets-local-secret,git=git-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
       SECRETS_LOOKUP_ALLOWED_CALLERS: "forge,containers"
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
@@ -165,9 +165,12 @@ services:
       # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: forge-local-secret
       # Job secret_refs: forge resolves "secret:<name>" via gatekeeper (forge must
-      # be in SECRETS_LOOKUP_ALLOWED_CALLERS) and "gitea:<owner>/<repo>" by minting
-      # a Forgejo clone URL via gitea-integration. GITEA_INTERNAL_KEY must match the
-      # value on the gitea-integration service.
+      # be in SECRETS_LOOKUP_ALLOWED_CALLERS), "git:<repo-url>" by minting clone
+      # credentials via the core git broker, and "gitea:<owner>/<repo>" via the
+      # optional gitea-integration service. The *_INTERNAL_KEY values must match the
+      # corresponding service.
+      GIT_INTERNAL_URL: http://git:8093
+      GIT_INTERNAL_KEY: forge-git-internal-local-secret
       GITEA_INTERNAL_URL: http://gitea-integration:8088
       GITEA_INTERNAL_KEY: forge-gitea-internal-local-secret
       # Execution containers join the internal forge-exec network and route all
@@ -552,6 +555,29 @@ services:
         condition: service_healthy
       workflows:
         condition: service_started
+    restart: on-failure
+
+  git:
+    build:
+      context: ../../src/systems/git
+    environment:
+      <<: *otel-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/git
+      GATEKEEPER_URL: http://gatekeeper:8081
+      # Must match the git entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: git-local-secret
+      # Encrypts linked-backend credential material at rest (AES-256-GCM).
+      GIT_ENCRYPTION_KEY: git-encryption-local-secret
+      # Authenticates forge/workflows → /internal/clone-token. Must match forge's
+      # GIT_INTERNAL_KEY.
+      GIT_INTERNAL_KEY: forge-git-internal-local-secret
+    ports:
+      - "8093:8093"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
     restart: on-failure
 
   hooks-integration-tests:

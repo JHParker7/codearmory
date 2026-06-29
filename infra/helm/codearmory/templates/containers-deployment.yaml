@@ -54,8 +54,12 @@ spec:
               value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
             - name: REGISTRY_URL
               value: {{ .Values.containers.env.registryUrl | quote }}
+            # gitea_integration is now a non-core service builder deploys on demand;
+            # builder deploys it under the fullname-prefixed name on its fixed port 8088.
+            # Kept (not removed) so containers always boots; resolves once an admin
+            # enables gitea via builder.
             - name: GITEA_INTEGRATION_URL
-              value: "http://{{ $fullname }}-gitea-integration:{{ .Values.giteaIntegration.port }}"
+              value: "http://{{ $fullname }}-gitea-integration:8088"
             {{- if .Values.containers.env.registryUsername }}
             - name: REGISTRY_USERNAME
               value: {{ .Values.containers.env.registryUsername | quote }}

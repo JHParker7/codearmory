@@ -1,4 +1,5 @@
 # Go build output
+src/systems/git/git
 src/systems/gatekeeper/gatekeeper
 src/systems/egress-proxy/egress-proxy
 src/systems/blueprints/blueprints

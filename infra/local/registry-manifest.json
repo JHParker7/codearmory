@@ -542,6 +542,91 @@
     ]
   },
   {
+    "name": "git",
+    "url": "http://git:8093",
+    "description": "Git credential broker — mints short-lived clone credentials for linked backends (GitHub, GitLab, Forgejo, generic)",
+    "forward_auth": true,
+    "service_key": "git-registry-local-secret",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/backends",
+        "action": "listBackend",
+        "resource": "git/backends"
+      },
+      {
+        "method": "POST",
+        "path": "/backends",
+        "action": "createBackend",
+        "resource": "git/backends"
+      },
+      {
+        "method": "GET",
+        "path": "/backends/{id}",
+        "action": "getBackend",
+        "resource": "git/backends/{id}"
+      },
+      {
+        "method": "PUT",
+        "path": "/backends/{id}",
+        "action": "updateBackend",
+        "resource": "git/backends/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/backends/{id}",
+        "action": "deleteBackend",
+        "resource": "git/backends/{id}"
+      },
+      {
+        "method": "POST",
+        "path": "/backends/{id}/test",
+        "action": "testBackend",
+        "resource": "git/backends/{id}"
+      },
+      {
+        "method": "POST",
+        "path": "/credentials",
+        "action": "mintCredential",
+        "resource": "git/credentials"
+      }
+    ],
+    "actions": [],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": [
+          "listBackend",
+          "createBackend"
+        ],
+        "resources": [
+          "{username}/git/backends"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "getBackend",
+          "updateBackend",
+          "deleteBackend",
+          "testBackend"
+        ],
+        "resources": [
+          "{username}/git/backends/*"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "mintCredential"
+        ],
+        "resources": [
+          "{username}/git/credentials"
+        ]
+      }
+    ]
+  },
+  {
     "name": "containers",
     "url": "http://containers:8089",
     "description": "Container image registry management",

@@ -1,0 +1,179 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"sync"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+var (
+	gormDB     *gorm.DB
+	gormDBRead *gorm.DB
+	dbInitMu   sync.Mutex
+)
+
+// errBackendNotFound is returned when a lookup matches no backend.
+var errBackendNotFound = errors.New("backend not found")
+
+func connect() *gorm.DB {
+	dbInitMu.Lock()
+	defer dbInitMu.Unlock()
+	if gormDB != nil {
+		return gormDB
+	}
+	conn, err := gorm.Open(postgres.Open(secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/git")), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		slog.Error("unable to connect to database", "error", err)
+		os.Exit(1)
+	}
+	gormDB = conn
+	return gormDB
+}
+
+func connectRead() *gorm.DB {
+	dbInitMu.Lock()
+	defer dbInitMu.Unlock()
+	if gormDBRead != nil {
+		return gormDBRead
+	}
+	if gormDB != nil {
+		return gormDB
+	}
+	readURL := secret("DATABASE_READ_URL")
+	if readURL == "" {
+		readURL = secretOrDefault("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/git")
+	}
+	conn, err := gorm.Open(postgres.Open(readURL), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		slog.Error("unable to connect to read database", "error", err)
+		os.Exit(1)
+	}
+	gormDBRead = conn
+	return gormDBRead
+}
+
+// Add inserts a new backend.
+func (b GitBackend) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.backend.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("backend.id", b.ID))
+	if err := connect().WithContext(ctx).Create(&b).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// Update persists base_url/host/auth changes for an existing backend.
+func (b GitBackend) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.backend.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("backend.id", b.ID))
+	b.UpdatedAt = time.Now().UTC()
+	if err := connect().WithContext(ctx).
+		Model(&GitBackend{}).
+		Where("id = ? AND owner = ?", b.ID, b.Owner).
+		Updates(map[string]any{
+			"base_url":   b.BaseURL,
+			"host":       b.Host,
+			"auth_mode":  b.AuthMode,
+			"auth_enc":   b.AuthEnc,
+			"updated_at": b.UpdatedAt,
+		}).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// Remove hard-deletes a backend owned by the caller.
+func (b GitBackend) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.backend.remove")
+	defer span.End()
+	span.SetAttributes(attribute.String("backend.id", b.ID))
+	res := connect().WithContext(ctx).
+		Where("id = ? AND owner = ?", b.ID, b.Owner).
+		Delete(&GitBackend{})
+	if res.Error != nil {
+		span.RecordError(res.Error)
+		span.SetStatus(codes.Error, res.Error.Error())
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errBackendNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// getBackendByID fetches a single backend scoped to its owner.
+func getBackendByID(ctx context.Context, owner, id string) (GitBackend, error) {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.backend.get")
+	defer span.End()
+	var b GitBackend
+	err := connectRead().WithContext(ctx).
+		Where("id = ? AND owner = ?", id, owner).
+		First(&b).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return GitBackend{}, errBackendNotFound
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return GitBackend{}, err
+	}
+	return b, nil
+}
+
+// getBackendByHost resolves the backend a clone host belongs to, for a given owner.
+func getBackendByHost(ctx context.Context, owner, host string) (GitBackend, error) {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.backend.get_by_host")
+	defer span.End()
+	var b GitBackend
+	err := connectRead().WithContext(ctx).
+		Where("owner = ? AND host = ?", owner, host).
+		First(&b).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return GitBackend{}, errBackendNotFound
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return GitBackend{}, err
+	}
+	return b, nil
+}
+
+// listBackends returns all backends owned by the caller, newest first.
+func listBackends(ctx context.Context, owner string) ([]GitBackend, error) {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.backend.list")
+	defer span.End()
+	var backends []GitBackend
+	if err := connectRead().WithContext(ctx).
+		Where("owner = ?", owner).
+		Order("created_at DESC").
+		Find(&backends).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	return backends, nil
+}

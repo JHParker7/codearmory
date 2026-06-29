@@ -19,6 +19,7 @@ import { Tickets } from './pages/app/Tickets';
 import { Hooks } from './pages/app/Hooks';
 import { Containers } from './pages/app/Containers';
 import { Gitea } from './pages/app/Gitea';
+import { Git } from './pages/app/Git';
 import { Outposts } from './pages/app/Outposts';
 import { ServiceFrame } from './pages/app/ServiceFrame';
 import { Audit } from './pages/app/Audit';
@@ -72,6 +73,7 @@ const LANDING_MODULES: { path: string; service: string }[] = [
   { path: 'tickets', service: 'tickets' },
   { path: 'hooks', service: 'hooks' },
   { path: 'containers', service: 'containers' },
+  { path: 'git', service: 'git' },
   { path: 'gitea', service: 'gitea_integration' },
   { path: 'outposts', service: 'outpost-gateway' },
 ];
@@ -124,6 +126,7 @@ export function App() {
             <Route path="tickets" element={<Tickets />} />
             <Route path="hooks" element={<Hooks />} />
             <Route path="containers" element={<Containers />} />
+            <Route path="git" element={<Git />} />
             <Route path="gitea" element={<Gitea />} />
             <Route path="outposts" element={<Outposts />} />
             <Route path="gatekeeper" element={<Gatekeeper />} />

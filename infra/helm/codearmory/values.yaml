@@ -50,7 +50,7 @@ gatekeeper:
     # Comma-separated list of service names permitted to register. Core services
     # deployed by this chart (incl. the forge + workflows CI/CD pair) are listed
     # here; non-core services are auto-permitted at runtime when builder registers them.
-    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,gitea_integration,containers"
+    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git,containers"
     # Comma-separated services allowed to resolve org secrets via the internal
     # lookup endpoint (deny-all when empty). Defaults to "forge" so forge can resolve
     # "secret:<name>" job secret_refs; add "containers" to let the container registry
@@ -439,16 +439,16 @@ tickets:
     clientCertSecret: ""
     caBundle: ""
 
-# ── Gitea integration ─────────────────────────────────────────────────────────
-# Forgejo/Gitea repository management. Source lives in the codearmory-gitea_integration
-# repo; the chart deploys its published image as a CORE service.
-giteaIntegration:
+# ── Git ───────────────────────────────────────────────────────────────────────
+# Backend-agnostic git credential broker — mints short-lived clone credentials for
+# linked backends (GitHub, GitLab, Forgejo, generic). In-repo GORM CORE service.
+git:
   enabled: true
   image:
-    repository: gitea_integration
+    repository: git
     tag: ""
   replicaCount: 1
-  port: 8088
+  port: 8093
   resources:
     requests:
       cpu: 50m
@@ -458,17 +458,20 @@ giteaIntegration:
       memory: 128Mi
   env:
     logLevel: info
-    # Base URL of the Forgejo/Gitea instance this service manages (required to function).
-    giteaUrl: ""
     otelEndpoint: ""
   secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
+    # Must match the git entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
-    # Admin API token for the Forgejo/Gitea instance (required to function).
-    giteaAdminToken: ""
-    # Shared HMAC secret authenticating forge → gitea_integration /internal/clone-token
-    # calls. forge derives the same key; leave empty for auto-generation (both sides agree).
-    giteaInternalKey: ""
+    # REQUIRED: encrypts linked-backend credentials at rest. The service refuses to
+    # start without it. Auto-generated on first install and preserved across upgrades
+    # (so early-encrypted rows stay decryptable). Set a managed key for production.
+    gitEncryptionKey: ""
+    # Shared HMAC secret authenticating forge → git /internal/clone-token calls.
+    # forge derives the same key; leave empty for auto-generation (both sides agree).
+    gitInternalKey: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -671,9 +674,10 @@ postgresql:
     initdb:
       scripts:
         # Only the CORE service databases (incl. the forge + workflows CI/CD pair and the
-        # DB-backed tickets + gitea_integration trio members; containers is stateless).
-        # Non-core services are deployed by builder with an admin-supplied db_url (HA
-        # Postgres / Neon / managed), so the bundled subchart never provisions theirs.
+        # DB-backed tickets + git core members; containers is stateless).
+        # Non-core services (incl. gitea_integration, now builder-deployed) are deployed
+        # by builder with an admin-supplied db_url (HA Postgres / Neon / managed), so the
+        # bundled subchart never provisions theirs.
         init.sql: |
           CREATE DATABASE gatekeeper;
           CREATE DATABASE registry;
@@ -681,4 +685,4 @@ postgresql:
           CREATE DATABASE forge;
           CREATE DATABASE workflows;
           CREATE DATABASE tickets;
-          CREATE DATABASE gitea_integration;
+          CREATE DATABASE git;

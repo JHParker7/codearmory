@@ -10,6 +10,7 @@
 | Builder                                              | 8095 | Org control plane + runtime deployer/registrar of optional service modules |
 | Portal                                               | —    | Web UI — React SPA + Express BFF proxying to Conductor |
 | [Forge](forge/architecture.md)                       | 8083 | Sandboxed container execution |
+| [Git](git/README.md)                                 | 8093 | Git credential broker — mints/brokers clone credentials for linked backends |
 | [Workflows](workflows/architecture.md)               | 8085 | CI/CD pipeline orchestrator |
 | [Hooks](hooks/architecture.md)                       | 8087 | Webhook receiver and pipeline trigger |
 | [Outpost Gateway](outpost-gateway/README.md)         | 8092 | Outpost-facing connection point + event backbone |

@@ -6,6 +6,7 @@ use (
 	./egress-proxy
 	./forge
 	./gatekeeper
+	./git
 	./hooks
 	./outpost
 	./outpost-gateway
