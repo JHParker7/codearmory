@@ -10,7 +10,6 @@ import { Login } from './pages/Login';
 import { Signup } from './pages/Signup';
 import { Setup } from './pages/Setup';
 import { AppLayout } from './pages/app/AppLayout';
-import { Blueprints } from './pages/app/Blueprints';
 import { Gatekeeper } from './pages/app/Gatekeeper';
 import { Builder } from './pages/app/Builder';
 import { Workflows } from './pages/app/Workflows';
@@ -21,8 +20,7 @@ import { Hooks } from './pages/app/Hooks';
 import { Containers } from './pages/app/Containers';
 import { Gitea } from './pages/app/Gitea';
 import { Outposts } from './pages/app/Outposts';
-import { Chaos } from './pages/app/Chaos';
-import { Argo } from './pages/app/Argo';
+import { ServiceFrame } from './pages/app/ServiceFrame';
 import { Audit } from './pages/app/Audit';
 import { Settings } from './pages/app/Settings';
 import { T } from './theme';
@@ -63,12 +61,12 @@ function RootRedirect() {
   return <Navigate to={token ? '/app' : '/login'} replace />;
 }
 
-// Ordered list of service-backed modules, mirroring the sidebar order, used to
-// pick the landing page. blueprints (and the rest) are no longer always enabled,
-// so /app lands on the first module whose service is actually registered, falling
-// back to gatekeeper/ — a core page that is always present.
+// Ordered list of bundled service-backed modules, mirroring the sidebar order,
+// used to pick the landing page. These are no longer always enabled, so /app lands
+// on the first module whose service is actually registered, falling back to
+// gatekeeper/ — a core page that is always present. Iframe-only (non-bundled)
+// services are intentionally not landing targets.
 const LANDING_MODULES: { path: string; service: string }[] = [
-  { path: 'blueprints', service: 'blueprints' },
   { path: 'forge', service: 'forge' },
   { path: 'workflows', service: 'workflows' },
   { path: 'tickets', service: 'tickets' },
@@ -76,8 +74,6 @@ const LANDING_MODULES: { path: string; service: string }[] = [
   { path: 'containers', service: 'containers' },
   { path: 'gitea', service: 'gitea_integration' },
   { path: 'outposts', service: 'outpost-gateway' },
-  { path: 'chaos', service: 'chaos' },
-  { path: 'argo', service: 'argo' },
 ];
 
 /**
@@ -122,7 +118,6 @@ export function App() {
           <Route path="/signup" element={<RedirectIfAuthed><Signup /></RedirectIfAuthed>} />
           <Route path="/app" element={<RequireAuth><AppLayout /></RequireAuth>}>
             <Route index element={<DefaultAppRoute />} />
-            <Route path="blueprints" element={<Blueprints />} />
             <Route path="forge" element={<Forge />} />
             <Route path="workflows" element={<Workflows />} />
             <Route path="workflows/runs/:runId" element={<RunView />} />
@@ -131,12 +126,14 @@ export function App() {
             <Route path="containers" element={<Containers />} />
             <Route path="gitea" element={<Gitea />} />
             <Route path="outposts" element={<Outposts />} />
-            <Route path="chaos" element={<Chaos />} />
-            <Route path="argo" element={<Argo />} />
             <Route path="gatekeeper" element={<Gatekeeper />} />
             <Route path="builder" element={<Builder />} />
             <Route path="audit" element={<Audit />} />
             <Route path="settings" element={<Settings />} />
+            {/* Generic iframe host for any registered, non-bundled service that
+                advertises a ui_path (e.g. blueprints, chaos, argo). Static routes
+                above out-rank this dynamic segment, so bundled pages always win. */}
+            <Route path=":service" element={<ServiceFrame />} />
           </Route>
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>

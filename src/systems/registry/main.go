@@ -226,6 +226,7 @@ type manifestEntry struct {
 	Description string `json:"description"`
 	ForwardAuth bool   `json:"forward_auth"`
 	ServiceKey  string `json:"service_key"`
+	UIPath      string `json:"ui_path"`
 	Endpoints   []struct {
 		Method   string `json:"method"`
 		Path     string `json:"path"`

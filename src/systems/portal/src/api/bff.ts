@@ -1205,6 +1205,10 @@ export function deleteService(token: string, service: string) {
 export interface RegisteredService {
   name: string;
   description?: string;
+  // Path under the service's route prefix that serves its embedded mini-portal
+  // (e.g. "/ui"). Present only for services that ship a UI; the shell renders an
+  // iframe page for any registered, non-bundled service that advertises one.
+  ui_path?: string;
 }
 
 /** Fetch conductor's live routing table (the services currently registered/routable), flattened to the bare array. */

@@ -28,6 +28,7 @@ type ServiceModel struct {
 	Description string    `gorm:"column:description;not null;default:''"`
 	ForwardAuth bool      `gorm:"column:forward_auth;not null;default:false"`
 	ServiceKey  string    `gorm:"column:service_key;not null;default:''"`
+	UIPath      string    `gorm:"column:ui_path;not null;default:''"`
 	Active      bool      `gorm:"column:active;not null;default:true"`
 	CreatedAt   time.Time `gorm:"column:created_at;not null;default:now()"`
 	UpdatedAt   time.Time `gorm:"column:updated_at;not null;default:now()"`
@@ -453,7 +454,7 @@ func upsertServiceModelByName(ctx context.Context, svc ServiceModel) error {
 // and default grants in a batch (avoids N+1 round-trips).
 func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, error) {
 	svcRows, err := connect().WithContext(ctx).Raw(
-		`SELECT service_id, name, url, description, forward_auth, active, created_at, updated_at
+		`SELECT service_id, name, url, description, forward_auth, ui_path, active, created_at, updated_at
 		 FROM services WHERE active = true ORDER BY name`).Rows()
 	if err != nil {
 		return nil, err
@@ -463,7 +464,7 @@ func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, err
 	var svcs []Service
 	for svcRows.Next() {
 		var s Service
-		if err := svcRows.Scan(&s.ServiceID, &s.Name, &s.URL, &s.Description, &s.ForwardAuth, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := svcRows.Scan(&s.ServiceID, &s.Name, &s.URL, &s.Description, &s.ForwardAuth, &s.UIPath, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			slog.ErrorContext(ctx, "listServicesWithEndpoints: scan", "error", err)
 			continue
 		}
@@ -739,6 +740,7 @@ func loadManifestEntry(ctx context.Context, e manifestEntry) {
 			Description: e.Description,
 			ForwardAuth: e.ForwardAuth,
 			ServiceKey:  hashedKey,
+			UIPath:      e.UIPath,
 		}
 		if err := conn.Create(&svcModel).Error; err != nil {
 			slog.ErrorContext(ctx, "manifest: failed to insert service", "service", e.Name, "error", err)
@@ -747,8 +749,8 @@ func loadManifestEntry(ctx context.Context, e manifestEntry) {
 		slog.InfoContext(ctx, "manifest: service created", "service", e.Name)
 	} else {
 		if err := conn.Exec(
-			`UPDATE services SET description = ?, forward_auth = ?, service_key = ?, active = true, updated_at = now() WHERE service_id = ?`,
-			e.Description, e.ForwardAuth, hashedKey, svcModel.ServiceID,
+			`UPDATE services SET description = ?, forward_auth = ?, service_key = ?, ui_path = ?, active = true, updated_at = now() WHERE service_id = ?`,
+			e.Description, e.ForwardAuth, hashedKey, e.UIPath, svcModel.ServiceID,
 		).Error; err != nil {
 			slog.ErrorContext(ctx, "manifest: failed to update service", "service", e.Name, "error", err)
 			return

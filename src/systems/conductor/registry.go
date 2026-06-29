@@ -40,6 +40,7 @@ type serviceState struct {
 	proxy       *httputil.ReverseProxy
 	forwardAuth bool   // whether to forward the caller's Authorization header
 	description string // human-readable description from the registry manifest
+	uiPath      string // path serving the service's embedded mini-portal ("" = no UI)
 }
 
 // routingMu protects both servicesMap and endpointsList under a single lock so
@@ -97,6 +98,7 @@ func refreshServiceCache(ctx context.Context) {
 		URL         string `json:"url"`
 		Description string `json:"description"`
 		ForwardAuth bool   `json:"forward_auth"`
+		UIPath      string `json:"ui_path"`
 		Endpoints   []struct {
 			Method   string `json:"method"`
 			Path     string `json:"path"`
@@ -138,6 +140,7 @@ func refreshServiceCache(ctx context.Context) {
 			proxy:       proxy,
 			forwardAuth: s.ForwardAuth,
 			description: s.Description,
+			uiPath:      s.UIPath,
 		}
 
 		for _, ep := range s.Endpoints {

@@ -30,6 +30,7 @@ type Service struct {
 	URL         string    `json:"url"`
 	Description string    `json:"description"`
 	ForwardAuth bool      `json:"forward_auth"`
+	UIPath      string    `json:"ui_path,omitempty"`
 	Active      bool      `json:"active"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -542,6 +543,7 @@ func serviceFromModel(m ServiceModel) Service {
 		URL:         m.URL,
 		Description: m.Description,
 		ForwardAuth: m.ForwardAuth,
+		UIPath:      m.UIPath,
 		Active:      m.Active,
 		CreatedAt:   m.CreatedAt,
 		UpdatedAt:   m.UpdatedAt,
