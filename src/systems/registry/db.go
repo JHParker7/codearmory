@@ -411,12 +411,12 @@ func rotateServiceKeyDB(ctx context.Context, name, newHash string) error {
 // which the caller replaces next via replaceServiceManifest. Returns
 // gorm.ErrRecordNotFound when no row with that name exists. service_key is left
 // untouched when setKey is false so an empty request key never clobbers a stored one.
-func reactivateServiceByName(ctx context.Context, name, url, description string, forwardAuth bool, hashedKey string, setKey bool) error {
+func reactivateServiceByName(ctx context.Context, name, url, description, uiPath string, forwardAuth bool, hashedKey string, setKey bool) error {
 	ctx, span := otel.Tracer("registry").Start(ctx, "db.service.reactivate")
 	defer span.End()
 	span.SetAttributes(attribute.String("service.name", name))
-	q := `UPDATE services SET active = true, url = ?, description = ?, forward_auth = ?, updated_at = now()`
-	args := []any{url, description, forwardAuth}
+	q := `UPDATE services SET active = true, url = ?, description = ?, forward_auth = ?, ui_path = ?, updated_at = now()`
+	args := []any{url, description, forwardAuth, uiPath}
 	if setKey {
 		q += `, service_key = ?`
 		args = append(args, hashedKey)

@@ -99,6 +99,7 @@ func createRegistryService(ctx context.Context, def serviceDef, url string) (str
 		"url":          url,
 		"description":  def.Description,
 		"forward_auth": def.ForwardAuth,
+		"ui_path":      def.UIPath,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, registryURL+"/services", bytes.NewReader(body))
 	if err != nil {

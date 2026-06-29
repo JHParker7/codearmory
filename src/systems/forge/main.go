@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -57,6 +58,36 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envFloatOrDefault reads key as a float, falling back to def when unset, empty,
+// or unparseable (an invalid value is logged and ignored rather than crashing).
+func envFloatOrDefault(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		slog.Warn("forge: ignoring invalid env value, using default", "key", key, "value", v, "default", def)
+		return def
+	}
+	return f
+}
+
+// envIntOrDefault reads key as an int, falling back to def under the same rules as
+// envFloatOrDefault.
+func envIntOrDefault(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		slog.Warn("forge: ignoring invalid env value, using default", "key", key, "value", v, "default", def)
+		return def
+	}
+	return n
 }
 
 // secret reads a secret from an env var. If NAME_FILE is set, the value is read

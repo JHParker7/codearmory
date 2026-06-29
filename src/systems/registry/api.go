@@ -353,6 +353,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		Description string `json:"description"`
 		ForwardAuth bool   `json:"forward_auth"`
 		ServiceKey  string `json:"service_key"`
+		UIPath      string `json:"ui_path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.URL == "" {
 		span.SetStatus(codes.Error, "bad request")
@@ -388,7 +389,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "service already registered", http.StatusConflict)
 			return
 		}
-		if err := reactivateServiceByName(ctx, req.Name, req.URL, req.Description, req.ForwardAuth, hashedKey, req.ServiceKey != ""); err != nil {
+		if err := reactivateServiceByName(ctx, req.Name, req.URL, req.Description, req.UIPath, req.ForwardAuth, hashedKey, req.ServiceKey != ""); err != nil {
 			slog.ErrorContext(ctx, "create service: reactivate", "error", err, "service", req.Name)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "reactivate failed")
@@ -442,6 +443,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		ForwardAuth: req.ForwardAuth,
 		ServiceKey:  hashedKey,
+		UIPath:      req.UIPath,
 	}
 	if err := newSvcModel.Add(ctx); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {

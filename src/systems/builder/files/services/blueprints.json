@@ -5,6 +5,7 @@
   "port": 8093,
   "forward_auth": true,
   "description": "OpenTofu/Terraform remote state storage",
+  "ui_path": "/ui",
   "registryAccount": false,
   "infra": {
     "managedRedis": true
@@ -61,6 +62,20 @@
       "path": "/backend",
       "action": "createBackend",
       "resource": "states"
+    },
+    {
+      "method": "GET",
+      "path": "/ui",
+      "action": "serveUI",
+      "resource": "blueprints/ui",
+      "public": true
+    },
+    {
+      "method": "GET",
+      "path": "/ui/",
+      "action": "serveUI",
+      "resource": "blueprints/ui",
+      "public": true
     }
   ],
   "actions": [
