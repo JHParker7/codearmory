@@ -100,10 +100,19 @@ func bearerToken() string {
 	return t
 }
 
+// isSignedIn reports whether a usable (non-expired) auth token is available. The
+// TUI hub gates its service menu on this: while signed out, registeredServices()
+// can't tell which services the caller can reach, so the menu would fail open and
+// list every service.
+func isSignedIn() bool { return bearerToken() != "" }
+
 // storeToken saves the token to the OS keychain. If the keychain is
 // unavailable (e.g. headless server), it falls back to the config file.
 // Returns a human-readable description of where the token was stored.
 func storeToken(token string) (string, error) {
+	// A new token means a (possibly different) caller; drop the cached
+	// per-token routing-table probe so the TUI hub re-resolves it after sign-in.
+	defer resetRegisteredServices()
 	if err := keyring.Set(keychainService, keychainAccount, token); err == nil {
 		return "keychain", nil
 	}

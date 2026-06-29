@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/zalando/go-keyring"
 )
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -52,6 +53,14 @@ func emitsLaunchSettings(cmd tea.Cmd) bool {
 		return false
 	}
 	_, ok := cmd().(launchSettingsMsg)
+	return ok
+}
+
+func emitsQuit(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	_, ok := cmd().(tea.QuitMsg)
 	return ok
 }
 
@@ -313,7 +322,7 @@ func TestSettingsModel_ResultAnyKeyReturnsHome(t *testing.T) {
 	}
 }
 
-// ── First-use prompt ─────────────────────────────────────────────────────────
+// ── First-use detection ──────────────────────────────────────────────────────
 
 func TestIsFirstUse_NoConfigNoEnv(t *testing.T) {
 	isolateHome(t)
@@ -345,35 +354,31 @@ func TestIsFirstUse_EnvURLSuppresses(t *testing.T) {
 	}
 }
 
-func TestFirstUseModel_YLaunchesSettings(t *testing.T) {
-	m := newFirstUseModel()
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	if !emitsLaunchSettings(cmd) {
-		t.Error("y should launch the settings screen")
-	}
-}
+// ── Sign-in gate ─────────────────────────────────────────────────────────────
 
-func TestFirstUseModel_EnterLaunchesSettings(t *testing.T) {
-	m := newFirstUseModel()
+func TestSignInGate_EnterLaunchesSettings(t *testing.T) {
+	m := newSignInGateModel()
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if !emitsLaunchSettings(cmd) {
-		t.Error("enter should launch the settings screen")
+		t.Error("enter should launch the settings (sign-in) screen")
 	}
 }
 
-func TestFirstUseModel_NDismissesToHome(t *testing.T) {
-	m := newFirstUseModel()
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	if !emitsGoHome(cmd) {
-		t.Error("n should dismiss to the home menu")
+func TestSignInGate_YLaunchesSettings(t *testing.T) {
+	m := newSignInGateModel()
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !emitsLaunchSettings(cmd) {
+		t.Error("y should launch the settings (sign-in) screen")
 	}
 }
 
-func TestFirstUseModel_EscDismissesToHome(t *testing.T) {
-	m := newFirstUseModel()
+// The gate has no skip-to-menu: esc quits rather than falling through to an
+// unfiltered service menu the signed-out user can't use.
+func TestSignInGate_EscQuits(t *testing.T) {
+	m := newSignInGateModel()
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if !emitsGoHome(cmd) {
-		t.Error("esc should dismiss to the home menu")
+	if !emitsQuit(cmd) {
+		t.Error("esc should quit the gate, not skip to the menu")
 	}
 }
 
@@ -424,21 +429,26 @@ func TestSetupCmd_HasNoTuiSubcommand(t *testing.T) {
 
 // ── appModel integration ─────────────────────────────────────────────────────
 
-func TestAppModel_FirstUseShowsPrompt(t *testing.T) {
+// A fresh install is signed out, so the user hub opens the sign-in gate rather
+// than a service menu the user has no token to filter or use.
+func TestAppModel_FreshInstallShowsGate(t *testing.T) {
 	isolateHome(t)
+	keyring.MockInit() // empty keychain → no stored token
 	t.Setenv("CODEARMORY_URL", "")
 	t.Setenv("CODEARMORY_TOKEN", "")
 	m := newAppModel()
-	if _, ok := m.active.(firstUseModel); !ok {
-		t.Errorf("active = %T, want firstUseModel on a fresh install", m.active)
+	if _, ok := m.active.(signInGateModel); !ok {
+		t.Errorf("active = %T, want signInGateModel on a fresh install", m.active)
 	}
 }
 
-func TestAppModel_NotFirstUseShowsHome(t *testing.T) {
+// Even with a conductor URL already configured, a signed-out user gets the gate —
+// this is the regression that let a logged-out user see every service.
+func TestAppModel_ConfiguredButSignedOutShowsGate(t *testing.T) {
 	isolateHome(t)
+	keyring.MockInit()
 	t.Setenv("CODEARMORY_URL", "")
 	t.Setenv("CODEARMORY_TOKEN", "")
-	// Pre-seed a config so isFirstUse returns false.
 	if err := os.MkdirAll(filepath.Dir(configPath()), 0700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -446,8 +456,26 @@ func TestAppModel_NotFirstUseShowsHome(t *testing.T) {
 		t.Fatalf("saveConfig: %v", err)
 	}
 	m := newAppModel()
+	if _, ok := m.active.(signInGateModel); !ok {
+		t.Errorf("active = %T, want signInGateModel when signed out", m.active)
+	}
+	if len(m.screens) != 0 {
+		t.Errorf("screens should not be built while gated, got %d", len(m.screens))
+	}
+}
+
+// A signed-in user lands straight on the service menu, not the gate.
+func TestAppModel_SignedInShowsHome(t *testing.T) {
+	isolateHome(t)
+	keyring.MockInit()
+	t.Setenv("CODEARMORY_URL", "http://x")
+	t.Setenv("CODEARMORY_TOKEN", "a-token")
+	m := newAppModel()
 	if m.active != nil {
-		t.Errorf("active = %T, want nil (home menu) when config already exists", m.active)
+		t.Errorf("active = %T, want nil (home menu) when signed in", m.active)
+	}
+	if len(m.screens) == 0 {
+		t.Error("signed-in user hub should have a service menu")
 	}
 }
 
@@ -458,5 +486,43 @@ func TestAppModel_LaunchSettingsMsgSwitchesToSettings(t *testing.T) {
 	app := next.(appModel)
 	if _, ok := app.active.(settingsModel); !ok {
 		t.Errorf("active = %T, want settingsModel after launchSettingsMsg", app.active)
+	}
+}
+
+// After signing in, returning home builds the (now filterable) service menu and
+// dismisses the gate.
+func TestAppModel_ReturnHomeAfterSignInBuildsMenu(t *testing.T) {
+	isolateHome(t)
+	keyring.MockInit()
+	t.Setenv("CODEARMORY_URL", "http://x")
+	t.Setenv("CODEARMORY_TOKEN", "")
+	m := newAppModel()
+	if _, ok := m.active.(signInGateModel); !ok {
+		t.Fatalf("expected the gate while signed out, got %T", m.active)
+	}
+	// Simulate a completed sign-in, then a return-home from the settings screen.
+	t.Setenv("CODEARMORY_TOKEN", "a-token")
+	next, _ := m.Update(goHomeMsg{})
+	app := next.(appModel)
+	if app.active != nil {
+		t.Errorf("active = %T, want nil (home menu) after sign-in", app.active)
+	}
+	if len(app.screens) == 0 {
+		t.Error("the menu should be built on return-home after sign-in")
+	}
+}
+
+// Backing out of the gate without signing in must re-show the gate, never fall
+// through to an unfiltered menu.
+func TestAppModel_ReturnHomeStillSignedOutReshowsGate(t *testing.T) {
+	isolateHome(t)
+	keyring.MockInit()
+	t.Setenv("CODEARMORY_URL", "http://x")
+	t.Setenv("CODEARMORY_TOKEN", "")
+	m := newAppModel()
+	next, _ := m.Update(goHomeMsg{})
+	app := next.(appModel)
+	if _, ok := app.active.(signInGateModel); !ok {
+		t.Errorf("active = %T, want signInGateModel when still signed out", app.active)
 	}
 }

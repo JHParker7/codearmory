@@ -16,8 +16,9 @@ import (
 var enablementClient = &http.Client{Timeout: 4 * time.Second}
 
 var (
-	registeredServicesOnce sync.Once
-	registeredServicesSet  map[string]bool
+	registeredServicesMu      sync.Mutex
+	registeredServicesFetched bool
+	registeredServicesSet     map[string]bool
 )
 
 // registeredServices returns the set of platform services currently registered
@@ -30,11 +31,30 @@ var (
 // an unreachable conductor, a non-2xx, or a decode error all yield nil, which the
 // hub filter treats as "unknown — hide nothing". A non-nil (possibly empty) map
 // means the set was resolved and modules outside it are hidden. The result is
-// cached for the life of the process: the hub is built once per launch, and a
-// restart re-reads it.
+// cached after the first resolve; resetRegisteredServices clears it after a
+// sign-in so the per-token set is re-fetched. Because the set is token-scoped,
+// the TUI hub deliberately never resolves it while signed out (which would cache
+// a fail-open nil) — it gates on sign-in first.
 func registeredServices() map[string]bool {
-	registeredServicesOnce.Do(func() { registeredServicesSet = fetchRegisteredServices() })
+	registeredServicesMu.Lock()
+	defer registeredServicesMu.Unlock()
+	if !registeredServicesFetched {
+		registeredServicesSet = fetchRegisteredServices()
+		registeredServicesFetched = true
+	}
 	return registeredServicesSet
+}
+
+// resetRegisteredServices clears the cached routing-table probe so the next
+// registeredServices() resolves afresh. Called after a sign-in (storeToken): the
+// set is per-token, and the TUI's sign-in gate fetches it for the first time only
+// once a token exists, so a login during a running TUI must invalidate any
+// earlier (signed-out or other-account) result.
+func resetRegisteredServices() {
+	registeredServicesMu.Lock()
+	defer registeredServicesMu.Unlock()
+	registeredServicesFetched = false
+	registeredServicesSet = nil
 }
 
 func fetchRegisteredServices() map[string]bool {

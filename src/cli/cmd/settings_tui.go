@@ -17,9 +17,9 @@ import (
 // user through the conductor URL, color theme (with live preview), and an
 // optional account log-in or sign-up — folding together what used to be a
 // separate quick "settings" form and a multi-step "setup" wizard. It is
-// reachable from the home menu, as `armory settings`, and as the automatic
-// first-use prompt. The line-based `armory setup` command (setup.go) remains
-// the scriptable, non-interactive counterpart.
+// reachable from the home menu, as `armory settings`, and from the sign-in gate
+// the user hub shows while signed out. The line-based `armory setup` command
+// (setup.go) remains the scriptable, non-interactive counterpart.
 
 // ── First-use detection ──────────────────────────────────────────────────────
 
@@ -42,51 +42,65 @@ func isFirstUse() bool {
 // ── Messages ────────────────────────────────────────────────────────────────
 
 // launchSettingsMsg asks the appModel to swap the active screen for the
-// settings screen. Emitted by the first-use prompt when the user opts in.
+// settings screen. Emitted by the sign-in gate when the user chooses to sign in.
 type launchSettingsMsg struct{}
 
 func launchSettings() tea.Msg { return launchSettingsMsg{} }
 
-// ── First-use prompt ────────────────────────────────────────────────────────
+// ── Sign-in gate ─────────────────────────────────────────────────────────────
 
-// firstUseModel is the welcome screen shown when no config has been written.
-// 'y' jumps straight into the settings screen; 'n' dismisses to the home menu.
-type firstUseModel struct {
+// signInGateModel is the screen the user hub shows while signed out. The service
+// menu is held behind it because registeredServices() needs a token to tell which
+// services the caller can reach — without one the menu fails open and lists every
+// service, the misleading view we want to avoid. The gate offers a single move:
+// go to Settings to sign in (which also covers first-time setup of the conductor
+// URL). esc/ctrl+c quit; there is deliberately no skip-to-menu.
+type signInGateModel struct {
 	width  int
 	height int
 }
 
-func newFirstUseModel() firstUseModel { return firstUseModel{} }
+func newSignInGateModel() signInGateModel { return signInGateModel{} }
 
-func (m firstUseModel) Init() tea.Cmd { return nil }
+func (m signInGateModel) Init() tea.Cmd { return nil }
 
-func (m firstUseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m signInGateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "y", "Y", "enter":
+		case "enter", "y", "Y":
 			return m, launchSettings
-		case "n", "N", "esc":
-			return m, goHome
-		case "ctrl+c":
+		case "esc", "ctrl+c":
 			return m, tea.Quit
 		}
 	}
 	return m, nil
 }
 
-func (m firstUseModel) View() string {
-	heading := tuiFormHeading.Render("Welcome to codearmory")
-	body := strings.Join([]string{
-		"It looks like this is your first time here.",
-		"",
-		"Would you like to configure codearmory now?",
-		"It covers the conductor URL, theme, and account sign-in.",
-	}, "\n")
-	hint := tuiFormHint.Render("[y/enter] yes   [n/esc] skip to menu   [ctrl+c] quit")
+func (m signInGateModel) View() string {
+	var heading, body string
+	// A fresh install has no conductor URL yet, so frame it as setup; an existing
+	// install that's merely logged out just needs to sign back in.
+	if isFirstUse() {
+		heading = tuiFormHeading.Render("Welcome to codearmory")
+		body = strings.Join([]string{
+			"Let's get you set up.",
+			"",
+			"Sign in to continue — it covers the conductor URL, theme,",
+			"and your account. Your services appear once you're signed in.",
+		}, "\n")
+	} else {
+		heading = tuiFormHeading.Render("Sign in to codearmory")
+		body = strings.Join([]string{
+			"You're signed out.",
+			"",
+			"Sign in to see the services available to you.",
+		}, "\n")
+	}
+	hint := tuiFormHint.Render("[enter] sign in   [esc] quit")
 	box := tuiFormBox.Render(heading + "\n\n" + body + "\n\n" + hint)
 	if m.width > 0 && m.height > 0 {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
