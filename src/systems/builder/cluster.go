@@ -499,7 +499,7 @@ func (b *k8sBackend) containerPort(ctx context.Context, service string) int32 {
 // core-only there is no base Deployment to clone, so this carries everything: the image
 // on its port, the full env (gatekeeper URL + the embedded def's static/inter-service
 // env, derived-secret refs, registry-account ref, and admin-secret refs), the security
-// context, probes, resources, image pull secrets, and (for forge) its ServiceAccount.
+// context, probes, resources, and image pull secrets.
 func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
 	def, hasDef := embeddedServiceDef(spec.Service)
 
@@ -537,14 +537,7 @@ func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
 	setRef("GATEKEEPER_SERVICE_KEY", "gatekeeper-service-key")
 	setRef("CONDUCTOR_FORWARD_KEY", "conductor-forward-key")
 	if hasDef {
-		egressOn := egressProxyEnabled(spec)
 		for k, v := range def.EnvExtras {
-			// When the egress proxy is disabled (e.g. kata, but NOT gvisor, which keeps
-			// it), don't point forge at a proxy that isn't deployed — leave
-			// FORGE_EGRESS_PROXY unset so the runtime falls back to direct/VM-level egress.
-			if k == "FORGE_EGRESS_PROXY" && !egressOn {
-				continue
-			}
 			v = strings.ReplaceAll(v, "${PREFIX}", b.prefix)
 			v = strings.ReplaceAll(v, "${NAMESPACE}", b.namespace)
 			setVal(k, v)
@@ -596,12 +589,6 @@ func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
 	}
 	for _, n := range b.imagePullSecrets {
 		podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, corev1.LocalObjectReference{Name: n})
-	}
-	// forge needs its ServiceAccount so it can create sandbox Jobs in the exec namespace.
-	if hasDef && def.Infra.ForgeExecRBAC {
-		automount := true
-		podSpec.ServiceAccountName = b.name(spec.Service)
-		podSpec.AutomountServiceAccountToken = &automount
 	}
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: b.labels(spec.Service)},

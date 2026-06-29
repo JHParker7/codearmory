@@ -6,12 +6,14 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
+import { useResizableWidth } from '../../components/ResizeHandle';
 import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
-import { useAppSelector } from '../../store/hooks';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
+import { fetchKnownProjects } from '../../store/projectSlice';
 import {
   getGiteaAccount, linkGiteaAccount, unlinkGiteaAccount,
-  listGiteaRepos, createGiteaRepo, deleteGiteaRepo,
+  listGiteaRepos, createGiteaRepo, deleteGiteaRepo, setGiteaRepoProject,
   listBranches, listGitTags, listCommits, listPulls, createPull, mergePull,
 } from '../../api/bff';
 import type { GiteaAccount, GiteaRepo, Branch, GitTag, GitCommit, PullRequest } from '../../api/bff';
@@ -107,6 +109,9 @@ function AccountPanel({ onLinked }: { onLinked: () => void }) {
 /** Gitea route: repo list + create form on the left, selected repo's branches/tags/commits/pulls tabs on the right with merge and a new-PR form (createPull). The empty state hosts the AccountPanel for linking a Forgejo token. */
 export function Gitea() {
   const token = useAppSelector(s => s.auth.token)!;
+  // Current-project view filter from the sidebar switcher; refetch on change.
+  const project = useAppSelector(s => s.project.current);
+  const dispatch = useAppDispatch();
   const [repos, setRepos] = useState<GiteaRepo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -134,17 +139,22 @@ export function Gitea() {
   const [prBody, setPrBody] = useState('');
   const [creatingPR, setCreatingPR] = useState(false);
 
+  // Inline editor for the selected repo's project (workspace) tag.
+  const [editingProject, setEditingProject] = useState(false);
+  const [projectDraft, setProjectDraft] = useState('');
+  const [savingProject, setSavingProject] = useState(false);
+
   const fetchRepos = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setRepos(await listGiteaRepos(token));
+      setRepos(await listGiteaRepos(token, project ?? undefined));
     } catch (e: unknown) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, project]);
 
   useEffect(() => { fetchRepos(); }, [fetchRepos]);
 
@@ -167,6 +177,7 @@ export function Gitea() {
     setSelected(repo);
     setRepoTab('branches');
     setShowCreatePR(false);
+    setEditingProject(false);
     loadTab(repo, 'branches');
   }, [loadTab]);
 
@@ -194,6 +205,7 @@ export function Gitea() {
   };
 
   const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gitea.main', 260, { min: 200, max: 480 });
 
   const handleDeleteRepo = async (repo: GiteaRepo) => {
     if (!(await confirm({ message: `Delete repository ${repo.full_name}? This permanently removes the repo and all its history.` }))) return;
@@ -213,6 +225,26 @@ export function Gitea() {
       setPulls(prev => prev.map(p => p.index === index ? { ...p, status: 'merged' } : p));
     } catch (e: unknown) {
       setTabError((e as Error).message);
+    }
+  };
+
+  // Assign/clear the selected repo's project tag, then merge the result locally
+  // and refresh the switcher's known-label list (a new label may now exist).
+  const saveProject = async () => {
+    if (!selected) return;
+    const next = projectDraft.trim();
+    setSavingProject(true);
+    try {
+      const updated = await setGiteaRepoProject(token, selected.owner, selected.name, next);
+      const merged: GiteaRepo = { ...selected, ...updated, project: next || undefined };
+      setRepos(prev => prev.map(r => r.full_name === merged.full_name ? merged : r));
+      setSelected(merged);
+      setEditingProject(false);
+      if (token) dispatch(fetchKnownProjects(token));
+    } catch (e: unknown) {
+      setError((e as Error).message);
+    } finally {
+      setSavingProject(false);
     }
   };
 
@@ -237,7 +269,7 @@ export function Gitea() {
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       {confirmEl}
       {/* Repo list */}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>git/</span>
@@ -293,11 +325,14 @@ export function Gitea() {
                 </div>
                 <div style={{ fontSize: 10, color: T.faint, marginTop: 2 }}>{repo.owner}</div>
                 {repo.default_branch && <div style={{ fontSize: 10, color: T.dim, marginTop: 1 }}>⌥ {repo.default_branch}</div>}
+                {/* Project tag shown only when unfiltered. */}
+                {!project && repo.project && <div style={{ fontSize: 10, color: T.green, marginTop: 1 }}>◆ {repo.project}</div>}
               </button>
             );
           })}
         </div>
       </div>
+      {railHandle}
 
       {/* Detail panel */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -319,6 +354,28 @@ export function Gitea() {
                 </div>
                 {selected.description && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, marginTop: 2 }}>{selected.description}</div>}
                 {selected.updated_at && <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginTop: 2 }}>updated {timeAgo(selected.updated_at)} ago</div>}
+                {/* Project (workspace) tag — assign the repo to a project so it can be filtered. */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
+                  {editingProject ? (
+                    <>
+                      <input value={projectDraft} onChange={e => setProjectDraft(e.target.value)} autoFocus
+                        onKeyDown={e => { if (e.key === 'Enter') saveProject(); if (e.key === 'Escape') setEditingProject(false); }}
+                        placeholder="project label (empty clears)"
+                        style={{ width: 200, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '3px 7px', outline: 'none' }} />
+                      <button onClick={saveProject} disabled={savingProject}
+                        style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 10, fontWeight: 600, padding: '3px 9px', cursor: 'pointer', opacity: savingProject ? 0.6 : 1 }}>
+                        {savingProject ? '·' : 'save'}
+                      </button>
+                      <button onClick={() => setEditingProject(false)}
+                        style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 8px', cursor: 'pointer' }}>✕</button>
+                    </>
+                  ) : (
+                    <button onClick={() => { setProjectDraft(selected.project ?? ''); setEditingProject(true); }} title="assign this repo to a project"
+                      style={{ background: 'transparent', border: `1px solid ${selected.project ? T.green : T.border}`, color: selected.project ? T.green : T.dim, fontFamily: T.mono, fontSize: 10, padding: '2px 8px', cursor: 'pointer' }}>
+                      {selected.project ? `◆ ${selected.project}` : '+ project'}
+                    </button>
+                  )}
+                </div>
               </div>
               <button onClick={() => handleDeleteRepo(selected)}
                 style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}

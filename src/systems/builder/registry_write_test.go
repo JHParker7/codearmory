@@ -86,7 +86,7 @@ func useStubRegistry(t *testing.T, stub *stubRegistry) {
 func TestEnsureRegistryService_RegistersWhenAbsent(t *testing.T) {
 	stub := &stubRegistry{listBody: "[]"}
 	useStubRegistry(t, stub)
-	def, _ := embeddedServiceDef("forge")
+	def, _ := embeddedServiceDef("tickets")
 
 	if err := ensureRegistryService(context.Background(), def, "codearmory"); err != nil {
 		t.Fatalf("ensureRegistryService: %v", err)
@@ -109,11 +109,11 @@ func TestEnsureRegistryService_RegistersWhenAbsent(t *testing.T) {
 	if post.auth != "builder:rk" {
 		t.Errorf("auth = %q, want builder:rk", post.auth)
 	}
-	if post.body["name"] != "forge" {
-		t.Errorf("POST name = %v, want forge", post.body["name"])
+	if post.body["name"] != "tickets" {
+		t.Errorf("POST name = %v, want tickets", post.body["name"])
 	}
-	if url, _ := post.body["url"].(string); url != "http://codearmory-forge:8083" {
-		t.Errorf("POST url = %q, want http://codearmory-forge:8083", url)
+	if url, _ := post.body["url"].(string); url != "http://codearmory-tickets:8086" {
+		t.Errorf("POST url = %q, want http://codearmory-tickets:8086", url)
 	}
 	if put.path != "/services/svc-1/endpoints" {
 		t.Errorf("PUT path = %q, want /services/svc-1/endpoints", put.path)
@@ -128,9 +128,9 @@ func TestEnsureRegistryService_RegistersWhenAbsent(t *testing.T) {
 
 func TestEnsureRegistryService_NoChurnWhenActive(t *testing.T) {
 	// Already active with endpoints → only the lookup GET, no POST/PUT.
-	stub := &stubRegistry{listBody: `[{"service_id":"svc-1","name":"forge","endpoints":[{"method":"GET","path":"/x"}]}]`}
+	stub := &stubRegistry{listBody: `[{"service_id":"svc-1","name":"tickets","endpoints":[{"method":"GET","path":"/x"}]}]`}
 	useStubRegistry(t, stub)
-	def, _ := embeddedServiceDef("forge")
+	def, _ := embeddedServiceDef("tickets")
 
 	if err := ensureRegistryService(context.Background(), def, "codearmory"); err != nil {
 		t.Fatalf("ensureRegistryService: %v", err)
@@ -176,7 +176,7 @@ func TestRemoveRegistryService_NoopWhenAbsent(t *testing.T) {
 func TestEnsureRegistryAccount_Upserts(t *testing.T) {
 	stub := &stubRegistry{}
 	useStubRegistry(t, stub)
-	if err := ensureRegistryAccount(context.Background(), "workflows", "derived-key"); err != nil {
+	if err := ensureRegistryAccount(context.Background(), "tickets", "derived-key"); err != nil {
 		t.Fatalf("ensureRegistryAccount: %v", err)
 	}
 	var got *recordedReq
@@ -189,7 +189,7 @@ func TestEnsureRegistryAccount_Upserts(t *testing.T) {
 	if got == nil {
 		t.Fatalf("expected POST /service-accounts, got %+v", stub.calls())
 	}
-	if got.body["name"] != "workflows" || got.body["key"] != "derived-key" || got.body["role"] != "read" {
+	if got.body["name"] != "tickets" || got.body["key"] != "derived-key" || got.body["role"] != "read" {
 		t.Errorf("unexpected account body: %+v", got.body)
 	}
 }

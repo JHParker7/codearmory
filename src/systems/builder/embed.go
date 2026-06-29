@@ -48,9 +48,6 @@ type serviceDef struct {
 }
 
 type svcInfra struct {
-	EgressProxy   bool `json:"egressProxy"`   // deploy forge's egress-proxy workload
-	NetworkPolicy bool `json:"networkPolicy"` // deploy a NetworkPolicy in the exec namespace
-	ForgeExecRBAC bool `json:"forgeExecRBAC"` // ensure SA+Role+RoleBinding in the forge exec namespace
 	// ManagedRedis: when the admin supplies no REDIS_URL, deploy a stateless in-cluster
 	// Redis and point the service at it. Supplying an external REDIS_URL opts out (and
 	// tears any builder-managed Redis back down). The store is ephemeral — fit for a

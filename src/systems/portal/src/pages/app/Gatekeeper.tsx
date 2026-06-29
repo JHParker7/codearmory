@@ -25,6 +25,7 @@ import {
 import type { User, Role, Permission, Secret, Org, Team, Invite, ServiceRequest, SecretProvider, SecretProviderName } from '../../api/bff';
 import { timeAgo, shortId } from '../../utils';
 import { useUserNames } from '../../hooks/useNames';
+import { useResizableWidth } from '../../components/ResizeHandle';
 
 type Tab = 'users' | 'roles' | 'permissions' | 'secrets' | 'teams' | 'orgs' | 'invites' | 'service-requests';
 
@@ -111,6 +112,7 @@ function UsersTab() {
   };
 
   const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.users', 260, { min: 200, max: 480 });
 
   const handleDelete = async (id: string) => {
     const name = users.find(u => u.user_id === id)?.username;
@@ -125,7 +127,7 @@ function UsersTab() {
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
       {confirmEl}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{users.length > 0 ? `${users.length} user${users.length !== 1 ? 's' : ''}` : ''}</span>
           <button onClick={fetchUsers} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '2px 6px', cursor: 'pointer' }}>↻</button>
@@ -147,6 +149,7 @@ function UsersTab() {
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedUser ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -285,6 +288,7 @@ function RolesTab() {
   };
 
   const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.roles', 260, { min: 200, max: 480 });
 
   const handleDelete = async (id: string) => {
     const r = roles.find(x => x.role_id === id);
@@ -299,7 +303,7 @@ function RolesTab() {
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
       {confirmEl}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{roles.length > 0 ? `${roles.length} role${roles.length !== 1 ? 's' : ''}` : ''}</span>
           <div style={{ display: 'flex', gap: 6 }}>
@@ -337,6 +341,7 @@ function RolesTab() {
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedRole ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -474,6 +479,7 @@ function PermissionsTab() {
   };
 
   const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.permissions', 260, { min: 200, max: 480 });
 
   const handleDelete = async (id: string) => {
     const name = perms.find(p => p.permissions_id === id)?.name;
@@ -488,7 +494,7 @@ function PermissionsTab() {
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
       {confirmEl}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{perms.length > 0 ? `${perms.length} permission${perms.length !== 1 ? 's' : ''}` : ''}</span>
           <div style={{ display: 'flex', gap: 6 }}>
@@ -527,6 +533,7 @@ function PermissionsTab() {
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedPerm ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -874,6 +881,7 @@ function TeamsTab() {
   };
 
   const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.teams', 260, { min: 200, max: 480 });
 
   const handleDelete = async (id: string) => {
     const name = teams.find(t => t.team_id === id)?.team_name;
@@ -899,7 +907,7 @@ function TeamsTab() {
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
       {confirmEl}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{teams.length > 0 ? `${teams.length} team${teams.length !== 1 ? 's' : ''}` : ''}</span>
           <div style={{ display: 'flex', gap: 6 }}>
@@ -938,6 +946,7 @@ function TeamsTab() {
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedTeam ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -1047,6 +1056,7 @@ function OrgsTab() {
   };
 
   const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.orgs', 260, { min: 200, max: 480 });
 
   const handleDelete = async (id: string) => {
     const name = orgs.find(o => o.org_id === id)?.org_name;
@@ -1072,7 +1082,7 @@ function OrgsTab() {
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
       {confirmEl}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{orgs.length > 0 ? `${orgs.length} org${orgs.length !== 1 ? 's' : ''}` : ''}</span>
           <div style={{ display: 'flex', gap: 6 }}>
@@ -1109,6 +1119,7 @@ function OrgsTab() {
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedOrg ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -1288,6 +1299,7 @@ function ServiceRequestsTab() {
   }, [token, statusFilter]);
 
   useEffect(() => { fetchRequests(); }, [fetchRequests]);
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.service-requests', 260, { min: 200, max: 480 });
 
   const selectedReq = requests.find(r => r.request_id === selected);
 
@@ -1319,7 +1331,7 @@ function ServiceRequestsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
             <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{requests.length} request{requests.length !== 1 ? 's' : ''}</span>
@@ -1347,6 +1359,7 @@ function ServiceRequestsTab() {
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedReq ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>

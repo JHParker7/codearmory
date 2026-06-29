@@ -9,7 +9,7 @@ import (
 // expectedNonCore is every non-core service the chart no longer deploys; builder must
 // carry an embedded definition for each so it can deploy + register it at runtime.
 var expectedNonCore = []string{
-	"blueprints", "forge", "workflows", "tickets", "notifications", "hooks",
+	"blueprints", "tickets", "notifications", "hooks",
 	"containers", "outpost-gateway", "chaos", "argo", "gitea_integration",
 }
 
@@ -71,13 +71,6 @@ func TestEmbeddedDefs_NoCoreServices(t *testing.T) {
 		if coreServices[name] {
 			t.Errorf("core service %q must not be in the builder catalog", name)
 		}
-	}
-}
-
-func TestEmbeddedDefs_ForgeInfra(t *testing.T) {
-	d, _ := embeddedServiceDef("forge")
-	if !d.Infra.EgressProxy || !d.Infra.ForgeExecRBAC {
-		t.Errorf("forge infra = %+v, want egressProxy + forgeExecRBAC", d.Infra)
 	}
 }
 

@@ -5,6 +5,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
+import { useResizableWidth } from '../../components/ResizeHandle';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import { listContainerRepos, listImageTags, getManifest, deleteManifest } from '../../api/bff';
@@ -77,6 +78,7 @@ export function Containers() {
   }, [token, selected]);
 
   const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.containers.main', 260, { min: 200, max: 480 });
 
   const handleDeleteManifest = async (digest: string) => {
     if (!selected) return;
@@ -106,7 +108,7 @@ export function Containers() {
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       {confirmEl}
       {/* Repo list */}
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>containers/</span>
@@ -137,6 +139,7 @@ export function Containers() {
           })}
         </div>
       </div>
+      {railHandle}
 
       {/* Detail panel */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

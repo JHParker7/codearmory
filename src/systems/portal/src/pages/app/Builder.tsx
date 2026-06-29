@@ -12,6 +12,7 @@ import type { ReactNode } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
+import { useResizableWidth } from '../../components/ResizeHandle';
 import { useAppSelector, useAppDispatch } from '../../store/hooks';
 import { hydrateRegisteredServices } from '../../store/authSlice';
 import { listServices, setService, deleteService } from '../../api/bff';
@@ -113,6 +114,7 @@ export function Builder() {
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.builder.services', 280, { min: 240, max: 560 });
 
   const [editing, setEditing] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -307,7 +309,7 @@ export function Builder() {
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* List */}
-        <div style={{ width: 280, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+        <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
           <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}` }}>
             <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{services.length > 0 ? `${services.length} service${services.length !== 1 ? 's' : ''}` : ''}</span>
           </div>
@@ -331,6 +333,7 @@ export function Builder() {
               );
             })}
         </div>
+        {railHandle}
 
         {/* Detail */}
         <div style={{ flex: 1, overflow: 'auto' }}>

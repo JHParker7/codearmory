@@ -37,14 +37,17 @@ export function Setup() {
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
   const [showPw, setShowPw] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   const { score, checks } = passwordScore(password);
+  const passwordsMatch = password === confirm;
   const formValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
     && /^[a-zA-Z0-9_-]{1,64}$/.test(username)
     && score >= 3
+    && passwordsMatch
     && !submitting;
 
   const submit = async (e: React.FormEvent) => {
@@ -147,6 +150,12 @@ export function Setup() {
                 }
               />
               <StrengthBar score={score} checks={checks} />
+
+              <PromptField prompt="admin password --confirm" value={confirm} onChange={setConfirm} type={showPw ? 'text' : 'password'} placeholder="••••••••••••"
+                hint={confirm && passwordsMatch ? '✓ passwords match' : 're-enter the admin password to confirm.'} />
+              {confirm && !passwordsMatch && (
+                <div style={{ fontSize: 11, color: T.red, fontFamily: T.mono, marginTop: -12, marginBottom: 16, letterSpacing: 0.2 }}>✗ passwords do not match</div>
+              )}
 
               <button type="submit" disabled={!formValid}
                 style={{ width: '100%', padding: '11px 14px', background: formValid ? T.green : 'transparent', color: formValid ? T.bg : T.faint, border: `1px solid ${formValid ? T.green : T.border}`, fontFamily: T.mono, fontSize: 13, fontWeight: 600, letterSpacing: 0.5, cursor: formValid ? 'pointer' : 'not-allowed', transition: 'all .15s' }}>

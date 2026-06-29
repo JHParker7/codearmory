@@ -13,11 +13,17 @@ const defaultOrgID = "default"
 
 // coreServices are control-plane services that are always available to every org
 // and can never be toggled off — disabling any of them would sever the platform.
+// They are shipped by the Helm chart (not deployed/registered by builder) and so are
+// excluded from the catalog, never reconciled, and rejected by the set-service API.
+// forge + workflows are the CI/CD pair: the chart deploys them and registers them via
+// the registry manifest, so builder treats them as core like the rest.
 var coreServices = map[string]bool{
 	"gatekeeper": true,
 	"conductor":  true,
 	"registry":   true,
 	"builder":    true,
+	"forge":      true,
+	"workflows":  true,
 }
 
 // kinds of org-service rows.
