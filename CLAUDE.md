@@ -57,7 +57,7 @@ Commits must follow Conventional Commits format (`feat:`, `fix:`, `chore:`, etc.
 ## Architecture
 
 ### Repository scope (core monorepo + spun-off services)
-This monorepo holds the **core control plane**: conductor, gatekeeper, registry, builder, portal, workflows, forge, hooks, the forge **egress-proxy**, and the outpost pair (`outpost` + `outpost-gateway`). The remaining services were spun out into their own `codearmory-<svc>` repos — **argo, blueprints, chaos, containers, gitea_integration, mcp, notifications, tickets** — but are still part of the platform: **builder** deploys and registers them at runtime from the images those repos publish (their deploy defs stay in `src/systems/builder/files/services/*.json`). References to these services below describe platform behavior even though their source now lives elsewhere.
+This monorepo holds the **core control plane**: conductor, gatekeeper, registry, builder, portal, workflows, forge, hooks, the forge **egress-proxy**, and the outpost pair (`outpost` + `outpost-gateway`). **tickets, gitea_integration (git), and containers (docker registry)** are also **core** — the Helm chart deploys their published images and they are registered via the registry manifest — even though their source lives in their own `codearmory-<svc>` repos (they have no builder def). The remaining services were spun out into their own `codearmory-<svc>` repos — **argo, blueprints, chaos, mcp, notifications** — but are still part of the platform: **builder** deploys and registers them at runtime from the images those repos publish (their deploy defs stay in `src/systems/builder/files/services/*.json`). References to these services below describe platform behavior even though their source now lives elsewhere.
 
 ### Request flow
 Every external request enters through **Conductor** (`:8080`), the API gateway. Conductor polls **Registry** (`:8082`) every ~5 minutes for service manifests that define routes, actions, and RBAC resources. Conductor verifies permissions with **Gatekeeper** (`:8081`) before forwarding each request to the target backend.
@@ -71,13 +71,13 @@ Two forwarding modes are controlled by `forward_auth` in the registry manifest:
 - `forward_auth: false` (all other services): bearer token is stripped; conductor injects `X-User-ID`, `X-Conductor-Token`, and `X-Conductor-Timestamp` headers so backends can verify the request came through conductor
 
 ### Service manifests
-`infra/local/registry-manifest.json` is the source of truth for what routes the **core** services expose, what RBAC action/resource pairs they map to, and what permissions are granted by default on startup (`default_grants`). The Helm equivalent populates this at deploy time. The spun-off services are **not** in the manifest — **builder** registers them with the registry at runtime when an admin enables them (it PUTs their endpoints/grants from its embedded defs, then notifies conductor). A new core service must be registered in this manifest; conductor will not route to it otherwise.
+`infra/local/registry-manifest.json` is the source of truth for what routes the **core** services expose, what RBAC action/resource pairs they map to, and what permissions are granted by default on startup (`default_grants`). The Helm equivalent populates this at deploy time. It also carries the core, source-external trio (tickets, gitea_integration, containers). The **builder-deployed** services (argo, blueprints, chaos, mcp, notifications) are **not** in the manifest — **builder** registers them with the registry at runtime when an admin enables them (it PUTs their endpoints/grants from its embedded defs, then notifies conductor). A new core service must be registered in this manifest; conductor will not route to it otherwise.
 
 ### Service registration / key rotation
 Every backend service calls `registry.StartKeyRotation(ctx, gatekeeperURL, "<service-name>", secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)` on startup (from the `codearmory_sdk`). This registers the service with Gatekeeper and rotates the shared key every 25 minutes. The initial key is set in `GATEKEEPER_SERVICE_KEY` and must match the corresponding entry in Gatekeeper's `GATEKEEPER_SERVICES` env var.
 
 ### Database pattern
-All GORM-based services in this repo (`gatekeeper`, `hooks`, `workflows`) — and the spun-off `tickets`/`gitea_integration`/`containers` — use the same pattern:
+All GORM-based services in this repo (`gatekeeper`, `hooks`, `workflows`) — and the source-external `tickets`/`gitea_integration`/`containers` — use the same pattern:
 - A `db` interface with `Add / Update / Remove / Get / List` methods implemented on each entity struct
 - Lazy-initialized `gormDB` / `gormDBRead` singletons via `connect()` / `connectRead()`
 - `CREATE TABLE IF NOT EXISTS` auto-migration on startup — no separate migration step
@@ -128,4 +128,4 @@ tests/              Python integration tests (pytest) per service
 docs/               Per-service READMEs and platform guide
 ```
 
-**Spun off** into their own `codearmory-<svc>` repos (deployed + registered by builder at runtime, not in this tree): argo, blueprints, chaos, containers, gitea_integration, mcp, notifications, tickets.
+**Spun off** into their own `codearmory-<svc>` repos (source not in this tree): argo, blueprints, chaos, mcp, notifications are deployed + registered by **builder** at runtime; tickets, gitea_integration, containers are also source-external but **core** (Helm-deployed, registered via the registry manifest, no builder def).
