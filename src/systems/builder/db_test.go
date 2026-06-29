@@ -16,11 +16,11 @@ func TestEnabledFrom(t *testing.T) {
 		want     bool
 	}{
 		{"core always enabled", "gatekeeper", ptr(OrgService{Enabled: false}), ptr(OrgService{Enabled: false}), true},
-		{"override wins (off)", "forge", ptr(OrgService{Enabled: false}), ptr(OrgService{Enabled: true}), false},
-		{"override wins (on)", "forge", ptr(OrgService{Enabled: true}), ptr(OrgService{Enabled: false}), true},
-		{"default fallback (off)", "forge", nil, ptr(OrgService{Enabled: false}), false},
-		{"default fallback (on)", "forge", nil, ptr(OrgService{Enabled: true}), true},
-		{"nothing configured is default-on", "forge", nil, nil, true},
+		{"override wins (off)", "blueprints", ptr(OrgService{Enabled: false}), ptr(OrgService{Enabled: true}), false},
+		{"override wins (on)", "blueprints", ptr(OrgService{Enabled: true}), ptr(OrgService{Enabled: false}), true},
+		{"default fallback (off)", "blueprints", nil, ptr(OrgService{Enabled: false}), false},
+		{"default fallback (on)", "blueprints", nil, ptr(OrgService{Enabled: true}), true},
+		{"nothing configured is default-on", "blueprints", nil, nil, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -33,14 +33,14 @@ func TestEnabledFrom(t *testing.T) {
 
 func TestComputeDisabled(t *testing.T) {
 	defaults := []OrgService{
-		{ServiceName: "forge", Enabled: false},      // disabled in baseline
-		{ServiceName: "workflows", Enabled: true},   // enabled in baseline
+		{ServiceName: "blueprints", Enabled: false}, // disabled in baseline
+		{ServiceName: "containers", Enabled: true},  // enabled in baseline
 		{ServiceName: "gatekeeper", Enabled: false}, // core: must be ignored
 	}
 	overrides := []OrgService{
-		{ServiceName: "forge", Enabled: true},     // org re-enables forge
-		{ServiceName: "tickets", Enabled: false},  // org disables tickets
-		{ServiceName: "workflows", Enabled: true}, // no change
+		{ServiceName: "blueprints", Enabled: true},  // org re-enables blueprints
+		{ServiceName: "tickets", Enabled: false},    // org disables tickets
+		{ServiceName: "containers", Enabled: true},  // no change
 	}
 
 	got := computeDisabled(defaults, overrides)
@@ -52,10 +52,10 @@ func TestComputeDisabled(t *testing.T) {
 }
 
 func TestComputeDisabled_DefaultOnlyInheritsBaseline(t *testing.T) {
-	defaults := []OrgService{{ServiceName: "forge", Enabled: false}}
+	defaults := []OrgService{{ServiceName: "blueprints", Enabled: false}}
 	got := computeDisabled(defaults, nil) // an org with no overrides inherits the baseline
-	if len(got) != 1 || got[0] != "forge" {
-		t.Fatalf("computeDisabled = %v, want [forge]", got)
+	if len(got) != 1 || got[0] != "blueprints" {
+		t.Fatalf("computeDisabled = %v, want [blueprints]", got)
 	}
 }
 

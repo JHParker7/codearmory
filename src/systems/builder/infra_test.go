@@ -37,30 +37,27 @@ func envRefKey(c corev1.Container, name string) string {
 	return ""
 }
 
-func TestProvision_WritesDerivedAndRegistrySecrets(t *testing.T) {
+func TestProvision_WritesDerivedSecrets(t *testing.T) {
 	httpClient = initHTTPClient()
 	enableDerivation(t)
 	rec := &registerRecorder{}
 	b := newTestBackend(t, rec)
 	ctx := context.Background()
 
-	if err := b.provision(ctx, "workflows", "postgres://wf@db/wf", nil); err != nil {
-		t.Fatalf("provision workflows: %v", err)
+	// hooks declares a shared derived key (hooks-trigger-key).
+	if err := b.provision(ctx, "hooks", "postgres://h@db/h", nil); err != nil {
+		t.Fatalf("provision hooks: %v", err)
 	}
-	sec, err := b.client.CoreV1().Secrets("codearmory").Get(ctx, "codearmory-workflows", metav1.GetOptions{})
+	sec, err := b.client.CoreV1().Secrets("codearmory").Get(ctx, "codearmory-hooks", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get secret: %v", err)
 	}
-	// Shared + private derived keys, and the registry read-account key (workflows pulls
-	// GET /actions). All are 64-hex.
-	for _, key := range []string{"hooks-trigger-key", "token-key", "registry-service-key"} {
-		v := string(sec.Data[key])
-		if raw, err := hex.DecodeString(v); err != nil || len(raw) != 32 {
-			t.Errorf("%s: not 64-hex (got %q)", key, v)
-		}
+	// The shared key is 64-hex and equals the deterministic derivation (so consumers agree).
+	v := string(sec.Data["hooks-trigger-key"])
+	if raw, err := hex.DecodeString(v); err != nil || len(raw) != 32 {
+		t.Errorf("hooks-trigger-key: not 64-hex (got %q)", v)
 	}
-	// The shared key must equal the deterministic derivation (so other consumers agree).
-	if string(sec.Data["hooks-trigger-key"]) != deriveSharedKey("hooks-trigger-key") {
+	if v != deriveSharedKey("hooks-trigger-key") {
 		t.Error("hooks-trigger-key does not match deriveSharedKey")
 	}
 
@@ -74,37 +71,30 @@ func TestProvision_WritesDerivedAndRegistrySecrets(t *testing.T) {
 	}
 }
 
-func TestTemplatePod_DeterministicEnvAndForgeSA(t *testing.T) {
+func TestTemplatePod_DeterministicEnv(t *testing.T) {
 	b := &k8sBackend{prefix: "codearmory", registry: "ghcr.io/x", tag: "v1", namespace: "codearmory"}
-	pt := b.templatePod(workloadSpec{Service: "forge"})
+	pt := b.templatePod(workloadSpec{Service: "tickets"})
 	c := pt.Spec.Containers[0]
 
 	if v, plain := envValue(c, "GATEKEEPER_URL"); !plain || v != "http://codearmory-gatekeeper:8081" {
 		t.Errorf("GATEKEEPER_URL = %q", v)
 	}
 	// ${PREFIX} substituted in inter-service env.
-	if v, _ := envValue(c, "FORGE_EGRESS_PROXY"); v != "http://codearmory-egress-proxy:3128" {
-		t.Errorf("FORGE_EGRESS_PROXY = %q", v)
-	}
-	if v, _ := envValue(c, "RUNTIME"); v != "kubernetes" {
-		t.Errorf("RUNTIME = %q", v)
+	if v, _ := envValue(c, "HOOKS_URL"); v != "http://codearmory-hooks:8087" {
+		t.Errorf("HOOKS_URL = %q", v)
 	}
 	// Derived secret wired as a secret ref to its key.
-	if k := envRefKey(c, "GITEA_INTERNAL_KEY"); k != "gitea-internal-key" {
-		t.Errorf("GITEA_INTERNAL_KEY ref = %q, want gitea-internal-key", k)
+	if k := envRefKey(c, "HOOKS_TRIGGER_KEY"); k != "hooks-trigger-key" {
+		t.Errorf("HOOKS_TRIGGER_KEY ref = %q, want hooks-trigger-key", k)
 	}
 	if k := envRefKey(c, "GATEKEEPER_SERVICE_KEY"); k != "gatekeeper-service-key" {
 		t.Errorf("GATEKEEPER_SERVICE_KEY ref = %q", k)
-	}
-	// forge runs under its own ServiceAccount.
-	if pt.Spec.ServiceAccountName != "codearmory-forge" {
-		t.Errorf("serviceAccountName = %q, want codearmory-forge", pt.Spec.ServiceAccountName)
 	}
 	if c.ReadinessProbe == nil || c.LivenessProbe == nil {
 		t.Error("missing probes")
 	}
 	// Deterministic: a second render is byte-identical (no churn).
-	if !reflect.DeepEqual(c.Env, b.templatePod(workloadSpec{Service: "forge"}).Spec.Containers[0].Env) {
+	if !reflect.DeepEqual(c.Env, b.templatePod(workloadSpec{Service: "tickets"}).Spec.Containers[0].Env) {
 		t.Error("templatePod env is not deterministic")
 	}
 }
@@ -118,148 +108,6 @@ func TestTemplatePod_GiteaUsesK8sName(t *testing.T) {
 				t.Fatalf("secret ref name = %q, want codearmory-gitea-integration", got)
 			}
 		}
-	}
-}
-
-func TestEnsureInfra_ForgeDeploysEgressProxyAndRBAC(t *testing.T) {
-	httpClient = initHTTPClient()
-	rec := &registerRecorder{}
-	b := newTestBackend(t, rec)
-	ctx := context.Background()
-
-	if err := b.ensureInfra(ctx, workloadSpec{Service: "forge"}); err != nil {
-		t.Fatalf("ensureInfra: %v", err)
-	}
-	// egress-proxy Deployment + Service exist and the Deployment is labelled infra-of=forge.
-	dep, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("egress-proxy deployment: %v", err)
-	}
-	if dep.Labels[labelInfraOf] != "forge" {
-		t.Errorf("egress-proxy infra-of = %q, want forge", dep.Labels[labelInfraOf])
-	}
-	if _, err := b.client.CoreV1().Services("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err != nil {
-		t.Errorf("egress-proxy service: %v", err)
-	}
-	// forge RBAC: SA + Role + RoleBinding in the release (= default exec) namespace.
-	if _, err := b.client.CoreV1().ServiceAccounts("codearmory").Get(ctx, "codearmory-forge", metav1.GetOptions{}); err != nil {
-		t.Errorf("forge serviceaccount: %v", err)
-	}
-	if _, err := b.client.RbacV1().Roles("codearmory").Get(ctx, "codearmory-forge", metav1.GetOptions{}); err != nil {
-		t.Errorf("forge role: %v", err)
-	}
-	if _, err := b.client.RbacV1().RoleBindings("codearmory").Get(ctx, "codearmory-forge", metav1.GetOptions{}); err != nil {
-		t.Errorf("forge rolebinding: %v", err)
-	}
-
-	// ListManaged must NOT return the egress-proxy (it is infra, not a top-level service).
-	managed, err := b.ListManaged(ctx)
-	if err != nil {
-		t.Fatalf("ListManaged: %v", err)
-	}
-	for _, s := range managed {
-		if s == egressProxyComponent {
-			t.Error("ListManaged returned egress-proxy (would be reclaimed as an orphan)")
-		}
-	}
-
-	// Teardown removes the infra.
-	b.teardownInfra(ctx, "forge")
-	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err == nil {
-		t.Error("egress-proxy deployment not torn down")
-	}
-}
-
-func TestEnsureInfra_EgressProxyDisabled(t *testing.T) {
-	httpClient = initHTTPClient()
-	b := newTestBackend(t, &registerRecorder{})
-	ctx := context.Background()
-
-	spec := workloadSpec{Service: "forge", Env: map[string]string{"EGRESS_PROXY_ENABLED": "false"}}
-	if err := b.ensureInfra(ctx, spec); err != nil {
-		t.Fatalf("ensureInfra: %v", err)
-	}
-	// No egress-proxy and no NetworkPolicy when the knob is off (kata isolates egress itself).
-	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err == nil {
-		t.Error("egress-proxy deployed despite EGRESS_PROXY_ENABLED=false")
-	}
-	if _, err := b.client.NetworkingV1().NetworkPolicies("codearmory").Get(ctx, b.forgeNetworkPolicyName("forge"), metav1.GetOptions{}); err == nil {
-		t.Error("NetworkPolicy created despite egress proxy disabled")
-	}
-	// RBAC is independent of the egress proxy — the k8s runtime still needs it.
-	if _, err := b.client.CoreV1().ServiceAccounts("codearmory").Get(ctx, "codearmory-forge", metav1.GetOptions{}); err != nil {
-		t.Errorf("forge serviceaccount missing: %v", err)
-	}
-	// templatePod must not point forge at a proxy that isn't deployed.
-	c := b.templatePod(spec).Spec.Containers[0]
-	if v, _ := envValue(c, "FORGE_EGRESS_PROXY"); v != "" {
-		t.Errorf("FORGE_EGRESS_PROXY = %q, want unset when egress proxy disabled", v)
-	}
-}
-
-func TestEnsureInfra_KataSkipsEgressProxy(t *testing.T) {
-	httpClient = initHTTPClient()
-	b := newTestBackend(t, &registerRecorder{})
-	ctx := context.Background()
-
-	// Selecting kata implicitly skips the egress proxy: kata VMs filter egress at the
-	// VM level, so the shared-network proxy + NetworkPolicy are moot.
-	spec := workloadSpec{Service: "forge", Env: map[string]string{"RUNTIME": "kata"}}
-	if err := b.ensureInfra(ctx, spec); err != nil {
-		t.Fatalf("ensureInfra: %v", err)
-	}
-	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err == nil {
-		t.Error("egress-proxy deployed despite RUNTIME=kata")
-	}
-	if _, err := b.client.NetworkingV1().NetworkPolicies("codearmory").Get(ctx, b.forgeNetworkPolicyName("forge"), metav1.GetOptions{}); err == nil {
-		t.Error("NetworkPolicy created despite RUNTIME=kata")
-	}
-	c := b.templatePod(spec).Spec.Containers[0]
-	if v, _ := envValue(c, "FORGE_EGRESS_PROXY"); v != "" {
-		t.Errorf("FORGE_EGRESS_PROXY = %q, want unset under kata", v)
-	}
-}
-
-func TestEnsureInfra_GvisorKeepsEgressProxy(t *testing.T) {
-	httpClient = initHTTPClient()
-	b := newTestBackend(t, &registerRecorder{})
-	ctx := context.Background()
-
-	// Unlike kata, gVisor is a kernel sandbox, not a network boundary: it does NOT
-	// confine egress, so RUNTIME=gvisor must KEEP the egress proxy + NetworkPolicy.
-	spec := workloadSpec{Service: "forge", Env: map[string]string{"RUNTIME": "gvisor"}}
-	if err := b.ensureInfra(ctx, spec); err != nil {
-		t.Fatalf("ensureInfra: %v", err)
-	}
-	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err != nil {
-		t.Errorf("egress-proxy not deployed under RUNTIME=gvisor: %v", err)
-	}
-	if _, err := b.client.NetworkingV1().NetworkPolicies("codearmory").Get(ctx, b.forgeNetworkPolicyName("forge"), metav1.GetOptions{}); err != nil {
-		t.Errorf("NetworkPolicy not created under RUNTIME=gvisor: %v", err)
-	}
-	c := b.templatePod(spec).Spec.Containers[0]
-	if v, _ := envValue(c, "FORGE_EGRESS_PROXY"); v == "" {
-		t.Error("FORGE_EGRESS_PROXY unset under gvisor, want it pointed at the proxy")
-	}
-}
-
-func TestEnsureInfra_EgressProxyToggleOffCleansUp(t *testing.T) {
-	httpClient = initHTTPClient()
-	b := newTestBackend(t, &registerRecorder{})
-	ctx := context.Background()
-
-	if err := b.ensureInfra(ctx, workloadSpec{Service: "forge"}); err != nil {
-		t.Fatalf("ensureInfra (on): %v", err)
-	}
-	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err != nil {
-		t.Fatalf("egress-proxy should exist after enabled pass: %v", err)
-	}
-	// Toggling the knob off on a later reconcile removes the now-unwanted proxy.
-	if err := b.ensureInfra(ctx, workloadSpec{Service: "forge", Env: map[string]string{"EGRESS_PROXY_ENABLED": "false"}}); err != nil {
-		t.Fatalf("ensureInfra (off): %v", err)
-	}
-	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-egress-proxy", metav1.GetOptions{}); err == nil {
-		t.Error("egress-proxy not cleaned up after toggling EGRESS_PROXY_ENABLED=false")
 	}
 }
 
