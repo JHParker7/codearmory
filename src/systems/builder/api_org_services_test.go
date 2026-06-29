@@ -9,7 +9,10 @@ func TestMissingRequiredConfig(t *testing.T) {
 	withSecretsKey(t) // enable encryption so the existing-secrets branch can decrypt
 
 	blueprints, _ := embeddedServiceDef("blueprints") // requires DATABASE_URL; REDIS_URL optional (managed when absent)
-	containers, _ := embeddedServiceDef("containers")  // requires REGISTRY_URL
+	// A synthetic def with a plain (non-secret) required config var, to exercise the
+	// non-DB required-config path. No remaining catalog service has a plain required
+	// config (containers, which did, is now core), so we construct one inline.
+	plainCfg := serviceDef{RegistryName: "demo", RequiredConfig: []string{"REGISTRY_URL"}}
 
 	storedRedis, err := encryptSecretsMap(map[string]string{"REDIS_URL": "redis://r:6379"}, "blueprints")
 	if err != nil {
@@ -57,17 +60,17 @@ func TestMissingRequiredConfig(t *testing.T) {
 			want:    nil,
 		},
 		{
-			name:    "containers needs registry-url (plain config)",
-			def:     containers,
+			name:    "plain required config supplied",
+			def:     plainCfg,
 			req:     setServiceRequest{Config: map[string]any{"REGISTRY_URL": "https://reg"}},
-			service: "containers",
+			service: "demo",
 			want:    nil,
 		},
 		{
-			name:    "containers missing registry-url",
-			def:     containers,
+			name:    "plain required config missing",
+			def:     plainCfg,
 			req:     setServiceRequest{},
-			service: "containers",
+			service: "demo",
 			want:    []string{"REGISTRY_URL"},
 		},
 	}

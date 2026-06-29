@@ -70,8 +70,8 @@ services:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: forge=forge-local-secret,workflows=workflows-local-secret,hooks=hooks-local-secret,outpost-gateway=outpost-gateway-local-secret,builder=builder-local-secret,test-service=test-service-local-secret
-      SECRETS_LOOKUP_ALLOWED_CALLERS: "forge"
+      GATEKEEPER_SERVICES: forge=forge-local-secret,workflows=workflows-local-secret,hooks=hooks-local-secret,outpost-gateway=outpost-gateway-local-secret,builder=builder-local-secret,tickets=tickets-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
+      SECRETS_LOOKUP_ALLOWED_CALLERS: "forge,containers"
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
       # Org-service disable-gate: when both are set, gatekeeper denies requests to
@@ -310,6 +310,78 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+      registry:
+        condition: service_started
+    restart: on-failure
+
+  # ── Tickets / Git / Container-registry (CORE, external images) ───────────────
+  # Source lives in their own codearmory-<svc> repos; locally we run the published
+  # images (override the tag with CODEARMORY_TAG). If the images are not pullable in
+  # your dev environment these stay down — the rest of the core stack is unaffected.
+  tickets:
+    image: ghcr.io/code-armory-app/tickets:${CODEARMORY_TAG:-alpha}
+    environment:
+      <<: *otel-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/tickets
+      GATEKEEPER_URL: http://gatekeeper:8081
+      # Must match the tickets entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: tickets-local-secret
+      HOOKS_URL: http://hooks:8087
+      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
+    ports:
+      - "8086:8086"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+      registry:
+        condition: service_started
+    restart: on-failure
+
+  gitea-integration:
+    image: ghcr.io/code-armory-app/gitea_integration:${CODEARMORY_TAG:-alpha}
+    environment:
+      <<: *otel-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gitea_integration
+      GATEKEEPER_URL: http://gatekeeper:8081
+      # Must match the gitea_integration entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: gitea-integration-local-secret
+      GITEA_URL: http://forgejo:3000
+      # Admin token written to the shared volume by forgejo-setup; read via the *_FILE pattern.
+      GITEA_ADMIN_TOKEN_FILE: /token/token.txt
+      # Must match forge's GITEA_INTERNAL_KEY.
+      GITEA_INTERNAL_KEY: forge-gitea-internal-local-secret
+    volumes:
+      - forgejo_token:/token:ro
+    ports:
+      - "8088:8088"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+      registry:
+        condition: service_started
+      forgejo-setup:
+        condition: service_completed_successfully
+    restart: on-failure
+
+  containers:
+    image: ghcr.io/code-armory-app/containers:${CODEARMORY_TAG:-alpha}
+    environment:
+      <<: *otel-env
+      GATEKEEPER_URL: http://gatekeeper:8081
+      # Must match the containers entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: containers-local-secret
+      # Forgejo ships a built-in OCI container registry.
+      REGISTRY_URL: http://forgejo:3000
+      GITEA_INTEGRATION_URL: http://gitea-integration:8088
+    ports:
+      - "8089:8089"
+    depends_on:
       gatekeeper:
         condition: service_healthy
       registry:

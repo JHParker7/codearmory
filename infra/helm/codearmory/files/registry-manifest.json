@@ -625,5 +625,319 @@
     ],
     "actions": [],
     "default_grants": []
+  },
+  {
+    "name": "tickets",
+    "url": "http://tickets:8086",
+    "description": "Issue and task tracking",
+    "forward_auth": true,
+    "service_key": "tickets-registry-local-secret",
+    "endpoints": [
+      {
+        "method": "POST",
+        "path": "/tickets",
+        "action": "createTicket",
+        "resource": "tickets/tickets"
+      },
+      {
+        "method": "GET",
+        "path": "/tickets",
+        "action": "listTicket",
+        "resource": "tickets/tickets"
+      },
+      {
+        "method": "GET",
+        "path": "/tickets/{id}",
+        "action": "getTicket",
+        "resource": "tickets/tickets/{id}"
+      },
+      {
+        "method": "PUT",
+        "path": "/tickets/{id}",
+        "action": "updateTicket",
+        "resource": "tickets/tickets/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/tickets/{id}",
+        "action": "deleteTicket",
+        "resource": "tickets/tickets/{id}"
+      },
+      {
+        "method": "POST",
+        "path": "/tickets/{id}/comments",
+        "action": "createComment",
+        "resource": "tickets/tickets/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/tickets/{id}/comments/{comment_id}",
+        "action": "deleteComment",
+        "resource": "tickets/tickets/{id}/comments/{comment_id}"
+      },
+      {
+        "method": "GET",
+        "path": "/field-defs",
+        "action": "listFieldDef",
+        "resource": "tickets/field-defs"
+      },
+      {
+        "method": "POST",
+        "path": "/field-defs",
+        "action": "createFieldDef",
+        "resource": "tickets/field-defs"
+      },
+      {
+        "method": "PUT",
+        "path": "/field-defs/{id}",
+        "action": "updateFieldDef",
+        "resource": "tickets/field-defs/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/field-defs/{id}",
+        "action": "deleteFieldDef",
+        "resource": "tickets/field-defs/{id}"
+      }
+    ],
+    "actions": [
+      {
+        "name": "tickets/create",
+        "method": "POST",
+        "path": "/tickets"
+      },
+      {
+        "name": "tickets/update",
+        "method": "PUT",
+        "path": "/tickets/{id}"
+      },
+      {
+        "name": "tickets/delete",
+        "method": "DELETE",
+        "path": "/tickets/{id}"
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": [
+          "createTicket",
+          "listTicket",
+          "getTicket",
+          "updateTicket",
+          "deleteTicket",
+          "createComment",
+          "deleteComment",
+          "listFieldDef",
+          "createFieldDef",
+          "updateFieldDef",
+          "deleteFieldDef"
+        ],
+        "resources": [
+          "{username}/tickets/tickets",
+          "{username}/tickets/tickets/*",
+          "{username}/tickets/field-defs",
+          "{username}/tickets/field-defs/*"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "gitea_integration",
+    "url": "http://gitea-integration:8088",
+    "description": "Forgejo/Gitea git repository management",
+    "forward_auth": true,
+    "service_key": "gitea-integration-registry-local-secret",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/account",
+        "action": "getAccount",
+        "resource": "gitea_integration/account"
+      },
+      {
+        "method": "PUT",
+        "path": "/account",
+        "action": "linkAccount",
+        "resource": "gitea_integration/account"
+      },
+      {
+        "method": "DELETE",
+        "path": "/account",
+        "action": "unlinkAccount",
+        "resource": "gitea_integration/account"
+      },
+      {
+        "method": "GET",
+        "path": "/repos",
+        "action": "listRepo",
+        "resource": "gitea_integration/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos",
+        "action": "createRepo",
+        "resource": "gitea_integration/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{owner}/{name}",
+        "action": "getRepo",
+        "resource": "gitea_integration/repos/{owner}/{name}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repos/{owner}/{name}",
+        "action": "deleteRepo",
+        "resource": "gitea_integration/repos/{owner}/{name}"
+      },
+      {
+        "method": "PUT",
+        "path": "/repos/{owner}/{name}/project",
+        "action": "setRepoProject",
+        "resource": "gitea_integration/repos/{owner}/{name}"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{owner}/{name}/branches",
+        "action": "listBranch",
+        "resource": "gitea_integration/repos/{owner}/{name}"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{owner}/{name}/tags",
+        "action": "listTag",
+        "resource": "gitea_integration/repos/{owner}/{name}"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{owner}/{name}/releases",
+        "action": "listRelease",
+        "resource": "gitea_integration/repos/{owner}/{name}"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{owner}/{name}/commits",
+        "action": "listCommit",
+        "resource": "gitea_integration/repos/{owner}/{name}"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{owner}/{name}/pulls",
+        "action": "listPull",
+        "resource": "gitea_integration/repos/{owner}/{name}/pulls"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{owner}/{name}/pulls",
+        "action": "createPull",
+        "resource": "gitea_integration/repos/{owner}/{name}/pulls"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{owner}/{name}/pulls/{index}",
+        "action": "getPull",
+        "resource": "gitea_integration/repos/{owner}/{name}/pulls/{index}"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{owner}/{name}/pulls/{index}/merge",
+        "action": "mergePull",
+        "resource": "gitea_integration/repos/{owner}/{name}/pulls/{index}"
+      }
+    ],
+    "actions": [],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": [
+          "getAccount",
+          "linkAccount",
+          "unlinkAccount",
+          "listRepo",
+          "createRepo"
+        ],
+        "resources": [
+          "{username}/gitea_integration/account",
+          "{username}/gitea_integration/repos"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "getRepo",
+          "deleteRepo",
+          "setRepoProject",
+          "listBranch",
+          "listTag",
+          "listRelease",
+          "listCommit",
+          "listPull",
+          "createPull",
+          "getPull",
+          "mergePull"
+        ],
+        "resources": [
+          "{username}/gitea_integration/repos/*"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "getRegistryToken"
+        ],
+        "resources": [
+          "{username}/gitea_integration/registry-token"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "containers",
+    "url": "http://containers:8089",
+    "description": "Container image registry management",
+    "forward_auth": true,
+    "service_key": "containers-registry-local-secret",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/repositories",
+        "action": "listRepository",
+        "resource": "containers/repositories"
+      },
+      {
+        "method": "GET",
+        "path": "/repositories/{namespace}/{image}/tags",
+        "action": "listTag",
+        "resource": "containers/repositories/{namespace}/{image}"
+      },
+      {
+        "method": "GET",
+        "path": "/repositories/{namespace}/{image}/manifests/{reference}",
+        "action": "getManifest",
+        "resource": "containers/repositories/{namespace}/{image}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repositories/{namespace}/{image}/manifests/{digest}",
+        "action": "deleteManifest",
+        "resource": "containers/repositories/{namespace}/{image}"
+      }
+    ],
+    "actions": [],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": [
+          "listRepository",
+          "listTag",
+          "getManifest"
+        ],
+        "resources": [
+          "{username}/containers/repositories",
+          "{username}/containers/repositories/*"
+        ]
+      }
+    ]
   }
 ]

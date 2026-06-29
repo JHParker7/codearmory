@@ -50,12 +50,12 @@ gatekeeper:
     # Comma-separated list of service names permitted to register. Core services
     # deployed by this chart (incl. the forge + workflows CI/CD pair) are listed
     # here; non-core services are auto-permitted at runtime when builder registers them.
-    permittedServices: "gatekeeper,registry,builder,forge,workflows"
+    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,gitea_integration,containers"
     # Comma-separated services allowed to resolve org secrets via the internal
     # lookup endpoint (deny-all when empty). Defaults to "forge" so forge can resolve
     # "secret:<name>" job secret_refs; add "containers" to let the container registry
     # resolve per-org creds. Requires the secrets feature (gatekeeperSecretsKey).
-    secretsLookupAllowedCallers: "forge"
+    secretsLookupAllowedCallers: "forge,containers"
     # Comma-separated CIDRs of trusted reverse proxies (optional).
     trustedProxyCIDRs: ""
     # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
@@ -403,6 +403,114 @@ workflows:
     clientCertSecret: ""
     caBundle: ""
 
+# ── Tickets ─────────────────────────────────────────────────────────────────
+# Issue/task tracking. Source lives in the codearmory-tickets repo; the chart deploys
+# its published image as a CORE service (registered via the registry manifest).
+tickets:
+  enabled: true
+  image:
+    repository: tickets
+    tag: ""
+  replicaCount: 1
+  port: 8086
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
+    databaseUrl: ""
+    # Must match the tickets entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
+    gatekeeperServiceKey: ""
+    # Shared HMAC secret with hooks for authenticating internal trigger requests.
+    # Auto-synced from the hooks secret when present. Leave empty for auto-generation.
+    hooksTriggerKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Gitea integration ─────────────────────────────────────────────────────────
+# Forgejo/Gitea repository management. Source lives in the codearmory-gitea_integration
+# repo; the chart deploys its published image as a CORE service.
+giteaIntegration:
+  enabled: true
+  image:
+    repository: gitea_integration
+    tag: ""
+  replicaCount: 1
+  port: 8088
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    # Base URL of the Forgejo/Gitea instance this service manages (required to function).
+    giteaUrl: ""
+    otelEndpoint: ""
+  secret:
+    databaseUrl: ""
+    gatekeeperServiceKey: ""
+    # Admin API token for the Forgejo/Gitea instance (required to function).
+    giteaAdminToken: ""
+    # Shared HMAC secret authenticating forge → gitea_integration /internal/clone-token
+    # calls. forge derives the same key; leave empty for auto-generation (both sides agree).
+    giteaInternalKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
+# ── Containers ──────────────────────────────────────────────────────────────
+# Container image registry management. Stateless (no DB). Source lives in the
+# codearmory-containers repo; the chart deploys its published image as a CORE service.
+containers:
+  enabled: true
+  image:
+    repository: containers
+    tag: ""
+  replicaCount: 1
+  port: 8089
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    # Base URL of the container registry it manages (required to function).
+    registryUrl: ""
+    # Optional registry basic-auth username (password goes in secret.registryPassword).
+    registryUsername: ""
+    otelEndpoint: ""
+  secret:
+    gatekeeperServiceKey: ""
+    # Optional registry basic-auth password.
+    registryPassword: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
 # ── Builder ───────────────────────────────────────────────────────────────────
 # Org-level service control plane: org admins enable/disable/configure services
 # for their org. A null/"default" org is the baseline every org inherits.
@@ -562,7 +670,8 @@ postgresql:
   primary:
     initdb:
       scripts:
-        # Only the CORE service databases (incl. the forge + workflows CI/CD pair).
+        # Only the CORE service databases (incl. the forge + workflows CI/CD pair and the
+        # DB-backed tickets + gitea_integration trio members; containers is stateless).
         # Non-core services are deployed by builder with an admin-supplied db_url (HA
         # Postgres / Neon / managed), so the bundled subchart never provisions theirs.
         init.sql: |
@@ -571,3 +680,5 @@ postgresql:
           CREATE DATABASE builder;
           CREATE DATABASE forge;
           CREATE DATABASE workflows;
+          CREATE DATABASE tickets;
+          CREATE DATABASE gitea_integration;

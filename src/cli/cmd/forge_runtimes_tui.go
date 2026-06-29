@@ -115,6 +115,15 @@ func frBoolDot(r frRecord, key string) string {
 	return "○"
 }
 
+// frBoolDotBool renders a plain boolean as a filled/empty dot (the typed variant
+// of frBoolDot, for tables whose rows are typed structs rather than frRecord maps).
+func frBoolDotBool(b bool) string {
+	if b {
+		return "●"
+	}
+	return "○"
+}
+
 // frBoolStr renders a boolean field as "true"/"false" for pre-filling selectors.
 func frBoolStr(r frRecord, key string) string {
 	if b, ok := r[key].(bool); ok && b {

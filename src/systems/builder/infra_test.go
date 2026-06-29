@@ -73,7 +73,7 @@ func TestProvision_WritesDerivedSecrets(t *testing.T) {
 
 func TestTemplatePod_DeterministicEnv(t *testing.T) {
 	b := &k8sBackend{prefix: "codearmory", registry: "ghcr.io/x", tag: "v1", namespace: "codearmory"}
-	pt := b.templatePod(workloadSpec{Service: "tickets"})
+	pt := b.templatePod(workloadSpec{Service: "chaos"})
 	c := pt.Spec.Containers[0]
 
 	if v, plain := envValue(c, "GATEKEEPER_URL"); !plain || v != "http://codearmory-gatekeeper:8081" {
@@ -94,20 +94,8 @@ func TestTemplatePod_DeterministicEnv(t *testing.T) {
 		t.Error("missing probes")
 	}
 	// Deterministic: a second render is byte-identical (no churn).
-	if !reflect.DeepEqual(c.Env, b.templatePod(workloadSpec{Service: "tickets"}).Spec.Containers[0].Env) {
+	if !reflect.DeepEqual(c.Env, b.templatePod(workloadSpec{Service: "chaos"}).Spec.Containers[0].Env) {
 		t.Error("templatePod env is not deterministic")
-	}
-}
-
-func TestTemplatePod_GiteaUsesK8sName(t *testing.T) {
-	b := &k8sBackend{prefix: "codearmory", registry: "ghcr.io/x", tag: "v1", namespace: "codearmory"}
-	// Secret ref must target the DNS-1123 object name, not the underscore registry name.
-	for _, e := range b.templatePod(workloadSpec{Service: "gitea_integration"}).Spec.Containers[0].Env {
-		if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
-			if got := e.ValueFrom.SecretKeyRef.Name; got != "codearmory-gitea-integration" {
-				t.Fatalf("secret ref name = %q, want codearmory-gitea-integration", got)
-			}
-		}
 	}
 }
 
@@ -211,22 +199,8 @@ func TestEnsureServiceSecret_ManagedRedisURLWired(t *testing.T) {
 	}
 }
 
-func TestEnsureService_GiteaNamedWithHyphen(t *testing.T) {
-	httpClient = initHTTPClient()
-	rec := &registerRecorder{}
-	b := newTestBackend(t, rec)
-	ctx := context.Background()
-
-	if err := b.EnsureService(ctx, workloadSpec{Service: "gitea_integration"}); err != nil {
-		t.Fatalf("EnsureService gitea: %v", err)
-	}
-	// Object name is the DNS-1123 k8sName, never the underscore registry name.
-	if _, err := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-gitea-integration", metav1.GetOptions{}); err != nil {
-		t.Fatalf("expected deployment codearmory-gitea-integration: %v", err)
-	}
-	// Labelled by the registry name (for the desired-state diff).
-	dep, _ := b.client.AppsV1().Deployments("codearmory").Get(ctx, "codearmory-gitea-integration", metav1.GetOptions{})
-	if dep.Labels[labelComponent] != "gitea_integration" {
-		t.Errorf("component label = %q, want gitea_integration", dep.Labels[labelComponent])
-	}
-}
+// Note: builder's underscore→hyphen k8s naming (registryName "gitea_integration" →
+// object "gitea-integration") was exercised here against gitea_integration. That service
+// is now core (Helm-deployed), so builder no longer manages it; no remaining catalog def
+// has an underscore name. The k8sName-vs-registryName invariant for defs is still guarded
+// by TestEmbeddedDefs_K8sNamesAreDNS1123 in embed_test.go.

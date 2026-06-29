@@ -34,18 +34,18 @@ func TestEnabledFrom(t *testing.T) {
 func TestComputeDisabled(t *testing.T) {
 	defaults := []OrgService{
 		{ServiceName: "blueprints", Enabled: false}, // disabled in baseline
-		{ServiceName: "containers", Enabled: true},  // enabled in baseline
+		{ServiceName: "chaos", Enabled: true},       // enabled in baseline
 		{ServiceName: "gatekeeper", Enabled: false}, // core: must be ignored
 	}
 	overrides := []OrgService{
-		{ServiceName: "blueprints", Enabled: true},  // org re-enables blueprints
-		{ServiceName: "tickets", Enabled: false},    // org disables tickets
-		{ServiceName: "containers", Enabled: true},  // no change
+		{ServiceName: "blueprints", Enabled: true}, // org re-enables blueprints
+		{ServiceName: "argo", Enabled: false},      // org disables argo
+		{ServiceName: "chaos", Enabled: true},      // no change
 	}
 
 	got := computeDisabled(defaults, overrides)
 	sort.Strings(got)
-	want := []string{"tickets"}
+	want := []string{"argo"}
 	if len(got) != len(want) || (len(got) > 0 && got[0] != want[0]) {
 		t.Fatalf("computeDisabled = %v, want %v", got, want)
 	}

@@ -9,8 +9,8 @@ import (
 // expectedNonCore is every non-core service the chart no longer deploys; builder must
 // carry an embedded definition for each so it can deploy + register it at runtime.
 var expectedNonCore = []string{
-	"blueprints", "tickets", "notifications", "hooks",
-	"containers", "outpost-gateway", "chaos", "argo", "gitea_integration",
+	"blueprints", "notifications", "hooks",
+	"outpost-gateway", "chaos", "argo",
 }
 
 func TestEmbeddedDefs_AllParseAndComplete(t *testing.T) {
@@ -46,22 +46,6 @@ func TestEmbeddedDefs_K8sNamesAreDNS1123(t *testing.T) {
 		if strings.Contains(d.K8sName, "_") {
 			t.Errorf("%s: k8sName %q contains '_' (invalid DNS-1123)", name, d.K8sName)
 		}
-	}
-}
-
-func TestEmbeddedDefs_GiteaNameMapping(t *testing.T) {
-	d, ok := embeddedServiceDef("gitea_integration")
-	if !ok {
-		t.Fatal("gitea_integration def not found")
-	}
-	if d.RegistryName != "gitea_integration" {
-		t.Errorf("registryName = %q, want gitea_integration (underscore)", d.RegistryName)
-	}
-	if d.K8sName != "gitea-integration" {
-		t.Errorf("k8sName = %q, want gitea-integration (hyphen)", d.K8sName)
-	}
-	if d.ImageRepo != "gitea_integration" {
-		t.Errorf("imageRepo = %q, want gitea_integration", d.ImageRepo)
 	}
 }
 
