@@ -974,6 +974,112 @@ export function mergePull(token: string, owner: string, repo: string, index: num
   return req<void>('POST', `/gitea_integration/repos/${owner}/${repo}/pulls/${index}/merge`, token);
 }
 
+// ── Git (credential broker) ─────────────────────────────────────────────────
+// The `git` core service is a backend-agnostic git credential broker. It stores
+// provider backends (github/gitlab/forgejo/generic) and mints short-lived clone
+// credentials for a repo URL. Secrets are write-only: they are sent on
+// create/update but NEVER returned by any read — the backend types below omit
+// every secret field.
+
+export type GitBackendType = 'github' | 'gitlab' | 'forgejo' | 'generic';
+
+/**
+ * A registered git backend as returned by reads. Secret material (tokens, keys,
+ * passwords) is never present — only the non-sensitive descriptor, including the
+ * resolved `host` and the `auth_mode` in effect.
+ */
+export interface GitBackend {
+  id: string;
+  name: string;
+  type: GitBackendType | string;
+  base_url: string;
+  host: string;
+  auth_mode: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * The write-only auth payload sent when creating/updating a backend. `mode`
+ * selects the credential scheme for the chosen backend type; the remaining
+ * fields are mode-specific and never read back. Numbers (app_id/installation_id)
+ * are sent as ints.
+ */
+export interface GitBackendAuth {
+  mode: string;
+  // github "app"
+  app_id?: number;
+  installation_id?: number;
+  private_key?: string;
+  // github "pat" / gitlab "token" / forgejo "token"
+  token?: string;
+  username?: string;
+  // gitlab "oauth"
+  refresh_token?: string;
+  client_id?: string;
+  client_secret?: string;
+  // forgejo "admin"
+  admin_token?: string;
+  // generic "basic"
+  password?: string;
+}
+
+export interface GitBackendCreate {
+  name: string;
+  type: GitBackendType | string;
+  base_url: string;
+  auth: GitBackendAuth;
+}
+
+/** Result of probing a backend's stored credentials. */
+export interface GitBackendTest {
+  ok: boolean;
+  backend_type: string;
+  auth_mode: string;
+  expires_at?: string | null;
+}
+
+/** A short-lived clone credential minted for a repo URL. `secret` is sensitive. */
+export interface GitCredential {
+  type: string;
+  username: string;
+  secret: string;
+  clone_url: string;
+  backend: string;
+  backend_type: string;
+  expires_at?: string | null;
+}
+
+export function listGitBackends(token: string) {
+  return req<GitBackend[]>('GET', '/git/backends', token);
+}
+
+export function getGitBackend(token: string, id: string) {
+  return req<GitBackend>('GET', `/git/backends/${id}`, token);
+}
+
+export function createGitBackend(token: string, payload: GitBackendCreate) {
+  return req<GitBackend>('POST', '/git/backends', token, payload);
+}
+
+export function updateGitBackend(token: string, id: string, payload: Partial<GitBackendCreate>) {
+  return req<GitBackend>('PUT', `/git/backends/${id}`, token, payload);
+}
+
+export function deleteGitBackend(token: string, id: string) {
+  return req<void>('DELETE', `/git/backends/${id}`, token);
+}
+
+/** Probe a backend's stored credentials against its host, returning the broker's verdict. */
+export function testGitBackend(token: string, id: string) {
+  return req<GitBackendTest>('POST', `/git/backends/${id}/test`, token);
+}
+
+/** Mint a short-lived clone credential for a repo URL (the broker picks the matching backend by host). */
+export function mintGitCredential(token: string, repoUrl: string) {
+  return req<GitCredential>('POST', '/git/credentials', token, { repo_url: repoUrl });
+}
+
 // ── Invites ───────────────────────────────────────────────────────────────────
 
 export interface Invite {

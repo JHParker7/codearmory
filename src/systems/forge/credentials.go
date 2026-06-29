@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -15,6 +16,7 @@ import (
 const (
 	refSchemeSecret = "secret" // secret:<gatekeeper-org-secret-name>  — e.g. a git SSH key / token for GitHub, Bitbucket, …
 	refSchemeGitea  = "gitea"  // gitea:<owner>/<repo>                 — mints a short-lived Forgejo clone URL
+	refSchemeGit    = "git"    // git:<https-repo-url>                 — broker mints creds for the URL's backend
 )
 
 var (
@@ -24,6 +26,13 @@ var (
 	// giteaInternalKey authenticates forge → gitea_integration internal calls
 	// (sent as X-Internal-Key). Empty disables gitea: references.
 	giteaInternalKey = secret("GITEA_INTERNAL_KEY")
+	// gitInternalURL is the base URL of the core git credential-broker service,
+	// used to mint short-lived clone URLs for any linked backend (GitHub, GitLab,
+	// Forgejo, generic). Empty disables git: references.
+	gitInternalURL = strings.TrimRight(envOrDefault("GIT_INTERNAL_URL", ""), "/")
+	// gitInternalKey authenticates forge → git broker internal calls (sent as
+	// X-Internal-Key). Empty disables git: references.
+	gitInternalKey = secret("GIT_INTERNAL_KEY")
 	// forgeServiceKey returns the current rotated gatekeeper service key. It is
 	// wired in main() from registry.StartKeyRotation's accessor so secret lookups
 	// authenticate with the live key rather than the bootstrap value.
@@ -35,7 +44,7 @@ var (
 func parseCredentialRef(ref string) (scheme, arg string, err error) {
 	scheme, arg, ok := strings.Cut(ref, ":")
 	if !ok || arg == "" {
-		return "", "", fmt.Errorf("reference must be \"secret:<name>\" or \"gitea:<owner>/<repo>\"")
+		return "", "", fmt.Errorf("reference must be \"secret:<name>\", \"git:<repo-url>\", or \"gitea:<owner>/<repo>\"")
 	}
 	switch scheme {
 	case refSchemeSecret:
@@ -46,8 +55,17 @@ func parseCredentialRef(ref string) (scheme, arg string, err error) {
 			return "", "", fmt.Errorf("gitea reference must be \"gitea:<owner>/<repo>\"")
 		}
 		return scheme, arg, nil
+	case refSchemeGit:
+		// strings.Cut split on the first ':', so arg is already the full clone URL
+		// (e.g. "https://github.com/acme/widgets.git"). The broker resolves which
+		// linked backend owns the URL's host.
+		u, perr := url.Parse(arg)
+		if perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return "", "", fmt.Errorf("git reference must be \"git:<http(s)-repo-url>\"")
+		}
+		return scheme, arg, nil
 	default:
-		return "", "", fmt.Errorf("unknown reference scheme %q (want secret: or gitea:)", scheme)
+		return "", "", fmt.Errorf("unknown reference scheme %q (want secret:, git:, or gitea:)", scheme)
 	}
 }
 
@@ -97,6 +115,8 @@ func resolveCredentials(ctx context.Context, exec Execution) (map[string]string,
 			value, err = lookupOrgSecret(ctx, exec.OrgID, arg)
 		case refSchemeGitea:
 			value, err = mintGiteaCloneURL(ctx, exec.UserID, arg)
+		case refSchemeGit:
+			value, err = mintGitCloneURL(ctx, exec.UserID, arg)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", target, err)
@@ -144,6 +164,46 @@ func lookupOrgSecret(ctx context.Context, orgID, name string) (string, error) {
 		return "", fmt.Errorf("decode secret lookup response: %w", err)
 	}
 	return result.Value, nil
+}
+
+// mintGitCloneURL asks the core git credential-broker to mint clone credentials
+// for repoURL and returns an authenticated HTTPS clone URL. The broker resolves
+// which of the user's linked backends (GitHub, GitLab, Forgejo, generic) owns the
+// URL's host and mints short-lived credentials where the backend supports it.
+func mintGitCloneURL(ctx context.Context, userID, repoURL string) (string, error) {
+	if gitInternalURL == "" || gitInternalKey == "" {
+		return "", fmt.Errorf("git credential broker not configured (set GIT_INTERNAL_URL and GIT_INTERNAL_KEY)")
+	}
+	body, _ := json.Marshal(map[string]string{"user_id": userID, "repo_url": repoURL})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gitInternalURL+"/internal/clone-token", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Key", gitInternalKey)
+
+	resp, err := forgeHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("clone-token request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("no linked git backend for repo %q", repoURL)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("clone-token returned %d", resp.StatusCode)
+	}
+	var result struct {
+		CloneURL string `json:"clone_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode clone-token response: %w", err)
+	}
+	if result.CloneURL == "" {
+		return "", fmt.Errorf("clone-token response missing clone_url")
+	}
+	return result.CloneURL, nil
 }
 
 // mintGiteaCloneURL asks gitea_integration to mint a Forgejo clone token for the

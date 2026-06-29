@@ -11,12 +11,13 @@ This guide explains what each CodeArmory service does, how they fit together, an
 3. [API Gateway — Conductor](#api-gateway--conductor)
 4. [Service Discovery — Registry](#service-discovery--registry)
 5. [Sandboxed Execution — Forge](#sandboxed-execution--forge)
-6. [Pipeline Orchestration — Workflows](#pipeline-orchestration--workflows)
-7. [Git Webhooks — Hooks](#git-webhooks--hooks)
-8. [Cluster Integrations — Outposts](#cluster-integrations--outposts)
-9. [CLI — Armory](#cli--armory)
-10. [Observability](#observability)
-11. [Running the stack](#running-the-stack)
+6. [Git Credentials — Git](#git-credentials--git)
+7. [Pipeline Orchestration — Workflows](#pipeline-orchestration--workflows)
+8. [Git Webhooks — Hooks](#git-webhooks--hooks)
+9. [Cluster Integrations — Outposts](#cluster-integrations--outposts)
+10. [CLI — Armory](#cli--armory)
+11. [Observability](#observability)
+12. [Running the stack](#running-the-stack)
 
 ---
 
@@ -37,6 +38,7 @@ Browser / CLI
         ├── POST /signup, POST /login ──► Gatekeeper :8081  (public)
         │
         ├── /executions/...       ──────► Forge      :8083  (sandboxed runners)
+        ├── /git/...              ──────► Git        :8096  (clone-credential broker)
         ├── /workflows/...        ──────► Workflows  :8085  (pipelines)
         └── /hooks/...            ──────► Hooks      :8087  (webhook receiver)
 
@@ -196,6 +198,48 @@ Each container is isolated at the OS level. Forge enforces:
 ### Integration with Workflows
 
 Forge is registered as a named service in the Workflows `SERVICES` env var. A workflow step that targets `"service": "forge"` with `"path": "/executions"` will trigger a Forge run, forwarding the caller's auth token so the execution is attributed to the right user.
+
+---
+
+## Git Credentials — Git
+
+**Port:** 8096
+
+Git is the core **credential broker** for source control. Users link one or more git backends — **GitHub, GitLab, Forgejo, or a generic git server** — and the broker mints (or just-in-time brokers) clone credentials on demand for whatever backend a repository belongs to. It is *not* a repository-management service; it does not create repos or pull requests. Its sole job is answering *"give me an authenticated clone URL for this repo"* — for a user directly, or for Forge/Workflows running a job on their behalf.
+
+### How it works
+
+Link a backend once; then any caller asks for a credential by **repository URL** and the broker derives the host, finds the caller's backend for that host, and mints or brokers a credential appropriate to its auth mode. It returns the username/secret plus an authenticated HTTPS `clone_url`.
+
+Like Forge, Git verifies every request **directly with Gatekeeper** (`forward_auth: true`) — the resolved `user_id` is the credential owner, so a compromised gateway cannot mint credentials by spoofing `X-User-ID`.
+
+### Backends and auth modes
+
+The broker mints **short-lived** credentials where the backend supports it, and otherwise brokers a stored secret just-in-time:
+
+| Type | Mode | Behaviour |
+|------|------|-----------|
+| `github` | `app` | GitHub App → ~1h installation token (genuinely short-lived) |
+| `github` | `pat` | Brokers a stored personal access token |
+| `gitlab` | `oauth` | Refresh token → ~2h access token (short-lived; refresh token rotated/persisted) |
+| `gitlab` | `token` | Brokers a stored access token |
+| `forgejo` | `admin` | Admin token mints a per-user, repo-scoped, revoke-on-reuse token |
+| `forgejo` | `token` | Brokers a stored personal access token |
+| `generic` | `basic` | Brokers a stored username + password/token over HTTPS basic auth |
+
+The minting modes (`github` `app`, `gitlab` `oauth`, `forgejo` `admin`) reduce credential blast radius; the `pat`/`token`/`basic` modes broker a long-lived secret you supplied — held encrypted and released only at mint time.
+
+### Encryption at rest
+
+All credential material is sealed with **AES-256-GCM** under a key derived from `GIT_ENCRYPTION_KEY` before it touches the database. The service refuses to start without that key, and the sealed credential is never returned by backend reads or logged.
+
+### Integration with Forge
+
+A Forge job's `secret_ref` of the form `git:<https-repo-url>` makes Forge call the broker's internal `clone-token` endpoint at dispatch time and inject an authenticated clone URL into the job env — never persisted on the execution record. This works across all backend types. (The older `gitea:<owner>/<repo>` scheme still works but targets the optional `gitea_integration` service.) See [Git README](git/README.md).
+
+### Not the same as `gitea_integration`
+
+`gitea_integration` is a separate, **optional non-core** service for Forgejo/Gitea **repository management** (repos, branches, pull requests), deployed by Builder on demand. Git (this service) only brokers clone credentials and is core. Use either, both, or neither.
 
 ---
 
@@ -437,10 +481,10 @@ You can run a subset of services depending on your use case:
 
 | Use case | Required services |
 |----------|------------------|
-| Core only | Gatekeeper, Conductor, Registry, Builder, Portal |
-| CI/CD pipelines | Add Forge, Workflows, Hooks |
+| Control plane | Gatekeeper, Conductor, Registry, Builder, Portal |
+| CI/CD pipelines | Add Forge, Git, Workflows, Hooks |
 | Cluster integrations | Add Outpost Gateway, and deploy an outpost in the target cluster |
-| Optional capabilities | Deployed and registered at runtime as modules by Builder |
+| Optional capabilities | Deployed and registered at runtime as modules by Builder (e.g. `gitea_integration` for Forgejo/Gitea repo management) |
 
 Gatekeeper, Conductor, Registry, Builder, and Portal are the core required by any configuration. The remaining services are independently deployable.
 

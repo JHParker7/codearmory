@@ -1,24 +1,24 @@
-{{- if .Values.giteaIntegration.enabled }}
+{{- if .Values.git.enabled }}
 {{- $fullname := include "codearmory.fullname" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ $fullname }}-gitea-integration
+  name: {{ $fullname }}-git
   labels:
     {{- include "codearmory.labels" . | nindent 4 }}
-    app.kubernetes.io/component: gitea-integration
+    app.kubernetes.io/component: git
 spec:
-  replicas: {{ .Values.giteaIntegration.replicaCount }}
+  replicas: {{ .Values.git.replicaCount }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "codearmory.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: gitea-integration
+      app.kubernetes.io/component: git
   template:
     metadata:
       labels:
         {{- include "codearmory.labels" . | nindent 8 }}
-        app.kubernetes.io/component: gitea-integration
+        app.kubernetes.io/component: git
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -33,8 +33,8 @@ spec:
       initContainers:
         {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
       containers:
-        - name: gitea-integration
-          image: "{{ include "codearmory.image" (list . .Values.giteaIntegration) }}"
+        - name: git
+          image: "{{ include "codearmory.image" (list . .Values.git) }}"
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -43,37 +43,38 @@ spec:
               drop: ["ALL"]
           ports:
             - name: http
-              containerPort: {{ .Values.giteaIntegration.port }}
+              containerPort: {{ .Values.git.port }}
               protocol: TCP
           env:
             - name: PORT
-              value: {{ .Values.giteaIntegration.port | quote }}
+              value: {{ .Values.git.port | quote }}
             - name: LOG_LEVEL
-              value: {{ .Values.giteaIntegration.env.logLevel | quote }}
+              value: {{ .Values.git.env.logLevel | quote }}
             - name: GATEKEEPER_URL
               value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
-            - name: GITEA_URL
-              value: {{ .Values.giteaIntegration.env.giteaUrl | quote }}
-            {{- include "codearmory.otel.envs" (list . .Values.giteaIntegration.env) | nindent 12 }}
-            {{- include "codearmory.postgresql.env" (list . "gitea-integration" "gitea_integration" $fullname) | nindent 12 }}
+            {{- include "codearmory.otel.envs" (list . .Values.git.env) | nindent 12 }}
+            {{- include "codearmory.postgresql.env" (list . "git" "git" $fullname) | nindent 12 }}
             - name: GATEKEEPER_SERVICE_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ $fullname }}-gitea-integration
+                  name: {{ $fullname }}-git
                   key: gatekeeper-service-key
-            - name: GITEA_INTERNAL_KEY
+            # Required: encrypts linked-backend credentials at rest. The service
+            # refuses to start without it.
+            - name: GIT_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ $fullname }}-gitea-integration
-                  key: gitea-internal-key
-            - name: GITEA_ADMIN_TOKEN
+                  name: {{ $fullname }}-git
+                  key: git-encryption-key
+            # Shared HMAC with forge authenticating forge → git /internal/clone-token.
+            # Matches the same key wired into forge-secret (bootstrap arg "git-internal").
+            - name: GIT_INTERNAL_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ $fullname }}-gitea-integration
-                  key: gitea-admin-token
-                  optional: true
-            {{- include "codearmory.tls.envs" .Values.giteaIntegration.tls | nindent 12 }}
-          {{- with (include "codearmory.tls.volumeMounts" .Values.giteaIntegration.tls) }}
+                  name: {{ $fullname }}-git
+                  key: git-internal-key
+            {{- include "codearmory.tls.envs" .Values.git.tls | nindent 12 }}
+          {{- with (include "codearmory.tls.volumeMounts" .Values.git.tls) }}
           volumeMounts:
             {{- . | nindent 12 }}
           {{- end }}
@@ -88,8 +89,8 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
-            {{- toYaml .Values.giteaIntegration.resources | nindent 12 }}
-      {{- with (include "codearmory.tls.volumes" .Values.giteaIntegration.tls) }}
+            {{- toYaml .Values.git.resources | nindent 12 }}
+      {{- with (include "codearmory.tls.volumes" .Values.git.tls) }}
       volumes:
         {{- . | nindent 8 }}
       {{- end }}

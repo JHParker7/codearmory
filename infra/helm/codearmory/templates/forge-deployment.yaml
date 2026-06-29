@@ -115,16 +115,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-forge
                   key: gatekeeper-service-key
-            {{- if .Values.giteaIntegration.enabled }}
-            # gitea_integration is core (Helm-deployed); wire forge → its /internal/clone-token
-            # so private-repo clone tokens work. Shared key matches gitea-integration-secret.
-            - name: GITEA_INTERNAL_URL
-              value: "http://{{ include "codearmory.fullname" . }}-gitea-integration:{{ .Values.giteaIntegration.port }}"
-            - name: GITEA_INTERNAL_KEY
+            {{- if .Values.git.enabled }}
+            # git is the core (Helm-deployed) credential broker; wire forge → its
+            # /internal/clone-token so private-repo clone credentials work. Shared key
+            # matches git-secret (the canonical owner of git-internal-key).
+            - name: GIT_INTERNAL_URL
+              value: "http://{{ include "codearmory.fullname" . }}-git:{{ .Values.git.port }}"
+            - name: GIT_INTERNAL_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-forge
-                  key: gitea-internal-key
+                  key: git-internal-key
             {{- end }}
             {{- if .Values.forge.proxmox.enabled }}
             # Proxmox VE API token consumed by a runtime backend of type "proxmox"

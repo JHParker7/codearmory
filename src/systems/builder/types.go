@@ -16,19 +16,22 @@ const defaultOrgID = "default"
 // They are shipped by the Helm chart (not deployed/registered by builder) and so are
 // excluded from the catalog, never reconciled, and rejected by the set-service API.
 // forge + workflows are the CI/CD pair: the chart deploys them and registers them via
-// the registry manifest, so builder treats them as core like the rest. tickets,
-// gitea_integration, and containers were likewise promoted to core: the chart deploys
-// their published images and registers them via the registry manifest.
+// the registry manifest, so builder treats them as core like the rest. tickets and
+// containers were likewise promoted to core: the chart deploys their published images
+// and registers them via the registry manifest. The core git service is the
+// backend-agnostic credential broker (src/systems/git); gitea_integration (Forgejo
+// repo management) is NOT core — most users do not run Forgejo, so builder deploys it
+// on demand from files/services/gitea_integration.json.
 var coreServices = map[string]bool{
-	"gatekeeper":        true,
-	"conductor":         true,
-	"registry":          true,
-	"builder":           true,
-	"forge":             true,
-	"workflows":         true,
-	"tickets":           true,
-	"gitea_integration": true,
-	"containers":        true,
+	"gatekeeper": true,
+	"conductor":  true,
+	"registry":   true,
+	"builder":    true,
+	"forge":      true,
+	"workflows":  true,
+	"tickets":    true,
+	"git":        true,
+	"containers": true,
 }
 
 // kinds of org-service rows.

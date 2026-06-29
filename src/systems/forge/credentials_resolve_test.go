@@ -42,6 +42,23 @@ func fakeGiteaServer(t *testing.T, h http.HandlerFunc) {
 	})
 }
 
+// fakeGitBrokerServer stands in for the git credential-broker's
+// /internal/clone-token endpoint, overriding gitInternalURL + gitInternalKey for
+// the test duration.
+func fakeGitBrokerServer(t *testing.T, h http.HandlerFunc) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	origURL := gitInternalURL
+	origKey := gitInternalKey
+	gitInternalURL = srv.URL
+	gitInternalKey = "git-internal-key"
+	t.Cleanup(func() {
+		gitInternalURL = origURL
+		gitInternalKey = origKey
+		srv.Close()
+	})
+}
+
 // ── lookupOrgSecret ─────────────────────────────────────────────────────────────
 
 func TestLookupOrgSecret_Success(t *testing.T) {
@@ -178,6 +195,59 @@ func TestMintGiteaCloneURL_BadJSON(t *testing.T) {
 	})
 	if _, err := mintGiteaCloneURL(context.Background(), "user-1", "acme/widgets"); err == nil {
 		t.Fatal("expected a decode error for a malformed clone-token response")
+	}
+}
+
+// ── mintGitCloneURL ─────────────────────────────────────────────────────────────
+
+func TestMintGitCloneURL_Success(t *testing.T) {
+	fakeGitBrokerServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/clone-token" {
+			t.Errorf("path = %q, want /internal/clone-token", r.URL.Path)
+		}
+		if got := r.Header.Get("X-Internal-Key"); got != "git-internal-key" {
+			t.Errorf("X-Internal-Key = %q, want git-internal-key", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"clone_url":"https://x-access-token:tok@github.com/acme/widgets.git"}`)) //nolint:errcheck
+	})
+	got, err := mintGitCloneURL(context.Background(), "user-1", "https://github.com/acme/widgets.git")
+	if err != nil {
+		t.Fatalf("mintGitCloneURL: %v", err)
+	}
+	if !strings.Contains(got, "github.com/acme/widgets.git") {
+		t.Errorf("clone url = %q, want the minted URL", got)
+	}
+}
+
+func TestMintGitCloneURL_NotConfigured(t *testing.T) {
+	origURL := gitInternalURL
+	origKey := gitInternalKey
+	gitInternalURL = ""
+	gitInternalKey = ""
+	t.Cleanup(func() { gitInternalURL = origURL; gitInternalKey = origKey })
+	if _, err := mintGitCloneURL(context.Background(), "user-1", "https://github.com/acme/widgets.git"); err == nil {
+		t.Fatal("expected an error when the git broker is not configured")
+	}
+}
+
+func TestMintGitCloneURL_NoLinkedBackend(t *testing.T) {
+	fakeGitBrokerServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	_, err := mintGitCloneURL(context.Background(), "user-1", "https://github.com/acme/widgets.git")
+	if err == nil || !strings.Contains(err.Error(), "no linked git backend") {
+		t.Fatalf("err = %v, want a no-linked-backend error", err)
+	}
+}
+
+func TestMintGitCloneURL_EmptyCloneURL(t *testing.T) {
+	fakeGitBrokerServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"clone_url":""}`)) //nolint:errcheck
+	})
+	if _, err := mintGitCloneURL(context.Background(), "user-1", "https://github.com/acme/widgets.git"); err == nil {
+		t.Fatal("expected an error when the response carries no clone_url")
 	}
 }
 

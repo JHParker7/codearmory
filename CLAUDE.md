@@ -57,7 +57,7 @@ Commits must follow Conventional Commits format (`feat:`, `fix:`, `chore:`, etc.
 ## Architecture
 
 ### Repository scope (core monorepo + spun-off services)
-This monorepo holds the **core control plane**: conductor, gatekeeper, registry, builder, portal, workflows, forge, hooks, the forge **egress-proxy**, and the outpost pair (`outpost` + `outpost-gateway`). **tickets, gitea_integration (git), and containers (docker registry)** are also **core** — the Helm chart deploys their published images and they are registered via the registry manifest — even though their source lives in their own `codearmory-<svc>` repos (they have no builder def). The remaining services were spun out into their own `codearmory-<svc>` repos — **argo, blueprints, chaos, mcp, notifications** — but are still part of the platform: **builder** deploys and registers them at runtime from the images those repos publish (their deploy defs stay in `src/systems/builder/files/services/*.json`). References to these services below describe platform behavior even though their source now lives elsewhere.
+This monorepo holds the **core control plane**: conductor, gatekeeper, registry, builder, portal, workflows, forge, **git** (the credential broker), hooks, the forge **egress-proxy**, and the outpost pair (`outpost` + `outpost-gateway`). The **git** service is the core git integration — a backend-agnostic **credential broker** (in-repo at `src/systems/git`) that mints short-lived clone credentials for whatever backend a repo lives on (GitHub, GitLab, Forgejo, generic). **tickets** and **containers (docker registry)** are also **core** — the Helm chart deploys their published images and they are registered via the registry manifest — even though their source lives in their own `codearmory-<svc>` repos (they have no builder def). The remaining services were spun out into their own `codearmory-<svc>` repos — **argo, blueprints, chaos, mcp, notifications**, and **gitea_integration** (Forgejo/Gitea repo management — demoted from core because most users do not run Forgejo) — but are still part of the platform: **builder** deploys and registers them at runtime from the images those repos publish (their deploy defs stay in `src/systems/builder/files/services/*.json`). References to these services below describe platform behavior even though their source now lives elsewhere.
 
 ### Request flow
 Every external request enters through **Conductor** (`:8080`), the API gateway. Conductor polls **Registry** (`:8082`) every ~5 minutes for service manifests that define routes, actions, and RBAC resources. Conductor verifies permissions with **Gatekeeper** (`:8081`) before forwarding each request to the target backend.
@@ -71,13 +71,13 @@ Two forwarding modes are controlled by `forward_auth` in the registry manifest:
 - `forward_auth: false` (all other services): bearer token is stripped; conductor injects `X-User-ID`, `X-Conductor-Token`, and `X-Conductor-Timestamp` headers so backends can verify the request came through conductor
 
 ### Service manifests
-`infra/local/registry-manifest.json` is the source of truth for what routes the **core** services expose, what RBAC action/resource pairs they map to, and what permissions are granted by default on startup (`default_grants`). The Helm equivalent populates this at deploy time. It also carries the core, source-external trio (tickets, gitea_integration, containers). The **builder-deployed** services (argo, blueprints, chaos, mcp, notifications) are **not** in the manifest — **builder** registers them with the registry at runtime when an admin enables them (it PUTs their endpoints/grants from its embedded defs, then notifies conductor). A new core service must be registered in this manifest; conductor will not route to it otherwise.
+`infra/local/registry-manifest.json` is the source of truth for what routes the **core** services expose, what RBAC action/resource pairs they map to, and what permissions are granted by default on startup (`default_grants`). The Helm equivalent populates this at deploy time. It also carries the source-external core pair (tickets, containers). The **builder-deployed** services (argo, blueprints, chaos, mcp, notifications, gitea_integration) are **not** in the Helm manifest — **builder** registers them with the registry at runtime when an admin enables them (it PUTs their endpoints/grants from its embedded defs, then notifies conductor). (For local-dev convenience the `infra/local` manifest may still list some builder-deployed services, e.g. `hooks` and `gitea_integration`, since compose does not run builder's reconciler.) A new core service must be registered in this manifest; conductor will not route to it otherwise.
 
 ### Service registration / key rotation
 Every backend service calls `registry.StartKeyRotation(ctx, gatekeeperURL, "<service-name>", secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)` on startup (from the `codearmory_sdk`). This registers the service with Gatekeeper and rotates the shared key every 25 minutes. The initial key is set in `GATEKEEPER_SERVICE_KEY` and must match the corresponding entry in Gatekeeper's `GATEKEEPER_SERVICES` env var.
 
 ### Database pattern
-All GORM-based services in this repo (`gatekeeper`, `hooks`, `workflows`) — and the source-external `tickets`/`gitea_integration`/`containers` — use the same pattern:
+All GORM-based services in this repo (`gatekeeper`, `hooks`, `workflows`, `git`) — and the source-external `tickets`/`containers` plus the builder-deployed `gitea_integration` — use the same pattern:
 - A `db` interface with `Add / Update / Remove / Get / List` methods implemented on each entity struct
 - Lazy-initialized `gormDB` / `gormDBRead` singletons via `connect()` / `connectRead()`
 - `CREATE TABLE IF NOT EXISTS` auto-migration on startup — no separate migration step
@@ -113,6 +113,7 @@ src/
     registry/       Service manifest store — routes, actions, default grants
     builder/        Org control plane + runtime deployer/registrar of non-core services
     forge/          Sandboxed execution (Docker + Kubernetes runtimes)
+    git/            Git credential broker — short-lived clone creds for GitHub/GitLab/Forgejo/generic backends
     egress-proxy/   Allowlist-enforcing HTTP/CONNECT proxy for forge sandbox egress
     workflows/      Pipeline orchestrator — steps, runs, worker
     hooks/          Webhook receiver — rules, event matching, trigger
@@ -128,4 +129,4 @@ tests/              Python integration tests (pytest) per service
 docs/               Per-service READMEs and platform guide
 ```
 
-**Spun off** into their own `codearmory-<svc>` repos (source not in this tree): argo, blueprints, chaos, mcp, notifications are deployed + registered by **builder** at runtime; tickets, gitea_integration, containers are also source-external but **core** (Helm-deployed, registered via the registry manifest, no builder def).
+**Spun off** into their own `codearmory-<svc>` repos (source not in this tree): argo, blueprints, chaos, mcp, notifications, and gitea_integration are deployed + registered by **builder** at runtime; tickets and containers are also source-external but **core** (Helm-deployed, registered via the registry manifest, no builder def). The core git integration is the in-repo **git** credential broker (`src/systems/git`), not gitea_integration.

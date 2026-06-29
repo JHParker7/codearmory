@@ -743,107 +743,53 @@
     ]
   },
   {
-    "name": "gitea_integration",
-    "url": "http://gitea-integration:8088",
-    "description": "Forgejo/Gitea git repository management",
+    "name": "git",
+    "url": "http://git:8096",
+    "description": "Git credential broker — mints short-lived clone credentials for linked backends (GitHub, GitLab, Forgejo, generic)",
     "forward_auth": true,
-    "service_key": "gitea-integration-registry-local-secret",
+    "service_key": "git-registry-local-secret",
     "endpoints": [
       {
         "method": "GET",
-        "path": "/account",
-        "action": "getAccount",
-        "resource": "gitea_integration/account"
+        "path": "/backends",
+        "action": "listBackend",
+        "resource": "git/backends"
+      },
+      {
+        "method": "POST",
+        "path": "/backends",
+        "action": "createBackend",
+        "resource": "git/backends"
+      },
+      {
+        "method": "GET",
+        "path": "/backends/{id}",
+        "action": "getBackend",
+        "resource": "git/backends/{id}"
       },
       {
         "method": "PUT",
-        "path": "/account",
-        "action": "linkAccount",
-        "resource": "gitea_integration/account"
+        "path": "/backends/{id}",
+        "action": "updateBackend",
+        "resource": "git/backends/{id}"
       },
       {
         "method": "DELETE",
-        "path": "/account",
-        "action": "unlinkAccount",
-        "resource": "gitea_integration/account"
-      },
-      {
-        "method": "GET",
-        "path": "/repos",
-        "action": "listRepo",
-        "resource": "gitea_integration/repos"
+        "path": "/backends/{id}",
+        "action": "deleteBackend",
+        "resource": "git/backends/{id}"
       },
       {
         "method": "POST",
-        "path": "/repos",
-        "action": "createRepo",
-        "resource": "gitea_integration/repos"
-      },
-      {
-        "method": "GET",
-        "path": "/repos/{owner}/{name}",
-        "action": "getRepo",
-        "resource": "gitea_integration/repos/{owner}/{name}"
-      },
-      {
-        "method": "DELETE",
-        "path": "/repos/{owner}/{name}",
-        "action": "deleteRepo",
-        "resource": "gitea_integration/repos/{owner}/{name}"
-      },
-      {
-        "method": "PUT",
-        "path": "/repos/{owner}/{name}/project",
-        "action": "setRepoProject",
-        "resource": "gitea_integration/repos/{owner}/{name}"
-      },
-      {
-        "method": "GET",
-        "path": "/repos/{owner}/{name}/branches",
-        "action": "listBranch",
-        "resource": "gitea_integration/repos/{owner}/{name}"
-      },
-      {
-        "method": "GET",
-        "path": "/repos/{owner}/{name}/tags",
-        "action": "listTag",
-        "resource": "gitea_integration/repos/{owner}/{name}"
-      },
-      {
-        "method": "GET",
-        "path": "/repos/{owner}/{name}/releases",
-        "action": "listRelease",
-        "resource": "gitea_integration/repos/{owner}/{name}"
-      },
-      {
-        "method": "GET",
-        "path": "/repos/{owner}/{name}/commits",
-        "action": "listCommit",
-        "resource": "gitea_integration/repos/{owner}/{name}"
-      },
-      {
-        "method": "GET",
-        "path": "/repos/{owner}/{name}/pulls",
-        "action": "listPull",
-        "resource": "gitea_integration/repos/{owner}/{name}/pulls"
+        "path": "/backends/{id}/test",
+        "action": "testBackend",
+        "resource": "git/backends/{id}"
       },
       {
         "method": "POST",
-        "path": "/repos/{owner}/{name}/pulls",
-        "action": "createPull",
-        "resource": "gitea_integration/repos/{owner}/{name}/pulls"
-      },
-      {
-        "method": "GET",
-        "path": "/repos/{owner}/{name}/pulls/{index}",
-        "action": "getPull",
-        "resource": "gitea_integration/repos/{owner}/{name}/pulls/{index}"
-      },
-      {
-        "method": "POST",
-        "path": "/repos/{owner}/{name}/pulls/{index}/merge",
-        "action": "mergePull",
-        "resource": "gitea_integration/repos/{owner}/{name}/pulls/{index}"
+        "path": "/credentials",
+        "action": "mintCredential",
+        "resource": "git/credentials"
       }
     ],
     "actions": [],
@@ -851,43 +797,32 @@
       {
         "grant_on": "user",
         "actions": [
-          "getAccount",
-          "linkAccount",
-          "unlinkAccount",
-          "listRepo",
-          "createRepo"
+          "listBackend",
+          "createBackend"
         ],
         "resources": [
-          "{username}/gitea_integration/account",
-          "{username}/gitea_integration/repos"
+          "{username}/git/backends"
         ]
       },
       {
         "grant_on": "user",
         "actions": [
-          "getRepo",
-          "deleteRepo",
-          "setRepoProject",
-          "listBranch",
-          "listTag",
-          "listRelease",
-          "listCommit",
-          "listPull",
-          "createPull",
-          "getPull",
-          "mergePull"
+          "getBackend",
+          "updateBackend",
+          "deleteBackend",
+          "testBackend"
         ],
         "resources": [
-          "{username}/gitea_integration/repos/*"
+          "{username}/git/backends/*"
         ]
       },
       {
         "grant_on": "user",
         "actions": [
-          "getRegistryToken"
+          "mintCredential"
         ],
         "resources": [
-          "{username}/gitea_integration/registry-token"
+          "{username}/git/credentials"
         ]
       }
     ]
