@@ -3,6 +3,7 @@ go 1.25.6
 use (
 	./builder
 	./conductor
+	./containers
 	./egress-proxy
 	./forge
 	./gatekeeper
@@ -11,5 +12,6 @@ use (
 	./outpost
 	./outpost-gateway
 	./registry
+	./tickets
 	./workflows
 )

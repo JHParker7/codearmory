@@ -124,6 +124,42 @@ jobs:
       - name: Run hooks unit tests
         run: cd src/systems/hooks; go test .
 
+  git-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run git unit tests
+        run: cd src/systems/git; go test .
+
+  tickets-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run tickets unit tests
+        run: cd src/systems/tickets; go test .
+
+  containers-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run containers unit tests
+        run: cd src/systems/containers; go test .
+
   outpost-gateway-unit-test:
     runs-on: ubuntu-latest
     steps:
@@ -159,6 +195,9 @@ jobs:
       - registry-unit-test
       - workflows-unit-test
       - hooks-unit-test
+      - git-unit-test
+      - tickets-unit-test
+      - containers-unit-test
       - outpost-gateway-unit-test
       - outpost-unit-test
     if: github.event_name != 'pull_request'
@@ -226,6 +265,12 @@ jobs:
             context: src/systems/workflows
           - name: hooks
             context: src/systems/hooks
+          - name: git
+            context: src/systems/git
+          - name: tickets
+            context: src/systems/tickets
+          - name: containers
+            context: src/systems/containers
           - name: outpost-gateway
             context: src/systems/outpost-gateway
           - name: outpost
@@ -244,6 +289,8 @@ jobs:
             context: tests/workflows
           - name: hooks-tests
             context: tests/hooks
+          - name: tickets-tests
+            context: tests/tickets
           - name: outpost-gateway-tests
             context: tests/outpost-gateway
     steps:
