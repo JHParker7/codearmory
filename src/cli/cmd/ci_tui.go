@@ -102,6 +102,20 @@ type tuiRun struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	StartedAt   *time.Time `json:"started_at"`
 	EndedAt     *time.Time `json:"ended_at"`
+
+	// triggeredByName is the resolved username for TriggeredBy (a user_id),
+	// filled in during fetch so the UI shows who triggered the run instead of a
+	// raw UUID. Not part of the API response; empty when the lookup failed.
+	triggeredByName string
+}
+
+// triggeredByLabel returns the human-readable trigger actor, falling back to the
+// raw user id only when no username resolved.
+func (r tuiRun) triggeredByLabel() string {
+	if r.triggeredByName != "" {
+		return r.triggeredByName
+	}
+	return r.TriggeredBy
 }
 
 type tuiStepRun struct {
@@ -254,12 +268,16 @@ var (
 		{"ACTIVE", 6, 0},
 		{"CREATED", 14, 0},
 	}
+	// Runs have no human name; the runs list is already scoped to one pipeline
+	// (its name is in the view title), so the primary label is meaningful context
+	// — status + who triggered it + time — with the short run id as a trailing
+	// detail column.
 	ciRunCols = []tuiColSpec{
-		{"RUN ID", 10, 0},
 		{"STATUS", 11, 0},
 		{"TRIGGERED BY", 16, 1},
 		{"STARTED", 18, 0},
 		{"DURATION", 10, 0},
+		{"RUN ID", 10, 0},
 	}
 	ciStepCols = []tuiColSpec{
 		{"#", 3, 0},
@@ -340,6 +358,11 @@ func tuiFetchRuns(workflowID string) tea.Cmd {
 		if err := json.Unmarshal(data, &rs); err != nil {
 			return tuiErrMsg{err}
 		}
+		// triggered_by is a user_id; resolve it to a username so the UI shows who
+		// triggered the run rather than a raw UUID (cached process-wide).
+		for i := range rs {
+			rs[i].triggeredByName = tuiResolveName("triggered_by", rs[i].TriggeredBy)
+		}
 		return tuiRunsMsg(rs)
 	}
 }
@@ -397,6 +420,8 @@ func tuiFetchAnnotatedRun(runID string, cachedSteps []tuiWorkflowStep) (*tuiRunF
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, nil, err
 	}
+	// triggered_by is a user_id; resolve it to a username for the detail view.
+	r.triggeredByName = tuiResolveName("triggered_by", r.TriggeredBy)
 	steps := tuiAnnotateParallelGroups(&r, cachedSteps)
 	return &r, steps, nil
 }
@@ -641,11 +666,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := make([]table.Row, len(m.runs))
 		for i, r := range m.runs {
 			rows[i] = table.Row{
-				tuiShortID(r.RunID),
 				r.Status,
-				r.TriggeredBy,
+				r.triggeredByLabel(),
 				tuiFormatTime(r.StartedAt),
 				tuiFormatDur(r.StartedAt, r.EndedAt),
+				tuiShortID(r.RunID),
 			}
 		}
 		m.rTable.SetRows(rows)
@@ -1348,7 +1373,7 @@ func (m tuiModel) tuiViewRunDetail() string {
 	meta := fmt.Sprintf("run %s  status: %s  triggered: %s",
 		tuiShortID(d.RunID),
 		tuiColorStatus(d.Status),
-		tuiTrunc(d.TriggeredBy, 20),
+		tuiTrunc(d.triggeredByLabel(), 20),
 	)
 	if d.StartedAt != nil {
 		meta += "  started: " + d.StartedAt.Local().Format("Jan 02 15:04:05")

@@ -219,6 +219,15 @@ func run(ctx context.Context) error {
 	if err := connect().AutoMigrate(&Outpost{}, &OutpostCommand{}, &OutpostEvent{}); err != nil {
 		return fmt.Errorf("migrate tables: %w", err)
 	}
+	// Outpost names are unique within their scope (the org when set, else the
+	// owning user) so an outpost can be referenced by name rather than its UUID.
+	// Partial indexes (WHERE active) let a name be reused after an outpost is removed.
+	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_outposts_org_name ON outposts (org_id, name) WHERE active AND org_id <> ''`).Error; err != nil {
+		slog.Warn("failed to create outposts org-name unique index (existing duplicate names?)", "error", err)
+	}
+	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_outposts_user_name ON outposts (user_id, name) WHERE active AND org_id = ''`).Error; err != nil {
+		slog.Warn("failed to create outposts user-name unique index (existing duplicate names?)", "error", err)
+	}
 	slog.Info("database initialized")
 
 	if outpostInternalKey == "" {

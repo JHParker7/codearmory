@@ -79,13 +79,15 @@ type forgeModel struct {
 	form   tuiForm
 }
 
+// Executions have no human name, so the primary label is meaningful context —
+// status + image + runner class — and the short id is a secondary detail column.
 var forgeExecCols = []tuiColSpec{
-	{"ID", 10, 0},
 	{"STATUS", 12, 0},
 	{"IMAGE", 20, 2},
 	{"CLASS", 10, 0},
 	{"STARTED", 16, 0},
 	{"DURATION", 9, 0},
+	{"ID", 10, 0},
 }
 
 func newForgeModel() forgeModel {
@@ -209,12 +211,12 @@ func (m forgeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := make([]table.Row, len(m.execs))
 		for i, e := range m.execs {
 			rows[i] = table.Row{
-				tuiShortID(e.ExecutionID),
 				e.Status,
 				e.Image,
 				e.RunnerClass,
 				tuiFormatTime(e.StartedAt),
 				tuiFormatDur(e.StartedAt, e.EndedAt),
+				tuiShortID(e.ExecutionID),
 			}
 		}
 		m.eTable.SetRows(rows)
@@ -639,8 +641,10 @@ func (m forgeModel) forgeViewOutput() string {
 	if mem := tuiFormatMem(d.MemoryUsedMB, d.MemoryLimitMB); mem != "" {
 		memStr = "  mem: " + mem
 	}
-	meta := tuiMetaStyle.Render(tuiTrunc(d.Image, 36) + "  " + tuiColorStatus(d.Status) + exitStr + memStr)
-	return tuiTitleStyle.Render(tuiShortID(d.ExecutionID)) + "  " + meta + "\n" +
+	// No human name for an execution: lead with status + class (context) and
+	// keep the short id as a trailing detail.
+	meta := tuiMetaStyle.Render(tuiColorStatus(d.Status) + "  " + tuiTrunc(d.RunnerClass, 16) + exitStr + memStr + "  " + tuiShortID(d.ExecutionID))
+	return tuiTitleStyle.Render(tuiTrunc(d.Image, 40)) + "  " + meta + "\n" +
 		tuiBoxStyle.Render(m.vp.View()) + "\n" + help
 }
 

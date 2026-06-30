@@ -352,7 +352,6 @@ function RolesTab() {
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 }}>
               <div>
                 <div style={{ fontFamily: T.mono, fontSize: 16, fontWeight: 700, color: T.textHi }}>{roleLabel(selectedRole)}</div>
-                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginTop: 2 }}>{selectedRole.role_id}</div>
                 <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginTop: 2 }}>
                   updated {timeAgo(selectedRole.updated_at)} ago ·{' '}
                   {selectedRole.active ? <span style={{ color: T.green }}>active</span> : <span style={{ color: T.red }}>inactive</span>}
@@ -941,7 +940,6 @@ function TeamsTab() {
               <button key={t.team_id} onClick={() => setSelected(t.team_id)}
                 style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{t.team_name}</div>
-                <div style={{ fontSize: 10, color: T.faint, marginTop: 2 }}>{t.team_id.slice(0, 8)}…</div>
               </button>
             );
           })}
@@ -1114,7 +1112,6 @@ function OrgsTab() {
               <button key={o.org_id} onClick={() => setSelected(o.org_id)}
                 style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{o.org_name}</div>
-                <div style={{ fontSize: 10, color: T.faint, marginTop: 2 }}>{o.org_id.slice(0, 8)}…</div>
               </button>
             );
           })}

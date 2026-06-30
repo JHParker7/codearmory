@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,28 @@ type teamRequest struct {
 
 type teamUpdateRequest struct {
 	TeamName string `json:"team_name"`
+}
+
+// teamNameTaken reports whether an active team with the given name already
+// exists in the same scope (the org when set, otherwise the owner for org-less
+// teams), excluding the team identified by excludeID. It gives the uq_teams_*
+// unique indexes a friendly 409 instead of surfacing a raw constraint error.
+// On query error it fails open, leaving the DB index as the backstop.
+func teamNameTaken(ctx context.Context, orgID *string, ownerID, name, excludeID string) bool {
+	q := connectRead().WithContext(ctx).Model(&Team{}).Where("team_name = ? AND active = true", name)
+	if orgID != nil {
+		q = q.Where("org_id = ?", *orgID)
+	} else {
+		q = q.Where("org_id IS NULL AND owner_id = ?", ownerID)
+	}
+	if excludeID != "" {
+		q = q.Where("team_id <> ?", excludeID)
+	}
+	var count int64
+	if err := q.Count(&count).Error; err != nil {
+		return false
+	}
+	return count > 0
 }
 
 func handleListTeams(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +143,15 @@ func handleCreateTeam(w http.ResponseWriter, r *http.Request) {
 	var callerOrgID *string
 	if callerRow, err := (User{UserID: callerID}).Get(ctx); err == nil {
 		callerOrgID = callerRow.(User).OrgID
+	}
+
+	// Team names must be unique within their scope so a team can be referenced
+	// by name rather than by its UUID (enforced by the uq_teams_* indexes).
+	if teamNameTaken(ctx, callerOrgID, callerID, req.TeamName, "") {
+		span.SetStatus(codes.Error, "team name taken")
+		slog.WarnContext(ctx, "create team: name already exists", "caller_id", callerID, "team_name", req.TeamName)
+		http.Error(w, "team with that name already exists", http.StatusConflict)
+		return
 	}
 
 	roleID := req.RoleID
@@ -312,6 +344,12 @@ func handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("db.read", trace.WithAttributes(attribute.String("team.id", id)))
 
 	team := row.(Team)
+	if req.TeamName != team.TeamName && teamNameTaken(ctx, team.OrgID, team.OwnerID, req.TeamName, team.TeamID) {
+		span.SetStatus(codes.Error, "team name taken")
+		slog.WarnContext(ctx, "update team: name already exists", "caller_id", callerID, "team_id", id, "team_name", req.TeamName)
+		http.Error(w, "team with that name already exists", http.StatusConflict)
+		return
+	}
 	team.TeamName = req.TeamName
 	if err := team.Update(ctx); err != nil {
 		span.RecordError(err)

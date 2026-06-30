@@ -105,3 +105,18 @@ func jsonBody(v any) []byte {
 	}
 	return b
 }
+
+// resetTUINameCache clears the process-wide TUI foreign-key name cache and
+// restores it on cleanup, so a test that exercises FK→name resolution starts
+// from a clean slate and doesn't leak resolved names into later tests.
+func resetTUINameCache(t *testing.T) {
+	t.Helper()
+	tuiNameCacheMu.Lock()
+	tuiNameCache = map[string]string{}
+	tuiNameCacheMu.Unlock()
+	t.Cleanup(func() {
+		tuiNameCacheMu.Lock()
+		tuiNameCache = map[string]string{}
+		tuiNameCacheMu.Unlock()
+	})
+}

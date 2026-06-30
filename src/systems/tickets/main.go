@@ -154,6 +154,12 @@ func main() {
 		slog.Error("failed to migrate tables", "error", err)
 		os.Exit(1)
 	}
+	// A field def's (kind, value) is its identifier within an org — e.g. an org
+	// must not have two status defs with value "open". Enforced as a partial
+	// unique index so a value can be reused after its def is deleted.
+	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ticket_field_defs_org_kind_value ON ticket_field_defs (org_id, kind, value) WHERE active`).Error; err != nil {
+		slog.Warn("failed to create ticket_field_defs unique index (existing duplicate values?)", "error", err)
+	}
 	if err := seedDefaultFieldDefs(ctx); err != nil {
 		slog.Error("failed to seed field defs", "error", err)
 		os.Exit(1)

@@ -197,6 +197,7 @@ func main() {
 	conn := connect()
 	conn.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{})
 	applyForeignKeys(conn)
+	applyUniqueIndexes(conn)
 	seedServiceAccounts(ctx)
 	seedAdminUser(ctx)
 	initOIDC()
@@ -439,5 +440,33 @@ func applyForeignKeys(db *gorm.DB) {
 	}
 	for _, c := range constraints {
 		db.Exec(c)
+	}
+}
+
+// applyUniqueIndexes enforces that name-referenced resources have a unique
+// human-readable name within their owning scope, so they can be addressed by
+// name rather than by an opaque UUID. Partial indexes (WHERE active) are used so
+// soft-deleted rows don't block re-creating a name, and so a name freed by a
+// delete becomes available again — mirroring the workflows service pattern.
+//
+// Roles and Permissions are intentionally excluded: a role's name is empty for
+// user-facing roles (only set to "workflow:<id>" for service roles), so it is
+// not a human-facing identifier. Index creation is best-effort: a pre-existing
+// row collision logs a warning rather than aborting startup.
+func applyUniqueIndexes(db *gorm.DB) {
+	indexes := []string{
+		// Secrets are referenced by name (e.g. forge's git:/secret_ref schemes);
+		// unique per org. The create path already rejects duplicates.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_secrets_org_name ON secrets (org_id, name) WHERE active`,
+		// Teams are unique by name within their org; org-less teams are unique per owner.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_org_name ON teams (org_id, team_name) WHERE active AND org_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_owner_name ON teams (owner_id, team_name) WHERE active AND org_id IS NULL`,
+		// OAuth clients are unique by name within their org.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_oauth_clients_org_name ON oauth_clients (org_id, name) WHERE active`,
+	}
+	for _, idx := range indexes {
+		if err := db.Exec(idx).Error; err != nil {
+			slog.Warn("unique index not created (existing duplicate names?); name uniqueness not enforced for this resource", "stmt", idx, "error", err)
+		}
 	}
 }

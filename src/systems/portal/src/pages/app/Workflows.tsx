@@ -432,8 +432,8 @@ function PipelinesTab() {
             </div>
           ) : (
             <div style={{ padding: '20px 24px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
-                {([['id', selectedWorkflow.workflow_id.slice(0, 8) + '…'], ['steps', selectedWorkflow.steps.length], ['updated', timeAgo(selectedWorkflow.updated_at) + ' ago']] as [string, string | number][]).map(([k, v]) => (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, marginBottom: 20 }}>
+                {([['steps', selectedWorkflow.steps.length], ['updated', timeAgo(selectedWorkflow.updated_at) + ' ago']] as [string, string | number][]).map(([k, v]) => (
                   <div key={k} style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px' }}>
                     <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 4, textTransform: 'uppercase' }}>{k}</div>
                     <div style={{ fontFamily: T.mono, fontSize: 15, color: T.textHi, fontWeight: 700 }}>{v}</div>
@@ -471,7 +471,10 @@ function PipelinesTab() {
                         onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = T.cardHi; }}
                         onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}>
                         <Pill tone={statusTone(run.status)}>{run.status}</Pill>
-                        <span style={{ fontFamily: T.mono, fontSize: 11.5, color: T.dim, flex: 1 }}>{run.run_id.slice(0, 8)}…</span>
+                        <span style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
+                          <span style={{ fontFamily: T.mono, fontSize: 11.5, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedWorkflow.name}</span>
+                          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{run.run_id.slice(0, 8)}…</span>
+                        </span>
                         {dur && <span style={{ fontFamily: T.mono, fontSize: 10.5, color: isRunning ? T.amber : T.faint }}>{isRunning ? '⟳ ' : ''}{dur}</span>}
                         <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>{timeAgo(run.created_at)} ago</span>
                         {isRunning && (
@@ -771,18 +774,14 @@ function StepsTab() {
               </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
-              <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px' }}>
-                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 4, textTransform: 'uppercase' }}>id</div>
-                <div style={{ fontFamily: T.mono, fontSize: 12, color: T.textHi }}>{selectedStep.step_id.slice(0, 8)}…</div>
-              </div>
-              {selectedStep.timeout != null && (
+            {selectedStep.timeout != null && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
                 <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px' }}>
                   <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 4, textTransform: 'uppercase' }}>timeout</div>
                   <div style={{ fontFamily: T.mono, fontSize: 12, color: T.textHi }}>{selectedStep.timeout}s</div>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             {selectedStep.with && Object.keys(selectedStep.with).length > 0 && (
               <>

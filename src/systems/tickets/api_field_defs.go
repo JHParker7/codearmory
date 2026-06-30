@@ -89,6 +89,15 @@ func handleCreateFieldDef(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "label is required", http.StatusBadRequest)
 		return
 	}
+	// (kind, value) must be unique within the org so a def is identified by its
+	// value rather than its UUID (enforced by uq_ticket_field_defs_org_kind_value).
+	var dupCount int64
+	if err := connect().WithContext(ctx).Model(&TicketFieldDef{}).
+		Where("org_id = ? AND kind = ? AND value = ? AND active = ?", orgID, req.Kind, req.Value, true).
+		Count(&dupCount).Error; err == nil && dupCount > 0 {
+		http.Error(w, "a field def with that kind and value already exists", http.StatusConflict)
+		return
+	}
 
 	now := time.Now().UTC()
 	f := TicketFieldDef{
