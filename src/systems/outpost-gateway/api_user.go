@@ -50,6 +50,12 @@ func handleCreateOutpost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
+	// Outpost names must be unique within their scope so an outpost can be
+	// referenced by name rather than its UUID (enforced by uq_outposts_* indexes).
+	if outpostNameTaken(ctx, orgID, userID, strings.TrimSpace(req.Name)) {
+		http.Error(w, "outpost with that name already exists", http.StatusConflict)
+		return
+	}
 	var modules []string
 	for _, m := range req.Modules {
 		m = strings.TrimSpace(m)
@@ -75,7 +81,7 @@ func handleCreateOutpost(w http.ResponseWriter, r *http.Request) {
 		OutpostID:       outpostID,
 		OrgID:           orgID,
 		UserID:          userID,
-		Name:            req.Name,
+		Name:            strings.TrimSpace(req.Name),
 		Modules:         strings.Join(modules, ","),
 		Status:          OutpostPending,
 		EnrollTokenHash: tokenHash,

@@ -108,6 +108,24 @@ func listOutposts(ctx context.Context, orgID, userID string) ([]Outpost, error) 
 	return out, err
 }
 
+// outpostNameTaken reports whether an active outpost with the given name already
+// exists in the same scope (the org when set, else the owning user). It backs
+// the uq_outposts_* unique indexes with a friendly 409; on query error it fails
+// open and lets the index be the backstop.
+func outpostNameTaken(ctx context.Context, orgID, userID, name string) bool {
+	q := connectRead().WithContext(ctx).Model(&Outpost{}).Where("active=? AND name=?", true, name)
+	if orgID != "" {
+		q = q.Where("org_id=?", orgID)
+	} else {
+		q = q.Where("org_id='' AND user_id=?", userID)
+	}
+	var count int64
+	if err := q.Count(&count).Error; err != nil {
+		return false
+	}
+	return count > 0
+}
+
 func (o Outpost) Add(ctx context.Context) error {
 	return connect().WithContext(ctx).Create(&o).Error
 }
