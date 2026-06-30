@@ -13,7 +13,7 @@ fullnameOverride: ""
 imageRegistry: "ghcr.io/code-armory-app"
 
 # Default image tag applied to all services when the per-service tag is empty.
-imageTag: alpha-1.2.0
+imageTag: alpha-0.1.0
 imagePullPolicy: IfNotPresent
 imagePullSecrets: []
 
