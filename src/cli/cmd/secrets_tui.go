@@ -17,6 +17,20 @@ type secretRec struct {
 	Name      string    `json:"name"`
 	CreatedBy string    `json:"created_by"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// createdByName is the resolved username for CreatedBy (a user_id), filled in
+	// during fetch so the list shows who created the secret instead of a raw UUID.
+	// Not part of the API response; empty when the lookup failed.
+	createdByName string
+}
+
+// createdByLabel returns the human-readable creator, falling back to the raw user
+// id only when no username resolved.
+func (s secretRec) createdByLabel() string {
+	if s.createdByName != "" {
+		return s.createdByName
+	}
+	return s.CreatedBy
 }
 
 type secretsListMsg []secretRec
@@ -77,6 +91,11 @@ func secretsFetch() tea.Msg {
 	if err := json.Unmarshal(data, &secs); err != nil {
 		return secretsErrMsg{err}
 	}
+	// created_by is a user_id; resolve it to a username so the list shows who
+	// created the secret rather than a raw UUID (cached process-wide).
+	for i := range secs {
+		secs[i].createdByName = tuiResolveName("created_by", secs[i].CreatedBy)
+	}
 	return secretsListMsg(secs)
 }
 
@@ -132,7 +151,7 @@ func (m secretsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.secrets = []secretRec(msg)
 		rows := make([]table.Row, len(m.secrets))
 		for i, s := range m.secrets {
-			rows[i] = table.Row{s.Name, frDash(s.CreatedBy), s.UpdatedAt.Local().Format("Jan 02 15:04")}
+			rows[i] = table.Row{s.Name, frDash(s.createdByLabel()), s.UpdatedAt.Local().Format("Jan 02 15:04")}
 		}
 		m.table.SetRows(rows)
 		return m, nil

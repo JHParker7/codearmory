@@ -184,6 +184,18 @@ def test_update_to_resolved_and_closed(bearer):
     assert res.status_code == 200
     assert res.json()["status"] == "closed"
 
+def test_update_status_only_preserves_title(bearer):
+    # The portal/board close action PUTs only {"status": ...}; an omitted title
+    # must fall back to the existing one rather than 400 "title is required".
+    res = requests.post(f"{TICKETS_URL}/tickets", headers=bearer, json={"title": "Keep my title"})
+    tid = res.json()["ticket_id"]
+
+    res = requests.put(f"{TICKETS_URL}/tickets/{tid}", headers=bearer, json={"status": "closed"})
+    assert res.status_code == 200
+    t = res.json()
+    assert t["status"] == "closed"
+    assert t["title"] == "Keep my title"
+
 
 # ── Delete ─────────────────────────────────────────────────────────────────────
 

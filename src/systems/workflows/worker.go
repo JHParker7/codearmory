@@ -242,7 +242,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		tasks, aggregateName, terr := buildGroupTasks(group, substContext{inputs: inputs, outputs: visible})
 		if terr != nil {
 			if sid := uuid.New().String(); p.startStepRun(runID, sid, group.indices[0], group.steps[0].Name) == nil {
-				p.finishStepRun(sid, StatusFailed, strPtr(terr.Error()), nil, nil)
+				p.finishStepRun(sid, StatusFailed, strPtr(terr.Error()), nil, nil, nil)
 			}
 			slog.WarnContext(ctx, "worker: matrix expansion failed", "run_id", runID, "step", group.indices[0], "error", terr)
 			finalStatus = StatusFailed
@@ -303,6 +303,7 @@ type stepTask struct {
 type taskResult struct {
 	name    string
 	output  string
+	logs    string
 	usedMB  *int64
 	limitMB *int64
 	err     error
@@ -481,7 +482,7 @@ func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID,
 			}
 			defer func() { <-sem }() // release
 			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix})
-			resCh <- taskResult{name: t.name, output: res.Output, usedMB: res.MemoryUsedMB, limitMB: res.MemoryLimitMB, err: err, idx: k}
+			resCh <- taskResult{name: t.name, output: res.Output, logs: res.Logs, usedMB: res.MemoryUsedMB, limitMB: res.MemoryLimitMB, err: err, idx: k}
 		}(k, t)
 	}
 
@@ -500,14 +501,14 @@ func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID,
 			} else {
 				status = StatusFailed
 			}
-			p.finishStepRun(sid, st, strPtr(failureOutput(r.output, r.err)), r.usedMB, r.limitMB)
+			p.finishStepRun(sid, st, strPtr(failureOutput(r.output, r.err)), strPtrOrNil(r.logs), r.usedMB, r.limitMB)
 			slog.WarnContext(ctx, "worker: step failed", "run_id", runID, "step", tasks[r.idx].stepIndex, "name", r.name)
 		} else {
 			meterStepsCompleted.Add(ctx, 1, metric.WithAttributes(
 				attribute.String("workflow.id", workflowID),
 				attribute.String("status", StatusCompleted),
 			))
-			p.finishStepRun(sid, StatusCompleted, strPtr(r.output), r.usedMB, r.limitMB)
+			p.finishStepRun(sid, StatusCompleted, strPtr(r.output), strPtrOrNil(r.logs), r.usedMB, r.limitMB)
 			slog.InfoContext(ctx, "worker: step completed", "run_id", runID, "step", tasks[r.idx].stepIndex, "name", r.name)
 		}
 	}
@@ -565,9 +566,26 @@ func (p *WorkerPool) rotateToken(ctx context.Context, store *tokenStore, runID, 
 // are nil for every other action — so memory surfaces wherever the step ran a
 // container, without coupling the generic poller to forge.
 type stepResult struct {
-	Output        string
+	Output string
+	// Logs is the action's stdout, captured on every terminal outcome for display in
+	// the run view (independent of Output, which on success is the consumable
+	// output_env map). See WorkflowStepRun.Logs.
+	Logs          string
 	MemoryUsedMB  *int64
 	MemoryLimitMB *int64
+}
+
+// asyncLogs returns the action's stdout (its OutputField, e.g. forge's "stdout")
+// from a poll response, for display as the step's execution log. Captured on every
+// terminal state — success, failure, and cancel — so a step's stdout is always
+// viewable in the run view regardless of outcome. Empty when the action declares no
+// stdout field (e.g. the http escape hatch) or the field is absent/non-string.
+func asyncLogs(async *AsyncConfig, result map[string]any) string {
+	if async == nil || async.OutputField == "" {
+		return ""
+	}
+	s, _ := result[async.OutputField].(string)
+	return s
 }
 
 // jsonInt64Ptr converts a value pulled from a decoded JSON object into an *int64,
@@ -783,9 +801,9 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 				// When the action declares a structured output map (e.g. forge's
 				// captured output_env), the SUCCESS output comes ONLY from that map so
 				// later steps read ${...output.KEY}. Raw stdout is never a consumable
-				// step output for these actions — an empty map means no output. (The
-				// FAILURE path below still uses OutputField, so a failed step can surface
-				// its stdout for debugging.)
+				// step output for these actions — an empty map means no output. The
+				// command's stdout is still captured separately as the step's display
+				// logs (asyncLogs below).
 				if def.Async.OutputMapField != "" {
 					if m, ok := result[def.Async.OutputMapField].(map[string]any); ok && len(m) > 0 {
 						if b, mErr := json.Marshal(m); mErr == nil {
@@ -797,17 +815,11 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 						out, _ = v.(string)
 					}
 				}
-				return stepResult{Output: out, MemoryUsedMB: used, MemoryLimitMB: limit}, nil
+				return stepResult{Output: out, Logs: asyncLogs(def.Async, result), MemoryUsedMB: used, MemoryLimitMB: limit}, nil
 			}
 		}
 		for _, s := range def.Async.FailureStates {
 			if status == s {
-				out := ""
-				if def.Async.OutputField != "" {
-					if v, ok := result[def.Async.OutputField]; ok {
-						out, _ = v.(string)
-					}
-				}
 				// Collect the action's own failure reason from its error fields (e.g.
 				// forge's stderr, or its "command not found" diagnostic).
 				var errDetails []string
@@ -822,19 +834,22 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 				// Surface the action's reported reason as the step error so the run
 				// shows the same message the backing service did (e.g. forge: command
 				// "sh" not found …). Fall back to the generic exit-code summary only
-				// when the action reported no detail. failureOutput keeps any stdout.
+				// when the action reported no detail.
 				err := fmt.Errorf("%s %s (exit code: %v)", def.Name, status, exitCode)
 				if detail := strings.TrimSpace(strings.Join(errDetails, "\n")); detail != "" {
 					err = fmt.Errorf("%s %s: %s", def.Name, status, detail)
 				}
-				return stepResult{Output: out, MemoryUsedMB: used, MemoryLimitMB: limit}, err
+				// stdout goes to Logs (shown for every outcome); Output is left empty so
+				// failureOutput surfaces the error reason alone, not stdout duplicated.
+				return stepResult{Logs: asyncLogs(def.Async, result), MemoryUsedMB: used, MemoryLimitMB: limit}, err
 			}
 		}
 		for _, s := range def.Async.CancelStates {
 			if status == s {
 				// Carry memory through on cancel too — a step cancelled after an
-				// OOM/timeout still has meaningful usage figures.
-				return stepResult{MemoryUsedMB: used, MemoryLimitMB: limit}, context.Canceled
+				// OOM/timeout still has meaningful usage figures — and the stdout it
+				// produced before cancellation, so a cancelled step's logs are viewable.
+				return stepResult{Logs: asyncLogs(def.Async, result), MemoryUsedMB: used, MemoryLimitMB: limit}, context.Canceled
 			}
 		}
 		// Status is not in any known terminal or cancel set — keep polling.
@@ -953,8 +968,8 @@ func (p *WorkerPool) startApprovalStepRun(runID, stepRunID string, index int, na
 	return (WorkflowStepRun{StepRunID: stepRunID, RunID: runID, StepIndex: index, StepName: name}).AddAwaitingApproval(message)
 }
 
-func (p *WorkerPool) finishStepRun(stepRunID, status string, output *string, usedMB, limitMB *int64) {
-	(WorkflowStepRun{StepRunID: stepRunID}).Complete(context.Background(), status, output, usedMB, limitMB)
+func (p *WorkerPool) finishStepRun(stepRunID, status string, output, logs *string, usedMB, limitMB *int64) {
+	(WorkflowStepRun{StepRunID: stepRunID}).Complete(context.Background(), status, output, logs, usedMB, limitMB)
 }
 
 func (p *WorkerPool) failRun(runID, sessionID string) {
@@ -965,11 +980,21 @@ func (p *WorkerPool) failRun(runID, sessionID string) {
 
 func strPtr(s string) *string { return &s }
 
-// failureOutput combines a failed (or cancelled) step's captured output — forge
-// stdout/stderr, an HTTP response body, etc. — with its error summary, so the run
-// view surfaces the real failure detail instead of only "<action> failed (exit
-// code: N)". Both share the single response_body column; the error trails the
-// captured output as a footer (and stands alone when the step produced none).
+// strPtrOrNil returns nil for an empty string so the column stays NULL (rather
+// than storing ""), matching how an absent value reads back as omitted JSON.
+func strPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// failureOutput combines a failed (or cancelled) step's captured Output — an HTTP
+// response body, or any action output that is not surfaced separately as Logs —
+// with its error summary, so the run view surfaces the real failure detail instead
+// of only "<action> failed (exit code: N)". The error trails the captured output as
+// a footer (and stands alone when the step produced none — e.g. forge, whose stdout
+// is carried in Logs, so Output is empty here and only the error reason shows).
 func failureOutput(output string, err error) string {
 	msg := err.Error()
 	if output = strings.TrimRight(output, "\n"); output == "" {

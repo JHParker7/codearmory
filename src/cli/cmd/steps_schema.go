@@ -40,6 +40,7 @@ const (
 	stepFieldInt                       // non-negative integer
 	stepFieldEnv                       // KEY=VALUE tokens → map[string]string
 	stepFieldJSON                      // raw JSON object, merged as the with base
+	stepFieldRepo                      // git clone URL → secret_refs{GIT_CLONE_URL: git:<url>}
 )
 
 // Field catalogs back a field with a name→value picker. ids are never typed by
@@ -52,6 +53,7 @@ const (
 	catTicket      = "ticket"       // tickets: show title, submit ticket_id
 	catOutpost     = "outpost"      // outposts: show name, submit outpost_id
 	catRunnerClass = "runner-class" // forge runner classes (name == value)
+	catRepo        = "repo"         // git repos: show name, submit clone URL
 )
 
 // stepField describes one input within an action's schema. key is the with-map
@@ -81,6 +83,7 @@ type stepCatalogs struct {
 	tickets       kvCatalog
 	outposts      kvCatalog
 	runnerClasses kvCatalog
+	repos         kvCatalog
 }
 
 // forCatalog returns the kvCatalog backing a catalog name (empty for image/none).
@@ -92,6 +95,8 @@ func (c stepCatalogs) forCatalog(name string) kvCatalog {
 		return c.outposts
 	case catRunnerClass:
 		return c.runnerClasses
+	case catRepo:
+		return c.repos
 	default:
 		return kvCatalog{}
 	}
@@ -106,6 +111,7 @@ var stepActionSchema = map[string][]stepField{
 		{key: "run", label: "Run", placeholder: "go test ./...\n(multi-line ok)", required: true, multiline: true},
 		{key: "env", label: "Input variables", placeholder: "REPO_URL=  BRANCH=main", kind: stepFieldEnv},
 		{key: "runner_class", label: "Runner", placeholder: "runner class (optional, default standard)", catalog: catRunnerClass},
+		{key: "secret_refs", label: "Git repo", placeholder: "select a repo — injected as $GIT_CLONE_URL", catalog: catRepo, kind: stepFieldRepo},
 	},
 	"tickets/create": {
 		{key: "title", label: "Title", placeholder: "Build failed", required: true},
@@ -221,6 +227,12 @@ func buildStepWith(action string, valueOf func(string) string) (map[string]any, 
 				return nil, err
 			}
 			with[f.key] = env
+		case stepFieldRepo:
+			// A chosen repo is a clone URL; wire it as forge's git: credential
+			// broker secret_ref so the runner clones via $GIT_CLONE_URL. When empty
+			// (handled by the raw == "" guard above) we set nothing, leaving any
+			// secret_refs the user supplied via the advanced With JSON to flow through.
+			with[f.key] = map[string]any{"GIT_CLONE_URL": "git:" + raw}
 		default: // text, image
 			with[f.key] = raw
 		}

@@ -329,6 +329,63 @@ func TestHandleDeleteComment_Unauthorized(t *testing.T) {
 
 
 
+// ── Board ─────────────────────────────────────────────────────────────────────
+
+func TestCanAccessBoard(t *testing.T) {
+	b := Board{CreatedBy: "user-1", OrgID: "org-1"}
+	if !canAccessBoard(b, "user-1", "") {
+		t.Error("owner should have access")
+	}
+	if !canAccessBoard(b, "user-2", "org-1") {
+		t.Error("same-org user should have access")
+	}
+	if canAccessBoard(b, "user-2", "org-2") {
+		t.Error("different-org user should not have access")
+	}
+	if canAccessBoard(Board{CreatedBy: "user-1", OrgID: ""}, "user-2", "org-1") {
+		t.Error("org membership should not grant access to a no-org board")
+	}
+}
+
+func TestHandleCreateBoard_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/boards", nil)
+	w := httptest.NewRecorder()
+	handleCreateBoard(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleCreateBoard_MissingName(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
+	r := httptest.NewRequest(http.MethodPost, "/boards", bytes.NewBufferString(`{"description":"no name"}`))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateBoard(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleListBoards_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/boards", nil)
+	w := httptest.NewRecorder()
+	handleListBoards(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleDeleteBoard_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodDelete, "/boards/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleDeleteBoard(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
 // ── statusResponseWriter ─────────────────────────────────────────────────────
 
 func TestStatusResponseWriter(t *testing.T) {

@@ -23,7 +23,12 @@ func handleListRepositories(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("user.id", userID))
 
-	repos, err := registry.listRepositories(ctx)
+	reg, ok := registryForRead(ctx, w, r)
+	if !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	repos, err := reg.listRepositories(ctx)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "registry error")
@@ -67,7 +72,12 @@ func handleListTags(w http.ResponseWriter, r *http.Request) {
 		attribute.String("repo.name", name),
 	)
 
-	tl, err := registry.listTags(ctx, name)
+	reg, ok := registryForRead(ctx, w, r)
+	if !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	tl, err := reg.listTags(ctx, name)
 	if err != nil {
 		if isRegistryNotFound(err) {
 			http.Error(w, "repository not found", http.StatusNotFound)
@@ -112,7 +122,12 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 		attribute.String("manifest.reference", reference),
 	)
 
-	manifest, err := registry.getManifest(ctx, name, reference)
+	reg, ok := registryForRead(ctx, w, r)
+	if !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	manifest, err := reg.getManifest(ctx, name, reference)
 	if err != nil {
 		if isRegistryNotFound(err) {
 			http.Error(w, "manifest not found", http.StatusNotFound)
@@ -164,7 +179,12 @@ func handleDeleteManifest(w http.ResponseWriter, r *http.Request) {
 		attribute.String("manifest.digest", digest),
 	)
 
-	if err := registry.deleteManifest(ctx, name, digest); err != nil {
+	reg, ok := registryForRead(ctx, w, r)
+	if !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	if err := reg.deleteManifest(ctx, name, digest); err != nil {
 		if isRegistryNotFound(err) {
 			http.Error(w, "manifest not found", http.StatusNotFound)
 			return

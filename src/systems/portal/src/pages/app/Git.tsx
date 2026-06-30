@@ -14,9 +14,10 @@ import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
-  listGitBackends, createGitBackend, deleteGitBackend, testGitBackend, mintGitCredential,
+  listGitBackends, createGitBackend, deleteGitBackend, testGitBackend, mintGitCredential, listGitRepos,
 } from '../../api/bff';
-import type { GitBackend, GitBackendType, GitBackendAuth, GitBackendTest, GitCredential } from '../../api/bff';
+import type { GitBackend, GitBackendType, GitBackendAuth, GitBackendTest, GitCredential, GitRepo } from '../../api/bff';
+import { RepoSelect } from '../../components/RepoSelect';
 import { timeAgo } from '../../utils';
 
 const BACKEND_TYPES: GitBackendType[] = ['github', 'gitlab', 'forgejo', 'generic'];
@@ -185,10 +186,15 @@ function CreateBackend({ onCreated, onCancel }: { onCreated: (b: GitBackend) => 
 function MintTool() {
   const token = useAppSelector(s => s.auth.token)!;
   const [repoUrl, setRepoUrl] = useState('');
+  const [repos, setRepos] = useState<GitRepo[]>([]);
   const [cred, setCred] = useState<GitCredential | null>(null);
   const [minting, setMinting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reveal, setReveal] = useState(false);
+
+  // Repo list (enumerated across backends + pinned) backs the picker; best effort,
+  // so a typed URL still works when the list is empty/unavailable.
+  useEffect(() => { listGitRepos(token).then(setRepos).catch(() => setRepos([])); }, [token]);
 
   const handleMint = async () => {
     if (!repoUrl.trim()) return;
@@ -209,10 +215,10 @@ function MintTool() {
     <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '12px 16px', marginBottom: 16 }}>
       <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginBottom: 8 }}>MINT CLONE CREDENTIAL</div>
       {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '6px 10px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 10 }}>{error}</div>}
-      <div style={{ display: 'flex', gap: 8 }}>
-        <input value={repoUrl} onChange={e => setRepoUrl(e.target.value)} placeholder="repo url (e.g. https://github.com/org/repo)"
-          onKeyDown={e => e.key === 'Enter' && handleMint()}
-          style={{ flex: 1, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', outline: 'none' }} />
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+        <div style={{ flex: 1 }}>
+          <RepoSelect value={repoUrl} onChange={setRepoUrl} repos={repos} placeholder="select or paste a repo url (e.g. https://github.com/org/repo)" />
+        </div>
         <button onClick={handleMint} disabled={!repoUrl.trim() || minting}
           style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, fontWeight: 600, padding: '7px 14px', cursor: 'pointer', opacity: (!repoUrl.trim() || minting) ? 0.6 : 1 }}>
           {minting ? '[ · · · ]' : '[ mint ]'}

@@ -1060,10 +1060,23 @@ components:
           type: string
           nullable: true
           description: |
-            Action result stored after the step completes. For `http` steps,
-            this is the response body. For catalog actions, this is the action
-            output. Up to 1 MB is stored. Null while the step is pending or
-            running.
+            The consumable action result stored after the step completes, used by
+            `${steps.NAME.output}`. For `http` steps, the response body. For
+            forge steps, the JSON-encoded `output_env` capture map (empty when none
+            was declared — stdout is never the consumable output). On a failed step
+            it carries the failure reason (the backing service's error / exit-code
+            summary); the step's stdout is in `logs`, not here. For an `http` step
+            that fails, the response body is appended before the error. Up to 1 MB
+            is stored. Null while the step is pending or running.
+        logs:
+          type: string
+          nullable: true
+          description: |
+            The step's execution log — the backing action's stdout (forge: the
+            command's stdout), captured for viewing on every terminal outcome
+            (success, failure, cancel). Distinct from `output`: stdout is shown
+            here but is never the consumable output. Null when the action exposes
+            no stdout (e.g. `http` steps).
         started_at:
           type: string
           format: date-time

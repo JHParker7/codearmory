@@ -60,6 +60,38 @@ func createRunToken(ctx context.Context, userID, roleID string) (token, sessionI
 	return result.Token, result.SessionID, nil
 }
 
+// resolveUsername turns a user UUID into its human-readable username for audit
+// lines (e.g. the approval gate's "approved by alice"). It forwards the caller's
+// own bearer to gatekeeper's GET /users/{id}: the default grant lets every user
+// read their own record, which is exactly the self-lookup the approval path needs.
+// Fails open to the UUID on any error so an audit line is never lost.
+func resolveUsername(ctx context.Context, bearer, userID string) string {
+	if bearer == "" || userID == "" {
+		return userID
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatekeeperURL+"/users/"+userID, nil)
+	if err != nil {
+		return userID
+	}
+	req.Header.Set("Authorization", bearer)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return userID
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck
+		return userID
+	}
+	var u struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil || u.Username == "" {
+		return userID
+	}
+	return u.Username
+}
+
 // revokeRunToken revokes the gatekeeper session associated with a run. Failures
 // are logged but never propagate — a missing revocation is better than a failed run.
 func revokeRunToken(ctx context.Context, sessionID string) {
@@ -440,7 +472,7 @@ func approvalDecision(w http.ResponseWriter, r *http.Request, approve bool) {
 	if !approve {
 		verb = "rejected"
 	}
-	decision := verb + " by " + userID
+	decision := verb + " by " + resolveUsername(ctx, r.Header.Get("Authorization"), userID)
 	if c := strings.TrimSpace(req.Comment); c != "" {
 		decision += ": " + c
 	}

@@ -226,6 +226,13 @@ type WorkflowStepRun struct {
 	StepName  string  `json:"step_name"              gorm:"column:step_name"`
 	Status    string  `json:"status"                 gorm:"column:status;default:'pending'"`
 	Output    *string `json:"output,omitempty"       gorm:"column:response_body"`
+	// Logs is the step's human-readable execution log — the backing action's stdout
+	// (forge: the command's stdout), captured for display on every terminal outcome
+	// (success, failure, cancel) so a step's stdout is always viewable in the run
+	// view. Distinct from Output: stdout is never the consumable ${steps.NAME.output}
+	// (that is the output_env map). NULL only when the action exposes no stdout (e.g.
+	// the http escape hatch); on failure Output then carries the error reason alone.
+	Logs *string `json:"logs,omitempty" gorm:"column:logs"`
 	// MemoryUsedMB/MemoryLimitMB are carried through from the forge execution a
 	// forge-backed step ran (NULL for non-forge steps and when forge could not
 	// measure usage). See forge's Execution for how they are captured.

@@ -6,7 +6,12 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+
+	"github.com/google/uuid"
 )
+
+// newID returns a fresh random UUID string for primary keys.
+func newID() string { return uuid.NewString() }
 
 // orgNameCache maps orgID → CodeArmory org name. Org names are stable, so entries
 // live for the process lifetime.

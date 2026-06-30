@@ -43,6 +43,7 @@ type Ticket struct {
 	CreatedBy        string          `json:"created_by"         gorm:"column:created_by"`
 	OrgID            string          `json:"org_id"             gorm:"column:org_id;default:''"`
 	Project          string          `json:"project,omitempty"  gorm:"column:project;default:''"`
+	BoardID          *string         `json:"board_id,omitempty" gorm:"column:board_id"`
 	AssigneeID       *string         `json:"assignee_id,omitempty"        gorm:"column:assignee_id"`
 	WorkflowID       *string         `json:"workflow_id,omitempty"        gorm:"column:workflow_id"`
 	RunID            *string         `json:"run_id,omitempty"             gorm:"column:run_id"`
@@ -69,6 +70,25 @@ type TicketComment struct {
 
 // TableName sets the GORM table name for TicketComment.
 func (TicketComment) TableName() string { return "ticket_comments" }
+
+// Board is a named grouping of tickets (a kanban board) owned by a user and
+// optionally shared within an org. Tickets reference a board via Ticket.BoardID;
+// the board's columns are the org's configured status field defs.
+type Board struct {
+	BoardID     string    `json:"board_id"     gorm:"column:board_id;primaryKey"`
+	Name        string    `json:"name"         gorm:"column:name"`
+	Description string    `json:"description"  gorm:"column:description;default:''"`
+	Color       string    `json:"color"        gorm:"column:color;default:''"`
+	Position    int       `json:"position"     gorm:"column:position;default:0"`
+	CreatedBy   string    `json:"created_by"   gorm:"column:created_by"`
+	OrgID       string    `json:"org_id"       gorm:"column:org_id;default:''"`
+	Active      bool      `json:"-"            gorm:"column:active;default:true"`
+	CreatedAt   time.Time `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt   time.Time `json:"updated_at"   gorm:"column:updated_at"`
+}
+
+// TableName sets the GORM table name for Board.
+func (Board) TableName() string { return "ticket_boards" }
 
 // TicketFieldDef defines a custom status, priority, or timescale value.
 // OrgID="" means it is a system-wide default visible to all orgs.

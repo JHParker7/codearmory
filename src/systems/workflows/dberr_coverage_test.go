@@ -63,7 +63,7 @@ func TestDBMethods_UnderBrokenDB(t *testing.T) {
 	if _, err := (WorkflowStepRun{}).List(ctx, 10, 0); err == nil {
 		t.Error("WorkflowStepRun.List: expected error")
 	}
-	(WorkflowStepRun{StepRunID: "x"}).Complete(ctx, StatusFailed, nil, nil, nil)
+	(WorkflowStepRun{StepRunID: "x"}).Complete(ctx, StatusFailed, nil, nil, nil, nil)
 
 	// Package-level query helpers.
 	if _, err := cancelRun(ctx, "x"); err == nil {

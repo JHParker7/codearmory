@@ -381,7 +381,10 @@ services:
       GATEKEEPER_URL: http://gatekeeper:8081
       # Must match the containers entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: containers-local-secret
-      # Forgejo ships a built-in OCI container registry.
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/containers
+      # Forgejo ships a built-in OCI container registry. REGISTRY_URL is optional —
+      # when set it seeds the default registry on first boot; additional registries
+      # are configurable at runtime via the /registries API.
       REGISTRY_URL: http://forgejo:3000
       GITEA_INTEGRATION_URL: http://gitea-integration:8088
     ports:
@@ -391,6 +394,8 @@ services:
         condition: service_healthy
       registry:
         condition: service_started
+      postgres:
+        condition: service_healthy
     restart: on-failure
 
   forgejo:

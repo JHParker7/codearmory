@@ -1,26 +1,63 @@
 /**
- * Tickets page — the ticket tracker: a list of tickets in a sidebar and a
- * detail panel with description, linked workflow/run/execution refs, comments,
- * and open/close + delete actions. create new tickets via a modal. data via
- * the bff.
+ * Tickets page — a kanban board mirroring the CLI `armory tickets board`, backed
+ * by first-class Board entities in the tickets service. The left sidebar is a
+ * board switcher (one entry per board, plus "all" and "unassigned"); permitted
+ * users can create and delete boards there. The main panel shows the selected
+ * board's tickets as columns by status; drag a card between columns to change its
+ * status, or open the column editor to configure the status columns. Clicking a
+ * card opens a detail drawer with description, refs, comments, and
+ * close/reopen + delete. Data via the bff.
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { T } from '../../theme';
 import { useResizableWidth } from '../../components/ResizeHandle';
 import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
-import { listTickets, createTicket, updateTicket, deleteTicket, addComment } from '../../api/bff';
-import type { Ticket } from '../../api/bff';
+import {
+  listTickets, createTicket, updateTicket, deleteTicket, addComment,
+  listTicketFieldDefs, createTicketFieldDef, updateTicketFieldDef, deleteTicketFieldDef,
+  listBoards, createBoard, deleteBoard,
+} from '../../api/bff';
+import type { Ticket, TicketFieldDef, Board } from '../../api/bff';
 import { timeAgo, shortId } from '../../utils';
 import { useUserNames, useWorkflowNames } from '../../hooks/useNames';
 
-/** Map a ticket status to a UI tone (closed→green, open→amber, blocked→red, else dim). */
+/** Column statuses used when the org has not configured custom status field defs (mirrors the CLI board fallback). */
+const DEFAULT_STATUSES: TicketFieldDef[] = [
+  { field_def_id: 'open', kind: 'status', value: 'open', label: 'open', position: 0 },
+  { field_def_id: 'in_progress', kind: 'status', value: 'in_progress', label: 'in progress', position: 1 },
+  { field_def_id: 'resolved', kind: 'status', value: 'resolved', label: 'resolved', position: 2 },
+  { field_def_id: 'closed', kind: 'status', value: 'closed', label: 'closed', position: 3 },
+];
+
+/** Sentinel board key for the "unassigned" pile (tickets with no board). */
+const UNASSIGNED = '\0unassigned';
+
+/** Map a ticket status to a UI tone for its pill (closed/resolved→green, open→amber, blocked→red, else dim). */
 function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
-  if (status === 'closed') return 'green';
+  if (status === 'closed' || status === 'resolved') return 'green';
   if (status === 'open') return 'amber';
   if (status === 'blocked') return 'red';
   return 'dim';
+}
+
+/** Accent color for a status column header — the field def's color if set, else a sensible default per known value. */
+function statusColor(value: string, color?: string): string {
+  if (color) return color;
+  switch (value) {
+    case 'open': return T.amber;
+    case 'in_progress': return T.blue;
+    case 'resolved': return T.green;
+    case 'closed': return T.dim;
+    case 'blocked': return T.red;
+    default: return T.dim;
+  }
+}
+
+/** A terminal status — used to decide whether the toggle reads "close" or "reopen". */
+function isTerminal(status: string): boolean {
+  return status === 'resolved' || status === 'closed';
 }
 
 /** Map a ticket priority to a theme color (high/critical→red, medium→amber, else dim). */
@@ -30,11 +67,14 @@ function priorityColor(priority: string | null | undefined): string {
   return T.dim;
 }
 
+/** Derive a stable status value (slug) from a human label. */
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
 /** Modal form for a new ticket; submits title/description/priority via createTicket and hands the created ticket back. */
-function CreateModal({ onCreated, onClose }: { onCreated: (t: Ticket) => void; onClose: () => void }) {
+function CreateModal({ boardId, onCreated, onClose }: { boardId?: string; onCreated: (t: Ticket) => void; onClose: () => void }) {
   const token = useAppSelector(s => s.auth.token)!;
-  // Tag the new ticket with the active project (workspace) so the current filter keeps it visible.
-  const project = useAppSelector(s => s.project.current);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState('medium');
@@ -46,7 +86,8 @@ function CreateModal({ onCreated, onClose }: { onCreated: (t: Ticket) => void; o
     setSubmitting(true);
     setError(null);
     try {
-      onCreated(await createTicket(token, { title: title.trim(), description: description.trim() || undefined, priority, project: project ?? undefined }));
+      // Place the new ticket on the active board so it shows up where the user is looking.
+      onCreated(await createTicket(token, { title: title.trim(), description: description.trim() || undefined, priority, board_id: boardId }));
     } catch (e: unknown) {
       setError((e as Error).message);
       setSubmitting(false);
@@ -96,50 +137,215 @@ function CreateModal({ onCreated, onClose }: { onCreated: (t: Ticket) => void; o
   );
 }
 
-/** Ticket tracker: sidebar list + detail panel with comments, status toggle, delete, and a create modal. */
+/** Modal to create a new board (name + optional description/color). */
+function NewBoardModal({ onCreated, onClose }: { onCreated: (b: Board) => void; onClose: () => void }) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    if (!name.trim()) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      onCreated(await createBoard(token, { name: name.trim(), description: description.trim() || undefined }));
+    } catch (e: unknown) {
+      setError((e as Error).message);
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: 420, background: T.card, border: `1px solid ${T.borderHi}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: `1px solid ${T.border}`, background: T.cardHi }}>
+          <span style={{ fontFamily: T.mono, fontSize: 12, color: T.dim }}>new board</span>
+          <button onClick={onClose} style={{ background: 'transparent', border: 0, color: T.faint, cursor: 'pointer', fontSize: 16 }}>×</button>
+        </div>
+        <div style={{ padding: '16px 20px' }}>
+          {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>{error}</div>}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>NAME</div>
+            <input value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSubmit()} autoFocus
+              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 13, padding: '8px 10px', outline: 'none', boxSizing: 'border-box' }} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>DESCRIPTION</div>
+            <input value={description} onChange={e => setDescription(e.target.value)}
+              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '8px 10px', outline: 'none', boxSizing: 'border-box' }} />
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button onClick={handleSubmit} disabled={!name.trim() || submitting}
+              style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 13, fontWeight: 600, padding: '9px 14px', cursor: 'pointer', opacity: (!name.trim() || submitting) ? 0.6 : 1 }}>
+              {submitting ? '[ · · · ]' : '[ create board ]'}
+            </button>
+            <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '9px 14px', cursor: 'pointer' }}>cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Modal to configure the status columns (org-level field defs shared across boards): add, rename, recolor, reorder, delete. */
+function ColumnsModal({ statuses, onChanged, onClose }: { statuses: TicketFieldDef[]; onChanged: () => void; onClose: () => void }) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [newLabel, setNewLabel] = useState('');
+  const ordered = [...statuses].sort((a, b) => a.position - b.position);
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try { await fn(); onChanged(); } catch (e: unknown) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const add = () => {
+    const label = newLabel.trim();
+    if (!label) return;
+    const value = slugify(label);
+    if (!value) { setError('label must contain letters or digits'); return; }
+    run(async () => { await createTicketFieldDef(token, { kind: 'status', value, label, position: ordered.length }); setNewLabel(''); });
+  };
+
+  // Swap a column with its neighbour by exchanging positions (skips synthetic default rows that have no real id).
+  const move = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= ordered.length) return;
+    const a = ordered[i], b = ordered[j];
+    run(async () => {
+      await Promise.all([
+        updateTicketFieldDef(token, a.field_def_id, { position: b.position }),
+        updateTicketFieldDef(token, b.field_def_id, { position: a.position }),
+      ]);
+    });
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: 520, maxHeight: '80vh', background: T.card, border: `1px solid ${T.borderHi}`, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: `1px solid ${T.border}`, background: T.cardHi }}>
+          <span style={{ fontFamily: T.mono, fontSize: 12, color: T.dim }}>configure status columns</span>
+          <button onClick={onClose} style={{ background: 'transparent', border: 0, color: T.faint, cursor: 'pointer', fontSize: 16 }}>×</button>
+        </div>
+        <div style={{ padding: '14px 18px', overflow: 'auto' }}>
+          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 12, lineHeight: 1.5 }}>
+            Status columns are shared across every board in your org.
+          </div>
+          {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>{error}</div>}
+          {ordered.map((s, i) => (
+            <div key={s.field_def_id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <input type="color" value={s.color || '#7d8a78'} disabled={busy}
+                onChange={e => run(async () => { await updateTicketFieldDef(token, s.field_def_id, { color: e.target.value }); })}
+                style={{ width: 26, height: 26, background: 'transparent', border: `1px solid ${T.border}`, cursor: 'pointer', flexShrink: 0 }} />
+              <input defaultValue={s.label} disabled={busy}
+                onBlur={e => { if (e.target.value.trim() && e.target.value !== s.label) run(async () => { await updateTicketFieldDef(token, s.field_def_id, { label: e.target.value.trim() }); }); }}
+                style={{ flex: 1, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '5px 8px', outline: 'none' }} />
+              <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, width: 90, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.value}</span>
+              <button onClick={() => move(i, -1)} disabled={busy || i === 0} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '3px 7px', cursor: 'pointer', opacity: i === 0 ? 0.3 : 1 }}>↑</button>
+              <button onClick={() => move(i, 1)} disabled={busy || i === ordered.length - 1} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '3px 7px', cursor: 'pointer', opacity: i === ordered.length - 1 ? 0.3 : 1 }}>↓</button>
+              <button onClick={() => run(async () => { await deleteTicketFieldDef(token, s.field_def_id); })} disabled={busy} style={{ background: T.redSoft, border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, padding: '3px 7px', cursor: 'pointer' }}>✕</button>
+            </div>
+          ))}
+          <div style={{ display: 'flex', gap: 8, marginTop: 14, borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
+            <input value={newLabel} onChange={e => setNewLabel(e.target.value)} onKeyDown={e => e.key === 'Enter' && add()} placeholder="new column label…"
+              style={{ flex: 1, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '6px 9px', outline: 'none' }} />
+            <button onClick={add} disabled={busy || !newLabel.trim()} style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, padding: '6px 14px', cursor: 'pointer', opacity: (busy || !newLabel.trim()) ? 0.6 : 1 }}>[ add ]</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Ticket kanban: first-class board switcher + status columns with drag-to-move, a detail drawer, and column config. */
 export function Tickets() {
   const token = useAppSelector(s => s.auth.token)!;
-  // Current-project view filter from the sidebar switcher; refetch on change.
-  const project = useAppSelector(s => s.project.current);
   const userNames = useUserNames(token);
   const workflowNames = useWorkflowNames(token);
   const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [boards, setBoards] = useState<Board[]>([]);
+  const [statuses, setStatuses] = useState<TicketFieldDef[]>(DEFAULT_STATUSES);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Selected board key: null = "all", UNASSIGNED = no-board pile, otherwise a board_id.
+  const [board, setBoard] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showNewBoard, setShowNewBoard] = useState(false);
+  const [showColumns, setShowColumns] = useState(false);
   const [newComment, setNewComment] = useState('');
   const [commenting, setCommenting] = useState(false);
+  // Drag state: the ticket being dragged and the status column hovered over.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
 
-  const fetchTickets = useCallback(async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setTickets(await listTickets(token, project ?? undefined));
+      const [tk, bd, defs] = await Promise.all([
+        listTickets(token),
+        listBoards(token).catch(() => [] as Board[]),
+        listTicketFieldDefs(token, 'status').catch(() => [] as TicketFieldDef[]),
+      ]);
+      setTickets(tk);
+      setBoards(bd);
+      setStatuses(defs.length > 0 ? [...defs].sort((a, b) => a.position - b.position) : DEFAULT_STATUSES);
     } catch (e: unknown) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [token, project]);
+  }, [token]);
 
-  useEffect(() => { fetchTickets(); }, [fetchTickets]);
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // If the selected board disappears (deleted elsewhere), fall back to "all".
+  useEffect(() => {
+    if (board !== null && board !== UNASSIGNED && !boards.some(b => b.board_id === board)) setBoard(null);
+  }, [board, boards]);
+
+  const unassignedCount = useMemo(() => tickets.filter(t => !t.board_id).length, [tickets]);
+
+  const visibleTickets = useMemo(() => {
+    if (board === null) return tickets;
+    if (board === UNASSIGNED) return tickets.filter(t => !t.board_id);
+    return tickets.filter(t => t.board_id === board);
+  }, [tickets, board]);
 
   const selectedTicket = tickets.find(t => t.ticket_id === selected);
+  const selectedBoard = boards.find(b => b.board_id === board);
+  const boardLabel = board === null ? 'all' : board === UNASSIGNED ? 'unassigned' : selectedBoard?.name ?? '';
 
-  const handleStatusToggle = async () => {
-    if (!selectedTicket) return;
-    const newStatus = selectedTicket.status === 'open' ? 'closed' : 'open';
+  /** Replace a ticket in local state with the server's updated copy. */
+  const applyUpdated = (updated: Ticket) =>
+    setTickets(prev => prev.map(t => (t.ticket_id === updated.ticket_id ? { ...t, ...updated } : t)));
+
+  /** Move a ticket to a new status (drag-drop or detail toggle), optimistically then reconciled with the server. */
+  const moveTicket = async (ticketId: string, newStatus: string) => {
+    const ticket = tickets.find(t => t.ticket_id === ticketId);
+    if (!ticket || ticket.status === newStatus) return;
+    const prev = ticket.status;
+    setTickets(cur => cur.map(t => (t.ticket_id === ticketId ? { ...t, status: newStatus } : t)));
     try {
-      const updated = await updateTicket(token, selectedTicket.ticket_id, { status: newStatus });
-      setTickets(prev => prev.map(t => t.ticket_id === updated.ticket_id ? updated : t));
+      applyUpdated(await updateTicket(token, ticketId, { status: newStatus }));
     } catch (e: unknown) {
+      setTickets(cur => cur.map(t => (t.ticket_id === ticketId ? { ...t, status: prev } : t)));
       setError((e as Error).message);
     }
   };
 
+  const handleStatusToggle = async () => {
+    if (!selectedTicket) return;
+    await moveTicket(selectedTicket.ticket_id, isTerminal(selectedTicket.status) ? 'open' : 'closed');
+  };
+
   const [confirm, confirmEl] = useConfirm();
-  const [railW, railHandle] = useResizableWidth('rail.tickets.main', 260, { min: 200, max: 480 });
+  const [railW, railHandle] = useResizableWidth('rail.tickets.main', 230, { min: 190, max: 420 });
 
   const handleDelete = async () => {
     if (!selectedTicket) return;
@@ -153,13 +359,26 @@ export function Tickets() {
     }
   };
 
+  const handleDeleteBoard = async (b: Board) => {
+    if (!(await confirm({ message: `Delete board "${b.name}"? Its tickets are kept and moved to "unassigned".` }))) return;
+    try {
+      await deleteBoard(token, b.board_id);
+      if (board === b.board_id) setBoard(null);
+      // Reflect the unassignment locally so cards don't vanish until the next refresh.
+      setTickets(prev => prev.map(t => (t.board_id === b.board_id ? { ...t, board_id: null } : t)));
+      setBoards(prev => prev.filter(x => x.board_id !== b.board_id));
+    } catch (e: unknown) {
+      setError((e as Error).message);
+    }
+  };
+
   const handleAddComment = async () => {
     if (!selectedTicket || !newComment.trim()) return;
     setCommenting(true);
     try {
       const comment = await addComment(token, selectedTicket.ticket_id, newComment.trim());
       setTickets(prev => prev.map(t =>
-        t.ticket_id === selectedTicket.ticket_id ? { ...t, comments: [...(t.comments ?? []), comment] } : t
+        t.ticket_id === selectedTicket.ticket_id ? { ...t, comments: [...(t.comments ?? []), comment] } : t,
       ));
       setNewComment('');
     } catch (e: unknown) {
@@ -169,21 +388,44 @@ export function Tickets() {
     }
   };
 
+  // The board_id to tag newly-created tickets with: the active board, or undefined on "all"/"unassigned".
+  const createBoardId = board && board !== UNASSIGNED ? board : undefined;
+
+  /** A board switcher row: name + count, highlighted when active, with an optional delete affordance. */
+  const BoardRow = ({ label, value, count, deletable }: { label: string; value: string | null; count: number; deletable?: Board }) => {
+    const active = board === value;
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', background: active ? T.greenSoft : 'transparent', borderLeft: `2px solid ${active ? T.green : 'transparent'}` }}
+        onMouseEnter={e => { const x = e.currentTarget.querySelector<HTMLElement>('[data-del]'); if (x) x.style.opacity = '1'; }}
+        onMouseLeave={e => { const x = e.currentTarget.querySelector<HTMLElement>('[data-del]'); if (x) x.style.opacity = '0'; }}>
+        <button onClick={() => setBoard(value)}
+          style={{ flex: 1, textAlign: 'left', padding: '9px 6px 9px 12px', background: 'transparent', border: 0, fontFamily: T.mono, cursor: 'pointer', color: active ? T.textHi : T.text, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
+          <span style={{ fontSize: 13, fontWeight: active ? 700 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+          <span style={{ fontSize: 10, color: T.faint, flexShrink: 0 }}>{count}</span>
+        </button>
+        {deletable && (
+          <button data-del onClick={() => handleDeleteBoard(deletable)} title="delete board"
+            style={{ opacity: 0, transition: 'opacity .12s', background: 'transparent', border: 0, color: T.faint, fontFamily: T.mono, fontSize: 12, padding: '0 10px', cursor: 'pointer' }}>✕</button>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       {confirmEl}
-      {/* Left panel */}
+      {/* Left panel — board switcher */}
       <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
         <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-            <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>tickets/</span>
+            <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>boards/</span>
             <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={() => setShowCreate(true)} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>+ new</button>
-              <button onClick={fetchTickets} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>↻</button>
+              <button onClick={() => setShowNewBoard(true)} title="new board" style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>+ board</button>
+              <button onClick={fetchData} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>↻</button>
             </div>
           </div>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-            {tickets.length > 0 && `${tickets.filter(t => t.status === 'open').length} open · ${tickets.length} total`}
+            {tickets.length > 0 && `${tickets.filter(t => !isTerminal(t.status)).length} open · ${tickets.length} total`}
           </div>
         </div>
 
@@ -192,67 +434,113 @@ export function Tickets() {
             <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
           ) : error ? (
             <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 11, color: T.red }}>{error}</div>
-          ) : tickets.length === 0 ? (
-            <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint }}>
-              <div>→ no tickets</div>
-              <div style={{ marginTop: 8 }}>
-                <button onClick={() => setShowCreate(true)} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>[ + new ticket ]</button>
-              </div>
-            </div>
-          ) : tickets.map(ticket => {
-            const isActive = selected === ticket.ticket_id;
-            return (
-              <button key={ticket.ticket_id} onClick={() => setSelected(ticket.ticket_id)}
-                style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-                  <span style={{ fontSize: 10, color: priorityColor(ticket.priority), flexShrink: 0 }}>■</span>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: isActive ? T.textHi : T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ticket.title}</span>
+          ) : (
+            <>
+              <BoardRow label="◆ all" value={null} count={tickets.length} />
+              {boards.map(b => (
+                <BoardRow key={b.board_id} label={b.name} value={b.board_id} count={tickets.filter(t => t.board_id === b.board_id).length} deletable={b} />
+              ))}
+              {unassignedCount > 0 && <BoardRow label="· unassigned" value={UNASSIGNED} count={unassignedCount} />}
+              {boards.length === 0 && (
+                <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 10, color: T.faint, lineHeight: 1.6 }}>
+                  → create a board to group your tickets
                 </div>
-                <div style={{ fontSize: 11, color: T.faint, paddingLeft: 16 }}>{ticket.status} · {timeAgo(ticket.updated_at)} ago</div>
-                {/* Project tag shown only when unfiltered. */}
-                {!project && ticket.project && <div style={{ fontSize: 10, color: T.green, paddingLeft: 16, marginTop: 2 }}>◆ {ticket.project}</div>}
-              </button>
-            );
-          })}
+              )}
+            </>
+          )}
         </div>
       </div>
       {railHandle}
 
-      {/* Right panel */}
+      {/* Right panel — the kanban board for the selected board */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
-            <span style={{ color: T.green }}>$</span> armory tickets{selectedTicket ? ` · ${selectedTicket.title}` : ''}
+            <span style={{ color: T.green }}>$</span> armory tickets board{boardLabel ? ` · ${boardLabel}` : ''}
           </div>
-          {selectedTicket && (
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={handleStatusToggle}
-                style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
-                [ {selectedTicket.status === 'open' ? '✓ close' : '↺ reopen'} ]
-              </button>
-              <button onClick={handleDelete}
-                style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}
-                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
-                [ delete ]
-              </button>
-            </div>
-          )}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => setShowColumns(true)} title="configure status columns" style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>⚙ columns</button>
+            <button onClick={() => setShowCreate(true)} style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer', fontWeight: 600 }}>[ + new ticket ]</button>
+          </div>
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto' }}>
-          {!selectedTicket ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint, textAlign: 'center' }}>
-                <div>→ select a ticket</div>
-                <div style={{ marginTop: 12 }}>
-                  <button onClick={() => setShowCreate(true)} style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 12, padding: '8px 16px', cursor: 'pointer', fontWeight: 600 }}>[ + new ticket ]</button>
+        {loading ? (
+          <div style={{ padding: '20px 24px', fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ loading · · ·</div>
+        ) : (
+          <div style={{ flex: 1, display: 'flex', gap: 0, overflowX: 'auto', overflowY: 'hidden' }}>
+            {statuses.map(s => {
+              const cards = visibleTickets.filter(t => t.status === s.value);
+              const accent = statusColor(s.value, s.color);
+              const isDropTarget = dragOver === s.value;
+              return (
+                <div key={s.value}
+                  onDragOver={e => { e.preventDefault(); if (dragOver !== s.value) setDragOver(s.value); }}
+                  onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(d => (d === s.value ? null : d)); }}
+                  onDrop={e => { e.preventDefault(); setDragOver(null); if (dragId) moveTicket(dragId, s.value); setDragId(null); }}
+                  style={{ width: 280, flexShrink: 0, display: 'flex', flexDirection: 'column', borderRight: `1px solid ${T.border}`, background: isDropTarget ? T.greenFaint : 'transparent', transition: 'background .12s' }}>
+                  <div style={{ padding: '12px 14px 8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: `1px solid ${T.border}` }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 7, fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.textHi, textTransform: 'lowercase' }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: accent, flexShrink: 0 }} />
+                      {s.label}
+                    </span>
+                    <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{cards.length}</span>
+                  </div>
+                  <div style={{ flex: 1, overflowY: 'auto', padding: '10px 10px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {cards.length === 0 ? (
+                      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, textAlign: 'center', padding: '16px 0', opacity: isDropTarget ? 1 : 0.5 }}>
+                        {isDropTarget ? '↓ drop here' : '—'}
+                      </div>
+                    ) : cards.map(ticket => {
+                      const onBoard = boards.find(b => b.board_id === ticket.board_id);
+                      return (
+                        <div key={ticket.ticket_id} draggable
+                          onDragStart={() => setDragId(ticket.ticket_id)}
+                          onDragEnd={() => { setDragId(null); setDragOver(null); }}
+                          onClick={() => setSelected(ticket.ticket_id)}
+                          style={{ background: T.card, border: `1px solid ${selected === ticket.ticket_id ? T.green : T.border}`, borderLeft: `2px solid ${priorityColor(ticket.priority)}`, padding: '9px 11px', cursor: 'grab', fontFamily: T.mono, opacity: dragId === ticket.ticket_id ? 0.4 : 1, transition: 'border-color .12s, opacity .12s' }}>
+                          <div style={{ fontSize: 12.5, fontWeight: 600, color: T.text, lineHeight: 1.35, marginBottom: 5, wordBreak: 'break-word' }}>{ticket.title}</div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: T.faint }}>
+                            <span style={{ color: priorityColor(ticket.priority) }}>● {ticket.priority ?? 'none'}</span>
+                            <span>· {timeAgo(ticket.updated_at)} ago</span>
+                          </div>
+                          {/* Show the board tag on "all" / "unassigned" views, where cards span boards. */}
+                          {board !== ticket.board_id && onBoard && (
+                            <div style={{ fontSize: 10, color: T.green, marginTop: 4 }}>◆ {onBoard.name}</div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Detail drawer */}
+      {selectedTicket && (
+        <div onClick={() => setSelected(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 40, display: 'flex', justifyContent: 'flex-end' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: 520, maxWidth: '90vw', height: '100%', background: T.bg, borderLeft: `1px solid ${T.borderHi}`, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <span style={{ color: T.green }}>$</span> {selectedTicket.title}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                <button onClick={handleStatusToggle}
+                  style={{ background: T.greenSoft, border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+                  [ {isTerminal(selectedTicket.status) ? '↺ reopen' : '✓ close'} ]
+                </button>
+                <button onClick={handleDelete}
+                  style={{ background: T.redSoft, border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+                  [ delete ]
+                </button>
+                <button onClick={() => setSelected(null)} style={{ background: 'transparent', border: 0, color: T.faint, cursor: 'pointer', fontSize: 16 }}>×</button>
               </div>
             </div>
-          ) : (
-            <div style={{ padding: '20px 24px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+
+            <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
                 <h2 style={{ margin: 0, fontFamily: T.mono, fontSize: 18, color: T.textHi, fontWeight: 700 }}>{selectedTicket.title}</h2>
                 <Pill tone={statusTone(selectedTicket.status)}>{selectedTicket.status}</Pill>
                 {selectedTicket.priority && (
@@ -263,6 +551,7 @@ export function Tickets() {
               </div>
               <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginBottom: 20 }}>
                 created {timeAgo(selectedTicket.created_at)} ago · updated {timeAgo(selectedTicket.updated_at)} ago
+                {selectedTicket.board_id && boards.find(b => b.board_id === selectedTicket.board_id) && <> · ◆ {boards.find(b => b.board_id === selectedTicket.board_id)!.name}</>}
               </div>
 
               {selectedTicket.description && (
@@ -303,14 +592,28 @@ export function Tickets() {
                 </button>
               </div>
             </div>
-          )}
+          </div>
         </div>
-      </div>
+      )}
 
       {showCreate && (
         <CreateModal
+          boardId={createBoardId}
           onCreated={t => { setTickets(prev => [t, ...prev]); setSelected(t.ticket_id); setShowCreate(false); }}
           onClose={() => setShowCreate(false)}
+        />
+      )}
+      {showNewBoard && (
+        <NewBoardModal
+          onCreated={b => { setBoards(prev => [...prev, b]); setBoard(b.board_id); setShowNewBoard(false); }}
+          onClose={() => setShowNewBoard(false)}
+        />
+      )}
+      {showColumns && (
+        <ColumnsModal
+          statuses={statuses}
+          onChanged={() => { listTicketFieldDefs(token, 'status').then(d => setStatuses(d.length > 0 ? [...d].sort((a, b) => a.position - b.position) : DEFAULT_STATUSES)).catch(() => {}); }}
+          onClose={() => setShowColumns(false)}
         />
       )}
     </div>

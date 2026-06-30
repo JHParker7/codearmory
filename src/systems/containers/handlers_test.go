@@ -5,13 +5,24 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	gk "github.com/code-armory-app/codearmory_sdk/gatekeeper"
 )
+
+// useTestRegistry seeds the default-registry cache with rc so handlers resolve
+// it without touching the database, and clears the cache on cleanup.
+func useTestRegistry(t *testing.T, rc *registryClient) {
+	t.Helper()
+	defRegMu.Lock()
+	defRegCache = rc
+	defRegExpires = time.Now().Add(time.Hour)
+	defRegMu.Unlock()
+	t.Cleanup(invalidateRegistryCache)
+}
 
 func fakeGatekeeper(t *testing.T, status int, body string) {
 	t.Helper()
@@ -68,8 +79,7 @@ func TestMain(m *testing.M) {
 	initMetrics()
 	httpClient = &http.Client{}
 	gatekeeperClient = &gk.Client{URL: gatekeeperURL, Service: "containers", HTTPClient: httpClient}
-	registry = &registryClient{baseURL: "http://127.0.0.1:1", http: httpClient}
-	ociProxy = &httputil.ReverseProxy{Director: func(r *http.Request) {}}
+	initOCIProxy()
 	getServiceKey = func() string { return "test-service-key" }
 	os.Exit(m.Run())
 }
@@ -480,16 +490,8 @@ func TestHandleV2_InjectsOrgCredsToProxy(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	// Wire ociProxy to the fake upstream.
-	origProxy := ociProxy
-	initOCIProxy()
-	t.Cleanup(func() { ociProxy = origProxy })
-
-	// Point registry baseURL at the fake upstream so initOCIProxy routes there.
-	origReg := registry
-	registry = &registryClient{baseURL: upstream.URL, http: httpClient}
-	t.Cleanup(func() { registry = origReg })
-	initOCIProxy()
+	// Make the default registry resolve to the fake upstream (no DB).
+	useTestRegistry(t, &registryClient{baseURL: upstream.URL, http: httpClient})
 
 	fakeGatekeeperMulti(t,
 		`{"authorized":true,"user_id":"u1","org_id":"org-director-test"}`,
@@ -594,10 +596,7 @@ func TestHandleV2_FallsBackWhenSecretMissing(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	origReg := registry
-	registry = &registryClient{baseURL: upstream.URL, http: httpClient, username: "global-user", password: "global-pass"}
-	t.Cleanup(func() { registry = origReg })
-	initOCIProxy()
+	useTestRegistry(t, &registryClient{baseURL: upstream.URL, http: httpClient, username: "global-user", password: "global-pass"})
 
 	fakeGatekeeperMulti(t,
 		`{"authorized":true,"user_id":"u1","org_id":"org-nosecret"}`,

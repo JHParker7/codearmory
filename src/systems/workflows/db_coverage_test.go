@@ -205,11 +205,15 @@ func TestWorkflowStepRun_CRUD(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	out := "done"
+	logs := "hello from stdout\n"
 	var used, lim int64 = 12, 256
-	sr.Complete(ctx, "completed", &out, &used, &lim)
+	sr.Complete(ctx, "completed", &out, &logs, &used, &lim)
 	got, _ := (WorkflowStepRun{StepRunID: sr.StepRunID}).Get(ctx)
 	if got.(WorkflowStepRun).Status != "completed" {
 		t.Errorf("step run status = %q", got.(WorkflowStepRun).Status)
+	}
+	if l := got.(WorkflowStepRun).Logs; l == nil || *l != logs {
+		t.Errorf("step run logs = %v, want %q", l, logs)
 	}
 }
 

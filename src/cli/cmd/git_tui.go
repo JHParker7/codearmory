@@ -73,8 +73,9 @@ const (
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 type gtBackendsMsg []gtBackend
+type gtReposMsg kvCatalog
 type gtErrMsg struct{ err error }
-type gtDoneMsg struct{ status string }       // mutation succeeded → refresh list
+type gtDoneMsg struct{ status string }           // mutation succeeded → refresh list
 type gtResultMsg struct{ content, title string } // test / creds result to display
 type gtFormErrMsg struct{ err error }
 type gtCredsMsg struct{ creds gitCreds } // minted creds awaiting redacted render
@@ -89,6 +90,9 @@ type gitModel struct {
 	height  int
 
 	backends []gtBackend
+	// repos backs the mint form's repo name picker (shows the repo name, submits
+	// the clone URL); degrades to a free-text URL when empty/unavailable.
+	repos kvCatalog
 
 	bTable table.Model
 	vp     viewport.Model
@@ -98,7 +102,7 @@ type gitModel struct {
 
 	// creds holds the most recently minted credentials so the result view can
 	// toggle the secret between redacted and revealed without re-fetching.
-	creds        gitCreds
+	creds         gitCreds
 	credsRevealed bool
 	resultTitle   string
 
@@ -138,6 +142,40 @@ func gtFetchBackends() tea.Msg {
 	}
 	return gtBackendsMsg(backends)
 }
+
+// fetchGitRepos loads the git-service repo list and builds a name→URL kvCatalog
+// (label = repo name, value = HTTPS clone URL) for the name pickers in the git,
+// forge, and steps TUIs. On any failure it returns an empty catalog so the
+// callers degrade to a free-text URL field rather than erroring.
+func fetchGitRepos() kvCatalog {
+	data, err := doRequest("GET", "/git/repos", nil)
+	if err != nil {
+		return kvCatalog{}
+	}
+	var repos []struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if err := json.Unmarshal(data, &repos); err != nil {
+		return kvCatalog{}
+	}
+	var cat kvCatalog
+	for _, r := range repos {
+		if r.URL == "" {
+			continue
+		}
+		label := r.Name
+		if label == "" {
+			label = r.URL
+		}
+		cat.labels = append(cat.labels, label)
+		cat.values = append(cat.values, r.URL)
+	}
+	return cat
+}
+
+// gtFetchRepos loads the repo catalog for the mint form's name picker.
+func gtFetchRepos() tea.Msg { return gtReposMsg(fetchGitRepos()) }
 
 func gtCreateBackend(payload map[string]any) tea.Cmd {
 	return func() tea.Msg {
@@ -207,7 +245,7 @@ func gtCredsContent(c gitCreds, revealed bool) string {
 
 // ── Init / Update ─────────────────────────────────────────────────────────────
 
-func (m gitModel) Init() tea.Cmd { return gtFetchBackends }
+func (m gitModel) Init() tea.Cmd { return tea.Batch(gtFetchBackends, gtFetchRepos) }
 
 func (m gitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -229,6 +267,18 @@ func (m gitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			rows[i] = table.Row{b.Name, frDash(b.Type), frDash(b.Host), frDash(b.AuthMode)}
 		}
 		m.bTable.SetRows(rows)
+		return m, nil
+	case gtReposMsg:
+		m.repos = kvCatalog(msg)
+		// If the mint form was opened before the catalog landed, its Repo field fell
+		// back to free-text; rebuild so it upgrades to the name picker, carrying the
+		// entered URL across.
+		if m.view == gtViewForm && m.formKind == gtFormCreds {
+			old := m.form
+			m.form, _ = newGitCredsForm(m.repos)
+			m.form.setValues(map[string]string{"repo_url": old.value("repo_url")})
+			m.form.errMsg = old.errMsg
+		}
 		return m, nil
 	case gtResultMsg:
 		m.loading = false
@@ -335,10 +385,16 @@ func (m gitModel) keyList(msg tea.KeyMsg) (gitModel, tea.Cmd) {
 		return m, nil
 	case "c":
 		m.formKind = gtFormCreds
-		m.form, _ = newTUIForm("Mint Clone Credentials",
-			formInput("repo_url", "Repo URL", "https://github.com/owner/repo.git (required)"))
+		var cmd tea.Cmd
+		m.form, cmd = newGitCredsForm(m.repos)
 		m.view = gtViewForm
-		return m, nil
+		// If the prefetch hasn't landed (or failed), the Repo field fell back to
+		// free-text; fetch now so it upgrades to a picker once the catalog arrives.
+		cmds := []tea.Cmd{cmd}
+		if len(m.repos.values) == 0 {
+			cmds = append(cmds, gtFetchRepos)
+		}
+		return m, tea.Batch(cmds...)
 	case "t":
 		if i := m.bTable.Cursor(); i >= 0 && i < len(m.backends) {
 			m.loading = true
@@ -359,6 +415,21 @@ func (m gitModel) keyList(msg tea.KeyMsg) (gitModel, tea.Cmd) {
 	var cmd tea.Cmd
 	m.bTable, cmd = m.bTable.Update(msg)
 	return m, cmd
+}
+
+// newGitCredsForm builds the mint-credentials form. The Repo field is a name→URL
+// picker (formSelectKV: label = repo name, value = clone URL) when the repo
+// catalog is loaded, degrading to a free-text URL input otherwise so the user can
+// still mint for an arbitrary repo. The submitted value is always the clone URL,
+// POSTed verbatim as {repo_url: <url>}.
+func newGitCredsForm(repos kvCatalog) (tuiForm, tea.Cmd) {
+	var repoField formField
+	if len(repos.values) > 0 {
+		repoField = formSelectKV("repo_url", "Repo", repos.labels, repos.values)
+	} else {
+		repoField = formInput("repo_url", "Repo URL", "https://github.com/owner/repo.git (required)")
+	}
+	return newTUIForm("Mint Clone Credentials", repoField)
 }
 
 func (m gitModel) keyForm(msg tea.KeyMsg) (gitModel, tea.Cmd) {

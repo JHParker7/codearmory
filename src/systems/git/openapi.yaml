@@ -58,6 +58,41 @@ paths:
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       responses:
         "200": { description: '{ ok, backend_type, auth_mode, expires_at }' }
+  /repos:
+    get:
+      summary: List clone targets — enumerated across linked backends plus pinned repos
+      operationId: listRepo
+      responses:
+        "200":
+          description: >
+            Array of { id?, name, url, backend, backend_type, source } where source
+            is "enumerated" or "manual"; id is present only for manual repos.
+    post:
+      summary: Pin a repository to the selector (for generic/un-enumerable backends)
+      operationId: createRepo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string }
+                name: { type: string }
+      responses:
+        "201":
+          description: The registered repo
+        "409":
+          description: A repo with this url is already registered
+  /repos/{id}:
+    delete:
+      summary: Remove a pinned repo
+      operationId: deleteRepo
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "204": { description: Deleted }
+        "404": { description: Not found }
   /credentials:
     post:
       summary: Mint a credential for a repository URL

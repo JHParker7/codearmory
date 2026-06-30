@@ -285,6 +285,11 @@ components:
         project:
           type: string
           description: Free-text project (workspace) label; a view filter, not a permission boundary
+        board_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The board this ticket belongs to (null = unassigned)
         created_by:
           type: string
           format: uuid
@@ -366,6 +371,11 @@ components:
         project:
           type: string
           description: Project (workspace) label to tag the ticket with
+        board_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Board to place the ticket on (omit/null = unassigned)
         assignee_id:
           type: string
           format: uuid
@@ -385,11 +395,10 @@ components:
 
     UpdateTicketRequest:
       type: object
-      required:
-        - title
       properties:
         title:
           type: string
+          description: Omitting (or empty) preserves the current title
         description:
           type: string
         status:
@@ -403,6 +412,11 @@ components:
         project:
           type: string
           description: Project (workspace) label; omitting (or empty) preserves the current value
+        board_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Omitting preserves the current board; "" clears it (unassign)
         assignee_id:
           type: string
           format: uuid

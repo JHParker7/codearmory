@@ -150,7 +150,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := connect().AutoMigrate(&GitBackend{}); err != nil {
+	if err := connect().AutoMigrate(&GitBackend{}, &GitRepo{}); err != nil {
 		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
 	}
@@ -173,6 +173,11 @@ func main() {
 	mux.HandleFunc("PUT /backends/{id}", handleUpdateBackend)
 	mux.HandleFunc("DELETE /backends/{id}", handleDeleteBackend)
 	mux.HandleFunc("POST /backends/{id}/test", handleTestBackend)
+
+	// Repo selector: enumerate clone targets across linked backends and pin extras.
+	mux.HandleFunc("GET /repos", handleListRepos)
+	mux.HandleFunc("POST /repos", handleCreateRepo)
+	mux.HandleFunc("DELETE /repos/{id}", handleDeleteRepo)
 
 	mux.HandleFunc("POST /credentials", handleMintCredential)
 

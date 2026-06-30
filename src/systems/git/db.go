@@ -25,6 +25,9 @@ var (
 // errBackendNotFound is returned when a lookup matches no backend.
 var errBackendNotFound = errors.New("backend not found")
 
+// errRepoNotFound is returned when a manual-repo lookup matches nothing.
+var errRepoNotFound = errors.New("repo not found")
+
 func connect() *gorm.DB {
 	dbInitMu.Lock()
 	defer dbInitMu.Unlock()
@@ -160,6 +163,56 @@ func getBackendByHost(ctx context.Context, owner, host string) (GitBackend, erro
 		return GitBackend{}, err
 	}
 	return b, nil
+}
+
+// Add inserts a new manual repo.
+func (rp GitRepo) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.repo.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("repo.id", rp.ID))
+	if err := connect().WithContext(ctx).Create(&rp).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// Remove hard-deletes a manual repo owned by the caller.
+func (rp GitRepo) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.repo.remove")
+	defer span.End()
+	span.SetAttributes(attribute.String("repo.id", rp.ID))
+	res := connect().WithContext(ctx).
+		Where("id = ? AND owner = ?", rp.ID, rp.Owner).
+		Delete(&GitRepo{})
+	if res.Error != nil {
+		span.RecordError(res.Error)
+		span.SetStatus(codes.Error, res.Error.Error())
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errRepoNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// listRepos returns all manually-registered repos owned by the caller, newest first.
+func listRepos(ctx context.Context, owner string) ([]GitRepo, error) {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.repo.list")
+	defer span.End()
+	var repos []GitRepo
+	if err := connectRead().WithContext(ctx).
+		Where("owner = ?", owner).
+		Order("created_at DESC").
+		Find(&repos).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	return repos, nil
 }
 
 // listBackends returns all backends owned by the caller, newest first.
