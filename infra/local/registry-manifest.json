@@ -347,6 +347,36 @@
         "path": "/field-defs/{id}",
         "action": "deleteFieldDef",
         "resource": "tickets/field-defs/{id}"
+      },
+      {
+        "method": "POST",
+        "path": "/boards",
+        "action": "createBoard",
+        "resource": "tickets/boards"
+      },
+      {
+        "method": "GET",
+        "path": "/boards",
+        "action": "listBoard",
+        "resource": "tickets/boards"
+      },
+      {
+        "method": "GET",
+        "path": "/boards/{id}",
+        "action": "getBoard",
+        "resource": "tickets/boards/{id}"
+      },
+      {
+        "method": "PUT",
+        "path": "/boards/{id}",
+        "action": "updateBoard",
+        "resource": "tickets/boards/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/boards/{id}",
+        "action": "deleteBoard",
+        "resource": "tickets/boards/{id}"
       }
     ],
     "actions": [
@@ -380,13 +410,20 @@
           "listFieldDef",
           "createFieldDef",
           "updateFieldDef",
-          "deleteFieldDef"
+          "deleteFieldDef",
+          "createBoard",
+          "listBoard",
+          "getBoard",
+          "updateBoard",
+          "deleteBoard"
         ],
         "resources": [
           "{username}/tickets/tickets",
           "{username}/tickets/tickets/*",
           "{username}/tickets/field-defs",
-          "{username}/tickets/field-defs/*"
+          "{username}/tickets/field-defs/*",
+          "{username}/tickets/boards",
+          "{username}/tickets/boards/*"
         ]
       }
     ]
@@ -585,6 +622,24 @@
         "resource": "git/backends/{id}"
       },
       {
+        "method": "GET",
+        "path": "/repos",
+        "action": "listRepo",
+        "resource": "git/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos",
+        "action": "createRepo",
+        "resource": "git/repos"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repos/{id}",
+        "action": "deleteRepo",
+        "resource": "git/repos/{id}"
+      },
+      {
         "method": "POST",
         "path": "/credentials",
         "action": "mintCredential",
@@ -601,6 +656,25 @@
         ],
         "resources": [
           "{username}/git/backends"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "listRepo",
+          "createRepo"
+        ],
+        "resources": [
+          "{username}/git/repos"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "deleteRepo"
+        ],
+        "resources": [
+          "{username}/git/repos/*"
         ]
       },
       {
@@ -656,6 +730,36 @@
         "path": "/repositories/{namespace}/{image}/manifests/{digest}",
         "action": "deleteManifest",
         "resource": "containers/repositories/{namespace}/{image}"
+      },
+      {
+        "method": "GET",
+        "path": "/registries",
+        "action": "listRegistry",
+        "resource": "containers/registries"
+      },
+      {
+        "method": "POST",
+        "path": "/registries",
+        "action": "createRegistry",
+        "resource": "containers/registries"
+      },
+      {
+        "method": "GET",
+        "path": "/registries/{name}",
+        "action": "getRegistry",
+        "resource": "containers/registries/{name}"
+      },
+      {
+        "method": "PATCH",
+        "path": "/registries/{name}",
+        "action": "updateRegistry",
+        "resource": "containers/registries/{name}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/registries/{name}",
+        "action": "deleteRegistry",
+        "resource": "containers/registries/{name}"
       }
     ],
     "actions": [],

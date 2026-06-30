@@ -52,8 +52,13 @@ spec:
               value: {{ .Values.containers.env.logLevel | quote }}
             - name: GATEKEEPER_URL
               value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+            {{- include "codearmory.postgresql.env" (list . "containers" "containers" $fullname) | nindent 12 }}
+            {{- if .Values.containers.env.registryUrl }}
+            # Optional — when set, seeds the default registry on first boot.
+            # Additional registries are configurable at runtime via /registries.
             - name: REGISTRY_URL
               value: {{ .Values.containers.env.registryUrl | quote }}
+            {{- end }}
             # gitea_integration is now a non-core service builder deploys on demand;
             # builder deploys it under the fullname-prefixed name on its fixed port 8088.
             # Kept (not removed) so containers always boots; resolves once an admin

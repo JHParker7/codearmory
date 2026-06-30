@@ -12,10 +12,11 @@ import { useAppSelector } from '../../store/hooks';
 import {
   listExecutions, getExecution, cancelExecution, createExecution,
   listRunnerClasses, createRunnerClass, updateRunnerClass, deleteRunnerClass,
-  listForgeImages, listRuntimeBackends,
+  listForgeImages, listRuntimeBackends, listGitRepos,
 } from '../../api/bff';
-import type { Execution, RunnerClass, RuntimeBackend } from '../../api/bff';
+import type { Execution, RunnerClass, RuntimeBackend, GitRepo } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
+import { RepoSelect } from '../../components/RepoSelect';
 import { useResizableWidth } from '../../components/ResizeHandle';
 import { timeAgo } from '../../utils';
 
@@ -59,7 +60,10 @@ function displayCommand(command: string[]): string {
 // ── Create-execution modal ────────────────────────────────────────────────────
 
 /** The fields needed to launch an execution — shared by the create modal and rerun. */
-type ExecutionInput = { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string };
+type ExecutionInput = { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; secret_refs?: Record<string, string> };
+
+/** Env var the repo picker injects the minted clone URL as (matches the workflow forge/run step). */
+const GIT_CLONE_ENV = 'GIT_CLONE_URL';
 
 /**
  * Centered modal for launching a one-off execution. Roomier than the old inline
@@ -78,16 +82,24 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
   const [image, setImage] = useState('');
   const [cmd, setCmd] = useState('');
   const [envStr, setEnvStr] = useState('');
+  const [repoUrl, setRepoUrl] = useState('');
   const [timeout, setTimeout_] = useState('');
   const [runnerClass, setRunnerClass] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [imageOptions, setImageOptions] = useState<string[]>([]);
+  const [repos, setRepos] = useState<GitRepo[]>([]);
 
   // The forge image allowlist drives the image picker. Best effort — an empty or
   // failing response just leaves the picker with no suggestions to filter.
   useEffect(() => {
     listForgeImages(token).then(setImageOptions).catch(() => setImageOptions([]));
+  }, [token]);
+
+  // The git repo list drives the repo picker; selecting one injects clone creds.
+  // Best effort — degrades to a free-text URL field when unavailable.
+  useEffect(() => {
+    listGitRepos(token).then(setRepos).catch(() => setRepos([]));
   }, [token]);
 
   const handleCreate = async () => {
@@ -99,6 +111,7 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
         const [k, ...rest] = line.split('=');
         if (k?.trim()) envPairs[k.trim()] = rest.join('=').trim();
       });
+      const repo = repoUrl.trim();
       await onSubmit({
         image: image.trim(),
         // Wrap in `sh -c` so the textarea runs as a shell script — multi-line
@@ -110,6 +123,9 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
         env: Object.keys(envPairs).length > 0 ? envPairs : undefined,
         timeout: timeout ? parseInt(timeout, 10) : undefined,
         runner_class: runnerClass.trim() || undefined,
+        // Selecting a repo injects a short-lived clone URL as $GIT_CLONE_URL at
+        // dispatch (resolved by the git broker, never persisted with the run).
+        secret_refs: repo ? { [GIT_CLONE_ENV]: `git:${repo}` } : undefined,
       });
     } catch (e: unknown) { setCreateError((e as Error).message); }
     finally { setSubmitting(false); }
@@ -142,6 +158,11 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
           <div style={label}>ENV <span style={{ color: T.faint, opacity: 0.7 }}>(KEY=VALUE, one per line)</span></div>
           <textarea value={envStr} onChange={e => setEnvStr(e.target.value)} rows={3} placeholder="FOO=bar"
             style={{ ...field, resize: 'vertical', lineHeight: 1.5, marginBottom: 14 }} />
+
+          <div style={label}>GIT REPO <span style={{ color: T.faint, opacity: 0.7 }}>(optional · clone creds injected as ${GIT_CLONE_ENV})</span></div>
+          <div style={{ marginBottom: 18 }}>
+            <RepoSelect value={repoUrl} onChange={setRepoUrl} repos={repos} />
+          </div>
 
           <div style={{ display: 'flex', gap: 12, marginBottom: 18 }}>
             <div style={{ flex: 1 }}>
@@ -231,7 +252,8 @@ function ExecutionsTab() {
     setExecutions(prev => [{
       execution_id, user_id: '', image: input.image, command: input.command,
       env: input.env ?? null, timeout: input.timeout ?? null,
-      runner_class: input.runner_class ?? null, project: project ?? undefined, status: 'pending',
+      runner_class: input.runner_class ?? null, secret_refs: input.secret_refs ?? null,
+      project: project ?? undefined, status: 'pending',
       exit_code: null, stdout: null, stderr: null,
       created_at: new Date().toISOString(), started_at: null, ended_at: null,
     }, ...prev]);
@@ -249,6 +271,7 @@ function ExecutionsTab() {
         env: exec.env && Object.keys(exec.env).length > 0 ? exec.env : undefined,
         timeout: exec.timeout ?? undefined,
         runner_class: exec.runner_class ?? undefined,
+        secret_refs: exec.secret_refs && Object.keys(exec.secret_refs).length > 0 ? exec.secret_refs : undefined,
       });
     } catch (e: unknown) { setRerunError((e as Error).message); }
     finally { setRerunning(false); }

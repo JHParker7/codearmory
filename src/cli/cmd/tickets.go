@@ -32,6 +32,7 @@ func init() {
 		ticketWorkflow  string
 		ticketRun       string
 		ticketForge     string
+		ticketBoard     string
 	)
 
 	createTicketCmd := &cobra.Command{
@@ -70,6 +71,9 @@ func init() {
 			if ticketForge != "" {
 				payload["forge_execution_id"] = ticketForge
 			}
+			if ticketBoard != "" {
+				payload["board_id"] = ticketBoard
+			}
 			// Tag the ticket with the project the user is working in.
 			if p := projectFilter(); p != "" {
 				payload["project"] = p
@@ -90,6 +94,7 @@ func init() {
 	createTicketCmd.Flags().StringVar(&ticketWorkflow, "workflow", "", "Linked pipeline ID")
 	createTicketCmd.Flags().StringVar(&ticketRun, "run", "", "Linked pipeline run ID")
 	createTicketCmd.Flags().StringVar(&ticketForge, "forge-execution", "", "Linked forge execution ID")
+	createTicketCmd.Flags().StringVar(&ticketBoard, "board", "", "Board ID to place the ticket on")
 
 	// ── armory tickets list ───────────────────────────────────────────────────
 
@@ -98,6 +103,7 @@ func init() {
 		listPriority  string
 		listTimescale string
 		listAssignee  string
+		listBoard     string
 	)
 
 	listTicketsCmd := &cobra.Command{
@@ -118,6 +124,9 @@ func init() {
 			if listAssignee != "" {
 				q.Set("assignee_id", listAssignee)
 			}
+			if listBoard != "" {
+				q.Set("board_id", listBoard)
+			}
 			if p := projectFilter(); p != "" {
 				q.Set("project", p)
 			}
@@ -132,6 +141,7 @@ func init() {
 	listTicketsCmd.Flags().StringVar(&listPriority, "priority", "", "Filter by priority value")
 	listTicketsCmd.Flags().StringVar(&listTimescale, "timescale", "", "Filter by timescale value")
 	listTicketsCmd.Flags().StringVar(&listAssignee, "assignee", "", "Filter by assignee user ID")
+	listTicketsCmd.Flags().StringVar(&listBoard, "board", "", "Filter by board ID (\"none\" for unassigned)")
 
 	// ── armory tickets get ────────────────────────────────────────────────────
 
@@ -276,6 +286,69 @@ func init() {
 
 	commentCmd.AddCommand(addCommentCmd, deleteCommentCmd)
 
+	// ── armory tickets boards ─────────────────────────────────────────────────
+
+	boardsCmd := &cobra.Command{
+		Use:   "boards",
+		Short: "Manage ticket boards",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return apiCall("GET", "/tickets/boards", nil)
+		},
+	}
+
+	var (
+		boardName  string
+		boardDesc  string
+		boardColor string
+	)
+
+	createBoardCmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a board",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if boardName == "" {
+				return fmt.Errorf("--name is required")
+			}
+			payload := map[string]any{"name": boardName}
+			if boardDesc != "" {
+				payload["description"] = boardDesc
+			}
+			if boardColor != "" {
+				payload["color"] = boardColor
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			return apiCall("POST", "/tickets/boards", body)
+		},
+	}
+	createBoardCmd.Flags().StringVar(&boardName, "name", "", "Board name (required)")
+	createBoardCmd.Flags().StringVar(&boardDesc, "description", "", "Board description")
+	createBoardCmd.Flags().StringVar(&boardColor, "color", "", "Board color (hex, e.g. #aabbcc)")
+
+	listBoardsCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List boards",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return apiCall("GET", "/tickets/boards", nil)
+		},
+	}
+
+	deleteBoardCmd := &cobra.Command{
+		Use:   "delete <id>",
+		Short: "Delete a board (its tickets are kept and become unassigned)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return apiCall("DELETE", "/tickets/boards/"+args[0], nil)
+		},
+	}
+
+	boardsCmd.AddCommand(createBoardCmd, listBoardsCmd, deleteBoardCmd)
+
 	ticketsCmd.AddCommand(
 		createTicketCmd,
 		listTicketsCmd,
@@ -283,6 +356,7 @@ func init() {
 		updateTicketCmd,
 		deleteTicketCmd,
 		commentCmd,
+		boardsCmd,
 	)
 	RegisterModule(Module{
 		Name:    "tickets",

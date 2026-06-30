@@ -11,14 +11,16 @@ export function shortId(id: string): string {
 
 /** Run/step statuses that are still in flight (not terminal). `awaiting_approval`
  * is paused on a manual-approval gate — non-terminal, so it keeps live-refreshing
- * and renders amber until it is approved or rejected. */
+ * until it is approved or rejected (it renders a distinct blue, not the in-flight
+ * amber, so a run waiting on a human stands apart from one merely running). */
 export const RUN_ACTIVE = ['running', 'in_progress', 'pending', 'queued', 'awaiting_approval'];
 /** Whether a run/step status is still in flight. */
 export const isRunActive = (status: string): boolean => RUN_ACTIVE.includes(status);
 
-/** Map a run/step status to a small badge tone (green=done, amber=in-flight, red=failed). */
-export function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
+/** Map a run/step status to a small badge tone (green=done, blue=awaiting approval, amber=in-flight, red=failed). */
+export function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' | 'blue' {
   if (['completed', 'success'].includes(status)) return 'green';
+  if (status === 'awaiting_approval') return 'blue';
   if (isRunActive(status)) return 'amber';
   if (['failed', 'error'].includes(status)) return 'red';
   return 'dim';

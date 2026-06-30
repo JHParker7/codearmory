@@ -321,6 +321,11 @@ export interface WorkflowStepRun {
   step_name: string;
   status: string;
   output?: string | null;
+  /** The step's execution log — the backing action's stdout (forge: the command's
+   * stdout), captured on success for display. Distinct from `output`, which holds
+   * the consumable captured outputs (output_env map). Absent on the failure path,
+   * where stdout is folded into `output`. */
+  logs?: string | null;
   started_at?: string | null;
   ended_at?: string | null;
 }
@@ -391,6 +396,8 @@ export interface Execution {
   env?: Record<string, string> | null;
   timeout?: number | null;
   runner_class?: string | null;
+  /** Credential references (target env var → "scheme:arg") resolved at dispatch, never the resolved values. */
+  secret_refs?: Record<string, string> | null;
   /** Free-text project (workspace) label this execution is tagged with. */
   project?: string;
   status: string;
@@ -467,6 +474,8 @@ export interface Ticket {
   priority?: string | null;
   /** Free-text project (workspace) label this ticket is tagged with. */
   project?: string;
+  /** The board this ticket belongs to (null/absent = unassigned). */
+  board_id?: string | null;
   created_by: string;
   org_id?: string | null;
   assignee_id?: string | null;
@@ -486,11 +495,12 @@ export function getTicket(token: string, id: string) {
   return req<Ticket>('GET', `/tickets/tickets/${id}`, token);
 }
 
-export function createTicket(token: string, payload: { title: string; description?: string; priority?: string; project?: string }) {
+export function createTicket(token: string, payload: { title: string; description?: string; priority?: string; project?: string; board_id?: string }) {
   return req<Ticket>('POST', '/tickets/tickets', token, payload);
 }
 
-export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string }>) {
+// board_id: a string assigns the ticket to that board; "" clears it (unassign); omit to leave unchanged.
+export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string; board_id: string }>) {
   return req<Ticket>('PUT', `/tickets/tickets/${id}`, token, payload);
 }
 
@@ -500,6 +510,61 @@ export function deleteTicket(token: string, id: string) {
 
 export function addComment(token: string, ticketId: string, body: string) {
   return req<TicketComment>('POST', `/tickets/tickets/${ticketId}/comments`, token, { body });
+}
+
+/** A configurable status/priority/timescale value — the kanban board's columns come from the `status` defs. */
+export interface TicketFieldDef {
+  field_def_id: string;
+  kind: string;
+  value: string;
+  label: string;
+  color?: string;
+  position: number;
+}
+
+export function listTicketFieldDefs(token: string, kind: string) {
+  return req<TicketFieldDef[]>('GET', `/tickets/field-defs?kind=${encodeURIComponent(kind)}`, token);
+}
+
+export function createTicketFieldDef(token: string, payload: { kind: string; value: string; label: string; color?: string; position?: number }) {
+  return req<TicketFieldDef>('POST', '/tickets/field-defs', token, payload);
+}
+
+export function updateTicketFieldDef(token: string, id: string, payload: Partial<{ label: string; color: string; position: number }>) {
+  return req<TicketFieldDef>('PUT', `/tickets/field-defs/${id}`, token, payload);
+}
+
+export function deleteTicketFieldDef(token: string, id: string) {
+  return req<void>('DELETE', `/tickets/field-defs/${id}`, token);
+}
+
+/** A named kanban board — a first-class grouping of tickets owned by a user/org. */
+export interface Board {
+  board_id: string;
+  name: string;
+  description?: string;
+  color?: string;
+  position: number;
+  created_by: string;
+  org_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function listBoards(token: string) {
+  return req<Board[]>('GET', '/tickets/boards', token);
+}
+
+export function createBoard(token: string, payload: { name: string; description?: string; color?: string }) {
+  return req<Board>('POST', '/tickets/boards', token, payload);
+}
+
+export function updateBoard(token: string, id: string, payload: Partial<{ name: string; description: string; color: string; position: number }>) {
+  return req<Board>('PUT', `/tickets/boards/${id}`, token, payload);
+}
+
+export function deleteBoard(token: string, id: string) {
+  return req<void>('DELETE', `/tickets/boards/${id}`, token);
 }
 
 // ── Hooks ─────────────────────────────────────────────────────────────────────
@@ -786,9 +851,12 @@ export function updateWorkflow(
 // ── Forge — create execution, manage runner classes ───────────────────────────
 
 // Forge's POST /executions responds with only the new id — not a full Execution.
+// secret_refs maps a target env var NAME to a "<scheme>:<arg>" credential reference
+// (e.g. "git:https://github.com/acme/widgets.git") resolved at dispatch and injected
+// into the runner env only — never persisted. The repo selector sets a git: ref.
 export function createExecution(
   token: string,
-  payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; project?: string },
+  payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; project?: string; secret_refs?: Record<string, string> },
 ) {
   return req<{ execution_id: string }>('POST', '/forge/executions', token, payload);
 }
@@ -1078,6 +1146,35 @@ export function testGitBackend(token: string, id: string) {
 /** Mint a short-lived clone credential for a repo URL (the broker picks the matching backend by host). */
 export function mintGitCredential(token: string, repoUrl: string) {
   return req<GitCredential>('POST', '/git/credentials', token, { repo_url: repoUrl });
+}
+
+/**
+ * One entry in the repo selector. `url` is the HTTPS clone URL a forge `git:` ref
+ * consumes. `source` is "enumerated" (discovered live from a linked backend's API)
+ * or "manual" (pinned by the user); `id` is present only for manual repos (deletable).
+ */
+export interface GitRepo {
+  id?: string;
+  name: string;
+  url: string;
+  backend?: string;
+  backend_type?: string;
+  source: 'enumerated' | 'manual' | string;
+}
+
+/** List clone targets: repos enumerated across the caller's linked backends plus any pinned manually. */
+export function listGitRepos(token: string) {
+  return req<GitRepo[]>('GET', '/git/repos', token);
+}
+
+/** Pin a repo to the selector (for generic backends that can't be enumerated, or to surface extras). */
+export function createGitRepo(token: string, payload: { url: string; name?: string }) {
+  return req<GitRepo>('POST', '/git/repos', token, payload);
+}
+
+/** Remove a pinned (manual) repo. */
+export function deleteGitRepo(token: string, id: string) {
+  return req<void>('DELETE', `/git/repos/${id}`, token);
 }
 
 // ── Invites ───────────────────────────────────────────────────────────────────

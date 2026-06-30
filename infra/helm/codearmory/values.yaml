@@ -498,12 +498,16 @@ containers:
       memory: 128Mi
   env:
     logLevel: info
-    # Base URL of the container registry it manages (required to function).
+    # Optional base URL of an upstream registry to seed as the default on first
+    # boot. Leave empty to start with no registry and configure one or more at
+    # runtime via the /registries API.
     registryUrl: ""
     # Optional registry basic-auth username (password goes in secret.registryPassword).
     registryUsername: ""
     otelEndpoint: ""
   secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
+    databaseUrl: ""
     gatekeeperServiceKey: ""
     # Optional registry basic-auth password.
     registryPassword: ""

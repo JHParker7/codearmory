@@ -23,7 +23,6 @@ import (
 var (
 	gatekeeperClient *gk.Client
 	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8081")
-	registry         *registryClient
 	httpClient       *http.Client
 
 	// orgSecretName is the Gatekeeper secret name that holds per-org registry
@@ -164,17 +163,15 @@ func main() {
 	initMetrics()
 	httpClient = initHTTPClient()
 
-	registryURL := secret("REGISTRY_URL")
-	if registryURL == "" {
-		slog.Error("REGISTRY_URL is required — point to your Docker/OCI registry base URL")
+	if err := migrate(); err != nil {
+		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
 	}
-	registry = &registryClient{
-		baseURL:  strings.TrimRight(registryURL, "/"),
-		username: secret("REGISTRY_USERNAME"),
-		password: secret("REGISTRY_PASSWORD"),
-		http:     httpClient,
-	}
+	// REGISTRY_URL is no longer required at startup — the service boots without
+	// any registry and admins configure one or more at runtime via /registries.
+	// When REGISTRY_URL is set and no registries exist yet, it is seeded as the
+	// default so existing env-configured deployments keep working unchanged.
+	seedRegistryFromEnv(ctx)
 	initOCIProxy()
 
 	orgSecretName = os.Getenv("REGISTRY_ORG_SECRET_NAME")
@@ -194,6 +191,13 @@ func main() {
 	mux.HandleFunc("GET /repositories/{namespace}/{image}/tags", handleListTags)
 	mux.HandleFunc("GET /repositories/{namespace}/{image}/manifests/{reference}", handleGetManifest)
 	mux.HandleFunc("DELETE /repositories/{namespace}/{image}/manifests/{digest}", handleDeleteManifest)
+
+	// Runtime registry administration (system-admin only — no default grant).
+	mux.HandleFunc("GET /registries", handleListRegistries)
+	mux.HandleFunc("POST /registries", handleCreateRegistry)
+	mux.HandleFunc("GET /registries/{name}", handleGetRegistry)
+	mux.HandleFunc("PATCH /registries/{name}", handleUpdateRegistry)
+	mux.HandleFunc("DELETE /registries/{name}", handleDeleteRegistry)
 
 	// OCI distribution API proxy — docker push/pull/login all use these routes.
 	// All /v2/ traffic is validated via gatekeeper then streamed to the upstream

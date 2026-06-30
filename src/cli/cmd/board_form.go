@@ -20,6 +20,8 @@ const (
 	boardModeCreate
 	boardModeEdit
 	boardModeConfirmDelete
+	boardModeNewBoard
+	boardModeConfirmDeleteBoard
 )
 
 const (
@@ -33,7 +35,7 @@ type boardMutatedMsg struct{ notice string }
 
 // ── HTTP commands ─────────────────────────────────────────────────────────────
 
-func sendCreateTicket(title, priority, status, timescale, dueDate, description string) tea.Cmd {
+func sendCreateTicket(title, priority, status, timescale, dueDate, description, boardID string) tea.Cmd {
 	return func() tea.Msg {
 		payload := map[string]any{"title": title}
 		if priority != "" {
@@ -51,6 +53,10 @@ func sendCreateTicket(title, priority, status, timescale, dueDate, description s
 		if description != "" {
 			payload["description"] = description
 		}
+		// Place the ticket on the board the user is currently viewing.
+		if boardID != "" {
+			payload["board_id"] = boardID
+		}
 		// Tag the ticket with the project the user is working in.
 		if p := projectFilter(); p != "" {
 			payload["project"] = p
@@ -60,6 +66,27 @@ func sendCreateTicket(title, priority, status, timescale, dueDate, description s
 			return boardErrMsg{err}
 		}
 		return boardMutatedMsg{"Created."}
+	}
+}
+
+// sendCreateBoard POSTs a new board and reports the result.
+func sendCreateBoard(name string) tea.Cmd {
+	return func() tea.Msg {
+		body, _ := json.Marshal(map[string]any{"name": name})
+		if _, err := doRequest("POST", "/tickets/boards", body); err != nil {
+			return boardErrMsg{err}
+		}
+		return boardMutatedMsg{"Board created."}
+	}
+}
+
+// sendDeleteBoard DELETEs a board (its tickets are kept, unassigned).
+func sendDeleteBoard(id string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := doRequest("DELETE", "/tickets/boards/"+id, nil); err != nil {
+			return boardErrMsg{err}
+		}
+		return boardMutatedMsg{"Board deleted."}
 	}
 }
 
@@ -237,7 +264,11 @@ func (m boardModel) submitForm() (tea.Model, tea.Cmd) {
 	due := strings.TrimSpace(m.formDue.Value())
 	desc := strings.TrimSpace(m.formDesc.Value())
 	if m.mode == boardModeCreate {
-		return m, sendCreateTicket(title, pVal, sVal, ts, due, desc)
+		boardID := ""
+		if m.boardFilter != "" && m.boardFilter != boardFilterNone {
+			boardID = m.boardFilter
+		}
+		return m, sendCreateTicket(title, pVal, sVal, ts, due, desc, boardID)
 	}
 	return m, sendUpdateTicket(m.editTarget, title, pVal, sVal, ts, due, desc)
 }
@@ -345,6 +376,89 @@ func (m boardModel) updateConfirmDelete(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = boardModeNav
 	}
 	return m, nil
+}
+
+// ── Board create / delete ───────────────────────────────────────────────────
+
+func openNewBoardForm(m boardModel) boardModel {
+	m.mode = boardModeNewBoard
+	m.formTitle = newFormInput("board name (required)")
+	return m
+}
+
+func (m boardModel) updateNewBoard(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "esc":
+			m.mode = boardModeNav
+			return m, nil
+		case "enter":
+			name := strings.TrimSpace(m.formTitle.Value())
+			if name == "" {
+				return m, nil
+			}
+			m.mode = boardModeNav
+			m.status = "Creating board…"
+			return m, sendCreateBoard(name)
+		}
+	}
+	var cmd tea.Cmd
+	m.formTitle, cmd = m.formTitle.Update(msg)
+	return m, cmd
+}
+
+func (m boardModel) updateConfirmDeleteBoard(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch key.String() {
+	case "y", "Y":
+		id := m.boardFilter
+		m.mode = boardModeNav
+		if id == "" || id == boardFilterNone {
+			return m, nil
+		}
+		m.boardFilter = ""
+		m.status = "Deleting board…"
+		return m, sendDeleteBoard(id)
+	case "esc", "n", "N":
+		m.mode = boardModeNav
+	}
+	return m, nil
+}
+
+func (m boardModel) viewNewBoard() string {
+	ti := m.formTitle
+	ti.Width = formInputW
+	rows := []string{
+		bsFormHeading.Render("New Board"),
+		lipgloss.JoinHorizontal(lipgloss.Top, bsFormLabelActive.Render("Name"), ti.View()),
+		"",
+		bsFormHint.Render("enter: create   esc: cancel"),
+	}
+	box := bsFormBox.Render(strings.Join(rows, "\n"))
+	if m.width > 0 && m.height > 0 {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+	}
+	return "\n" + box
+}
+
+func (m boardModel) viewConfirmDeleteBoard() string {
+	content := strings.Join([]string{
+		bsFormHeading.Render("Delete Board"),
+		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Text)).
+			Render("Delete board " + fmt.Sprintf("%q", m.boardFilterLabel()) + "?"),
+		bsFormHint.Render("Its tickets are kept and become unassigned."),
+		"",
+		bsFormHint.Render("y: confirm   esc: cancel"),
+	}, "\n")
+	box := bsFormBox.Render(content)
+	if m.width > 0 && m.height > 0 {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+	}
+	return "\n" + box
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────

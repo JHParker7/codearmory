@@ -22,11 +22,21 @@ type boardTicket struct {
 	Status           string  `json:"status"`
 	Timescale        string  `json:"timescale"`
 	DueDate          *string `json:"due_date"`
+	BoardID          *string `json:"board_id,omitempty"`
 	AssigneeID       *string `json:"assignee_id,omitempty"`
 	WorkflowID       *string `json:"workflow_id,omitempty"`
 	RunID            *string `json:"run_id,omitempty"`
 	ForgeExecutionID *string `json:"forge_execution_id,omitempty"`
 }
+
+// boardInfo is a board the tickets can be grouped by (the board switcher's entries).
+type boardInfo struct {
+	ID   string `json:"board_id"`
+	Name string `json:"name"`
+}
+
+// boardFilterNone selects tickets that belong to no board.
+const boardFilterNone = "\x00none"
 
 type boardFieldDef struct {
 	FieldDefID string `json:"field_def_id"`
@@ -54,7 +64,8 @@ var defaultBoardPriorities []boardFieldDef
 type boardDataMsg struct {
 	statuses   []boardFieldDef
 	priorities []boardFieldDef
-	cols       [][]boardTicket
+	boards     []boardInfo
+	tickets    []boardTicket
 }
 type boardMovedMsg struct{}
 type boardErrMsg struct{ err error }
@@ -64,14 +75,19 @@ type boardErrMsg struct{ err error }
 type boardModel struct {
 	statuses   []boardFieldDef
 	priorities []boardFieldDef
-	cols       [][]boardTicket
-	col        int
-	row        int
-	loading    bool
-	err        error
-	status     string
-	width      int
-	height     int
+	boards     []boardInfo
+	allTickets []boardTicket
+	// boardFilter selects which board's tickets to show: "" = all boards,
+	// boardFilterNone = unassigned, otherwise a board ID.
+	boardFilter string
+	cols        [][]boardTicket
+	col         int
+	row         int
+	loading     bool
+	err         error
+	status      string
+	width       int
+	height      int
 	// form state
 	mode       boardMode
 	editTarget boardTicket
@@ -194,6 +210,7 @@ func buildBoardStyles() {
 func fetchBoardData() tea.Msg {
 	statuses := fetchBoardFieldDefs("status", defaultBoardStatuses)
 	priorities := fetchBoardFieldDefs("priority", defaultBoardPriorities)
+	boards := fetchBoards()
 
 	data, err := doRequest("GET", appendProjectParam("/tickets/tickets"), nil)
 	if err != nil {
@@ -204,21 +221,102 @@ func fetchBoardData() tea.Msg {
 		return boardErrMsg{fmt.Errorf("parse response: %w", err)}
 	}
 
+	return boardDataMsg{statuses: statuses, priorities: priorities, boards: boards, tickets: tickets}
+}
+
+// fetchBoards returns the caller's boards, or nil if the API is unavailable.
+func fetchBoards() []boardInfo {
+	data, err := doRequest("GET", "/tickets/boards", nil)
+	if err != nil {
+		return nil
+	}
+	var boards []boardInfo
+	if err := json.Unmarshal(data, &boards); err != nil {
+		return nil
+	}
+	return boards
+}
+
+// regroup rebuilds the status columns from allTickets, applying the active board
+// filter. Called whenever the data or the filter changes.
+func (m boardModel) regroup() boardModel {
 	statusIdx := map[string]int{}
-	for i, s := range statuses {
+	for i, s := range m.statuses {
 		statusIdx[s.Value] = i
 	}
-	cols := make([][]boardTicket, len(statuses))
+	cols := make([][]boardTicket, len(m.statuses))
 	for i := range cols {
 		cols[i] = []boardTicket{}
 	}
-	for _, t := range tickets {
+	for _, t := range m.allTickets {
+		if !m.ticketInFilter(t) {
+			continue
+		}
 		if i, ok := statusIdx[t.Status]; ok {
 			cols[i] = append(cols[i], t)
 		}
 	}
+	m.cols = cols
+	return m
+}
 
-	return boardDataMsg{statuses: statuses, priorities: priorities, cols: cols}
+// ticketInFilter reports whether a ticket matches the active board filter.
+func (m boardModel) ticketInFilter(t boardTicket) bool {
+	switch m.boardFilter {
+	case "":
+		return true
+	case boardFilterNone:
+		return t.BoardID == nil || *t.BoardID == ""
+	default:
+		return t.BoardID != nil && *t.BoardID == m.boardFilter
+	}
+}
+
+// boardFilterKeys returns the ordered set of board-filter values the user can
+// cycle through: all boards, then each board, then the unassigned pile.
+func (m boardModel) boardFilterKeys() []string {
+	keys := []string{""}
+	for _, b := range m.boards {
+		keys = append(keys, b.ID)
+	}
+	keys = append(keys, boardFilterNone)
+	return keys
+}
+
+// boardFilterLabel renders the active board filter for the help line.
+func (m boardModel) boardFilterLabel() string {
+	switch m.boardFilter {
+	case "":
+		return "all"
+	case boardFilterNone:
+		return "unassigned"
+	default:
+		for _, b := range m.boards {
+			if b.ID == m.boardFilter {
+				return b.Name
+			}
+		}
+		return "—"
+	}
+}
+
+// cycleBoard advances the board filter by dir (+1/-1) and regroups.
+func (m boardModel) cycleBoard(dir int) boardModel {
+	keys := m.boardFilterKeys()
+	idx := 0
+	for i, k := range keys {
+		if k == m.boardFilter {
+			idx = i
+			break
+		}
+	}
+	m.boardFilter = keys[(idx+dir+len(keys))%len(keys)]
+	m = m.regroup()
+	m.col = boardClamp(m.col, len(m.statuses))
+	if len(m.cols) > 0 {
+		m.row = boardClamp(m.row, len(m.cols[m.col]))
+	}
+	return m
 }
 
 func fetchBoardFieldDefs(kind string, fallback []boardFieldDef) []boardFieldDef {
@@ -276,7 +374,21 @@ func (m boardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 	case boardDataMsg:
-		m.statuses, m.priorities, m.cols = msg.statuses, msg.priorities, msg.cols
+		m.statuses, m.priorities, m.boards, m.allTickets = msg.statuses, msg.priorities, msg.boards, msg.tickets
+		// Drop a board filter that no longer resolves (its board was deleted).
+		if m.boardFilter != "" && m.boardFilter != boardFilterNone {
+			stillThere := false
+			for _, b := range m.boards {
+				if b.ID == m.boardFilter {
+					stillThere = true
+					break
+				}
+			}
+			if !stillThere {
+				m.boardFilter = ""
+			}
+		}
+		m = m.regroup()
 		m.loading, m.err = false, nil
 		if m.status == "Refreshing…" {
 			m.status = ""
@@ -320,6 +432,10 @@ func (m boardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateForm(msg)
 	case boardModeConfirmDelete:
 		return m.updateConfirmDelete(msg)
+	case boardModeNewBoard:
+		return m.updateNewBoard(msg)
+	case boardModeConfirmDeleteBoard:
+		return m.updateConfirmDeleteBoard(msg)
 	}
 	return m.updateNav(msg)
 }
@@ -350,6 +466,18 @@ func (m boardModel) updateNav(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "d":
 		if _, focused := m.focusedCard(); focused {
 			m.mode = boardModeConfirmDelete
+		}
+	case "tab":
+		return m.cycleBoard(1), nil
+	case "shift+tab":
+		return m.cycleBoard(-1), nil
+	case "b":
+		m = openNewBoardForm(m)
+		return m, m.formTitle.Focus()
+	case "D":
+		// Delete the board currently being viewed (only meaningful on a real board).
+		if m.boardFilter != "" && m.boardFilter != boardFilterNone {
+			m.mode = boardModeConfirmDeleteBoard
 		}
 	case "r":
 		m.err = nil
@@ -431,6 +559,10 @@ func (m boardModel) View() string {
 		return m.viewForm()
 	case boardModeConfirmDelete:
 		return m.viewConfirmDelete()
+	case boardModeNewBoard:
+		return m.viewNewBoard()
+	case boardModeConfirmDeleteBoard:
+		return m.viewConfirmDeleteBoard()
 	}
 
 	if len(m.statuses) == 0 {
@@ -444,12 +576,12 @@ func (m boardModel) View() string {
 		cols[i] = m.renderBoardCol(i, cw, perCol)
 	}
 
-	statusPrefix := ""
+	statusPrefix := "board: " + m.boardFilterLabel() + "  ·  "
 	if m.status != "" {
-		statusPrefix = m.status + "  ·  "
+		statusPrefix = m.status + "  ·  " + statusPrefix
 	}
-	full := "← → h l: col   ↑ ↓ j k: card   H/L: move   n: new   e: edit   d: delete   r: refresh   esc: home"
-	compact := "h l: col  j k: card  H/L: move  n: new  e: edit  d: del  r: refresh  esc: home"
+	full := "← → h l: col   ↑ ↓ j k: card   H/L: move   tab: board   n: new   b: +board   d: del   D: del board   r: refresh   esc: home"
+	compact := "h l: col  j k: card  H/L: move  tab: board  n: new  b: +board  d: del  D: board  r: refresh  esc: home"
 	helpText := full
 	helpStyle := bsHelp
 	// Keep the help from overflowing a narrow terminal: switch to the compact

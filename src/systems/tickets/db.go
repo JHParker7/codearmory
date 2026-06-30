@@ -152,6 +152,146 @@ func (t Ticket) List(ctx context.Context, limit, offset int) ([]db, error) {
 	return result, nil
 }
 
+// ── Board ─────────────────────────────────────────────────────────────────────
+
+func (b Board) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("board.id", b.BoardID))
+	if err := connect().WithContext(ctx).Create(&b).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (b Board) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("board.id", b.BoardID))
+	b.UpdatedAt = time.Now().UTC()
+	if err := connect().WithContext(ctx).Save(&b).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (b Board) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.remove")
+	defer span.End()
+	span.SetAttributes(attribute.String("board.id", b.BoardID))
+	if err := connect().WithContext(ctx).Model(&Board{}).
+		Where("board_id=? AND active=?", b.BoardID, true).
+		Update("active", false).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (b Board) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("board.id", b.BoardID))
+	var result Board
+	if err := connectRead().WithContext(ctx).Where("board_id=? AND active=?", b.BoardID, true).First(&result).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return result, nil
+}
+
+func (b Board) List(ctx context.Context, limit, offset int) ([]db, error) {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.list")
+	defer span.End()
+	boards, err := listBoards(ctx, b.CreatedBy, b.OrgID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	if limit > 0 {
+		if offset >= len(boards) {
+			boards = nil
+		} else {
+			end := offset + limit
+			if end > len(boards) {
+				end = len(boards)
+			}
+			boards = boards[offset:end]
+		}
+	}
+	span.SetStatus(codes.Ok, "")
+	result := make([]db, len(boards))
+	for i, bd := range boards {
+		result[i] = bd
+	}
+	return result, nil
+}
+
+// getBoard returns a single active board by ID.
+func getBoard(ctx context.Context, id string) (Board, error) {
+	row, err := (Board{BoardID: id}).Get(ctx)
+	if err != nil {
+		return Board{}, err
+	}
+	return row.(Board), nil
+}
+
+// listBoards returns active boards accessible to the caller (owned or same-org),
+// ordered by position then name.
+func listBoards(ctx context.Context, userID, orgID string) ([]Board, error) {
+	var boards []Board
+	if err := connectRead().WithContext(ctx).
+		Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID).
+		Order("position, name, created_at").
+		Find(&boards).Error; err != nil {
+		return nil, err
+	}
+	if boards == nil {
+		boards = []Board{}
+	}
+	return boards, nil
+}
+
+// boardNameTaken reports whether an active board with the same name already
+// exists in the caller's scope (org-shared when org-backed, else per-user),
+// excluding the board with excludeID (empty to check all).
+func boardNameTaken(ctx context.Context, name, userID, orgID, excludeID string) (bool, error) {
+	q := connectRead().WithContext(ctx).Model(&Board{}).Where("active = ? AND name = ?", true, name)
+	if orgID != "" {
+		q = q.Where("org_id = ?", orgID)
+	} else {
+		q = q.Where("org_id = '' AND created_by = ?", userID)
+	}
+	if excludeID != "" {
+		q = q.Where("board_id <> ?", excludeID)
+	}
+	var count int64
+	if err := q.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// unassignBoardTickets clears board_id on all active tickets pointing at boardID,
+// so deleting a board orphans its tickets to the "unassigned" pile rather than
+// deleting them.
+func unassignBoardTickets(ctx context.Context, boardID string) error {
+	return connect().WithContext(ctx).Model(&Ticket{}).
+		Where("board_id = ? AND active = ?", boardID, true).
+		Update("board_id", nil).Error
+}
+
 // getTicket returns a single active ticket by ID with an empty comments slice.
 func getTicket(ctx context.Context, id string) (Ticket, error) {
 	row, err := (Ticket{TicketID: id}).Get(ctx)
@@ -162,9 +302,10 @@ func getTicket(ctx context.Context, id string) (Ticket, error) {
 }
 
 // listTickets returns active tickets accessible to the caller with optional filters.
-// projectFilter is a view filter only — it never widens access beyond the
-// created_by/org_id scope above.
-func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilter, assigneeFilter, timescaleFilter, projectFilter string) ([]Ticket, error) {
+// projectFilter/boardFilter are view filters only — they never widen access beyond
+// the created_by/org_id scope above. A boardFilter of "none" selects unassigned
+// tickets (no board).
+func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilter, assigneeFilter, timescaleFilter, projectFilter, boardFilter string) ([]Ticket, error) {
 	q := connectRead().WithContext(ctx).
 		Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID)
 	if statusFilter != "" {
@@ -181,6 +322,11 @@ func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilte
 	}
 	if projectFilter != "" {
 		q = q.Where("project = ?", projectFilter)
+	}
+	if boardFilter == "none" {
+		q = q.Where("board_id IS NULL OR board_id = ''")
+	} else if boardFilter != "" {
+		q = q.Where("board_id = ?", boardFilter)
 	}
 	var tickets []Ticket
 	if err := q.Order("created_at DESC").Limit(100).Find(&tickets).Error; err != nil {

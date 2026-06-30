@@ -150,7 +150,7 @@ func main() {
 	initMetrics()
 	httpClient = initHTTPClient()
 
-	if err := connect().AutoMigrate(&Ticket{}, &TicketComment{}, &TicketFieldDef{}); err != nil {
+	if err := connect().AutoMigrate(&Ticket{}, &TicketComment{}, &TicketFieldDef{}, &Board{}); err != nil {
 		slog.Error("failed to migrate tables", "error", err)
 		os.Exit(1)
 	}
@@ -159,6 +159,15 @@ func main() {
 	// unique index so a value can be reused after its def is deleted.
 	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ticket_field_defs_org_kind_value ON ticket_field_defs (org_id, kind, value) WHERE active`).Error; err != nil {
 		slog.Warn("failed to create ticket_field_defs unique index (existing duplicate values?)", "error", err)
+	}
+	// Board names are unique within their owner scope: per-org for org-backed
+	// boards, per-user for personal ones. Partial (WHERE active) so a name frees
+	// up on delete and the two scopes never collide.
+	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ticket_boards_org_name ON ticket_boards (org_id, name) WHERE active AND org_id <> ''`).Error; err != nil {
+		slog.Warn("failed to create ticket_boards org unique index (existing duplicate names?)", "error", err)
+	}
+	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ticket_boards_user_name ON ticket_boards (created_by, name) WHERE active AND org_id = ''`).Error; err != nil {
+		slog.Warn("failed to create ticket_boards user unique index (existing duplicate names?)", "error", err)
 	}
 	if err := seedDefaultFieldDefs(ctx); err != nil {
 		slog.Error("failed to seed field defs", "error", err)
@@ -193,6 +202,12 @@ func main() {
 	mux.HandleFunc("POST /field-defs", handleCreateFieldDef)
 	mux.HandleFunc("PUT /field-defs/{id}", handleUpdateFieldDef)
 	mux.HandleFunc("DELETE /field-defs/{id}", handleDeleteFieldDef)
+
+	mux.HandleFunc("POST /boards", handleCreateBoard)
+	mux.HandleFunc("GET /boards", handleListBoards)
+	mux.HandleFunc("GET /boards/{id}", handleGetBoard)
+	mux.HandleFunc("PUT /boards/{id}", handleUpdateBoard)
+	mux.HandleFunc("DELETE /boards/{id}", handleDeleteBoard)
 
 	port := envOrDefault("PORT", "8086")
 	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{mux}), "tickets",

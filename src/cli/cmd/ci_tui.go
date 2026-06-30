@@ -126,6 +126,9 @@ type tuiStepRun struct {
 	ParallelGroup *int       `json:"parallel_group"`
 	Status        string     `json:"status"`
 	Output        *string    `json:"output"`
+	// Logs is the step's stdout, captured on success for display (distinct from
+	// Output, the consumable captured outputs). See workflows' WorkflowStepRun.Logs.
+	Logs          *string    `json:"logs"`
 	MemoryUsedMB  *int64     `json:"memory_used_mb"`
 	MemoryLimitMB *int64     `json:"memory_limit_mb"`
 	StartedAt     *time.Time `json:"started_at"`
@@ -1199,10 +1202,7 @@ func (m tuiModel) tuiKeyRunDetail(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		i := m.dTable.Cursor()
 		if i < len(m.runFull.StepRuns) {
 			sr := m.runFull.StepRuns[i]
-			output := "(no output)"
-			if sr.Output != nil && *sr.Output != "" {
-				output = *sr.Output
-			}
+			output := tuiStepRunContent(sr)
 			m.outputTitle = fmt.Sprintf("Step %d: %s  [%s]", sr.StepIndex+1, sr.StepName, sr.Status)
 			m.vp.SetContent(output)
 			m.vp.GotoTop()
@@ -1392,6 +1392,31 @@ func (m tuiModel) tuiViewOutput() string {
 	title := tuiTitleStyle.Render(m.outputTitle)
 	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [esc] back", m.width)
 	return title + "\n" + tuiBoxStyle.Render(m.vp.View()) + "\n" + help
+}
+
+// tuiStepRunContent renders a step run's viewable text: the command's stdout
+// (Logs, captured on success) followed by its consumable captured outputs — or,
+// for a failed step, the failure detail (Output). Output is skipped when it just
+// repeats the logs, so a plain echo step shows its stdout once.
+func tuiStepRunContent(sr tuiStepRun) string {
+	var b strings.Builder
+	if sr.Logs != nil && *sr.Logs != "" {
+		b.WriteString(*sr.Logs)
+	}
+	if sr.Output != nil && *sr.Output != "" && (sr.Logs == nil || *sr.Output != *sr.Logs) {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		label := "captured outputs"
+		if sr.Status != "completed" {
+			label = "failure detail"
+		}
+		b.WriteString("── " + label + " ──\n" + *sr.Output)
+	}
+	if b.Len() == 0 {
+		return "(no output)"
+	}
+	return b.String()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

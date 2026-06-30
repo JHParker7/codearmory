@@ -29,7 +29,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	if err := conn.AutoMigrate(&GitBackend{}); err != nil {
+	if err := conn.AutoMigrate(&GitBackend{}, &GitRepo{}); err != nil {
 		panic(err)
 	}
 	gormDB = conn

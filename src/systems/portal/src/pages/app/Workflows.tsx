@@ -8,10 +8,11 @@ import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   listWorkflows, getWorkflow, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
-  createWorkflow, updateWorkflow, listSteps, createStep, updateStep, deleteStep, listActions, listForgeImages,
+  createWorkflow, updateWorkflow, listSteps, createStep, updateStep, deleteStep, listActions, listForgeImages, listGitRepos,
 } from '../../api/bff';
-import type { Workflow, WorkflowRun, Step, WorkflowAction } from '../../api/bff';
+import type { Workflow, WorkflowRun, Step, WorkflowAction, GitRepo } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
+import { RepoSelect } from '../../components/RepoSelect';
 import { ResizeHandle, useResizableWidth } from '../../components/ResizeHandle';
 import { PipelineBlocks } from './PipelineBlocks';
 import { StepInspector } from './StepInspector';
@@ -513,6 +514,7 @@ function StepsTab() {
   const [selected, setSelected] = useState<string | null>(null);
   const [actions, setActions] = useState<WorkflowAction[]>([]);
   const [images, setImages] = useState<string[]>([]);
+  const [repos, setRepos] = useState<GitRepo[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -542,6 +544,10 @@ function StepsTab() {
   // Load the forge image allowlist so the forge/run image field is a picker (like
   // the Forge run form). Best effort — degrades to free text if unavailable.
   useEffect(() => { listForgeImages(token).then(setImages).catch(() => {}); }, [token]);
+
+  // Load the git repo list so the forge/run "Git repo" field is a picker that wires
+  // clone-credential injection. Best effort — degrades to free text if unavailable.
+  useEffect(() => { listGitRepos(token).then(setRepos).catch(() => {}); }, [token]);
 
   // The Action selector offers every catalog action plus the built-in `http`
   // escape hatch. Manual approval is added directly in the pipeline builder as an
@@ -671,6 +677,10 @@ function StepsTab() {
                     {f.catalog === 'image' && images.length > 0 ? (
                       <div style={{ marginBottom: 6 }}>
                         <ImageSelect value={val} onChange={v => setWith(key, v)} options={images} placeholder={f.placeholder} fontSize={11} />
+                      </div>
+                    ) : f.catalog === 'repo' ? (
+                      <div style={{ marginBottom: 6 }}>
+                        <RepoSelect value={val} onChange={v => setWith(key, v)} repos={repos} placeholder={f.placeholder} fontSize={11} />
                       </div>
                     ) : f.multiline ? (
                       <textarea value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder}

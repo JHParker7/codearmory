@@ -12,20 +12,56 @@ import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useAppSelector } from '../../store/hooks';
 import { getRun, getWorkflow, listSteps, cancelRun, approveRun, rejectRun } from '../../api/bff';
-import type { WorkflowRun, Workflow, WorkflowStepRun, Step } from '../../api/bff';
-import { statusTone, isRunActive, fmtDuration, timeAgo } from '../../utils';
+import type { WorkflowRun, Workflow, WorkflowStepRun, Step, ApprovalGate } from '../../api/bff';
+import { statusTone, isRunActive, fmtDuration, timeAgo, shortId } from '../../utils';
+import { useUserNames } from '../../hooks/useNames';
 import { useViewport, clamp } from '../../hooks/useViewport';
 
 /** Solid accent colour for a status (used for a step's left bar). */
 function statusColor(status: string): string {
   const t = statusTone(status);
-  return t === 'green' ? T.green : t === 'amber' ? T.amber : t === 'red' ? T.red : T.dim;
+  return t === 'green' ? T.green : t === 'amber' ? T.amber : t === 'red' ? T.red : t === 'blue' ? T.blue : T.dim;
+}
+
+/** The decision controls for a run paused on a manual-approval gate, rendered
+ * right on the gate's pipeline block so the call to action sits where the eye
+ * already is (rather than only in the logs panel). The optional gate message
+ * tells the approver what they are signing off on. */
+function ApprovalPanel({ gate, deciding, decideErr, onApprove, onReject }: {
+  gate?: ApprovalGate | null;
+  deciding: boolean;
+  decideErr: string | null;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <div style={{ border: `1px solid ${T.blue}`, background: T.blueSoft, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 11, fontWeight: 700, color: T.blue, letterSpacing: 0.5 }}>⏸ NEEDS YOUR APPROVAL</div>
+      {gate?.message && (
+        <div style={{ fontFamily: T.mono, fontSize: 11, color: T.text, lineHeight: 1.5 }}>{gate.message}</div>
+      )}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button onClick={onApprove} disabled={deciding}
+          style={{ flex: '1 1 90px', background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, fontWeight: 700, padding: '6px 10px', cursor: deciding ? 'default' : 'pointer', opacity: deciding ? 0.5 : 1 }}>
+          [ ✓ approve ]
+        </button>
+        <button onClick={onReject} disabled={deciding}
+          style={{ flex: '1 1 90px', background: 'transparent', border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 700, padding: '6px 10px', cursor: deciding ? 'default' : 'pointer', opacity: deciding ? 0.5 : 1 }}>
+          [ ✗ reject ]
+        </button>
+      </div>
+      {decideErr && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.red }}>{decideErr}</div>}
+    </div>
+  );
 }
 
 /** One step in the run, resolved from the workflow structure + its step run. */
 interface RunStep {
   index: number;
   label: string;
+  /** The manual-approval gate config, when this step is a gate (so the block can
+   * show what the approver is signing off on). */
+  gate?: ApprovalGate | null;
   sr?: WorkflowStepRun;
 }
 
@@ -45,7 +81,7 @@ function buildStages(workflow: Workflow | null, stepRuns: WorkflowStepRun[], cat
       const label = s.approval
         ? (s.name || 'approval gate')
         : (s.name ?? catalog[s.step_id ?? '']?.name ?? sr?.step_name ?? (s.step_id ?? '').slice(0, 8) + '…');
-      const step: RunStep = { index: i, label, sr };
+      const step: RunStep = { index: i, label, gate: s.approval, sr };
       if (g !== null && g === prev) stages[stages.length - 1].push(step);
       else stages.push([step]);
       prev = g;
@@ -64,6 +100,7 @@ export function RunView() {
   const { runId = '' } = useParams();
   const navigate = useNavigate();
   const token = useAppSelector((s) => s.auth.token)!;
+  const userNames = useUserNames(token);
   const { width } = useViewport();
   // Below ~1000px the page splits vertically (pipeline over logs); above it, the
   // pipeline panel scales with the viewport rather than a fixed width.
@@ -121,7 +158,7 @@ export function RunView() {
   useEffect(() => {
     if (selected !== null) return;
     const active = stepRuns.find((sr) => isRunActive(sr.status));
-    const withOut = [...stepRuns].reverse().find((sr) => sr.output);
+    const withOut = [...stepRuns].reverse().find((sr) => sr.logs || sr.output);
     const pick = active ?? withOut ?? stepRuns[stepRuns.length - 1];
     if (pick) setSelected(pick.step_index);
   }, [stepRuns, selected]);
@@ -180,7 +217,7 @@ export function RunView() {
         <Pill tone={statusTone(run.status)}>{run.status}</Pill>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
           {run.started_at ? `${run.ended_at ? 'took' : 'elapsed'} ${fmtDuration(run.started_at, run.ended_at)} · ` : ''}
-          by user {run.triggered_by ? run.triggered_by.slice(0, 8) + '…' : '—'}
+          by {run.triggered_by ? (userNames[run.triggered_by] ?? shortId(run.triggered_by)) : '—'}
           {run.started_at ? ` · started ${timeAgo(run.started_at)} ago` : ''}
         </span>
         <div style={{ flex: 1 }} />
@@ -218,19 +255,30 @@ export function RunView() {
                   {stage.map((st) => {
                     const status = st.sr?.status ?? 'pending';
                     const active = isRunActive(status);
+                    const awaiting = status === 'awaiting_approval';
                     const isSel = st.index === selected;
                     const dur = st.sr?.ended_at ? fmtDuration(st.sr.started_at, st.sr.ended_at) : (st.sr?.started_at && active ? fmtDuration(st.sr.started_at) : '');
+                    // A gate waiting on a human gets a blue border so it reads apart
+                    // from the amber of a step that is merely running.
+                    const borderColor = isSel ? T.green : awaiting ? T.blue : active ? T.amber : T.border;
                     return (
-                      <button key={st.index} onClick={() => setSelected(st.index)}
-                        style={{ flex: parallel ? '1 1 150px' : undefined, width: parallel ? undefined : '100%', textAlign: 'left', minWidth: 0,
-                          display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', cursor: 'pointer',
-                          background: isSel ? T.cardHi : T.card, border: `1px solid ${isSel ? T.green : active ? T.amber : T.border}`,
-                          borderLeft: `3px solid ${statusColor(status)}`, fontFamily: T.mono,
-                          animation: active ? 'pulse 1.4s ease-in-out infinite' : undefined }}>
-                        <Pill tone={statusTone(status)}>{status}</Pill>
-                        <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 600, color: T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{st.label}</span>
-                        {dur && <span style={{ fontSize: 10, color: active ? T.amber : T.faint }}>{active ? '⟳ ' : ''}{dur}</span>}
-                      </button>
+                      <div key={st.index} style={{ flex: parallel ? '1 1 150px' : undefined, width: parallel ? undefined : '100%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <button onClick={() => setSelected(st.index)}
+                          style={{ width: '100%', textAlign: 'left', minWidth: 0,
+                            display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', cursor: 'pointer',
+                            background: isSel ? T.cardHi : T.card, border: `1px solid ${borderColor}`,
+                            borderLeft: `3px solid ${statusColor(status)}`, fontFamily: T.mono,
+                            // The gate draws the eye with colour + its action panel, so
+                            // skip the pulse there; keep it for steps that are running.
+                            animation: active && !awaiting ? 'pulse 1.4s ease-in-out infinite' : undefined }}>
+                          <Pill tone={statusTone(status)}>{status}</Pill>
+                          <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 600, color: T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{st.label}</span>
+                          {dur && <span style={{ fontSize: 10, color: active ? T.amber : T.faint }}>{active ? '⟳ ' : ''}{dur}</span>}
+                        </button>
+                        {awaiting && (
+                          <ApprovalPanel gate={st.gate} deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
+                        )}
+                      </div>
                     );
                   })}
                 </div>
@@ -251,32 +299,38 @@ export function RunView() {
             {!selectedSr ? (
               <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ select a step to see its logs</div>
             ) : selectedSr.status === 'awaiting_approval' ? (
-              // Approval gate: the decision lives here, in place of step output. The
-              // gate's optional prompt (its captured output) sits above the controls.
+              // Approval gate: the decision controls now sit on the gate's pipeline
+              // block (left), so here we just surface its prompt/output for context
+              // and point the approver at the block.
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 640 }}>
+                <div style={{ border: `1px solid ${T.blue}`, background: T.blueSoft, padding: 16, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.blue }}>⏸ paused for manual approval</div>
+                  <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, lineHeight: 1.5 }}>
+                    Approve or reject on the highlighted gate step in the pipeline at left.
+                  </div>
+                </div>
                 {selectedSr.output && (
                   <pre style={{ margin: 0, fontFamily: T.mono, fontSize: 12, color: T.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selectedSr.output}</pre>
                 )}
-                <div style={{ border: `1px solid ${T.amber}`, background: T.card, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  <div style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.amber }}>⏸ paused for manual approval</div>
-                  <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, lineHeight: 1.5 }}>
-                    Approve to resume the pipeline, or reject to fail this run.
-                  </div>
-                  <div style={{ display: 'flex', gap: 10 }}>
-                    <button onClick={handleApprove} disabled={deciding}
-                      style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, fontWeight: 700, padding: '6px 14px', cursor: deciding ? 'default' : 'pointer', opacity: deciding ? 0.5 : 1 }}>
-                      [ ✓ approve ]
-                    </button>
-                    <button onClick={handleReject} disabled={deciding}
-                      style={{ background: 'transparent', border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 700, padding: '6px 14px', cursor: deciding ? 'default' : 'pointer', opacity: deciding ? 0.5 : 1 }}>
-                      [ ✗ reject ]
-                    </button>
-                  </div>
-                  {decideErr && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.red }}>{decideErr}</div>}
-                </div>
               </div>
-            ) : selectedSr.output ? (
-              <pre style={{ margin: 0, fontFamily: T.mono, fontSize: 12, color: T.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selectedSr.output}</pre>
+            ) : (selectedSr.logs || selectedSr.output) ? (
+              // Two distinct things: `logs` is the command's stdout (captured on
+              // success for viewing), `output` is the consumable captured outputs
+              // (output_env map) — or, on a failed step, the failure detail. Show
+              // both, skipping `output` when it just repeats the logs.
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {selectedSr.logs && (
+                  <pre style={{ margin: 0, fontFamily: T.mono, fontSize: 12, color: T.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selectedSr.logs}</pre>
+                )}
+                {selectedSr.output && selectedSr.output !== selectedSr.logs && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>
+                      {selectedSr.status === 'completed' ? 'captured outputs' : 'failure detail'}
+                    </div>
+                    <pre style={{ margin: 0, fontFamily: T.mono, fontSize: 12, color: T.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selectedSr.output}</pre>
+                  </div>
+                )}
+              </div>
             ) : (
               <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint, animation: isRunActive(selectedSr.status) ? 'pulse 1.2s ease-in-out infinite' : undefined }}>
                 → {isRunActive(selectedSr.status) ? 'running — no output yet · · ·' : 'no output captured'}

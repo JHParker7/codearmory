@@ -274,10 +274,10 @@ export function AppLayout() {
         <nav style={{ flex: 1, padding: '8px 0', overflowY: 'auto', overflowX: 'hidden' }}>
           {!navCollapsed && <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase' }}>tools</div>}
           <NavItem to="/app/workflows" label="workflows/" service="workflows" collapsed={navCollapsed} icon="workflows" />
+          <NavItem to="/app/tickets" label="tickets/" service="tickets" collapsed={navCollapsed} icon="tickets" />
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
           {!navCollapsed && <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase' }}>modules</div>}
           <NavItem to="/app/forge" label="forge/" service="forge" collapsed={navCollapsed} icon="forge" />
-          <NavItem to="/app/tickets" label="tickets/" service="tickets" collapsed={navCollapsed} icon="tickets" />
           <NavItem to="/app/hooks" label="hooks/" service="hooks" collapsed={navCollapsed} icon="hooks" />
           <NavItem to="/app/containers" label="containers/" service="containers" collapsed={navCollapsed} icon="containers" />
           <NavItem to="/app/git" label="git/" service="git" collapsed={navCollapsed} icon="git" />

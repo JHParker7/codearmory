@@ -46,6 +46,7 @@ type forgeCreatedMsg struct{}
 type forgeFormErrMsg struct{ err error }
 type forgeImagesMsg []string
 type forgeRunnersMsg []string
+type forgeReposMsg kvCatalog
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,10 @@ type forgeModel struct {
 	// option lists for the create form's ←/→ selectors, fetched on startup.
 	images  []string
 	runners []string
+	// repos backs the create form's optional Git repo name picker (shows the repo
+	// name, submits the clone URL); a selection wires forge's git: secret_ref so the
+	// runner can clone via $GIT_CLONE_URL. Degrades to a free-text URL when empty.
+	repos kvCatalog
 
 	eTable table.Model
 	vp     viewport.Model
@@ -182,10 +187,17 @@ func forgeFetchRunners() tea.Msg {
 	return forgeRunnersMsg(names)
 }
 
+// forgeFetchRepos loads the git-service repo list for the create form's optional
+// Git repo picker (name shown, clone URL submitted), degrading to an empty catalog
+// (free-text URL fallback) on failure.
+func forgeFetchRepos() tea.Msg {
+	return forgeReposMsg(fetchGitRepos())
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 func (m forgeModel) Init() tea.Cmd {
-	return tea.Batch(forgeFetchExecs, forgeFetchImages, forgeFetchRunners)
+	return tea.Batch(forgeFetchExecs, forgeFetchImages, forgeFetchRunners, forgeFetchRepos)
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
@@ -261,6 +273,16 @@ func (m forgeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runners = []string(msg)
 		return m, nil
 
+	case forgeReposMsg:
+		m.repos = kvCatalog(msg)
+		// If the form was opened before the catalog landed, its Git repo field fell
+		// back to free-text; rebuild so it upgrades to the name picker, carrying the
+		// entered URL (matched by key) across.
+		if m.view == forgeViewCreate {
+			m.form = forgeRebuildCreateForm(m.form, m.images, m.runners, m.repos)
+		}
+		return m, nil
+
 	case tuiAutoRefreshMsg:
 		// Silent re-fetch (no loading flash) so the page updates in place: the
 		// list keeps its cursor, and the output view keeps its scroll position
@@ -330,9 +352,15 @@ func (m forgeModel) forgeKeyList(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
 		}
 	case "n":
 		var cmd tea.Cmd
-		m.form, cmd = newForgeCreateForm(m.images, m.runners)
+		m.form, cmd = newForgeCreateForm(m.images, m.runners, m.repos)
 		m.view = forgeViewCreate
-		return m, cmd
+		// If a prefetch hasn't landed (or failed), the repo field fell back to
+		// free-text; fetch now so it upgrades to a picker once the catalog arrives.
+		cmds := []tea.Cmd{cmd}
+		if len(m.repos.values) == 0 {
+			cmds = append(cmds, forgeFetchRepos)
+		}
+		return m, tea.Batch(cmds...)
 	case "x":
 		i := m.eTable.Cursor()
 		if i >= 0 && i < len(m.execs) {
@@ -390,9 +418,10 @@ func (m forgeModel) forgeKeyOutput(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
 // ── Create form ───────────────────────────────────────────────────────────────
 
 // newForgeCreateForm builds the execution form. When the server advertises an
-// image allowlist or runner classes, those fields become ←/→ selectors;
-// otherwise they fall back to free-text inputs.
-func newForgeCreateForm(images, runners []string) (tuiForm, tea.Cmd) {
+// image allowlist, runner classes, or git repos, those fields become selectors;
+// otherwise they fall back to free-text inputs. A chosen repo is injected as a
+// git: secret_ref on submit so the runner can clone via $GIT_CLONE_URL.
+func newForgeCreateForm(images, runners []string, repos kvCatalog) (tuiForm, tea.Cmd) {
 	var imageField formField
 	if len(images) > 0 {
 		imageField = formSelect("image", "Image", images)
@@ -412,7 +441,42 @@ func newForgeCreateForm(images, runners []string) (tuiForm, tea.Cmd) {
 		formInput("env", "Env", "KEY=VALUE KEY2=VALUE2 (optional)"),
 		formInput("timeout", "Timeout", "seconds (optional)"),
 		runnerField,
+		forgeRepoField(repos),
 	)
+}
+
+// forgeRepoField builds the optional Git repo control: a name→URL picker
+// (formSelectKV, leading "(none)" → no repo) when the catalog is loaded, else a
+// free-text URL input so the user can still clone an arbitrary repo.
+func forgeRepoField(repos kvCatalog) formField {
+	if len(repos.values) > 0 {
+		labels := append([]string{""}, repos.labels...)
+		values := append([]string{""}, repos.values...)
+		return formSelectKV("repo", "Git repo", labels, values)
+	}
+	return formInput("repo", "Git repo", "https://github.com/owner/repo.git (optional → $GIT_CLONE_URL)")
+}
+
+// forgeRebuildCreateForm rebuilds the create form against the latest catalogs,
+// carrying entered values (matched by key — for the repo picker that means the
+// clone URL), focus, and any inline error over. Used when a late repo prefetch
+// upgrades the free-text Git repo field to a picker.
+func forgeRebuildCreateForm(old tuiForm, images, runners []string, repos kvCatalog) tuiForm {
+	form, _ := newForgeCreateForm(images, runners, repos)
+	form.title = old.title
+	form.focus = old.focus
+	if form.focus >= len(form.fields) {
+		form.focus = len(form.fields) - 1
+	}
+	if form.focus < 0 {
+		form.focus = 0
+	}
+	form.errMsg = old.errMsg
+	for i := range form.fields {
+		form.fields[i].setValue(old.value(form.fields[i].key))
+	}
+	form.focusActive()
+	return form
 }
 
 func (m forgeModel) forgeKeyCreate(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
@@ -466,10 +530,10 @@ func (m forgeModel) forgeSubmitCreate() (forgeModel, tea.Cmd) {
 		timeout = t
 	}
 	m.form.errMsg = ""
-	return m, forgeSubmitExec(image, command, env, timeout, m.form.value("runner"))
+	return m, forgeSubmitExec(image, command, env, timeout, m.form.value("runner"), m.form.value("repo"))
 }
 
-func forgeSubmitExec(image string, command []string, env map[string]string, timeout int64, runner string) tea.Cmd {
+func forgeSubmitExec(image string, command []string, env map[string]string, timeout int64, runner, repo string) tea.Cmd {
 	return func() tea.Msg {
 		payload := map[string]any{"image": image, "command": command}
 		if len(env) > 0 {
@@ -480,6 +544,12 @@ func forgeSubmitExec(image string, command []string, env map[string]string, time
 		}
 		if runner != "" {
 			payload["runner_class"] = runner
+		}
+		// A chosen repo wires forge's git: credential broker into the run: the
+		// runner clones via $GIT_CLONE_URL (fixed env var name). Omitted entirely
+		// when no repo is selected/typed.
+		if repo != "" {
+			payload["secret_refs"] = map[string]any{"GIT_CLONE_URL": "git:" + repo}
 		}
 		// Tag with the current project so the new run isn't hidden by the
 		// project-filtered list the user just created it from.

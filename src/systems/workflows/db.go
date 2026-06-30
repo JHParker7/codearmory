@@ -524,7 +524,7 @@ func getStepRuns(ctx context.Context, runID string) ([]WorkflowStepRun, error) {
 	var stepRuns []WorkflowStepRun
 	if err := connectRead().WithContext(ctx).Raw(
 		`SELECT step_run_id, run_id, step_index, step_name, status,
-		        response_body, memory_used_mb, memory_limit_mb, started_at, ended_at
+		        response_body, logs, memory_used_mb, memory_limit_mb, started_at, ended_at
 		 FROM workflow_step_runs WHERE run_id=? ORDER BY step_index`, runID,
 	).Scan(&stepRuns).Error; err != nil {
 		return nil, err
@@ -813,7 +813,7 @@ func (sr WorkflowStepRun) List(ctx context.Context, limit, offset int) ([]db, er
 
 // Complete records the step run's outcome. Best-effort; run status is authoritative.
 // Uses context.Background() internally as the run context may already be cancelled.
-func (sr WorkflowStepRun) Complete(_ context.Context, status string, output *string, usedMB, limitMB *int64) {
+func (sr WorkflowStepRun) Complete(_ context.Context, status string, output, logs *string, usedMB, limitMB *int64) {
 	_, span := otel.Tracer("workflows").Start(context.Background(), "db.step_run.complete")
 	defer span.End()
 	span.SetAttributes(
@@ -821,8 +821,8 @@ func (sr WorkflowStepRun) Complete(_ context.Context, status string, output *str
 		attribute.String("status", status),
 	)
 	connect().WithContext(context.Background()).Exec( //nolint:errcheck — step result is best-effort; run status is authoritative
-		`UPDATE workflow_step_runs SET status=?, response_body=?, memory_used_mb=?, memory_limit_mb=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=?`,
-		status, output, usedMB, limitMB, sr.StepRunID)
+		`UPDATE workflow_step_runs SET status=?, response_body=?, logs=?, memory_used_mb=?, memory_limit_mb=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=?`,
+		status, output, logs, usedMB, limitMB, sr.StepRunID)
 	span.SetStatus(codes.Ok, "")
 }
 
