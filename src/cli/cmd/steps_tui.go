@@ -41,7 +41,6 @@ type tuiImagesMsg []string
 type tuiTicketsMsg kvCatalog
 type tuiOutpostsMsg kvCatalog
 type tuiRunnerClassesMsg kvCatalog
-type tuiReposMsg kvCatalog
 type tuiStepCreatedMsg struct{}
 
 // stepTestDoneMsg carries the result of a standalone step test (run via a
@@ -98,10 +97,6 @@ type stepsModel struct {
 	// step can pin a forge runner class. Degrades to a free-text input when
 	// unavailable; an empty selection lets forge apply its default class.
 	runnerClasses kvCatalog
-	// repos backs the forge/run form's Git repo picker (shows the repo name, submits
-	// the clone URL), injected as a git: secret_ref. Degrades to a free-text URL when
-	// unavailable; an empty selection injects no secret_refs.
-	repos kvCatalog
 
 	form tuiForm
 	// editStepID is the id of the step being edited (stepsViewEdit); the edit form
@@ -116,7 +111,7 @@ type stepsModel struct {
 
 // catalogs bundles the model's option sources for the create-step form.
 func (m stepsModel) catalogs() stepCatalogs {
-	return stepCatalogs{images: m.images, tickets: m.tickets, outposts: m.outposts, runnerClasses: m.runnerClasses, repos: m.repos}
+	return stepCatalogs{images: m.images, tickets: m.tickets, outposts: m.outposts, runnerClasses: m.runnerClasses}
 }
 
 func newStepsModel() stepsModel {
@@ -140,10 +135,10 @@ func (m *stepsModel) applyLayout() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 // Init loads steps and batches the form's option catalogs (actions, forge images,
-// tickets, outposts, runner classes, git repos) so every selector — including the
-// name pickers — is ready the moment the create-step form opens.
+// tickets, outposts, runner classes) so every selector — including the name
+// pickers — is ready the moment the create-step form opens.
 func (m stepsModel) Init() tea.Cmd {
-	return tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages, tuiFetchTickets, tuiFetchOutposts, tuiFetchRunnerClasses, tuiFetchRepos)
+	return tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages, tuiFetchTickets, tuiFetchOutposts, tuiFetchRunnerClasses)
 }
 
 // ── Fetch commands ────────────────────────────────────────────────────────────
@@ -284,13 +279,6 @@ func tuiFetchRunnerClasses() tea.Msg {
 	return tuiRunnerClassesMsg(cat)
 }
 
-// tuiFetchRepos loads the git-service repo catalog so the forge/run form can offer
-// a Git repo picker (the repo name is shown, the clone URL submitted and wired as a
-// git: secret_ref). Degrades to an empty catalog (free-text URL fallback) on failure.
-func tuiFetchRepos() tea.Msg {
-	return tuiReposMsg(fetchGitRepos())
-}
-
 // ── Update ────────────────────────────────────────────────────────────────────
 
 func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -361,14 +349,6 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tuiReposMsg:
-		m.repos = kvCatalog(msg)
-		// Upgrade an open forge/run Git repo field from free-text to a name picker.
-		if m.view == stepsViewCreate || m.view == stepsViewEdit {
-			m.form = rebuildStepForm(m.form, m.actions, m.catalogs())
-		}
-		return m, nil
-
 	case tuiStepCreatedMsg:
 		m.view = stepsViewList
 		m.loading = true
@@ -407,7 +387,7 @@ func (m stepsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "r":
 				m.err = nil
 				m.loading = true
-				return m, tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages, tuiFetchTickets, tuiFetchOutposts, tuiFetchRunnerClasses, tuiFetchRepos)
+				return m, tea.Batch(tuiFetchSteps, tuiFetchActions, tuiFetchImages, tuiFetchTickets, tuiFetchOutposts, tuiFetchRunnerClasses)
 			}
 			return m, nil
 		}
@@ -469,9 +449,6 @@ func (m stepsModel) keyList(msg tea.KeyMsg) (stepsModel, tea.Cmd) {
 		}
 		if len(m.runnerClasses.values) == 0 {
 			cmds = append(cmds, tuiFetchRunnerClasses)
-		}
-		if len(m.repos.values) == 0 {
-			cmds = append(cmds, tuiFetchRepos)
 		}
 		return m, tea.Batch(cmds...)
 	case "e", "enter":
@@ -568,7 +545,7 @@ func stepSchemaField(sf stepField, cats stepCatalogs) formField {
 		if len(cats.images) > 0 {
 			return formSelect(key, sf.label, cats.images)
 		}
-	case catTicket, catOutpost, catRunnerClass, catRepo:
+	case catTicket, catOutpost, catRunnerClass:
 		if c := cats.forCatalog(sf.catalog); len(c.values) > 0 {
 			return idPickerField(key, sf.label, sf.required, c)
 		}
@@ -733,9 +710,6 @@ func (m stepsModel) startStepEdit() (stepsModel, tea.Cmd) {
 	if len(m.runnerClasses.values) == 0 {
 		cmds = append(cmds, tuiFetchRunnerClasses)
 	}
-	if len(m.repos.values) == 0 {
-		cmds = append(cmds, tuiFetchRepos)
-	}
 	return m, tea.Batch(cmds...)
 }
 
@@ -803,9 +777,10 @@ func ciSaveStep(method, path, name, action, desc string, with map[string]any, ti
 // stepEditValues reverses buildStepWith: it maps an existing step back to the
 // create-form's string values (keyed by the prefixed form keys) so the edit form
 // opens pre-populated. Typed schema fields are formatted to match how the form
-// reads them back (ints as digits, env maps as KEY=VALUE tokens, the repo field as
-// the bare clone URL behind secret_refs.GIT_CLONE_URL); any `with` keys the action's
-// schema doesn't cover fall into the advanced With JSON field.
+// reads them back (ints as digits, env maps as KEY=VALUE tokens); any `with` keys
+// the action's schema doesn't cover fall into the advanced With JSON field. The git
+// repo is no longer a step field — it is set per step in the pipeline builder (the
+// DSL's name@repo) — so a step's secret_refs round-trips via the advanced With JSON.
 func stepEditValues(s tuiStep) map[string]string {
 	vals := map[string]string{
 		"name":    s.Name,
@@ -826,18 +801,6 @@ func stepEditValues(s tuiStep) map[string]string {
 		case stepFieldEnv:
 			consumed[f.key] = true
 			vals[withKeyPrefix+f.key] = formatEnvTokens(v)
-		case stepFieldRepo:
-			// Reverse the git: secret_ref: pull GIT_CLONE_URL out of secret_refs and
-			// strip the git: prefix so the field shows the bare clone URL. Only own
-			// secret_refs when GIT_CLONE_URL is its sole key; if the user added other
-			// keys, leave the whole map for the advanced With JSON field so it (and the
-			// git: ref) round-trips untouched and isn't clobbered on re-submit.
-			url, sole := stepRepoFromSecretRefs(v)
-			if url == "" || !sole {
-				continue // not solely a git: ref we own; leave it for the leftover bucket
-			}
-			vals[withKeyPrefix+f.key] = url
-			consumed[f.key] = true
 		default:
 			consumed[f.key] = true
 			vals[withKeyPrefix+f.key] = formatScalarValue(v)
@@ -855,27 +818,6 @@ func stepEditValues(s tuiStep) map[string]string {
 		}
 	}
 	return vals
-}
-
-// stepRepoFromSecretRefs extracts the bare clone URL for the repo field from a
-// with.secret_refs value: it reads the GIT_CLONE_URL entry and strips the leading
-// git: scheme buildStepWith adds. It returns the URL (empty when there is no git:
-// GIT_CLONE_URL ref) and whether GIT_CLONE_URL is the map's only key — so the caller
-// knows whether the rest of secret_refs still needs to round-trip via advanced JSON.
-func stepRepoFromSecretRefs(v any) (url string, sole bool) {
-	refs, ok := v.(map[string]any)
-	if !ok {
-		return "", false
-	}
-	raw, ok := refs["GIT_CLONE_URL"].(string)
-	if !ok {
-		return "", false
-	}
-	ref, ok := strings.CutPrefix(raw, "git:")
-	if !ok {
-		return "", false // some other scheme — leave secret_refs untouched
-	}
-	return ref, len(refs) == 1
 }
 
 // formatScalarValue renders a with-map scalar back into the form's text form,

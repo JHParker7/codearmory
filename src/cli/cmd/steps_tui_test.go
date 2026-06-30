@@ -942,9 +942,10 @@ func TestStepEditValues_FormatsIntWithoutDecimal(t *testing.T) {
 	}
 }
 
-// A forge/run secret_refs git: ref reverses to the bare clone URL in the repo
-// field, and the secret_refs key is fully consumed (not left for advanced JSON).
-func TestStepEditValues_ReversesRepoSecretRef(t *testing.T) {
+// The git repo is no longer a step field — it is configured per step in the pipeline
+// builder (the DSL's name@repo) — so a step's secret_refs has no dedicated form field
+// to reverse into and simply round-trips through the advanced With JSON.
+func TestStepEditValues_SecretRefs_RoundTripsViaAdvancedJSON(t *testing.T) {
 	s := tuiStep{
 		Action: "forge/run",
 		With: map[string]any{
@@ -953,33 +954,11 @@ func TestStepEditValues_ReversesRepoSecretRef(t *testing.T) {
 		},
 	}
 	vals := stepEditValues(s)
-	if got := vals["with.secret_refs"]; got != "https://github.com/owner/repo.git" {
-		t.Errorf("with.secret_refs = %q, want the bare clone URL", got)
-	}
-	if raw := vals["with."+rawWithKey]; raw != "" {
-		t.Errorf("secret_refs should be consumed by the repo field, advanced With = %q", raw)
-	}
-}
-
-// When secret_refs carries keys beyond GIT_CLONE_URL, the whole map is left to the
-// advanced With JSON field so the extra keys round-trip and aren't clobbered.
-func TestStepEditValues_RepoSecretRef_WithExtraKeys_FallsToAdvancedJSON(t *testing.T) {
-	s := tuiStep{
-		Action: "forge/run",
-		With: map[string]any{
-			"image": "ubuntu:22.04",
-			"secret_refs": map[string]any{
-				"GIT_CLONE_URL": "git:https://github.com/owner/repo.git",
-				"TOKEN":         "vault:tok",
-			},
-		},
-	}
-	vals := stepEditValues(s)
 	if got := vals["with.secret_refs"]; got != "" {
-		t.Errorf("repo field should stay empty when secret_refs has extra keys, got %q", got)
+		t.Errorf("there is no repo field to populate, got with.secret_refs = %q", got)
 	}
-	if raw := vals["with."+rawWithKey]; !strings.Contains(raw, "GIT_CLONE_URL") || !strings.Contains(raw, "TOKEN") {
-		t.Errorf("advanced With should carry the whole secret_refs map, got %q", raw)
+	if raw := vals["with."+rawWithKey]; !strings.Contains(raw, "GIT_CLONE_URL") {
+		t.Errorf("advanced With should carry the secret_refs map, got %q", raw)
 	}
 }
 
@@ -1009,25 +988,9 @@ func TestBuildStepWith_ForgeRun_AssemblesImageRunEnv(t *testing.T) {
 	}
 }
 
-func TestBuildStepWith_ForgeRun_Repo_InjectsGitSecretRef(t *testing.T) {
-	with, err := buildStepWith("forge/run", fakeForm(map[string]string{
-		"with.image":       "ubuntu:22.04",
-		"with.run":         "go test ./...",
-		"with.secret_refs": "https://github.com/owner/repo.git",
-	}))
-	if err != nil {
-		t.Fatalf("buildStepWith error: %v", err)
-	}
-	refs, ok := with["secret_refs"].(map[string]any)
-	if !ok {
-		t.Fatalf("secret_refs = %T, want map[string]any", with["secret_refs"])
-	}
-	if refs["GIT_CLONE_URL"] != "git:https://github.com/owner/repo.git" {
-		t.Errorf("secret_refs.GIT_CLONE_URL = %v, want git:<url>", refs["GIT_CLONE_URL"])
-	}
-}
-
-func TestBuildStepWith_ForgeRun_NoRepo_OmitsSecretRefs(t *testing.T) {
+// A forge/run step has no dedicated repo field (the repo is per-step in the pipeline
+// builder), so absent any advanced With secret_refs the assembled with map has none.
+func TestBuildStepWith_ForgeRun_OmitsSecretRefsByDefault(t *testing.T) {
 	with, err := buildStepWith("forge/run", fakeForm(map[string]string{
 		"with.image": "ubuntu:22.04",
 		"with.run":   "go test ./...",
@@ -1036,13 +999,13 @@ func TestBuildStepWith_ForgeRun_NoRepo_OmitsSecretRefs(t *testing.T) {
 		t.Fatalf("buildStepWith error: %v", err)
 	}
 	if _, present := with["secret_refs"]; present {
-		t.Errorf("secret_refs should be omitted when no repo is chosen, with = %v", with)
+		t.Errorf("secret_refs should be omitted when none is supplied, with = %v", with)
 	}
 }
 
-// When the repo field is empty, a secret_refs supplied via the advanced With JSON
-// escape hatch must still flow through (the empty repo field sets nothing).
-func TestBuildStepWith_ForgeRun_NoRepo_AdvancedSecretRefsPreserved(t *testing.T) {
+// secret_refs supplied via the advanced With JSON escape hatch must still flow
+// through — the per-step repo is layered on in the pipeline builder, not here.
+func TestBuildStepWith_ForgeRun_AdvancedSecretRefsPreserved(t *testing.T) {
 	with, err := buildStepWith("forge/run", fakeForm(map[string]string{
 		"with.image": "ubuntu:22.04",
 		"with.run":   "go test ./...",

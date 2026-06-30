@@ -119,13 +119,13 @@ func (r tuiRun) triggeredByLabel() string {
 }
 
 type tuiStepRun struct {
-	StepRunID     string     `json:"step_run_id"`
-	RunID         string     `json:"run_id"`
-	StepIndex     int        `json:"step_index"`
-	StepName      string     `json:"step_name"`
-	ParallelGroup *int       `json:"parallel_group"`
-	Status        string     `json:"status"`
-	Output        *string    `json:"output"`
+	StepRunID     string  `json:"step_run_id"`
+	RunID         string  `json:"run_id"`
+	StepIndex     int     `json:"step_index"`
+	StepName      string  `json:"step_name"`
+	ParallelGroup *int    `json:"parallel_group"`
+	Status        string  `json:"status"`
+	Output        *string `json:"output"`
 	// Logs is the step's stdout, captured on success for display (distinct from
 	// Output, the consumable captured outputs). See workflows' WorkflowStepRun.Logs.
 	Logs          *string    `json:"logs"`
@@ -145,12 +145,13 @@ type tuiRunFull struct {
 // concurrently. The run record carries no grouping, so the run-detail view
 // derives it from the definition (see tuiAnnotateParallelGroups).
 type tuiWorkflowStep struct {
-	StepID        string        `json:"step_id"`
-	Name          string        `json:"name"`
-	Action        string        `json:"action"`
-	ParallelGroup *int          `json:"parallel_group"`
-	Matrix        *matrixConfig `json:"matrix,omitempty"`
-	Approval      *approvalGate `json:"approval,omitempty"`
+	StepID        string         `json:"step_id"`
+	Name          string         `json:"name"`
+	Action        string         `json:"action"`
+	With          map[string]any `json:"with,omitempty"`
+	ParallelGroup *int           `json:"parallel_group"`
+	Matrix        *matrixConfig  `json:"matrix,omitempty"`
+	Approval      *approvalGate  `json:"approval,omitempty"`
 }
 
 // tuiPipelineDef is the subset of a pipeline (GET /pipelines/{id}) the run-detail
@@ -865,21 +866,29 @@ func (m tuiModel) tuiKeyPipelines(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 
 // ── Create form ───────────────────────────────────────────────────────────────
 
+// ciPipelineStepsHelp documents the pipeline DSL, including the per-step git repo
+// annotation (a clone URL or a ${inputs.X} run-input template) cloned as $GIT_CLONE_URL.
+const ciPipelineStepsHelp = "steps: a->b->c sequential, [a,b] parallel. add a per-step git repo with name@<url> or name@${inputs.REPO} — cloned as $GIT_CLONE_URL for that step."
+
 func newCIPipelineForm() (tuiForm, tea.Cmd) {
-	return newTUIForm("New Pipeline",
+	f, cmd := newTUIForm("New Pipeline",
 		formInput("name", "Name", "my-pipeline (required)"),
-		formInput("steps", "Steps", "build->test->deploy (required)"),
+		formInput("steps", "Steps", "build->test@${inputs.REPO}->deploy (required)"),
 		formInput("desc", "Desc", "description (optional)"),
 	)
+	f.help = ciPipelineStepsHelp
+	return f, cmd
 }
 
 // newCIPipelineEditForm is the create form pre-filled from an existing pipeline.
 func newCIPipelineEditForm(name, dsl, desc string) (tuiForm, tea.Cmd) {
-	return newTUIForm("Edit Pipeline",
+	f, cmd := newTUIForm("Edit Pipeline",
 		formInputDefault("name", "Name", "my-pipeline (required)", name),
-		formInputDefault("steps", "Steps", "build->test->deploy (required)", dsl),
+		formInputDefault("steps", "Steps", "build->test@${inputs.REPO}->deploy (required)", dsl),
 		formInputDefault("desc", "Desc", "description (optional)", desc),
 	)
+	f.help = ciPipelineStepsHelp
+	return f, cmd
 }
 
 func (m tuiModel) tuiKeyCreate(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
@@ -989,21 +998,31 @@ func tuiFetchPipelineForEdit(workflowID string) tea.Cmd {
 	}
 }
 
+// dslStepToken renders one step as its DSL token, appending "@<repo>" when the step
+// carries a per-occurrence git repo override (so an edit round-trips it back). The
+// inverse of splitStepRepo.
+func dslStepToken(s tuiWorkflowStep) string {
+	if repo := gitRepoFromStepWith(s.With); repo != "" {
+		return s.Name + "@" + repo
+	}
+	return s.Name
+}
+
 // stepsToDSL renders an ordered step list back into the pipeline DSL, collapsing
-// consecutive steps that share a parallel group into "[a,b]" segments — the
-// inverse of parseDSL.
+// consecutive steps that share a parallel group into "[a,b]" segments and appending
+// each step's per-occurrence git repo as "name@repo" — the inverse of parseDSL.
 func stepsToDSL(steps []tuiWorkflowStep) string {
 	var segs []string
 	for i := 0; i < len(steps); {
 		g := steps[i].ParallelGroup
 		if g == nil {
-			segs = append(segs, steps[i].Name)
+			segs = append(segs, dslStepToken(steps[i]))
 			i++
 			continue
 		}
 		var names []string
 		for i < len(steps) && steps[i].ParallelGroup != nil && *steps[i].ParallelGroup == *g {
-			names = append(names, steps[i].Name)
+			names = append(names, dslStepToken(steps[i]))
 			i++
 		}
 		if len(names) == 1 {

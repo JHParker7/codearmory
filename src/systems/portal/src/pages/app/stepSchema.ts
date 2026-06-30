@@ -19,23 +19,59 @@ export const WITH_KEY_PREFIX = 'with.';
 export const RAW_WITH_KEY = '__raw';
 
 /** Controls how a schema field's text value is parsed into the with map.
- * `list` splits a comma-separated string into a string array; `repo` wraps the
- * selected clone URL into a forge `secret_refs` entry (see GIT_CLONE_ENV). */
-export type StepFieldKind = 'text' | 'int' | 'env' | 'json' | 'list' | 'repo';
+ * `list` splits a comma-separated string into a string array. */
+export type StepFieldKind = 'text' | 'int' | 'env' | 'json' | 'list';
 
 /**
  * Names a catalog that backs a field with a picker instead of free text:
- * `image` (the forge image allowlist) and `repo` (the git broker's repo list).
- * The field degrades to a plain text input when its catalog is empty/unavailable.
+ * `image` (the forge image allowlist). The field degrades to a plain text input
+ * when its catalog is empty/unavailable.
  */
-export type StepFieldCatalog = 'image' | 'repo';
+export type StepFieldCatalog = 'image';
 
 /**
- * Env var a `repo`-kind field injects the minted clone URL as. Selecting a repo
- * sets `with.secret_refs = { GIT_CLONE_URL: "git:<clone-url>" }`; forge resolves
- * the ref at dispatch so the runner clones/pulls/pushes via `$GIT_CLONE_URL`.
+ * Env var the per-step git repo is injected as. Picking a repo for a forge step in
+ * the pipeline builder sets that step-occurrence's
+ * `with.secret_refs = { GIT_CLONE_URL: "git:<clone-url-or-${inputs.X}>" }`; forge
+ * resolves the ref at dispatch so the runner clones/pulls/pushes via `$GIT_CLONE_URL`.
+ * The repo is per-occurrence (chosen in the builder), not baked into the shared step,
+ * so the same step (e.g. "unit tests") runs against whatever repo each pipeline names.
  */
 export const GIT_CLONE_ENV = 'GIT_CLONE_URL';
+
+/**
+ * Whether an action's runner can clone a per-step git repo. Only forge steps consume
+ * the `git:` secret_ref, so the repo picker shows only for them in the builder.
+ */
+export function actionSupportsGitRepo(action: string): boolean {
+  return action.startsWith('forge/');
+}
+
+/**
+ * Reads the bare repo reference (a clone URL or a `${inputs.X}` template) back out of
+ * a step's `with.secret_refs.GIT_CLONE_URL`, stripping the `git:` scheme. Returns ''
+ * when there is no git: ref, so the picker shows empty rather than a malformed value.
+ */
+export function gitRepoFromWith(withMap: Record<string, unknown>): string {
+  const sr = withMap.secret_refs;
+  if (!sr || typeof sr !== 'object' || Array.isArray(sr)) return '';
+  const ref = (sr as Record<string, unknown>)[GIT_CLONE_ENV];
+  return typeof ref === 'string' && ref.startsWith('git:') ? ref.slice('git:'.length) : '';
+}
+
+/**
+ * Returns the secret_refs map with the git repo set to `repo` (or GIT_CLONE_URL
+ * removed when `repo` is blank), preserving any other secret_refs entries. Returns
+ * undefined when nothing remains, so callers can drop the key entirely.
+ */
+export function withGitRepo(secretRefs: unknown, repo: string): Record<string, unknown> | undefined {
+  const sr: Record<string, unknown> = (secretRefs && typeof secretRefs === 'object' && !Array.isArray(secretRefs))
+    ? { ...(secretRefs as Record<string, unknown>) } : {};
+  const v = repo.trim();
+  if (v === '') delete sr[GIT_CLONE_ENV];
+  else sr[GIT_CLONE_ENV] = `git:${v}`;
+  return Object.keys(sr).length > 0 ? sr : undefined;
+}
 
 /**
  * One input within an action's schema. `key` is the with-map key it fills
@@ -71,7 +107,6 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
     { key: 'image', label: 'Image', placeholder: 'ubuntu:22.04 (required)', required: true, catalog: 'image', config: true },
     { key: 'run', label: 'Run', placeholder: 'go test ./...', required: true, multiline: true, config: true },
     { key: 'runner_class', label: 'Runner', placeholder: 'runner class (optional, default standard)', config: true },
-    { key: 'secret_refs', label: 'Git repo', placeholder: 'select a repo — clone creds injected as $GIT_CLONE_URL', catalog: 'repo', kind: 'repo', config: true },
     { key: 'env', label: 'Input variables', placeholder: 'REPO_URL= BRANCH=main', kind: 'env' },
     { key: 'output_env', label: 'Output variables', placeholder: 'BUILD_ID, VERSION', kind: 'list', output: true },
   ],
@@ -156,20 +191,6 @@ export function formValsFromWith(action: string, withMap: Record<string, unknown
 
   for (const f of fields) {
     if (f.key === RAW_WITH_KEY) continue;
-    if (f.kind === 'repo') {
-      // Reverse the git: secret_ref into the bare clone URL — but only claim
-      // secret_refs (so it leaves the advanced With JSON) when GIT_CLONE_URL is a
-      // git: ref AND its sole key. Any other entries (e.g. a secret: ref) are left
-      // for the advanced field to round-trip untouched.
-      const v = withMap[f.key];
-      const sr = (v && typeof v === 'object' && !Array.isArray(v)) ? v as Record<string, unknown> : null;
-      const ref = sr && typeof sr[GIT_CLONE_ENV] === 'string' ? sr[GIT_CLONE_ENV] as string : '';
-      if (sr && ref.startsWith('git:') && Object.keys(sr).length === 1) {
-        typedKeys.add(f.key);
-        vals[WITH_KEY_PREFIX + f.key] = ref.slice('git:'.length);
-      }
-      continue;
-    }
     typedKeys.add(f.key);
     if (!(f.key in withMap)) continue;
     const v = withMap[f.key];
@@ -254,11 +275,6 @@ export function buildStepWith(action: string, valueOf: (key: string) => string):
         break;
       case 'list':
         withMap[f.key] = raw.split(',').map(s => s.trim()).filter(Boolean);
-        break;
-      case 'repo':
-        // Wrap the chosen clone URL as a forge git: secret_ref under GIT_CLONE_ENV.
-        // Owns secret_refs when set; left empty, an advanced-With secret_refs flows.
-        withMap.secret_refs = { [GIT_CLONE_ENV]: `git:${raw}` };
         break;
       default: // text
         withMap[f.key] = raw;
