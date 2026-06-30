@@ -8,7 +8,9 @@
  * from the step definition are kept, so the override stays minimal.
  */
 import { T } from '../../theme';
-import { schemaForAction } from './stepSchema';
+import { schemaForAction, actionSupportsGitRepo, gitRepoFromWith, withGitRepo } from './stepSchema';
+import { RepoSelect } from '../../components/RepoSelect';
+import type { GitRepo } from '../../api/bff';
 
 export type UpstreamOutput = { name: string; outputEnv: string[] };
 
@@ -42,11 +44,12 @@ function WireSelect({ refs, onPick }: { refs: string[]; onPick: (ref: string) =>
   );
 }
 
-export function StepInputsEditor({ action, defWith, override, upstream, onChange }: {
+export function StepInputsEditor({ action, defWith, override, upstream, repos, onChange }: {
   action: string;
   defWith: Record<string, unknown>;
   override: Record<string, unknown>;
   upstream: UpstreamOutput[];
+  repos: GitRepo[];
   onChange: (override: Record<string, unknown>) => void;
 }) {
   const eff: Record<string, unknown> = { ...defWith, ...override };
@@ -61,6 +64,21 @@ export function StepInputsEditor({ action, defWith, override, upstream, onChange
     const next = { ...override };
     if (JSON.stringify(value) === JSON.stringify(defWith[key])) delete next[key];
     else next[key] = value;
+    onChange(next);
+  };
+
+  // The per-occurrence git repo lives in secret_refs.GIT_CLONE_URL. It is replaced as
+  // a whole map (the backend merges `with` overrides at the top level), so build from
+  // the EFFECTIVE secret_refs to preserve any other entries (e.g. a secret: ref).
+  const showRepo = actionSupportsGitRepo(action);
+  const repoVal = gitRepoFromWith(eff);
+  const setRepo = (url: string) => {
+    const sr = withGitRepo(eff.secret_refs, url);
+    const next = { ...override };
+    // Drop the override when the repo (with any sibling secret_refs) is empty or
+    // matches the step definition, so the saved override stays minimal.
+    if (sr === undefined || JSON.stringify(sr) === JSON.stringify(defWith.secret_refs)) delete next.secret_refs;
+    else next.secret_refs = sr;
     onChange(next);
   };
 
@@ -79,7 +97,16 @@ export function StepInputsEditor({ action, defWith, override, upstream, onChange
       <div style={{ fontFamily: T.mono, fontSize: 9, color: T.green, letterSpacing: 1, textTransform: 'uppercase' }}>
         inputs · {refs.length > 0 ? 'wire ⚯ to an upstream output' : 'no upstream outputs yet'}
       </div>
-      {stringKeys.length === 0 && !env && (
+      {showRepo && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>git repo</span>
+          <RepoSelect value={repoVal} onChange={setRepo} repos={repos} placeholder="select a repo, or ${inputs.REPO}" fontSize={11} />
+          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, lineHeight: 1.4 }}>
+            cloned as $GIT_CLONE_URL · pick a repo for this step or reference a run input like {'${inputs.REPO}'}
+          </span>
+        </div>
+      )}
+      {stringKeys.length === 0 && !env && !showRepo && (
         <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>this step has no editable inputs</div>
       )}
       {stringKeys.map((k) => (

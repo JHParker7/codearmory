@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 import {
   schemaKey, schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX, RAW_WITH_KEY, GIT_CLONE_ENV,
+  actionSupportsGitRepo, gitRepoFromWith, withGitRepo,
 } from '../src/pages/app/stepSchema.ts';
 
 // valueOf factory: reads prefixed keys ("with.<key>") from a plain map.
@@ -21,7 +22,7 @@ describe('schemaKey', () => {
 describe('schemaForAction', () => {
   it('returns the tailored fields plus a trailing advanced With for a known action', () => {
     const fields = schemaForAction('forge/run');
-    expect(fields.map(f => f.key)).to.deep.equal(['image', 'run', 'runner_class', 'secret_refs', 'env', 'output_env', RAW_WITH_KEY]);
+    expect(fields.map(f => f.key)).to.deep.equal(['image', 'run', 'runner_class', 'env', 'output_env', RAW_WITH_KEY]);
     expect(fields[fields.length - 1].kind).to.equal('json');
     expect(fields[fields.length - 1].required).to.not.equal(true);
   });
@@ -89,20 +90,10 @@ describe('buildStepWith', () => {
     expect(out).to.deep.equal({ image: 'alpine', run: 'true', extra: 'kept' });
   });
 
-  it('wraps a selected repo into a forge git: secret_ref', () => {
-    const out = buildStepWith('forge/run', reader({
-      [p('image')]: 'alpine',
-      [p('run')]: 'git clone "$GIT_CLONE_URL"',
-      [p('secret_refs')]: 'https://github.com/acme/widgets.git',
-    }));
-    expect(out).to.deep.equal({
-      image: 'alpine',
-      run: 'git clone "$GIT_CLONE_URL"',
-      secret_refs: { [GIT_CLONE_ENV]: 'git:https://github.com/acme/widgets.git' },
-    });
-  });
-
-  it('omits secret_refs when no repo is selected, leaving an advanced one intact', () => {
+  // The shared step definition is repo-agnostic (the repo is chosen per step in the
+  // pipeline builder), so a secret_refs supplied via the advanced With JSON still
+  // flows through unchanged.
+  it('passes an advanced-With secret_refs through untouched', () => {
     const out = buildStepWith('forge/run', reader({
       [p('image')]: 'alpine',
       [p('run')]: 'true',
@@ -112,34 +103,51 @@ describe('buildStepWith', () => {
   });
 });
 
-describe('formValsFromWith (repo round-trip)', () => {
-  it('recovers the bare clone URL from a git: secret_ref', () => {
+// The repo is no longer a shared-step field — it is a per-occurrence override set in
+// the pipeline builder. formValsFromWith therefore leaves secret_refs to the advanced
+// With JSON field (it has no dedicated repo field to claim it).
+describe('formValsFromWith (secret_refs → advanced With)', () => {
+  it('routes a git: secret_ref into the advanced With JSON and round-trips', () => {
     const withMap = {
       image: 'alpine',
       run: 'true',
       secret_refs: { [GIT_CLONE_ENV]: 'git:https://github.com/acme/widgets.git' },
     };
     const vals = formValsFromWith('forge/run', withMap);
-    expect(vals[p('secret_refs')]).to.equal('https://github.com/acme/widgets.git');
-    // The repo field claims secret_refs, so it is not dumped into the advanced field.
-    expect(vals[p(RAW_WITH_KEY)]).to.equal(undefined);
-    // And it round-trips back to the same with map.
+    expect(vals[p('secret_refs')]).to.equal(undefined); // no dedicated repo field
+    expect(JSON.parse(vals[p(RAW_WITH_KEY)])).to.deep.equal({ secret_refs: withMap.secret_refs });
     const back = buildStepWith('forge/run', (k) => vals[k] ?? '');
     expect(back).to.deep.equal(withMap);
   });
+});
 
-  it('leaves secret_refs to the advanced With JSON when it carries non-repo refs', () => {
-    const withMap = {
-      image: 'alpine',
-      run: 'true',
-      secret_refs: { [GIT_CLONE_ENV]: 'git:https://github.com/acme/widgets.git', DEPLOY_KEY: 'secret:deploy' },
-    };
-    const vals = formValsFromWith('forge/run', withMap);
-    // The repo field stays empty; the whole secret_refs map goes to advanced JSON…
-    expect(vals[p('secret_refs')]).to.equal(undefined);
-    expect(JSON.parse(vals[p(RAW_WITH_KEY)])).to.deep.equal({ secret_refs: withMap.secret_refs });
-    // …and round-trips intact (no dropped DEPLOY_KEY).
-    const back = buildStepWith('forge/run', (k) => vals[k] ?? '');
-    expect(back).to.deep.equal(withMap);
+// Per-occurrence git repo helpers used by the pipeline builder's StepInputsEditor.
+describe('per-step git repo helpers', () => {
+  it('actionSupportsGitRepo is true only for forge steps', () => {
+    expect(actionSupportsGitRepo('forge/run')).to.equal(true);
+    expect(actionSupportsGitRepo('tickets/create')).to.equal(false);
+    expect(actionSupportsGitRepo('http')).to.equal(false);
+  });
+
+  it('gitRepoFromWith recovers the bare ref and ignores non-git refs', () => {
+    expect(gitRepoFromWith({ secret_refs: { [GIT_CLONE_ENV]: 'git:https://github.com/acme/widgets.git' } }))
+      .to.equal('https://github.com/acme/widgets.git');
+    // A run-input template round-trips too (the "based on an env var" case).
+    expect(gitRepoFromWith({ secret_refs: { [GIT_CLONE_ENV]: 'git:${inputs.REPO}' } })).to.equal('${inputs.REPO}');
+    expect(gitRepoFromWith({})).to.equal('');
+    expect(gitRepoFromWith({ secret_refs: { OTHER: 'secret:x' } })).to.equal('');
+  });
+
+  it('withGitRepo sets/clears GIT_CLONE_URL while preserving sibling refs', () => {
+    expect(withGitRepo(undefined, 'https://github.com/acme/widgets.git'))
+      .to.deep.equal({ [GIT_CLONE_ENV]: 'git:https://github.com/acme/widgets.git' });
+    // Preserves a sibling secret: ref.
+    expect(withGitRepo({ DEPLOY_KEY: 'secret:deploy' }, '${inputs.REPO}'))
+      .to.deep.equal({ DEPLOY_KEY: 'secret:deploy', [GIT_CLONE_ENV]: 'git:${inputs.REPO}' });
+    // Clearing drops GIT_CLONE_URL but keeps siblings.
+    expect(withGitRepo({ [GIT_CLONE_ENV]: 'git:x', DEPLOY_KEY: 'secret:deploy' }, ''))
+      .to.deep.equal({ DEPLOY_KEY: 'secret:deploy' });
+    // Clearing the sole ref returns undefined so the override can be dropped entirely.
+    expect(withGitRepo({ [GIT_CLONE_ENV]: 'git:x' }, '')).to.equal(undefined);
   });
 });

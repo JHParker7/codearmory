@@ -25,7 +25,7 @@ import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import { T } from '../../theme';
 import { useViewport, clamp } from '../../hooks/useViewport';
-import type { Step } from '../../api/bff';
+import type { Step, GitRepo } from '../../api/bff';
 import { Block, StepRef, MatrixConfig, ApprovalGate, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
 import { StepInputsEditor, UpstreamOutput } from './StepInputsEditor';
 
@@ -34,6 +34,8 @@ export interface PipelineBlocksProps {
   catalog: Record<string, Step>;
   editable?: boolean;
   palette?: Step[];
+  // The git-broker repo catalog, for the per-step Git repo picker on forge blocks.
+  repos?: GitRepo[];
   onChange?: (steps: StepRef[]) => void;
   // Reports the step_id and effective (occurrence) name of the selected block (null
   // step for a gate or no selection), so the builder can show that step's
@@ -84,6 +86,7 @@ interface BlockCardProps {
   selected: boolean;
   defWith: Record<string, unknown>;
   upstream: UpstreamOutput[];
+  repos: GitRepo[];
   onSelect: () => void;
   onRename: (uid: string, name: string | undefined) => void;
   onSetWith: (uid: string, override: Record<string, unknown>) => void;
@@ -127,7 +130,7 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
   );
 }
 
-function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, onSelect, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
+function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, repos, onSelect, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
   const leftBar = isGate ? T.blue : block.matrix ? T.amber : inParallel ? T.green : T.dim;
   const style: React.CSSProperties = {
@@ -189,14 +192,14 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
       {showMatrix && block.matrix && <MatrixEditor uid={block.uid} matrix={block.matrix} onSetMatrix={onSetMatrix} />}
       {editable && isGate && block.approval && <GateEditor uid={block.uid} gate={block.approval} onSetApproval={onSetApproval} />}
       {editable && !isGate && selected && (
-        <StepInputsEditor action={action} defWith={defWith} override={block.with ?? {}} upstream={upstream}
+        <StepInputsEditor action={action} defWith={defWith} override={block.with ?? {}} upstream={upstream} repos={repos}
           onChange={(o) => onSetWith(block.uid, o)} />
       )}
     </div>
   );
 }
 
-export function PipelineBlocks({ initialSteps, catalog, editable = false, palette = [], onChange, onInspect, height }: PipelineBlocksProps) {
+export function PipelineBlocks({ initialSteps, catalog, editable = false, palette = [], repos = [], onChange, onInspect, height }: PipelineBlocksProps) {
   const [blocks, setBlocks] = useState<Block[]>(() => blocksFromSteps(initialSteps));
   const [parallelMode, setParallelMode] = useState(false);
   const [parallelOpen, setParallelOpen] = useState(false);
@@ -357,7 +360,7 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
       <BlockCard key={b.uid} block={b} label={label} action={action} editable={editable}
         canLink={(indexOf.get(b.uid) ?? 0) > 0} inParallel={inParallel} isGate={isGate}
         selected={selectedUid === b.uid} defWith={(catalog[b.stepId]?.with ?? {}) as Record<string, unknown>}
-        upstream={selectedUid === b.uid ? upstreamFor(b.uid) : []}
+        upstream={selectedUid === b.uid ? upstreamFor(b.uid) : []} repos={repos}
         onSelect={() => select(b)} onRename={setName} onSetWith={setWith}
         onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onSetApproval={setApproval} onRemove={remove} />
     );

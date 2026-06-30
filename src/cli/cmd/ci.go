@@ -34,11 +34,52 @@ type approvalGate struct {
 }
 
 // workflowStepRef is the per-step payload inside a create/update workflow request.
+// With holds per-occurrence overrides merged over the step definition at run time
+// (the backend lets ref keys win) — how a pipeline assigns a repo to a reusable step
+// without baking it into the shared definition. See gitRepoStepWith / the DSL's
+// `name@repo` syntax.
 type workflowStepRef struct {
-	StepID        string        `json:"step_id,omitempty"`
-	ParallelGroup *int          `json:"parallel_group,omitempty"`
-	Matrix        *matrixConfig `json:"matrix,omitempty"`
-	Approval      *approvalGate `json:"approval,omitempty"`
+	StepID        string         `json:"step_id,omitempty"`
+	With          map[string]any `json:"with,omitempty"`
+	ParallelGroup *int           `json:"parallel_group,omitempty"`
+	Matrix        *matrixConfig  `json:"matrix,omitempty"`
+	Approval      *approvalGate  `json:"approval,omitempty"`
+}
+
+// gitCloneEnv is the env var a per-step git repo is injected as. forge resolves the
+// `git:<url>` secret_ref under this name into an authenticated clone URL at dispatch,
+// so the runner clones/pulls/pushes via $GIT_CLONE_URL. Mirrors the portal builder.
+const gitCloneEnv = "GIT_CLONE_URL"
+
+// gitRepoStepWith wraps a per-step repo (a clone URL or a ${inputs.X} template) as
+// the step-ref `with` override forge consumes — secret_refs.GIT_CLONE_URL = git:<v>.
+// Returns nil for an empty repo so the ref carries no override.
+func gitRepoStepWith(repo string) map[string]any {
+	if repo == "" {
+		return nil
+	}
+	return map[string]any{"secret_refs": map[string]any{gitCloneEnv: "git:" + repo}}
+}
+
+// gitRepoFromStepWith reverses gitRepoStepWith: it reads the bare repo (a clone URL
+// or ${inputs.X}) back out of a step's `with.secret_refs.GIT_CLONE_URL`, stripping the
+// git: scheme. Returns "" when there is no git: ref, OR when secret_refs carries keys
+// beyond GIT_CLONE_URL (the DSL's `@repo` can't express those, so it leaves them be
+// rather than silently dropping them on round-trip — use -f JSON for richer refs).
+func gitRepoFromStepWith(with map[string]any) string {
+	sr, ok := with["secret_refs"].(map[string]any)
+	if !ok || len(sr) != 1 {
+		return ""
+	}
+	ref, ok := sr[gitCloneEnv].(string)
+	if !ok {
+		return ""
+	}
+	bare, ok := strings.CutPrefix(ref, "git:")
+	if !ok {
+		return ""
+	}
+	return bare
 }
 
 // pipelineFile is the JSON file format for -f pipeline creation.
@@ -52,16 +93,30 @@ type pipelineFile struct {
 
 type dslNode struct {
 	names      []string
-	groupIndex int // unique across parallel groups in this DSL
+	repos      []string // parallel to names; repos[i] is the git repo for names[i] ("" = none)
+	groupIndex int      // unique across parallel groups in this DSL
+}
+
+// splitStepRepo splits a DSL step token "name@repo" into its bare step name and the
+// optional per-step git repo (a clone URL or a ${inputs.X} template). Step names are
+// [A-Za-z0-9._-] so they never contain '@'; the split is on the first '@', leaving any
+// '@' inside a repo URL intact. Returns ("", "") guarded by the caller's empty check.
+func splitStepRepo(tok string) (name, repo string) {
+	name, repo, _ = strings.Cut(tok, "@")
+	return strings.TrimSpace(name), strings.TrimSpace(repo)
 }
 
 // parseDSL tokenises a pipeline DSL string into ordered nodes.
 // Grammar: steps are separated by "->"; a parallel group is written as
-// "[step1,step2,...]" and results in a single node with multiple names.
+// "[step1,step2,...]" and results in a single node with multiple names. A step may
+// carry a per-step git repo as "name@<clone-url-or-${inputs.X}>", cloned as
+// $GIT_CLONE_URL for that step only.
 // Examples:
 //
-//	"build->test->deploy"          — three sequential steps
-//	"build->[lint,test]->deploy"   — lint and test run in parallel
+//	"build->test->deploy"                      — three sequential steps
+//	"build->[lint,test]->deploy"               — lint and test run in parallel
+//	"test@https://github.com/acme/app.git"     — test clones that repo
+//	"test@${inputs.REPO}"                      — test clones a run-input repo
 func parseDSL(dsl string) ([]dslNode, error) {
 	segments := strings.Split(dsl, "->")
 	var nodes []dslNode
@@ -79,18 +134,23 @@ func parseDSL(dsl string) ([]dslNode, error) {
 			if len(parts) < 2 {
 				return nil, fmt.Errorf("parallel group must contain at least two steps: %q", seg)
 			}
-			var names []string
+			var names, repos []string
 			for _, p := range parts {
-				p = strings.TrimSpace(p)
-				if p == "" {
+				name, repo := splitStepRepo(p)
+				if name == "" {
 					return nil, fmt.Errorf("empty step name in parallel group %q", seg)
 				}
-				names = append(names, p)
+				names = append(names, name)
+				repos = append(repos, repo)
 			}
-			nodes = append(nodes, dslNode{names: names, groupIndex: groupIdx})
+			nodes = append(nodes, dslNode{names: names, repos: repos, groupIndex: groupIdx})
 			groupIdx++
 		} else {
-			nodes = append(nodes, dslNode{names: []string{seg}})
+			name, repo := splitStepRepo(seg)
+			if name == "" {
+				return nil, fmt.Errorf("empty step name in pipeline DSL")
+			}
+			nodes = append(nodes, dslNode{names: []string{name}, repos: []string{repo}})
 		}
 	}
 	if len(nodes) == 0 {
@@ -115,11 +175,12 @@ func resolveStepName(name string) (string, error) {
 	return steps[0].StepID, nil
 }
 
-// dslToRefs resolves DSL nodes to workflow step refs (step IDs + parallel groups).
+// dslToRefs resolves DSL nodes to workflow step refs (step IDs + parallel groups +
+// any per-step git repo override).
 func dslToRefs(nodes []dslNode) ([]workflowStepRef, error) {
 	var refs []workflowStepRef
 	for _, node := range nodes {
-		for _, name := range node.names {
+		for i, name := range node.names {
 			id, err := resolveStepName(name)
 			if err != nil {
 				return nil, err
@@ -128,6 +189,9 @@ func dslToRefs(nodes []dslNode) ([]workflowStepRef, error) {
 			if len(node.names) > 1 {
 				g := node.groupIndex
 				ref.ParallelGroup = &g
+			}
+			if i < len(node.repos) {
+				ref.With = gitRepoStepWith(node.repos[i])
 			}
 			refs = append(refs, ref)
 		}
