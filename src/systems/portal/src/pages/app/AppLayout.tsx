@@ -29,7 +29,6 @@ const ROUTE_SERVICE: Record<string, string> = {
   hooks: 'hooks',
   containers: 'containers',
   git: 'git',
-  gitea: 'gitea_integration',
   outposts: 'outpost-gateway',
 };
 
@@ -40,7 +39,7 @@ const ROUTE_SERVICE: Record<string, string> = {
 // services (gatekeeper, builder) are bundled and never iframe-hosted.
 const BUNDLED_SERVICES = new Set<string>([
   'forge', 'workflows', 'hooks', 'gatekeeper', 'builder',
-  'tickets', 'git', 'gitea_integration', 'containers', 'outpost-gateway',
+  'tickets', 'git', 'containers', 'outpost-gateway',
 ]);
 
 /**
@@ -282,7 +281,6 @@ export function AppLayout() {
           <NavItem to="/app/hooks" label="hooks/" service="hooks" collapsed={navCollapsed} icon="hooks" />
           <NavItem to="/app/containers" label="containers/" service="containers" collapsed={navCollapsed} icon="containers" />
           <NavItem to="/app/git" label="git/" service="git" collapsed={navCollapsed} icon="git" />
-          <NavItem to="/app/gitea" label="forgejo/" service="gitea_integration" collapsed={navCollapsed} icon="git" />
           <NavItem to="/app/outposts" label="outposts/" service="outpost-gateway" collapsed={navCollapsed} icon="outposts" />
           {/* Generic iframe-hosted services (blueprints, chaos, argo, and any future
               non-core service that advertises a ui_path) — discovered at runtime,
