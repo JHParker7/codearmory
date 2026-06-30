@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 )
@@ -80,6 +81,58 @@ func resolvedNameForID(field, uuid string, obj map[string]any) string {
 		}
 	}
 	nameCache[cacheKey] = name
+	return name
+}
+
+// tuiNameCache persists resolved FK names across renders for the TUIs (unlike
+// nameCache, which is per-printResponse). Guarded by a mutex because TUI fetch
+// commands run in their own goroutines.
+var (
+	tuiNameCache   = map[string]string{}
+	tuiNameCacheMu sync.Mutex
+)
+
+// tuiResolveName resolves a foreign-key UUID to its human-readable name using
+// the same foreignKeyResolvers map that print.go uses for non-TUI output. It is
+// safe to call from a tea.Cmd goroutine (it makes a synchronous API call on a
+// cache miss) and dedupes lookups process-wide. An unresolvable id (no resolver,
+// empty value, or failed lookup) yields "" so callers can fall back to the id.
+func tuiResolveName(field, uuid string) string {
+	r, ok := foreignKeyResolvers[field]
+	if !ok {
+		return ""
+	}
+	return tuiResolveNameVia(field, r.path, r.field, uuid)
+}
+
+// tuiResolveNameVia is the explicit-endpoint form of tuiResolveName for fields
+// with no entry in foreignKeyResolvers (e.g. role_id, which print.go treats as a
+// primary id and so deliberately does not resolve in record output). pathFmt is
+// a "%s"-templated GET path; nameField is the response key holding the name.
+func tuiResolveNameVia(field, pathFmt, nameField, uuid string) string {
+	if uuid == "" {
+		return ""
+	}
+	cacheKey := field + ":" + uuid
+	tuiNameCacheMu.Lock()
+	if name, cached := tuiNameCache[cacheKey]; cached {
+		tuiNameCacheMu.Unlock()
+		return name
+	}
+	tuiNameCacheMu.Unlock()
+
+	name := ""
+	if data, err := doRequest("GET", fmt.Sprintf(pathFmt, uuid), nil); err == nil {
+		var resp map[string]any
+		if json.Unmarshal(data, &resp) == nil {
+			if n, ok := resp[nameField].(string); ok {
+				name = n
+			}
+		}
+	}
+	tuiNameCacheMu.Lock()
+	tuiNameCache[cacheKey] = name
+	tuiNameCacheMu.Unlock()
 	return name
 }
 

@@ -77,6 +77,9 @@ export function RunView() {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [deciding, setDeciding] = useState(false);
+  // Approve/reject failures show inline beside the gate controls rather than
+  // replacing the whole run view (which `error` does for a failed load).
+  const [decideErr, setDecideErr] = useState<string | null>(null);
 
   // Initial load: the run, its workflow (best-effort — may be deleted), and the
   // step catalog for labels.
@@ -135,9 +138,9 @@ export function RunView() {
   // status; live-refresh then continues to stream the resumed steps.
   const handleApprove = useCallback(async () => {
     if (!run) return;
-    setDeciding(true); setError(null);
+    setDeciding(true); setDecideErr(null);
     try { setRun(await approveRun(token, run.run_id)); }
-    catch (e: unknown) { setError((e as Error).message); }
+    catch (e: unknown) { setDecideErr((e as Error).message); }
     finally { setDeciding(false); }
   }, [run, token]);
 
@@ -147,9 +150,9 @@ export function RunView() {
     if (!run) return;
     const comment = window.prompt('Reason for rejecting this run? (optional)');
     if (comment === null) return;
-    setDeciding(true); setError(null);
+    setDeciding(true); setDecideErr(null);
     try { setRun(await rejectRun(token, run.run_id, comment || undefined)); }
-    catch (e: unknown) { setError((e as Error).message); }
+    catch (e: unknown) { setDecideErr((e as Error).message); }
     finally { setDeciding(false); }
   }, [run, token]);
 
@@ -177,22 +180,10 @@ export function RunView() {
         <Pill tone={statusTone(run.status)}>{run.status}</Pill>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
           {run.started_at ? `${run.ended_at ? 'took' : 'elapsed'} ${fmtDuration(run.started_at, run.ended_at)} · ` : ''}
-          by {run.triggered_by ? run.triggered_by.slice(0, 8) + '…' : '—'}
+          by user {run.triggered_by ? run.triggered_by.slice(0, 8) + '…' : '—'}
           {run.started_at ? ` · started ${timeAgo(run.started_at)} ago` : ''}
         </span>
         <div style={{ flex: 1 }} />
-        {run.status === 'awaiting_approval' && (
-          <>
-            <button onClick={handleApprove} disabled={deciding}
-              style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, fontWeight: 700, padding: '5px 12px', cursor: deciding ? 'default' : 'pointer', opacity: deciding ? 0.5 : 1 }}>
-              [ ✓ approve ]
-            </button>
-            <button onClick={handleReject} disabled={deciding}
-              style={{ background: 'transparent', border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 700, padding: '5px 12px', cursor: deciding ? 'default' : 'pointer', opacity: deciding ? 0.5 : 1 }}>
-              [ ✗ reject ]
-            </button>
-          </>
-        )}
         {isRunActive(run.status) && (
           <button onClick={handleCancel}
             style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
@@ -259,6 +250,31 @@ export function RunView() {
           <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
             {!selectedSr ? (
               <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ select a step to see its logs</div>
+            ) : selectedSr.status === 'awaiting_approval' ? (
+              // Approval gate: the decision lives here, in place of step output. The
+              // gate's optional prompt (its captured output) sits above the controls.
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 640 }}>
+                {selectedSr.output && (
+                  <pre style={{ margin: 0, fontFamily: T.mono, fontSize: 12, color: T.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selectedSr.output}</pre>
+                )}
+                <div style={{ border: `1px solid ${T.amber}`, background: T.card, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <div style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.amber }}>⏸ paused for manual approval</div>
+                  <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, lineHeight: 1.5 }}>
+                    Approve to resume the pipeline, or reject to fail this run.
+                  </div>
+                  <div style={{ display: 'flex', gap: 10 }}>
+                    <button onClick={handleApprove} disabled={deciding}
+                      style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, fontWeight: 700, padding: '6px 14px', cursor: deciding ? 'default' : 'pointer', opacity: deciding ? 0.5 : 1 }}>
+                      [ ✓ approve ]
+                    </button>
+                    <button onClick={handleReject} disabled={deciding}
+                      style={{ background: 'transparent', border: `1px solid ${T.red}`, color: T.red, fontFamily: T.mono, fontSize: 11, fontWeight: 700, padding: '6px 14px', cursor: deciding ? 'default' : 'pointer', opacity: deciding ? 0.5 : 1 }}>
+                      [ ✗ reject ]
+                    </button>
+                  </div>
+                  {decideErr && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.red }}>{decideErr}</div>}
+                </div>
+              </div>
             ) : selectedSr.output ? (
               <pre style={{ margin: 0, fontFamily: T.mono, fontSize: 12, color: T.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selectedSr.output}</pre>
             ) : (

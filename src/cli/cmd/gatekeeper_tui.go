@@ -70,9 +70,9 @@ var gkDefs = []gkSectionDef{
 	gkTeams: {
 		name: "Teams", label: "team",
 		path: "/gatekeeper/teams", idKey: "team_id", nameKey: "team_name",
-		cols: []tuiColSpec{{"NAME", 16, 2}, {"ROLE", 10, 0}, {"OWNER", 10, 0}, {"ACTIVE", 7, 0}, {"CREATED", 14, 0}},
+		cols: []tuiColSpec{{"NAME", 16, 2}, {"ROLE", 12, 1}, {"OWNER", 12, 1}, {"ACTIVE", 7, 0}, {"CREATED", 14, 0}},
 		row: func(r gkRecord) table.Row {
-			return table.Row{gkStr(r, "team_name"), gkDash(gkShort(r, "role_id")), gkDash(gkShort(r, "owner_id")), gkActiveDot(r), gkTimeCell(r, "created_at")}
+			return table.Row{gkStr(r, "team_name"), gkNameOrShort(r, "role_name", "role_id"), gkNameOrShort(r, "owner_name", "owner_id"), gkActiveDot(r), gkTimeCell(r, "created_at")}
 		},
 		actions:   []gkAct{{"D", "delete", "DELETE", true, func(id string) string { return "/gatekeeper/teams/" + id }}},
 		canCreate: true, canInvite: true,
@@ -109,18 +109,18 @@ var gkDefs = []gkSectionDef{
 	gkRoles: {
 		name: "Roles", label: "role",
 		path: "/gatekeeper/roles", idKey: "role_id", nameKey: "name",
-		cols: []tuiColSpec{{"NAME", 16, 2}, {"PERMS", 6, 0}, {"OWNER", 10, 0}, {"ACTIVE", 7, 0}, {"CREATED", 14, 0}},
+		cols: []tuiColSpec{{"NAME", 16, 2}, {"PERMS", 6, 0}, {"OWNER", 12, 1}, {"ACTIVE", 7, 0}, {"CREATED", 14, 0}},
 		row: func(r gkRecord) table.Row {
-			return table.Row{gkDash(gkStr(r, "name")), gkCount(r, "permissions_ids"), gkDash(gkShort(r, "owner_id")), gkActiveDot(r), gkTimeCell(r, "created_at")}
+			return table.Row{gkDash(gkStr(r, "name")), gkCount(r, "permissions_ids"), gkNameOrShort(r, "owner_name", "owner_id"), gkActiveDot(r), gkTimeCell(r, "created_at")}
 		},
 		actions: []gkAct{{"D", "delete", "DELETE", true, func(id string) string { return "/gatekeeper/roles/" + id }}},
 	},
 	gkOrgs: {
 		name: "Orgs", label: "org",
 		path: "/gatekeeper/orgs", idKey: "org_id", nameKey: "org_name",
-		cols: []tuiColSpec{{"NAME", 20, 2}, {"OWNER", 12, 0}, {"ACTIVE", 7, 0}, {"CREATED", 14, 0}},
+		cols: []tuiColSpec{{"NAME", 20, 2}, {"OWNER", 12, 1}, {"ACTIVE", 7, 0}, {"CREATED", 14, 0}},
 		row: func(r gkRecord) table.Row {
-			return table.Row{gkStr(r, "org_name"), gkDash(gkShort(r, "owner_id")), gkActiveDot(r), gkTimeCell(r, "created_at")}
+			return table.Row{gkStr(r, "org_name"), gkNameOrShort(r, "owner_name", "owner_id"), gkActiveDot(r), gkTimeCell(r, "created_at")}
 		},
 		actions:   []gkAct{{"D", "delete", "DELETE", true, func(id string) string { return "/gatekeeper/orgs/" + id }}},
 		canCreate: true, canInvite: true,
@@ -128,9 +128,9 @@ var gkDefs = []gkSectionDef{
 	gkUsers: {
 		name: "Users", label: "user",
 		path: "/gatekeeper/users", idKey: "user_id", nameKey: "username",
-		cols: []tuiColSpec{{"USERNAME", 16, 2}, {"ORG", 10, 0}, {"TEAM", 10, 0}, {"ACTIVE", 7, 0}, {"CREATED", 14, 0}},
+		cols: []tuiColSpec{{"USERNAME", 16, 2}, {"ORG", 12, 1}, {"TEAM", 12, 1}, {"ACTIVE", 7, 0}, {"CREATED", 14, 0}},
 		row: func(r gkRecord) table.Row {
-			return table.Row{gkStr(r, "username"), gkDash(gkShort(r, "org_id")), gkDash(gkShort(r, "team_id")), gkActiveDot(r), gkTimeCell(r, "created_at")}
+			return table.Row{gkStr(r, "username"), gkNameOrShort(r, "org_name", "org_id"), gkNameOrShort(r, "team_name", "team_id"), gkActiveDot(r), gkTimeCell(r, "created_at")}
 		},
 		actions: []gkAct{{"D", "delete", "DELETE", true, func(id string) string { return "/gatekeeper/users/" + id }}},
 	},
@@ -146,6 +146,17 @@ func gkStr(r gkRecord, key string) string {
 }
 
 func gkShort(r gkRecord, key string) string { return tuiShortID(gkStr(r, key)) }
+
+// gkNameOrShort prefers the human-readable companion name field (e.g. owner_name,
+// resolved during fetch) and falls back to a short id only if no name resolved,
+// then a dash if neither is present. Used for FK columns so a human reads a name,
+// never a raw UUID, with the id at most a degraded fallback.
+func gkNameOrShort(r gkRecord, nameKey, idKey string) string {
+	if name := gkStr(r, nameKey); name != "" {
+		return name
+	}
+	return gkDash(gkShort(r, idKey))
+}
 
 func gkDash(s string) string {
 	if s == "" {
@@ -359,7 +370,36 @@ func gkFetch(section gkSection, srFilter string) tea.Cmd {
 		if err := json.Unmarshal(data, &recs); err != nil {
 			return gkErrMsg{err}
 		}
+		for _, r := range recs {
+			gkResolveNames(r)
+		}
 		return gkRecordsMsg{section: section, records: recs}
+	}
+}
+
+// gkResolveNames enriches a record in place with human-readable companion name
+// fields for its foreign-key UUIDs (owner_id→owner_name, role_id→role_name,
+// org_id→org_name, team_id→team_name) so the row builders can show names instead
+// of raw ids. The gatekeeper list endpoints return only the ids, so each name is
+// resolved via the shared foreignKeyResolvers lookup (cached process-wide). Runs
+// inside the fetch goroutine, where synchronous API calls are safe.
+func gkResolveNames(r gkRecord) {
+	if r == nil {
+		return
+	}
+	if name := tuiResolveName("owner_id", gkStr(r, "owner_id")); name != "" {
+		r["owner_name"] = name
+	}
+	if name := tuiResolveName("org_id", gkStr(r, "org_id")); name != "" {
+		r["org_name"] = name
+	}
+	if name := tuiResolveName("team_id", gkStr(r, "team_id")); name != "" {
+		r["team_name"] = name
+	}
+	// role_id has no foreignKeyResolvers entry (print.go treats it as a primary
+	// id), so resolve it via the roles endpoint explicitly.
+	if name := tuiResolveNameVia("role_id", "/gatekeeper/roles/%s", "name", gkStr(r, "role_id")); name != "" {
+		r["role_name"] = name
 	}
 }
 

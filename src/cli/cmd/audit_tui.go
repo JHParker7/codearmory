@@ -21,6 +21,21 @@ type auditEntry struct {
 	ResourceID string    `json:"resource_id"`
 	Detail     string    `json:"detail"`
 	CreatedAt  time.Time `json:"created_at"`
+
+	// actorName is the resolved human-readable actor, filled in during fetch:
+	// the username for a user actor (actor_id is a user_id) or the service name
+	// for a service actor (actor_id already is the name). Not part of the API
+	// response. Empty when the user lookup failed.
+	actorName string
+}
+
+// actorLabel returns the human-readable actor for display, falling back to the
+// raw actor_id only when no name could be resolved.
+func (e auditEntry) actorLabel() string {
+	if e.actorName != "" {
+		return e.actorName
+	}
+	return e.ActorID
 }
 
 // ── Messages ──────────────────────────────────────────────────────────────────
@@ -97,6 +112,15 @@ func auditFetch(page int) tea.Cmd {
 		if err := json.Unmarshal(data, &entries); err != nil {
 			return auditErrMsg{err}
 		}
+		for i := range entries {
+			// Service actors carry their name in actor_id already; user actors
+			// carry a user_id, so resolve it to a username via the shared lookup.
+			if entries[i].ActorType == "user" {
+				entries[i].actorName = tuiResolveName("user_id", entries[i].ActorID)
+			} else {
+				entries[i].actorName = entries[i].ActorID
+			}
+		}
 		return auditEntriesMsg(entries)
 	}
 }
@@ -128,7 +152,7 @@ func (m auditModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := make([]table.Row, len(m.entries))
 		for i, e := range m.entries {
 			rows[i] = table.Row{
-				e.ActorID,
+				e.actorLabel(),
 				e.ActorType,
 				e.Action,
 				tuiShortID(e.ResourceID),
@@ -195,7 +219,7 @@ func (m auditModel) auditKeyList(msg tea.KeyMsg) (auditModel, tea.Cmd) {
 			m.selEntry = &e
 			content := fmt.Sprintf(
 				"ID:        %s\nActor:     %s (%s)\nAction:    %s\nResource:  %s\nTime:      %s\n\nDetail:\n%s",
-				e.AuditLogID, e.ActorID, e.ActorType,
+				e.AuditLogID, e.actorLabel(), e.ActorType,
 				e.Action, e.ResourceID,
 				e.CreatedAt.Local().Format(time.RFC3339),
 				e.Detail,
@@ -274,7 +298,7 @@ func (m auditModel) auditViewDetail() string {
 	title := tuiTitleStyle.Render("Audit Entry")
 	if m.selEntry != nil {
 		title = tuiTitleStyle.Render(m.selEntry.Action) + "  " +
-			tuiMetaStyle.Render(m.selEntry.ActorID)
+			tuiMetaStyle.Render(m.selEntry.actorLabel())
 	}
 	help := tuiHelp("[↑↓/pgup/pgdn] scroll  [esc] back", m.width)
 	return title + "\n" + tuiBoxStyle.Render(m.vp.View()) + "\n" + help

@@ -222,7 +222,7 @@ export function Tickets() {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
-            <span style={{ color: T.green }}>$</span> armory tickets{selectedTicket ? ` · ${selectedTicket.ticket_id.slice(0, 8)}…` : ''}
+            <span style={{ color: T.green }}>$</span> armory tickets{selectedTicket ? ` · ${selectedTicket.title}` : ''}
           </div>
           {selectedTicket && (
             <div style={{ display: 'flex', gap: 8 }}>
