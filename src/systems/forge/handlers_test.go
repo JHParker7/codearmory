@@ -32,6 +32,8 @@ func fakeGatekeeper(t *testing.T, status int, body string) *httptest.Server {
 func TestMain(m *testing.M) {
 	initMetrics()
 	forgeHTTPClient = initHTTPClient()
+	initVolumeConfig()
+	initBuildConfig()
 	setupForgeTestDB()
 	os.Exit(m.Run())
 }
@@ -380,7 +382,7 @@ func TestWorkerPool_Cancel_Found(t *testing.T) {
 }
 
 // TestWorkerPool_Cancel_CallsRuntimeCancel verifies Cancel also drives the
-// resolved runtime's Cancel (stop+destroy for proxmox, job delete for k8s).
+// resolved runtime's Cancel (job delete for k8s, no-op for docker).
 func TestWorkerPool_Cancel_CallsRuntimeCancel(t *testing.T) {
 	pool := &WorkerPool{}
 	rt := &fakeRuntime{}

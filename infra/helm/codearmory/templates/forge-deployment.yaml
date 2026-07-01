@@ -69,6 +69,38 @@ spec:
               {{- end }}
             - name: ALLOWED_IMAGES
               value: {{ .Values.forge.env.allowedImages | quote }}
+            {{- with .Values.forge.volumes }}
+            # Shared workspace volumes: per-workflow total-size cap (0 disables the
+            # feature), optional per-volume cap, PVC StorageClass/access mode, and the
+            # orphan-reaper age. Empty values fall back to the binary defaults.
+            - name: FORGE_MAX_WORKFLOW_VOLUME_MB
+              value: {{ .maxWorkflowMB | quote }}
+            {{- if .maxVolumeMB }}
+            - name: FORGE_MAX_VOLUME_MB
+              value: {{ .maxVolumeMB | quote }}
+            {{- end }}
+            {{- if .storageClass }}
+            - name: FORGE_VOLUME_STORAGE_CLASS
+              value: {{ .storageClass | quote }}
+            {{- end }}
+            {{- if .accessMode }}
+            - name: FORGE_VOLUME_ACCESS_MODE
+              value: {{ .accessMode | quote }}
+            {{- end }}
+            {{- if .maxAgeSecs }}
+            - name: FORGE_VOLUME_MAX_AGE_SECS
+              value: {{ .maxAgeSecs | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.forge.build }}
+            # Image builds (forge/build-image) use Kaniko. Override the builder image
+            # to point at a private mirror in an air-gapped install; empty = the binary
+            # default (gcr.io/kaniko-project/executor:debug).
+            {{- if .builderImage }}
+            - name: FORGE_BUILDER_IMAGE
+              value: {{ .builderImage | quote }}
+            {{- end }}
+            {{- end }}
             - name: GATEKEEPER_URL
               value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
             {{- if or (eq .Values.forge.env.runtime "kubernetes") .Values.forge.kata.enabled .Values.forge.gvisor.enabled }}
@@ -126,17 +158,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-forge
                   key: git-internal-key
-            {{- end }}
-            {{- if .Values.forge.proxmox.enabled }}
-            # Proxmox VE API token consumed by a runtime backend of type "proxmox"
-            # via secret_refs {token: "PROXMOX_TOKEN"}. Optional so a missing key
-            # degrades to that backend's executions failing, not the whole pod.
-            - name: PROXMOX_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "codearmory.fullname" . }}-forge
-                  key: proxmox-token
-                  optional: true
             {{- end }}
             {{- include "codearmory.tls.envs" .Values.forge.tls | nindent 12 }}
           {{- $tlsMounts := include "codearmory.tls.volumeMounts" .Values.forge.tls }}

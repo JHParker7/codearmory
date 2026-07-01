@@ -283,13 +283,103 @@ func boardNameTaken(ctx context.Context, name, userID, orgID, excludeID string) 
 	return count > 0, nil
 }
 
-// unassignBoardTickets clears board_id on all active tickets pointing at boardID,
-// so deleting a board orphans its tickets to the "unassigned" pile rather than
-// deleting them.
-func unassignBoardTickets(ctx context.Context, boardID string) error {
+// deleteBoardTickets soft-deletes every active ticket on boardID. Boards are
+// required, so deleting a board cascade-deletes its tickets rather than orphaning
+// them to a board-less "unassigned" pile.
+func deleteBoardTickets(ctx context.Context, boardID string) error {
 	return connect().WithContext(ctx).Model(&Ticket{}).
 		Where("board_id = ? AND active = ?", boardID, true).
-		Update("board_id", nil).Error
+		Update("active", false).Error
+}
+
+// defaultBoardName is the name of the per-scope board a ticket lands on when the
+// caller creates it without naming a board. Every ticket must belong to a board.
+const defaultBoardName = "Default"
+
+// findDefaultBoard looks up the caller's existing default board within its owner
+// scope (shared per-org for org-backed callers, else per-user), returning
+// gorm.ErrRecordNotFound when it has not been created yet.
+func findDefaultBoard(ctx context.Context, userID, orgID string) (Board, error) {
+	q := connectRead().WithContext(ctx).Where("active = ? AND name = ?", true, defaultBoardName)
+	if orgID != "" {
+		q = q.Where("org_id = ?", orgID)
+	} else {
+		q = q.Where("org_id = '' AND created_by = ?", userID)
+	}
+	var b Board
+	err := q.First(&b).Error
+	return b, err
+}
+
+// getOrCreateDefaultBoard returns the caller's default board, creating it (and
+// seeding its own status columns) on first use. It is the board a ticket is
+// placed on when the caller does not specify one, so the "every ticket has a
+// board" invariant holds without every client having to pick a board.
+func getOrCreateDefaultBoard(ctx context.Context, userID, orgID string) (Board, error) {
+	existing, err := findDefaultBoard(ctx, userID, orgID)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return Board{}, err
+	}
+
+	now := time.Now().UTC()
+	b := Board{
+		BoardID:     uuid.New().String(),
+		Name:        defaultBoardName,
+		Description: "Default board",
+		CreatedBy:   userID,
+		OrgID:       orgID,
+		Active:      true,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := b.Add(ctx); err != nil {
+		// A concurrent create may have won the race against the unique name
+		// index; fall back to reading the board it inserted.
+		if raced, rerr := findDefaultBoard(ctx, userID, orgID); rerr == nil {
+			return raced, nil
+		}
+		return Board{}, err
+	}
+	// Best-effort, matching handleCreateBoard: on failure the board falls back to
+	// the org/global status set rather than failing ticket creation.
+	if err := seedBoardStatuses(ctx, b); err != nil {
+		slog.WarnContext(ctx, "default board: seed status columns failed", "board_id", b.BoardID, "error", err)
+	}
+	return b, nil
+}
+
+// backfillTicketBoards assigns any pre-existing board-less tickets to their
+// scope's default board, so the "every ticket has a board" invariant also holds
+// for rows created before boards were required. Idempotent: once every ticket
+// has a board it is a no-op.
+func backfillTicketBoards(ctx context.Context) error {
+	type scope struct {
+		CreatedBy string
+		OrgID     string
+	}
+	var scopes []scope
+	if err := connect().WithContext(ctx).Model(&Ticket{}).
+		Select("created_by, org_id").
+		Where("active = ? AND (board_id IS NULL OR board_id = '')", true).
+		Group("created_by, org_id").
+		Scan(&scopes).Error; err != nil {
+		return err
+	}
+	for _, s := range scopes {
+		b, err := getOrCreateDefaultBoard(ctx, s.CreatedBy, s.OrgID)
+		if err != nil {
+			return err
+		}
+		if err := connect().WithContext(ctx).Model(&Ticket{}).
+			Where("active = ? AND (board_id IS NULL OR board_id = '') AND created_by = ? AND org_id = ?", true, s.CreatedBy, s.OrgID).
+			Update("board_id", b.BoardID).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // getTicket returns a single active ticket by ID with an empty comments slice.

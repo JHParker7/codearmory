@@ -15,6 +15,11 @@ export interface ConfirmOptions {
   cancelLabel?: string;
   /** Accent for the confirm button. Defaults to "red". */
   tone?: Tone;
+  /**
+   * When set, the user must type this exact string before the confirm button
+   * unlocks — a type-to-confirm guard for high-consequence deletes.
+   */
+  requireText?: string;
 }
 
 /**
@@ -29,23 +34,29 @@ export function ConfirmDialog({
   confirmLabel = 'delete',
   cancelLabel = 'cancel',
   tone = 'red',
+  requireText,
   onConfirm,
   onCancel,
 }: ConfirmOptions & { onConfirm: () => void; onCancel: () => void }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [typed, setTyped] = useState('');
   const accent = tone === 'amber' ? T.amber : T.red;
   const accentSoft = tone === 'amber' ? T.amberSoft : T.redSoft;
+  // Type-to-confirm: lock the destructive action until the typed text matches.
+  const locked = requireText != null && typed !== requireText;
 
   useEffect(() => {
-    // Focus cancel so Enter activates the safe choice; Escape also cancels. The
-    // destructive action is only reachable by an explicit click (or Tab+Enter).
-    cancelRef.current?.focus();
+    // With type-to-confirm, focus the input so the user can start typing; else
+    // focus cancel so Enter activates the safe choice. Escape always cancels.
+    if (requireText != null) inputRef.current?.focus();
+    else cancelRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.stopPropagation(); onCancel(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onConfirm, onCancel]);
+  }, [onConfirm, onCancel, requireText]);
 
   return (
     <div onClick={onCancel} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -55,13 +66,26 @@ export function ConfirmDialog({
           <button onClick={onCancel} style={{ background: 'transparent', border: 0, color: T.faint, cursor: 'pointer', fontSize: 16 }}>×</button>
         </div>
         <div style={{ padding: '18px 20px', fontFamily: T.mono, fontSize: 12, lineHeight: 1.6, color: T.dim }}>{message}</div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '0 20px 18px' }}>
+        {requireText != null && (
+          <div style={{ padding: '0 20px 4px' }}>
+            <input
+              ref={inputRef}
+              value={typed}
+              onChange={e => setTyped(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !locked) onConfirm(); }}
+              placeholder={requireText}
+              aria-label="Type the name to confirm"
+              style={{ width: '100%', boxSizing: 'border-box', background: T.bg, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '7px 10px' }}
+            />
+          </div>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '18px 20px 18px' }}>
           <button ref={cancelRef} onClick={onCancel}
             style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '6px 14px', cursor: 'pointer' }}>
             [ {cancelLabel} ]
           </button>
-          <button onClick={onConfirm}
-            style={{ background: accentSoft, border: `1px solid ${accent}`, color: accent, fontFamily: T.mono, fontSize: 11, padding: '6px 14px', cursor: 'pointer' }}>
+          <button onClick={onConfirm} disabled={locked}
+            style={{ background: accentSoft, border: `1px solid ${accent}`, color: accent, fontFamily: T.mono, fontSize: 11, padding: '6px 14px', cursor: locked ? 'not-allowed' : 'pointer', opacity: locked ? 0.45 : 1 }}>
             [ {confirmLabel} ]
           </button>
         </div>

@@ -332,8 +332,8 @@ paths:
       operationId: createRuntimeBackend
       description: |
         Creates a runtime backend (admin only). Returns `409` if one with the same
-        name already exists. A `proxmox` backend validates its required config keys
-        and the `token` secret_ref.
+        name already exists. A `kata` or `gvisor` backend validates that its
+        `runtime_class` config key is set.
 
         Permission: `createRuntimeBackend` on `forge/runtime-backends`.
       requestBody:
@@ -444,6 +444,104 @@ paths:
               schema:
                 type: string
 
+  /volumes:
+    post:
+      operationId: createVolume
+      summary: Create a shared workspace volume
+      description: |
+        Provisions a run-scoped shared volume (a RAM/tmpfs-backed PVC in Kubernetes,
+        a tmpfs named volume in Docker) that a workflow's steps attach via the
+        `volumes` key on a run. Enforces the admin's per-workflow total-size cap
+        (`FORGE_MAX_WORKFLOW_VOLUME_MB`): a request that would push the workflow's
+        summed volume size over the cap is rejected with 409. Creating the same
+        `(workflow_id, name)` twice is idempotent.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVolumeRequest'
+      responses:
+        '201':
+          description: Volume created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Volume'
+        '200':
+          description: Volume already existed (idempotent create)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Volume'
+        '400':
+          description: Invalid request
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Per-workflow volume size cap exceeded
+    get:
+      operationId: listVolume
+      summary: List a workflow's active volumes
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: workflow_id
+          in: query
+          schema:
+            type: string
+          description: Restrict to this workflow's volumes (all active volumes when omitted).
+      responses:
+        '200':
+          description: Volumes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Volume'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      operationId: deleteVolume
+      summary: Tear down a workflow's volumes
+      description: |
+        Deletes every active volume for `workflow_id` (the run-teardown path), or a
+        single one when `name` is also given. Idempotent — an already-gone volume is
+        a no-op.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: workflow_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: name
+          in: query
+          schema:
+            type: string
+          description: Delete only this named volume within the workflow.
+      responses:
+        '200':
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: integer
+        '400':
+          description: workflow_id is required
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -541,6 +639,142 @@ components:
             `checkout.env` (default `GIT_CLONE_URL`), typically populated by a
             `git:`/`gitea:` `secret_ref`. Requires `git` in the image and a shell
             (`-c`) command; a clone failure fails the whole execution.
+        volumes:
+          type: array
+          items:
+            $ref: '#/components/schemas/VolumeMount'
+          description: |
+            Shared workspace volumes to attach to the sandbox. Each references a
+            volume created via `POST /volumes` by its `(workflow_id, name)` handle
+            and mounts it at `mount_path`. Used to share a checked-out repo and
+            build artifacts between the steps of a workflow run. Each referenced
+            volume must already exist and belong to the caller.
+        build:
+          allOf:
+            - $ref: '#/components/schemas/BuildSpec'
+          description: |
+            When set, this is an image-build execution: forge derives `image` (its
+            Kaniko builder) and `command` (the assembled build invocation)
+            from the spec, so any `image`/`command` you send are ignored. Built with
+            Kaniko (daemonless). Requires a **privileged** runner class on a **kata**
+            or **gvisor** backend (root + writable rootfs, safe behind the VM/Sentry
+            boundary); rejected on the shared-kernel docker/kubernetes backends.
+
+    BuildSpec:
+      type: object
+      description: Container-image build configuration (see SubmitRequest.build).
+      properties:
+        context:
+          type: string
+          description: Build-context directory (default /workspace — usually an attached shared volume).
+          example: /workspace
+        dockerfile:
+          type: string
+          description: Dockerfile path relative to the context. Default "Dockerfile".
+          example: docker/Dockerfile
+        destinations:
+          type: array
+          items:
+            type: string
+          description: Image refs to build and push. Required unless no_push.
+          example: [registry.example.com/acme/app:1.2.3, registry.example.com/acme/app:latest]
+        build_args:
+          type: object
+          additionalProperties:
+            type: string
+          description: Dockerfile ARG values.
+        target:
+          type: string
+          description: Stage to build in a multi-stage Dockerfile (optional).
+        registry_auth:
+          type: string
+          description: |
+            Name of the env var (set via a `secret_refs` entry) holding a Docker
+            config.json used to authenticate the push. Default REGISTRY_AUTH.
+            Required when pushing.
+        no_push:
+          type: boolean
+          description: Build without pushing (a validation/PR build).
+
+    VolumeMount:
+      type: object
+      required: [workflow_id, name]
+      description: Attaches a shared workspace volume to an execution.
+      properties:
+        workflow_id:
+          type: string
+          description: The workflow-run scope the volume was created under.
+        name:
+          type: string
+          description: The volume's logical handle within the workflow (a DNS-1123 label).
+          example: workspace
+        mount_path:
+          type: string
+          description: Absolute path to mount the volume at. Defaults to /workspace.
+          example: /workspace
+        read_only:
+          type: boolean
+          description: Mount read-only. Defaults to false.
+        workdir:
+          type: boolean
+          description: |
+            Set the container working directory to `mount_path`, so the command
+            runs inside the shared volume (e.g. a checked-out repo). At most one
+            attached volume per execution may set this.
+
+    CreateVolumeRequest:
+      type: object
+      required: [workflow_id]
+      properties:
+        workflow_id:
+          type: string
+          description: The workflow-run scope. Volumes sharing it count against the per-workflow size cap and are torn down together.
+        name:
+          type: string
+          description: Logical handle within the workflow (DNS-1123 label). Defaults to `workspace`.
+          example: workspace
+        size_mb:
+          type: integer
+          description: Requested size in MB (floored to 16, bounded by FORGE_MAX_VOLUME_MB).
+          example: 1024
+        medium:
+          type: string
+          enum: [memory, disk]
+          description: '`memory` (default) is RAM/tmpfs-backed; `disk` is node-disk-backed.'
+        mount_path:
+          type: string
+          description: Default mount path recorded for the volume. Defaults to /workspace.
+        runner_class:
+          type: string
+          description: Resolve the backend from this runner class (if `backend` is unset).
+        backend:
+          type: string
+          description: Runtime backend to provision the volume on. Defaults to the class's backend, else `default`.
+
+    Volume:
+      type: object
+      properties:
+        resource_name:
+          type: string
+          description: The concrete backend object (PVC / docker volume) name, derived from (workflow_id, name).
+        workflow_id:
+          type: string
+        name:
+          type: string
+        size_mb:
+          type: integer
+        medium:
+          type: string
+        mount_path:
+          type: string
+        backend:
+          type: string
+        status:
+          type: string
+          enum: [active, deleted]
+        created_at:
+          type: string
+          format: date-time
 
     CheckoutSpec:
       type: object
@@ -671,8 +905,8 @@ components:
         disk_gb:
           type: integer
           description: |
-            Disk size in gigabytes. Used only by the proxmox backend (VM disk
-            size); ignored by the docker and kubernetes backends.
+            Reserved for a future VM-style backend (per-class disk size);
+            currently ignored by all backends.
           example: 10
         backend:
           type: string
@@ -722,8 +956,8 @@ components:
         disk_gb:
           type: integer
           description: |
-            VM disk size in gigabytes for the proxmox backend; ignored by docker
-            and kubernetes. Minimum 0 (0 = use the template disk unchanged).
+            Reserved for a future VM-style backend (per-class disk size);
+            currently ignored by all backends. Minimum 0.
           minimum: 0
           example: 20
         backend:
@@ -743,12 +977,12 @@ components:
         name:
           type: string
           description: Unique backend name. Runner classes reference it by name.
-          example: proxmox-prod
+          example: kata-prod
         type:
           type: string
-          enum: [docker, kubernetes, proxmox, kata, gvisor]
+          enum: [docker, kubernetes, kata, gvisor]
           description: Runtime implementation this backend selects.
-          example: proxmox
+          example: kata
         enabled:
           type: boolean
           description: Whether the backend may be used by new jobs.
@@ -758,21 +992,13 @@ components:
           additionalProperties:
             type: string
           description: |
-            Non-secret backend settings. For proxmox:
-            `url`, `node`, `template_vmid`, `storage`, `bridge`, and optionally
-            `boot_disk` (disk id to resize, default `scsi0`), `vlan`,
-            `clone_mode` (`linked`|`full`), `egress_proxy`, `tls_insecure`,
-            `ca_file`. For kata: `runtime_class` (required, the Kubernetes
-            RuntimeClass, e.g. `kata-qemu`). For gvisor: `runtime_class`
+            Non-secret backend settings. For kata: `runtime_class` (required, the
+            Kubernetes RuntimeClass, e.g. `kata-qemu`). For gvisor: `runtime_class`
             (required, the gVisor RuntimeClass, e.g. `gvisor` — no /dev/kvm
             needed). kubernetes accepts an optional `runtime_class` (else
             K8S_RUNTIME_CLASS). docker reads env instead.
           example:
-            url: https://pve:8006/api2/json
-            node: pve
-            template_vmid: "9000"
-            storage: local-lvm
-            bridge: vmbr1
+            runtime_class: kata-qemu
         secret_refs:
           type: object
           additionalProperties:
@@ -780,10 +1006,9 @@ components:
           description: |
             Maps a logical key to the NAME of an environment variable read via the
             secret() convention — only env var names are stored and returned, never
-            secret values. Proxmox requires `token` → the var holding the PVE API
-            token.
-          example:
-            token: PROXMOX_TOKEN
+            secret values. The built-in backends (docker/kubernetes/kata/gvisor)
+            need none.
+          example: {}
         created_at:
           type: string
           format: date-time
@@ -798,11 +1023,11 @@ components:
         name:
           type: string
           description: Unique backend name. Ignored on PUT (name comes from path).
-          example: proxmox-prod
+          example: kata-prod
         type:
           type: string
-          enum: [docker, kubernetes, proxmox, kata, gvisor]
-          example: proxmox
+          enum: [docker, kubernetes, kata, gvisor]
+          example: kata
         enabled:
           type: boolean
           example: true

@@ -109,3 +109,17 @@ func TestSubstituteWith_EmptyContextReturnsInput(t *testing.T) {
 		t.Errorf("title = %v, want untouched with an empty context", out["title"])
 	}
 }
+
+func TestSubstitute_RunID(t *testing.T) {
+	sc := substContext{runID: "run-abc-123"}
+	if got := substitute("workflow=${run_id}", sc); got != "workflow=run-abc-123" {
+		t.Errorf("${run_id} = %q, want workflow=run-abc-123", got)
+	}
+	if got := substitute("ws-${run.id}", sc); got != "ws-run-abc-123" {
+		t.Errorf("${run.id} = %q, want ws-run-abc-123", got)
+	}
+	// Unset run id leaves the reference untouched.
+	if got := substitute("${run_id}", substContext{}); got != "${run_id}" {
+		t.Errorf("unset run id = %q, want the literal ${run_id}", got)
+	}
+}

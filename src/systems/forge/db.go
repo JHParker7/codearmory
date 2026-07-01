@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -225,13 +226,14 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		SecretRefs  []byte `gorm:"column:secret_refs"`
 		OutputEnv   []byte `gorm:"column:output_env"`
 		Checkout    []byte `gorm:"column:checkout"`
+		Volumes     []byte `gorm:"column:volumes"`
 	}
 	var raw pendingRow
 
 	// FOR UPDATE SKIP LOCKED lets multiple workers run in parallel: each goroutine
 	// locks exactly one pending row and skips any already locked by a sibling.
 	result := tx.Raw(`
-		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class, backend, org_id, secret_refs, output_env, checkout
+		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class, backend, org_id, secret_refs, output_env, checkout, volumes
 		FROM executions WHERE status = 'pending' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
 	`).Scan(&raw)
 	if result.Error != nil {
@@ -300,6 +302,18 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			slog.ErrorContext(ctx, "worker: unmarshal checkout", "execution_id", exec.ExecutionID, "error", err)
+			return Execution{}, false
+		}
+	}
+	// volumes drives shared-workspace attachment in the runtime; a '[]'/NULL column
+	// leaves Volumes nil (no shared storage). Like output_env, it must be loaded here
+	// or the worker mounts nothing and the run can't see the checkout.
+	if len(raw.Volumes) > 0 {
+		if err := json.Unmarshal(raw.Volumes, &exec.Volumes); err != nil {
+			tx.Rollback() //nolint:errcheck
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			slog.ErrorContext(ctx, "worker: unmarshal volumes", "execution_id", exec.ExecutionID, "error", err)
 			return Execution{}, false
 		}
 	}
@@ -494,4 +508,137 @@ func (b RuntimeBackend) List(ctx context.Context, _ int, _ int) ([]db, error) {
 		rows[i] = be
 	}
 	return rows, nil
+}
+
+// ── Volume ────────────────────────────────────────────────────────────────────
+
+func (v Volume) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.volume.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("volume.resource_name", v.ResourceName))
+	if err := connect().WithContext(ctx).Create(&v).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (v Volume) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.volume.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("volume.resource_name", v.ResourceName))
+	if err := connect().WithContext(ctx).Save(&v).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (v Volume) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.volume.remove")
+	defer span.End()
+	span.SetAttributes(attribute.String("volume.resource_name", v.ResourceName))
+	result := connect().WithContext(ctx).Where("resource_name = ?", v.ResourceName).Delete(&Volume{})
+	if result.Error != nil {
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// Get finds a volume by ResourceName.
+func (v Volume) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.volume.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("volume.resource_name", v.ResourceName))
+	var out Volume
+	if err := connect().WithContext(ctx).Where("resource_name = ?", v.ResourceName).First(&out).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return out, nil
+}
+
+// List returns the active volumes for the WorkflowID set on the receiver, ordered
+// by creation. An empty WorkflowID lists all active volumes.
+func (v Volume) List(ctx context.Context, _ int, _ int) ([]db, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.volume.list")
+	defer span.End()
+	q := connect().WithContext(ctx).Where("status = ?", volumeStatusActive)
+	if v.WorkflowID != "" {
+		q = q.Where("workflow_id = ?", v.WorkflowID)
+	}
+	var volumes []Volume
+	if err := q.Order("created_at").Find(&volumes).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	rows := make([]db, len(volumes))
+	for i, vol := range volumes {
+		rows[i] = vol
+	}
+	return rows, nil
+}
+
+// sumActiveWorkflowVolumeMB totals the size of a workflow's active volumes — the
+// figure the per-workflow size cap is checked against before a new create.
+func sumActiveWorkflowVolumeMB(ctx context.Context, workflowID string) (int64, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.volume.sum_workflow")
+	defer span.End()
+	var total *int64
+	if err := connect().WithContext(ctx).
+		Model(&Volume{}).
+		Where("workflow_id = ? AND status = ?", workflowID, volumeStatusActive).
+		Select("COALESCE(SUM(size_mb), 0)").
+		Scan(&total).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return 0, err
+	}
+	if total == nil {
+		return 0, nil
+	}
+	return *total, nil
+}
+
+// getActiveVolume resolves a volume by its (workflowID, name) handle for attach
+// validation. Only active volumes are returned.
+func getActiveVolume(ctx context.Context, workflowID, name string) (Volume, error) {
+	var out Volume
+	err := connect().WithContext(ctx).
+		Where("workflow_id = ? AND name = ? AND status = ?", workflowID, name, volumeStatusActive).
+		First(&out).Error
+	return out, err
+}
+
+// markVolumeDeleted flips a volume's row to deleted after its backend resource is
+// gone, so it stops counting against the cap and a repeat delete is a no-op.
+func markVolumeDeleted(ctx context.Context, resourceName string) error {
+	return connect().WithContext(ctx).Exec(
+		`UPDATE volumes SET status = ? WHERE resource_name = ?`, volumeStatusDeleted, resourceName,
+	).Error
+}
+
+// listReapableVolumes returns active volumes created before cutoff — orphans whose
+// workflow ended without tearing them down. The reaper deletes their backend
+// resource then marks the row deleted.
+func listReapableVolumes(ctx context.Context, cutoff time.Time) ([]Volume, error) {
+	var volumes []Volume
+	err := connect().WithContext(ctx).
+		Where("status = ? AND created_at < ?", volumeStatusActive, cutoff).
+		Find(&volumes).Error
+	return volumes, err
 }

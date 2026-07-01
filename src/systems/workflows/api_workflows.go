@@ -26,8 +26,9 @@ import (
 // created earlier. Bump it whenever collectWorkflowPermissions changes what it
 // grants; handleTriggerRun re-provisions any workflow whose stored role predates
 // the current version. v1 added the async-poll read grant (getExecution) that
-// stops forge steps from hanging at "running".
-const workflowRolePermsVersion = 1
+// stops forge steps from hanging at "running". v2 added the deleteVolume companion
+// grant so a run that creates shared workspace volumes can tear them down at the end.
+const workflowRolePermsVersion = 2
 
 // collectWorkflowPermissions returns the deduplicated set of gatekeeper
 // permissions declared by the workflow's step actions in the current catalog.
@@ -74,6 +75,18 @@ func collectWorkflowPermissions(steps []WorkflowStep) []PermissionSpec {
 			if _, dup := seen[pollKey]; !dup {
 				seen[pollKey] = struct{}{}
 				out = append(out, pollSpec)
+			}
+		}
+
+		// A create-volume step's run tears its volumes down when it finishes (DELETE
+		// /volumes?workflow_id=...). Grant the matching deleteVolume on the same
+		// resource so teardown isn't 403'd and volumes linger until the age reaper.
+		if p.Action == "createVolume" {
+			delSpec := PermissionSpec{Service: p.Service, Action: "deleteVolume", Resource: p.Resource}
+			delKey := delSpec.Service + ":" + delSpec.Action + ":" + delSpec.Resource
+			if _, dup := seen[delKey]; !dup {
+				seen[delKey] = struct{}{}
+				out = append(out, delSpec)
 			}
 		}
 	}

@@ -15,6 +15,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
+  # Shared workspace volumes are backed by PersistentVolumeClaims that forge
+  # provisions (POST /volumes), mounts into execution pods, and deletes at run end
+  # (plus an age-based reaper for orphans). Without these verbs the create-volume
+  # step fails with a "forbidden" from the API server.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "watch", "delete"]
   # Warning events on a Job/Pod carry the real reason a kata or gvisor run failed
   # (FailedCreatePodSandBox, Evicted, a missing RuntimeClass); forge reads them to
   # surface a useful diagnostic instead of an opaque "no pod found".

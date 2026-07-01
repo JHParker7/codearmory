@@ -26,10 +26,11 @@ type substContext struct {
 	inputs  map[string]string // run-level inputs, by name
 	outputs map[string]string // earlier step outputs, by step name
 	matrix  map[string]string // matrix bindings for this execution, by var name
+	runID   string            // this run's id, exposed as ${run_id} / ${run.id}
 }
 
 func (sc substContext) empty() bool {
-	return len(sc.inputs) == 0 && len(sc.outputs) == 0 && len(sc.matrix) == 0
+	return len(sc.inputs) == 0 && len(sc.outputs) == 0 && len(sc.matrix) == 0 && sc.runID == ""
 }
 
 var refPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
@@ -86,6 +87,11 @@ func (sc substContext) resolve(expr string) (string, bool) {
 			}
 		}
 		return "", false
+	}
+	// ${run_id} / ${run.id} expose the run's id — used to scope a shared workspace
+	// volume to the run (workflow_id) and to name it deterministically across steps.
+	if expr == "run_id" || expr == "run.id" {
+		return sc.runID, sc.runID != ""
 	}
 	// Bare ${NAME} resolves to a run input (backward compatible).
 	v, ok := sc.inputs[expr]

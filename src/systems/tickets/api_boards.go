@@ -270,12 +270,19 @@ func handleDeleteBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Orphan the board's tickets (board_id → NULL) before soft-deleting the board
-	// so they remain accessible under the "unassigned" pile.
-	if err := unassignBoardTickets(ctx, id); err != nil {
+	// Deleting a board cascade-deletes its tickets, so require the caller to
+	// re-type the board's exact name as confirmation (via ?confirm=<name>).
+	if r.URL.Query().Get("confirm") != b.Name {
+		http.Error(w, "confirmation required: pass ?confirm=<board name> matching the board's name to delete it and its tickets", http.StatusBadRequest)
+		return
+	}
+
+	// Boards are required, so a board's tickets are cascade-deleted with it
+	// rather than orphaned to a board-less "unassigned" pile.
+	if err := deleteBoardTickets(ctx, id); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.ErrorContext(ctx, "delete board: unassign tickets", "board_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete board: delete tickets", "board_id", id, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete board", http.StatusInternalServerError)
 		return
 	}

@@ -27,11 +27,9 @@ type runtimeBackendBody struct {
 
 func validateRuntimeBackendBody(b runtimeBackendBody) error {
 	if !validRuntimeTypes[b.Type] {
-		return fmt.Errorf("type must be one of: docker, kubernetes, proxmox, kata, gvisor")
+		return fmt.Errorf("type must be one of: docker, kubernetes, kata, gvisor")
 	}
 	switch b.Type {
-	case "proxmox":
-		return validateProxmoxBackend(b)
 	case "kata":
 		return validateKataBackend(b)
 	case "gvisor":

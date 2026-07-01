@@ -63,7 +63,7 @@ var errBackendLookup = errors.New("backend lookup failed")
 
 // validatePrivilegedBackend rejects a privileged runner class that does not target
 // a kernel-isolated backend. Root + writable rootfs is only safe when the job has
-// its own kernel (a VM for kata/proxmox, the gVisor Sentry for gvisor); on
+// its own kernel (a microVM for kata, the gVisor Sentry for gvisor); on
 // shared-kernel container backends (docker/kubernetes/runc) it would be a
 // host-kernel escape risk. This is the user-facing guard; buildJob enforces the
 // same rule at runtime as a second layer (it drops privileged off a shared-kernel
@@ -81,7 +81,7 @@ func validatePrivilegedBackend(ctx context.Context, backend string, privileged b
 		return fmt.Errorf("%w: %v", errBackendLookup, err)
 	}
 	if b := row.(RuntimeBackend); !isKernelIsolatedBackendType(b.Type) {
-		return fmt.Errorf("privileged is only allowed on kernel-isolated backends (kata, proxmox, gvisor); backend %q is type %q", backend, b.Type)
+		return fmt.Errorf("privileged is only allowed on kernel-isolated backends (kata, gvisor); backend %q is type %q", backend, b.Type)
 	}
 	return nil
 }

@@ -74,6 +74,23 @@ func normalizeBoardID(ctx context.Context, boardID *string, userID, orgID string
 	return &id, true, nil
 }
 
+// resolveCreateBoardID resolves the board a ticket will be placed on. Every
+// ticket must belong to a board: a nil or empty requested board falls back to
+// the caller's default board (created on first use), while a named board must
+// exist and be accessible. The bool is false when a named board is missing or
+// inaccessible (caller should 400); a non-nil error is a DB failure (500).
+func resolveCreateBoardID(ctx context.Context, boardID *string, userID, orgID string) (*string, bool, error) {
+	if boardID == nil || *boardID == "" {
+		b, err := getOrCreateDefaultBoard(ctx, userID, orgID)
+		if err != nil {
+			return nil, false, err
+		}
+		id := b.BoardID
+		return &id, true, nil
+	}
+	return normalizeBoardID(ctx, boardID, userID, orgID)
+}
+
 // boardScope flattens a ticket's resolved board pointer to the string board
 // scope used by the field-def helpers ("" = the org/global status set).
 func boardScope(boardID *string) string {
@@ -125,8 +142,20 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the board first so the status is scoped to the board's own columns.
-	boardID, boardOK, err := normalizeBoardID(ctx, req.BoardID, userID, orgID)
+	// Validate priority (not board-scoped) up front, before resolving the board.
+	priority := req.Priority
+	if priority == "" {
+		priority = PriorityMedium
+	}
+	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, "", validPriorities), priority) {
+		http.Error(w, "invalid priority", http.StatusBadRequest)
+		return
+	}
+
+	// Every ticket must belong to a board: resolve the requested board (or fall
+	// back to the caller's default board) so the status can be scoped to that
+	// board's own columns.
+	boardID, boardOK, err := resolveCreateBoardID(ctx, req.BoardID, userID, orgID)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "board lookup failed")
@@ -148,14 +177,6 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	if !slices.Contains(statusValues, status) {
 		http.Error(w, "invalid status", http.StatusBadRequest)
-		return
-	}
-	priority := req.Priority
-	if priority == "" {
-		priority = PriorityMedium
-	}
-	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, "", validPriorities), priority) {
-		http.Error(w, "invalid priority", http.StatusBadRequest)
 		return
 	}
 
@@ -358,11 +379,12 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 
 	// Validate a board change up-front (before any mutation) so the status can be
 	// scoped to the resulting board's own columns. A nil pointer means the field
-	// was omitted (keep current); an explicit "" clears the board.
+	// was omitted (keep current); an explicit "" re-homes the ticket to the
+	// caller's default board, since every ticket must belong to a board.
 	boardChanged := req.BoardID != nil
 	var newBoardID *string
 	if boardChanged {
-		bid, boardOK, err := normalizeBoardID(ctx, req.BoardID, userID, orgID)
+		bid, boardOK, err := resolveCreateBoardID(ctx, req.BoardID, userID, orgID)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "board lookup failed")

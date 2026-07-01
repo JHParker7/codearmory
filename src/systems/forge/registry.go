@@ -71,23 +71,21 @@ func (r *runtimeRegistry) Evict(name string) {
 // (root + writable rootfs): on a shared-kernel container backend (docker/kubernetes)
 // that would be a host escape. This is the single source of truth consulted by both
 // the API gate (validatePrivilegedBackend) and the runtime build below, so the two
-// never disagree. "kata" pins a VM-isolating RuntimeClass and "proxmox" boots a
-// throwaway VM per job (a guest kernel); "gvisor" pins a gVisor RuntimeClass whose
-// userspace kernel (the Sentry) services every syscall the job makes — a different
-// mechanism but the same guarantee that container-root is contained away from the
-// host kernel. (gVisor is a kernel boundary, not a network one — it does not confine
-// egress, so unlike the VM backends it keeps the egress proxy; that is decided in
-// Helm/builder, not here.)
+// never disagree. "kata" pins a VM-isolating RuntimeClass (a hardware-virtualized
+// microVM guest kernel); "gvisor" pins a gVisor RuntimeClass whose userspace kernel
+// (the Sentry) services every syscall the job makes — a different mechanism but the
+// same guarantee that container-root is contained away from the host kernel. (gVisor
+// is a kernel boundary, not a network one — it does not confine egress, so unlike the
+// VM backends it keeps the egress proxy; that is decided in Helm/builder, not here.)
 func isKernelIsolatedBackendType(t string) bool {
-	return t == "kata" || t == "proxmox" || t == "gvisor"
+	return t == "kata" || t == "gvisor"
 }
 
 // buildRuntime constructs the concrete Runtime for a backend. docker and
 // kubernetes keep reading their existing env vars (FORGE_NETWORK_MODE,
-// K8S_NAMESPACE, …) so an existing single-runtime deployment is unchanged; the
-// proxmox case reads backend.Config / SecretRefs. kata is the kubernetes runtime
-// pinned to a VM-isolating RuntimeClass from config (validateKataBackend
-// guarantees it is set).
+// K8S_NAMESPACE, …) so an existing single-runtime deployment is unchanged. kata
+// is the kubernetes runtime pinned to a VM-isolating RuntimeClass from config
+// (validateKataBackend guarantees it is set).
 func buildRuntime(b RuntimeBackend) (Runtime, error) {
 	switch b.Type {
 	case "kubernetes":
@@ -126,9 +124,7 @@ func buildRuntime(b RuntimeBackend) (Runtime, error) {
 		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], isKernelIsolatedBackendType(b.Type))
 	case "docker":
 		return newDockerRuntime()
-	case "proxmox":
-		return newProxmoxRuntime(b)
 	default:
-		return nil, fmt.Errorf("unknown runtime type %q: expected docker, kubernetes, proxmox, gvisor or kata", b.Type)
+		return nil, fmt.Errorf("unknown runtime type %q: expected docker, kubernetes, gvisor or kata", b.Type)
 	}
 }

@@ -19,8 +19,54 @@ export const WITH_KEY_PREFIX = 'with.';
 export const RAW_WITH_KEY = '__raw';
 
 /** Controls how a schema field's text value is parsed into the with map.
- * `list` splits a comma-separated string into a string array. */
-export type StepFieldKind = 'text' | 'int' | 'env' | 'json' | 'list';
+ * `list` splits a comma-separated string into a string array;
+ * `volumeAttach` turns a compact "name[:/mount]" spec into a shared-volume attach. */
+export type StepFieldKind = 'text' | 'int' | 'env' | 'json' | 'list' | 'volumeAttach';
+
+/**
+ * A shared workspace volume is scoped to the run: the workflows worker substitutes
+ * ${run_id} at dispatch, so the create-volume step and every attach agree on one
+ * per-run volume. DEFAULT_MOUNT_PATH is where an attach lands when no path is given.
+ */
+export const RUN_ID_REF = '${run_id}';
+export const DEFAULT_MOUNT_PATH = '/workspace';
+export const DEFAULT_VOLUME_NAME = 'workspace';
+
+/** Env var (set via a secret_ref) a build reads its registry Docker config.json from;
+ * the build-image form wires the chosen org secret to it. */
+export const REGISTRY_AUTH_ENV = 'REGISTRY_AUTH';
+
+/** The flat build-image form keys that nest under the `build` object of forge's
+ * /executions body (volumes and runner_class stay top-level). */
+const BUILD_IMAGE_FIELDS = ['destinations', 'dockerfile', 'context', 'build_args', 'target'];
+
+/**
+ * Turns a compact "name[:/mount]" attach spec into forge's `volumes` array: one
+ * shared volume, scoped to the run (${run_id}), made the working directory. Returns
+ * undefined for a blank spec so the key is dropped.
+ */
+export function volumeAttachWith(raw: string): Array<Record<string, unknown>> | undefined {
+  const spec = raw.trim();
+  if (spec === '') return undefined;
+  const colon = spec.indexOf(':');
+  const name = (colon >= 0 ? spec.slice(0, colon) : spec).trim() || DEFAULT_VOLUME_NAME;
+  const mount = (colon >= 0 ? spec.slice(colon + 1) : '').trim() || DEFAULT_MOUNT_PATH;
+  return [{ workflow_id: RUN_ID_REF, name, mount_path: mount, workdir: true }];
+}
+
+/**
+ * Reverses volumeAttachWith for the edit form: renders the first attached volume back
+ * to "name" or "name:/mount". Returns '' when the value isn't a single-volume attach,
+ * leaving it to the advanced With field.
+ */
+export function volumeAttachFromWith(value: unknown): string {
+  if (!Array.isArray(value) || value.length !== 1) return '';
+  const m = value[0] as Record<string, unknown>;
+  const name = typeof m?.name === 'string' ? m.name : '';
+  if (name === '') return '';
+  const mount = typeof m?.mount_path === 'string' ? m.mount_path : '';
+  return mount === '' || mount === DEFAULT_MOUNT_PATH ? name : `${name}:${mount}`;
+}
 
 /**
  * Names a catalog that backs a field with a picker instead of free text:
@@ -107,8 +153,25 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
     { key: 'image', label: 'Image', placeholder: 'ubuntu:22.04 (required)', required: true, catalog: 'image', config: true },
     { key: 'run', label: 'Run', placeholder: 'go test ./...', required: true, multiline: true, config: true },
     { key: 'runner_class', label: 'Runner', placeholder: 'runner class (optional, default standard)', config: true },
+    { key: 'volumes', label: 'Attach volume', placeholder: 'workspace or workspace:/src (optional)', kind: 'volumeAttach', config: true },
     { key: 'env', label: 'Input variables', placeholder: 'REPO_URL= BRANCH=main', kind: 'env' },
     { key: 'output_env', label: 'Output variables', placeholder: 'BUILD_ID, VERSION', kind: 'list', output: true },
+  ],
+  'forge/create-volume': [
+    { key: 'name', label: 'Volume name', placeholder: 'workspace (default)', config: true },
+    { key: 'size_mb', label: 'Size MB', placeholder: '1024 (optional)', kind: 'int', config: true },
+    { key: 'medium', label: 'Medium', placeholder: 'memory (default) | disk', config: true },
+    { key: 'mount_path', label: 'Mount path', placeholder: '/workspace (default)', config: true },
+  ],
+  'forge/build-image': [
+    { key: 'destinations', label: 'Push to', placeholder: 'reg.io/acme/app:1.0, reg.io/acme/app:latest (required)', required: true, kind: 'list', config: true },
+    { key: 'dockerfile', label: 'Dockerfile', placeholder: 'Dockerfile (default, relative to context)', config: true },
+    { key: 'context', label: 'Context', placeholder: '/workspace (default)', config: true },
+    { key: 'build_args', label: 'Build args', placeholder: 'VERSION=1.0 COMMIT=abc', kind: 'env', config: true },
+    { key: 'target', label: 'Target stage', placeholder: 'multi-stage target (optional)', config: true },
+    { key: 'registry_secret', label: 'Registry secret', placeholder: 'org secret holding a docker config.json (to push)', config: true },
+    { key: 'volumes', label: 'Source volume', placeholder: 'workspace or workspace:/src (attach the checkout)', kind: 'volumeAttach', config: true },
+    { key: 'runner_class', label: 'Build runner', placeholder: 'privileged kata/gvisor class (required)', required: true, config: true },
   ],
   'tickets/create': [
     { key: 'title', label: 'Title', placeholder: 'Build failed', required: true },
@@ -188,26 +251,37 @@ export function formValsFromWith(action: string, withMap: Record<string, unknown
   const vals: Record<string, string> = {};
   const fields = schemaForAction(action);
   const typedKeys = new Set<string>();
+  // Flatten nested action shapes (build-image's `build` object + registry secret_ref)
+  // back to the flat form fields the schema names.
+  const wm = flattenStepWith(action, withMap);
 
   for (const f of fields) {
     if (f.key === RAW_WITH_KEY) continue;
     typedKeys.add(f.key);
-    if (!(f.key in withMap)) continue;
-    const v = withMap[f.key];
+    if (!(f.key in wm)) continue;
+    const v = wm[f.key];
     if (f.kind === 'env' && v && typeof v === 'object' && !Array.isArray(v)) {
       vals[WITH_KEY_PREFIX + f.key] = Object.entries(v as Record<string, unknown>)
         .map(([k, val]) => `${k}=${val}`).join(' ');
     } else if (f.kind === 'list' && Array.isArray(v)) {
       vals[WITH_KEY_PREFIX + f.key] = (v as unknown[]).map(String).join(', ');
+    } else if (f.kind === 'volumeAttach') {
+      vals[WITH_KEY_PREFIX + f.key] = volumeAttachFromWith(v);
     } else {
       vals[WITH_KEY_PREFIX + f.key] = typeof v === 'string' ? v : JSON.stringify(v);
     }
   }
 
+  // A create-volume step's workflow_id defaults to ${run_id} and has no field of its
+  // own; don't spill that default into the advanced With JSON on edit.
+  if (action === 'forge/create-volume' && wm.workflow_id === RUN_ID_REF) {
+    typedKeys.add('workflow_id');
+  }
+
   // Keys the typed fields didn't claim go into the advanced With JSON field, the
   // same escape hatch buildStepWith reads them back from.
   const leftover: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(withMap)) {
+  for (const [k, v] of Object.entries(wm)) {
     if (!typedKeys.has(k)) leftover[k] = v;
   }
   if (fields.some(f => f.key === RAW_WITH_KEY) && Object.keys(leftover).length > 0) {
@@ -276,6 +350,11 @@ export function buildStepWith(action: string, valueOf: (key: string) => string):
       case 'list':
         withMap[f.key] = raw.split(',').map(s => s.trim()).filter(Boolean);
         break;
+      case 'volumeAttach': {
+        const attach = volumeAttachWith(raw);
+        if (attach) withMap[f.key] = attach;
+        break;
+      }
       default: // text
         withMap[f.key] = raw;
     }
@@ -287,5 +366,62 @@ export function buildStepWith(action: string, valueOf: (key: string) => string):
       if (!(k in withMap)) withMap[k] = v;
     }
   }
+
+  // A create-volume step is always scoped to the run: default its workflow_id to
+  // ${run_id} so the user never types it (an explicit value still wins).
+  if (action === 'forge/create-volume' && !('workflow_id' in withMap)) {
+    withMap.workflow_id = RUN_ID_REF;
+  }
+  if (action === 'forge/build-image') nestForgeBuild(withMap);
   return withMap;
+}
+
+/**
+ * Restructures the flat build-image form fields into forge's nested request: the
+ * build.* keys under a `build` object, and the chosen registry secret into
+ * secret_refs[REGISTRY_AUTH]. volumes and runner_class stay top-level.
+ */
+function nestForgeBuild(withMap: Record<string, unknown>): void {
+  const build: Record<string, unknown> = {};
+  for (const k of BUILD_IMAGE_FIELDS) {
+    if (k in withMap) { build[k] = withMap[k]; delete withMap[k]; }
+  }
+  if (Object.keys(build).length > 0) withMap.build = build;
+
+  const rs = withMap.registry_secret;
+  if (typeof rs === 'string') {
+    delete withMap.registry_secret;
+    if (rs !== '') {
+      const sr: Record<string, unknown> = (withMap.secret_refs && typeof withMap.secret_refs === 'object' && !Array.isArray(withMap.secret_refs))
+        ? { ...(withMap.secret_refs as Record<string, unknown>) } : {};
+      sr[REGISTRY_AUTH_ENV] = `secret:${rs}`;
+      withMap.secret_refs = sr;
+    }
+  }
+}
+
+/**
+ * Inverse of nestForgeBuild: returns a shallow copy of `withMap` with build-image's
+ * `build` object and registry secret_ref lifted back to the flat form fields, so the
+ * edit form pre-populates and round-trips. Other actions pass through unchanged.
+ */
+export function flattenStepWith(action: string, withMap: Record<string, unknown>): Record<string, unknown> {
+  const wm: Record<string, unknown> = { ...withMap };
+  if (action !== 'forge/build-image') return wm;
+
+  if (wm.build && typeof wm.build === 'object' && !Array.isArray(wm.build)) {
+    Object.assign(wm, wm.build as Record<string, unknown>);
+    delete wm.build;
+  }
+  const sr = wm.secret_refs;
+  if (sr && typeof sr === 'object' && !Array.isArray(sr)) {
+    const refs = sr as Record<string, unknown>;
+    const ref = refs[REGISTRY_AUTH_ENV];
+    if (typeof ref === 'string') {
+      wm.registry_secret = ref.startsWith('secret:') ? ref.slice('secret:'.length) : ref;
+      const rest = Object.fromEntries(Object.entries(refs).filter(([k]) => k !== REGISTRY_AUTH_ENV));
+      if (Object.keys(rest).length > 0) wm.secret_refs = rest; else delete wm.secret_refs;
+    }
+  }
+  return wm;
 }

@@ -114,6 +114,10 @@ func (c *CheckoutSpec) script(refs map[string]string) string {
 
 	var b strings.Builder
 	b.WriteString("# forge: checkout — clone repo into working dir\n")
+	// Preflight: without git the raw `git clone` fails with a bare "git: not found"
+	// that the clone guard below then masks as "git clone failed" — misleading, since
+	// the real cause is the image. Name it explicitly and point at the fix.
+	b.WriteString("command -v git >/dev/null 2>&1 || { echo 'forge: checkout: git is not installed in this image; use a runner image that includes git' >&2; exit 1; }\n")
 	// ${env:-} guards against `set -u` while treating unset as empty.
 	b.WriteString("if [ -z \"${" + env + ":-}\" ]; then echo 'forge: checkout: " + env + " is not set' >&2; exit 1; fi\n")
 	b.WriteString("git clone" + flags + " -- \"$" + env + "\" " + shellSingleQuote(dir) +

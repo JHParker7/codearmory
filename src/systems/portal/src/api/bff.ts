@@ -441,7 +441,7 @@ export interface RunnerClass {
   privileged?: boolean;
 }
 
-/** Admin runtime target. `type` is the runtime implementation: docker | kubernetes | proxmox | kata. */
+/** Admin runtime target. `type` is the runtime implementation: docker | kubernetes | kata | gvisor. */
 export interface RuntimeBackend {
   name: string;
   type: string;
@@ -492,7 +492,7 @@ export interface Ticket {
   priority?: string | null;
   /** Free-text project (workspace) label this ticket is tagged with. */
   project?: string;
-  /** The board this ticket belongs to (null/absent = unassigned). */
+  /** The board this ticket belongs to. New tickets always have a board; null/absent only for legacy rows. */
   board_id?: string | null;
   created_by: string;
   org_id?: string | null;
@@ -517,7 +517,7 @@ export function createTicket(token: string, payload: { title: string; descriptio
   return req<Ticket>('POST', '/tickets/tickets', token, payload);
 }
 
-// board_id: a string assigns the ticket to that board; "" clears it (unassign); omit to leave unchanged.
+// board_id: a string assigns the ticket to that board; "" re-homes it to the default board; omit to leave unchanged.
 export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string; board_id: string }>) {
   return req<Ticket>('PUT', `/tickets/tickets/${id}`, token, payload);
 }
@@ -585,8 +585,10 @@ export function updateBoard(token: string, id: string, payload: Partial<{ name: 
   return req<Board>('PUT', `/tickets/boards/${id}`, token, payload);
 }
 
-export function deleteBoard(token: string, id: string) {
-  return req<void>('DELETE', `/tickets/boards/${id}`, token);
+// Deleting a board cascade-deletes its tickets, so the server requires the
+// board's exact name echoed back as confirmation (?confirm=<name>).
+export function deleteBoard(token: string, id: string, confirmName: string) {
+  return req<void>('DELETE', `/tickets/boards/${id}?confirm=${encodeURIComponent(confirmName)}`, token);
 }
 
 // ── Hooks ─────────────────────────────────────────────────────────────────────

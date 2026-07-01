@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -13,31 +12,8 @@ import (
 var validRuntimeTypes = map[string]bool{
 	"docker":     true,
 	"kubernetes": true,
-	"proxmox":    true,
 	"kata":       true,
 	"gvisor":     true,
-}
-
-// requiredProxmoxConfigKeys must be present (non-empty) in a proxmox backend's
-// config before it will be accepted.
-var requiredProxmoxConfigKeys = []string{pmKeyURL, pmKeyNode, pmKeyTemplate, pmKeyStorage, pmKeyBridge}
-
-// validateProxmoxBackend checks the config/secret shape a proxmox backend needs
-// so a misconfiguration is rejected at create/update time rather than surfacing
-// only when a job tries to run.
-func validateProxmoxBackend(b runtimeBackendBody) error {
-	for _, k := range requiredProxmoxConfigKeys {
-		if strings.TrimSpace(b.Config[k]) == "" {
-			return fmt.Errorf("proxmox config key %q is required", k)
-		}
-	}
-	if _, err := strconv.Atoi(strings.TrimSpace(b.Config[pmKeyTemplate])); err != nil {
-		return fmt.Errorf("proxmox config key %q must be an integer VMID", pmKeyTemplate)
-	}
-	if strings.TrimSpace(b.SecretRefs[pmSecretToken]) == "" {
-		return fmt.Errorf("proxmox secret_ref %q is required", pmSecretToken)
-	}
-	return nil
 }
 
 // validateKataBackend checks a kata backend names a RuntimeClass. Kata is the

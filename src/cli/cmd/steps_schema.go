@@ -36,10 +36,26 @@ const (
 type stepFieldKind int
 
 const (
-	stepFieldText stepFieldKind = iota // plain string
-	stepFieldInt                       // non-negative integer
-	stepFieldEnv                       // KEY=VALUE tokens → map[string]string
-	stepFieldJSON                      // raw JSON object, merged as the with base
+	stepFieldText         stepFieldKind = iota // plain string
+	stepFieldInt                               // non-negative integer
+	stepFieldEnv                               // KEY=VALUE tokens → map[string]string
+	stepFieldJSON                              // raw JSON object, merged as the with base
+	stepFieldVolumeAttach                      // "name[:/mount]" → a shared-volume attach
+	stepFieldList                              // comma-separated string → []string
+)
+
+// registryAuthEnv is the env var (set via a secret_ref) a build reads its registry
+// Docker config.json from; the build-image form wires the chosen org secret to it.
+const registryAuthEnv = "REGISTRY_AUTH"
+
+// volumeRunIDRef scopes an attached/created shared volume to the current run: the
+// workflows worker substitutes ${run_id} with the run's id at dispatch, so the
+// create-volume step and every attach agree on one per-run volume. defaultMountPath
+// is where an attach lands when no path is given.
+const (
+	volumeRunIDRef    = "${run_id}"
+	defaultMountPath  = "/workspace"
+	defaultVolumeName = "workspace"
 )
 
 // Field catalogs back a field with a name→value picker. ids are never typed by
@@ -106,6 +122,23 @@ var stepActionSchema = map[string][]stepField{
 		{key: "run", label: "Run", placeholder: "go test ./...\n(multi-line ok)", required: true, multiline: true},
 		{key: "env", label: "Input variables", placeholder: "REPO_URL=  BRANCH=main", kind: stepFieldEnv},
 		{key: "runner_class", label: "Runner", placeholder: "runner class (optional, default standard)", catalog: catRunnerClass},
+		{key: "volumes", label: "Attach volume", placeholder: "workspace or workspace:/src (optional)", kind: stepFieldVolumeAttach},
+	},
+	"forge/create-volume": {
+		{key: "name", label: "Volume name", placeholder: "workspace (default)"},
+		{key: "size_mb", label: "Size MB", placeholder: "1024 (optional)", kind: stepFieldInt},
+		{key: "medium", label: "Medium", placeholder: "memory (default) | disk"},
+		{key: "mount_path", label: "Mount path", placeholder: "/workspace (default)"},
+	},
+	"forge/build-image": {
+		{key: "destinations", label: "Push to", placeholder: "reg.io/acme/app:1.0, reg.io/acme/app:latest (required)", required: true, kind: stepFieldList},
+		{key: "dockerfile", label: "Dockerfile", placeholder: "Dockerfile (default, relative to context)"},
+		{key: "context", label: "Context", placeholder: "/workspace (default)"},
+		{key: "build_args", label: "Build args", placeholder: "VERSION=1.0 COMMIT=abc", kind: stepFieldEnv},
+		{key: "target", label: "Target stage", placeholder: "multi-stage target (optional)"},
+		{key: "registry_secret", label: "Registry secret", placeholder: "org secret holding a docker config.json (to push)"},
+		{key: "volumes", label: "Source volume", placeholder: "workspace or workspace:/src (attach the checkout)", kind: stepFieldVolumeAttach},
+		{key: "runner_class", label: "Build runner", placeholder: "privileged kata/gvisor class (required)", required: true, catalog: catRunnerClass},
 	},
 	"tickets/create": {
 		{key: "title", label: "Title", placeholder: "Build failed", required: true},
@@ -221,6 +254,10 @@ func buildStepWith(action string, valueOf func(string) string) (map[string]any, 
 				return nil, err
 			}
 			with[f.key] = env
+		case stepFieldVolumeAttach:
+			with[f.key] = volumeAttachWith(raw)
+		case stepFieldList:
+			with[f.key] = splitList(raw)
 		default: // text, image
 			with[f.key] = raw
 		}
@@ -232,7 +269,148 @@ func buildStepWith(action string, valueOf func(string) string) (map[string]any, 
 			with[k] = v
 		}
 	}
+
+	// A create-volume step is always scoped to the run: default its workflow_id to
+	// ${run_id} so the user never has to type it (an explicit value still wins).
+	if action == "forge/create-volume" {
+		if _, set := with["workflow_id"]; !set {
+			with["workflow_id"] = volumeRunIDRef
+		}
+	}
+	if action == "forge/build-image" {
+		nestForgeBuild(with)
+	}
 	return with, nil
+}
+
+// buildImageFields are the flat form keys that nest under the `build` object of a
+// forge/build-image /executions body (volumes and runner_class stay top-level).
+var buildImageFields = []string{"destinations", "dockerfile", "context", "build_args", "target"}
+
+// flattenStepWith is the inverse of the action-specific nesting done by buildStepWith:
+// it returns a shallow copy of `with` with build-image's `build` object and registry
+// secret_ref lifted back to the flat form fields, so the edit form pre-populates and
+// round-trips. Other actions are returned as a plain copy.
+func flattenStepWith(action string, with map[string]any) map[string]any {
+	wm := make(map[string]any, len(with))
+	for k, v := range with {
+		wm[k] = v
+	}
+	if action != "forge/build-image" {
+		return wm
+	}
+	if build, ok := wm["build"].(map[string]any); ok {
+		for k, v := range build {
+			wm[k] = v
+		}
+		delete(wm, "build")
+	}
+	if sr, ok := wm["secret_refs"].(map[string]any); ok {
+		if ref, ok := sr[registryAuthEnv].(string); ok {
+			wm["registry_secret"] = strings.TrimPrefix(ref, "secret:")
+			rest := map[string]any{}
+			for k, v := range sr {
+				if k != registryAuthEnv {
+					rest[k] = v
+				}
+			}
+			if len(rest) > 0 {
+				wm["secret_refs"] = rest
+			} else {
+				delete(wm, "secret_refs")
+			}
+		}
+	}
+	return wm
+}
+
+// formatList renders a stored list value ([]any of strings, from JSON, or []string)
+// back to the comma-separated text the list field reads.
+func formatList(v any) string {
+	switch t := v.(type) {
+	case []string:
+		return strings.Join(t, ", ")
+	case []any:
+		parts := make([]string, 0, len(t))
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ", ")
+	default:
+		return ""
+	}
+}
+
+// nestForgeBuild restructures the flat build-image form fields into forge's nested
+// request: the build.* keys under a `build` object, and the chosen registry secret
+// into secret_refs[REGISTRY_AUTH].
+func nestForgeBuild(with map[string]any) {
+	build := map[string]any{}
+	for _, k := range buildImageFields {
+		if v, ok := with[k]; ok {
+			build[k] = v
+			delete(with, k)
+		}
+	}
+	if len(build) > 0 {
+		with["build"] = build
+	}
+	if rs, ok := with["registry_secret"].(string); ok {
+		delete(with, "registry_secret")
+		if rs != "" {
+			sr, _ := with["secret_refs"].(map[string]any)
+			if sr == nil {
+				sr = map[string]any{}
+			}
+			sr[registryAuthEnv] = "secret:" + rs
+			with["secret_refs"] = sr
+		}
+	}
+}
+
+// volumeAttachWith turns a compact "name[:/mount]" attach spec into forge's volumes
+// array: one shared volume, scoped to the run (${run_id}), made the working dir.
+func volumeAttachWith(raw string) []any {
+	name, mount, _ := strings.Cut(raw, ":")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = defaultVolumeName
+	}
+	mount = strings.TrimSpace(mount)
+	if mount == "" {
+		mount = defaultMountPath
+	}
+	return []any{map[string]any{
+		"workflow_id": volumeRunIDRef,
+		"name":        name,
+		"mount_path":  mount,
+		"workdir":     true,
+	}}
+}
+
+// volumeAttachString reverses volumeAttachWith for the edit form: it renders the
+// first attached volume back to "name" or "name:/mount". Returns "" when the value
+// isn't a recognisable single-volume attach (leaving it to the advanced With field).
+func volumeAttachString(v any) string {
+	arr, ok := v.([]any)
+	if !ok || len(arr) != 1 {
+		return ""
+	}
+	m, ok := arr[0].(map[string]any)
+	if !ok {
+		return ""
+	}
+	name, _ := m["name"].(string)
+	if name == "" {
+		return ""
+	}
+	mount, _ := m["mount_path"].(string)
+	if mount == "" || mount == defaultMountPath {
+		return name
+	}
+	return name + ":" + mount
 }
 
 // parseEnvTokens splits a KEY=VALUE token string into a map, sharing the shell-style

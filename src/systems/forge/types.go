@@ -59,10 +59,23 @@ type Execution struct {
 	// GIT_CLONE_URL), typically populated by a git:/gitea: secret_ref. Nil = no
 	// auto-checkout (the command runs in the image's working dir as before).
 	Checkout *CheckoutSpec `gorm:"column:checkout;type:jsonb;serializer:json" json:"checkout,omitempty"`
-	Status   string        `gorm:"column:status;not null;default:pending"                  json:"status"`
-	ExitCode *int          `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
-	Stdout   *string       `gorm:"column:stdout"                                           json:"stdout,omitempty"`
-	Stderr   *string       `gorm:"column:stderr"                                           json:"stderr,omitempty"`
+	// Volumes lists shared workspace volumes to attach to the sandbox. Each names a
+	// volume previously created via POST /volumes (a run-scoped PVC in kubernetes / a
+	// named tmpfs volume in docker) and the path to mount it at. This is how a
+	// workflow shares a checked-out repo and build artifacts between steps: a git
+	// step clones into an attached volume, later steps attach the same volume and see
+	// its contents. Empty = an isolated sandbox with no shared storage (the default).
+	Volumes []VolumeMount `gorm:"column:volumes;type:jsonb;not null;default:'[]';serializer:json" json:"volumes,omitempty"`
+	// Build, when set, makes this execution an image build: forge derives the Image
+	// (its own Kaniko builder) and Command (the assembled build invocation) from the
+	// spec at submit, so the two fields above are materialised, not user-supplied.
+	// Stored for display only — the worker runs the materialised Command and never
+	// reads this back, so it is deliberately absent from claimPendingExecution's SELECT.
+	Build    *BuildSpec `gorm:"column:build;type:jsonb;serializer:json" json:"build,omitempty"`
+	Status   string     `gorm:"column:status;not null;default:pending"                  json:"status"`
+	ExitCode *int       `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
+	Stdout   *string    `gorm:"column:stdout"                                           json:"stdout,omitempty"`
+	Stderr   *string    `gorm:"column:stderr"                                           json:"stderr,omitempty"`
 	// MemoryUsedMB is the peak memory the run's container consumed, captured
 	// best-effort from the runtime (k8s metrics-server / docker stats). It is NULL
 	// when metrics are unavailable — most often a very short job a metrics-server
@@ -72,6 +85,33 @@ type Execution struct {
 	CreatedAt     time.Time  `gorm:"column:created_at;not null;default:now()"            json:"created_at"`
 	StartedAt     *time.Time `gorm:"column:started_at"                                   json:"started_at,omitempty"`
 	EndedAt       *time.Time `gorm:"column:ended_at"                                     json:"ended_at,omitempty"`
+}
+
+// BuildSpec configures a container-image build. Forge builds it with Kaniko — a
+// daemonless builder that does userspace layer extraction, so it needs no Docker
+// daemon, no host socket, and no elevated capabilities: only root + a writable
+// rootfs, which forge grants via a privileged runner class on a kernel-isolated
+// backend (kata or gvisor). The build context is normally a shared workspace volume
+// a prior checkout step populated.
+type BuildSpec struct {
+	// Context is the build-context directory (default /workspace — usually a shared
+	// volume). Dockerfile is the Dockerfile path relative to Context (default
+	// "Dockerfile").
+	Context    string `json:"context,omitempty"`
+	Dockerfile string `json:"dockerfile,omitempty"`
+	// Destinations are the image refs to build and push (e.g.
+	// registry.example.com/acme/app:1.2.3). Required unless NoPush.
+	Destinations []string `json:"destinations,omitempty"`
+	// BuildArgs are Dockerfile ARG values. Target selects a stage in a multi-stage
+	// build (optional).
+	BuildArgs map[string]string `json:"build_args,omitempty"`
+	Target    string            `json:"target,omitempty"`
+	// RegistryAuth names the env var (set via a secret_ref) holding a Docker
+	// config.json used to authenticate the push. Default REGISTRY_AUTH. Required when
+	// pushing.
+	RegistryAuth string `json:"registry_auth,omitempty"`
+	// NoPush builds without pushing (a validation/PR build).
+	NoPush bool `json:"no_push,omitempty"`
 }
 
 // CheckoutSpec configures forge's actions/checkout-style clone. Before running the
@@ -95,10 +135,10 @@ type CheckoutSpec struct {
 	Depth *int `json:"depth,omitempty"`
 }
 
-// RunnerClass defines the resource limits for a named execution tier. The same
-// resource fields are reinterpreted per backend: docker/k8s read MemoryMB/
-// CPUMillicores/PidsLimit/TmpfsMB; the proxmox backend maps MemoryMB→VM RAM,
-// CPUMillicores→ceil(/1000) vCPU and adds DiskGB (which docker/k8s ignore).
+// RunnerClass defines the resource limits for a named execution tier. Every
+// backend (docker/k8s/kata/gvisor) reads MemoryMB/CPUMillicores/PidsLimit/TmpfsMB.
+// DiskGB is currently unused by all backends — retained on the schema/API so a
+// future VM-style backend can reinstate a per-class disk size without a migration.
 type RunnerClass struct {
 	Name          string `gorm:"primaryKey"                 json:"name"`
 	MemoryMB      int64  `gorm:"not null"                   json:"memory_mb"`
@@ -113,13 +153,13 @@ type RunnerClass struct {
 	Enabled bool   `gorm:"not null;default:true"      json:"enabled"`
 	// Privileged runs the job as root with a writable root filesystem and
 	// privilege escalation allowed, so package managers (apt/pacman/dnf) work. It
-	// is only meaningful on VM-isolated backends, where the microVM/VM — not the
-	// container — is the isolation boundary:
-	//   - kata: the k8s runtime applies it via the pod/container securityContext.
-	//   - proxmox: every job already runs as root in a throwaway VM with a real
-	//     Docker daemon, so the flag has no additional effect (effectively always
-	//     on). validatePrivilegedBackend still requires a privileged class to
-	//     target such a backend.
+	// is only meaningful on kernel-isolated backends, where the guest/userspace
+	// kernel — not the container — is the isolation boundary:
+	//   - kata: the k8s runtime applies it via the pod/container securityContext
+	//     inside a microVM.
+	//   - gvisor: the k8s runtime applies it the same way; the gVisor Sentry
+	//     contains the job's root.
+	// validatePrivilegedBackend requires a privileged class to target such a backend.
 	// On shared-kernel container backends (docker/kubernetes/runc) it is ignored
 	// at runtime: root in a shared-kernel container is an escape risk, so the
 	// locked-down sandbox is always applied there regardless of this flag.
@@ -127,7 +167,7 @@ type RunnerClass struct {
 }
 
 // RuntimeBackend is an admin-managed runtime target. Type selects the runtime
-// implementation (docker|kubernetes|proxmox|kata); Config holds non-secret settings
+// implementation (docker|kubernetes|kata|gvisor); Config holds non-secret settings
 // (jsonb) and SecretRefs maps a logical key to the NAME of an env var read via
 // secret() — credentials never live in the database, so returning a backend is
 // always safe.
@@ -164,6 +204,15 @@ type submitRequest struct {
 	// (or plain env var) into the working dir before running the command — see
 	// CheckoutSpec.
 	Checkout *CheckoutSpec `json:"checkout"`
+	// Volumes attaches shared workspace volumes (created via POST /volumes) to the
+	// sandbox — see VolumeMount. Each referenced volume must already exist and belong
+	// to the caller.
+	Volumes []VolumeMount `json:"volumes"`
+	// Build, when set, makes this an image-build execution: forge derives the image
+	// (its Kaniko builder) and command from the spec, so `image` and `command` are
+	// ignored. Requires a privileged runner class on a kata/gvisor backend. See
+	// BuildSpec.
+	Build *BuildSpec `json:"build"`
 }
 
 // RunResult holds the output of a completed container run. ExitCode is a pointer

@@ -225,3 +225,39 @@ func TestHandleTriggerRun_HealsStaleWorkflowRole(t *testing.T) {
 		t.Errorf("re-provisioned again though version current: calls %d -> %d", callsAfterHeal, roleCalls)
 	}
 }
+
+// A create-volume step's run must also be able to tear its volumes down: the run
+// role needs deleteVolume alongside createVolume, or the end-of-run DELETE 403s and
+// volumes linger until forge's age reaper.
+func TestCollectWorkflowPermissions_CreateVolumeGrantsDelete(t *testing.T) {
+	withCatalog(t, map[string]ActionDef{
+		"forge/create-volume": {
+			Name:               "forge/create-volume",
+			RequiredPermission: &PermissionSpec{Service: "forge", Action: "createVolume", Resource: "forge/volumes"},
+		},
+	})
+	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Action: "forge/create-volume"}}})
+	var hasCreate, hasDelete bool
+	for _, p := range perms {
+		if p.Service == "forge" && p.Resource == "forge/volumes" {
+			switch p.Action {
+			case "createVolume":
+				hasCreate = true
+			case "deleteVolume":
+				hasDelete = true
+			}
+		}
+	}
+	if !hasCreate || !hasDelete {
+		t.Fatalf("perms = %+v, want both createVolume and deleteVolume on forge/volumes", perms)
+	}
+}
+
+func TestWorkflowUsesVolumes(t *testing.T) {
+	if !workflowUsesVolumes([]WorkflowStep{{Step: Step{Action: "forge/run"}}, {Step: Step{Action: ActionForgeCreateVolume}}}) {
+		t.Error("want true when a create-volume step is present")
+	}
+	if workflowUsesVolumes([]WorkflowStep{{Step: Step{Action: "forge/run"}}}) {
+		t.Error("want false when no create-volume step")
+	}
+}

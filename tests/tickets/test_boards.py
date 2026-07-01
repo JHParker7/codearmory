@@ -86,6 +86,17 @@ def test_ticket_create_with_unknown_board_rejected(bearer):
                         json={"title": "Bad board", "board_id": "00000000-0000-0000-0000-000000000000"})
     assert res.status_code == 400
 
+def test_ticket_create_without_board_gets_default(bearer):
+    # Every ticket has a board: omitting board_id lands the ticket on the caller's
+    # auto-created "Default" board rather than leaving it unassigned.
+    res = requests.post(f"{TICKETS_URL}/tickets", headers=bearer, json={"title": "No board given"})
+    assert res.status_code == 201, res.text
+    bid = res.json().get("board_id")
+    assert bid, "ticket created without a board should be placed on the default board"
+    b = requests.get(f"{TICKETS_URL}/boards/{bid}", headers=bearer)
+    assert b.status_code == 200
+    assert b.json()["name"] == "Default"
+
 def test_ticket_list_filter_by_board(bearer):
     res = requests.post(f"{TICKETS_URL}/boards", headers=bearer, json={"name": f"Filter {uuid.uuid4().hex[:8]}"})
     bid = res.json()["board_id"]
@@ -96,28 +107,38 @@ def test_ticket_list_filter_by_board(bearer):
     assert len(tickets) >= 1
     assert all(t["board_id"] == bid for t in tickets)
 
-def test_ticket_update_clears_board(bearer):
+def test_ticket_update_empty_board_rehomes_to_default(bearer):
     res = requests.post(f"{TICKETS_URL}/boards", headers=bearer, json={"name": f"Clearable {uuid.uuid4().hex[:8]}"})
     bid = res.json()["board_id"]
     tid = requests.post(f"{TICKETS_URL}/tickets", headers=bearer,
                         json={"title": "Movable", "board_id": bid}).json()["ticket_id"]
+    # Clearing the board ("") re-homes the ticket to the caller's default board
+    # rather than leaving it board-less — every ticket must have a board.
     res = requests.put(f"{TICKETS_URL}/tickets/{tid}", headers=bearer, json={"board_id": ""})
     assert res.status_code == 200, res.text
-    assert res.json().get("board_id") in (None, "")
+    new_board = res.json().get("board_id")
+    assert new_board, "ticket should still have a board after clearing"
+    assert new_board != bid
 
 
-# ── Delete unassigns tickets ───────────────────────────────────────────────────
+# ── Delete requires name confirmation and cascade-deletes tickets ──────────────
 
-def test_board_delete_unassigns_tickets(bearer):
+def test_board_delete_requires_name_confirmation_and_cascades(bearer):
     res = requests.post(f"{TICKETS_URL}/boards", headers=bearer, json={"name": f"Doomed {uuid.uuid4().hex[:8]}"})
-    bid = res.json()["board_id"]
+    board = res.json()
+    bid, name = board["board_id"], board["name"]
     tid = requests.post(f"{TICKETS_URL}/tickets", headers=bearer,
-                        json={"title": "Survivor", "board_id": bid}).json()["ticket_id"]
+                        json={"title": "Casualty", "board_id": bid}).json()["ticket_id"]
 
-    assert requests.delete(f"{TICKETS_URL}/boards/{bid}", headers=bearer).status_code == 204
-    # Board is gone…
+    # No confirmation → rejected; board and ticket untouched.
+    assert requests.delete(f"{TICKETS_URL}/boards/{bid}", headers=bearer).status_code == 400
+    # Wrong name → rejected.
+    assert requests.delete(f"{TICKETS_URL}/boards/{bid}", headers=bearer,
+                           params={"confirm": "not the name"}).status_code == 400
+    assert requests.get(f"{TICKETS_URL}/boards/{bid}", headers=bearer).status_code == 200
+
+    # Correct name → board deleted and its tickets cascade-deleted with it.
+    assert requests.delete(f"{TICKETS_URL}/boards/{bid}", headers=bearer,
+                           params={"confirm": name}).status_code == 204
     assert requests.get(f"{TICKETS_URL}/boards/{bid}", headers=bearer).status_code == 404
-    # …but its ticket survives, now unassigned.
-    res = requests.get(f"{TICKETS_URL}/tickets/{tid}", headers=bearer)
-    assert res.status_code == 200
-    assert res.json().get("board_id") in (None, "")
+    assert requests.get(f"{TICKETS_URL}/tickets/{tid}", headers=bearer).status_code == 404

@@ -196,6 +196,10 @@ func main() {
 		slog.Error("failed to migrate runtime backends", "error", err)
 		os.Exit(1)
 	}
+	if err := connect().AutoMigrate(&Volume{}); err != nil {
+		slog.Error("failed to migrate volumes", "error", err)
+		os.Exit(1)
+	}
 	slog.Info("database initialized")
 
 	// The registry builds runtimes lazily per backend. Eagerly resolve the
@@ -209,11 +213,8 @@ func main() {
 	slog.Info("runtime registry initialized", "default_type", defaultRuntimeType())
 
 	initAllowedImages(os.Getenv("ALLOWED_IMAGES"))
-
-	// Reap proxmox VMs orphaned by a previous crash. Must run before the worker
-	// pool starts: the sweep blanket-destroys forge-* VMs and so is only safe while
-	// nothing is processing jobs.
-	sweepProxmoxOrphans(ctx, reg)
+	initVolumeConfig()
+	initBuildConfig()
 
 	// Rotate the gatekeeper service key every 25 minutes. GATEKEEPER_SERVICE_KEY
 	// must match the key in GATEKEEPER_SERVICES on gatekeeper. No-op if unset.
@@ -225,6 +226,10 @@ func main() {
 	workers := newWorkerPool(reg)
 	workers.Start(ctx, 10)
 	slog.Info("worker pool started", "workers", 10)
+
+	// Reap shared workspace volumes orphaned by a workflow that crashed before
+	// tearing them down. Normal runs delete their own volumes; this is the backstop.
+	go startVolumeReaper(ctx, reg)
 
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -239,6 +244,9 @@ func main() {
 	mux.HandleFunc("GET /runner-classes/{name}", handleGetRunnerClass)
 	mux.HandleFunc("PUT /runner-classes/{name}", handleUpdateRunnerClass)
 	mux.HandleFunc("DELETE /runner-classes/{name}", handleDeleteRunnerClass)
+	mux.HandleFunc("POST /volumes", handleCreateVolume(reg))
+	mux.HandleFunc("GET /volumes", handleListVolumes)
+	mux.HandleFunc("DELETE /volumes", handleDeleteVolumes(reg))
 	mux.HandleFunc("GET /runtime-backends", handleListRuntimeBackends)
 	mux.HandleFunc("POST /runtime-backends", handleCreateRuntimeBackend)
 	mux.HandleFunc("GET /runtime-backends/{name}", handleGetRuntimeBackend)
