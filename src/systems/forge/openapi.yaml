@@ -522,6 +522,57 @@ components:
           example:
             REPO_URL: gitea:codearmory/codearmory
             GIT_DEPLOY_KEY: secret:github-deploy-key
+        output_env:
+          type: array
+          items:
+            type: string
+          description: |
+            Names of environment variables to capture from the command's shell
+            after it runs (the values a script exported/computed). Captured into
+            the execution's `outputs` map — used by workflows as the step output.
+            Requires a shell (`-c`) command. At most 32 names.
+        checkout:
+          allOf:
+            - $ref: '#/components/schemas/CheckoutSpec'
+          description: |
+            When set, forge `git clone`s a repo into the sandbox working dir and
+            `cd`s into it before running `command` — the actions/checkout
+            equivalent. The clone URL is read at runtime from the env var named by
+            `checkout.env` (default `GIT_CLONE_URL`), typically populated by a
+            `git:`/`gitea:` `secret_ref`. Requires `git` in the image and a shell
+            (`-c`) command; a clone failure fails the whole execution.
+
+    CheckoutSpec:
+      type: object
+      description: actions/checkout-style clone configuration (see SubmitRequest.checkout).
+      properties:
+        env:
+          type: string
+          description: |
+            Env var holding the authenticated clone URL. Must also be set by
+            `secret_refs` or `env`. Defaults to `GIT_CLONE_URL`.
+          default: GIT_CLONE_URL
+        path:
+          type: string
+          description: |
+            Directory (relative to the image working dir) to clone into and cd
+            into. Must be a relative path of `[A-Za-z0-9._/-]` with no `..`.
+            Defaults to the repo name derived from the `git:`/`gitea:` ref, else
+            `repo`.
+          example: src
+        ref:
+          type: string
+          description: |
+            Branch or tag to check out (`git clone --branch`). Empty clones the
+            remote's default branch. Commit SHAs are not supported here.
+          example: main
+        depth:
+          type: integer
+          minimum: 0
+          description: |
+            `git clone --depth`. Omit for a shallow depth-1 clone (like
+            actions/checkout); `0` requests a full clone.
+          example: 1
 
     Execution:
       type: object
@@ -555,6 +606,11 @@ components:
         project:
           type: string
           description: Free-text project (workspace) label; a view filter, not a permission boundary
+        checkout:
+          allOf:
+            - $ref: '#/components/schemas/CheckoutSpec'
+          nullable: true
+          description: actions/checkout-style clone configuration, if requested at submit.
         status:
           type: string
           enum: [pending, running, completed, failed, timed_out, cancelled]

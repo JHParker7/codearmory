@@ -254,6 +254,10 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := validateCheckout(req.Checkout, req.Command, req.SecretRefs, req.Env); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if req.RunnerClass == "" {
 		req.RunnerClass = "standard"
 	}
@@ -290,6 +294,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		Project:     req.Project,
 		SecretRefs:  req.SecretRefs,
 		OutputEnv:   req.OutputEnv,
+		Checkout:    req.Checkout,
 		Status:      StatusPending,
 	}
 	if err := exec.Add(ctx); err != nil {

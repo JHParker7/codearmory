@@ -493,7 +493,7 @@ func TestFetchBoardData_Success(t *testing.T) {
 	srv := boardFetchServer(t, http.StatusOK, string(body))
 	setupCLI(t, srv)
 
-	msg := fetchBoardData()
+	msg := fetchBoardData("")()
 
 	loaded, ok := msg.(boardDataMsg)
 	if !ok {
@@ -516,7 +516,7 @@ func TestFetchBoardData_EmptyList(t *testing.T) {
 	srv := boardFetchServer(t, http.StatusOK, `[]`)
 	setupCLI(t, srv)
 
-	msg := fetchBoardData()
+	msg := fetchBoardData("")()
 	loaded, ok := msg.(boardDataMsg)
 	if !ok {
 		t.Fatalf("expected boardDataMsg, got %T", msg)
@@ -530,7 +530,7 @@ func TestFetchBoardData_HTTPError(t *testing.T) {
 	srv := boardFetchServer(t, http.StatusInternalServerError, `internal error`)
 	setupCLI(t, srv)
 
-	msg := fetchBoardData()
+	msg := fetchBoardData("")()
 	if _, ok := msg.(boardErrMsg); !ok {
 		t.Fatalf("expected boardErrMsg on HTTP error, got %T", msg)
 	}
@@ -540,7 +540,7 @@ func TestFetchBoardData_InvalidJSON(t *testing.T) {
 	srv := boardFetchServer(t, http.StatusOK, `not json`)
 	setupCLI(t, srv)
 
-	msg := fetchBoardData()
+	msg := fetchBoardData("")()
 	if _, ok := msg.(boardErrMsg); !ok {
 		t.Fatalf("expected boardErrMsg on bad JSON, got %T", msg)
 	}
@@ -551,7 +551,7 @@ func TestFetchBoardData_UnknownStatusIgnored(t *testing.T) {
 	srv := boardFetchServer(t, http.StatusOK, payload)
 	setupCLI(t, srv)
 
-	msg := fetchBoardData()
+	msg := fetchBoardData("")()
 	loaded, ok := msg.(boardDataMsg)
 	if !ok {
 		t.Fatalf("expected boardDataMsg, got %T", msg)

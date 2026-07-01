@@ -388,6 +388,22 @@ export function rejectRun(token: string, id: string, comment?: string) {
 
 // ── Forge ─────────────────────────────────────────────────────────────────────
 
+/**
+ * actions/checkout-style clone config. When set on an execution, forge `git clone`s
+ * the repo whose authenticated URL lives in `env` (default GIT_CLONE_URL, usually a
+ * git:/gitea: secret_ref) into `path` and cd's into it before running the command.
+ */
+export interface CheckoutSpec {
+  /** Env var holding the clone URL. Default GIT_CLONE_URL. */
+  env?: string;
+  /** Directory to clone into and cd into. Default: repo name derived from the ref, else "repo". */
+  path?: string;
+  /** Branch or tag to check out. Empty = the remote's default branch. */
+  ref?: string;
+  /** git clone --depth. Omit for a shallow depth-1 clone; 0 = full clone. */
+  depth?: number;
+}
+
 export interface Execution {
   execution_id: string;
   user_id: string;
@@ -398,6 +414,8 @@ export interface Execution {
   runner_class?: string | null;
   /** Credential references (target env var → "scheme:arg") resolved at dispatch, never the resolved values. */
   secret_refs?: Record<string, string> | null;
+  /** actions/checkout-style clone config, if requested at submit. */
+  checkout?: CheckoutSpec | null;
   /** Free-text project (workspace) label this execution is tagged with. */
   project?: string;
   status: string;
@@ -495,7 +513,7 @@ export function getTicket(token: string, id: string) {
   return req<Ticket>('GET', `/tickets/tickets/${id}`, token);
 }
 
-export function createTicket(token: string, payload: { title: string; description?: string; priority?: string; project?: string; board_id?: string }) {
+export function createTicket(token: string, payload: { title: string; description?: string; status?: string; priority?: string; project?: string; board_id?: string }) {
   return req<Ticket>('POST', '/tickets/tickets', token, payload);
 }
 
@@ -520,13 +538,17 @@ export interface TicketFieldDef {
   label: string;
   color?: string;
   position: number;
+  /** Set on status defs that are owned by a specific board ("" = org/global). */
+  board_id?: string;
 }
 
-export function listTicketFieldDefs(token: string, kind: string) {
-  return req<TicketFieldDef[]>('GET', `/tickets/field-defs?kind=${encodeURIComponent(kind)}`, token);
+// boardId scopes status columns to a single board; omit (or "") for the org/global set.
+export function listTicketFieldDefs(token: string, kind: string, boardId?: string) {
+  const q = boardId ? `&board_id=${encodeURIComponent(boardId)}` : '';
+  return req<TicketFieldDef[]>('GET', `/tickets/field-defs?kind=${encodeURIComponent(kind)}${q}`, token);
 }
 
-export function createTicketFieldDef(token: string, payload: { kind: string; value: string; label: string; color?: string; position?: number }) {
+export function createTicketFieldDef(token: string, payload: { kind: string; value: string; label: string; color?: string; position?: number; board_id?: string }) {
   return req<TicketFieldDef>('POST', '/tickets/field-defs', token, payload);
 }
 
@@ -856,7 +878,7 @@ export function updateWorkflow(
 // into the runner env only — never persisted. The repo selector sets a git: ref.
 export function createExecution(
   token: string,
-  payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; project?: string; secret_refs?: Record<string, string> },
+  payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; project?: string; secret_refs?: Record<string, string>; checkout?: CheckoutSpec },
 ) {
   return req<{ execution_id: string }>('POST', '/forge/executions', token, payload);
 }

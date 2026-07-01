@@ -426,27 +426,46 @@ func validateStepRefs(ctx context.Context, refs []WorkflowStepRef, userID, orgID
 	for _, s := range steps {
 		found[s.StepID] = s
 	}
+	// A step's effective name (per-occurrence override, else the step definition's
+	// name) is its ${steps.<name>.output} key and its step-run label, so two blocks
+	// sharing one name silently collide in the run's output map — the later one
+	// shadows the earlier, and any output reference resolves against the wrong entry
+	// (or not at all). Require names to be unique across the pipeline so wiring is
+	// unambiguous. Approval gates carry no override name here and produce no output,
+	// so an empty name never collides.
+	seenNames := make(map[string]int, len(refs))
 	for i, ref := range refs {
-		if ref.Approval != nil {
-			continue
+		name := ref.Name
+		if ref.Approval == nil {
+			s, ok := found[ref.StepID]
+			if !ok {
+				err := fmt.Errorf("step %d: step %q not found", i, ref.StepID)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return err
+			}
+			if !canAccessStep(s, userID, orgID) {
+				err := fmt.Errorf("step %d: step %q not found", i, ref.StepID)
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return err
+			}
+			// A manual-approval gate is a single pause point, not a fan-out, so a matrix
+			// over it is meaningless — reject it rather than spawn N parallel gates.
+			if ref.Matrix != nil && s.Action == ActionApproval {
+				err := fmt.Errorf("step %d: an approval step cannot use a matrix", i)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return err
+			}
+			if name == "" {
+				name = s.Name
+			}
 		}
-		s, ok := found[ref.StepID]
-		if !ok {
-			err := fmt.Errorf("step %d: step %q not found", i, ref.StepID)
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return err
-		}
-		if !canAccessStep(s, userID, orgID) {
-			err := fmt.Errorf("step %d: step %q not found", i, ref.StepID)
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return err
-		}
-		// A manual-approval gate is a single pause point, not a fan-out, so a matrix
-		// over it is meaningless — reject it rather than spawn N parallel gates.
-		if ref.Matrix != nil && s.Action == ActionApproval {
-			err := fmt.Errorf("step %d: an approval step cannot use a matrix", i)
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return err
+		if name != "" {
+			if first, dup := seenNames[name]; dup {
+				err := fmt.Errorf("step %d: duplicate step name %q (already used by step %d) — each step in a workflow must have a unique name; give this block a per-occurrence name", i, name, first)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return err
+			}
+			seenNames[name] = i
 		}
 	}
 	return nil

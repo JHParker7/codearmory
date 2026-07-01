@@ -72,12 +72,15 @@ function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
-/** Modal form for a new ticket; submits title/description/priority via createTicket and hands the created ticket back. */
-function CreateModal({ boardId, onCreated, onClose }: { boardId?: string; onCreated: (t: Ticket) => void; onClose: () => void }) {
+/** Modal form for a new ticket; submits title/description/status/priority via createTicket and hands the created ticket back. */
+function CreateModal({ boardId, statuses, onCreated, onClose }: { boardId?: string; statuses: TicketFieldDef[]; onCreated: (t: Ticket) => void; onClose: () => void }) {
   const token = useAppSelector(s => s.auth.token)!;
+  // Status columns left-to-right; the new ticket defaults to the left-most.
+  const ordered = useMemo(() => [...statuses].sort((a, b) => a.position - b.position), [statuses]);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState('medium');
+  const [status, setStatus] = useState(ordered[0]?.value ?? 'open');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -87,7 +90,7 @@ function CreateModal({ boardId, onCreated, onClose }: { boardId?: string; onCrea
     setError(null);
     try {
       // Place the new ticket on the active board so it shows up where the user is looking.
-      onCreated(await createTicket(token, { title: title.trim(), description: description.trim() || undefined, priority, board_id: boardId }));
+      onCreated(await createTicket(token, { title: title.trim(), description: description.trim() || undefined, status, priority, board_id: boardId }));
     } catch (e: unknown) {
       setError((e as Error).message);
       setSubmitting(false);
@@ -113,7 +116,7 @@ function CreateModal({ boardId, onCreated, onClose }: { boardId?: string; onCrea
             <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3}
               style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '8px 10px', outline: 'none', resize: 'vertical', boxSizing: 'border-box' }} />
           </div>
-          <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 12 }}>
             <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>PRIORITY</div>
             <div style={{ display: 'flex', gap: 8 }}>
               {(['low', 'medium', 'high'] as const).map(p => (
@@ -124,6 +127,24 @@ function CreateModal({ boardId, onCreated, onClose }: { boardId?: string; onCrea
               ))}
             </div>
           </div>
+          {ordered.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>STATUS</div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {ordered.map(s => {
+                  const active = status === s.value;
+                  const accent = statusColor(s.value, s.color);
+                  return (
+                    <button key={s.value} onClick={() => setStatus(s.value)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 6, background: active ? T.cardHi : 'transparent', border: `1px solid ${active ? accent : T.border}`, color: active ? T.text : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: accent, flexShrink: 0 }} />
+                      {s.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 10 }}>
             <button onClick={handleSubmit} disabled={!title.trim() || submitting}
               style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 13, fontWeight: 600, padding: '9px 14px', cursor: 'pointer', opacity: (!title.trim() || submitting) ? 0.6 : 1 }}>
@@ -189,8 +210,12 @@ function NewBoardModal({ onCreated, onClose }: { onCreated: (b: Board) => void; 
   );
 }
 
-/** Modal to configure the status columns (org-level field defs shared across boards): add, rename, recolor, reorder, delete. */
-function ColumnsModal({ statuses, onChanged, onClose }: { statuses: TicketFieldDef[]; onChanged: () => void; onClose: () => void }) {
+/**
+ * Modal to configure status columns: add, rename, recolor, reorder, delete.
+ * Scoped to a board when boardId is set (the board owns its own columns); on the
+ * "all"/"unassigned" views it edits the org/global default columns.
+ */
+function ColumnsModal({ statuses, boardId, boardName, onChanged, onClose }: { statuses: TicketFieldDef[]; boardId?: string; boardName?: string; onChanged: () => void; onClose: () => void }) {
   const token = useAppSelector(s => s.auth.token)!;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -208,7 +233,7 @@ function ColumnsModal({ statuses, onChanged, onClose }: { statuses: TicketFieldD
     if (!label) return;
     const value = slugify(label);
     if (!value) { setError('label must contain letters or digits'); return; }
-    run(async () => { await createTicketFieldDef(token, { kind: 'status', value, label, position: ordered.length }); setNewLabel(''); });
+    run(async () => { await createTicketFieldDef(token, { kind: 'status', value, label, position: ordered.length, board_id: boardId }); setNewLabel(''); });
   };
 
   // Swap a column with its neighbour by exchanging positions (skips synthetic default rows that have no real id).
@@ -233,7 +258,9 @@ function ColumnsModal({ statuses, onChanged, onClose }: { statuses: TicketFieldD
         </div>
         <div style={{ padding: '14px 18px', overflow: 'auto' }}>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 12, lineHeight: 1.5 }}>
-            Status columns are shared across every board in your org.
+            {boardId
+              ? <>Status columns for board <span style={{ color: T.green }}>◆ {boardName}</span> — they belong to this board only.</>
+              : <>Default status columns for new boards and unassigned tickets.</>}
           </div>
           {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>{error}</div>}
           {ordered.map((s, i) => (
@@ -283,18 +310,31 @@ export function Tickets() {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
 
+  // Resolve a board switcher key to the board_id used for board-scoped status
+  // columns ("all"/"unassigned" → undefined = org/global columns).
+  const scopedBoardId = useCallback((key: string | null) => (key && key !== UNASSIGNED ? key : undefined), []);
+
+  // Status columns are owned per-board, so they are fetched for the selected
+  // board separately from the (board-independent) ticket and board lists.
+  const fetchStatuses = useCallback(async (key: string | null) => {
+    try {
+      const defs = await listTicketFieldDefs(token, 'status', scopedBoardId(key));
+      setStatuses(defs.length > 0 ? [...defs].sort((a, b) => a.position - b.position) : DEFAULT_STATUSES);
+    } catch {
+      setStatuses(DEFAULT_STATUSES);
+    }
+  }, [token, scopedBoardId]);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [tk, bd, defs] = await Promise.all([
+      const [tk, bd] = await Promise.all([
         listTickets(token),
         listBoards(token).catch(() => [] as Board[]),
-        listTicketFieldDefs(token, 'status').catch(() => [] as TicketFieldDef[]),
       ]);
       setTickets(tk);
       setBoards(bd);
-      setStatuses(defs.length > 0 ? [...defs].sort((a, b) => a.position - b.position) : DEFAULT_STATUSES);
     } catch (e: unknown) {
       setError((e as Error).message);
     } finally {
@@ -303,6 +343,9 @@ export function Tickets() {
   }, [token]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Refetch the status columns whenever the selected board changes.
+  useEffect(() => { fetchStatuses(board); }, [board, fetchStatuses]);
 
   // If the selected board disappears (deleted elsewhere), fall back to "all".
   useEffect(() => {
@@ -421,7 +464,7 @@ export function Tickets() {
             <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>boards/</span>
             <div style={{ display: 'flex', gap: 6 }}>
               <button onClick={() => setShowNewBoard(true)} title="new board" style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>+ board</button>
-              <button onClick={fetchData} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>↻</button>
+              <button onClick={() => { fetchData(); fetchStatuses(board); }} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>↻</button>
             </div>
           </div>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
@@ -599,6 +642,7 @@ export function Tickets() {
       {showCreate && (
         <CreateModal
           boardId={createBoardId}
+          statuses={statuses}
           onCreated={t => { setTickets(prev => [t, ...prev]); setSelected(t.ticket_id); setShowCreate(false); }}
           onClose={() => setShowCreate(false)}
         />
@@ -612,7 +656,9 @@ export function Tickets() {
       {showColumns && (
         <ColumnsModal
           statuses={statuses}
-          onChanged={() => { listTicketFieldDefs(token, 'status').then(d => setStatuses(d.length > 0 ? [...d].sort((a, b) => a.position - b.position) : DEFAULT_STATUSES)).catch(() => {}); }}
+          boardId={createBoardId}
+          boardName={selectedBoard?.name}
+          onChanged={() => { fetchStatuses(board); }}
           onClose={() => setShowColumns(false)}
         />
       )}

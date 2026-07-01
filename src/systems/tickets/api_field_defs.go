@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -17,12 +18,30 @@ import (
 
 var validFieldKinds = []string{FieldKindStatus, FieldKindPriority, FieldKindTimescale}
 
+// canModifyFieldDef reports whether the caller may update or delete f. A
+// board-scoped status column is owned by anyone who can access its board; an
+// org/global def is owned by its org (which also protects global seeded defs,
+// OrgID="", from being deleted by any real org).
+func canModifyFieldDef(ctx context.Context, f TicketFieldDef, userID, orgID string) bool {
+	if f.BoardID != "" {
+		b, err := getBoard(ctx, f.BoardID)
+		if err != nil {
+			return false
+		}
+		return canAccessBoard(b, userID, orgID)
+	}
+	return f.OrgID == orgID
+}
+
 type createFieldDefRequest struct {
 	Kind     string `json:"kind"`
 	Value    string `json:"value"`
 	Label    string `json:"label"`
 	Color    string `json:"color"`
 	Position int    `json:"position"`
+	// BoardID scopes a status column to a single board. Only valid for
+	// kind=status; ignored (must be empty) for priority/timescale.
+	BoardID string `json:"board_id"`
 }
 
 type updateFieldDefRequest struct {
@@ -47,7 +66,9 @@ func handleListFieldDefs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "kind must be one of: status, priority, timescale", http.StatusBadRequest)
 		return
 	}
-	defs, err := listFieldDefs(ctx, orgID, kind)
+	// board_id scopes the status columns to a single board (other kinds ignore it).
+	boardID := r.URL.Query().Get("board_id")
+	defs, err := listFieldDefs(ctx, orgID, kind, boardID)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
@@ -65,7 +86,7 @@ func handleCreateFieldDef(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("tickets").Start(r.Context(), "handleCreateFieldDef")
 	defer span.End()
 
-	_, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createFieldDef", "tickets/field-defs")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createFieldDef", "tickets/field-defs")
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -89,11 +110,34 @@ func handleCreateFieldDef(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "label is required", http.StatusBadRequest)
 		return
 	}
-	// (kind, value) must be unique within the org so a def is identified by its
-	// value rather than its UUID (enforced by uq_ticket_field_defs_org_kind_value).
+	// Only status columns can be board-scoped; priority/timescale are org-wide.
+	if req.BoardID != "" && req.Kind != FieldKindStatus {
+		http.Error(w, "only status columns can be board-scoped", http.StatusBadRequest)
+		return
+	}
+	if req.BoardID != "" {
+		b, err := getBoard(ctx, req.BoardID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				http.Error(w, "board not found or not accessible", http.StatusBadRequest)
+				return
+			}
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "board lookup failed")
+			http.Error(w, "failed to create field def", http.StatusInternalServerError)
+			return
+		}
+		if !canAccessBoard(b, userID, orgID) {
+			http.Error(w, "board not found or not accessible", http.StatusBadRequest)
+			return
+		}
+	}
+	// (kind, value) must be unique within the org and board so a def is identified
+	// by its value rather than its UUID (enforced by
+	// uq_ticket_field_defs_org_board_kind_value).
 	var dupCount int64
 	if err := connect().WithContext(ctx).Model(&TicketFieldDef{}).
-		Where("org_id = ? AND kind = ? AND value = ? AND active = ?", orgID, req.Kind, req.Value, true).
+		Where("org_id = ? AND board_id = ? AND kind = ? AND value = ? AND active = ?", orgID, req.BoardID, req.Kind, req.Value, true).
 		Count(&dupCount).Error; err == nil && dupCount > 0 {
 		http.Error(w, "a field def with that kind and value already exists", http.StatusConflict)
 		return
@@ -103,6 +147,7 @@ func handleCreateFieldDef(w http.ResponseWriter, r *http.Request) {
 	f := TicketFieldDef{
 		FieldDefID: uuid.New().String(),
 		OrgID:      orgID,
+		BoardID:    req.BoardID,
 		Kind:       req.Kind,
 		Value:      req.Value,
 		Label:      req.Label,
@@ -133,7 +178,7 @@ func handleUpdateFieldDef(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	_, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateFieldDef", "tickets/field-defs/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateFieldDef", "tickets/field-defs/"+id)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -152,7 +197,7 @@ func handleUpdateFieldDef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := row.(TicketFieldDef)
-	if f.OrgID != orgID {
+	if !canModifyFieldDef(ctx, f, userID, orgID) {
 		http.Error(w, "field def not found", http.StatusNotFound)
 		return
 	}
@@ -189,7 +234,7 @@ func handleDeleteFieldDef(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	_, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteFieldDef", "tickets/field-defs/"+id)
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteFieldDef", "tickets/field-defs/"+id)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -208,11 +253,12 @@ func handleDeleteFieldDef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := row.(TicketFieldDef)
-	// Strict org match (mirrors handleUpdateFieldDef): an org may only delete its
-	// own field defs. Global seeded defs (OrgID="") are never org-owned, so this
-	// also prevents any org from deleting them — which would break ticket creation
-	// platform-wide by removing the default statuses.
-	if f.OrgID != orgID {
+	// Ownership check (mirrors handleUpdateFieldDef): board-scoped columns require
+	// board access; org/global defs require an org match. Global seeded defs
+	// (OrgID="") are never org-owned, so this also prevents any real org from
+	// deleting them — which would break ticket creation platform-wide by removing
+	// the default statuses.
+	if !canModifyFieldDef(ctx, f, userID, orgID) {
 		http.Error(w, "field def not found", http.StatusNotFound)
 		return
 	}

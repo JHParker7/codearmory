@@ -442,6 +442,10 @@ func newForgeCreateForm(images, runners []string, repos kvCatalog) (tuiForm, tea
 		formInput("timeout", "Timeout", "seconds (optional)"),
 		runnerField,
 		forgeRepoField(repos),
+		// Checkout: clone the chosen repo into the working dir and cd in before the
+		// command runs (actions/checkout-style). Only applied when a repo is set.
+		formSelectKV("checkout", "Checkout", []string{"no", "into working dir"}, []string{"", "yes"}),
+		formInput("checkout_dir", "Checkout dir", "clone dir (optional, defaults to repo name)"),
 	)
 }
 
@@ -506,14 +510,29 @@ func (m forgeModel) forgeSubmitCreate() (forgeModel, tea.Cmd) {
 		m.form.errMsg = "image is required"
 		return m, nil
 	}
-	command, err := buildForgeCommand(m.form.value("command"))
-	if err != nil {
-		m.form.errMsg = err.Error()
-		return m, nil
-	}
-	if len(command) == 0 {
-		m.form.errMsg = "command is required"
-		return m, nil
+	rawCmd := m.form.value("command")
+	checkout := m.form.value("checkout") == "yes"
+	// Checkout weaves a `git clone … && cd …` prologue into a shell script, which
+	// forge only accepts for a shell (`sh -c`) command. buildForgeCommand parses a
+	// single-line entry into raw argv, so force the shell form when checkout is on.
+	var command []string
+	if checkout {
+		if strings.TrimSpace(rawCmd) == "" {
+			m.form.errMsg = "command is required"
+			return m, nil
+		}
+		command = []string{"sh", "-c", rawCmd}
+	} else {
+		var err error
+		command, err = buildForgeCommand(rawCmd)
+		if err != nil {
+			m.form.errMsg = err.Error()
+			return m, nil
+		}
+		if len(command) == 0 {
+			m.form.errMsg = "command is required"
+			return m, nil
+		}
 	}
 	env, err := parseEnvAssignments(m.form.value("env"))
 	if err != nil {
@@ -529,11 +548,18 @@ func (m forgeModel) forgeSubmitCreate() (forgeModel, tea.Cmd) {
 		}
 		timeout = t
 	}
+	repo := m.form.value("repo")
+	// Checkout only makes sense with a repo to clone; reject the mismatch instead of
+	// silently dropping it so the user isn't surprised the working dir is empty.
+	if repo == "" && checkout {
+		m.form.errMsg = "checkout needs a Git repo selected"
+		return m, nil
+	}
 	m.form.errMsg = ""
-	return m, forgeSubmitExec(image, command, env, timeout, m.form.value("runner"), m.form.value("repo"))
+	return m, forgeSubmitExec(image, command, env, timeout, m.form.value("runner"), repo, checkout, m.form.value("checkout_dir"))
 }
 
-func forgeSubmitExec(image string, command []string, env map[string]string, timeout int64, runner, repo string) tea.Cmd {
+func forgeSubmitExec(image string, command []string, env map[string]string, timeout int64, runner, repo string, checkout bool, checkoutDir string) tea.Cmd {
 	return func() tea.Msg {
 		payload := map[string]any{"image": image, "command": command}
 		if len(env) > 0 {
@@ -550,6 +576,16 @@ func forgeSubmitExec(image string, command []string, env map[string]string, time
 		// when no repo is selected/typed.
 		if repo != "" {
 			payload["secret_refs"] = map[string]any{"GIT_CLONE_URL": "git:" + repo}
+			// Checkout asks forge to clone $GIT_CLONE_URL into the working dir and cd
+			// in before running the command. An empty dir lets forge derive it from
+			// the repo name. Only sent alongside a repo (validated in the form).
+			if checkout {
+				spec := map[string]any{}
+				if checkoutDir != "" {
+					spec["path"] = checkoutDir
+				}
+				payload["checkout"] = spec
+			}
 		}
 		// Tag with the current project so the new run isn't hidden by the
 		// project-filtered list the user just created it from.

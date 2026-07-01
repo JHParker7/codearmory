@@ -74,6 +74,15 @@ func normalizeBoardID(ctx context.Context, boardID *string, userID, orgID string
 	return &id, true, nil
 }
 
+// boardScope flattens a ticket's resolved board pointer to the string board
+// scope used by the field-def helpers ("" = the org/global status set).
+func boardScope(boardID *string) string {
+	if boardID == nil {
+		return ""
+	}
+	return *boardID
+}
+
 // parseDueDate parses a due date string in YYYY-MM-DD or RFC3339 format.
 func parseDueDate(s *string) (*time.Time, error) {
 	if s == nil || *s == "" {
@@ -115,29 +124,8 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "title is required", http.StatusBadRequest)
 		return
 	}
-	status := req.Status
-	if status == "" {
-		status = StatusOpen
-	}
-	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindStatus, validStatuses), status) {
-		http.Error(w, "invalid status", http.StatusBadRequest)
-		return
-	}
-	priority := req.Priority
-	if priority == "" {
-		priority = PriorityMedium
-	}
-	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, validPriorities), priority) {
-		http.Error(w, "invalid priority", http.StatusBadRequest)
-		return
-	}
 
-	dueDate, err := parseDueDate(req.DueDate)
-	if err != nil {
-		http.Error(w, "invalid due_date: use YYYY-MM-DD", http.StatusBadRequest)
-		return
-	}
-
+	// Resolve the board first so the status is scoped to the board's own columns.
 	boardID, boardOK, err := normalizeBoardID(ctx, req.BoardID, userID, orgID)
 	if err != nil {
 		span.RecordError(err)
@@ -148,6 +136,32 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	if !boardOK {
 		http.Error(w, "board not found or not accessible", http.StatusBadRequest)
+		return
+	}
+	scopeBoard := boardScope(boardID)
+
+	// Status defaults to the board's left-most column when the client omits it.
+	statusValues := getFieldDefValues(ctx, orgID, FieldKindStatus, scopeBoard, validStatuses)
+	status := req.Status
+	if status == "" {
+		status = statusValues[0]
+	}
+	if !slices.Contains(statusValues, status) {
+		http.Error(w, "invalid status", http.StatusBadRequest)
+		return
+	}
+	priority := req.Priority
+	if priority == "" {
+		priority = PriorityMedium
+	}
+	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, "", validPriorities), priority) {
+		http.Error(w, "invalid priority", http.StatusBadRequest)
+		return
+	}
+
+	dueDate, err := parseDueDate(req.DueDate)
+	if err != nil {
+		http.Error(w, "invalid due_date: use YYYY-MM-DD", http.StatusBadRequest)
 		return
 	}
 
@@ -214,11 +228,18 @@ func handleListTickets(w http.ResponseWriter, r *http.Request) {
 	projectFilter := q.Get("project")
 	boardFilter := q.Get("board_id")
 
-	if statusFilter != "" && !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindStatus, validStatuses), statusFilter) {
+	// Validate the status filter against the columns of the board being viewed
+	// (a real board_id), else the org/global status set. "none" (unassigned) and
+	// "" both map to the org/global scope.
+	statusScopeBoard := ""
+	if boardFilter != "" && boardFilter != "none" {
+		statusScopeBoard = boardFilter
+	}
+	if statusFilter != "" && !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindStatus, statusScopeBoard, validStatuses), statusFilter) {
 		http.Error(w, "invalid status filter", http.StatusBadRequest)
 		return
 	}
-	if priorityFilter != "" && !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, validPriorities), priorityFilter) {
+	if priorityFilter != "" && !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, "", validPriorities), priorityFilter) {
 		http.Error(w, "invalid priority filter", http.StatusBadRequest)
 		return
 	}
@@ -334,29 +355,10 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	if req.Title == "" {
 		req.Title = existing.Title
 	}
-	if req.Status == "" {
-		req.Status = existing.Status
-	}
-	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindStatus, validStatuses), req.Status) {
-		http.Error(w, "invalid status", http.StatusBadRequest)
-		return
-	}
-	if req.Priority == "" {
-		req.Priority = existing.Priority
-	}
-	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, validPriorities), req.Priority) {
-		http.Error(w, "invalid priority", http.StatusBadRequest)
-		return
-	}
 
-	dueDate, err := parseDueDate(req.DueDate)
-	if err != nil {
-		http.Error(w, "invalid due_date: use YYYY-MM-DD", http.StatusBadRequest)
-		return
-	}
-
-	// Validate a board change up-front (before any mutation). A nil pointer means
-	// the field was omitted (keep current); an explicit "" clears the board.
+	// Validate a board change up-front (before any mutation) so the status can be
+	// scoped to the resulting board's own columns. A nil pointer means the field
+	// was omitted (keep current); an explicit "" clears the board.
 	boardChanged := req.BoardID != nil
 	var newBoardID *string
 	if boardChanged {
@@ -372,6 +374,38 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newBoardID = bid
+	}
+	effectiveBoardID := boardScope(existing.BoardID)
+	if boardChanged {
+		effectiveBoardID = boardScope(newBoardID)
+	}
+
+	if req.Status == "" {
+		req.Status = existing.Status
+	}
+	statusValues := getFieldDefValues(ctx, orgID, FieldKindStatus, effectiveBoardID, validStatuses)
+	if !slices.Contains(statusValues, req.Status) {
+		// Moving a ticket to a board whose columns don't include the current
+		// status snaps it to that board's left-most column rather than 400ing.
+		if boardChanged {
+			req.Status = statusValues[0]
+		} else {
+			http.Error(w, "invalid status", http.StatusBadRequest)
+			return
+		}
+	}
+	if req.Priority == "" {
+		req.Priority = existing.Priority
+	}
+	if !slices.Contains(getFieldDefValues(ctx, orgID, FieldKindPriority, "", validPriorities), req.Priority) {
+		http.Error(w, "invalid priority", http.StatusBadRequest)
+		return
+	}
+
+	dueDate, err := parseDueDate(req.DueDate)
+	if err != nil {
+		http.Error(w, "invalid due_date: use YYYY-MM-DD", http.StatusBadRequest)
+		return
 	}
 
 	wasOpen := existing.Status != StatusResolved && existing.Status != StatusClosed

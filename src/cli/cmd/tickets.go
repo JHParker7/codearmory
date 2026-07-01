@@ -25,6 +25,7 @@ func init() {
 	var (
 		ticketTitle     string
 		ticketDesc      string
+		ticketStatus    string
 		ticketPriority  string
 		ticketTimescale string
 		ticketDueDate   string
@@ -49,6 +50,9 @@ func init() {
 			payload := map[string]any{"title": ticketTitle}
 			if ticketDesc != "" {
 				payload["description"] = ticketDesc
+			}
+			if ticketStatus != "" {
+				payload["status"] = ticketStatus
 			}
 			if ticketPriority != "" {
 				payload["priority"] = ticketPriority
@@ -87,6 +91,7 @@ func init() {
 	}
 	createTicketCmd.Flags().StringVar(&ticketTitle, "title", "", "Ticket title (required)")
 	createTicketCmd.Flags().StringVar(&ticketDesc, "description", "", "Ticket description")
+	createTicketCmd.Flags().StringVar(&ticketStatus, "status", "", "Status value (defaults to the board's left-most column)")
 	createTicketCmd.Flags().StringVar(&ticketPriority, "priority", "", "Priority value (e.g. low, medium, high, critical)")
 	createTicketCmd.Flags().StringVar(&ticketTimescale, "timescale", "", "Timescale value (e.g. Q1 2026, sprint-3)")
 	createTicketCmd.Flags().StringVar(&ticketDueDate, "due-date", "", "Due date in YYYY-MM-DD format")

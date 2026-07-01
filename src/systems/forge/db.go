@@ -223,13 +223,15 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		Backend     string `gorm:"column:backend"`
 		OrgID       string `gorm:"column:org_id"`
 		SecretRefs  []byte `gorm:"column:secret_refs"`
+		OutputEnv   []byte `gorm:"column:output_env"`
+		Checkout    []byte `gorm:"column:checkout"`
 	}
 	var raw pendingRow
 
 	// FOR UPDATE SKIP LOCKED lets multiple workers run in parallel: each goroutine
 	// locks exactly one pending row and skips any already locked by a sibling.
 	result := tx.Raw(`
-		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class, backend, org_id, secret_refs
+		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class, backend, org_id, secret_refs, output_env, checkout
 		FROM executions WHERE status = 'pending' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
 	`).Scan(&raw)
 	if result.Error != nil {
@@ -277,6 +279,29 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		span.SetStatus(codes.Error, err.Error())
 		slog.ErrorContext(ctx, "worker: unmarshal env", "execution_id", exec.ExecutionID, "error", err)
 		return Execution{}, false
+	}
+	// output_env drives structured-output capture (wrapOutputEnv); it must be
+	// loaded here or the worker never wraps the command. A '[]'/NULL column
+	// leaves OutputEnv nil, which is the no-capture case.
+	if len(raw.OutputEnv) > 0 {
+		if err := json.Unmarshal(raw.OutputEnv, &exec.OutputEnv); err != nil {
+			tx.Rollback() //nolint:errcheck
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			slog.ErrorContext(ctx, "worker: unmarshal output_env", "execution_id", exec.ExecutionID, "error", err)
+			return Execution{}, false
+		}
+	}
+	// checkout drives the actions/checkout-style clone prologue; a NULL column
+	// leaves Checkout nil (no auto-checkout).
+	if len(raw.Checkout) > 0 {
+		if err := json.Unmarshal(raw.Checkout, &exec.Checkout); err != nil {
+			tx.Rollback() //nolint:errcheck
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			slog.ErrorContext(ctx, "worker: unmarshal checkout", "execution_id", exec.ExecutionID, "error", err)
+			return Execution{}, false
+		}
 	}
 
 	if err := tx.Exec(`UPDATE executions SET status = 'running', started_at = now() WHERE execution_id = ?`, exec.ExecutionID).Error; err != nil {

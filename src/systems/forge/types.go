@@ -53,10 +53,16 @@ type Execution struct {
 	// instead of raw stdout. Capture works for shell (`-c`) commands; see worker.go.
 	OutputEnv []string          `gorm:"column:output_env;type:jsonb;not null;default:'[]';serializer:json" json:"output_env,omitempty"`
 	Outputs   map[string]string `gorm:"column:outputs;type:jsonb;not null;default:'{}';serializer:json"     json:"outputs,omitempty"`
-	Status    string            `gorm:"column:status;not null;default:pending"                  json:"status"`
-	ExitCode  *int              `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
-	Stdout    *string           `gorm:"column:stdout"                                           json:"stdout,omitempty"`
-	Stderr    *string           `gorm:"column:stderr"                                           json:"stderr,omitempty"`
+	// Checkout, when set, asks forge to `git clone` a repo into the sandbox working
+	// dir and cd into it before running Command — the actions/checkout equivalent.
+	// The clone URL is read at runtime from the env var it names (default
+	// GIT_CLONE_URL), typically populated by a git:/gitea: secret_ref. Nil = no
+	// auto-checkout (the command runs in the image's working dir as before).
+	Checkout *CheckoutSpec `gorm:"column:checkout;type:jsonb;serializer:json" json:"checkout,omitempty"`
+	Status   string        `gorm:"column:status;not null;default:pending"                  json:"status"`
+	ExitCode *int          `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
+	Stdout   *string       `gorm:"column:stdout"                                           json:"stdout,omitempty"`
+	Stderr   *string       `gorm:"column:stderr"                                           json:"stderr,omitempty"`
 	// MemoryUsedMB is the peak memory the run's container consumed, captured
 	// best-effort from the runtime (k8s metrics-server / docker stats). It is NULL
 	// when metrics are unavailable — most often a very short job a metrics-server
@@ -66,6 +72,27 @@ type Execution struct {
 	CreatedAt     time.Time  `gorm:"column:created_at;not null;default:now()"            json:"created_at"`
 	StartedAt     *time.Time `gorm:"column:started_at"                                   json:"started_at,omitempty"`
 	EndedAt       *time.Time `gorm:"column:ended_at"                                     json:"ended_at,omitempty"`
+}
+
+// CheckoutSpec configures forge's actions/checkout-style clone. Before running the
+// command, forge `git clone`s the repo whose authenticated URL lives in the env var
+// named by Env (default GIT_CLONE_URL — usually set by a git:/gitea: secret_ref)
+// into Path and cd's into it, so the command starts inside a checked-out repo. A
+// clone failure fails the whole execution. Requires `git` in the image and a shell
+// (`-c`) command; both are enforced at submit time.
+type CheckoutSpec struct {
+	// Env names the env var holding the clone URL. Default GIT_CLONE_URL.
+	Env string `json:"env,omitempty"`
+	// Path is the directory (relative to the image's working dir) to clone into and
+	// cd into. Default: the repo name derived from the git:/gitea: ref, else "repo".
+	Path string `json:"path,omitempty"`
+	// Ref is an optional branch or tag to check out (git clone --branch). Empty
+	// clones the remote's default branch. Commit SHAs are not supported here (use a
+	// full clone + your own `git checkout` in the command).
+	Ref string `json:"ref,omitempty"`
+	// Depth is the git clone --depth. Nil defaults to 1 (shallow, like
+	// actions/checkout); 0 means a full clone; a positive value sets that depth.
+	Depth *int `json:"depth,omitempty"`
 }
 
 // RunnerClass defines the resource limits for a named execution tier. The same
@@ -133,6 +160,10 @@ type submitRequest struct {
 	// "gitea:<owner>/<repo>" mints a short-lived Forgejo clone URL. Resolved at
 	// dispatch, injected into the runtime env, and never persisted.
 	SecretRefs map[string]string `json:"secret_refs"`
+	// Checkout, when set, asks forge to clone the repo referenced by a secret_ref
+	// (or plain env var) into the working dir before running the command — see
+	// CheckoutSpec.
+	Checkout *CheckoutSpec `json:"checkout"`
 }
 
 // RunResult holds the output of a completed container run. ExitCode is a pointer

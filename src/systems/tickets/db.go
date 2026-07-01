@@ -520,7 +520,7 @@ func (f TicketFieldDef) Get(ctx context.Context) (db, error) {
 func (f TicketFieldDef) List(ctx context.Context, limit, offset int) ([]db, error) {
 	ctx, span := otel.Tracer("tickets").Start(ctx, "db.field_def.list")
 	defer span.End()
-	defs, err := listFieldDefs(ctx, f.OrgID, f.Kind)
+	defs, err := listFieldDefs(ctx, f.OrgID, f.Kind, f.BoardID)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -545,12 +545,13 @@ func (f TicketFieldDef) List(ctx context.Context, limit, offset int) ([]db, erro
 	return result, nil
 }
 
-// listFieldDefs returns active field defs visible to orgID: system defaults
-// (OrgID='') plus org-specific ones, ordered by position. Org-specific defs
-// override global ones with the same Kind+Value.
-func listFieldDefs(ctx context.Context, orgID, kind string) ([]TicketFieldDef, error) {
+// queryFieldDefs returns active field defs at an exact board scope visible to
+// orgID: system defaults (OrgID=”) plus org-specific ones, ordered by position.
+// Org-specific defs override global ones with the same Kind+Value. boardID is
+// matched exactly (” = the org/global level).
+func queryFieldDefs(ctx context.Context, orgID, kind, boardID string) ([]TicketFieldDef, error) {
 	q := connectRead().WithContext(ctx).
-		Where("active = ? AND (org_id = '' OR org_id = ?)", true, orgID)
+		Where("active = ? AND board_id = ? AND (org_id = '' OR org_id = ?)", true, boardID, orgID)
 	if kind != "" {
 		q = q.Where("kind = ?", kind)
 	}
@@ -571,9 +572,56 @@ func listFieldDefs(ctx context.Context, orgID, kind string) ([]TicketFieldDef, e
 	return deduped, nil
 }
 
-// getFieldDefValues returns distinct valid values for a kind visible to orgID.
-// Falls back to the provided defaults if the DB pool is uninitialised or returns nothing.
-func getFieldDefValues(ctx context.Context, orgID, kind string, fallback []string) []string {
+// listFieldDefs returns the field defs visible to orgID in the context of
+// boardID. Status columns are board-scoped: a board's own status defs fully
+// replace the org/global set, falling back to org/global when the board has
+// configured none (or boardID==""). Priority/timescale defs are always
+// org/global. Results are ordered by position within each kind.
+func listFieldDefs(ctx context.Context, orgID, kind, boardID string) ([]TicketFieldDef, error) {
+	// Non-status kinds are never board-scoped.
+	if kind != "" && kind != FieldKindStatus {
+		return queryFieldDefs(ctx, orgID, kind, "")
+	}
+
+	// Resolve the effective status set: the board's own columns, else org/global.
+	var statuses []TicketFieldDef
+	if boardID != "" {
+		own, err := queryFieldDefs(ctx, orgID, FieldKindStatus, boardID)
+		if err != nil {
+			return nil, err
+		}
+		statuses = own
+	}
+	if len(statuses) == 0 {
+		base, err := queryFieldDefs(ctx, orgID, FieldKindStatus, "")
+		if err != nil {
+			return nil, err
+		}
+		statuses = base
+	}
+	if kind == FieldKindStatus {
+		return statuses, nil
+	}
+
+	// kind == "": all kinds — board-scoped statuses plus org/global others.
+	others, err := queryFieldDefs(ctx, orgID, "", "")
+	if err != nil {
+		return nil, err
+	}
+	out := statuses
+	for _, d := range others {
+		if d.Kind != FieldKindStatus {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// getFieldDefValues returns distinct valid values for a kind visible to orgID
+// in the context of boardID (only status is board-scoped), ordered by position
+// so the first element is the left-most column. Falls back to the provided
+// defaults if the DB pool is uninitialised or returns nothing.
+func getFieldDefValues(ctx context.Context, orgID, kind, boardID string, fallback []string) []string {
 	// Skip the DB call entirely when no connection pool has been opened yet
 	// (e.g. unit-test processes that never call connect()).
 	dbInitMu.Lock()
@@ -583,7 +631,7 @@ func getFieldDefValues(ctx context.Context, orgID, kind string, fallback []strin
 		return fallback
 	}
 
-	defs, err := listFieldDefs(ctx, orgID, kind)
+	defs, err := listFieldDefs(ctx, orgID, kind, boardID)
 	if err != nil || len(defs) == 0 {
 		return fallback
 	}
@@ -596,6 +644,52 @@ func getFieldDefValues(ctx context.Context, orgID, kind string, fallback []strin
 		}
 	}
 	return values
+}
+
+// builtinStatusDefs returns the hard-coded default status columns, used to seed
+// a board when the org/global status set is somehow empty.
+func builtinStatusDefs() []TicketFieldDef {
+	return []TicketFieldDef{
+		{Kind: FieldKindStatus, Value: StatusOpen, Label: "Open", Position: 0},
+		{Kind: FieldKindStatus, Value: StatusInProgress, Label: "In Progress", Position: 1},
+		{Kind: FieldKindStatus, Value: StatusResolved, Label: "Resolved", Position: 2},
+		{Kind: FieldKindStatus, Value: StatusClosed, Label: "Closed", Position: 3},
+	}
+}
+
+// seedBoardStatuses gives a freshly-created board its own copy of the effective
+// org/global status columns so its columns can be edited independently of other
+// boards. Best-effort: a failure leaves the board falling back to org/global
+// statuses, so callers log rather than fail board creation.
+func seedBoardStatuses(ctx context.Context, b Board) error {
+	base, err := queryFieldDefs(ctx, b.OrgID, FieldKindStatus, "")
+	if err != nil {
+		return err
+	}
+	if len(base) == 0 {
+		base = builtinStatusDefs()
+	}
+	now := time.Now().UTC()
+	defs := make([]TicketFieldDef, 0, len(base))
+	for i, s := range base {
+		defs = append(defs, TicketFieldDef{
+			FieldDefID: uuid.New().String(),
+			OrgID:      b.OrgID,
+			BoardID:    b.BoardID,
+			Kind:       FieldKindStatus,
+			Value:      s.Value,
+			Label:      s.Label,
+			Color:      s.Color,
+			Position:   i,
+			Active:     true,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		})
+	}
+	if len(defs) == 0 {
+		return nil
+	}
+	return connect().WithContext(ctx).Create(&defs).Error
 }
 
 // seedDefaultFieldDefs inserts global system defaults for each kind
