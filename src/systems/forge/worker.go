@@ -171,6 +171,12 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	// crashing the worker — see R5 in the design.
 	var result RunResult
 	var runErr error
+	// Prepend an actions/checkout-style `git clone … && cd …` prologue so the
+	// command runs inside a checked-out repo. Applied before wrapOutputEnv so the
+	// clone runs first and the output-env trailer stays at the very end.
+	if exec.Checkout != nil {
+		exec.Command = applyCheckout(exec.Command, exec.Checkout, exec.SecretRefs)
+	}
 	// Capture requested output env vars: wrap the command so it emits them after a
 	// unique marker, then split them back out of stdout once the run finishes.
 	marker := ""

@@ -14,7 +14,7 @@ import {
   listRunnerClasses, createRunnerClass, updateRunnerClass, deleteRunnerClass,
   listForgeImages, listRuntimeBackends, listGitRepos,
 } from '../../api/bff';
-import type { Execution, RunnerClass, RuntimeBackend, GitRepo } from '../../api/bff';
+import type { Execution, RunnerClass, RuntimeBackend, GitRepo, CheckoutSpec } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
 import { RepoSelect } from '../../components/RepoSelect';
 import { useResizableWidth } from '../../components/ResizeHandle';
@@ -60,7 +60,7 @@ function displayCommand(command: string[]): string {
 // ── Create-execution modal ────────────────────────────────────────────────────
 
 /** The fields needed to launch an execution — shared by the create modal and rerun. */
-type ExecutionInput = { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; secret_refs?: Record<string, string> };
+type ExecutionInput = { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; secret_refs?: Record<string, string>; checkout?: CheckoutSpec };
 
 /** Env var the repo picker injects the minted clone URL as (matches the workflow forge/run step). */
 const GIT_CLONE_ENV = 'GIT_CLONE_URL';
@@ -83,6 +83,11 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
   const [cmd, setCmd] = useState('');
   const [envStr, setEnvStr] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
+  // Checkout: when on, forge clones the selected repo into the working dir and cd's
+  // into it before the command runs (actions/checkout-style). Only meaningful with a
+  // repo selected. checkoutPath overrides the clone dir (blank = derived repo name).
+  const [checkout, setCheckout] = useState(false);
+  const [checkoutPath, setCheckoutPath] = useState('');
   const [timeout, setTimeout_] = useState('');
   const [runnerClass, setRunnerClass] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -126,6 +131,9 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
         // Selecting a repo injects a short-lived clone URL as $GIT_CLONE_URL at
         // dispatch (resolved by the git broker, never persisted with the run).
         secret_refs: repo ? { [GIT_CLONE_ENV]: `git:${repo}` } : undefined,
+        // With checkout on, forge clones $GIT_CLONE_URL into the working dir and
+        // cd's in before running the command — the command starts inside the repo.
+        checkout: repo && checkout ? (checkoutPath.trim() ? { path: checkoutPath.trim() } : {}) : undefined,
       });
     } catch (e: unknown) { setCreateError((e as Error).message); }
     finally { setSubmitting(false); }
@@ -160,9 +168,25 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
             style={{ ...field, resize: 'vertical', lineHeight: 1.5, marginBottom: 14 }} />
 
           <div style={label}>GIT REPO <span style={{ color: T.faint, opacity: 0.7 }}>(optional · clone creds injected as ${GIT_CLONE_ENV})</span></div>
-          <div style={{ marginBottom: 18 }}>
+          <div style={{ marginBottom: repoUrl.trim() ? 10 : 18 }}>
             <RepoSelect value={repoUrl} onChange={setRepoUrl} repos={repos} />
           </div>
+
+          {/* Auto-checkout is only meaningful once a repo is selected. */}
+          {repoUrl.trim() && (
+            <div style={{ marginBottom: 18 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontFamily: T.mono, fontSize: 12, color: T.dim }}>
+                <input type="checkbox" checked={checkout} onChange={e => setCheckout(e.target.checked)} />
+                check out into working dir <span style={{ color: T.faint, opacity: 0.7 }}>(git clone + cd before the command, like actions/checkout)</span>
+              </label>
+              {checkout && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={label}>CLONE DIR <span style={{ color: T.faint, opacity: 0.7 }}>(optional · defaults to the repo name)</span></div>
+                  <input value={checkoutPath} onChange={e => setCheckoutPath(e.target.value)} placeholder="repo" style={field} />
+                </div>
+              )}
+            </div>
+          )}
 
           <div style={{ display: 'flex', gap: 12, marginBottom: 18 }}>
             <div style={{ flex: 1 }}>

@@ -82,6 +82,19 @@ export function StepInputsEditor({ action, defWith, override, upstream, repos, o
     onChange(next);
   };
 
+  // Per-occurrence checkout: with a repo set, forge can clone it into the working
+  // dir and cd in before the run (actions/checkout-style). Stored as with.checkout,
+  // a passthrough object forge consumes; empty {} = defaults, {path} sets the dir.
+  const checkoutSpec = (eff.checkout && typeof eff.checkout === 'object' && !Array.isArray(eff.checkout))
+    ? eff.checkout as Record<string, unknown> : null;
+  const checkoutPath = typeof checkoutSpec?.path === 'string' ? checkoutSpec.path : '';
+  const setCheckout = (spec: Record<string, unknown> | null) => {
+    const next = { ...override };
+    if (spec === null) delete next.checkout;
+    else next.checkout = spec;
+    onChange(next);
+  };
+
   // Config fields (image/run/runner) and outputs define what the step IS — they
   // belong to the step definition, not per-occurrence wiring; so they're not
   // editable here. Everything else is an input the pipeline connects.
@@ -102,8 +115,22 @@ export function StepInputsEditor({ action, defWith, override, upstream, repos, o
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>git repo</span>
           <RepoSelect value={repoVal} onChange={setRepo} repos={repos} placeholder="select a repo, or ${inputs.REPO}" fontSize={11} />
           <span style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, lineHeight: 1.4 }}>
-            cloned as $GIT_CLONE_URL · pick a repo for this step or reference a run input like {'${inputs.REPO}'}
+            injected as $GIT_CLONE_URL · pick a repo for this step or reference a run input like {'${inputs.REPO}'}
           </span>
+          {repoVal && (
+            <>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontFamily: T.mono, fontSize: 10, color: T.dim, marginTop: 2 }}>
+                <input type="checkbox" checked={checkoutSpec !== null} onPointerDown={stop}
+                  onChange={(e) => setCheckout(e.target.checked ? {} : null)} />
+                check out into working dir <span style={{ color: T.faint }}>(git clone + cd, like actions/checkout)</span>
+              </label>
+              {checkoutSpec !== null && (
+                <input value={checkoutPath} onPointerDown={stop} placeholder="clone dir (optional, defaults to repo name)"
+                  onChange={(e) => { const p = e.target.value.trim(); setCheckout(p ? { path: p } : {}); }}
+                  style={{ ...fieldStyle, flex: 'unset', marginLeft: 20, fontSize: 10 }} />
+              )}
+            </>
+          )}
         </div>
       )}
       {stringKeys.length === 0 && !env && !showRepo && (

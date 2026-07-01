@@ -167,6 +167,36 @@ Forge needs `GIT_INTERNAL_URL` (the broker's base URL) and `GIT_INTERNAL_KEY` (m
 
 The older `gitea:<owner>/<repo>` secret_ref scheme still works, but it targets the optional [`gitea_integration`](#relationship-to-gitea_integration) service (Forge's `GITEA_INTERNAL_URL` / `GITEA_INTERNAL_KEY`), not this broker. New jobs should prefer `git:` with a full repo URL, which works across all backend types.
 
+### Auto-checkout (`checkout`) — actions/checkout equivalent
+
+A `git:`/`gitea:` secret_ref only puts an **authenticated clone URL in an env var** — the job still has to run `git clone` itself. To have Forge check the repo out **for** you, add a `checkout` block. Before running `command`, Forge prepends a `git clone … && cd …` prologue so the command starts **inside** the checked-out repo — the [`actions/checkout`](https://github.com/actions/checkout) equivalent:
+
+```jsonc
+// Forge execution / Workflows step — clone into ./widgets, then run there
+{
+  "image": "alpine/git",
+  "command": ["sh", "-c", "git rev-parse HEAD && make build"],
+  "secret_refs": { "GIT_CLONE_URL": "git:https://gitlab.example.com/acme/widgets.git" },
+  "checkout": {}          // env: GIT_CLONE_URL, path: <repo name>, shallow depth-1
+}
+```
+
+`checkout` fields (all optional):
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `env` | `GIT_CLONE_URL` | Env var holding the clone URL. Must also be set by `secret_refs` or `env`. |
+| `path` | repo name from the ref, else `repo` | Directory to clone into and `cd` into (relative, no `..`). |
+| `ref` | remote's default branch | Branch or tag to check out (`git clone --branch`). Commit SHAs are not supported here. |
+| `depth` | `1` (shallow) | `git clone --depth`; `0` requests a full clone. |
+
+Requirements and behaviour:
+
+- **`git` must be in the image** (as with a self-run `git clone`) and the **command must be a shell form** (`["sh","-c", …]`) so the prologue can be woven in — both are enforced at submit (`400` otherwise).
+- A **clone failure fails the whole execution** — the command never runs against an empty dir.
+- Works on **every runtime backend** (docker, k8s, kata, gvisor, proxmox) because it is a command transform, not a runtime feature.
+- The env var can also be a plain public URL set via `env` (no creds) — checkout doesn't require a `secret_ref`.
+
 ## RBAC
 
 Git registers the following actions and resources. The resources are namespaced with the owner's `{username}/` prefix when stored as grants, matching the platform's resource-scoping convention.

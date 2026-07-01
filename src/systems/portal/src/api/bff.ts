@@ -388,6 +388,22 @@ export function rejectRun(token: string, id: string, comment?: string) {
 
 // ── Forge ─────────────────────────────────────────────────────────────────────
 
+/**
+ * actions/checkout-style clone config. When set on an execution, forge `git clone`s
+ * the repo whose authenticated URL lives in `env` (default GIT_CLONE_URL, usually a
+ * git:/gitea: secret_ref) into `path` and cd's into it before running the command.
+ */
+export interface CheckoutSpec {
+  /** Env var holding the clone URL. Default GIT_CLONE_URL. */
+  env?: string;
+  /** Directory to clone into and cd into. Default: repo name derived from the ref, else "repo". */
+  path?: string;
+  /** Branch or tag to check out. Empty = the remote's default branch. */
+  ref?: string;
+  /** git clone --depth. Omit for a shallow depth-1 clone; 0 = full clone. */
+  depth?: number;
+}
+
 export interface Execution {
   execution_id: string;
   user_id: string;
@@ -398,6 +414,8 @@ export interface Execution {
   runner_class?: string | null;
   /** Credential references (target env var → "scheme:arg") resolved at dispatch, never the resolved values. */
   secret_refs?: Record<string, string> | null;
+  /** actions/checkout-style clone config, if requested at submit. */
+  checkout?: CheckoutSpec | null;
   /** Free-text project (workspace) label this execution is tagged with. */
   project?: string;
   status: string;
@@ -860,7 +878,7 @@ export function updateWorkflow(
 // into the runner env only — never persisted. The repo selector sets a git: ref.
 export function createExecution(
   token: string,
-  payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; project?: string; secret_refs?: Record<string, string> },
+  payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; project?: string; secret_refs?: Record<string, string>; checkout?: CheckoutSpec },
 ) {
   return req<{ execution_id: string }>('POST', '/forge/executions', token, payload);
 }
