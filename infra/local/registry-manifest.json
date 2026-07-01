@@ -179,6 +179,29 @@
           "output_map_field": "outputs",
           "error_fields": ["stderr"]
         }
+      },
+      {
+        "name": "forge/git-clone",
+        "summary": "Clone a git repo into a shared volume",
+        "description": "Clones a git repository into a run-scoped shared workspace volume so later steps build from the checkout without needing `git` in their own image (the actions/checkout equivalent). Create the volume first with `forge/create-volume`, then attach the same volume name here; the repo — wired per step via the git credential broker and injected as `$GIT_CLONE_URL` — is shallow-cloned into it on a small git-capable image. Downstream `forge/run` steps attach the same volume to see the working tree. Optional `path` (clone dir), `ref` (branch/tag), and `depth` (0 = full clone) tune it.",
+        "method": "POST",
+        "path": "/executions",
+        "body_transforms": [
+          { "from_key": "run", "to_key": "command", "wrap": ["sh", "-c"] }
+        ],
+        "required_permission": { "action": "createExecution", "resource": "forge/executions" },
+        "async": {
+          "id_field": "execution_id",
+          "poll_path": "/executions/{id}",
+          "poll_interval_secs": 2,
+          "status_field": "status",
+          "success_states": ["completed"],
+          "failure_states": ["failed", "timed_out"],
+          "cancel_states": ["cancelled"],
+          "output_field": "stdout",
+          "output_map_field": "outputs",
+          "error_fields": ["stderr"]
+        }
       }
     ],
     "default_grants": [
@@ -660,6 +683,12 @@
       {
         "method": "GET",
         "path": "/repos",
+        "action": "listRepo",
+        "resource": "git/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/branches",
         "action": "listRepo",
         "resource": "git/repos"
       },

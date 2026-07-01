@@ -1201,6 +1201,21 @@ export function deleteGitRepo(token: string, id: string) {
   return req<void>('DELETE', `/git/repos/${id}`, token);
 }
 
+/** One branch of a repo; `default` flags the remote's default branch. */
+export interface GitBranch {
+  name: string;
+  default?: boolean;
+}
+
+/**
+ * List a repo's branches (for the checkout branch selector), enumerated via the
+ * owning backend's API. Returns [] for generic/un-enumerable backends so the caller
+ * falls back to a free-text ref. `cloneURL` is the repo's HTTPS clone URL.
+ */
+export function listGitBranches(token: string, cloneURL: string) {
+  return req<GitBranch[]>('GET', `/git/repos/branches?url=${encodeURIComponent(cloneURL)}`, token);
+}
+
 // ── Invites ───────────────────────────────────────────────────────────────────
 
 export interface Invite {

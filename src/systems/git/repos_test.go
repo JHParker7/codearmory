@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -162,4 +163,115 @@ func TestRepoEnumerationForgejoMergesManual(t *testing.T) {
 // srvCloneURL builds an absolute clone URL on the mock server's host.
 func srvCloneURL(r *http.Request, path string) string {
 	return "http://" + r.Host + path
+}
+
+func TestRepoPathFromURL(t *testing.T) {
+	cases := map[string]string{
+		"https://github.com/acme/widgets.git":      "acme/widgets",
+		"https://github.com/acme/widgets":          "acme/widgets",
+		"https://gitlab.com/group/sub/project.git": "group/sub/project",
+		"https://git.internal/solo":                "solo",
+	}
+	for in, want := range cases {
+		got, err := repoPathFromURL(in)
+		if err != nil {
+			t.Fatalf("repoPathFromURL(%q) error: %v", in, err)
+		}
+		if got != want {
+			t.Errorf("repoPathFromURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if _, err := repoPathFromURL("https://git.internal/"); err == nil {
+		t.Error("expected error for pathless url")
+	}
+}
+
+func TestListBranchesForgejo(t *testing.T) {
+	// Mock Forgejo: the repo object gives the default branch; /branches lists them.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "token fj-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v1/repos/ivan/site":
+			json.NewEncoder(w).Encode(map[string]string{"default_branch": "main"}) //nolint:errcheck
+		case "/api/v1/repos/ivan/site/branches":
+			json.NewEncoder(w).Encode([]map[string]string{ //nolint:errcheck
+				{"name": "main"}, {"name": "dev"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	rec := httptest.NewRecorder()
+	handleCreateBackend(rec, req("POST", "/backends", "ivan", createBackendRequest{
+		Name: "fj", Type: backendForgejo, BaseURL: srv.URL,
+		Auth: authConfig{Mode: modeToken, Token: "fj-tok", Username: "ivan"},
+	}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create backend: %d %s", rec.Code, rec.Body.String())
+	}
+
+	repoURL := srv.URL + "/ivan/site.git"
+	rec = httptest.NewRecorder()
+	handleListBranches(rec, req("GET", "/repos/branches?url="+url.QueryEscape(repoURL), "ivan", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list branches: %d %s", rec.Code, rec.Body.String())
+	}
+	var branches []branchView
+	json.Unmarshal(rec.Body.Bytes(), &branches) //nolint:errcheck
+	if len(branches) != 2 {
+		t.Fatalf("expected 2 branches, got %d (%+v)", len(branches), branches)
+	}
+	var sawDefault bool
+	for _, b := range branches {
+		if b.Name == "main" {
+			sawDefault = b.Default
+		}
+		if b.Name == "dev" && b.Default {
+			t.Errorf("dev should not be marked default: %+v", branches)
+		}
+	}
+	if !sawDefault {
+		t.Errorf("main should be marked default: %+v", branches)
+	}
+}
+
+func TestListBranchesUnlinkedHost(t *testing.T) {
+	// No backend linked for the URL's host → 404.
+	rec := httptest.NewRecorder()
+	handleListBranches(rec, req("GET", "/repos/branches?url="+url.QueryEscape("https://nowhere.example/a/b.git"), "judy", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Missing url query param → 400.
+	rec = httptest.NewRecorder()
+	handleListBranches(rec, req("GET", "/repos/branches", "judy", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListBranchesGenericEmpty(t *testing.T) {
+	// Generic backends have no branch API → empty list (UI falls back to free-text).
+	rec := httptest.NewRecorder()
+	handleCreateBackend(rec, req("POST", "/backends", "kim", createBackendRequest{
+		Name: "internal", Type: backendGeneric, BaseURL: "https://scm.internal",
+		Auth: authConfig{Mode: modeBasic, Username: "kim", Password: "pw"},
+	}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create backend: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	handleListBranches(rec, req("GET", "/repos/branches?url="+url.QueryEscape("https://scm.internal/team/app.git"), "kim", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("expected empty array, got %s", rec.Body.String())
+	}
 }

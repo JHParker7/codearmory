@@ -252,3 +252,56 @@ describe('forge/build-image', () => {
     expect(buildStepWith('forge/build-image', (k) => vals[k] ?? '')).to.deep.equal(withMap);
   });
 });
+
+describe('forge/git-clone', () => {
+  it('nests path/ref/depth under a checkout object with a no-op run default', () => {
+    const out = buildStepWith('forge/git-clone', reader({
+      [p('image')]: 'alpine/git',
+      [p('volumes')]: 'workspace:/src',
+      [p('path')]: 'app',
+      [p('ref')]: 'main',
+      [p('depth')]: '1',
+    }));
+    expect(out.checkout).to.deep.equal({ path: 'app', ref: 'main', depth: 1 });
+    expect(out.image).to.equal('alpine/git');
+    expect(out.run).to.equal('true'); // no-op; the checkout prologue is woven in
+    expect(out.volumes).to.deep.equal([
+      { workflow_id: '${run_id}', name: 'workspace', mount_path: '/src', workdir: true },
+    ]);
+    // path/ref/depth moved under checkout, not left at the top level.
+    expect(out).to.not.have.property('path');
+  });
+
+  it('always sets checkout (empty) and lets a post-clone command override run', () => {
+    const out = buildStepWith('forge/git-clone', reader({
+      [p('image')]: 'alpine/git',
+      [p('volumes')]: 'workspace',
+      [p('run')]: 'git submodule update --init',
+    }));
+    expect(out.checkout).to.deep.equal({});
+    expect(out.run).to.equal('git submodule update --init');
+  });
+
+  it('requires image and volume', () => {
+    expect(() => buildStepWith('forge/git-clone', reader({ [p('volumes')]: 'workspace' }))).to.throw(/Git image is required/);
+    expect(() => buildStepWith('forge/git-clone', reader({ [p('image')]: 'alpine/git' }))).to.throw(/Clone into volume is required/);
+  });
+
+  it('round-trips through formValsFromWith without leaking checkout into advanced With', () => {
+    const withMap = buildStepWith('forge/git-clone', reader({
+      [p('image')]: 'alpine/git',
+      [p('volumes')]: 'workspace:/src',
+      [p('path')]: 'app',
+      [p('ref')]: 'release',
+      [p('depth')]: '0',
+    }));
+    const vals = formValsFromWith('forge/git-clone', withMap);
+    expect(vals[p('path')]).to.equal('app');
+    expect(vals[p('ref')]).to.equal('release');
+    expect(vals[p('depth')]).to.equal('0');
+    expect(vals[p('volumes')]).to.equal('workspace:/src');
+    expect(vals[p(RAW_WITH_KEY)]).to.equal(undefined);
+    // And it re-nests identically.
+    expect(buildStepWith('forge/git-clone', (k) => vals[k] ?? '')).to.deep.equal(withMap);
+  });
+});

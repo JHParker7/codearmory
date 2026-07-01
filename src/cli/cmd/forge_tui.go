@@ -443,8 +443,10 @@ func newForgeCreateForm(images, runners []string, repos kvCatalog) (tuiForm, tea
 		runnerField,
 		forgeRepoField(repos),
 		// Checkout: clone the chosen repo into the working dir and cd in before the
-		// command runs (actions/checkout-style). Only applied when a repo is set.
+		// command runs (actions/checkout-style). Only applied when a repo is set. The
+		// branch (git clone --branch) defaults to the remote's default when blank.
 		formSelectKV("checkout", "Checkout", []string{"no", "into working dir"}, []string{"", "yes"}),
+		formInput("checkout_branch", "Checkout branch", "branch or tag (optional, defaults to the remote's default)"),
 		formInput("checkout_dir", "Checkout dir", "clone dir (optional, defaults to repo name)"),
 	)
 }
@@ -556,10 +558,10 @@ func (m forgeModel) forgeSubmitCreate() (forgeModel, tea.Cmd) {
 		return m, nil
 	}
 	m.form.errMsg = ""
-	return m, forgeSubmitExec(image, command, env, timeout, m.form.value("runner"), repo, checkout, m.form.value("checkout_dir"))
+	return m, forgeSubmitExec(image, command, env, timeout, m.form.value("runner"), repo, checkout, m.form.value("checkout_dir"), m.form.value("checkout_branch"))
 }
 
-func forgeSubmitExec(image string, command []string, env map[string]string, timeout int64, runner, repo string, checkout bool, checkoutDir string) tea.Cmd {
+func forgeSubmitExec(image string, command []string, env map[string]string, timeout int64, runner, repo string, checkout bool, checkoutDir, checkoutBranch string) tea.Cmd {
 	return func() tea.Msg {
 		payload := map[string]any{"image": image, "command": command}
 		if len(env) > 0 {
@@ -583,6 +585,11 @@ func forgeSubmitExec(image string, command []string, env map[string]string, time
 				spec := map[string]any{}
 				if checkoutDir != "" {
 					spec["path"] = checkoutDir
+				}
+				// A branch/tag ref becomes `git clone --branch`; blank clones the
+				// remote's default branch.
+				if checkoutBranch != "" {
+					spec["ref"] = checkoutBranch
 				}
 				payload["checkout"] = spec
 			}

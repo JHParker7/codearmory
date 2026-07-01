@@ -40,6 +40,10 @@ export const REGISTRY_AUTH_ENV = 'REGISTRY_AUTH';
  * /executions body (volumes and runner_class stay top-level). */
 const BUILD_IMAGE_FIELDS = ['destinations', 'dockerfile', 'context', 'build_args', 'target'];
 
+/** The flat git-clone form keys that nest under the `checkout` object of forge's
+ * /executions body (image and volumes stay top-level). */
+const CHECKOUT_FIELDS = ['path', 'ref', 'depth'];
+
 /**
  * Turns a compact "name[:/mount]" attach spec into forge's `volumes` array: one
  * shared volume, scoped to the run (${run_id}), made the working directory. Returns
@@ -172,6 +176,14 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
     { key: 'registry_secret', label: 'Registry secret', placeholder: 'org secret holding a docker config.json (to push)', config: true },
     { key: 'volumes', label: 'Source volume', placeholder: 'workspace or workspace:/src (attach the checkout)', kind: 'volumeAttach', config: true },
     { key: 'runner_class', label: 'Build runner', placeholder: 'privileged kata/gvisor class (required)', required: true, config: true },
+  ],
+  'forge/git-clone': [
+    { key: 'volumes', label: 'Clone into volume', placeholder: 'workspace or workspace:/src (create with forge/create-volume)', required: true, kind: 'volumeAttach', config: true },
+    { key: 'image', label: 'Git image', placeholder: 'alpine/git (required, must include git)', required: true, catalog: 'image', config: true },
+    { key: 'path', label: 'Clone dir', placeholder: 'repo name (default, relative to the volume)', config: true },
+    { key: 'ref', label: 'Branch / tag', placeholder: 'main (optional, default remote HEAD)', config: true },
+    { key: 'depth', label: 'Depth', placeholder: '1 (default shallow; 0 = full clone)', kind: 'int', config: true },
+    { key: 'run', label: 'Post-clone command', placeholder: 'true (optional; runs in the checkout after clone)', config: true },
   ],
   'tickets/create': [
     { key: 'title', label: 'Title', placeholder: 'Build failed', required: true },
@@ -373,7 +385,24 @@ export function buildStepWith(action: string, valueOf: (key: string) => string):
     withMap.workflow_id = RUN_ID_REF;
   }
   if (action === 'forge/build-image') nestForgeBuild(withMap);
+  if (action === 'forge/git-clone') nestForgeCheckout(withMap);
   return withMap;
+}
+
+/**
+ * Restructures the flat git-clone form fields into forge's request: the path/ref/depth
+ * keys under a `checkout` object (always present so forge runs the clone prologue), and
+ * a no-op `run` default so the execution is a valid shell command the checkout weaves
+ * into. The repo itself is wired per-occurrence as secret_refs.GIT_CLONE_URL. image and
+ * volumes stay top-level.
+ */
+function nestForgeCheckout(withMap: Record<string, unknown>): void {
+  const checkout: Record<string, unknown> = {};
+  for (const k of CHECKOUT_FIELDS) {
+    if (k in withMap) { checkout[k] = withMap[k]; delete withMap[k]; }
+  }
+  withMap.checkout = checkout;
+  if (!('run' in withMap)) withMap.run = 'true';
 }
 
 /**
@@ -407,6 +436,14 @@ function nestForgeBuild(withMap: Record<string, unknown>): void {
  */
 export function flattenStepWith(action: string, withMap: Record<string, unknown>): Record<string, unknown> {
   const wm: Record<string, unknown> = { ...withMap };
+
+  if (action === 'forge/git-clone') {
+    if (wm.checkout && typeof wm.checkout === 'object' && !Array.isArray(wm.checkout)) {
+      Object.assign(wm, wm.checkout as Record<string, unknown>);
+      delete wm.checkout;
+    }
+    return wm;
+  }
   if (action !== 'forge/build-image') return wm;
 
   if (wm.build && typeof wm.build === 'object' && !Array.isArray(wm.build)) {

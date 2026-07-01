@@ -214,7 +214,7 @@ function PipelineBuilderOverlay({
       </div>
       <div ref={splitRow} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 3px 14px 14px' }}>
-          <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} actions={actions} repos={repos}
+          <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} actions={actions} repos={repos} token={token}
             onChange={setSteps} onInspect={onInspect} onPickAction={onPickAction}
             pendingAdd={pendingAdd} onPendingConsumed={() => setPendingAdd(null)} />
         </div>

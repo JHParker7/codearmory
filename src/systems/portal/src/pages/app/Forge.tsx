@@ -17,6 +17,7 @@ import {
 import type { Execution, RunnerClass, RuntimeBackend, GitRepo, CheckoutSpec } from '../../api/bff';
 import { ImageSelect } from '../../components/ImageSelect';
 import { RepoSelect } from '../../components/RepoSelect';
+import { BranchSelect } from '../../components/BranchSelect';
 import { useResizableWidth } from '../../components/ResizeHandle';
 import { timeAgo } from '../../utils';
 
@@ -85,9 +86,11 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
   const [repoUrl, setRepoUrl] = useState('');
   // Checkout: when on, forge clones the selected repo into the working dir and cd's
   // into it before the command runs (actions/checkout-style). Only meaningful with a
-  // repo selected. checkoutPath overrides the clone dir (blank = derived repo name).
+  // repo selected. checkoutPath overrides the clone dir (blank = derived repo name);
+  // checkoutRef picks the branch/tag to clone (blank = the remote's default branch).
   const [checkout, setCheckout] = useState(false);
   const [checkoutPath, setCheckoutPath] = useState('');
+  const [checkoutRef, setCheckoutRef] = useState('');
   const [timeout, setTimeout_] = useState('');
   const [runnerClass, setRunnerClass] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -133,7 +136,11 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
         secret_refs: repo ? { [GIT_CLONE_ENV]: `git:${repo}` } : undefined,
         // With checkout on, forge clones $GIT_CLONE_URL into the working dir and
         // cd's in before running the command — the command starts inside the repo.
-        checkout: repo && checkout ? (checkoutPath.trim() ? { path: checkoutPath.trim() } : {}) : undefined,
+        // A branch/tag ref, when set, becomes `git clone --branch`.
+        checkout: repo && checkout ? {
+          ...(checkoutPath.trim() ? { path: checkoutPath.trim() } : {}),
+          ...(checkoutRef.trim() ? { ref: checkoutRef.trim() } : {}),
+        } : undefined,
       });
     } catch (e: unknown) { setCreateError((e as Error).message); }
     finally { setSubmitting(false); }
@@ -180,10 +187,16 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
                 check out into working dir <span style={{ color: T.faint, opacity: 0.7 }}>(git clone + cd before the command, like actions/checkout)</span>
               </label>
               {checkout && (
-                <div style={{ marginTop: 8 }}>
-                  <div style={label}>CLONE DIR <span style={{ color: T.faint, opacity: 0.7 }}>(optional · defaults to the repo name)</span></div>
-                  <input value={checkoutPath} onChange={e => setCheckoutPath(e.target.value)} placeholder="repo" style={field} />
-                </div>
+                <>
+                  <div style={{ marginTop: 8 }}>
+                    <div style={label}>BRANCH <span style={{ color: T.faint, opacity: 0.7 }}>(optional · defaults to the remote's default branch)</span></div>
+                    <BranchSelect token={token} repoUrl={repoUrl} value={checkoutRef} onChange={setCheckoutRef} />
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <div style={label}>CLONE DIR <span style={{ color: T.faint, opacity: 0.7 }}>(optional · defaults to the repo name)</span></div>
+                    <input value={checkoutPath} onChange={e => setCheckoutPath(e.target.value)} placeholder="repo" style={field} />
+                  </div>
+                </>
               )}
             </div>
           )}

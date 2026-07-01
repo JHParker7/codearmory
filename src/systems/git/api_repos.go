@@ -51,6 +51,52 @@ func handleListRepos(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mergeRepos(backends, enumerated, manual))
 }
 
+// handleListBranches returns the branch selector's options for a repo: the
+// branches of the clone URL in the `url` query param, enumerated via the owning
+// backend's API and feeding forge's checkout.ref. Reuses the listRepo permission
+// since branch listing is part of choosing a clone target. Generic (un-enumerable)
+// backends return an empty list so the UI falls back to a free-text ref.
+func handleListBranches(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("git").Start(r.Context(), "handleListBranches")
+	defer span.End()
+
+	userID, ok := checkGatekeeper(ctx, w, r, "listRepo", "git/repos")
+	if !ok {
+		return
+	}
+	repoURL := strings.TrimSpace(r.URL.Query().Get("url"))
+	if repoURL == "" {
+		http.Error(w, "url query parameter is required", http.StatusBadRequest)
+		return
+	}
+	host, err := deriveHost(repoURL)
+	if err != nil {
+		http.Error(w, "url: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	b, err := getBackendByHost(ctx, userID, host)
+	if errors.Is(err, errBackendNotFound) {
+		http.Error(w, "no git backend linked for that repository host", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "list branches: get backend", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	branches, err := enumerateBranches(ctx, b, repoURL)
+	if err != nil {
+		slog.WarnContext(ctx, "branch enumeration failed", "backend", b.Name, "type", b.Type, "error", err)
+		http.Error(w, "failed to list branches: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if branches == nil {
+		branches = []branchView{}
+	}
+	span.SetStatus(codes.Ok, "")
+	writeJSON(w, http.StatusOK, branches)
+}
+
 // handleCreateRepo pins a repo to the caller's selector. Useful for generic
 // backends (which can't be enumerated) or to surface a repo the enumeration page
 // limit dropped. The URL's host need not match a linked backend at registration
