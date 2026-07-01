@@ -25,7 +25,7 @@ import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import { T } from '../../theme';
 import { useViewport, clamp } from '../../hooks/useViewport';
-import type { Step, GitRepo } from '../../api/bff';
+import type { Step, GitRepo, WorkflowAction } from '../../api/bff';
 import { Block, StepRef, MatrixConfig, ApprovalGate, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
 import { StepInputsEditor, UpstreamOutput } from './StepInputsEditor';
 
@@ -34,6 +34,9 @@ export interface PipelineBlocksProps {
   catalog: Record<string, Step>;
   editable?: boolean;
   palette?: Step[];
+  // The action catalog, shown as blocks in the palette so a step can be created and
+  // configured inline from an action (via onPickAction), not only reused from palette.
+  actions?: WorkflowAction[];
   // The git-broker repo catalog, for the per-step Git repo picker on forge blocks.
   repos?: GitRepo[];
   onChange?: (steps: StepRef[]) => void;
@@ -41,6 +44,13 @@ export interface PipelineBlocksProps {
   // step for a gate or no selection), so the builder can show that step's
   // inputs/output — referenced by the occurrence name — in an inspector panel.
   onInspect?: (stepId: string | null, name?: string) => void;
+  // Clicking an action block: the host opens an inline create form for that action.
+  onPickAction?: (action: WorkflowAction) => void;
+  // A freshly-created step to drop into the pipeline as a new block (honoring the
+  // active parallel/matrix mode). The host sets it after a create form is submitted
+  // and clears it via onPendingConsumed once added.
+  pendingAdd?: Step | null;
+  onPendingConsumed?: () => void;
   height?: number | string;
 }
 
@@ -49,6 +59,12 @@ export interface PipelineBlocksProps {
 const collisionDetection: CollisionDetection = (args) => {
   const within = pointerWithin(args);
   return within.length ? within : closestCenter(args);
+};
+
+/** Uppercase divider heading for a palette group (actions / steps). */
+const paletteSection: React.CSSProperties = {
+  padding: '9px 16px 5px', fontFamily: T.mono, fontSize: 9, color: T.faint,
+  letterSpacing: 1, textTransform: 'uppercase', background: T.bgAlt, borderBottom: `1px solid ${T.border}`,
 };
 
 function labelFor(catalog: Record<string, Step>, stepId: string): { label: string; action: string } {
@@ -199,7 +215,7 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
   );
 }
 
-export function PipelineBlocks({ initialSteps, catalog, editable = false, palette = [], repos = [], onChange, onInspect, height }: PipelineBlocksProps) {
+export function PipelineBlocks({ initialSteps, catalog, editable = false, palette = [], actions = [], repos = [], onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed, height }: PipelineBlocksProps) {
   const [blocks, setBlocks] = useState<Block[]>(() => blocksFromSteps(initialSteps));
   const [parallelMode, setParallelMode] = useState(false);
   const [parallelOpen, setParallelOpen] = useState(false);
@@ -287,6 +303,17 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     setSelectedUid(uid);
     onInspect?.(s.step_id); // show the freshly-added step's inputs/output
   }, [parallelMode, parallelOpen, matrixMode, onInspect]);
+
+  // Drop a host-supplied freshly-created step in as a new block (honoring the active
+  // parallel/matrix mode), each pendingAdd object consumed exactly once.
+  const consumedAdd = useRef<Step | null>(null);
+  useEffect(() => {
+    if (pendingAdd && consumedAdd.current !== pendingAdd) {
+      consumedAdd.current = pendingAdd;
+      addStep(pendingAdd);
+      onPendingConsumed?.();
+    }
+  }, [pendingAdd, addStep, onPendingConsumed]);
 
   const toggleParallelMode = useCallback(() => { setParallelMode((m) => !m); setParallelOpen(false); setMatrixMode(false); }, []);
   const toggleMatrixMode = useCallback(() => { setMatrixMode((m) => !m); setParallelMode(false); setParallelOpen(false); }, []);
@@ -443,8 +470,25 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
             <div style={{ fontSize: 14, fontWeight: 700 }}>⏸ approval gate</div>
             <div style={{ fontSize: 11, color: T.faint, marginTop: 2 }}>pause for manual approval</div>
           </button>
+          {/* Actions — click to create & configure a new step inline from an action. */}
+          {onPickAction && actions.length > 0 && (
+            <>
+              <div style={paletteSection}>actions · create a step</div>
+              {actions.map((a) => (
+                <button key={a.name} onClick={() => onPickAction(a)} title="create & configure a new step from this action"
+                  style={{ width: '100%', textAlign: 'left', padding: '10px 16px', background: 'transparent', border: 'none', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, cursor: 'pointer', color: T.text }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = T.cardHi; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{a.name}</div>
+                  {a.summary && <div style={{ fontSize: 10.5, color: T.faint, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.summary}</div>}
+                </button>
+              ))}
+            </>
+          )}
+          {/* Reusable steps — add a pre-configured (saved) step. */}
+          <div style={paletteSection}>steps · reuse a saved step</div>
           {palette.length === 0 ? (
-            <div style={{ padding: '14px 16px', fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ no steps yet — create one in the Steps tab</div>
+            <div style={{ padding: '12px 16px', fontFamily: T.mono, fontSize: 11, color: T.faint }}>→ no saved steps — create one from an action above or in the steps tab</div>
           ) : palette.map((s) => (
             <button key={s.step_id} onClick={() => addStep(s)} title="add to pipeline (can be added more than once)"
               style={{ width: '100%', textAlign: 'left', padding: '12px 16px', background: 'transparent', border: 'none', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, cursor: 'pointer', color: T.text }}

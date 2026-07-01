@@ -195,6 +195,27 @@ export function collectRefs(withMap: Record<string, unknown>): { inputs: string[
   return { inputs: [...inputs], steps: [...steps] };
 }
 
+/** The effective ${steps.<name>.output} key for a step ref: its per-occurrence
+ * name if set, else the step definition's name (resolved via defName). Approval
+ * gates carry only an override name (they produce no output). '' when unnamed. */
+export function effectiveStepName(ref: StepRef, defName: (stepId: string) => string | undefined): string {
+  if (ref.name) return ref.name;
+  if (ref.step_id) return defName(ref.step_id) ?? '';
+  return '';
+}
+
+/** Effective names shared by more than one step. Such steps collide in a run's
+ * output map (the later shadows the earlier), so ${steps.<name>.output} wiring is
+ * ambiguous — the backend rejects it, and the builder blocks save. Order-preserved. */
+export function duplicateStepNames(steps: StepRef[], defName: (stepId: string) => string | undefined): string[] {
+  const counts = new Map<string, number>();
+  for (const s of steps) {
+    const n = effectiveStepName(s, defName);
+    if (n) counts.set(n, (counts.get(n) ?? 0) + 1);
+  }
+  return [...counts.entries()].filter(([, c]) => c > 1).map(([n]) => n);
+}
+
 /** Renders the pipeline as the canonical config JSON (the saved payload).
  * description is omitted when empty. */
 export function configToJson(name: string, description: string, steps: StepRef[]): string {

@@ -2,6 +2,7 @@ import { expect } from 'chai';
 import {
   stagesFromSteps, blocksFromSteps, stepsFromBlocks, stagesOf, StepRef, Block,
   stepsToPayload, configToJson, parseConfig, collectRefs,
+  effectiveStepName, duplicateStepNames,
 } from '../src/pages/app/pipelineGraph.ts';
 
 describe('stagesFromSteps', () => {
@@ -291,5 +292,43 @@ describe('collectRefs (step inspector)', () => {
     const refs = collectRefs({ a: '${steps.x.output} ${steps.x.output}', b: '${inputs.y}', c: '${y}' });
     expect(refs.steps).to.deep.equal(['x']);
     expect(refs.inputs).to.have.members(['y']);
+  });
+});
+
+describe('duplicateStepNames', () => {
+  const defName = (id: string) => ({ s1: 'run', s2: 'run', s3: 'deploy' }[id]);
+
+  it('flags two blocks that fall back to the same definition name', () => {
+    // Both unnamed -> both resolve to "run" -> collide in the output map.
+    const steps: StepRef[] = [{ step_id: 's1' }, { step_id: 's2' }];
+    expect(duplicateStepNames(steps, defName)).to.deep.equal(['run']);
+  });
+
+  it('is clean once each block has a unique per-occurrence name', () => {
+    const steps: StepRef[] = [
+      { step_id: 's1', name: 'build' },
+      { step_id: 's2', name: 'test' },
+    ];
+    expect(duplicateStepNames(steps, defName)).to.deep.equal([]);
+  });
+
+  it('flags an override that collides with another block definition name', () => {
+    const steps: StepRef[] = [{ step_id: 's3' }, { step_id: 's1', name: 'deploy' }];
+    expect(duplicateStepNames(steps, defName)).to.deep.equal(['deploy']);
+  });
+
+  it('ignores unnamed approval gates (no output, empty name never collides)', () => {
+    const steps: StepRef[] = [
+      { approval: { message: 'ok?' } },
+      { approval: { message: 'again?' } },
+      { step_id: 's3' },
+    ];
+    expect(duplicateStepNames(steps, defName)).to.deep.equal([]);
+  });
+
+  it('effectiveStepName prefers the override, else the definition name', () => {
+    expect(effectiveStepName({ step_id: 's1' }, defName)).to.equal('run');
+    expect(effectiveStepName({ step_id: 's1', name: 'x' }, defName)).to.equal('x');
+    expect(effectiveStepName({ approval: {} }, defName)).to.equal('');
   });
 });

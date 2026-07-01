@@ -1,6 +1,6 @@
-/** Workflows page — the CI/CD control surface, a tabbed view over pipelines, steps, and the action catalog. pipelines tab creates/triggers/cancels/deletes workflows and lists their runs; steps tab CRUDs reusable steps; actions tab browses the read-only action catalog. all data goes through the typed BFF client (listWorkflows/createStep/etc), never conductor directly. */
+/** Workflows page — the CI/CD control surface, a tabbed view over pipelines and the action catalog. pipelines tab creates/triggers/cancels/deletes workflows, lists their runs, and opens the visual builder (which now also hosts the reusable-step library); actions tab browses the read-only action catalog. all data goes through the typed BFF client (listWorkflows/createWorkflow/etc), never conductor directly. */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import type { ReactNode, CSSProperties } from 'react';
+import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
@@ -8,16 +8,15 @@ import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   listWorkflows, getWorkflow, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
-  createWorkflow, updateWorkflow, listSteps, createStep, updateStep, deleteStep, listActions, listForgeImages, listGitRepos,
+  createWorkflow, updateWorkflow, listSteps, listActions, listGitRepos,
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction, GitRepo } from '../../api/bff';
-import { ImageSelect } from '../../components/ImageSelect';
 import { ResizeHandle, useResizableWidth } from '../../components/ResizeHandle';
 import { PipelineBlocks } from './PipelineBlocks';
-import { StepInspector } from './StepInspector';
+import { StepDefForm } from './StepDefForm';
+import { StepsTab } from './StepLibrary';
 import type { StepRef } from './pipelineGraph';
-import { stepsToPayload, configToJson, parseConfig } from './pipelineGraph';
-import { schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX, RAW_WITH_KEY } from './stepSchema';
+import { stepsToPayload, configToJson, parseConfig, duplicateStepNames } from './pipelineGraph';
 import { timeAgo, statusTone, isRunActive, fmtDuration } from '../../utils';
 
 type MainTab = 'pipelines' | 'steps' | 'actions';
@@ -32,7 +31,7 @@ type MainTab = 'pipelines' | 'steps' | 'actions';
  * create (initial=null) and edit. The visual builder and the JSON panel are
  * two-way synced; save sends the same config to the API. */
 function PipelineBuilderOverlay({
-  token, initial, catalog, palette, onClose, onSaved,
+  token, initial, catalog, palette, onClose, onSaved, onStepsChanged,
 }: {
   token: string;
   initial: Workflow | null;
@@ -40,6 +39,9 @@ function PipelineBuilderOverlay({
   palette: Step[];
   onClose: () => void;
   onSaved: (wf: Workflow) => void;
+  // Reload the reusable-step catalog after an inline step create/edit, so the
+  // palette/graph pick the change up without leaving the builder.
+  onStepsChanged: () => void;
 }) {
   const initialStepRefs = useMemo<StepRef[]>(
     () => initial ? initial.steps.map(s => {
@@ -87,9 +89,10 @@ function PipelineBuilderOverlay({
   const [jsonError, setJsonError] = useState<string | null>(null);
   const jsonFocused = useRef(false);
 
-  // Right-panel tabs: a step inspector (inputs/output of the selected step) and the
-  // live JSON config. Selecting a step in the builder switches to the inspector.
-  const [rightTab, setRightTab] = useState<'inspector' | 'json'>('json');
+  // Right-panel tabs: the step editor (create a step inline from a chosen action, or
+  // edit the step behind the selected block) and the live JSON config. Selecting a
+  // block — or picking an action to create — switches to the step editor.
+  const [rightTab, setRightTab] = useState<'step' | 'json'>('json');
   // Draggable split between the visual builder and the right (inspector/JSON) pane.
   // Width is in px, persisted so the layout survives reopening the builder; the
   // divider clamps it so neither pane collapses below a usable minimum.
@@ -103,19 +106,39 @@ function PipelineBuilderOverlay({
     const total = splitRow.current?.offsetWidth ?? window.innerWidth;
     return Math.max(280, Math.min(w - dx, total - 360));
   }), []);
+  // The step block currently selected in the builder (null = none / an approval
+  // gate, whose config lives on the card). Its step is edited in the right panel.
   const [inspectId, setInspectId] = useState<string | null>(null);
-  const [inspectName, setInspectName] = useState<string | undefined>(undefined);
+  // An action the user picked from the palette to create a step from: the right
+  // panel shows an inline create form for it until saved or cancelled.
+  const [creatingAction, setCreatingAction] = useState<WorkflowAction | null>(null);
+  // A freshly-created step handed to the block builder to add as a new block.
+  const [pendingAdd, setPendingAdd] = useState<Step | null>(null);
   const [actions, setActions] = useState<WorkflowAction[]>([]);
   useEffect(() => { listActions(token).then(setActions).catch(() => {}); }, [token]);
-  const actionsByName = useMemo(() => Object.fromEntries(actions.map(a => [a.name, a])), [actions]);
   // Git repo catalog for the builder's per-step repo picker (forge blocks).
   const [repos, setRepos] = useState<GitRepo[]>([]);
   useEffect(() => { listGitRepos(token).then(setRepos).catch(() => {}); }, [token]);
-  const onInspect = useCallback((stepId: string | null, name?: string) => {
+  // Selecting a block shows that step in the editor and cancels any in-progress
+  // create (picking a block wins over a half-started new step).
+  const onInspect = useCallback((stepId: string | null) => {
     setInspectId(stepId);
-    setInspectName(name);
-    setRightTab('inspector');
+    setCreatingAction(null);
+    setRightTab('step');
   }, []);
+  // Picking an action from the palette opens the inline create form for it.
+  const onPickAction = useCallback((a: WorkflowAction) => {
+    setCreatingAction(a);
+    setRightTab('step');
+  }, []);
+  // A sensible, collision-free default name for a step created from an action:
+  // the action slug (e.g. forge/run → forge-run), suffixed if already taken.
+  const defaultStepName = useCallback((action: string) => {
+    const base = action.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'step';
+    const taken = new Set(palette.map(s => s.name));
+    if (!taken.has(base)) return base;
+    for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+  }, [palette]);
 
   // Drop a per-occurrence name that just equals the step definition's name, so only
   // real overrides are saved/shown (and definition renames keep propagating).
@@ -151,10 +174,17 @@ function PipelineBuilderOverlay({
     }
   }, [builderSeed]);
 
-  const canSave = !!name.trim() && !saving && !jsonError;
+  // Two blocks sharing one effective name collide in the run output map, so
+  // ${steps.<name>.output} wiring silently resolves against the wrong step. The
+  // backend rejects it; block save here too, pointing at the offending name(s).
+  const dupNames = useMemo(
+    () => duplicateStepNames(cleanedSteps, (id) => catalog[id]?.name),
+    [cleanedSteps, catalog],
+  );
+  const canSave = !!name.trim() && !saving && !jsonError && dupNames.length === 0;
 
   const handleSave = async () => {
-    if (!name.trim()) return;
+    if (!name.trim() || dupNames.length > 0) return;
     setSaving(true); setSaveError(null);
     try {
       const payload = {
@@ -184,26 +214,49 @@ function PipelineBuilderOverlay({
       </div>
       <div ref={splitRow} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 3px 14px 14px' }}>
-          <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} repos={repos} onChange={setSteps} onInspect={onInspect} />
+          <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} actions={actions} repos={repos}
+            onChange={setSteps} onInspect={onInspect} onPickAction={onPickAction}
+            pendingAdd={pendingAdd} onPendingConsumed={() => setPendingAdd(null)} />
         </div>
-        {/* Drag to rebalance the builder vs. inspector/JSON panes. */}
+        {/* Drag to rebalance the builder vs. step-editor/JSON panes. */}
         <ResizeHandle onResize={onSplitResize} />
-        {/* Right panel: step inspector (inputs/output of the selected step) +
-            live, editable JSON config, as tabs. */}
+        {/* Right panel: the step editor (create a step inline from a chosen action or
+            edit the selected block's step) and the live, editable JSON config, as tabs. */}
         <div style={{ width: rightW, minWidth: 280, flexShrink: 0, padding: '14px 14px 14px 3px', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div style={{ display: 'flex', alignItems: 'stretch', border: `1px solid ${T.border}`, borderBottom: 'none', background: T.bgAlt }}>
-            {(['inspector', 'json'] as const).map(tab => (
+            {(['step', 'json'] as const).map(tab => (
               <button key={tab} onClick={() => setRightTab(tab)}
                 style={{ background: rightTab === tab ? T.bg : 'transparent', border: 'none', borderRight: `1px solid ${T.border}`, color: rightTab === tab ? T.textHi : T.faint, fontFamily: T.mono, fontSize: 10, letterSpacing: 1, textTransform: 'uppercase', padding: '8px 14px', cursor: 'pointer' }}>
-                {tab === 'inspector' ? 'step' : 'pipeline.json'}
+                {tab === 'step' ? 'step' : 'pipeline.json'}
               </button>
             ))}
             <div style={{ flex: 1 }} />
             {rightTab === 'json' && <span style={{ alignSelf: 'center', padding: '0 12px', fontFamily: T.mono, fontSize: 9, color: jsonError ? T.red : T.green }}>{jsonError ? '✗ invalid' : '✓ in sync'}</span>}
           </div>
           <div style={{ flex: 1, minHeight: 0, border: `1px solid ${T.border}`, background: T.bg, display: 'flex', flexDirection: 'column' }}>
-            {rightTab === 'inspector' ? (
-              <StepInspector step={inspectId ? (catalog[inspectId] ?? null) : null} name={inspectName} action={inspectId && catalog[inspectId] ? actionsByName[catalog[inspectId].action] : undefined} />
+            {rightTab === 'step' ? (
+              creatingAction ? (
+                // Create a new step from the picked action; on save, drop it into the
+                // pipeline as a new block (pendingAdd) and refresh the catalog.
+                <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 }}>new step · {creatingAction.name}</div>
+                  <StepDefForm token={token} initial={null} lockAction={creatingAction.name} autoFocus
+                    defaultName={defaultStepName(creatingAction.name)} createLabel="[ add step ]"
+                    onSaved={(saved) => { setPendingAdd(saved); setCreatingAction(null); onStepsChanged(); }}
+                    onCancel={() => setCreatingAction(null)} />
+                </div>
+              ) : inspectId && catalog[inspectId] ? (
+                // Edit the step behind the selected block, inline.
+                <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 }}>edit step</div>
+                  <StepDefForm key={inspectId} token={token} initial={catalog[inspectId]} lockAction={catalog[inspectId].action}
+                    onSaved={() => onStepsChanged()} />
+                </div>
+              ) : (
+                <div style={{ flex: 1, overflow: 'auto', padding: 14, fontFamily: T.mono, fontSize: 12, color: T.faint }}>
+                  → pick an action on the left to create a step, or select a step block to edit it
+                </div>
+              )
             ) : (
               <>
                 <textarea value={jsonDraft} spellCheck={false}
@@ -221,9 +274,14 @@ function PipelineBuilderOverlay({
       </div>
       <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-          palette: ∥ parallel · ⊞ matrix · ⏸ approval gate · click a step to inspect its inputs &amp; output · drag to reorder
+          palette: ∥ parallel · ⊞ matrix · ⏸ approval gate · click an action to create a step · click a block to edit it · drag to reorder
         </span>
         <div style={{ flex: 1 }} />
+        {dupNames.length > 0 && (
+          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>
+            duplicate step name{dupNames.length > 1 ? 's' : ''}: {dupNames.join(', ')} — each block needs a unique name
+          </span>
+        )}
         {saveError && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>{saveError}</span>}
         <button onClick={handleSave} disabled={!canSave}
           style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, fontWeight: 600, padding: '6px 16px', cursor: canSave ? 'pointer' : 'not-allowed', opacity: canSave ? 1 : 0.5 }}>
@@ -268,7 +326,10 @@ function PipelinesTab() {
 
   // Step catalog backs the builder palette and resolves step_id -> name/action
   // labels on the graph. Best effort; the canvas falls back to truncated ids.
-  useEffect(() => { listSteps(token).then(setCatalog).catch(() => {}); }, [token]);
+  // reloadSteps is also handed to the builder's embedded step library so the
+  // palette refreshes when a definition is created/edited/deleted in place.
+  const reloadSteps = useCallback(() => { listSteps(token).then(setCatalog).catch(() => {}); }, [token]);
+  useEffect(() => { reloadSteps(); }, [reloadSteps]);
   const catalogMap = useMemo(() => Object.fromEntries(catalog.map(s => [s.step_id, s])) as Record<string, Step>, [catalog]);
 
   // Live-refresh the runs list while any run is in flight, so statuses/durations
@@ -354,6 +415,7 @@ function PipelinesTab() {
           palette={catalog}
           onClose={() => setBuilder(null)}
           onSaved={handleSaved}
+          onStepsChanged={reloadSteps}
         />
       )}
       {/* Left panel */}
@@ -500,312 +562,6 @@ function PipelinesTab() {
   );
 }
 
-// ── Steps tab ─────────────────────────────────────────────────────────────────
-
-/** shared input/select style for the create-step form. */
-const stepInputStyle: CSSProperties = { width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 };
-/** small uppercase label shown above each tailored `with` field. */
-const stepLabelStyle: CSSProperties = { display: 'block', fontFamily: T.mono, fontSize: 9, color: T.faint, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 3 };
-
-/** Steps tab — left rail lists reusable steps with an inline create form; right panel shows the selected step's action, timeout, and `with` inputs, with delete. */
-function StepsTab() {
-  const token = useAppSelector(s => s.auth.token)!;
-  const [steps, setSteps] = useState<Step[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [actions, setActions] = useState<WorkflowAction[]>([]);
-  const [images, setImages] = useState<string[]>([]);
-  const [showCreate, setShowCreate] = useState(false);
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [timeoutSecs, setTimeoutSecs] = useState('');
-  const [action, setAction] = useState('');
-  const [withVals, setWithVals] = useState<Record<string, string>>({});
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  // null = the form (when open) creates a new step; a step_id = it edits that step.
-  const [editId, setEditId] = useState<string | null>(null);
-  const [railW, railHandle] = useResizableWidth('rail.workflows.steps', 260, { min: 200, max: 480 });
-
-  const fetchSteps = useCallback(async () => {
-    setLoading(true); setError(null);
-    try { setSteps(await listSteps(token)); }
-    catch (e: unknown) { setError((e as Error).message); }
-    finally { setLoading(false); }
-  }, [token]);
-
-  useEffect(() => { fetchSteps(); }, [fetchSteps]);
-
-  // Load the action catalog once so the create form's Action field becomes a
-  // selector whose tailored `with` inputs change with the chosen action — mirroring
-  // the CLI TUI. Degrades to a free-text Action input if the catalog is unavailable.
-  useEffect(() => { listActions(token).then(setActions).catch(() => {}); }, [token]);
-
-  // Load the forge image allowlist so the forge/run image field is a picker (like
-  // the Forge run form). Best effort — degrades to free text if unavailable.
-  useEffect(() => { listForgeImages(token).then(setImages).catch(() => {}); }, [token]);
-
-  // The Action selector offers every catalog action plus the built-in `http`
-  // escape hatch. Manual approval is added directly in the pipeline builder as an
-  // inline gate, so it is intentionally not a step action here.
-  const actionOptions = useMemo(() => {
-    const names = actions.map(a => a.name);
-    return names.includes('http') ? names : [...names, 'http'];
-  }, [actions]);
-
-  // Default the Action to forge/run when the form opens. forge is core so the
-  // catalog always offers it; the selector renders the current value even if the
-  // catalog hasn't landed yet, so there's no broken intermediate state.
-  useEffect(() => {
-    if (showCreate && action === '') setAction('forge/run');
-  }, [showCreate, action]);
-
-  const selectedStep = steps.find(s => s.step_id === selected);
-
-  const setWith = (key: string, val: string) => setWithVals(v => ({ ...v, [key]: val }));
-  const resetCreate = () => { setName(''); setDescription(''); setTimeoutSecs(''); setAction(''); setWithVals({}); setCreateError(null); setEditId(null); };
-
-  // Toggle the form open in create mode (clearing any in-progress edit), or close
-  // it if it's already open for a create.
-  const openCreate = () => {
-    if (showCreate && editId === null) { setShowCreate(false); resetCreate(); return; }
-    resetCreate();
-    setShowCreate(true);
-  };
-
-  // Load an existing step into the form and open it in edit mode. formValsFromWith
-  // is the inverse of buildStepWith, so the tailored `with` inputs prefill.
-  const startEdit = (s: Step) => {
-    setEditId(s.step_id);
-    setName(s.name);
-    setDescription(s.description ?? '');
-    setTimeoutSecs(s.timeout != null ? String(s.timeout) : '');
-    setAction(s.action);
-    setWithVals(formValsFromWith(s.action, s.with ?? {}));
-    setCreateError(null);
-    setShowCreate(true);
-  };
-
-  /** Creates or (when editId is set) updates a step, assembling the `with` map from
-   *  the action's tailored schema fields. The backend update is a full replace, so
-   *  the payload is identical for both — only the endpoint differs. */
-  const handleSubmit = async () => {
-    if (!name.trim() || !action.trim()) return;
-    setCreating(true); setCreateError(null);
-    try {
-      const withMap = buildStepWith(action, k => withVals[k] ?? '');
-      const payload = {
-        name: name.trim(),
-        description: description.trim() || undefined,
-        action: action.trim(),
-        with: Object.keys(withMap).length > 0 ? withMap : undefined,
-        timeout: timeoutSecs ? parseInt(timeoutSecs, 10) : undefined,
-      };
-      if (editId) {
-        const updated = await updateStep(token, editId, payload);
-        setSteps(prev => prev.map(s => s.step_id === editId ? updated : s));
-      } else {
-        const s = await createStep(token, payload);
-        setSteps(prev => [s, ...prev]);
-      }
-      resetCreate();
-      setShowCreate(false);
-    } catch (e: unknown) { setCreateError((e as Error).message); }
-    finally { setCreating(false); }
-  };
-
-  const [confirm, confirmEl] = useConfirm();
-
-  const handleDelete = async (id: string) => {
-    const name = steps.find(s => s.step_id === id)?.name;
-    if (!(await confirm({ message: `Delete step ${name ?? id}? Pipelines referencing it may break.` }))) return;
-    try {
-      await deleteStep(token, id);
-      setSteps(prev => prev.filter(s => s.step_id !== id));
-      if (selected === id) setSelected(null);
-    } catch (e: unknown) { setError((e as Error).message); }
-  };
-
-  return (
-    <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-      {confirmEl}
-      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
-        <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-            <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.textHi }}>steps</span>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={openCreate} title="new step"
-                style={{ background: showCreate ? T.greenSoft : 'transparent', border: `1px solid ${showCreate ? T.green : T.border}`, color: showCreate ? T.green : T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>+</button>
-              <button onClick={fetchSteps} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>↻</button>
-            </div>
-          </div>
-          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-            {steps.length > 0 && `${steps.length} step${steps.length !== 1 ? 's' : ''}`}
-          </div>
-        </div>
-
-        {showCreate && (
-          <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card, overflow: 'auto', maxHeight: '62vh' }}>
-            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 8 }}>{editId ? 'edit step' : 'new step'}</div>
-            {createError && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{createError}</div>}
-
-            <label style={stepLabelStyle}>name *</label>
-            <input value={name} onChange={e => setName(e.target.value)} placeholder="unit_tests" autoFocus style={stepInputStyle} />
-
-            <label style={stepLabelStyle}>action *</label>
-            {actionOptions.length > 0 ? (
-              <select value={action} onChange={e => { setAction(e.target.value); setCreateError(null); }} style={stepInputStyle}>
-                {action && !actionOptions.includes(action) && <option value={action}>{action}</option>}
-                {actionOptions.map(a => <option key={a} value={a}>{a}</option>)}
-              </select>
-            ) : (
-              <input value={action} onChange={e => setAction(e.target.value)} placeholder="forge/run" style={stepInputStyle} />
-            )}
-
-            {(() => {
-              const fields = schemaForAction(action);
-              const renderField = (f: ReturnType<typeof schemaForAction>[number]) => {
-                const key = WITH_KEY_PREFIX + f.key;
-                const val = withVals[key] ?? '';
-                return (
-                  <div key={key}>
-                    <label style={stepLabelStyle}>{f.label}{f.required ? ' *' : ''}</label>
-                    {f.catalog === 'image' && images.length > 0 ? (
-                      <div style={{ marginBottom: 6 }}>
-                        <ImageSelect value={val} onChange={v => setWith(key, v)} options={images} placeholder={f.placeholder} fontSize={11} />
-                      </div>
-                    ) : f.multiline ? (
-                      <textarea value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder}
-                        rows={f.key === 'run' ? 3 : 2} style={{ ...stepInputStyle, resize: 'vertical' }} />
-                    ) : (
-                      <input value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder} style={stepInputStyle} />
-                    )}
-                  </div>
-                );
-              };
-              // A reusable step declares an interface, grouped into three sections:
-              // config (what the step IS — set once on the definition), inputs (the
-              // params a pipeline supplies; the value set here is the default), and
-              // outputs (what later steps can read). Wiring between steps is NOT done
-              // here — it lives in the pipeline builder. The advanced With field (if
-              // any) is the escape hatch and trails the rest.
-              const config = fields.filter(f => f.config);
-              const advanced = fields.filter(f => f.key === RAW_WITH_KEY);
-              const outputs = fields.filter(f => f.output);
-              const inputs = fields.filter(f => !f.config && !f.output && f.key !== RAW_WITH_KEY);
-              const section = (label: string, help: React.ReactNode, fs: typeof fields) => fs.length > 0 && (
-                <>
-                  <div style={{ height: 1, background: T.border, margin: '10px 0 8px' }} />
-                  <label style={stepLabelStyle}>{label}</label>
-                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, lineHeight: 1.4 }}>{help}</div>
-                  {fs.map(renderField)}
-                </>
-              );
-              return (
-                <>
-                  {section('config', 'what this step runs — fixed by the step definition, the same in every pipeline', config)}
-                  {section('inputs', <>values the pipeline supplies — what you set here is the <span style={{ color: T.dim }}>default</span>; connect an input to another step's output in the pipeline builder</>, inputs)}
-                  {section('outputs', <>values this step produces for later steps (read as <span style={{ color: T.dim }}>{'${steps.<step>.output.VAR}'}</span>) — without any, the step produces no output (stdout is not a step output)</>, outputs)}
-                  {advanced.map(renderField)}
-                </>
-              );
-            })()}
-
-            <label style={stepLabelStyle}>timeout</label>
-            <input value={timeoutSecs} onChange={e => setTimeoutSecs(e.target.value)} placeholder="seconds (default 30)" style={stepInputStyle} />
-
-            <label style={stepLabelStyle}>description</label>
-            <input value={description} onChange={e => setDescription(e.target.value)} placeholder="optional" style={stepInputStyle} />
-
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={handleSubmit} disabled={!name.trim() || !action.trim() || creating}
-                style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 10, fontWeight: 600, padding: '5px 0', cursor: 'pointer', opacity: (!name.trim() || !action.trim() || creating) ? 0.6 : 1 }}>
-                {creating ? '[ · · · ]' : editId ? '[ save ]' : '[ create ]'}
-              </button>
-              <button onClick={() => { setShowCreate(false); resetCreate(); }} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '5px 8px', cursor: 'pointer' }}>✕</button>
-            </div>
-          </div>
-        )}
-
-        <div style={{ flex: 1, overflow: 'auto' }}>
-          {loading ? (
-            <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
-          ) : error ? (
-            <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 11, color: T.red }}>{error}</div>
-          ) : steps.length === 0 ? (
-            <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint }}>→ no steps</div>
-          ) : steps.map(s => {
-            const isActive = selected === s.step_id;
-            return (
-              <button key={s.step_id} onClick={() => setSelected(s.step_id)}
-                style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{s.name}</div>
-                <div style={{ fontSize: 11, color: T.faint, marginTop: 2 }}>{s.action}</div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {railHandle}
-      <div style={{ flex: 1, overflow: 'auto' }}>
-        {!selectedStep ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-            <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ select a step</div>
-          </div>
-        ) : (
-          <div style={{ padding: '20px 24px' }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20 }}>
-              <div>
-                <div style={{ fontFamily: T.mono, fontSize: 18, fontWeight: 700, color: T.textHi, marginBottom: 4 }}>{selectedStep.name}</div>
-                <div style={{ fontFamily: T.mono, fontSize: 12, color: T.blue }}>{selectedStep.action}</div>
-                {selectedStep.description && <div style={{ fontFamily: T.mono, fontSize: 12, color: T.dim, marginTop: 4 }}>{selectedStep.description}</div>}
-                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginTop: 4 }}>updated {timeAgo(selectedStep.updated_at)} ago</div>
-              </div>
-              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-                <button onClick={() => startEdit(selectedStep)}
-                  style={{ background: editId === selectedStep.step_id ? T.greenSoft : 'transparent', border: `1px solid ${editId === selectedStep.step_id ? T.green : T.border}`, color: editId === selectedStep.step_id ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
-                  [ edit ]
-                </button>
-                <button onClick={() => handleDelete(selectedStep.step_id)}
-                  style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}
-                  onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
-                  onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
-                  [ delete ]
-                </button>
-              </div>
-            </div>
-
-            {selectedStep.timeout != null && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
-                <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px' }}>
-                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 4, textTransform: 'uppercase' }}>timeout</div>
-                  <div style={{ fontFamily: T.mono, fontSize: 12, color: T.textHi }}>{selectedStep.timeout}s</div>
-                </div>
-              </div>
-            )}
-
-            {selectedStep.with && Object.keys(selectedStep.with).length > 0 && (
-              <>
-                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 8 }}>WITH</div>
-                <div style={{ background: T.card, border: `1px solid ${T.border}`, overflow: 'hidden' }}>
-                  {Object.entries(selectedStep.with).map(([k, v], i, arr) => (
-                    <div key={k} style={{ display: 'flex', padding: '8px 14px', borderBottom: i < arr.length - 1 ? `1px solid ${T.border}` : 'none', fontFamily: T.mono, fontSize: 12, gap: 12 }}>
-                      <span style={{ color: T.faint, width: 120, flexShrink: 0 }}>{k}</span>
-                      <span style={{ color: T.text, wordBreak: 'break-word' }}>{typeof v === 'string' ? v : JSON.stringify(v)}</span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ── Actions catalog tab ───────────────────────────────────────────────────────
 
 /** one label/value row inside a config card; value falls back to a dim placeholder when empty. */
@@ -932,7 +688,7 @@ function ActionsTab() {
 
 // ── Workflows page ────────────────────────────────────────────────────────────
 
-/** Workflows route — top tab bar switching between the pipelines, steps, and actions tabs. */
+/** Workflows route — top tab bar switching between the pipelines, steps (pre-configured reusable steps), and actions tabs. Steps can also be created and configured inline while building a pipeline. */
 export function Workflows() {
   const [tab, setTab] = useState<MainTab>('pipelines');
 
