@@ -20,7 +20,7 @@ func TestRunnerClass_BackendAndDisk_DB(t *testing.T) {
 
 	authAs(t, "admin")
 	createBody := `{"name":"` + name + `","memory_mb":4096,"cpu_millicores":2000,` +
-		`"pids_limit":128,"tmpfs_mb":64,"disk_gb":50,"backend":"proxmox-prod","enabled":true}`
+		`"pids_limit":128,"tmpfs_mb":64,"disk_gb":50,"backend":"kata-prod","enabled":true}`
 	r := httptest.NewRequest(http.MethodPost, "/runner-classes", bytes.NewBufferString(createBody))
 	r.Header.Set("Authorization", "Bearer t")
 	w := httptest.NewRecorder()
@@ -30,8 +30,8 @@ func TestRunnerClass_BackendAndDisk_DB(t *testing.T) {
 	}
 	var created RunnerClass
 	json.NewDecoder(w.Body).Decode(&created) //nolint:errcheck
-	if created.Backend != "proxmox-prod" {
-		t.Errorf("backend = %q, want proxmox-prod", created.Backend)
+	if created.Backend != "kata-prod" {
+		t.Errorf("backend = %q, want kata-prod", created.Backend)
 	}
 	if created.DiskGB != 50 {
 		t.Errorf("disk_gb = %d, want 50", created.DiskGB)

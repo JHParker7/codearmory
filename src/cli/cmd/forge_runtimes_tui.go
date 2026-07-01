@@ -18,7 +18,7 @@ import (
 // The Forge Runtimes TUI is the admin counterpart to the Forge executions
 // screen: it manages the two server-side configuration resources forge exposes —
 // runner classes (resource tiers) and runtime backends (docker/kubernetes/
-// proxmox/kata/gvisor targets) — behind a tab-style section switcher modelled on the
+// kata/gvisor targets) — behind a tab-style section switcher modelled on the
 // gatekeeper TUI. Both sections share the same list/detail/form machinery; what
 // differs (the endpoint, the table columns, how a record maps to a row, and the
 // create/edit form) is small enough to branch on per section. Records are kept
@@ -662,12 +662,12 @@ func frRunnerClassForm(rec frRecord, backends []string, mode string) (tuiForm, t
 		formInput("cpu_millicores", "CPU (m)", "min 100"),
 		formInput("pids_limit", "PIDs", "min 8"),
 		formInput("tmpfs_mb", "tmpfs MB", "min 16"),
-		formInput("disk_gb", "Disk GB", "proxmox only"),
+		formInput("disk_gb", "Disk GB", "reserved; currently unused"),
 		frBackendField(backends, gkStr(rec, "backend")),
 		formSelect("enabled", "Enabled", []string{"true", "false"}),
 		formSelect("privileged", "Privileged", []string{"false", "true"}),
 	)
-	f.help = "Privileged runs as root and only works on a kernel-isolated backend (kata/proxmox/gvisor). Disk GB applies to proxmox only."
+	f.help = "Privileged runs as root and only works on a kernel-isolated backend (kata/gvisor). Disk GB is reserved and currently unused."
 	if mode == "edit" {
 		f.setValues(map[string]string{
 			"memory_mb":      frInt(rec, "memory_mb"),
@@ -692,7 +692,7 @@ func frRunnerClassForm(rec frRecord, backends []string, mode string) (tuiForm, t
 
 // frRuntimeBackendForm builds the runtime-backend create/edit dialog. Config and
 // secret_refs are entered as "key=value" lines; the server validates type-
-// specific requirements (proxmox/kata/gvisor) and surfaces any failure inline.
+// specific requirements (kata/gvisor) and surfaces any failure inline.
 func frRuntimeBackendForm(rec frRecord, mode string) (tuiForm, tea.Cmd) {
 	title, nameField := "New Runtime Backend", formInput("name", "Name", "e.g. kata-prod (required)")
 	if mode == "edit" {
@@ -701,12 +701,12 @@ func frRuntimeBackendForm(rec frRecord, mode string) (tuiForm, tea.Cmd) {
 	}
 	f, cmd := newTUIForm(title,
 		nameField,
-		formSelect("type", "Type", []string{"docker", "kubernetes", "proxmox", "kata", "gvisor"}),
+		formSelect("type", "Type", []string{"docker", "kubernetes", "kata", "gvisor"}),
 		formSelect("enabled", "Enabled", []string{"true", "false"}),
 		formTextarea("config", "Config", "key=value per line\nkata: runtime_class=kata-qemu\ngvisor: runtime_class=gvisor"),
-		formTextarea("secret_refs", "Secrets", "logical=ENV_VAR_NAME per line\nproxmox: token=PROXMOX_TOKEN"),
+		formTextarea("secret_refs", "Secrets", "logical=ENV_VAR_NAME per line"),
 	)
-	f.help = "proxmox needs config url,node,template_vmid,storage,bridge + secret token. kata/gvisor need config runtime_class."
+	f.help = "kata/gvisor need config runtime_class. docker/kubernetes read their settings from env."
 	if mode == "edit" {
 		f.setValues(map[string]string{
 			"type":        gkStr(rec, "type"),
@@ -741,7 +741,7 @@ func (m forgeRuntimesModel) keyForm(msg tea.KeyMsg) (forgeRuntimesModel, tea.Cmd
 // submitForm validates the active form and returns the create/update cmd.
 // Validation failures stay in the form with an inline message; the server
 // performs the authoritative checks (resource minimums, privileged-backend and
-// proxmox/kata rules) and any rejection comes back as a form error.
+// kata/gvisor rules) and any rejection comes back as a form error.
 func (m forgeRuntimesModel) submitForm() (forgeRuntimesModel, tea.Cmd) {
 	switch m.formKind {
 	case frFormRunnerClass:

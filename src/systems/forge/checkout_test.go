@@ -104,6 +104,19 @@ func TestCheckoutScript(t *testing.T) {
 			t.Errorf("expected the prologue to exit on clone failure:\n%s", s)
 		}
 	})
+
+	t.Run("preflights git before the clone, with a clear message", func(t *testing.T) {
+		s := (&CheckoutSpec{}).script(refs)
+		if !strings.Contains(s, "command -v git") {
+			t.Errorf("expected a git preflight before the clone:\n%s", s)
+		}
+		if !strings.Contains(s, "git is not installed in this image") {
+			t.Errorf("expected an actionable missing-git message:\n%s", s)
+		}
+		if strings.Index(s, "command -v git") >= strings.Index(s, "git clone") {
+			t.Errorf("git preflight must precede the clone:\n%s", s)
+		}
+	})
 }
 
 func TestRepoBasename(t *testing.T) {

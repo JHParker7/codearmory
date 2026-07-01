@@ -267,6 +267,33 @@ forge:
     containerMemoryLimit: "256Mi"
     containerCpuLimit: "500m"
     otelEndpoint: ""
+  # Shared workspace volumes let a workflow run's steps share a filesystem: a
+  # create-volume step provisions one, a git step clones into it, and later steps
+  # attach the same volume (and never need git themselves). Volumes are torn down
+  # when the run ends, with an age-based reaper as the backstop.
+  volumes:
+    # Cap on the summed size (MB) of all of one workflow run's volumes. This is the
+    # admin ceiling forge enforces on create. Set to 0 to disable shared volumes.
+    maxWorkflowMB: 10240
+    # Optional cap on any single volume (MB). Empty = same as maxWorkflowMB.
+    maxVolumeMB: ""
+    # StorageClass backing workspace PVCs. Empty = the cluster default. Point it at a
+    # RAM/tmpfs-backed StorageClass to keep volumes in memory.
+    storageClass: ""
+    # PVC access mode. ReadWriteOnce suits sequential single-node runs; use
+    # ReadWriteMany (on a class that supports it) when a run's steps span nodes.
+    accessMode: "ReadWriteOnce"
+    # Seconds before an orphaned volume is reaped. Empty = binary default
+    # (longest possible run + 1h), which is safely above any live run.
+    maxAgeSecs: ""
+  # Image building (the forge/build-image workflow action). Builds run with Kaniko
+  # (daemonless, no privileged container) and REQUIRE a privileged runner class on a
+  # kata or gvisor backend (create one via the forge runner-classes API, backed by a
+  # kata/gvisor runtime backend, privileged=true). Override the builder image only for
+  # a private mirror / air-gapped install; empty = the forge default
+  # (gcr.io/kaniko-project/executor:debug).
+  build:
+    builderImage: ""
   secret:
     # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
@@ -275,10 +302,6 @@ forge:
     # Must match the forge entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
-    # Proxmox VE API token for the proxmox runtime backend, in the form
-    # "USER@REALM!TOKENID=SECRET". Only used when forge.proxmox.enabled is true;
-    # referenced by a runtime backend via secret_refs {token: "PROXMOX_TOKEN"}.
-    proxmoxToken: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -293,13 +316,6 @@ forge:
   dockerSocket:
     enabled: false
     path: /var/run/docker.sock
-  # Proxmox VM-per-job runtime backend. When enabled, the PROXMOX_TOKEN secret is
-  # mounted into forge so an admin can create a runtime backend of type "proxmox"
-  # (via POST /runtime-backends) that clones a throwaway VM per job. The backend's
-  # url/node/template_vmid/storage/bridge live in its API config, not here — this
-  # flag only gates whether the token secret is wired into the pod.
-  proxmox:
-    enabled: false
   # Domain-allowlisting egress proxy for forge's sandbox traffic. Deployed by this
   # chart and ENABLED BY DEFAULT: sandbox executions reach the internet only through
   # this proxy, confined to allowedDomains. Automatically skipped when forge.kata.enabled

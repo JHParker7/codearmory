@@ -15,7 +15,7 @@ var defaultRunnerClasses = []RunnerClass{
 
 // defaultRunnersPrivileged reports whether the seeded default runner classes should
 // run privileged. True exactly when the "default" backend is kernel-isolated
-// (RUNTIME=kata, proxmox or gvisor): there a guest/userspace kernel — not the shared
+// (RUNTIME=kata or gvisor): there a guest/userspace kernel — not the shared
 // host kernel — is the boundary, so root + writable rootfs is safe and lets package
 // managers (apt/pacman/dnf) work. On a shared-kernel default backend
 // (docker/kubernetes) privileged would be a host-kernel escape, so the defaults stay

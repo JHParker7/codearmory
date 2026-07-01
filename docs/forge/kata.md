@@ -17,14 +17,15 @@ apply unchanged, and every container hardening setting (non-root, read-only root
 `drop ALL` capabilities, no service-account token, seccomp) is still set on top of
 the VM boundary.
 
-Compared to the **proxmox** backend, kata needs no template, no guest agent, and no
-PVE API token — Kata builds the guest from the submitted image. By default the job
-runs as the same locked-down non-root container it would under plain Kubernetes, but
-because the microVM (not the container) is the security boundary, a runner class may
-set `privileged: true` to run the job as **root with a writable rootfs** so package
-managers (`apt`/`pacman`/`dnf`) work — see *Privileged jobs* below. Use **kata** for
-strongly-isolated workloads that need either a locked-down sandbox or root + package
-installs; use **proxmox** for CI that needs an in-VM **Docker daemon** / `docker build`.
+Kata needs no template, no guest agent, and no external API token — it builds the
+guest from the submitted image. By default the job runs as the same locked-down
+non-root container it would under plain Kubernetes, but because the microVM (not the
+container) is the security boundary, a runner class may set `privileged: true` to run
+the job as **root with a writable rootfs** so package managers (`apt`/`pacman`/`dnf`)
+work — see *Privileged jobs* below. Use **kata** for strongly-isolated workloads that
+need either a locked-down sandbox or root + package installs. To **build container
+images**, use forge's built-in daemonless image build (BuildKit on kata) rather than a
+Docker daemon.
 
 ```
 POST /executions (runner_class → backend snapshot)
@@ -152,11 +153,10 @@ curl -X PUT "$CONDUCTOR/forge/runner-classes/kata-standard" \
 ```
 
 This is safe because the **microVM**, not the container, is the isolation boundary —
-the same model the proxmox backend uses to run jobs as root in a disposable VM. Two
-guardrails:
+a full guest kernel contains the job's root. Two guardrails:
 
-- **VM-isolated backends only.** `privileged` is honoured solely on VM-isolated
-  backends — kata and proxmox. The API rejects it for any shared-kernel backend
+- **Kernel-isolated backends only.** `privileged` is honoured solely on kernel-isolated
+  backends — kata and gvisor. The API rejects it for any shared-kernel backend
   (`docker`/`kubernetes`), and forge drops it at runtime if it ever reaches one
   (`buildJob`): root + writable rootfs in a shared-kernel (runc) container would be a
   host-kernel escape risk.
@@ -166,8 +166,9 @@ guardrails:
   The pod still stays within `baseline`: it does not set container `privileged`, host
   namespaces, or host paths.
 
-It does **not** provide an in-VM Docker daemon — for `docker build` use the proxmox
-backend. The egress proxy / NetworkPolicy isolation applies to privileged jobs too.
+It does **not** provide an in-VM Docker daemon; to build container images use forge's
+built-in daemonless image build (BuildKit on kata), which needs no daemon or host
+socket. The egress proxy / NetworkPolicy isolation applies to privileged jobs too.
 
 ## Notes & limits
 
@@ -176,7 +177,7 @@ backend. The egress proxy / NetworkPolicy isolation applies to privileged jobs t
   `ALLOWED_IMAGES` allowlist.
 - **Boot latency.** Each job boots a microVM (typically tens to a few hundred ms,
   VMM-dependent) on top of normal pod scheduling — slower to start than a plain
-  container, far faster than a full Proxmox clone.
+  container, far faster than booting a full VM.
 - **Node support is operator responsibility.** If a node lacks `/dev/kvm` or the
   Kata binaries, pods scheduled there fail to start; that surfaces as a per-job
   failure, not a worker crash. Constrain scheduling (taints/affinity) to Kata-capable

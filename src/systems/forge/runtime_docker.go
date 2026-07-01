@@ -12,6 +12,8 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 )
@@ -82,11 +84,31 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 		reader.Close()
 	}
 
+	// Attach any shared workspace volumes. Each mounts a named docker volume created
+	// via POST /volumes at its path; a mount that sets workdir also pins the
+	// container's working directory there so the command runs inside the volume (e.g.
+	// a checked-out repo). Mounted volumes are writable even under ReadonlyRootfs —
+	// the read-only flag applies only to the image layers, not to explicit mounts.
+	var volMounts []mount.Mount
+	workingDir := ""
+	for _, rm := range resolveVolumeMounts(exec) {
+		volMounts = append(volMounts, mount.Mount{
+			Type:     mount.TypeVolume,
+			Source:   rm.resourceName,
+			Target:   rm.mountPath,
+			ReadOnly: rm.readOnly,
+		})
+		if rm.workdir {
+			workingDir = rm.mountPath
+		}
+	}
+
 	resp, err := r.client.ContainerCreate(ctx,
 		&container.Config{
 			Image:        exec.Image,
 			Cmd:          exec.Command,
 			Env:          envList,
+			WorkingDir:   workingDir,
 			AttachStdout: true,
 			AttachStderr: true,
 		},
@@ -96,6 +118,7 @@ func (r *DockerRuntime) Run(ctx context.Context, exec Execution) (RunResult, err
 			// tmpfs mount so programs that need a scratch directory still work.
 			ReadonlyRootfs: true,
 			Tmpfs:          map[string]string{"/tmp": tmpfsOpt},
+			Mounts:         volMounts,
 			Resources: container.Resources{
 				Memory:    memLimit,
 				CPUQuota:  cpuQuota,
@@ -256,6 +279,33 @@ func (r *DockerRuntime) collectLogs(containerID string) (stdout, stderr string, 
 	}
 	stderr, err = fetch(false)
 	return stdout, stderr, err
+}
+
+// CreateVolume provisions a named docker volume for a shared workspace. It is a
+// plain local volume regardless of the requested medium: a tmpfs-backed local volume
+// is NOT shareable across sequential containers (the local driver unmounts the tmpfs
+// when the last user stops, so the next step sees an empty filesystem — verified),
+// which would defeat the entire point of a shared workspace. The volume is still
+// ephemeral — forge deletes it at run end and the reaper removes orphans — so "no
+// lingering state" holds; RAM-backing is honoured only on kubernetes (via a
+// tmpfs/RAM StorageClass), where a PVC genuinely shares across pods. VolumeCreate
+// returns the existing volume when the name is already present, so a retried create
+// is idempotent.
+func (r *DockerRuntime) CreateVolume(ctx context.Context, spec VolumeSpec) error {
+	opts := volume.CreateOptions{Name: spec.ResourceName, Driver: "local"}
+	if _, err := r.client.VolumeCreate(ctx, opts); err != nil {
+		return fmt.Errorf("create docker volume: %w", err)
+	}
+	return nil
+}
+
+// DeleteVolume removes a named docker volume. A missing volume is treated as success
+// so teardown is idempotent.
+func (r *DockerRuntime) DeleteVolume(ctx context.Context, resourceName string) error {
+	if err := r.client.VolumeRemove(ctx, resourceName, false); err != nil && !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("remove docker volume: %w", err)
+	}
+	return nil
 }
 
 // Cancel is a no-op for the Docker runtime: cancellation is driven by context

@@ -194,7 +194,7 @@ Requirements and behaviour:
 
 - **`git` must be in the image** (as with a self-run `git clone`) and the **command must be a shell form** (`["sh","-c", …]`) so the prologue can be woven in — both are enforced at submit (`400` otherwise).
 - A **clone failure fails the whole execution** — the command never runs against an empty dir.
-- Works on **every runtime backend** (docker, k8s, kata, gvisor, proxmox) because it is a command transform, not a runtime feature.
+- Works on **every runtime backend** (docker, k8s, kata, gvisor) because it is a command transform, not a runtime feature.
 - The env var can also be a plain public URL set via `env` (no creds) — checkout doesn't require a `secret_ref`.
 
 ## RBAC

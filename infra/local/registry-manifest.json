@@ -124,9 +124,20 @@
       { "method": "POST",   "path": "/runtime-backends",         "action": "createRuntimeBackend", "resource": "forge/runtime-backends" },
       { "method": "GET",    "path": "/runtime-backends/{name}",  "action": "getRuntimeBackend",    "resource": "forge/runtime-backends/{name}" },
       { "method": "PUT",    "path": "/runtime-backends/{name}",  "action": "updateRuntimeBackend", "resource": "forge/runtime-backends/{name}" },
-      { "method": "DELETE", "path": "/runtime-backends/{name}",  "action": "deleteRuntimeBackend", "resource": "forge/runtime-backends/{name}" }
+      { "method": "DELETE", "path": "/runtime-backends/{name}",  "action": "deleteRuntimeBackend", "resource": "forge/runtime-backends/{name}" },
+      { "method": "POST",   "path": "/volumes",                  "action": "createVolume",      "resource": "forge/volumes" },
+      { "method": "GET",    "path": "/volumes",                  "action": "listVolume",        "resource": "forge/volumes" },
+      { "method": "DELETE", "path": "/volumes",                  "action": "deleteVolume",      "resource": "forge/volumes" }
     ],
     "actions": [
+      {
+        "name": "forge/create-volume",
+        "summary": "Create a shared workspace volume for a workflow run",
+        "description": "Provisions a run-scoped shared volume (a RAM/tmpfs-backed PVC in Kubernetes, a tmpfs named volume in Docker) that later steps can attach via the `volumes` key on a `forge/run` step. A git step clones a repo into it; downstream steps mount the same volume and see the checkout plus any build artifacts — and never need `git` in their own image. Pass `workflow_id` (use `${run_id}`), an optional `name` (default `workspace`), `size_mb`, and `medium` (`memory` default, or `disk`). The summed size of all of a workflow's volumes is capped by the admin (FORGE_MAX_WORKFLOW_VOLUME_MB). Volumes are torn down automatically when the run ends.",
+        "method": "POST",
+        "path": "/volumes",
+        "required_permission": { "action": "createVolume", "resource": "forge/volumes" }
+      },
       {
         "name": "forge/run",
         "summary": "Run a shell command in a sandboxed container",
@@ -148,6 +159,26 @@
           "output_map_field": "outputs",
           "error_fields": ["stderr"]
         }
+      },
+      {
+        "name": "forge/build-image",
+        "summary": "Build and push a container image",
+        "description": "Builds a container image from a Dockerfile and pushes it to a registry, with no Docker daemon and no host socket — the actions/docker-build-push equivalent. Forge builds with Kaniko (daemonless, userspace layer extraction), which runs on both kernel-isolated backends. Builds REQUIRE a privileged runner class on a kata or gvisor backend (root + writable rootfs, safe behind the VM/Sentry boundary); they are rejected on the shared-kernel docker/kubernetes backends. Pass `build` = { context (default /workspace — usually an attached shared volume), dockerfile, destinations, build_args, target, no_push }, attach the source via `volumes`, and provide registry credentials as a Docker config.json under a `secret_refs` env named REGISTRY_AUTH. Set `runner_class` to a privileged build class.",
+        "method": "POST",
+        "path": "/executions",
+        "required_permission": { "action": "createExecution", "resource": "forge/executions" },
+        "async": {
+          "id_field": "execution_id",
+          "poll_path": "/executions/{id}",
+          "poll_interval_secs": 5,
+          "status_field": "status",
+          "success_states": ["completed"],
+          "failure_states": ["failed", "timed_out"],
+          "cancel_states": ["cancelled"],
+          "output_field": "stdout",
+          "output_map_field": "outputs",
+          "error_fields": ["stderr"]
+        }
       }
     ],
     "default_grants": [
@@ -155,6 +186,11 @@
         "grant_on": "user",
         "actions": ["createExecution", "listExecution", "getExecution", "deleteExecution"],
         "resources": ["{username}/forge/executions", "{username}/forge/executions/*"]
+      },
+      {
+        "grant_on": "user",
+        "actions": ["createVolume", "listVolume", "deleteVolume"],
+        "resources": ["{username}/forge/volumes"]
       },
       {
         "grant_on": "user",

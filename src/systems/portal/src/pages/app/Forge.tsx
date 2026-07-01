@@ -22,14 +22,14 @@ import { timeAgo } from '../../utils';
 
 type ForgeTab = 'executions' | 'runner-classes';
 
-// VM-isolated backends (kata microVMs, proxmox VMs) put the isolation boundary at
-// the VM, not the container — the only place `privileged` is meaningful. Used to
-// tint the runtime badge so a kata/VM class is distinguishable at a glance.
-const VM_ISOLATED = new Set(['kata', 'proxmox']);
+// Kernel-isolated backends (kata microVMs, gVisor's userspace kernel) put the
+// isolation boundary outside the container — the only place `privileged` is
+// meaningful. Used to tint the runtime badge so such a class stands out at a glance.
+const KERNEL_ISOLATED = new Set(['kata', 'gvisor']);
 
-/** Badge style for a runner class's runtime type — VM-isolated types stand out green. */
+/** Badge style for a runner class's runtime type — kernel-isolated types stand out green. */
 function runtimeBadge(type: string): CSSProperties {
-  const c = VM_ISOLATED.has(type) ? T.green : T.dim;
+  const c = KERNEL_ISOLATED.has(type) ? T.green : T.dim;
   return { fontSize: 9, color: c, border: `1px solid ${c}`, padding: '0 4px', letterSpacing: 0.3, textTransform: 'uppercase' };
 }
 
@@ -643,7 +643,7 @@ function RunnerClassesTab() {
                 // Runtime (kata vs not) + privileged lead, since they define the isolation
                 // model; VM-isolated runtimes show green, a privileged class shows amber.
                 ['runtime', selectedRuntime ?? (selectedClass.backend || 'default'),
-                  selectedRuntime && VM_ISOLATED.has(selectedRuntime) ? T.green : undefined],
+                  selectedRuntime && KERNEL_ISOLATED.has(selectedRuntime) ? T.green : undefined],
                 ['privileged', selectedClass.privileged ? 'yes' : 'no',
                   selectedClass.privileged ? T.amber : undefined],
                 ['backend', selectedClass.backend || 'default'],

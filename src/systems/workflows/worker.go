@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"sync"
 	"time"
@@ -220,7 +221,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			}
 			ws := group.steps[0]
 			i := group.indices[0]
-			msg := substitute(withString(ws.With, "message"), substContext{inputs: inputs, outputs: visible})
+			msg := substitute(withString(ws.With, "message"), substContext{inputs: inputs, outputs: visible, runID: runID})
 			stepRunID := uuid.New().String()
 			if err := p.startApprovalStepRun(runID, stepRunID, i, ws.Name, msg); err != nil {
 				slog.ErrorContext(ctx, "worker: start approval step run", "run_id", runID, "step", i, "error", err)
@@ -239,7 +240,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		// Expand the group into the concrete executions to run: one task for a
 		// sequential step, one per member for a parallel group, or one per value
 		// for a matrix step.
-		tasks, aggregateName, terr := buildGroupTasks(group, substContext{inputs: inputs, outputs: visible})
+		tasks, aggregateName, terr := buildGroupTasks(group, substContext{inputs: inputs, outputs: visible, runID: runID})
 		if terr != nil {
 			if sid := uuid.New().String(); p.startStepRun(runID, sid, group.indices[0], group.steps[0].Name) == nil {
 				p.finishStepRun(sid, StatusFailed, strPtr(terr.Error()), nil, nil, nil)
@@ -283,9 +284,68 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 		attribute.String("workflow.id", workflowID),
 		attribute.String("status", finalStatus),
 	))
+	// Tear down any shared workspace volumes before the run token is revoked — the
+	// token carries the deleteVolume grant. Best-effort: forge's age reaper is the
+	// backstop for the crash-before-teardown case (and for stuck-run recovery, which
+	// has no token). Uses a background context so a cancelled run still cleans up.
+	if workflowUsesVolumes(workflow.Steps) {
+		p.teardownRunVolumes(context.Background(), store, runID)
+	}
 	(WorkflowRun{RunID: runID}).Complete(context.Background(), finalStatus)
 	revokeRunToken(context.Background(), store.getSessionID())
 	slog.InfoContext(ctx, "worker: run finished", "run_id", runID, "status", finalStatus)
+}
+
+// ActionForgeCreateVolume is the catalog action a step uses to provision a shared
+// workspace volume for the run. Its presence means the run must tear its volumes
+// down when it finishes.
+const ActionForgeCreateVolume = "forge/create-volume"
+
+// workflowUsesVolumes reports whether any step provisions a shared volume, so the
+// run knows to tear volumes down (and to expect the deleteVolume grant on its role).
+func workflowUsesVolumes(steps []WorkflowStep) bool {
+	for _, ws := range steps {
+		if ws.Action == ActionForgeCreateVolume {
+			return true
+		}
+	}
+	return false
+}
+
+// teardownRunVolumes deletes every shared volume forge provisioned for this run
+// (DELETE /volumes?workflow_id=<runID>). It is idempotent — forge returns deleted:0
+// when none remain — and best-effort: any failure is logged and forge's age reaper
+// removes whatever is left. Must run before the run token is revoked; the token
+// carries the deleteVolume grant via the create-volume companion permission.
+func (p *WorkerPool) teardownRunVolumes(ctx context.Context, store *tokenStore, runID string) {
+	serviceURLsMu.RLock()
+	baseURL, ok := serviceURLs["forge"]
+	serviceURLsMu.RUnlock()
+	if !ok {
+		slog.WarnContext(ctx, "worker: forge service URL unknown, skipping volume teardown", "run_id", runID)
+		return
+	}
+	reqURL := strings.TrimRight(baseURL, "/") + "/volumes?workflow_id=" + neturl.QueryEscape(runID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
+	if err != nil {
+		slog.ErrorContext(ctx, "worker: build volume teardown request", "run_id", runID, "error", err)
+		return
+	}
+	if tok := store.getToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		slog.WarnContext(ctx, "worker: volume teardown failed (reaper will retry)", "run_id", runID, "error", err)
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	if resp.StatusCode >= 300 {
+		slog.WarnContext(ctx, "worker: volume teardown non-2xx (reaper will retry)", "run_id", runID, "status", resp.StatusCode)
+		return
+	}
+	slog.InfoContext(ctx, "worker: run volumes torn down", "run_id", runID)
 }
 
 // stepTask is one concrete execution within a group: a sequential step, one
@@ -481,7 +541,7 @@ func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID,
 				return
 			}
 			defer func() { <-sem }() // release
-			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix})
+			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, runID: runID})
 			resCh <- taskResult{name: t.name, output: res.Output, logs: res.Logs, usedMB: res.MemoryUsedMB, limitMB: res.MemoryLimitMB, err: err, idx: k}
 		}(k, t)
 	}

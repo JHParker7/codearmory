@@ -221,23 +221,43 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Image == "" || len(req.Command) == 0 {
-		http.Error(w, "image and command are required", http.StatusBadRequest)
-		return
+	if req.Env == nil {
+		req.Env = map[string]string{}
 	}
-	// allowedImages == nil means ALLOWED_IMAGES was not configured: deny all.
-	if allowedImages == nil || !allowedImages[req.Image] {
-		http.Error(w, "image not allowed", http.StatusBadRequest)
-		return
+	if req.SecretRefs == nil {
+		req.SecretRefs = map[string]string{}
 	}
-	if req.Timeout <= 0 {
-		req.Timeout = defaultTimeout
+
+	// An image-build execution derives its image (forge's Kaniko builder)
+	// and command (the assembled build invocation) from the build spec, so the usual
+	// image/command/allowlist checks don't apply to it. The engine choice and the
+	// privileged-runner requirement are enforced once the runner class resolves its
+	// backend, below.
+	isBuild := req.Build != nil
+	if isBuild {
+		if err := validateBuild(req.Build, req.SecretRefs, req.Env); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Timeout <= 0 {
+			req.Timeout = defaultBuildTimeoutSecs
+		}
+	} else {
+		if req.Image == "" || len(req.Command) == 0 {
+			http.Error(w, "image and command are required", http.StatusBadRequest)
+			return
+		}
+		// allowedImages == nil means ALLOWED_IMAGES was not configured: deny all.
+		if allowedImages == nil || !allowedImages[req.Image] {
+			http.Error(w, "image not allowed", http.StatusBadRequest)
+			return
+		}
+		if req.Timeout <= 0 {
+			req.Timeout = defaultTimeout
+		}
 	}
 	if req.Timeout > maxTimeout {
 		req.Timeout = maxTimeout
-	}
-	if req.Env == nil {
-		req.Env = map[string]string{}
 	}
 	if err := validateEnvKeys(req.Env); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -247,9 +267,6 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.SecretRefs == nil {
-		req.SecretRefs = map[string]string{}
-	}
 	if err := validateSecretRefs(req.SecretRefs, req.Env, orgID); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -257,6 +274,29 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := validateCheckout(req.Checkout, req.Command, req.SecretRefs, req.Env); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if err := validateVolumeMounts(req.Volumes); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Each attached volume must already exist and belong to the caller, so a job
+	// cannot mount another user's workspace. The run-scoped identity that created the
+	// volume is the same one that submits the steps attaching it.
+	for _, m := range req.Volumes {
+		vol, err := getActiveVolume(ctx, m.WorkflowID, m.Name)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, fmt.Sprintf("volume %q not found for workflow %q (create it first)", m.Name, m.WorkflowID), http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			slog.ErrorContext(ctx, "submit: volume lookup", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if vol.UserID != userID {
+			http.Error(w, fmt.Sprintf("volume %q is not owned by the caller", m.Name), http.StatusForbidden)
+			return
+		}
 	}
 	if req.RunnerClass == "" {
 		req.RunnerClass = "standard"
@@ -271,6 +311,20 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	backend := rc.Backend
 	if backend == "" {
 		backend = "default"
+	}
+
+	// Materialise an image build: it requires a privileged runner class (root +
+	// writable rootfs), which forge only honours on a kernel-isolated backend (kata or
+	// gvisor) — so that one check is the whole guard. Forge builds it with Kaniko,
+	// setting the forge-controlled builder image and the assembled build command, which
+	// bypass the user image allowlist checked above.
+	if isBuild {
+		if !rc.Privileged {
+			http.Error(w, "image builds require a privileged runner class (root + writable rootfs on a kata or gvisor backend)", http.StatusBadRequest)
+			return
+		}
+		req.Image = builderImage
+		req.Command = kanikoCommand(req.Build)
 	}
 
 	executionID := uuid.New().String()
@@ -295,6 +349,8 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		SecretRefs:  req.SecretRefs,
 		OutputEnv:   req.OutputEnv,
 		Checkout:    req.Checkout,
+		Volumes:     req.Volumes,
+		Build:       req.Build,
 		Status:      StatusPending,
 	}
 	if err := exec.Add(ctx); err != nil {

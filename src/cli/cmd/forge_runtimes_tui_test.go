@@ -323,7 +323,7 @@ func TestForgeRuntimesModel_SubmitRuntimeBackend_ParsesConfig(t *testing.T) {
 		"type":        "kata",
 		"enabled":     "true",
 		"config":      "runtime_class=kata-qemu",
-		"secret_refs": "token=PROXMOX_TOKEN",
+		"secret_refs": "token=REGISTRY_TOKEN",
 	})
 	_, cmd := m.submitForm()
 	if cmd == nil {
@@ -345,8 +345,8 @@ func TestForgeRuntimesModel_SubmitRuntimeBackend_ParsesConfig(t *testing.T) {
 		t.Errorf("config.runtime_class = %v, want kata-qemu", cfg["runtime_class"])
 	}
 	sec, _ := got["secret_refs"].(map[string]any)
-	if sec["token"] != "PROXMOX_TOKEN" {
-		t.Errorf("secret_refs.token = %v, want PROXMOX_TOKEN", sec["token"])
+	if sec["token"] != "REGISTRY_TOKEN" {
+		t.Errorf("secret_refs.token = %v, want REGISTRY_TOKEN", sec["token"])
 	}
 }
 

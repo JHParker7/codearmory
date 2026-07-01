@@ -288,8 +288,7 @@ components:
         board_id:
           type: string
           format: uuid
-          nullable: true
-          description: The board this ticket belongs to (null = unassigned)
+          description: The board this ticket belongs to. Every ticket has a board.
         created_by:
           type: string
           format: uuid
@@ -368,8 +367,8 @@ components:
           type: string
           description: >-
             Status column for the new ticket. Omitting defaults to the board's
-            left-most column (or the org/global left-most status when
-            unassigned). Must be one of the board's configured status columns.
+            left-most column. Must be one of the board's configured status
+            columns.
         priority:
           type: string
           enum: [low, medium, high, critical]
@@ -381,7 +380,10 @@ components:
           type: string
           format: uuid
           nullable: true
-          description: Board to place the ticket on (omit/null = unassigned)
+          description: >-
+            Board to place the ticket on. Every ticket has a board: omitting or
+            passing null/"" places it on the caller's default board (created on
+            first use).
         assignee_id:
           type: string
           format: uuid
@@ -422,7 +424,9 @@ components:
           type: string
           format: uuid
           nullable: true
-          description: Omitting preserves the current board; "" clears it (unassign)
+          description: >-
+            Omitting preserves the current board; "" re-homes the ticket to the
+            caller's default board (tickets always have a board)
         assignee_id:
           type: string
           format: uuid

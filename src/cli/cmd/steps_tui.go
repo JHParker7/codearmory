@@ -788,12 +788,15 @@ func stepEditValues(s tuiStep) map[string]string {
 		"timeout": strconv.FormatInt(s.Timeout, 10),
 		"desc":    s.Description,
 	}
+	// Flatten nested action shapes (build-image's `build` object + registry secret_ref)
+	// back to the form's flat fields so the edit form pre-populates and round-trips.
+	wm := flattenStepWith(s.Action, s.With)
 	consumed := map[string]bool{}
 	for _, f := range schemaForAction(s.Action) {
 		if f.kind == stepFieldJSON {
 			continue // the advanced With field collects leftovers below
 		}
-		v, ok := s.With[f.key]
+		v, ok := wm[f.key]
 		if !ok {
 			continue
 		}
@@ -801,13 +804,26 @@ func stepEditValues(s tuiStep) map[string]string {
 		case stepFieldEnv:
 			consumed[f.key] = true
 			vals[withKeyPrefix+f.key] = formatEnvTokens(v)
+		case stepFieldVolumeAttach:
+			consumed[f.key] = true
+			vals[withKeyPrefix+f.key] = volumeAttachString(v)
+		case stepFieldList:
+			consumed[f.key] = true
+			vals[withKeyPrefix+f.key] = formatList(v)
 		default:
 			consumed[f.key] = true
 			vals[withKeyPrefix+f.key] = formatScalarValue(v)
 		}
 	}
+	// A create-volume step's workflow_id defaults to ${run_id} and has no field of its
+	// own; don't spill that default into the advanced With JSON on edit.
+	if s.Action == "forge/create-volume" {
+		if wid, ok := wm["workflow_id"].(string); ok && wid == volumeRunIDRef {
+			consumed["workflow_id"] = true
+		}
+	}
 	leftover := map[string]any{}
-	for k, v := range s.With {
+	for k, v := range wm {
 		if !consumed[k] {
 			leftover[k] = v
 		}

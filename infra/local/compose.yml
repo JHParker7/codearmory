@@ -180,13 +180,6 @@ services:
       FORGE_EGRESS_PROXY: http://egress-proxy:3128
       # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
       # K8S_RUNTIME_CLASS: gvisor     # optional: use gVisor for stronger isolation
-      #
-      # Proxmox VM-per-job runtime: the PVE host is external (not part of this
-      # compose stack), so there is nothing to start here. To try it, set the token
-      # below and create a runtime backend of type "proxmox" via the API whose
-      # config points at your PVE host and whose egress_proxy reuses the same
-      # FORGE_EGRESS_PROXY URL above. secret_refs {token: "PROXMOX_TOKEN"}.
-      # PROXMOX_TOKEN: "root@pam!forge=00000000-0000-0000-0000-000000000000"
     volumes:
       # Mount the Docker socket for the local docker runtime.
       # Remove this when deploying to Kubernetes (use RUNTIME=kubernetes instead).

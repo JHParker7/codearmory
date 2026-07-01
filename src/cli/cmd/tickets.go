@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -343,14 +344,41 @@ func init() {
 		},
 	}
 
+	var boardDeleteConfirm string
 	deleteBoardCmd := &cobra.Command{
 		Use:   "delete <id>",
-		Short: "Delete a board (its tickets are kept and become unassigned)",
+		Short: "Delete a board and all of its tickets",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return apiCall("DELETE", "/tickets/boards/"+args[0], nil)
+			id := args[0]
+			confirmName := boardDeleteConfirm
+			if confirmName == "" {
+				// Deleting a board cascade-deletes its tickets, so look up the
+				// board's name and require the user to retype it.
+				body, err := doRequest("GET", "/tickets/boards/"+id, nil)
+				if err != nil {
+					return err
+				}
+				var b struct {
+					Name string `json:"name"`
+				}
+				if err := json.Unmarshal(body, &b); err != nil {
+					return fmt.Errorf("could not read board: %w", err)
+				}
+				fmt.Fprintf(os.Stderr, "Deleting board %q also permanently deletes all of its tickets.\n", b.Name)
+				typed, err := prompt("Type the board name to confirm", "")
+				if err != nil {
+					return err
+				}
+				if typed != b.Name {
+					return fmt.Errorf("confirmation %q did not match board name %q; aborted", typed, b.Name)
+				}
+				confirmName = b.Name
+			}
+			return apiCall("DELETE", "/tickets/boards/"+id+"?confirm="+url.QueryEscape(confirmName), nil)
 		},
 	}
+	deleteBoardCmd.Flags().StringVar(&boardDeleteConfirm, "confirm", "", "Board name, to confirm deletion non-interactively")
 
 	boardsCmd.AddCommand(createBoardCmd, listBoardsCmd, deleteBoardCmd)
 

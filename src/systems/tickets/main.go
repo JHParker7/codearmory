@@ -179,6 +179,12 @@ func main() {
 		slog.Error("failed to seed field defs", "error", err)
 		os.Exit(1)
 	}
+	// Boards are required: home any legacy board-less tickets onto their scope's
+	// default board. Best-effort — a transient failure here retries next startup
+	// and must not block the service from serving.
+	if err := backfillTicketBoards(ctx); err != nil {
+		slog.Warn("failed to backfill board-less tickets", "error", err)
+	}
 	slog.Info("database initialized")
 
 	gatekeeperClient = newGatekeeperClient()

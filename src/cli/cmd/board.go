@@ -103,6 +103,9 @@ type boardModel struct {
 	formPIdx   int
 	formSIdx   int
 	formFocus  int
+	// confirmName is the exact board name the user must retype to confirm a
+	// board deletion (which cascade-deletes the board's tickets).
+	confirmName string
 	// followID, when non-empty, moves the cursor to that ticket after next refresh
 	followID string
 }
@@ -518,9 +521,14 @@ func (m boardModel) updateNav(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = openNewBoardForm(m)
 		return m, m.formTitle.Focus()
 	case "D":
-		// Delete the board currently being viewed (only meaningful on a real board).
+		// Delete the board currently being viewed (only meaningful on a real
+		// board). Deleting a board cascade-deletes its tickets, so require the
+		// user to retype the board's name to confirm.
 		if m.boardFilter != "" && m.boardFilter != boardFilterNone {
 			m.mode = boardModeConfirmDeleteBoard
+			m.confirmName = m.boardFilterLabel()
+			m.formTitle = newFormInput("type board name to confirm")
+			return m, m.formTitle.Focus()
 		}
 	case "r":
 		m.err = nil

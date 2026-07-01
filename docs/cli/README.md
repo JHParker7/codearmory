@@ -377,7 +377,7 @@ classes and runtime backends. Runner classes are also managed from the CLI:
 | `admin forge-runtimes runner-classes delete <name>` | | Delete a runner class |
 
 The `privileged` flag (root + writable rootfs, honoured only on kernel-isolated
-`kata`/`proxmox`/`gvisor` backends) is set via the Forge Runtimes TUI editor or the
+`kata`/`gvisor` backends) is set via the Forge Runtimes TUI editor or the
 runner-class API, not these CLI flags. See [forge runner classes](../forge/README.md#runner-classes).
 
 ### `admin outpost`

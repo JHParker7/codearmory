@@ -403,12 +403,20 @@ export function Tickets() {
   };
 
   const handleDeleteBoard = async (b: Board) => {
-    if (!(await confirm({ message: `Delete board "${b.name}"? Its tickets are kept and moved to "unassigned".` }))) return;
+    // Deleting a board also deletes its tickets, so require the user to type the
+    // board's exact name to confirm.
+    if (!(await confirm({
+      title: 'Delete board',
+      message: <>Deleting <b>"{b.name}"</b> permanently deletes the board <b>and all of its tickets</b>. This cannot be undone. Type the board name to confirm.</>,
+      confirmLabel: 'delete board',
+      requireText: b.name,
+    }))) return;
     try {
-      await deleteBoard(token, b.board_id);
+      await deleteBoard(token, b.board_id, b.name);
       if (board === b.board_id) setBoard(null);
-      // Reflect the unassignment locally so cards don't vanish until the next refresh.
-      setTickets(prev => prev.map(t => (t.board_id === b.board_id ? { ...t, board_id: null } : t)));
+      // Drop the board and its now-deleted tickets locally so nothing lingers
+      // until the next refresh.
+      setTickets(prev => prev.filter(t => t.board_id !== b.board_id));
       setBoards(prev => prev.filter(x => x.board_id !== b.board_id));
     } catch (e: unknown) {
       setError((e as Error).message);

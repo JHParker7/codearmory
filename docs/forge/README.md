@@ -26,12 +26,13 @@ Forge calls Gatekeeper directly to verify the Bearer token on every request. It 
 
 ## Runtime backends
 
-The runtime that runs a job is selected per-execution. Admins define **runtime backends** (`/runtime-backends`, admin-only CRUD; users get read-only list/get) of type `docker`, `kubernetes`, `proxmox`, `kata`, or `gvisor`, and point a runner class at one via its `backend` field. The execution snapshots the class's backend at submit time. A `default` backend is seeded from the legacy `RUNTIME` env, so a single-runtime deployment needs no change.
+The runtime that runs a job is selected per-execution. Admins define **runtime backends** (`/runtime-backends`, admin-only CRUD; users get read-only list/get) of type `docker`, `kubernetes`, `kata`, or `gvisor`, and point a runner class at one via its `backend` field. The execution snapshots the class's backend at submit time. A `default` backend is seeded from the legacy `RUNTIME` env, so a single-runtime deployment needs no change.
 
 - **docker / kubernetes** — container-level sandbox (read-only rootfs, dropped caps, egress proxy). Best for untrusted code.
 - **kata** — the kubernetes runtime pinned to a Kata Containers `RuntimeClass`, so each job runs in a lightweight VM (a real kernel, hardware-virtualization boundary) while keeping the same Job lifecycle and container hardening. Stronger isolation than a plain container with no new runtime to operate. See [kata.md](kata.md).
 - **gvisor** — the kubernetes runtime pinned to a gVisor (`runsc`) `RuntimeClass`, so each job runs under a userspace kernel (the Sentry) that intercepts its syscalls. Kernel-level isolation comparable to kata but with **no hardware virtualization** — the choice when nodes lack nested virt / `/dev/kvm`. Keeps the egress proxy (gVisor is not a network boundary). See [gvisor.md](gvisor.md).
-- **proxmox** — a throwaway VM per job with full root and a real Docker daemon, for CI work that needs `apt`/`docker build`. See [proxmox.md](proxmox.md).
+
+To **build container images**, use forge's built-in daemonless image build (BuildKit on kata, Kaniko on gvisor) rather than a Docker daemon — it needs a privileged runner class on a kernel-isolated backend, never the host socket.
 
 ## Requirements
 
@@ -133,7 +134,7 @@ These three classes are seeded automatically on startup if absent. Operators can
 
 ### Privileged classes (root for package managers)
 
-A runner class may set `privileged: true` to run jobs as **root with a writable root filesystem** and privilege escalation allowed, so package managers (`apt`/`pacman`/`dnf`) and other root operations work. This is honoured **only on kernel-isolated backends** (`kata`, `proxmox`, `gvisor`), where a guest or userspace kernel — not the host kernel — contains the job's root. The API rejects `privileged` on shared-kernel container backends (`docker`/`kubernetes`) with `400`, and forge drops the flag at runtime if it ever reaches one (root + writable rootfs in a shared-kernel container is a host-escape risk). See [kata.md](kata.md#privileged-jobs-root--package-managers).
+A runner class may set `privileged: true` to run jobs as **root with a writable root filesystem** and privilege escalation allowed, so package managers (`apt`/`pacman`/`dnf`) and other root operations work. This is honoured **only on kernel-isolated backends** (`kata`, `gvisor`), where a guest or userspace kernel — not the host kernel — contains the job's root. The API rejects `privileged` on shared-kernel container backends (`docker`/`kubernetes`) with `400`, and forge drops the flag at runtime if it ever reaches one (root + writable rootfs in a shared-kernel container is a host-escape risk). See [kata.md](kata.md#privileged-jobs-root--package-managers).
 
 ### Selecting a runner class
 

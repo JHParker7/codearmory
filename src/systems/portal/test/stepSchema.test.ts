@@ -22,7 +22,7 @@ describe('schemaKey', () => {
 describe('schemaForAction', () => {
   it('returns the tailored fields plus a trailing advanced With for a known action', () => {
     const fields = schemaForAction('forge/run');
-    expect(fields.map(f => f.key)).to.deep.equal(['image', 'run', 'runner_class', 'env', 'output_env', RAW_WITH_KEY]);
+    expect(fields.map(f => f.key)).to.deep.equal(['image', 'run', 'runner_class', 'volumes', 'env', 'output_env', RAW_WITH_KEY]);
     expect(fields[fields.length - 1].kind).to.equal('json');
     expect(fields[fields.length - 1].required).to.not.equal(true);
   });
@@ -149,5 +149,106 @@ describe('per-step git repo helpers', () => {
       .to.deep.equal({ DEPLOY_KEY: 'secret:deploy' });
     // Clearing the sole ref returns undefined so the override can be dropped entirely.
     expect(withGitRepo({ [GIT_CLONE_ENV]: 'git:x' }, '')).to.equal(undefined);
+  });
+});
+
+describe('shared workspace volumes', () => {
+  it('create-volume defaults workflow_id to ${run_id}', () => {
+    const out = buildStepWith('forge/create-volume', reader({
+      [p('name')]: 'workspace',
+      [p('size_mb')]: '1024',
+      [p('medium')]: 'memory',
+      [p('mount_path')]: '/workspace',
+    }));
+    expect(out).to.deep.equal({
+      workflow_id: '${run_id}', name: 'workspace', size_mb: 1024, medium: 'memory', mount_path: '/workspace',
+    });
+  });
+
+  it('create-volume lets an explicit workflow_id (advanced With) win', () => {
+    const out = buildStepWith('forge/create-volume', reader({
+      [p(RAW_WITH_KEY)]: '{"workflow_id":"custom-scope"}',
+    }));
+    expect(out.workflow_id).to.equal('custom-scope');
+  });
+
+  it('forge/run volume attach becomes the run-scoped volumes array', () => {
+    const out = buildStepWith('forge/run', reader({
+      [p('image')]: 'alpine:3.19',
+      [p('run')]: 'make build',
+      [p('volumes')]: 'workspace:/src',
+    }));
+    expect(out.volumes).to.deep.equal([
+      { workflow_id: '${run_id}', name: 'workspace', mount_path: '/src', workdir: true },
+    ]);
+  });
+
+  it('forge/run omits volumes when the attach field is blank', () => {
+    const out = buildStepWith('forge/run', reader({
+      [p('image')]: 'alpine:3.19',
+      [p('run')]: 'make build',
+    }));
+    expect(out).to.not.have.property('volumes');
+  });
+
+  it('round-trips a forge/run volume attach through formValsFromWith', () => {
+    const withMap = buildStepWith('forge/run', reader({
+      [p('image')]: 'alpine:3.19',
+      [p('run')]: 'make build',
+      [p('volumes')]: 'cache:/data',
+    }));
+    const vals = formValsFromWith('forge/run', withMap);
+    expect(vals[p('volumes')]).to.equal('cache:/data');
+    // The default-mount case renders as the bare name.
+    const bare = formValsFromWith('forge/run', { image: 'x', run: 'y', volumes: [{ workflow_id: '${run_id}', name: 'workspace', mount_path: '/workspace', workdir: true }] });
+    expect(bare[p('volumes')]).to.equal('workspace');
+  });
+
+  it('does not spill the default workflow_id into advanced With on edit', () => {
+    const withMap = buildStepWith('forge/create-volume', reader({ [p('name')]: 'workspace' }));
+    const vals = formValsFromWith('forge/create-volume', withMap);
+    expect(vals[p(RAW_WITH_KEY)]).to.equal(undefined);
+  });
+});
+
+describe('forge/build-image', () => {
+  it('nests flat fields into a build object + registry secret_ref', () => {
+    const out = buildStepWith('forge/build-image', reader({
+      [p('destinations')]: 'reg.io/acme/app:1.0, reg.io/acme/app:latest',
+      [p('dockerfile')]: 'docker/Dockerfile',
+      [p('build_args')]: 'VERSION=1.0 COMMIT=abc',
+      [p('target')]: 'prod',
+      [p('registry_secret')]: 'my-registry',
+      [p('volumes')]: 'workspace:/src',
+      [p('runner_class')]: 'build-kata',
+    }));
+    expect(out.build).to.deep.equal({
+      destinations: ['reg.io/acme/app:1.0', 'reg.io/acme/app:latest'],
+      dockerfile: 'docker/Dockerfile',
+      build_args: { VERSION: '1.0', COMMIT: 'abc' },
+      target: 'prod',
+    });
+    expect(out.secret_refs).to.deep.equal({ REGISTRY_AUTH: 'secret:my-registry' });
+    expect(out.runner_class).to.equal('build-kata');
+    expect(out.volumes).to.be.an('array');
+    expect(out).to.not.have.property('destinations'); // moved under build
+  });
+
+  it('round-trips through formValsFromWith', () => {
+    const withMap = buildStepWith('forge/build-image', reader({
+      [p('destinations')]: 'reg.io/acme/app:1.0',
+      [p('dockerfile')]: 'Dockerfile',
+      [p('registry_secret')]: 'my-registry',
+      [p('runner_class')]: 'build-kata',
+    }));
+    const vals = formValsFromWith('forge/build-image', withMap);
+    expect(vals[p('destinations')]).to.equal('reg.io/acme/app:1.0');
+    expect(vals[p('dockerfile')]).to.equal('Dockerfile');
+    expect(vals[p('registry_secret')]).to.equal('my-registry');
+    expect(vals[p('runner_class')]).to.equal('build-kata');
+    // The nested build object and secret_refs must not leak into the advanced With.
+    expect(vals[p(RAW_WITH_KEY)]).to.equal(undefined);
+    // And it re-nests identically.
+    expect(buildStepWith('forge/build-image', (k) => vals[k] ?? '')).to.deep.equal(withMap);
   });
 });

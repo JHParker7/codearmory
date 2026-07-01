@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -80,13 +81,15 @@ func sendCreateBoard(name string) tea.Cmd {
 	}
 }
 
-// sendDeleteBoard DELETEs a board (its tickets are kept, unassigned).
-func sendDeleteBoard(id string) tea.Cmd {
+// sendDeleteBoard DELETEs a board and its tickets. The server requires the
+// board's exact name echoed back via ?confirm=<name> as a delete guard.
+func sendDeleteBoard(id, confirmName string) tea.Cmd {
 	return func() tea.Msg {
-		if _, err := doRequest("DELETE", "/tickets/boards/"+id, nil); err != nil {
+		path := "/tickets/boards/" + id + "?confirm=" + url.QueryEscape(confirmName)
+		if _, err := doRequest("DELETE", path, nil); err != nil {
 			return boardErrMsg{err}
 		}
-		return boardMutatedMsg{"Board deleted."}
+		return boardMutatedMsg{"Board and its tickets deleted."}
 	}
 }
 
@@ -406,24 +409,33 @@ func (m boardModel) updateNewBoard(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m boardModel) updateConfirmDeleteBoard(msg tea.Msg) (tea.Model, tea.Cmd) {
-	key, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return m, nil
-	}
-	switch key.String() {
-	case "y", "Y":
-		id := m.boardFilter
-		m.mode = boardModeNav
-		if id == "" || id == boardFilterNone {
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "esc":
+			m.mode = boardModeNav
 			return m, nil
+		case "enter":
+			id := m.boardFilter
+			if id == "" || id == boardFilterNone {
+				m.mode = boardModeNav
+				return m, nil
+			}
+			// Type-to-confirm: the typed name must match the board's exactly,
+			// since deleting the board also deletes all of its tickets.
+			if strings.TrimSpace(m.formTitle.Value()) != m.confirmName {
+				return m, nil
+			}
+			name := m.confirmName
+			m.mode = boardModeNav
+			m.boardFilter = ""
+			m.status = "Deleting board…"
+			return m, sendDeleteBoard(id, name)
 		}
-		m.boardFilter = ""
-		m.status = "Deleting board…"
-		return m, sendDeleteBoard(id)
-	case "esc", "n", "N":
-		m.mode = boardModeNav
 	}
-	return m, nil
+	// Delegate typing to the confirmation input.
+	var cmd tea.Cmd
+	m.formTitle, cmd = m.formTitle.Update(msg)
+	return m, cmd
 }
 
 func (m boardModel) viewNewBoard() string {
@@ -443,14 +455,18 @@ func (m boardModel) viewNewBoard() string {
 }
 
 func (m boardModel) viewConfirmDeleteBoard() string {
+	ti := m.formTitle
+	ti.Width = formInputW
 	content := strings.Join([]string{
 		bsFormHeading.Render("Delete Board"),
 		"",
 		lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Text)).
-			Render("Delete board " + fmt.Sprintf("%q", m.boardFilterLabel()) + "?"),
-		bsFormHint.Render("Its tickets are kept and become unassigned."),
+			Render("Delete board " + fmt.Sprintf("%q", m.confirmName) + " and all its tickets?"),
+		bsFormHint.Render("This permanently deletes the board and every ticket on it."),
 		"",
-		bsFormHint.Render("y: confirm   esc: cancel"),
+		lipgloss.JoinHorizontal(lipgloss.Top, bsFormLabelActive.Render("Name"), ti.View()),
+		"",
+		bsFormHint.Render("type the board name, then enter: confirm   esc: cancel"),
 	}, "\n")
 	box := bsFormBox.Render(content)
 	if m.width > 0 && m.height > 0 {

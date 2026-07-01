@@ -225,6 +225,46 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 	privileged := spec.Privileged && r.kernelIsolated
 	podSC, containerSC := podSecurityContexts(privileged)
 
+	// Start from the always-present tmpfs /tmp, then attach any shared workspace
+	// volumes: each binds a pre-created PVC (POST /volumes) at its path, and a mount
+	// that sets workdir pins the container's working directory there so the command
+	// runs inside the volume (e.g. a checked-out repo). FSGroup on the pod security
+	// context makes the PVC group-writable by the sandbox UID, same as /tmp.
+	volumeMounts := []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}}
+	volumes := []corev1.Volume{{
+		Name: "tmp",
+		VolumeSource: corev1.VolumeSource{
+			// Memory-backed (tmpfs), matching the docker runtime's `--tmpfs /tmp`
+			// and the `TmpfsMB` runner-class field. Critically, this is what makes
+			// Firecracker (kata-fc) work: Firecracker has no virtio-fs/9p
+			// filesystem sharing, so a default node-backed emptyDir cannot be
+			// shared into the microVM and the container never starts. A Memory
+			// emptyDir lives inside the guest and needs no host sharing. The size
+			// counts against the pod memory limit, same as the docker tmpfs.
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: &tmpSize,
+			},
+		},
+	}}
+	workingDir := ""
+	for i, rm := range resolveVolumeMounts(exec) {
+		volName := fmt.Sprintf("ws-%d", i)
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: volName, MountPath: rm.mountPath, ReadOnly: rm.readOnly})
+		volumes = append(volumes, corev1.Volume{
+			Name: volName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: rm.resourceName,
+					ReadOnly:  rm.readOnly,
+				},
+			},
+		})
+		if rm.workdir {
+			workingDir = rm.mountPath
+		}
+	}
+
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -252,10 +292,11 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 					AutomountServiceAccountToken: ptr(false),
 					SecurityContext:              podSC,
 					Containers: []corev1.Container{{
-						Name:    "runner",
-						Image:   exec.Image,
-						Command: exec.Command,
-						Env:     envVars,
+						Name:       "runner",
+						Image:      exec.Image,
+						Command:    exec.Command,
+						Env:        envVars,
+						WorkingDir: workingDir,
 						Resources: corev1.ResourceRequirements{
 							Limits: corev1.ResourceList{
 								corev1.ResourceMemory: memLimit,
@@ -267,24 +308,9 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 							},
 						},
 						SecurityContext: containerSC,
-						VolumeMounts:    []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}},
+						VolumeMounts:    volumeMounts,
 					}},
-					Volumes: []corev1.Volume{{
-						Name: "tmp",
-						VolumeSource: corev1.VolumeSource{
-							// Memory-backed (tmpfs), matching the docker runtime's `--tmpfs /tmp`
-							// and the `TmpfsMB` runner-class field. Critically, this is what makes
-							// Firecracker (kata-fc) work: Firecracker has no virtio-fs/9p
-							// filesystem sharing, so a default node-backed emptyDir cannot be
-							// shared into the microVM and the container never starts. A Memory
-							// emptyDir lives inside the guest and needs no host sharing. The size
-							// counts against the pod memory limit, same as the docker tmpfs.
-							EmptyDir: &corev1.EmptyDirVolumeSource{
-								Medium:    corev1.StorageMediumMemory,
-								SizeLimit: &tmpSize,
-							},
-						},
-					}},
+					Volumes: volumes,
 				},
 			},
 		},
@@ -706,6 +732,65 @@ func podExitCode(pod *corev1.Pod) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// CreateVolume provisions a PersistentVolumeClaim to back a shared workspace. The
+// StorageClass (FORGE_VOLUME_STORAGE_CLASS, empty = cluster default) decides the
+// backing medium — point it at a RAM/tmpfs-backed class to keep the volume in
+// memory. AccessMode defaults to ReadWriteOnce (FORGE_VOLUME_ACCESS_MODE); set it to
+// ReadWriteMany on a class that supports it if a run's steps span nodes. An
+// already-existing PVC is treated as success so a retried create is idempotent.
+func (r *KubernetesRuntime) CreateVolume(ctx context.Context, spec VolumeSpec) error {
+	size := resource.MustParse(fmt.Sprintf("%dMi", spec.SizeMB))
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      spec.ResourceName,
+			Namespace: r.namespace,
+			Labels:    map[string]string{"app": "forge", "component": "workspace"},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{parseAccessMode(volumeAccessMode)},
+			StorageClassName: storageClassName(),
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: size},
+			},
+		},
+	}
+	if _, err := r.client.CoreV1().PersistentVolumeClaims(r.namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create pvc: %w", err)
+	}
+	return nil
+}
+
+// DeleteVolume removes the PVC backing a shared workspace. A missing PVC is treated
+// as success so teardown is idempotent.
+func (r *KubernetesRuntime) DeleteVolume(ctx context.Context, resourceName string) error {
+	if err := r.client.CoreV1().PersistentVolumeClaims(r.namespace).Delete(ctx, resourceName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete pvc: %w", err)
+	}
+	return nil
+}
+
+// parseAccessMode maps the configured access-mode string to the corev1 constant,
+// defaulting to ReadWriteOnce for an unset or unrecognised value.
+func parseAccessMode(mode string) corev1.PersistentVolumeAccessMode {
+	switch mode {
+	case "ReadWriteMany":
+		return corev1.ReadWriteMany
+	case "ReadOnlyMany":
+		return corev1.ReadOnlyMany
+	default:
+		return corev1.ReadWriteOnce
+	}
+}
+
+// storageClassName returns the configured StorageClass pointer, or nil to use the
+// cluster's default StorageClass.
+func storageClassName() *string {
+	if volumeStorageClass == "" {
+		return nil
+	}
+	return &volumeStorageClass
 }
 
 // Cancel deletes the Kubernetes Job for the execution, which terminates the

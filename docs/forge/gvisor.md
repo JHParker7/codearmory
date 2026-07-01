@@ -32,8 +32,9 @@ kernel, so both reach kernel-level isolation and both may run privileged jobs (s
 Choose **gvisor** when you want kernel-level isolation but your nodes lack nested
 virtualization / `/dev/kvm` (most managed node pools) — it runs the Sentry on the
 default ptrace platform with no special hardware. Choose **kata** when you have
-hardware virtualization and want a real guest kernel; choose **proxmox** for CI that
-needs an in-VM **Docker daemon** / `docker build`.
+hardware virtualization and want a real guest kernel. To **build container images**,
+use forge's built-in daemonless image build (Kaniko on gvisor) rather than a Docker
+daemon.
 
 ```
 POST /executions (runner_class → backend snapshot)
@@ -164,7 +165,7 @@ boundary — the job's "root" makes syscalls to the userspace kernel, never to t
 kernel. Two guardrails:
 
 - **Kernel-isolated backends only.** `privileged` is honoured solely on
-  kernel-isolated backends — kata, proxmox, and gvisor. The API rejects it for any
+  kernel-isolated backends — kata and gvisor. The API rejects it for any
   shared-kernel backend (`docker`/`kubernetes`), and forge drops it at runtime if it
   ever reaches one (`buildJob`): root + writable rootfs in a shared-kernel (runc)
   container would be a host-kernel escape risk.
@@ -174,8 +175,9 @@ kernel. Two guardrails:
   The pod still stays within `baseline`: it does not set container `privileged`, host
   namespaces, or host paths.
 
-It does **not** provide an in-VM Docker daemon — for `docker build` use the proxmox
-backend. The egress proxy / NetworkPolicy isolation applies to privileged jobs too.
+It does **not** provide an in-VM Docker daemon; to build container images use forge's
+built-in daemonless image build (Kaniko on gvisor), which needs no daemon or host
+socket. The egress proxy / NetworkPolicy isolation applies to privileged jobs too.
 
 ## Helm
 

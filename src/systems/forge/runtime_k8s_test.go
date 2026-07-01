@@ -665,3 +665,105 @@ func TestBuildJob_RuntimeClassName(t *testing.T) {
 		t.Errorf("RuntimeClassName = %q, want nil for a plain k8s backend", *got)
 	}
 }
+
+// TestBuildJob_AttachesVolumes checks a shared workspace volume becomes a PVC-backed
+// pod volume mounted at its path, with the runner's working directory pinned to the
+// mount that sets workdir. This is what lets a git step's checkout be visible (and
+// the process start) inside the shared volume.
+func TestBuildJob_AttachesVolumes(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge"}
+	exec := Execution{
+		ExecutionID: "exec-1", Image: "alpine:3.19", Command: []string{"true"}, TimeoutSecs: 30,
+		Volumes: []VolumeMount{{WorkflowID: "run-1", Name: "workspace", MountPath: "/workspace", Workdir: true}},
+	}
+	pod := r.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec
+
+	want := volumeResourceName("run-1", "workspace")
+	var pvcVolName string
+	for _, v := range pod.Volumes {
+		if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == want {
+			pvcVolName = v.Name
+		}
+	}
+	if pvcVolName == "" {
+		t.Fatalf("no pod volume backed by PVC %q; volumes=%+v", want, pod.Volumes)
+	}
+
+	c := pod.Containers[0]
+	if c.WorkingDir != "/workspace" {
+		t.Errorf("WorkingDir = %q, want /workspace", c.WorkingDir)
+	}
+	mounted := false
+	for _, m := range c.VolumeMounts {
+		if m.Name == pvcVolName && m.MountPath == "/workspace" {
+			mounted = true
+		}
+	}
+	if !mounted {
+		t.Errorf("PVC volume not mounted at /workspace; mounts=%+v", c.VolumeMounts)
+	}
+	// The always-present tmpfs /tmp must survive alongside the new mount.
+	tmp := false
+	for _, m := range c.VolumeMounts {
+		if m.MountPath == "/tmp" {
+			tmp = true
+		}
+	}
+	if !tmp {
+		t.Error("/tmp mount was dropped when attaching a volume")
+	}
+}
+
+// TestBuildJob_NoVolumes keeps the default (no shared storage): just the /tmp mount,
+// and no working directory override.
+func TestBuildJob_NoVolumes(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge"}
+	exec := Execution{ExecutionID: "exec-1", Image: "alpine:3.19", Command: []string{"true"}, TimeoutSecs: 30}
+	c := r.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec.Containers[0]
+	if c.WorkingDir != "" {
+		t.Errorf("WorkingDir = %q, want empty when no workdir volume", c.WorkingDir)
+	}
+	if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].MountPath != "/tmp" {
+		t.Errorf("want only the /tmp mount, got %+v", c.VolumeMounts)
+	}
+}
+
+// TestKubernetesCreateDeleteVolume exercises the PVC lifecycle against the fake
+// clientset: create provisions a correctly-sized PVC, create is idempotent, and
+// delete removes it (and is idempotent on a missing PVC).
+func TestKubernetesCreateDeleteVolume(t *testing.T) {
+	initVolumeConfig()
+	r := &KubernetesRuntime{client: fake.NewSimpleClientset(), namespace: "forge"}
+	ctx := context.Background()
+	name := volumeResourceName("run-1", "workspace")
+
+	if err := r.CreateVolume(ctx, VolumeSpec{ResourceName: name, SizeMB: 512, Medium: mediumMemory}); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	pvc, err := r.client.CoreV1().PersistentVolumeClaims("forge").Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("PVC not created: %v", err)
+	}
+	if got := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; got.String() != "512Mi" {
+		t.Errorf("PVC size = %s, want 512Mi", got.String())
+	}
+	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteOnce {
+		t.Errorf("PVC access modes = %v, want [ReadWriteOnce]", pvc.Spec.AccessModes)
+	}
+
+	// Idempotent create (already exists) must not error.
+	if err := r.CreateVolume(ctx, VolumeSpec{ResourceName: name, SizeMB: 512, Medium: mediumMemory}); err != nil {
+		t.Fatalf("idempotent CreateVolume: %v", err)
+	}
+
+	if err := r.DeleteVolume(ctx, name); err != nil {
+		t.Fatalf("DeleteVolume: %v", err)
+	}
+	if _, err := r.client.CoreV1().PersistentVolumeClaims("forge").Get(ctx, name, metav1.GetOptions{}); err == nil {
+		t.Error("PVC still present after delete")
+	}
+	// Idempotent delete (already gone) must not error.
+	if err := r.DeleteVolume(ctx, name); err != nil {
+		t.Fatalf("idempotent DeleteVolume: %v", err)
+	}
+}

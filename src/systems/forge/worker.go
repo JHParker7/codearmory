@@ -48,9 +48,8 @@ func (p *WorkerPool) Start(ctx context.Context, n int) {
 
 // Cancel terminates a running execution. It cancels the execution's context
 // (unblocking Run) and then asks the resolved runtime to tear down its work
-// explicitly — a no-op for docker, a job delete for kubernetes, a VM stop+destroy
-// for proxmox. Returns false if the execution is not currently tracked (already
-// finished or not yet started).
+// explicitly — a no-op for docker, a job delete for kubernetes. Returns false if
+// the execution is not currently tracked (already finished or not yet started).
 func (p *WorkerPool) Cancel(executionID string) bool {
 	v, ok := p.cancels.Load(executionID)
 	if !ok {
