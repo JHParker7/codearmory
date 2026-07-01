@@ -10,6 +10,7 @@
 import { T } from '../../theme';
 import { schemaForAction, actionSupportsGitRepo, gitRepoFromWith, withGitRepo } from './stepSchema';
 import { RepoSelect } from '../../components/RepoSelect';
+import { BranchSelect } from '../../components/BranchSelect';
 import type { GitRepo } from '../../api/bff';
 
 export type UpstreamOutput = { name: string; outputEnv: string[] };
@@ -44,12 +45,13 @@ function WireSelect({ refs, onPick }: { refs: string[]; onPick: (ref: string) =>
   );
 }
 
-export function StepInputsEditor({ action, defWith, override, upstream, repos, onChange }: {
+export function StepInputsEditor({ action, defWith, override, upstream, repos, token, onChange }: {
   action: string;
   defWith: Record<string, unknown>;
   override: Record<string, unknown>;
   upstream: UpstreamOutput[];
   repos: GitRepo[];
+  token?: string;
   onChange: (override: Record<string, unknown>) => void;
 }) {
   const eff: Record<string, unknown> = { ...defWith, ...override };
@@ -88,11 +90,22 @@ export function StepInputsEditor({ action, defWith, override, upstream, repos, o
   const checkoutSpec = (eff.checkout && typeof eff.checkout === 'object' && !Array.isArray(eff.checkout))
     ? eff.checkout as Record<string, unknown> : null;
   const checkoutPath = typeof checkoutSpec?.path === 'string' ? checkoutSpec.path : '';
+  const checkoutRef = typeof checkoutSpec?.ref === 'string' ? checkoutSpec.ref : '';
   const setCheckout = (spec: Record<string, unknown> | null) => {
     const next = { ...override };
     if (spec === null) delete next.checkout;
     else next.checkout = spec;
     onChange(next);
+  };
+  // Update one field of the checkout spec, preserving the others (and any keys forge
+  // understands beyond path/ref, e.g. depth). A blank value drops that key.
+  const patchCheckout = (patch: { path?: string; ref?: string }) => {
+    const next: Record<string, unknown> = { ...(checkoutSpec ?? {}) };
+    for (const [k, v] of Object.entries(patch)) {
+      const trimmed = (v ?? '').trim();
+      if (trimmed) next[k] = trimmed; else delete next[k];
+    }
+    setCheckout(next);
   };
 
   // Config fields (image/run/runner) and outputs define what the step IS — they
@@ -117,7 +130,9 @@ export function StepInputsEditor({ action, defWith, override, upstream, repos, o
           <span style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, lineHeight: 1.4 }}>
             injected as $GIT_CLONE_URL · pick a repo for this step or reference a run input like {'${inputs.REPO}'}
           </span>
-          {repoVal && (
+          {/* forge/git-clone always checks out (baked into the step), so it doesn't show
+              the opt-in checkout toggle a plain forge/run step does. */}
+          {repoVal && action !== 'forge/git-clone' && (
             <>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontFamily: T.mono, fontSize: 10, color: T.dim, marginTop: 2 }}>
                 <input type="checkbox" checked={checkoutSpec !== null} onPointerDown={stop}
@@ -125,9 +140,15 @@ export function StepInputsEditor({ action, defWith, override, upstream, repos, o
                 check out into working dir <span style={{ color: T.faint }}>(git clone + cd, like actions/checkout)</span>
               </label>
               {checkoutSpec !== null && (
-                <input value={checkoutPath} onPointerDown={stop} placeholder="clone dir (optional, defaults to repo name)"
-                  onChange={(e) => { const p = e.target.value.trim(); setCheckout(p ? { path: p } : {}); }}
-                  style={{ ...fieldStyle, flex: 'unset', marginLeft: 20, fontSize: 10 }} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginLeft: 20 }}>
+                  <div onPointerDown={stop}>
+                    <BranchSelect token={token ?? ''} repoUrl={repoVal} value={checkoutRef}
+                      onChange={(v) => patchCheckout({ ref: v })} fontSize={10} />
+                  </div>
+                  <input value={checkoutPath} onPointerDown={stop} placeholder="clone dir (optional, defaults to repo name)"
+                    onChange={(e) => patchCheckout({ path: e.target.value })}
+                    style={{ ...fieldStyle, flex: 'unset', fontSize: 10 }} />
+                </div>
               )}
             </>
           )}

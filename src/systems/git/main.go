@@ -178,6 +178,8 @@ func main() {
 	mux.HandleFunc("GET /repos", handleListRepos)
 	mux.HandleFunc("POST /repos", handleCreateRepo)
 	mux.HandleFunc("DELETE /repos/{id}", handleDeleteRepo)
+	// Branch selector: enumerate the branches of a clone URL (?url=) for checkout.ref.
+	mux.HandleFunc("GET /repos/branches", handleListBranches)
 
 	mux.HandleFunc("POST /credentials", handleMintCredential)
 

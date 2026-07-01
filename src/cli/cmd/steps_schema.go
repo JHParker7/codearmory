@@ -140,6 +140,14 @@ var stepActionSchema = map[string][]stepField{
 		{key: "volumes", label: "Source volume", placeholder: "workspace or workspace:/src (attach the checkout)", kind: stepFieldVolumeAttach},
 		{key: "runner_class", label: "Build runner", placeholder: "privileged kata/gvisor class (required)", required: true, catalog: catRunnerClass},
 	},
+	"forge/git-clone": {
+		{key: "volumes", label: "Clone into volume", placeholder: "workspace or workspace:/src (create with forge/create-volume)", required: true, kind: stepFieldVolumeAttach},
+		{key: "image", label: "Git image", placeholder: "alpine/git (required, must include git)", required: true, catalog: catImage},
+		{key: "path", label: "Clone dir", placeholder: "repo name (default, relative to the volume)"},
+		{key: "ref", label: "Branch / tag", placeholder: "main (optional, default remote HEAD)"},
+		{key: "depth", label: "Depth", placeholder: "1 (default shallow; 0 = full clone)", kind: stepFieldInt},
+		{key: "run", label: "Post-clone command", placeholder: "true (optional; runs in the checkout after clone)"},
+	},
 	"tickets/create": {
 		{key: "title", label: "Title", placeholder: "Build failed", required: true},
 		{key: "description", label: "Desc", placeholder: "ticket body (optional)"},
@@ -280,7 +288,32 @@ func buildStepWith(action string, valueOf func(string) string) (map[string]any, 
 	if action == "forge/build-image" {
 		nestForgeBuild(with)
 	}
+	if action == "forge/git-clone" {
+		nestForgeCheckout(with)
+	}
 	return with, nil
+}
+
+// checkoutFields are the flat git-clone form keys that nest under the `checkout`
+// object of a forge/git-clone /executions body (image and volumes stay top-level).
+var checkoutFields = []string{"path", "ref", "depth"}
+
+// nestForgeCheckout restructures the flat git-clone form fields into forge's request:
+// the path/ref/depth keys under a `checkout` object (always present so forge runs the
+// clone prologue), plus a no-op `run` default so the execution is a valid shell command
+// the checkout weaves into. The repo is wired per-occurrence as secret_refs.GIT_CLONE_URL.
+func nestForgeCheckout(with map[string]any) {
+	checkout := map[string]any{}
+	for _, k := range checkoutFields {
+		if v, ok := with[k]; ok {
+			checkout[k] = v
+			delete(with, k)
+		}
+	}
+	with["checkout"] = checkout
+	if _, ok := with["run"]; !ok {
+		with["run"] = "true"
+	}
 }
 
 // buildImageFields are the flat form keys that nest under the `build` object of a
@@ -295,6 +328,15 @@ func flattenStepWith(action string, with map[string]any) map[string]any {
 	wm := make(map[string]any, len(with))
 	for k, v := range with {
 		wm[k] = v
+	}
+	if action == "forge/git-clone" {
+		if checkout, ok := wm["checkout"].(map[string]any); ok {
+			for k, v := range checkout {
+				wm[k] = v
+			}
+			delete(wm, "checkout")
+		}
+		return wm
 	}
 	if action != "forge/build-image" {
 		return wm

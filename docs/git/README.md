@@ -92,6 +92,19 @@ All user-facing endpoints require a Gatekeeper-issued Bearer token (`Authorizati
 | `DELETE` | `/git/backends/{id}` | `deleteBackend` on `git/backends/{id}` | Unlink a backend |
 | `POST` | `/git/backends/{id}/test` | `testBackend` on `git/backends/{id}` | Verify a backend can actually mint (no repo needed) |
 
+### Repos (selector)
+
+Convenience read endpoints that back the repo/branch pickers in the portal and CLI (e.g. the Forge run form and the Workflows step editor). They enumerate what the caller can clone; they do **not** manage repositories.
+
+| Method | Path | Permission | Description |
+|--------|------|------------|-------------|
+| `GET` | `/git/repos` | `listRepo` on `git/repos` | List clone targets — enumerated across linked backends plus repos pinned manually |
+| `POST` | `/git/repos` | `createRepo` on `git/repos` | Pin a repo to the selector (for generic/un-enumerable backends, or to surface extras) |
+| `DELETE` | `/git/repos/{id}` | `deleteRepo` on `git/repos/{id}` | Remove a pinned repo |
+| `GET` | `/git/repos/branches?url=<clone-url>` | `listRepo` on `git/repos` | List a repo's branches (for the checkout branch selector); `{ name, default }` per branch, `[]` for generic/un-enumerable backends |
+
+The branch list feeds a `checkout.ref` (see [Auto-checkout](#auto-checkout-checkout--actionscheckout-equivalent)); like repo enumeration it fetches a single page and degrades to a free-text ref when a backend can't be enumerated.
+
 ### Credentials
 
 | Method | Path | Permission | Description |

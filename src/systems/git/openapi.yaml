@@ -85,6 +85,27 @@ paths:
           description: The registered repo
         "409":
           description: A repo with this url is already registered
+  /repos/branches:
+    get:
+      summary: List a repository's branches (for the checkout branch selector)
+      # Authorised by the same listRepo permission as GET /repos (see the registry
+      # manifest); the operationId is distinct only to keep this document valid.
+      operationId: listBranches
+      parameters:
+        - name: url
+          in: query
+          required: true
+          description: The HTTPS clone URL whose branches to enumerate
+          schema: { type: string }
+      responses:
+        "200":
+          description: >
+            Array of { name, default } branches, default flagging the repo's
+            default branch. Empty for generic/un-enumerable backends.
+        "404":
+          description: No backend linked for the repo host
+        "502":
+          description: The backend's branch API could not be reached
   /repos/{id}:
     delete:
       summary: Remove a pinned repo

@@ -39,6 +39,8 @@ export interface PipelineBlocksProps {
   actions?: WorkflowAction[];
   // The git-broker repo catalog, for the per-step Git repo picker on forge blocks.
   repos?: GitRepo[];
+  // Auth token, so the per-step checkout branch selector can enumerate a repo's branches.
+  token?: string;
   onChange?: (steps: StepRef[]) => void;
   // Reports the step_id and effective (occurrence) name of the selected block (null
   // step for a gate or no selection), so the builder can show that step's
@@ -103,6 +105,7 @@ interface BlockCardProps {
   defWith: Record<string, unknown>;
   upstream: UpstreamOutput[];
   repos: GitRepo[];
+  token?: string;
   onSelect: () => void;
   onRename: (uid: string, name: string | undefined) => void;
   onSetWith: (uid: string, override: Record<string, unknown>) => void;
@@ -146,7 +149,7 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
   );
 }
 
-function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, repos, onSelect, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
+function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, repos, token, onSelect, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
   const leftBar = isGate ? T.blue : block.matrix ? T.amber : inParallel ? T.green : T.dim;
   const style: React.CSSProperties = {
@@ -208,14 +211,14 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
       {showMatrix && block.matrix && <MatrixEditor uid={block.uid} matrix={block.matrix} onSetMatrix={onSetMatrix} />}
       {editable && isGate && block.approval && <GateEditor uid={block.uid} gate={block.approval} onSetApproval={onSetApproval} />}
       {editable && !isGate && selected && (
-        <StepInputsEditor action={action} defWith={defWith} override={block.with ?? {}} upstream={upstream} repos={repos}
+        <StepInputsEditor action={action} defWith={defWith} override={block.with ?? {}} upstream={upstream} repos={repos} token={token}
           onChange={(o) => onSetWith(block.uid, o)} />
       )}
     </div>
   );
 }
 
-export function PipelineBlocks({ initialSteps, catalog, editable = false, palette = [], actions = [], repos = [], onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed, height }: PipelineBlocksProps) {
+export function PipelineBlocks({ initialSteps, catalog, editable = false, palette = [], actions = [], repos = [], token, onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed, height }: PipelineBlocksProps) {
   const [blocks, setBlocks] = useState<Block[]>(() => blocksFromSteps(initialSteps));
   const [parallelMode, setParallelMode] = useState(false);
   const [parallelOpen, setParallelOpen] = useState(false);
@@ -387,7 +390,7 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
       <BlockCard key={b.uid} block={b} label={label} action={action} editable={editable}
         canLink={(indexOf.get(b.uid) ?? 0) > 0} inParallel={inParallel} isGate={isGate}
         selected={selectedUid === b.uid} defWith={(catalog[b.stepId]?.with ?? {}) as Record<string, unknown>}
-        upstream={selectedUid === b.uid ? upstreamFor(b.uid) : []} repos={repos}
+        upstream={selectedUid === b.uid ? upstreamFor(b.uid) : []} repos={repos} token={token}
         onSelect={() => select(b)} onRename={setName} onSetWith={setWith}
         onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onSetApproval={setApproval} onRemove={remove} />
     );
