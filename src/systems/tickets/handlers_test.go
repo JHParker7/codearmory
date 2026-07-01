@@ -327,8 +327,6 @@ func TestHandleDeleteComment_Unauthorized(t *testing.T) {
 	}
 }
 
-
-
 // ── Board ─────────────────────────────────────────────────────────────────────
 
 func TestCanAccessBoard(t *testing.T) {
@@ -383,6 +381,40 @@ func TestHandleDeleteBoard_Unauthorized(t *testing.T) {
 	handleDeleteBoard(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+// ── board-scoped status helpers ──────────────────────────────────────────────
+
+func TestBoardScope(t *testing.T) {
+	if got := boardScope(nil); got != "" {
+		t.Errorf("nil board pointer: got %q, want \"\"", got)
+	}
+	id := "board-1"
+	if got := boardScope(&id); got != "board-1" {
+		t.Errorf("got %q, want board-1", got)
+	}
+	empty := ""
+	if got := boardScope(&empty); got != "" {
+		t.Errorf("empty board pointer: got %q, want \"\"", got)
+	}
+}
+
+func TestBuiltinStatusDefs_OrderedOpenFirst(t *testing.T) {
+	defs := builtinStatusDefs()
+	if len(defs) == 0 {
+		t.Fatal("expected built-in status defs")
+	}
+	if defs[0].Value != StatusOpen {
+		t.Errorf("left-most built-in status = %q, want %q", defs[0].Value, StatusOpen)
+	}
+	for i, d := range defs {
+		if d.Position != i {
+			t.Errorf("def %d (%q) position = %d, want %d", i, d.Value, d.Position, i)
+		}
+		if d.Kind != FieldKindStatus {
+			t.Errorf("def %q kind = %q, want status", d.Value, d.Kind)
+		}
 	}
 }
 

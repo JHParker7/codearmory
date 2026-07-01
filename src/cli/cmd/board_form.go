@@ -168,7 +168,8 @@ func openCreateForm(m boardModel) boardModel {
 	m.formDue = newFormInput("YYYY-MM-DD (optional)")
 	m.formDesc = newDescInput()
 	m.formPIdx = 0
-	m.formSIdx = m.col
+	// A new ticket defaults to the left-most status column; the user can cycle it.
+	m.formSIdx = 0
 	m.formFocus = 0
 	return m
 }
@@ -205,13 +206,10 @@ func openEditForm(m boardModel, t boardTicket) boardModel {
 	return m
 }
 
-// formFieldCount returns the number of fields for the current form mode.
-// create: title(0), priority(1), timescale(2), due_date(3), description(4)
-// edit:   title(0), priority(1), status(2), timescale(3), due_date(4), description(5)
+// formFieldCount returns the number of fields in the create/edit form. Both
+// modes share the same layout so a new ticket can pick its starting status:
+// title(0), priority(1), status(2), timescale(3), due_date(4), description(5)
 func (m boardModel) formFieldCount() int {
-	if m.mode == boardModeCreate {
-		return 5
-	}
 	return 6
 }
 
@@ -316,7 +314,7 @@ func (m boardModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.formPIdx = (m.formPIdx - 1 + len(m.priorities)) % len(m.priorities)
 				return m, nil
 			}
-			if m.formFocus == statusFieldIdx && m.mode == boardModeEdit && len(m.statuses) > 0 {
+			if m.formFocus == statusFieldIdx && len(m.statuses) > 0 {
 				m.formSIdx = (m.formSIdx - 1 + len(m.statuses)) % len(m.statuses)
 				return m, nil
 			}
@@ -326,7 +324,7 @@ func (m boardModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.formPIdx = (m.formPIdx + 1) % len(m.priorities)
 				return m, nil
 			}
-			if m.formFocus == statusFieldIdx && m.mode == boardModeEdit && len(m.statuses) > 0 {
+			if m.formFocus == statusFieldIdx && len(m.statuses) > 0 {
 				m.formSIdx = (m.formSIdx + 1) % len(m.statuses)
 				return m, nil
 			}
@@ -533,15 +531,13 @@ func (m boardModel) viewForm() string {
 	rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top,
 		lbl("Priority", prioFieldIdx), bsFormCycle.Render("‹ "+pVal+" ›")))
 
-	// Status (edit only)
-	if m.mode == boardModeEdit {
-		sVal := "-"
-		if len(m.statuses) > 0 {
-			sVal = m.statuses[m.formSIdx].Label
-		}
-		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top,
-			lbl("Status", statusFieldIdx), bsFormCycle.Render("‹ "+sVal+" ›")))
+	// Status — shown for both create (pick the starting column) and edit.
+	sVal := "-"
+	if len(m.statuses) > 0 {
+		sVal = m.statuses[m.formSIdx].Label
 	}
+	rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top,
+		lbl("Status", statusFieldIdx), bsFormCycle.Render("‹ "+sVal+" ›")))
 
 	// Timescale
 	tsi := m.formTs

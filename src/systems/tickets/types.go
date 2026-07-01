@@ -24,7 +24,7 @@ const (
 
 // validStatuses / validPriorities are the built-in fallbacks used when an org
 // has no custom field defs defined.
-var validStatuses   = []string{StatusOpen, StatusInProgress, StatusResolved, StatusClosed}
+var validStatuses = []string{StatusOpen, StatusInProgress, StatusResolved, StatusClosed}
 var validPriorities = []string{PriorityLow, PriorityMedium, PriorityHigh, PriorityCritical}
 
 const maxBodyBytes = 64 * 1024
@@ -92,17 +92,24 @@ func (Board) TableName() string { return "ticket_boards" }
 
 // TicketFieldDef defines a custom status, priority, or timescale value.
 // OrgID="" means it is a system-wide default visible to all orgs.
+//
+// BoardID scopes a status def to a single board so each board owns its own
+// status columns ("linked to the board"). BoardID="" is the org/global level
+// used by no-board tickets and as the fallback for boards that have not
+// configured their own columns. Only status defs are ever board-scoped;
+// priority/timescale defs always keep BoardID="".
 type TicketFieldDef struct {
-	FieldDefID string    `json:"field_def_id" gorm:"column:field_def_id;primaryKey"`
-	OrgID      string    `json:"org_id"       gorm:"column:org_id;default:''"`
-	Kind       string    `json:"kind"         gorm:"column:kind"`
-	Value      string    `json:"value"        gorm:"column:value"`
-	Label      string    `json:"label"        gorm:"column:label"`
-	Color      string    `json:"color"        gorm:"column:color;default:''"`
-	Position   int       `json:"position"     gorm:"column:position;default:0"`
-	Active     bool      `json:"-"            gorm:"column:active;default:true"`
-	CreatedAt  time.Time `json:"created_at"   gorm:"column:created_at"`
-	UpdatedAt  time.Time `json:"updated_at"   gorm:"column:updated_at"`
+	FieldDefID string    `json:"field_def_id"        gorm:"column:field_def_id;primaryKey"`
+	OrgID      string    `json:"org_id"              gorm:"column:org_id;default:''"`
+	BoardID    string    `json:"board_id,omitempty"  gorm:"column:board_id;default:''"`
+	Kind       string    `json:"kind"                gorm:"column:kind"`
+	Value      string    `json:"value"               gorm:"column:value"`
+	Label      string    `json:"label"               gorm:"column:label"`
+	Color      string    `json:"color"               gorm:"column:color;default:''"`
+	Position   int       `json:"position"            gorm:"column:position;default:0"`
+	Active     bool      `json:"-"                   gorm:"column:active;default:true"`
+	CreatedAt  time.Time `json:"created_at"          gorm:"column:created_at"`
+	UpdatedAt  time.Time `json:"updated_at"          gorm:"column:updated_at"`
 }
 
 // TableName sets the GORM table name for TicketFieldDef.

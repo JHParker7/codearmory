@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -67,6 +68,10 @@ type boardDataMsg struct {
 	boards     []boardInfo
 	tickets    []boardTicket
 }
+
+// boardStatusesMsg carries the status columns for a newly-selected board,
+// fetched after the board filter changes (statuses are owned per board).
+type boardStatusesMsg struct{ statuses []boardFieldDef }
 type boardMovedMsg struct{}
 type boardErrMsg struct{ err error }
 
@@ -207,21 +212,42 @@ func buildBoardStyles() {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-func fetchBoardData() tea.Msg {
-	statuses := fetchBoardFieldDefs("status", defaultBoardStatuses)
-	priorities := fetchBoardFieldDefs("priority", defaultBoardPriorities)
-	boards := fetchBoards()
-
-	data, err := doRequest("GET", appendProjectParam("/tickets/tickets"), nil)
-	if err != nil {
-		return boardErrMsg{err}
+// statusBoardScope maps a board filter to the board_id used for board-scoped
+// status columns ("" / unassigned → the org/global column set).
+func statusBoardScope(boardFilter string) string {
+	if boardFilter == "" || boardFilter == boardFilterNone {
+		return ""
 	}
-	var tickets []boardTicket
-	if err := json.Unmarshal(data, &tickets); err != nil {
-		return boardErrMsg{fmt.Errorf("parse response: %w", err)}
-	}
+	return boardFilter
+}
 
-	return boardDataMsg{statuses: statuses, priorities: priorities, boards: boards, tickets: tickets}
+// fetchBoardData loads everything for the board view, scoping the status columns
+// to boardFilter (statuses are owned per board).
+func fetchBoardData(boardFilter string) tea.Cmd {
+	return func() tea.Msg {
+		statuses := fetchBoardFieldDefs("status", defaultBoardStatuses, statusBoardScope(boardFilter))
+		priorities := fetchBoardFieldDefs("priority", defaultBoardPriorities, "")
+		boards := fetchBoards()
+
+		data, err := doRequest("GET", appendProjectParam("/tickets/tickets"), nil)
+		if err != nil {
+			return boardErrMsg{err}
+		}
+		var tickets []boardTicket
+		if err := json.Unmarshal(data, &tickets); err != nil {
+			return boardErrMsg{fmt.Errorf("parse response: %w", err)}
+		}
+
+		return boardDataMsg{statuses: statuses, priorities: priorities, boards: boards, tickets: tickets}
+	}
+}
+
+// fetchBoardStatuses reloads just the status columns for boardFilter, used when
+// the board switcher moves to a different board.
+func fetchBoardStatuses(boardFilter string) tea.Cmd {
+	return func() tea.Msg {
+		return boardStatusesMsg{fetchBoardFieldDefs("status", defaultBoardStatuses, statusBoardScope(boardFilter))}
+	}
 }
 
 // fetchBoards returns the caller's boards, or nil if the API is unavailable.
@@ -319,8 +345,15 @@ func (m boardModel) cycleBoard(dir int) boardModel {
 	return m
 }
 
-func fetchBoardFieldDefs(kind string, fallback []boardFieldDef) []boardFieldDef {
-	data, err := doRequest("GET", "/tickets/field-defs?kind="+kind, nil)
+// fetchBoardFieldDefs loads the field defs for a kind, scoping status columns to
+// boardID when set (other kinds ignore it). Falls back when the API is
+// unavailable or returns nothing.
+func fetchBoardFieldDefs(kind string, fallback []boardFieldDef, boardID string) []boardFieldDef {
+	path := "/tickets/field-defs?kind=" + url.QueryEscape(kind)
+	if boardID != "" {
+		path += "&board_id=" + url.QueryEscape(boardID)
+	}
+	data, err := doRequest("GET", path, nil)
 	if err != nil {
 		return fallback
 	}
@@ -365,7 +398,7 @@ func sendMoveTicket(t boardTicket, newStatus string) tea.Cmd {
 
 // ── Init / Update / View ─────────────────────────────────────────────────────
 
-func (m boardModel) Init() tea.Cmd { return fetchBoardData }
+func (m boardModel) Init() tea.Cmd { return fetchBoardData(m.boardFilter) }
 
 func (m boardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Mode-independent messages.
@@ -413,14 +446,22 @@ func (m boardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.row = boardClamp(m.row, len(m.cols[m.col]))
 		}
 		return m, nil
+	case boardStatusesMsg:
+		m.statuses = msg.statuses
+		m = m.regroup()
+		m.col = boardClamp(m.col, len(m.statuses))
+		if len(m.cols) > 0 {
+			m.row = boardClamp(m.row, len(m.cols[m.col]))
+		}
+		return m, nil
 	case boardMutatedMsg:
 		m.status = msg.notice
 		m.mode = boardModeNav
 		m.loading = true
-		return m, fetchBoardData
+		return m, fetchBoardData(m.boardFilter)
 	case boardMovedMsg:
 		m.status = "Moved."
-		return m, fetchBoardData
+		return m, fetchBoardData(m.boardFilter)
 	case boardErrMsg:
 		m.loading, m.err = false, msg.err
 		m.mode = boardModeNav
@@ -468,9 +509,11 @@ func (m boardModel) updateNav(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = boardModeConfirmDelete
 		}
 	case "tab":
-		return m.cycleBoard(1), nil
+		m = m.cycleBoard(1)
+		return m, fetchBoardStatuses(m.boardFilter)
 	case "shift+tab":
-		return m.cycleBoard(-1), nil
+		m = m.cycleBoard(-1)
+		return m, fetchBoardStatuses(m.boardFilter)
 	case "b":
 		m = openNewBoardForm(m)
 		return m, m.formTitle.Focus()
@@ -482,7 +525,7 @@ func (m boardModel) updateNav(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.err = nil
 		m.loading, m.status = true, "Refreshing…"
-		return m, fetchBoardData
+		return m, fetchBoardData(m.boardFilter)
 	case "left", "h":
 		if m.col > 0 {
 			m.col--

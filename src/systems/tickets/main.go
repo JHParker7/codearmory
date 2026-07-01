@@ -154,10 +154,16 @@ func main() {
 		slog.Error("failed to migrate tables", "error", err)
 		os.Exit(1)
 	}
-	// A field def's (kind, value) is its identifier within an org — e.g. an org
-	// must not have two status defs with value "open". Enforced as a partial
-	// unique index so a value can be reused after its def is deleted.
-	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ticket_field_defs_org_kind_value ON ticket_field_defs (org_id, kind, value) WHERE active`).Error; err != nil {
+	// A field def's (kind, value) is its identifier within an org and board —
+	// e.g. one board must not have two status defs with value "open", but two
+	// different boards may each have their own "open" column. Enforced as a
+	// partial unique index so a value can be reused after its def is deleted.
+	// Drop the pre-board index first since the uniqueness scope now includes
+	// board_id (existing rows default board_id='' so the data stays valid).
+	if err := connect().Exec(`DROP INDEX IF EXISTS uq_ticket_field_defs_org_kind_value`).Error; err != nil {
+		slog.Warn("failed to drop legacy ticket_field_defs unique index", "error", err)
+	}
+	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ticket_field_defs_org_board_kind_value ON ticket_field_defs (org_id, board_id, kind, value) WHERE active`).Error; err != nil {
 		slog.Warn("failed to create ticket_field_defs unique index (existing duplicate values?)", "error", err)
 	}
 	// Board names are unique within their owner scope: per-org for org-backed

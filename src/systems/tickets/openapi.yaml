@@ -364,6 +364,12 @@ components:
           example: Deploy v1.2 to production
         description:
           type: string
+        status:
+          type: string
+          description: >-
+            Status column for the new ticket. Omitting defaults to the board's
+            left-most column (or the org/global left-most status when
+            unassigned). Must be one of the board's configured status columns.
         priority:
           type: string
           enum: [low, medium, high, critical]

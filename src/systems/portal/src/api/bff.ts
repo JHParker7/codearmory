@@ -495,7 +495,7 @@ export function getTicket(token: string, id: string) {
   return req<Ticket>('GET', `/tickets/tickets/${id}`, token);
 }
 
-export function createTicket(token: string, payload: { title: string; description?: string; priority?: string; project?: string; board_id?: string }) {
+export function createTicket(token: string, payload: { title: string; description?: string; status?: string; priority?: string; project?: string; board_id?: string }) {
   return req<Ticket>('POST', '/tickets/tickets', token, payload);
 }
 
@@ -520,13 +520,17 @@ export interface TicketFieldDef {
   label: string;
   color?: string;
   position: number;
+  /** Set on status defs that are owned by a specific board ("" = org/global). */
+  board_id?: string;
 }
 
-export function listTicketFieldDefs(token: string, kind: string) {
-  return req<TicketFieldDef[]>('GET', `/tickets/field-defs?kind=${encodeURIComponent(kind)}`, token);
+// boardId scopes status columns to a single board; omit (or "") for the org/global set.
+export function listTicketFieldDefs(token: string, kind: string, boardId?: string) {
+  const q = boardId ? `&board_id=${encodeURIComponent(boardId)}` : '';
+  return req<TicketFieldDef[]>('GET', `/tickets/field-defs?kind=${encodeURIComponent(kind)}${q}`, token);
 }
 
-export function createTicketFieldDef(token: string, payload: { kind: string; value: string; label: string; color?: string; position?: number }) {
+export function createTicketFieldDef(token: string, payload: { kind: string; value: string; label: string; color?: string; position?: number; board_id?: string }) {
   return req<TicketFieldDef>('POST', '/tickets/field-defs', token, payload);
 }
 
