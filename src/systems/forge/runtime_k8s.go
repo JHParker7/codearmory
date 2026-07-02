@@ -830,6 +830,77 @@ func (r *KubernetesRuntime) DeleteVolume(ctx context.Context, resourceName strin
 	return nil
 }
 
+// VolumeStatus reports whether the PVC backing a shared workspace has provisioned.
+// A create-volume workflow step polls it so a slow dynamic provisioner (Ceph RBD is
+// ~35s here) finishes before a downstream step mounts the volume — otherwise, since
+// WaitForFirstConsumer defers provisioning until the mounting pod schedules, that
+// latency lands inside the exec Job's ActiveDeadlineSeconds (the command timeout,
+// default 30s) and the pod is killed mid-bind ("pod was removed before its logs
+// could be read").
+func (r *KubernetesRuntime) VolumeStatus(ctx context.Context, resourceName string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	pvc, err := r.client.CoreV1().PersistentVolumeClaims(r.namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// The claim we created is gone (torn down, or never persisted) — there is no
+			// volume to become ready, so fail rather than poll forever.
+			return volumeReadyFailed, "volume claim not found", nil
+		}
+		return "", "", fmt.Errorf("get pvc: %w", err)
+	}
+
+	switch pvc.Status.Phase {
+	case corev1.ClaimBound:
+		return volumeReadyReady, "", nil
+	case corev1.ClaimLost:
+		return volumeReadyFailed, "volume claim lost its backing PersistentVolume", nil
+	}
+
+	// Still Pending. A WaitForFirstConsumer StorageClass deliberately holds the claim
+	// unbound until a consumer pod exists — which only happens at the mount step, never
+	// here — so there is nothing to wait for: report ready and let the mount trigger
+	// binding, exactly as before this endpoint existed. Otherwise it is genuinely still
+	// provisioning; surface the latest Warning as detail for a caller inspecting it.
+	deferred, warning := r.pvcEventState(ctx, resourceName)
+	if deferred {
+		return volumeReadyReady, "", nil
+	}
+	return volumeReadyProvisioning, warning, nil
+}
+
+// pvcEventState scans a PVC's events once, returning whether its StorageClass defers
+// binding to first consumer (the WaitForFirstConsumer event — nothing to wait for)
+// and the latest Warning reason (e.g. ProvisioningFailed) to surface as detail. The
+// field selector narrows to this PVC on a real API server; the client-side filter
+// keeps it correct under the fake clientset, which ignores field selectors.
+func (r *KubernetesRuntime) pvcEventState(ctx context.Context, pvcName string) (deferred bool, warning string) {
+	evs, err := r.client.CoreV1().Events(r.namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "involvedObject.name=" + pvcName,
+	})
+	if err != nil {
+		return false, ""
+	}
+	var best *corev1.Event
+	for i := range evs.Items {
+		e := &evs.Items[i]
+		if e.InvolvedObject.Kind != "PersistentVolumeClaim" || e.InvolvedObject.Name != pvcName {
+			continue
+		}
+		if e.Reason == "WaitForFirstConsumer" {
+			deferred = true
+		}
+		if e.Type == corev1.EventTypeWarning && (best == nil || eventTime(e).After(eventTime(best))) {
+			best = e
+		}
+	}
+	if best != nil {
+		warning = joinReasonMessage(best.Reason, best.Message)
+	}
+	return deferred, warning
+}
+
 // parseAccessMode maps the configured access-mode string to the corev1 constant,
 // defaulting to ReadWriteOnce for an unset or unrecognised value.
 func parseAccessMode(mode string) corev1.PersistentVolumeAccessMode {

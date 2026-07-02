@@ -842,6 +842,16 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		resp.Body.Close()
 
+		// A 401/403 on the poll is deterministic for a fixed run token — it will never
+		// become authorized, so spinning until the budget is a silent hang. Fail fast
+		// with the missing-permission context instead. (The async-poll read grant is
+		// derived by collectWorkflowPermissions and must exist as a default grant, or
+		// the no-escalation filter drops it from the run role — the bug this guards.)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return stepResult{}, fmt.Errorf("%s: poll returned %d — the run role lacks read permission for the submitted job: %s",
+				def.Name, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+
 		var result map[string]any
 		if err := json.Unmarshal(body, &result); err != nil {
 			continue

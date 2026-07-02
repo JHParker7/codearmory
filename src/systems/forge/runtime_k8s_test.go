@@ -795,3 +795,75 @@ func TestKubernetesCreateVolume_NoStorageClass(t *testing.T) {
 		t.Error("unbindable PVC was left behind; want it deleted")
 	}
 }
+
+func pvcWithPhase(name string, phase corev1.PersistentVolumeClaimPhase) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "forge"},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: phase},
+	}
+}
+
+func pvcEvent(name, reason string, typ string) *corev1.Event {
+	return &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: name + "." + reason, Namespace: "forge"},
+		InvolvedObject: corev1.ObjectReference{Kind: "PersistentVolumeClaim", Name: name, Namespace: "forge"},
+		Reason:         reason,
+		Message:        reason + " detail",
+		Type:           typ,
+		LastTimestamp:  metav1.Now(),
+	}
+}
+
+func TestKubernetesVolumeStatus(t *testing.T) {
+	name := "fv-abc-workspace"
+	tests := []struct {
+		desc       string
+		objs       []runtime.Object
+		wantState  string
+		wantDetail string // substring; "" = don't care
+	}{
+		{
+			desc:      "bound is ready",
+			objs:      []runtime.Object{pvcWithPhase(name, corev1.ClaimBound)},
+			wantState: volumeReadyReady,
+		},
+		{
+			desc:      "lost is failed",
+			objs:      []runtime.Object{pvcWithPhase(name, corev1.ClaimLost)},
+			wantState: volumeReadyFailed,
+		},
+		{
+			// WaitForFirstConsumer binds only when a pod mounts it — nothing to wait for
+			// at create time, so report ready and let the mount trigger binding.
+			desc:      "pending + WaitForFirstConsumer event is ready",
+			objs:      []runtime.Object{pvcWithPhase(name, corev1.ClaimPending), pvcEvent(name, "WaitForFirstConsumer", corev1.EventTypeNormal)},
+			wantState: volumeReadyReady,
+		},
+		{
+			desc:       "pending while provisioning keeps waiting, surfaces warning",
+			objs:       []runtime.Object{pvcWithPhase(name, corev1.ClaimPending), pvcEvent(name, "ProvisioningFailed", corev1.EventTypeWarning)},
+			wantState:  volumeReadyProvisioning,
+			wantDetail: "ProvisioningFailed",
+		},
+		{
+			desc:      "missing claim is failed",
+			objs:      nil,
+			wantState: volumeReadyFailed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			r := &KubernetesRuntime{client: fake.NewSimpleClientset(tc.objs...), namespace: "forge"}
+			state, detail, err := r.VolumeStatus(context.Background(), name)
+			if err != nil {
+				t.Fatalf("VolumeStatus: unexpected error: %v", err)
+			}
+			if state != tc.wantState {
+				t.Errorf("state = %q, want %q", state, tc.wantState)
+			}
+			if tc.wantDetail != "" && !strings.Contains(detail, tc.wantDetail) {
+				t.Errorf("detail = %q, want substring %q", detail, tc.wantDetail)
+			}
+		})
+	}
+}

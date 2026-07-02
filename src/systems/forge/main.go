@@ -246,6 +246,7 @@ func main() {
 	mux.HandleFunc("DELETE /runner-classes/{name}", handleDeleteRunnerClass)
 	mux.HandleFunc("POST /volumes", handleCreateVolume(reg))
 	mux.HandleFunc("GET /volumes", handleListVolumes)
+	mux.HandleFunc("GET /volumes/{id}", handleGetVolume(reg))
 	mux.HandleFunc("DELETE /volumes", handleDeleteVolumes(reg))
 	mux.HandleFunc("GET /runtime-backends", handleListRuntimeBackends)
 	mux.HandleFunc("POST /runtime-backends", handleCreateRuntimeBackend)
