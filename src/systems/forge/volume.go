@@ -29,6 +29,15 @@ const (
 	volumeStatusActive     = "active"
 	volumeStatusDeleted    = "deleted"
 
+	// Volume readiness states reported by VolumeStatus and polled by a create-volume
+	// workflow step (via GET /volumes/{id}). "ready" is terminal-success, "failed" is
+	// terminal-failure, and "provisioning" keeps the poller waiting — so a downstream
+	// step that mounts the volume pays no dynamic-provisioning latency inside its own
+	// command timeout.
+	volumeReadyReady        = "ready"
+	volumeReadyProvisioning = "provisioning"
+	volumeReadyFailed       = "failed"
+
 	// minVolumeMB floors a request so a zero/omitted size does not create a 0-byte
 	// volume; maxVolumeNameLen bounds the logical handle.
 	minVolumeMB      = 16
@@ -144,6 +153,21 @@ type VolumeSpec struct {
 type VolumeRuntime interface {
 	CreateVolume(ctx context.Context, spec VolumeSpec) error
 	DeleteVolume(ctx context.Context, resourceName string) error
+	// VolumeStatus reports whether a volume's backing storage is usable yet, as one of
+	// volumeReadyReady / volumeReadyProvisioning / volumeReadyFailed plus an optional
+	// human-readable detail. A create-volume step polls it so slow dynamic provisioning
+	// (e.g. Ceph RBD at ~35s) completes before a downstream step mounts the volume,
+	// rather than being charged against that step's command timeout.
+	VolumeStatus(ctx context.Context, resourceName string) (state string, detail string, err error)
+}
+
+// volumeStatusResponse is the GET /volumes/{id} body the create-volume async poll
+// reads: Status is the readiness state (success_states: ["ready"], failure_states:
+// ["failed"]); Detail carries a provisioning-failure reason for the failure path.
+type volumeStatusResponse struct {
+	ResourceName string `json:"resource_name"`
+	Status       string `json:"status"`
+	Detail       string `json:"detail,omitempty"`
 }
 
 // volumeResourceName derives the concrete backend object name from the (workflowID,

@@ -28,7 +28,10 @@ import (
 // the current version. v1 added the async-poll read grant (getExecution) that
 // stops forge steps from hanging at "running". v2 added the deleteVolume companion
 // grant so a run that creates shared workspace volumes can tear them down at the end.
-const workflowRolePermsVersion = 2
+// v3 made forge/create-volume async, so the generic async-poll rule now also grants
+// getVolume on forge/volumes/* — without the bump, volume workflows created earlier
+// would 403 every create-volume status poll and hang until timeout.
+const workflowRolePermsVersion = 3
 
 // collectWorkflowPermissions returns the deduplicated set of gatekeeper
 // permissions declared by the workflow's step actions in the current catalog.

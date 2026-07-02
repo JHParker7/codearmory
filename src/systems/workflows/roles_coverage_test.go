@@ -183,7 +183,7 @@ func TestHandleTriggerRun_HealsStaleWorkflowRole(t *testing.T) {
 	json.Unmarshal(cw.Body.Bytes(), &wf) //nolint:errcheck
 	t.Cleanup(func() {
 		connect().Exec(`DELETE FROM workflow_runs WHERE workflow_id = ?`, wf.WorkflowID) //nolint:errcheck
-		connect().Exec(`DELETE FROM workflows WHERE workflow_id = ?`, wf.WorkflowID)      //nolint:errcheck
+		connect().Exec(`DELETE FROM workflows WHERE workflow_id = ?`, wf.WorkflowID)     //nolint:errcheck
 	})
 
 	// Simulate a pre-fix workflow: stale version + an old role id.
@@ -229,27 +229,34 @@ func TestHandleTriggerRun_HealsStaleWorkflowRole(t *testing.T) {
 // A create-volume step's run must also be able to tear its volumes down: the run
 // role needs deleteVolume alongside createVolume, or the end-of-run DELETE 403s and
 // volumes linger until forge's age reaper.
-func TestCollectWorkflowPermissions_CreateVolumeGrantsDelete(t *testing.T) {
+func TestCollectWorkflowPermissions_CreateVolumeGrantsDeleteAndPoll(t *testing.T) {
+	// forge/create-volume is async: the submit needs createVolume, the run's teardown
+	// needs deleteVolume, and the async status poll (GET /volumes/{id}) needs getVolume
+	// on forge/volumes/* — the generic create→get poll grant.
 	withCatalog(t, map[string]ActionDef{
 		"forge/create-volume": {
 			Name:               "forge/create-volume",
 			RequiredPermission: &PermissionSpec{Service: "forge", Action: "createVolume", Resource: "forge/volumes"},
+			Async:              &AsyncConfig{IDField: "resource_name", PollPath: "/volumes/{id}", StatusField: "status", SuccessStates: []string{"ready"}, FailureStates: []string{"failed"}},
 		},
 	})
 	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Action: "forge/create-volume"}}})
-	var hasCreate, hasDelete bool
+	var hasCreate, hasDelete, hasGet bool
 	for _, p := range perms {
-		if p.Service == "forge" && p.Resource == "forge/volumes" {
-			switch p.Action {
-			case "createVolume":
-				hasCreate = true
-			case "deleteVolume":
-				hasDelete = true
-			}
+		if p.Service != "forge" {
+			continue
+		}
+		switch {
+		case p.Action == "createVolume" && p.Resource == "forge/volumes":
+			hasCreate = true
+		case p.Action == "deleteVolume" && p.Resource == "forge/volumes":
+			hasDelete = true
+		case p.Action == "getVolume" && p.Resource == "forge/volumes/*":
+			hasGet = true
 		}
 	}
-	if !hasCreate || !hasDelete {
-		t.Fatalf("perms = %+v, want both createVolume and deleteVolume on forge/volumes", perms)
+	if !hasCreate || !hasDelete || !hasGet {
+		t.Fatalf("perms = %+v, want createVolume + deleteVolume on forge/volumes and getVolume on forge/volumes/*", perms)
 	}
 }
 

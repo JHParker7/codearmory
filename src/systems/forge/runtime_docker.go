@@ -308,6 +308,13 @@ func (r *DockerRuntime) DeleteVolume(ctx context.Context, resourceName string) e
 	return nil
 }
 
+// VolumeStatus always reports ready for the Docker runtime: VolumeCreate provisions
+// a local volume synchronously, so by the time this is polled the volume is already
+// usable — there is no async provisioning to wait for.
+func (r *DockerRuntime) VolumeStatus(_ context.Context, _ string) (string, string, error) {
+	return volumeReadyReady, "", nil
+}
+
 // Cancel is a no-op for the Docker runtime: cancellation is driven by context
 // cancellation inside Run, which stops the container via ContainerStop.
 func (r *DockerRuntime) Cancel(_ context.Context, executionID string) error {

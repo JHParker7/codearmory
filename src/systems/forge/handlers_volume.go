@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"gorm.io/gorm"
 )
 
 // volumeRuntime resolves the backend to a runtime that can materialise a shared
@@ -166,6 +168,65 @@ func handleCreateVolume(reg *runtimeRegistry) http.HandlerFunc {
 		span.SetStatus(codes.Ok, "")
 		slog.InfoContext(ctx, "volume created", "user_id", userID, "resource_name", resourceName, "workflow_id", req.WorkflowID, "size_mb", req.SizeMB, "backend", backend)
 		writeJSON(w, http.StatusCreated, vol)
+	}
+}
+
+// ── Status ───────────────────────────────────────────────────────────────────
+
+// handleGetVolume reports a shared volume's provisioning readiness (provisioning |
+// ready | failed). It backs the forge/create-volume async poll: the workflows worker
+// polls it to "ready" before the next step mounts the volume, so slow dynamic
+// provisioning completes outside the mounting step's command timeout.
+func handleGetVolume(reg *runtimeRegistry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, span := otel.Tracer("forge").Start(r.Context(), "handleGetVolume")
+		defer span.End()
+
+		resourceName := r.PathValue("id")
+		userID, ok := checkGatekeeper(ctx, w, r, "getVolume", "forge/volumes/"+resourceName)
+		if !ok {
+			span.SetStatus(codes.Ok, "")
+			return
+		}
+		span.SetAttributes(
+			attribute.String("user.id", userID),
+			attribute.String("volume.resource_name", resourceName),
+		)
+		span.AddEvent("permission.granted")
+
+		row, err := (Volume{ResourceName: resourceName}).Get(ctx)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			span.RecordError(err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		vol := row.(Volume)
+		if vol.UserID != userID {
+			// Do not disclose the existence of another caller's volume.
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+
+		vr, err := volumeRuntime(ctx, reg, vol.Backend)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		state, detail, err := vr.VolumeStatus(ctx, vol.ResourceName)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "backend status error")
+			slog.ErrorContext(ctx, "get volume status: backend error", "user_id", userID, "resource_name", resourceName, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		span.SetStatus(codes.Ok, "")
+		writeJSON(w, http.StatusOK, volumeStatusResponse{ResourceName: vol.ResourceName, Status: state, Detail: detail})
 	}
 }
 

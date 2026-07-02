@@ -136,7 +136,16 @@
         "description": "Provisions a run-scoped shared volume (a RAM/tmpfs-backed PVC in Kubernetes, a tmpfs named volume in Docker) that later steps can attach via the `volumes` key on a `forge/run` step. A git step clones a repo into it; downstream steps mount the same volume and see the checkout plus any build artifacts — and never need `git` in their own image. Pass `workflow_id` (use `${run_id}`), an optional `name` (default `workspace`), `size_mb`, and `medium` (`memory` default, or `disk`). The summed size of all of a workflow's volumes is capped by the admin (FORGE_MAX_WORKFLOW_VOLUME_MB). Volumes are torn down automatically when the run ends.",
         "method": "POST",
         "path": "/volumes",
-        "required_permission": { "action": "createVolume", "resource": "forge/volumes" }
+        "required_permission": { "action": "createVolume", "resource": "forge/volumes" },
+        "async": {
+          "id_field": "resource_name",
+          "poll_path": "/volumes/{id}",
+          "poll_interval_secs": 2,
+          "status_field": "status",
+          "success_states": ["ready"],
+          "failure_states": ["failed"],
+          "error_fields": ["detail"]
+        }
       },
       {
         "name": "forge/run",
@@ -212,8 +221,8 @@
       },
       {
         "grant_on": "user",
-        "actions": ["createVolume", "listVolume", "deleteVolume"],
-        "resources": ["{username}/forge/volumes"]
+        "actions": ["createVolume", "listVolume", "getVolume", "deleteVolume"],
+        "resources": ["{username}/forge/volumes", "{username}/forge/volumes/*"]
       },
       {
         "grant_on": "user",
