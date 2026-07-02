@@ -733,6 +733,12 @@ func TestBuildJob_NoVolumes(t *testing.T) {
 // delete removes it (and is idempotent on a missing PVC).
 func TestKubernetesCreateDeleteVolume(t *testing.T) {
 	initVolumeConfig()
+	// A resolvable StorageClass is required: with the fake clientset (no admission)
+	// an empty class leaves the PVC class-less, which CreateVolume now rejects. This
+	// mirrors production, where either an explicit class or the cluster default is
+	// stamped onto the PVC.
+	volumeStorageClass = "test-sc"
+	t.Cleanup(func() { volumeStorageClass = "" })
 	r := &KubernetesRuntime{client: fake.NewSimpleClientset(), namespace: "forge"}
 	ctx := context.Background()
 	name := volumeResourceName("run-1", "workspace")
@@ -765,5 +771,27 @@ func TestKubernetesCreateDeleteVolume(t *testing.T) {
 	// Idempotent delete (already gone) must not error.
 	if err := r.DeleteVolume(ctx, name); err != nil {
 		t.Fatalf("idempotent DeleteVolume: %v", err)
+	}
+}
+
+// TestKubernetesCreateVolume_NoStorageClass covers the misconfiguration that
+// surfaces as "pod has unbound immediate PersistentVolumeClaims" several steps
+// later: no configured class and no cluster default, so the PVC resolves to no
+// StorageClass. CreateVolume must reject it up front and leave no orphan PVC.
+func TestKubernetesCreateVolume_NoStorageClass(t *testing.T) {
+	initVolumeConfig() // resets volumeStorageClass to ""
+	r := &KubernetesRuntime{client: fake.NewSimpleClientset(), namespace: "forge"}
+	ctx := context.Background()
+	name := volumeResourceName("run-1", "workspace")
+
+	err := r.CreateVolume(ctx, VolumeSpec{ResourceName: name, SizeMB: 512, Medium: mediumMemory})
+	if err == nil {
+		t.Fatal("CreateVolume: want error for missing StorageClass, got nil")
+	}
+	if !strings.Contains(err.Error(), "StorageClass") {
+		t.Errorf("error %q does not mention StorageClass", err.Error())
+	}
+	if _, gerr := r.client.CoreV1().PersistentVolumeClaims("forge").Get(ctx, name, metav1.GetOptions{}); gerr == nil {
+		t.Error("unbindable PVC was left behind; want it deleted")
 	}
 }

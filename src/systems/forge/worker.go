@@ -18,7 +18,14 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const pollInterval = 1 * time.Second
+// pollInterval is how often each idle worker polls the pending queue for a
+// claimable execution. Kept short so a freshly submitted execution is picked up
+// almost immediately instead of waiting up to a second to be noticed — the
+// dominant slice of a fast run's time-to-first-log. The claim is a single
+// `FOR UPDATE SKIP LOCKED` row lock (see claimPendingExecution), so N workers
+// polling in parallel is cheap and contention-free. Override with
+// FORGE_POLL_INTERVAL_MS.
+var pollInterval = time.Duration(envIntOrDefault("FORGE_POLL_INTERVAL_MS", 250)) * time.Millisecond
 
 // WorkerPool runs executions pulled from the pending queue in PostgreSQL.
 type WorkerPool struct {

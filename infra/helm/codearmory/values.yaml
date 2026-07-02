@@ -278,7 +278,10 @@ forge:
     # Optional cap on any single volume (MB). Empty = same as maxWorkflowMB.
     maxVolumeMB: ""
     # StorageClass backing workspace PVCs. Empty = the cluster default. Point it at a
-    # RAM/tmpfs-backed StorageClass to keep volumes in memory.
+    # RAM/tmpfs-backed StorageClass to keep volumes in memory. NOTE: if the cluster has
+    # no default StorageClass this MUST be set to a provisionable class, else volume
+    # PVCs never bind and steps that mount them fail to schedule ("pod has unbound
+    # immediate PersistentVolumeClaims"); a WaitForFirstConsumer class is preferred.
     storageClass: ""
     # PVC access mode. ReadWriteOnce suits sequential single-node runs; use
     # ReadWriteMany (on a class that supports it) when a run's steps span nodes.
