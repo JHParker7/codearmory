@@ -56,6 +56,19 @@ type KubernetesRuntime struct {
 // "kata" and "gvisor" types, which exist precisely to pin a sandboxing RuntimeClass.
 const k8sKeyRuntimeClass = "runtime_class"
 
+// k8sPollInterval is how often waitAndCollect polls a running Job's status. Kept
+// short so a finished command is observed — and its logs returned — with minimal
+// lag; this is the tail slice of a fast run's time-to-first-result, previously a
+// flat 2s. Override with FORGE_K8S_POLL_INTERVAL_MS.
+var k8sPollInterval = time.Duration(envIntOrDefault("FORGE_K8S_POLL_INTERVAL_MS", 500)) * time.Millisecond
+
+// metricsSampleInterval throttles how often the poll loop samples pod memory from
+// metrics.k8s.io. metrics-server scrapes only every ~15s, so sampling on every
+// fast status tick would be wasted apiserver load for no fresher data; sampling a
+// few seconds apart captures the same peak while keeping the fast tick to the
+// job Get + pod List calls the QPS budget is sized for.
+const metricsSampleInterval = 5 * time.Second
+
 // newKubernetesRuntime builds a Kubernetes runtime. configRuntimeClass is the
 // backend's per-backend RuntimeClass (the "runtime_class" config key); see
 // resolveRuntimeClass for how it combines with the legacy K8S_RUNTIME_CLASS env.
@@ -75,14 +88,16 @@ func newKubernetesRuntime(configRuntimeClass string, kernelIsolated bool) (*Kube
 	}
 
 	// client-go defaults to QPS=5/Burst=10 — far too low for a job-polling
-	// controller. waitAndCollect fires ~3 apiserver calls (job Get + pod List +
-	// metrics) every 2s per running job, so a handful of concurrent executions
+	// controller. waitAndCollect fires a job Get + pod List every k8sPollInterval
+	// (500ms) per running job — 4x the rate of the old 2s poll now that fast
+	// time-to-first-log matters — so a handful of concurrent executions would
 	// saturate the client-side limiter and Get calls fail with "client rate
 	// limiter Wait ... would exceed context deadline". Raise the ceiling
 	// (env-overridable) so polling scales with concurrency; the apiserver's own
-	// API Priority & Fairness is the real backstop.
-	cfg.QPS = float32(envFloatOrDefault("FORGE_K8S_QPS", 50))
-	cfg.Burst = envIntOrDefault("FORGE_K8S_BURST", 100)
+	// API Priority & Fairness is the real backstop. Metrics sampling is throttled
+	// separately (metricsSampleInterval), so it is not part of the fast-tick load.
+	cfg.QPS = float32(envFloatOrDefault("FORGE_K8S_QPS", 100))
+	cfg.Burst = envIntOrDefault("FORGE_K8S_BURST", 200)
 
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
@@ -174,6 +189,28 @@ func sandboxUIDFromEnv() int64 {
 		slog.Warn("forge: ignoring invalid FORGE_SANDBOX_UID, using default", "value", v, "default", 1000)
 	}
 	return 1000
+}
+
+// imagePullPolicy controls whether the kubelet re-pulls the runner image when a
+// copy is already cached on the node. The default, IfNotPresent, turns the node's
+// image cache into a warm layer: the first run on a node pulls the image, every
+// later run reuses it and skips the pull — usually the single largest slice of a
+// cold start. (Kubernetes otherwise defaults :latest / untagged images to Always,
+// re-pulling on every run.) Set FORGE_IMAGE_PULL_POLICY=Always to force a fresh
+// pull each run (e.g. a mutable :latest that must never be stale), or Never.
+var imagePullPolicy = imagePullPolicyFromEnv()
+
+func imagePullPolicyFromEnv() corev1.PullPolicy {
+	v := os.Getenv("FORGE_IMAGE_PULL_POLICY")
+	switch corev1.PullPolicy(v) {
+	case corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+		return corev1.PullPolicy(v)
+	default:
+		if v != "" {
+			slog.Warn("forge: ignoring invalid FORGE_IMAGE_PULL_POLICY, using default", "value", v, "default", string(corev1.PullIfNotPresent))
+		}
+		return corev1.PullIfNotPresent
+	}
 }
 
 // Run creates a Kubernetes Job for the execution, polls until it reaches a
@@ -292,11 +329,12 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 					AutomountServiceAccountToken: ptr(false),
 					SecurityContext:              podSC,
 					Containers: []corev1.Container{{
-						Name:       "runner",
-						Image:      exec.Image,
-						Command:    exec.Command,
-						Env:        envVars,
-						WorkingDir: workingDir,
+						Name:            "runner",
+						Image:           exec.Image,
+						ImagePullPolicy: imagePullPolicy,
+						Command:         exec.Command,
+						Env:             envVars,
+						WorkingDir:      workingDir,
 						Resources: corev1.ResourceRequirements{
 							Limits: corev1.ResourceList{
 								corev1.ResourceMemory: memLimit,
@@ -367,7 +405,7 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 	pollCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(k8sPollInterval)
 	defer ticker.Stop()
 
 	var timedOut bool
@@ -385,6 +423,10 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 	// run. metrics-server scrapes roughly every 15 s, so a short job may never be
 	// sampled (peak stays 0 → recorded as no usage); the limit is set separately.
 	var peakMemMB int64
+	// lastMetricsSample throttles the metrics fetch to metricsSampleInterval so the
+	// fast status tick doesn't spam metrics.k8s.io for data that only refreshes every
+	// ~15s. The zero value makes the first eligible tick sample immediately.
+	var lastMetricsSample time.Time
 
 	for {
 		select {
@@ -405,7 +447,8 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 			if p, perr := r.findPod(pollCtx, exec.ExecutionID); perr == nil && p != nil {
 				lastPod = p
 			}
-			if r.podMemoryMB != nil && lastPod != nil {
+			if r.podMemoryMB != nil && lastPod != nil && time.Since(lastMetricsSample) >= metricsSampleInterval {
+				lastMetricsSample = time.Now()
 				if mb, ok := r.podMemoryMB(pollCtx, lastPod.Name); ok && mb > peakMemMB {
 					peakMemMB = mb
 				}
@@ -756,8 +799,24 @@ func (r *KubernetesRuntime) CreateVolume(ctx context.Context, spec VolumeSpec) e
 			},
 		},
 	}
-	if _, err := r.client.CoreV1().PersistentVolumeClaims(r.namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+	created, err := r.client.CoreV1().PersistentVolumeClaims(r.namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil // idempotent: a retried create-volume step must not fail
+		}
 		return fmt.Errorf("create pvc: %w", err)
+	}
+	// Fail fast when the PVC resolves to no StorageClass. Forge treats an empty
+	// FORGE_VOLUME_STORAGE_CLASS as "use the cluster default"; the DefaultStorageClass
+	// admission plugin then stamps the default class name onto the created object. A
+	// still-empty class here means the cluster has no default StorageClass (and none
+	// was configured), so the PVC can never bind and any step that later mounts it
+	// fails to schedule with an opaque "pod has unbound immediate
+	// PersistentVolumeClaims". Surface that at the create-volume step instead, with an
+	// actionable message, and delete the orphan PVC so it does not linger unbound.
+	if created.Spec.StorageClassName == nil || *created.Spec.StorageClassName == "" {
+		_ = r.client.CoreV1().PersistentVolumeClaims(r.namespace).Delete(ctx, spec.ResourceName, metav1.DeleteOptions{})
+		return fmt.Errorf("shared volume %q cannot be provisioned: no StorageClass — the cluster has no default StorageClass and FORGE_VOLUME_STORAGE_CLASS is unset; set forge.volumes.storageClass to a provisionable class", spec.ResourceName)
 	}
 	return nil
 }
