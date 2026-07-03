@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// forge/git-clone nests path/ref/depth under a `checkout` object, keeps image and
-// volumes top-level, and defaults `run` to a no-op the checkout prologue weaves into.
+// forge/git-clone nests path/ref/depth under a `checkout` object, keeps volumes
+// top-level, and defaults `run` to a no-op the checkout prologue weaves into. The
+// image is not a form field — forge supplies its controlled minimal git image.
 func TestBuildStepWith_GitCloneNestsCheckout(t *testing.T) {
 	with, err := buildStepWith("forge/git-clone", reader(map[string]string{
-		withKeyPrefix + "image":   "alpine/git",
 		withKeyPrefix + "volumes": "workspace:/src",
 		withKeyPrefix + "path":    "app",
 		withKeyPrefix + "ref":     "main",
@@ -18,8 +18,9 @@ func TestBuildStepWith_GitCloneNestsCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildStepWith: %v", err)
 	}
-	if with["image"] != "alpine/git" {
-		t.Errorf("image = %v, want alpine/git", with["image"])
+	// image is forge-controlled: the step must not send one.
+	if _, ok := with["image"]; ok {
+		t.Errorf("image should not be set by the git-clone step, got %v", with["image"])
 	}
 	if with["run"] != "true" {
 		t.Errorf("run = %v, want default \"true\"", with["run"])
@@ -52,7 +53,6 @@ func TestBuildStepWith_GitCloneNestsCheckout(t *testing.T) {
 // prologue, and a post-clone command overrides the default no-op run.
 func TestBuildStepWith_GitCloneEmptyCheckoutAndCustomRun(t *testing.T) {
 	with, err := buildStepWith("forge/git-clone", reader(map[string]string{
-		withKeyPrefix + "image":   "alpine/git",
 		withKeyPrefix + "volumes": "workspace",
 		withKeyPrefix + "run":     "git submodule update --init",
 	}))
@@ -68,17 +68,17 @@ func TestBuildStepWith_GitCloneEmptyCheckoutAndCustomRun(t *testing.T) {
 	}
 }
 
-// image and volumes are required.
-func TestBuildStepWith_GitCloneRequiresImageAndVolume(t *testing.T) {
+// The volume is required; the image is not (forge supplies it).
+func TestBuildStepWith_GitCloneRequiresVolume(t *testing.T) {
 	if _, err := buildStepWith("forge/git-clone", reader(map[string]string{
-		withKeyPrefix + "volumes": "workspace",
-	})); err == nil {
-		t.Errorf("expected error when image is missing")
-	}
-	if _, err := buildStepWith("forge/git-clone", reader(map[string]string{
-		withKeyPrefix + "image": "alpine/git",
+		withKeyPrefix + "path": "app",
 	})); err == nil {
 		t.Errorf("expected error when volume is missing")
+	}
+	if _, err := buildStepWith("forge/git-clone", reader(map[string]string{
+		withKeyPrefix + "volumes": "workspace",
+	})); err != nil {
+		t.Errorf("volume alone should be sufficient, got %v", err)
 	}
 }
 
@@ -86,7 +86,6 @@ func TestBuildStepWith_GitCloneRequiresImageAndVolume(t *testing.T) {
 // fields (checkout lifted to path/ref/depth), so the edit form pre-populates.
 func TestGitCloneFlattenRoundTrip(t *testing.T) {
 	orig := map[string]string{
-		withKeyPrefix + "image":   "alpine/git",
 		withKeyPrefix + "volumes": "workspace:/src",
 		withKeyPrefix + "path":    "app",
 		withKeyPrefix + "ref":     "release",

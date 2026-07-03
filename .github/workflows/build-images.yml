@@ -55,6 +55,8 @@ jobs:
             context: src/systems/outpost
           - name: portal
             context: src/systems/portal
+          - name: runner-git
+            context: infra/runner-images/git
           - name: gatekeeper-tests
             context: tests/gatekeeper
           - name: conductor-tests

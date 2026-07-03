@@ -446,6 +446,11 @@ export interface RuntimeBackend {
   name: string;
   type: string;
   enabled: boolean;
+  /** Non-secret settings (e.g. `runtime_class` for kata/gvisor). Always an object from the API. */
+  config?: Record<string, string>;
+  /** Logical key → the NAME of an env var read via secret(); never the secret value. */
+  secret_refs?: Record<string, string>;
+  created_at?: string;
 }
 
 export function listExecutions(token: string, project?: string) {
@@ -906,6 +911,27 @@ export function updateRunnerClass(
 
 export function deleteRunnerClass(token: string, name: string) {
   return req<void>('DELETE', `/forge/runner-classes/${name}`, token);
+}
+
+// RuntimeBackend admin (docker/kubernetes/kata/gvisor). Create/update send the full
+// object — forge re-validates type + the kata/gvisor runtime_class on every write,
+// so partial updates would be rejected. secret_refs holds env-var NAMES, not values.
+export type RuntimeBackendInput = { name: string; type: string; enabled: boolean; config?: Record<string, string>; secret_refs?: Record<string, string> };
+
+export function createRuntimeBackend(token: string, payload: RuntimeBackendInput) {
+  return req<RuntimeBackend>('POST', '/forge/runtime-backends', token, payload);
+}
+
+export function getRuntimeBackend(token: string, name: string) {
+  return req<RuntimeBackend>('GET', `/forge/runtime-backends/${name}`, token);
+}
+
+export function updateRuntimeBackend(token: string, name: string, payload: Omit<RuntimeBackendInput, 'name'>) {
+  return req<RuntimeBackend>('PUT', `/forge/runtime-backends/${name}`, token, payload);
+}
+
+export function deleteRuntimeBackend(token: string, name: string) {
+  return req<void>('DELETE', `/forge/runtime-backends/${name}`, token);
 }
 
 // ── Containers ────────────────────────────────────────────────────────────────

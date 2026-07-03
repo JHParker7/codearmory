@@ -199,13 +199,13 @@ A `git:`/`gitea:` secret_ref only puts an **authenticated clone URL in an env va
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `env` | `GIT_CLONE_URL` | Env var holding the clone URL. Must also be set by `secret_refs` or `env`. |
-| `path` | repo name from the ref, else `repo` | Directory to clone into and `cd` into (relative, no `..`). |
+| `path` | the shared-volume root (`.`) when the working dir is a `workdir` volume, else the repo name from the ref (else `repo`) | Directory to clone into and `cd` into (relative, no `..`). When the checkout runs into a shared workspace volume made the working dir (as `forge/git-clone` does), it clones into the volume root so the volume itself becomes the working tree — downstream steps mount it at their root. |
 | `ref` | remote's default branch | Branch or tag to check out (`git clone --branch`). Commit SHAs are not supported here. |
 | `depth` | `1` (shallow) | `git clone --depth`; `0` requests a full clone. |
 
 Requirements and behaviour:
 
-- **`git` must be in the image** (as with a self-run `git clone`) and the **command must be a shell form** (`["sh","-c", …]`) so the prologue can be woven in — both are enforced at submit (`400` otherwise).
+- **`git` must be in the image** — or **omit `image` entirely** and Forge runs the checkout on its built-in minimal git image (`FORGE_GIT_IMAGE`, forge-controlled, bypasses the image allowlist). This is what the `forge/git-clone` workflow step does, so users never pick or maintain a git-capable image. The **command must be a shell form** (`["sh","-c", …]`) so the prologue can be woven in — both are enforced at submit (`400` otherwise).
 - A **clone failure fails the whole execution** — the command never runs against an empty dir.
 - Works on **every runtime backend** (docker, k8s, kata, gvisor) because it is a command transform, not a runtime feature.
 - The env var can also be a plain public URL set via `env` (no creds) — checkout doesn't require a `secret_ref`.

@@ -22,6 +22,11 @@ import {
   getRunnerClass,
   updateRunnerClass,
   deleteRunnerClass,
+  listRuntimeBackends,
+  createRuntimeBackend,
+  getRuntimeBackend,
+  updateRuntimeBackend,
+  deleteRuntimeBackend,
   listContainerRepos,
   listImageTags,
   getManifest,
@@ -590,6 +595,70 @@ describe('bff client', () => {
         expect.fail('should have thrown');
       } catch (err: unknown) {
         expect((err as { status: number }).status).to.equal(404);
+      }
+    });
+  });
+
+  describe('listRuntimeBackends', () => {
+    it('GETs /api/forge/runtime-backends', async () => {
+      fetchStub.resolves(mockResponse(200, [{ name: 'default', type: 'docker', enabled: true }]));
+      const res = await listRuntimeBackends(TOKEN);
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/forge/runtime-backends');
+      expect(opts.method).to.equal('GET');
+      expect(res[0].type).to.equal('docker');
+    });
+  });
+
+  describe('createRuntimeBackend', () => {
+    it('POSTs the full backend to /api/forge/runtime-backends', async () => {
+      const payload = { name: 'kata-prod', type: 'kata', enabled: true, config: { runtime_class: 'kata-qemu' }, secret_refs: {} };
+      fetchStub.resolves(mockResponse(201, payload));
+      await createRuntimeBackend(TOKEN, payload);
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/forge/runtime-backends');
+      expect(opts.method).to.equal('POST');
+      expect(JSON.parse(opts.body as string)).to.deep.equal(payload);
+    });
+  });
+
+  describe('getRuntimeBackend', () => {
+    it('GETs /api/forge/runtime-backends/:name', async () => {
+      fetchStub.resolves(mockResponse(200, { name: 'default', type: 'docker', enabled: true }));
+      const res = await getRuntimeBackend(TOKEN, 'default');
+      const [url] = fetchStub.firstCall.args as [string];
+      expect(url).to.equal('/api/forge/runtime-backends/default');
+      expect(res.name).to.equal('default');
+    });
+  });
+
+  describe('updateRuntimeBackend', () => {
+    it('PUTs the full body (no name) to /api/forge/runtime-backends/:name', async () => {
+      fetchStub.resolves(mockResponse(200, { name: 'gvisor-prod', type: 'gvisor', enabled: false }));
+      await updateRuntimeBackend(TOKEN, 'gvisor-prod', { type: 'gvisor', enabled: false, config: { runtime_class: 'gvisor' }, secret_refs: {} });
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/forge/runtime-backends/gvisor-prod');
+      expect(opts.method).to.equal('PUT');
+      expect(JSON.parse(opts.body as string)).to.deep.equal({ type: 'gvisor', enabled: false, config: { runtime_class: 'gvisor' }, secret_refs: {} });
+    });
+  });
+
+  describe('deleteRuntimeBackend', () => {
+    it('DELETEs /api/forge/runtime-backends/:name', async () => {
+      fetchStub.resolves(mock204());
+      await deleteRuntimeBackend(TOKEN, 'kata-prod');
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/forge/runtime-backends/kata-prod');
+      expect(opts.method).to.equal('DELETE');
+    });
+
+    it('surfaces the 409 when deleting the default backend', async () => {
+      fetchStub.resolves(mockText(409, 'cannot delete the default runtime backend'));
+      try {
+        await deleteRuntimeBackend(TOKEN, 'default');
+        expect.fail('should have thrown');
+      } catch (err: unknown) {
+        expect((err as { status: number }).status).to.equal(409);
       }
     });
   });

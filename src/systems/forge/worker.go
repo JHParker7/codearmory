@@ -179,9 +179,12 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	var runErr error
 	// Prepend an actions/checkout-style `git clone … && cd …` prologue so the
 	// command runs inside a checked-out repo. Applied before wrapOutputEnv so the
-	// clone runs first and the output-env trailer stays at the very end.
+	// clone runs first and the output-env trailer stays at the very end. When the
+	// execution's working dir is a shared workspace volume (workdir: true, as
+	// forge/git-clone sets), the checkout clones into the volume root so downstream
+	// steps that mount the same volume see the working tree at its root.
 	if exec.Checkout != nil {
-		exec.Command = applyCheckout(exec.Command, exec.Checkout, exec.SecretRefs)
+		exec.Command = applyCheckout(exec.Command, exec.Checkout, exec.SecretRefs, checkoutIntoWorkdirRoot(exec.Volumes))
 	}
 	// Capture requested output env vars: wrap the command so it emits them after a
 	// unique marker, then split them back out of stdout once the run finishes.

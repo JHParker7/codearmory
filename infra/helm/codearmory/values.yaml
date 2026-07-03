@@ -297,6 +297,11 @@ forge:
   # (gcr.io/kaniko-project/executor:debug).
   build:
     builderImage: ""
+  # The forge/git-clone step (and any checkout-only execution that supplies no image)
+  # runs on a forge-controlled minimal git image — users never pick or maintain one.
+  # Empty = the binary default (ghcr.io/code-armory-app/runner-git:latest). Override
+  # to pin a channel/digest or point at a private mirror in an air-gapped install.
+  gitImage: ""
   secret:
     # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""

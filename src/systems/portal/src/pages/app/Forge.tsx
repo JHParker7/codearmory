@@ -1,9 +1,10 @@
 /**
- * Forge page: sandboxed execution + runner-class admin. Two tabs — executions
- * (run a one-off image+command and stream stdout/stderr) and runner classes (the
- * admin cpu/memory/limits resource classes). Talks to the BFF (listExecutions /
- * createExecution / listRunnerClasses / …); write actions on runner classes are
- * gated by the forge:createRunnerClass permission.
+ * Forge page: sandboxed execution + runner admin. Three tabs — executions (run a
+ * one-off image+command and stream stdout/stderr), runner classes (the admin
+ * cpu/memory/limits resource classes), and runtime backends (the admin runtime
+ * targets: docker / kubernetes / kata / gvisor). Talks to the BFF (listExecutions /
+ * createExecution / listRunnerClasses / listRuntimeBackends / …); write actions are
+ * gated by the forge:createRunnerClass and forge:createRuntimeBackend permissions.
  */
 import { useState, useEffect, useCallback, type CSSProperties } from 'react';
 import { T } from '../../theme';
@@ -12,16 +13,18 @@ import { useAppSelector } from '../../store/hooks';
 import {
   listExecutions, getExecution, cancelExecution, createExecution,
   listRunnerClasses, createRunnerClass, updateRunnerClass, deleteRunnerClass,
-  listForgeImages, listRuntimeBackends, listGitRepos,
+  listForgeImages, listRuntimeBackends, createRuntimeBackend, updateRuntimeBackend, deleteRuntimeBackend,
+  listGitRepos,
 } from '../../api/bff';
-import type { Execution, RunnerClass, RuntimeBackend, GitRepo, CheckoutSpec } from '../../api/bff';
+import type { Execution, RunnerClass, RuntimeBackend, RuntimeBackendInput, GitRepo, CheckoutSpec } from '../../api/bff';
+import { RUNTIME_TYPES, requiresRuntimeClass, parseKVLines, formatKVLines } from './runtimeBackend';
 import { ImageSelect } from '../../components/ImageSelect';
 import { RepoSelect } from '../../components/RepoSelect';
 import { BranchSelect } from '../../components/BranchSelect';
 import { useResizableWidth } from '../../components/ResizeHandle';
 import { timeAgo } from '../../utils';
 
-type ForgeTab = 'executions' | 'runner-classes';
+type ForgeTab = 'executions' | 'runner-classes' | 'runtime-backends';
 
 // Kernel-isolated backends (kata microVMs, gVisor's userspace kernel) put the
 // isolation boundary outside the container — the only place `privileged` is
@@ -679,16 +682,249 @@ function RunnerClassesTab() {
   );
 }
 
+// ── Runtime Backends tab ──────────────────────────────────────────────────────
+
+/**
+ * Create/edit form for a runtime backend, reused for both (keyed on the selected
+ * name so it remounts fresh per selection). Name is immutable on edit (it's the
+ * primary key / PUT path). type/enabled/config/secret_refs are always sent whole —
+ * forge re-validates on every write. config/secret_refs are `key=value`-per-line;
+ * kata/gvisor require a `runtime_class` config key (checked here for a fast error,
+ * authoritatively enforced server-side). onSave rejects on failure so we stay open.
+ */
+function BackendForm({ existing, onSave, onCancel, onDelete }: {
+  existing?: RuntimeBackend;
+  onSave: (input: RuntimeBackendInput) => Promise<void>;
+  onCancel: () => void;
+  onDelete?: () => void;
+}) {
+  const isEdit = !!existing;
+  const [name, setName] = useState(existing?.name ?? '');
+  const [type, setType] = useState<string>(existing?.type ?? 'docker');
+  const [enabled, setEnabled] = useState(existing?.enabled ?? true);
+  const [configStr, setConfigStr] = useState(formatKVLines(existing?.config));
+  const [secretsStr, setSecretsStr] = useState(formatKVLines(existing?.secret_refs));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSave = async () => {
+    if (!name.trim()) { setError('name is required'); return; }
+    let config: Record<string, string>;
+    let secret_refs: Record<string, string>;
+    try { config = parseKVLines(configStr); } catch (e) { setError(`config: ${(e as Error).message}`); return; }
+    try { secret_refs = parseKVLines(secretsStr); } catch (e) { setError(`secret_refs: ${(e as Error).message}`); return; }
+    if (requiresRuntimeClass(type) && !config['runtime_class']) {
+      setError(`${type} requires a config runtime_class (the Kubernetes RuntimeClass, e.g. kata-qemu)`);
+      return;
+    }
+    setSaving(true); setError(null);
+    try { await onSave({ name: name.trim(), type, enabled, config, secret_refs }); }
+    catch (e) { setError((e as Error).message); }
+    finally { setSaving(false); }
+  };
+
+  const label = { fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 4, letterSpacing: 0.5, textTransform: 'uppercase' } as const;
+  const field = { width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '7px 10px', outline: 'none', boxSizing: 'border-box' } as const;
+
+  return (
+    <div style={{ padding: '20px 24px', maxWidth: 620 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
+        <div style={{ fontFamily: T.mono, fontSize: 16, fontWeight: 700, color: T.textHi }}>
+          {isEdit ? existing!.name : 'new runtime backend'}
+        </div>
+        {isEdit && onDelete && (
+          <button onClick={onDelete}
+            style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}
+            onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
+            [ delete ]
+          </button>
+        )}
+      </div>
+
+      {error && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 11, marginBottom: 12 }}>{error}</div>}
+
+      <div style={label}>name</div>
+      <input value={name} onChange={e => setName(e.target.value)} disabled={isEdit} autoFocus={!isEdit}
+        placeholder="e.g. kata-prod"
+        style={{ ...field, marginBottom: 14, opacity: isEdit ? 0.6 : 1 }} />
+
+      <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+        <div style={{ flex: 1 }}>
+          <div style={label}>type</div>
+          <select value={type} onChange={e => setType(e.target.value)} style={field}>
+            {RUNTIME_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={label}>enabled</div>
+          <button onClick={() => setEnabled(v => !v)}
+            style={{ ...field, textAlign: 'left', cursor: 'pointer', background: enabled ? T.greenSoft : T.cardHi, color: enabled ? T.green : T.dim, borderColor: enabled ? T.green : T.border }}>
+            {enabled ? '● enabled' : '○ disabled'}
+          </button>
+        </div>
+      </div>
+
+      <div style={label}>config <span style={{ color: T.faint, opacity: 0.7, textTransform: 'none' }}>(key=value per line{requiresRuntimeClass(type) ? ` · ${type} needs runtime_class=…` : ''})</span></div>
+      <textarea value={configStr} onChange={e => setConfigStr(e.target.value)} rows={3}
+        placeholder={requiresRuntimeClass(type) ? 'runtime_class=kata-qemu' : 'docker/kubernetes read their settings from env'}
+        style={{ ...field, resize: 'vertical', lineHeight: 1.5, marginBottom: 14 }} />
+
+      <div style={label}>secret refs <span style={{ color: T.faint, opacity: 0.7, textTransform: 'none' }}>(logical=ENV_VAR_NAME per line · never a secret value)</span></div>
+      <textarea value={secretsStr} onChange={e => setSecretsStr(e.target.value)} rows={2}
+        placeholder="token=SOME_ENV_VAR_NAME"
+        style={{ ...field, resize: 'vertical', lineHeight: 1.5, marginBottom: 18 }} />
+
+      <div style={{ display: 'flex', gap: 10 }}>
+        <button onClick={handleSave} disabled={saving || !name.trim()}
+          style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 12, fontWeight: 600, padding: '8px 20px', cursor: (saving || !name.trim()) ? 'default' : 'pointer', letterSpacing: 0.4, opacity: (saving || !name.trim()) ? 0.6 : 1 }}>
+          {saving ? '[ · · · ]' : isEdit ? '[ save ]' : '[ create ]'}
+        </button>
+        <button onClick={onCancel}
+          style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '8px 16px', cursor: 'pointer' }}>
+          cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Runtime-backends admin tab: lists the admin-managed runtime targets (docker /
+ * kubernetes / kata / gvisor) and, for holders of forge:createRuntimeBackend,
+ * a create/edit form + delete. The "default" backend cannot be deleted (forge
+ * 409s; surfaced inline). Read (list) is granted to everyone by default, so the
+ * tab always renders; only write affordances are gated.
+ */
+function RuntimeBackendsTab() {
+  const token = useAppSelector(s => s.auth.token)!;
+  const canWrite = useAppSelector(s => s.auth.permissions?.['forge:createRuntimeBackend'] === true);
+  const [backends, setBackends] = useState<RuntimeBackend[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [confirm, confirmEl] = useConfirm();
+
+  const fetchBackends = useCallback(async () => {
+    setLoading(true); setError(null);
+    try { setBackends(await listRuntimeBackends(token)); }
+    catch (e: unknown) { setError((e as Error).message); }
+    finally { setLoading(false); }
+  }, [token]);
+
+  useEffect(() => { fetchBackends(); }, [fetchBackends]);
+
+  const selectedBackend = backends.find(b => b.name === selected);
+
+  const handleCreate = async (input: RuntimeBackendInput) => {
+    const created = await createRuntimeBackend(token, input);
+    setBackends(prev => [created, ...prev.filter(b => b.name !== created.name)]);
+    setCreating(false);
+    setSelected(created.name);
+  };
+
+  const handleEdit = async (input: RuntimeBackendInput) => {
+    const { name, ...rest } = input;
+    const updated = await updateRuntimeBackend(token, name, rest);
+    setBackends(prev => prev.map(b => b.name === name ? updated : b));
+  };
+
+  const handleDelete = async (name: string) => {
+    if (!(await confirm({ message: `Delete runtime backend ${name}? Runner classes targeting it will fail to launch until repointed to another backend.` }))) return;
+    try {
+      await deleteRuntimeBackend(token, name);
+      setBackends(prev => prev.filter(b => b.name !== name));
+      if (selected === name) setSelected(null);
+    } catch (e: unknown) { setError((e as Error).message); }
+  };
+
+  const [railW, railHandle] = useResizableWidth('rail.forge.runtime-backends', 260, { min: 200, max: 480 });
+
+  return (
+    <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {confirmEl}
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
+        <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+            <span style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.textHi }}>runtime backends</span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {canWrite && <button onClick={() => { setCreating(true); setSelected(null); }}
+                style={{ background: creating ? T.greenSoft : 'transparent', border: `1px solid ${creating ? T.green : T.border}`, color: creating ? T.green : T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>+</button>}
+              <button onClick={fetchBackends} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>↻</button>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          {loading ? (
+            <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
+          ) : error && backends.length === 0 ? (
+            <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 11, color: T.red }}>{error}</div>
+          ) : backends.length === 0 ? (
+            <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint }}>→ no runtime backends</div>
+          ) : backends.map(b => {
+            const isActive = selected === b.name && !creating;
+            return (
+              <button key={b.name} onClick={() => { setSelected(b.name); setCreating(false); }}
+                style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{b.name}</span>
+                  <span style={runtimeBadge(b.type)}>{b.type}</span>
+                  {b.name === 'default' && <span style={{ fontSize: 9, color: T.faint, border: `1px solid ${T.faint}`, padding: '0 4px' }}>default</span>}
+                  {!b.enabled && <span style={{ fontSize: 9, color: T.faint, border: `1px solid ${T.faint}`, padding: '0 4px' }}>disabled</span>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {railHandle}
+
+      <div style={{ flex: 1, overflow: 'auto' }}>
+        {error && backends.length > 0 && <div style={{ padding: '10px 24px 0', fontFamily: T.mono, fontSize: 11, color: T.red }}>{error}</div>}
+        {creating && canWrite ? (
+          <BackendForm key="__new__" onSave={handleCreate} onCancel={() => setCreating(false)} />
+        ) : !selectedBackend ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+            <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ select a runtime backend</div>
+          </div>
+        ) : canWrite ? (
+          <BackendForm key={selectedBackend.name} existing={selectedBackend}
+            onSave={handleEdit} onCancel={() => setSelected(null)} onDelete={() => handleDelete(selectedBackend.name)} />
+        ) : (
+          <div style={{ padding: '20px 24px' }}>
+            <div style={{ fontFamily: T.mono, fontSize: 20, fontWeight: 700, color: T.textHi, marginBottom: 20 }}>{selectedBackend.name}</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
+              {([
+                ['type', selectedBackend.type, KERNEL_ISOLATED.has(selectedBackend.type) ? T.green : undefined],
+                ['enabled', selectedBackend.enabled ? 'yes' : 'no', selectedBackend.enabled ? undefined : T.faint],
+                ['config', formatKVLines(selectedBackend.config) || '—'],
+                ['secret refs', formatKVLines(selectedBackend.secret_refs) || '—'],
+              ] as [string, string, (string | undefined)?][]).map(([k, v, color]) => (
+                <div key={k} style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px' }}>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 4, textTransform: 'uppercase' }}>{k}</div>
+                  <div style={{ fontFamily: T.mono, fontSize: 14, color: color ?? T.textHi, fontWeight: 700, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Forge page ────────────────────────────────────────────────────────────────
 
-/** Forge route: tabbed shell switching between the executions and runner-classes tabs. */
+/** Forge route: tabbed shell switching between the executions, runner-classes and runtime-backends tabs. */
 export function Forge() {
   const [tab, setTab] = useState<ForgeTab>('executions');
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden', flexDirection: 'column' }}>
       <div style={{ display: 'flex', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, flexShrink: 0 }}>
-        {(['executions', 'runner-classes'] as ForgeTab[]).map(t => (
+        {(['executions', 'runner-classes', 'runtime-backends'] as ForgeTab[]).map(t => (
           <button key={t} onClick={() => setTab(t)}
             style={{ background: tab === t ? T.card : 'transparent', border: 'none', borderBottom: `2px solid ${tab === t ? T.green : 'transparent'}`, color: tab === t ? T.textHi : T.dim, fontFamily: T.mono, fontSize: 12, padding: '11px 20px', cursor: 'pointer', letterSpacing: 0.3 }}>
             {t}
@@ -703,6 +939,7 @@ export function Forge() {
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {tab === 'executions' && <ExecutionsTab />}
         {tab === 'runner-classes' && <RunnerClassesTab />}
+        {tab === 'runtime-backends' && <RuntimeBackendsTab />}
       </div>
     </div>
   );
