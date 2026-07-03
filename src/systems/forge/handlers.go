@@ -234,7 +234,13 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	// privileged-runner requirement are enforced once the runner class resolves its
 	// backend, below.
 	isBuild := req.Build != nil
-	if isBuild {
+	// A checkout step that supplies no image of its own (the forge/git-clone action)
+	// runs on forge's controlled minimal git image: like the Kaniko builder it is
+	// forge-supplied and bypasses ALLOWED_IMAGES, so users never pick or maintain a
+	// git-capable image just to clone a repo into a shared volume.
+	isDefaultGitCheckout := !isBuild && req.Checkout != nil && req.Image == ""
+	switch {
+	case isBuild:
 		if err := validateBuild(req.Build, req.SecretRefs, req.Env); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -242,7 +248,16 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		if req.Timeout <= 0 {
 			req.Timeout = defaultBuildTimeoutSecs
 		}
-	} else {
+	case isDefaultGitCheckout:
+		if len(req.Command) == 0 {
+			http.Error(w, "command is required", http.StatusBadRequest)
+			return
+		}
+		req.Image = gitImage
+		if req.Timeout <= 0 {
+			req.Timeout = defaultTimeout
+		}
+	default:
 		if req.Image == "" || len(req.Command) == 0 {
 			http.Error(w, "image and command are required", http.StatusBadRequest)
 			return

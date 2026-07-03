@@ -789,10 +789,12 @@ components:
         path:
           type: string
           description: |
-            Directory (relative to the image working dir) to clone into and cd
-            into. Must be a relative path of `[A-Za-z0-9._/-]` with no `..`.
-            Defaults to the repo name derived from the `git:`/`gitea:` ref, else
-            `repo`.
+            Directory (relative to the working dir) to clone into and cd into.
+            Must be a relative path of `[A-Za-z0-9._/-]` with no `..`. When the
+            working dir is a shared workspace volume (a `workdir: true` mount, as
+            `forge/git-clone` sets), an unset path clones into the volume root so
+            the volume itself is the working tree; otherwise it defaults to the
+            repo name derived from the `git:`/`gitea:` ref, else `repo`.
           example: src
         ref:
           type: string

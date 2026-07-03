@@ -142,8 +142,7 @@ var stepActionSchema = map[string][]stepField{
 	},
 	"forge/git-clone": {
 		{key: "volumes", label: "Clone into volume", placeholder: "workspace or workspace:/src (create with forge/create-volume)", required: true, kind: stepFieldVolumeAttach},
-		{key: "image", label: "Git image", placeholder: "alpine/git (required, must include git)", required: true, catalog: catImage},
-		{key: "path", label: "Clone dir", placeholder: "repo name (default, relative to the volume)"},
+		{key: "path", label: "Clone dir", placeholder: "volume root (default; a subdir relative to the volume)"},
 		{key: "ref", label: "Branch / tag", placeholder: "main (optional, default remote HEAD)"},
 		{key: "depth", label: "Depth", placeholder: "1 (default shallow; 0 = full clone)", kind: stepFieldInt},
 		{key: "run", label: "Post-clone command", placeholder: "true (optional; runs in the checkout after clone)"},

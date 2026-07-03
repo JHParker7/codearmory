@@ -215,6 +215,7 @@ func main() {
 	initAllowedImages(os.Getenv("ALLOWED_IMAGES"))
 	initVolumeConfig()
 	initBuildConfig()
+	initCheckoutConfig()
 
 	// Rotate the gatekeeper service key every 25 minutes. GATEKEEPER_SERVICE_KEY
 	// must match the key in GATEKEEPER_SERVICES on gatekeeper. No-op if unset.

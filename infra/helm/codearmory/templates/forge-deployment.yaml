@@ -101,6 +101,13 @@ spec:
               value: {{ .builderImage | quote }}
             {{- end }}
             {{- end }}
+            # The forge/git-clone step runs on a forge-controlled minimal git image.
+            # Override to pin a channel/digest or point at a private mirror; empty =
+            # the binary default (ghcr.io/code-armory-app/runner-git:latest).
+            {{- if .Values.forge.gitImage }}
+            - name: FORGE_GIT_IMAGE
+              value: {{ .Values.forge.gitImage | quote }}
+            {{- end }}
             - name: GATEKEEPER_URL
               value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
             {{- if or (eq .Values.forge.env.runtime "kubernetes") .Values.forge.kata.enabled .Values.forge.gvisor.enabled }}

@@ -162,6 +162,11 @@ services:
       RUNTIME: docker
       GATEKEEPER_URL: http://gatekeeper:8081
       ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25
+      # The forge/git-clone step runs on a forge-controlled minimal git image (users
+      # never pick one; it bypasses ALLOWED_IMAGES). To exercise git-clone locally
+      # before CI publishes the image, build it from the repo root first:
+      #   docker build -t ghcr.io/code-armory-app/runner-git:latest infra/runner-images/git
+      FORGE_GIT_IMAGE: ghcr.io/code-armory-app/runner-git:latest
       # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: forge-local-secret
       # Job secret_refs: forge resolves "secret:<name>" via gatekeeper (forge must

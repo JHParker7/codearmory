@@ -15,6 +15,16 @@ const (
 	defaultCheckoutDepth = 1               // shallow clone, matching actions/checkout
 )
 
+// gitImage is the forge-controlled minimal git image used for a checkout step that
+// supplies no image of its own (the forge/git-clone action). Like the Kaniko builder
+// image it is operator-overridable and bypasses ALLOWED_IMAGES, so users never pick
+// or maintain a git-capable image just to clone a repo. Read once at startup.
+var gitImage string
+
+func initCheckoutConfig() {
+	gitImage = envOrDefault("FORGE_GIT_IMAGE", "ghcr.io/code-armory-app/runner-git:latest")
+}
+
 var (
 	// checkoutPathRe restricts the clone directory to a safe relative path. It is
 	// interpolated into a shell script, so the allowlist keeps out shell
@@ -76,28 +86,34 @@ func validateCheckout(c *CheckoutSpec, command []string, refs, env map[string]st
 // applyCheckout weaves a `git clone … && cd …` prologue into a shell command so
 // the command runs inside a freshly checked-out repo. It is a no-op for non-shell
 // commands (submit rejects those, so this is defensive). refs supplies the git:/
-// gitea: reference used only to derive a default clone directory. The returned
-// slice is a copy; the persisted command is never modified.
-func applyCheckout(cmd []string, c *CheckoutSpec, refs map[string]string) []string {
+// gitea: reference used only to derive a default clone directory. intoWorkdirRoot
+// is set when the execution's working directory is itself a shared workspace volume
+// (a mount with workdir: true): the clone then defaults into that volume's root so
+// the volume *is* the working tree, rather than a repo-name subdirectory of it.
+// The returned slice is a copy; the persisted command is never modified.
+func applyCheckout(cmd []string, c *CheckoutSpec, refs map[string]string, intoWorkdirRoot bool) []string {
 	if c == nil || !isShellCommand(cmd) {
 		return cmd
 	}
 	out := append([]string(nil), cmd...)
-	out[2] = c.script(refs) + "\n" + cmd[2]
+	out[2] = c.script(refs, intoWorkdirRoot) + "\n" + cmd[2]
 	return out
 }
 
+// tmpCheckoutDir is the temporary subdirectory the volume-root checkout clones into
+// before relocating the tree up to the working dir. A repo won't contain this name at
+// its top level, so the relocation can't collide.
+const tmpCheckoutDir = ".forge-checkout"
+
 // script builds the POSIX-sh prologue that clones the repo and cd's into it. All
 // interpolated values (env name, path, ref) are validated at submit time and
-// single-quoted here, so they cannot break out of the script.
-func (c *CheckoutSpec) script(refs map[string]string) string {
+// single-quoted here, so they cannot break out of the script. intoWorkdirRoot is set
+// when the working dir is itself a shared volume (workdir: true), which switches the
+// no-path default to landing the tree at the volume root (see below).
+func (c *CheckoutSpec) script(refs map[string]string, intoWorkdirRoot bool) string {
 	env := c.Env
 	if env == "" {
 		env = defaultCheckoutEnv
-	}
-	dir := c.Path
-	if dir == "" {
-		dir = c.defaultDir(refs)
 	}
 
 	depth := defaultCheckoutDepth
@@ -120,6 +136,28 @@ func (c *CheckoutSpec) script(refs map[string]string) string {
 	b.WriteString("command -v git >/dev/null 2>&1 || { echo 'forge: checkout: git is not installed in this image; use a runner image that includes git' >&2; exit 1; }\n")
 	// ${env:-} guards against `set -u` while treating unset as empty.
 	b.WriteString("if [ -z \"${" + env + ":-}\" ]; then echo 'forge: checkout: " + env + " is not set' >&2; exit 1; fi\n")
+
+	// Volume-root checkout: the working dir is a shared volume that downstream steps
+	// mount at their root, so the tree must land at the volume root — not a repo-name
+	// subdirectory of it (forge/build-image's default /workspace context and a
+	// downstream forge/run's workdir both look at the root). `git clone … .` refuses a
+	// non-empty target, and a disk-backed PVC can carry a lost+found, so clone into a
+	// temp subdir on the volume and relocate its entries (dotfiles included) up to the
+	// root. Only for the no-explicit-path case; an explicit path is an ordinary subdir.
+	if intoWorkdirRoot && c.Path == "" {
+		tmp := shellSingleQuote(tmpCheckoutDir)
+		b.WriteString("git clone" + flags + " -- \"$" + env + "\" " + tmp +
+			" || { echo 'forge: checkout: git clone failed' >&2; exit 1; }\n")
+		b.WriteString("find " + tmp + " -mindepth 1 -maxdepth 1 -exec mv -- {} . ';'" +
+			" || { echo 'forge: checkout: could not move the checkout into the workspace' >&2; exit 1; }\n")
+		b.WriteString("rmdir " + tmp + " 2>/dev/null || true\n")
+		return b.String()
+	}
+
+	dir := c.Path
+	if dir == "" {
+		dir = c.defaultDir(refs)
+	}
 	b.WriteString("git clone" + flags + " -- \"$" + env + "\" " + shellSingleQuote(dir) +
 		" || { echo 'forge: checkout: git clone failed' >&2; exit 1; }\n")
 	b.WriteString("cd " + shellSingleQuote(dir) + " || exit 1\n")
@@ -129,6 +167,8 @@ func (c *CheckoutSpec) script(refs map[string]string) string {
 // defaultDir derives the clone directory from the git:/gitea: reference the same
 // job sets on the source env var (e.g. git:https://host/acme/widgets.git → widgets).
 // Falls back to "repo" when no reference is present or a safe name can't be derived.
+// Used only for the subdirectory checkout; the volume-root case (see script) never
+// calls it.
 func (c *CheckoutSpec) defaultDir(refs map[string]string) string {
 	env := c.Env
 	if env == "" {
@@ -138,6 +178,19 @@ func (c *CheckoutSpec) defaultDir(refs map[string]string) string {
 		return name
 	}
 	return defaultCheckoutDir
+}
+
+// checkoutIntoWorkdirRoot reports whether any attached volume is made the execution's
+// working directory (workdir: true). When so, an auto-checkout with no explicit path
+// clones into the volume root rather than a subdirectory of it, so the shared volume
+// itself holds the working tree.
+func checkoutIntoWorkdirRoot(mounts []VolumeMount) bool {
+	for _, m := range mounts {
+		if m.Workdir {
+			return true
+		}
+	}
+	return false
 }
 
 // repoBasename extracts a repository directory name from a secret_ref value such as

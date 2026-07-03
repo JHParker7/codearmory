@@ -56,7 +56,7 @@ func TestCheckoutScript(t *testing.T) {
 	refs := map[string]string{"GIT_CLONE_URL": "git:https://github.com/acme/widgets.git"}
 
 	t.Run("defaults: shallow, dir from ref, default env", func(t *testing.T) {
-		s := (&CheckoutSpec{}).script(refs)
+		s := (&CheckoutSpec{}).script(refs, false)
 		if !strings.Contains(s, `"$GIT_CLONE_URL"`) {
 			t.Errorf("missing default env expansion:\n%s", s)
 		}
@@ -71,15 +71,46 @@ func TestCheckoutScript(t *testing.T) {
 		}
 	})
 
+	t.Run("into workdir volume lands the tree at the volume root", func(t *testing.T) {
+		s := (&CheckoutSpec{}).script(refs, true)
+		// Clones into a temp subdir then relocates every entry (dotfiles included) up to
+		// the working-dir root, so it works even on a non-empty volume (a PVC lost+found).
+		if !strings.Contains(s, "-- \"$GIT_CLONE_URL\" '.forge-checkout'") {
+			t.Errorf("expected clone into the temp subdir:\n%s", s)
+		}
+		if !strings.Contains(s, "find '.forge-checkout' -mindepth 1 -maxdepth 1 -exec mv -- {} . ';'") {
+			t.Errorf("expected relocation of the checkout into the workspace root:\n%s", s)
+		}
+		if !strings.Contains(s, "rmdir '.forge-checkout'") {
+			t.Errorf("expected the temp subdir to be removed:\n%s", s)
+		}
+		if strings.Contains(s, "'widgets'") {
+			t.Errorf("volume-root checkout must not derive a repo-name subdir:\n%s", s)
+		}
+		if strings.Contains(s, "\ncd ") {
+			t.Errorf("volume-root checkout is already at the working dir; no cd expected:\n%s", s)
+		}
+	})
+
+	t.Run("explicit path wins over the volume-root default", func(t *testing.T) {
+		s := (&CheckoutSpec{Path: "app"}).script(refs, true)
+		if !strings.Contains(s, "-- \"$GIT_CLONE_URL\" 'app'") || !strings.Contains(s, "cd 'app'") {
+			t.Errorf("explicit path should win even into a workdir volume:\n%s", s)
+		}
+		if strings.Contains(s, ".forge-checkout") {
+			t.Errorf("an explicit path should not trigger the volume-root relocation:\n%s", s)
+		}
+	})
+
 	t.Run("full clone omits depth flag", func(t *testing.T) {
-		s := (&CheckoutSpec{Depth: intPtr(0)}).script(refs)
+		s := (&CheckoutSpec{Depth: intPtr(0)}).script(refs, false)
 		if strings.Contains(s, "--depth") {
 			t.Errorf("depth 0 should be a full clone (no --depth):\n%s", s)
 		}
 	})
 
 	t.Run("ref and explicit path and depth", func(t *testing.T) {
-		s := (&CheckoutSpec{Path: "app", Ref: "v2.0", Depth: intPtr(5)}).script(refs)
+		s := (&CheckoutSpec{Path: "app", Ref: "v2.0", Depth: intPtr(5)}).script(refs, false)
 		if !strings.Contains(s, "--depth=5") || !strings.Contains(s, "--branch='v2.0'") {
 			t.Errorf("expected depth and branch flags:\n%s", s)
 		}
@@ -89,7 +120,7 @@ func TestCheckoutScript(t *testing.T) {
 	})
 
 	t.Run("custom env and no ref", func(t *testing.T) {
-		s := (&CheckoutSpec{Env: "REPO_URL"}).script(map[string]string{"REPO_URL": "git:https://h/x/y.git"})
+		s := (&CheckoutSpec{Env: "REPO_URL"}).script(map[string]string{"REPO_URL": "git:https://h/x/y.git"}, false)
 		if !strings.Contains(s, `"$REPO_URL"`) || !strings.Contains(s, "${REPO_URL:-}") {
 			t.Errorf("expected custom env var used and guarded:\n%s", s)
 		}
@@ -99,14 +130,14 @@ func TestCheckoutScript(t *testing.T) {
 	})
 
 	t.Run("clone failure aborts the job", func(t *testing.T) {
-		s := (&CheckoutSpec{}).script(refs)
+		s := (&CheckoutSpec{}).script(refs, false)
 		if !strings.Contains(s, "exit 1") {
 			t.Errorf("expected the prologue to exit on clone failure:\n%s", s)
 		}
 	})
 
 	t.Run("preflights git before the clone, with a clear message", func(t *testing.T) {
-		s := (&CheckoutSpec{}).script(refs)
+		s := (&CheckoutSpec{}).script(refs, false)
 		if !strings.Contains(s, "command -v git") {
 			t.Errorf("expected a git preflight before the clone:\n%s", s)
 		}
@@ -145,7 +176,7 @@ func TestApplyCheckout(t *testing.T) {
 	cmd := []string{"sh", "-c", "make build"}
 
 	t.Run("prepends prologue, preserves shell wrapper and user script", func(t *testing.T) {
-		out := applyCheckout(cmd, &CheckoutSpec{}, refs)
+		out := applyCheckout(cmd, &CheckoutSpec{}, refs, false)
 		if out[0] != "sh" || out[1] != "-c" {
 			t.Fatalf("shell wrapper changed: %v", out[:2])
 		}
@@ -161,7 +192,7 @@ func TestApplyCheckout(t *testing.T) {
 	})
 
 	t.Run("nil spec is a no-op", func(t *testing.T) {
-		out := applyCheckout(cmd, nil, refs)
+		out := applyCheckout(cmd, nil, refs, false)
 		if out[2] != "make build" {
 			t.Errorf("nil checkout should not alter command: %q", out[2])
 		}
@@ -169,7 +200,7 @@ func TestApplyCheckout(t *testing.T) {
 
 	t.Run("non-shell command is a no-op", func(t *testing.T) {
 		raw := []string{"make", "build"}
-		out := applyCheckout(raw, &CheckoutSpec{}, refs)
+		out := applyCheckout(raw, &CheckoutSpec{}, refs, false)
 		if len(out) != 2 || out[0] != "make" {
 			t.Errorf("non-shell command should be unchanged: %v", out)
 		}
@@ -183,7 +214,7 @@ func TestCheckoutThenOutputEnvOrdering(t *testing.T) {
 	refs := map[string]string{"GIT_CLONE_URL": "git:https://github.com/acme/widgets.git"}
 	cmd := []string{"sh", "-c", "make build"}
 
-	withCheckout := applyCheckout(cmd, &CheckoutSpec{}, refs)
+	withCheckout := applyCheckout(cmd, &CheckoutSpec{}, refs, false)
 	final := wrapOutputEnv(withCheckout, []string{"VERSION"}, "MARKER")
 
 	script := final[2]
@@ -192,5 +223,25 @@ func TestCheckoutThenOutputEnvOrdering(t *testing.T) {
 	markerAt := strings.Index(script, "MARKER")
 	if !(cloneAt >= 0 && cloneAt < userAt && userAt < markerAt) {
 		t.Fatalf("expected clone < user script < output trailer; got %d, %d, %d:\n%s", cloneAt, userAt, markerAt, script)
+	}
+}
+
+func TestCheckoutIntoWorkdirRoot(t *testing.T) {
+	tests := []struct {
+		name   string
+		mounts []VolumeMount
+		want   bool
+	}{
+		{name: "no volumes", mounts: nil, want: false},
+		{name: "attached but not workdir", mounts: []VolumeMount{{Name: "ws"}}, want: false},
+		{name: "workdir volume", mounts: []VolumeMount{{Name: "ws", Workdir: true}}, want: true},
+		{name: "one of several is workdir", mounts: []VolumeMount{{Name: "a"}, {Name: "b", Workdir: true}}, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := checkoutIntoWorkdirRoot(tc.mounts); got != tc.want {
+				t.Errorf("checkoutIntoWorkdirRoot(%+v) = %v, want %v", tc.mounts, got, tc.want)
+			}
+		})
 	}
 }

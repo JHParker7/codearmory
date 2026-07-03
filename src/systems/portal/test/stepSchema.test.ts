@@ -256,14 +256,14 @@ describe('forge/build-image', () => {
 describe('forge/git-clone', () => {
   it('nests path/ref/depth under a checkout object with a no-op run default', () => {
     const out = buildStepWith('forge/git-clone', reader({
-      [p('image')]: 'alpine/git',
       [p('volumes')]: 'workspace:/src',
       [p('path')]: 'app',
       [p('ref')]: 'main',
       [p('depth')]: '1',
     }));
     expect(out.checkout).to.deep.equal({ path: 'app', ref: 'main', depth: 1 });
-    expect(out.image).to.equal('alpine/git');
+    // image is forge-controlled; the step must not send one.
+    expect(out).to.not.have.property('image');
     expect(out.run).to.equal('true'); // no-op; the checkout prologue is woven in
     expect(out.volumes).to.deep.equal([
       { workflow_id: '${run_id}', name: 'workspace', mount_path: '/src', workdir: true },
@@ -274,7 +274,6 @@ describe('forge/git-clone', () => {
 
   it('always sets checkout (empty) and lets a post-clone command override run', () => {
     const out = buildStepWith('forge/git-clone', reader({
-      [p('image')]: 'alpine/git',
       [p('volumes')]: 'workspace',
       [p('run')]: 'git submodule update --init',
     }));
@@ -282,14 +281,13 @@ describe('forge/git-clone', () => {
     expect(out.run).to.equal('git submodule update --init');
   });
 
-  it('requires image and volume', () => {
-    expect(() => buildStepWith('forge/git-clone', reader({ [p('volumes')]: 'workspace' }))).to.throw(/Git image is required/);
-    expect(() => buildStepWith('forge/git-clone', reader({ [p('image')]: 'alpine/git' }))).to.throw(/Clone into volume is required/);
+  it('requires a volume (image is forge-controlled, not required)', () => {
+    expect(() => buildStepWith('forge/git-clone', reader({ [p('path')]: 'app' }))).to.throw(/Clone into volume is required/);
+    expect(() => buildStepWith('forge/git-clone', reader({ [p('volumes')]: 'workspace' }))).to.not.throw();
   });
 
   it('round-trips through formValsFromWith without leaking checkout into advanced With', () => {
     const withMap = buildStepWith('forge/git-clone', reader({
-      [p('image')]: 'alpine/git',
       [p('volumes')]: 'workspace:/src',
       [p('path')]: 'app',
       [p('ref')]: 'release',
