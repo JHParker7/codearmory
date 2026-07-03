@@ -90,11 +90,16 @@ export type StepFieldCatalog = 'image';
 export const GIT_CLONE_ENV = 'GIT_CLONE_URL';
 
 /**
- * Whether an action's runner can clone a per-step git repo. Only forge steps consume
- * the `git:` secret_ref, so the repo picker shows only for them in the builder.
+ * Whether an action clones a per-step git repo — i.e. whether the builder shows a
+ * repo picker on its block. Only two forge actions actually consume the repo:
+ * `forge/git-clone` clones it into a shared volume, and `forge/run` can optionally
+ * check it out into the working dir. `forge/create-volume` (only provisions a PVC)
+ * and `forge/build-image` (builds from an already-populated volume and authenticates
+ * with a registry secret, not GIT_CLONE_URL) do NOT clone, so a repo picker on them
+ * just misleads — attaching a repo there does nothing. Keep this list tight.
  */
 export function actionSupportsGitRepo(action: string): boolean {
-  return action.startsWith('forge/');
+  return action === 'forge/run' || action === 'forge/git-clone';
 }
 
 /**
@@ -121,6 +126,49 @@ export function withGitRepo(secretRefs: unknown, repo: string): Record<string, u
   if (v === '') delete sr[GIT_CLONE_ENV];
   else sr[GIT_CLONE_ENV] = `git:${v}`;
   return Object.keys(sr).length > 0 ? sr : undefined;
+}
+
+/**
+ * Reasons a step block's configuration is still incomplete (a required field is
+ * unset), so the pipeline builder can flag it — a red border + hint — before the
+ * user saves the workflow. An empty array means the block is ready to run.
+ *
+ * `eff` is the block's EFFECTIVE `with` (the step definition merged with the
+ * per-occurrence override, in forge's nested body shape); `repo` is the block's
+ * per-occurrence git repo (secret_refs.GIT_CLONE_URL), which the schema field list
+ * does not itself cover. The forge actions are checked against their real nested
+ * shape; every other action falls back to its schema's `required` flags.
+ */
+export function stepConfigIssues(action: string, eff: Record<string, unknown>, repo: string): string[] {
+  const issues: string[] = [];
+  const str = (v: unknown) => typeof v === 'string' && v.trim() !== '';
+  const arr = (v: unknown) => Array.isArray(v) && v.length > 0;
+  switch (action) {
+    case 'forge/git-clone':
+      if (!arr(eff.volumes)) issues.push('attach a volume to clone into');
+      if (!str(repo)) issues.push('select a git repo');
+      return issues;
+    case 'forge/run':
+      if (!str(eff.image)) issues.push('set an image');
+      if (!str(eff.run)) issues.push('set a command to run');
+      return issues;
+    case 'forge/build-image': {
+      const build = (eff.build && typeof eff.build === 'object' && !Array.isArray(eff.build)) ? eff.build as Record<string, unknown> : {};
+      if (!arr(build.destinations) && !str(build.destinations)) issues.push('set a push destination');
+      if (!str(eff.runner_class)) issues.push('set a privileged build runner');
+      return issues;
+    }
+    case 'forge/create-volume':
+      return issues; // name defaults to "workspace"; nothing is strictly required
+  }
+  // Generic fallback: every required, non-output field must have a non-empty value
+  // at the top level of the built `with`.
+  for (const f of schemaForAction(action)) {
+    if (!f.required || f.output) continue;
+    const v = eff[f.key];
+    if (!str(v) && !arr(v) && typeof v !== 'number' && typeof v !== 'boolean') issues.push(`set ${f.label.toLowerCase()}`);
+  }
+  return issues;
 }
 
 /**
@@ -180,7 +228,9 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
   'forge/git-clone': [
     { key: 'volumes', label: 'Clone into volume', placeholder: 'workspace or workspace:/src (create with forge/create-volume)', required: true, kind: 'volumeAttach', config: true },
     { key: 'path', label: 'Clone dir', placeholder: 'volume root (default; a subdir relative to the volume)', config: true },
-    { key: 'ref', label: 'Branch / tag', placeholder: 'main (optional, default remote HEAD)', config: true },
+    // Branch/tag (checkout.ref) is chosen per-occurrence on the block via a BranchSelect
+    // (like forge/run's checkout), since the repo it enumerates is also per-occurrence —
+    // so it is intentionally NOT a step-definition field here.
     { key: 'depth', label: 'Depth', placeholder: '1 (default shallow; 0 = full clone)', kind: 'int', config: true },
     { key: 'run', label: 'Post-clone command', placeholder: 'true (optional; runs in the checkout after clone)', config: true },
   ],

@@ -28,6 +28,7 @@ import { useViewport, clamp } from '../../hooks/useViewport';
 import type { Step, GitRepo, WorkflowAction } from '../../api/bff';
 import { Block, StepRef, MatrixConfig, ApprovalGate, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
 import { StepInputsEditor, UpstreamOutput } from './StepInputsEditor';
+import { gitRepoFromWith, stepConfigIssues } from './stepSchema';
 
 export interface PipelineBlocksProps {
   initialSteps: StepRef[];
@@ -152,6 +153,13 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
 function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, repos, token, onSelect, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
   const leftBar = isGate ? T.blue : block.matrix ? T.amber : inParallel ? T.green : T.dim;
+  // Flag a block whose required config is still unset (e.g. a git-clone with no repo,
+  // or a run with no command) so it reads as incomplete — a red border + hint —
+  // before the workflow is saved. Gates carry their own config on the card, so they
+  // are never flagged here. Only in the editable builder, never the read-only diagram.
+  const eff = { ...defWith, ...(block.with ?? {}) };
+  const issues = editable && !isGate ? stepConfigIssues(action, eff, gitRepoFromWith(eff)) : [];
+  const incomplete = issues.length > 0;
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -164,7 +172,7 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
     flex: inParallel ? '1 1 160px' : undefined,
     minWidth: inParallel ? 0 : undefined,
     background: selected ? T.cardHi : inParallel ? T.bgAlt : T.card,
-    border: `1px solid ${isDragging ? T.green : selected ? T.textHi : T.border}`,
+    border: `1px solid ${isDragging ? T.green : incomplete ? T.red : selected ? T.textHi : T.border}`,
     borderLeft: `3px solid ${leftBar}`,
     padding: '8px 10px', fontFamily: T.mono,
     cursor: editable ? 'grab' : 'default', touchAction: editable ? 'none' : undefined, userSelect: 'none',
@@ -195,6 +203,12 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
             )}
           </div>
           <div onClick={onSelect} style={{ fontSize: 10, color: T.faint, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{isMatrix ? ' · matrix fan-out' : ''}</div>
+          {incomplete && (
+            <div onClick={onSelect} title={`incomplete — ${issues.join('; ')}`}
+              style={{ fontSize: 9.5, color: T.red, cursor: 'pointer', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              ⚠ incomplete · {issues.join(' · ')}
+            </div>
+          )}
         </div>
         {editable && canLink && !isGate && !isMatrix && (
           <button onPointerDown={stop} onClick={() => onToggleParallel(block.uid)}

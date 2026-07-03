@@ -130,14 +130,28 @@ export function StepInputsEditor({ action, defWith, override, upstream, repos, t
           <span style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, lineHeight: 1.4 }}>
             injected as $GIT_CLONE_URL · pick a repo for this step or reference a run input like {'${inputs.REPO}'}
           </span>
-          {/* forge/git-clone always checks out (baked into the step), so it doesn't show
-              the opt-in checkout toggle a plain forge/run step does. */}
+          {/* forge/git-clone always checks out (baked into the step). The branch/tag is
+              picked here per-occurrence — like forge/run's checkout below — since the repo
+              it enumerates is also per-occurrence. */}
+          {repoVal && action === 'forge/git-clone' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 2 }}>
+              <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>branch / tag</span>
+              <div onPointerDown={stop}>
+                <BranchSelect token={token ?? ''} repoUrl={repoVal} value={checkoutRef}
+                  onChange={(v) => patchCheckout({ ref: v })} fontSize={10} />
+              </div>
+              <span style={{ fontFamily: T.mono, fontSize: 9, color: T.faint }}>blank = the remote's default branch</span>
+            </div>
+          )}
+          {/* forge/run: an OPTIONAL checkout that clones into the working dir before the
+              command — unlike forge/git-clone it runs in the step's own image, so that
+              image must contain git. */}
           {repoVal && action !== 'forge/git-clone' && (
             <>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontFamily: T.mono, fontSize: 10, color: T.dim, marginTop: 2 }}>
                 <input type="checkbox" checked={checkoutSpec !== null} onPointerDown={stop}
                   onChange={(e) => setCheckout(e.target.checked ? {} : null)} />
-                check out into working dir <span style={{ color: T.faint }}>(git clone + cd, like actions/checkout)</span>
+                check out into working dir <span style={{ color: T.faint }}>(clone + cd before the command · needs git in the image)</span>
               </label>
               {checkoutSpec !== null && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginLeft: 20 }}>
