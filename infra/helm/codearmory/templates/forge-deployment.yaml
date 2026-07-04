@@ -101,12 +101,23 @@ spec:
               value: {{ .builderImage | quote }}
             {{- end }}
             {{- end }}
-            # The forge/git-clone step runs on a forge-controlled minimal git image.
-            # Override to pin a channel/digest or point at a private mirror; empty =
-            # the binary default (ghcr.io/code-armory-app/runner-git:latest).
-            {{- if .Values.forge.gitImage }}
+            # The forge/git-clone step runs on a forge-controlled minimal git image,
+            # versioned in lockstep with forge (same release pipeline, same tag). When
+            # gitImage is unset, default it to the runner-git image at forge's own
+            # registry and tag — NOT the binary default runner-git:latest, which the
+            # pipeline publishes only from the main branch, so an alpha/beta deployment
+            # would try to pull a tag that was never built (ImagePullBackOff). Override
+            # gitImage to pin a digest or point at a private mirror.
             - name: FORGE_GIT_IMAGE
+            {{- if .Values.forge.gitImage }}
               value: {{ .Values.forge.gitImage | quote }}
+            {{- else }}
+              {{- $gitTag := include "codearmory.imageTag" (list . .Values.forge) }}
+              {{- if .Values.imageRegistry }}
+              value: {{ printf "%s/runner-git:%s" .Values.imageRegistry $gitTag | quote }}
+              {{- else }}
+              value: {{ printf "runner-git:%s" $gitTag | quote }}
+              {{- end }}
             {{- end }}
             - name: GATEKEEPER_URL
               value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"

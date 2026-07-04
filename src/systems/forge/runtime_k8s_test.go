@@ -71,6 +71,45 @@ func TestBuildJob_NonRootSecurityContext(t *testing.T) {
 	}
 }
 
+// TestBuildJob_EgressProxyEnv verifies the exec pod gets the egress-proxy env vars
+// when FORGE_EGRESS_PROXY is set: the NetworkPolicy confines exec pods to the proxy,
+// so without HTTP(S)_PROXY a clone dials the host directly and is blocked, failing
+// right after "Cloning into…". A user-set value in exec.Env must win.
+func TestBuildJob_EgressProxyEnv(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge", egressProxy: "http://egress-proxy:3128"}
+	exec := Execution{
+		ExecutionID: "exec-1",
+		Image:       "alpine:3.19",
+		Command:     []string{"sh", "-c", "git clone $GIT_CLONE_URL ."},
+		TimeoutSecs: 30,
+		Env:         map[string]string{"NO_PROXY": "example.internal"}, // user override
+	}
+
+	env := map[string]string{}
+	for _, e := range r.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+
+	if got := env["HTTPS_PROXY"]; got != "http://egress-proxy:3128" {
+		t.Errorf("HTTPS_PROXY = %q, want the egress proxy URL", got)
+	}
+	if got := env["HTTP_PROXY"]; got != "http://egress-proxy:3128" {
+		t.Errorf("HTTP_PROXY = %q, want the egress proxy URL", got)
+	}
+	// User-set NO_PROXY wins over the injected default.
+	if got := env["NO_PROXY"]; got != "example.internal" {
+		t.Errorf("NO_PROXY = %q, want the user override to win", got)
+	}
+
+	// With no proxy configured (e.g. kata), nothing is injected.
+	bare := &KubernetesRuntime{namespace: "forge"}
+	for _, e := range bare.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "HTTP_PROXY" || e.Name == "HTTPS_PROXY" {
+			t.Errorf("no proxy configured but %s was injected", e.Name)
+		}
+	}
+}
+
 // TestBuildJob_PrivilegedKata verifies the kata (VM-isolated) opt-in: a runner
 // class with Privileged runs the job as root with a writable rootfs and privilege
 // escalation allowed so package managers work — the microVM is the boundary.
@@ -166,8 +205,11 @@ func TestBuildJob_PlumbsExecutionFields(t *testing.T) {
 	if cmd := pod.Containers[0].Command; len(cmd) != 3 || cmd[0] != "python" {
 		t.Errorf("command = %v", cmd)
 	}
-	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 42 {
-		t.Errorf("ActiveDeadlineSeconds = %v, want 42", job.Spec.ActiveDeadlineSeconds)
+	// ActiveDeadlineSeconds is the command timeout plus the startup grace: it counts
+	// from pod creation, so it must leave room for ContainerCreating (volume bind +
+	// image pull) on top of the command's own budget.
+	if want := int64(42) + podStartupGraceSecs; job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != want {
+		t.Errorf("ActiveDeadlineSeconds = %v, want %d", job.Spec.ActiveDeadlineSeconds, want)
 	}
 	if amt := pod.AutomountServiceAccountToken; amt == nil || *amt {
 		t.Error("AutomountServiceAccountToken should be false (no cluster credentials in the sandbox)")
@@ -866,4 +908,75 @@ func TestKubernetesVolumeStatus(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunnerStarted checks the container-start gate that begins the command timeout:
+// a ContainerCreating (Waiting) runner has not started — so pod-startup latency
+// (volume bind + image pull) is not charged against the command — while a Running or
+// already-Terminated runner has. A nil pod and a pod without a runner container have
+// not started.
+func TestRunnerStarted(t *testing.T) {
+	runner := func(s corev1.ContainerState) *corev1.Pod {
+		return &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "runner", State: s}}}}
+	}
+	cases := []struct {
+		desc string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{"ContainerCreating has not started", runner(corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}), false},
+		{"Running has started", runner(corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}), true},
+		{"Terminated has started", runner(corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}), true},
+		{"nil pod has not started", nil, false},
+		{"no runner container has not started", &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "other", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}}, false},
+	}
+	for _, tc := range cases {
+		if got := runnerStarted(tc.pod); got != tc.want {
+			t.Errorf("%s: runnerStarted = %v, want %v", tc.desc, got, tc.want)
+		}
+	}
+}
+
+// TestWaitAndCollect_CommandTimeoutFromContainerStart verifies the command timeout is
+// enforced by the poll loop from container start — not left to the Job's larger
+// ActiveDeadlineSeconds — so a command that runs long past its budget while the pod
+// stays Running (the job never reaching a terminal status) is reported as a timeout.
+func TestWaitAndCollect_CommandTimeoutFromContainerStart(t *testing.T) {
+	// Poll fast so the ~1s command timeout is observed promptly; a small grace keeps
+	// the loop's safety deadline near the command timeout if this ever regresses.
+	defer swapDuration(&k8sPollInterval, 5*time.Millisecond)()
+	defer swapInt64(&podStartupGraceSecs, 1)()
+
+	const execID = "exec-slow"
+	const jobName = "forge-" + execID
+	// A running pod whose job never succeeds/fails — only the command timeout ends it.
+	runningJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: "forge"}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName + "-abcde", Namespace: "forge", Labels: map[string]string{"execution-id": execID}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: "runner", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}},
+	}
+	r := &KubernetesRuntime{client: fake.NewSimpleClientset(runningJob, pod), namespace: "forge"}
+
+	res, err := r.waitAndCollect(context.Background(), Execution{ExecutionID: execID, TimeoutSecs: 1}, jobName)
+	if err == nil || !strings.Contains(err.Error(), "timed out after 1s") {
+		t.Fatalf("waitAndCollect err = %v, want a \"timed out after 1s\" error", err)
+	}
+	if res.ExitCode == nil || *res.ExitCode == 0 {
+		t.Errorf("ExitCode = %v, want a non-zero timeout exit", res.ExitCode)
+	}
+}
+
+// swapDuration sets *p to v and returns a func that restores the old value, for
+// defer-scoped overrides of package-level tunables in a test.
+func swapDuration(p *time.Duration, v time.Duration) func() {
+	old := *p
+	*p = v
+	return func() { *p = old }
+}
+
+// swapInt64 is swapDuration for an int64 tunable.
+func swapInt64(p *int64, v int64) func() {
+	old := *p
+	*p = v
+	return func() { *p = old }
 }
