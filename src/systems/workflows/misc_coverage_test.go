@@ -33,7 +33,7 @@ func TestComplete_StatusVariants(t *testing.T) {
 		rid := run.RunID
 		t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, rid) }) //nolint:errcheck
 		run.Status = "running"
-		run.Complete(context.Background(), status)
+		run.Complete(context.Background(), status, nil)
 		got, _ := (WorkflowRun{RunID: rid}).Get(context.Background())
 		if got.(WorkflowRun).Status != status {
 			t.Errorf("Complete(%q) → %q", status, got.(WorkflowRun).Status)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"maps"
@@ -668,19 +669,28 @@ func approvalStepRun(ctx context.Context, runID string) (WorkflowStepRun, error)
 	return sr, err
 }
 
-// Complete marks the run with its final status and clears credentials. Uses
-// context.Background() internally: the caller's context may be cancelled on
-// shutdown or user cancel, but the terminal state must always be persisted.
-func (run WorkflowRun) Complete(_ context.Context, status string) {
+// Complete marks the run with its final status, records its resolved output map
+// (nil for a non-completed run), and clears credentials. Uses context.Background()
+// internally: the caller's context may be cancelled on shutdown or user cancel, but
+// the terminal state must always be persisted. outputs is stored as the JSON string
+// the serializer:json column round-trips (a text/bytea column across postgres and
+// the sqlite used in unit tests — no dialect-specific cast).
+func (run WorkflowRun) Complete(_ context.Context, status string, outputs map[string]string) {
 	_, span := otel.Tracer("workflows").Start(context.Background(), "db.workflow_run.complete")
 	defer span.End()
 	span.SetAttributes(
 		attribute.String("run.id", run.RunID),
 		attribute.String("status", status),
 	)
+	var outParam any // NULL unless the run completed with declared outputs
+	if len(outputs) > 0 {
+		if b, err := json.Marshal(outputs); err == nil {
+			outParam = string(b)
+		}
+	}
 	if err := connect().WithContext(context.Background()).Exec(
-		"UPDATE workflow_runs SET status=?, ended_at=CURRENT_TIMESTAMP, token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
-		status, run.RunID,
+		"UPDATE workflow_runs SET status=?, outputs=?, ended_at=CURRENT_TIMESTAMP, token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
+		status, outParam, run.RunID,
 	).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

@@ -110,7 +110,7 @@ func TestExecuteAction_Sync(t *testing.T) {
 	}))
 	defer srv.Close()
 	def := ActionDef{Name: "x/run", ServiceURL: srv.URL, Method: http.MethodPost, Path: "/run"}
-	res, err := pool.executeAction(context.Background(), newTokenStore("tok", "sess"), def, map[string]any{"a": "b"})
+	res, err := pool.executeAction(context.Background(), newTokenStore("tok", "sess"), def, map[string]any{"a": "b"}, "", 0)
 	if err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestExecuteAction_Sync_Non2xx(t *testing.T) {
 	}))
 	defer srv.Close()
 	def := ActionDef{Name: "x/run", ServiceURL: srv.URL, Method: http.MethodPost, Path: "/run"}
-	if _, err := pool.executeAction(context.Background(), newTokenStore("", ""), def, nil); err == nil {
+	if _, err := pool.executeAction(context.Background(), newTokenStore("", ""), def, nil, "", 0); err == nil {
 		t.Error("expected error on non-2xx")
 	}
 }
@@ -151,7 +151,7 @@ func TestExecuteAction_AsyncPoll(t *testing.T) {
 			OutputField: "stdout",
 		},
 	}
-	res, err := pool.executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"run": "echo hi"})
+	res, err := pool.executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"run": "echo hi"}, "", 0)
 	if err != nil {
 		t.Fatalf("async executeAction: %v", err)
 	}

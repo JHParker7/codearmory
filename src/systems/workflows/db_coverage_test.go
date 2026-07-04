@@ -180,7 +180,7 @@ func TestWorkflowRun_CRUD_Dequeue_Complete(t *testing.T) {
 
 	// Complete finalises it.
 	run.Status = "running"
-	run.Complete(ctx, "completed")
+	run.Complete(ctx, "completed", nil)
 	done, _ := (WorkflowRun{RunID: run.RunID}).Get(ctx)
 	if done.(WorkflowRun).Status != "completed" {
 		t.Errorf("after complete status = %q", done.(WorkflowRun).Status)

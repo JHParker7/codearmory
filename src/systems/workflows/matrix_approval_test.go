@@ -46,6 +46,12 @@ func TestParseMatrixList(t *testing.T) {
 		{"  ", nil},
 		{`[]`, []string{}},
 		{"solo", []string{"solo"}},
+		// Linux-style list output: whitespace separates values just like commas.
+		{"a b c", []string{"a", "b", "c"}},               // space-separated (echo a b c)
+		{"a.txt\nb.txt\nc.txt", []string{"a.txt", "b.txt", "c.txt"}}, // newline-separated (ls)
+		{"a.txt\nb.txt\n", []string{"a.txt", "b.txt"}},   // trailing newline dropped
+		{"a\tb  c", []string{"a", "b", "c"}},             // tabs and runs of spaces collapse
+		{"a, b\nc d", []string{"a", "b", "c", "d"}},      // mixed comma + whitespace
 	}
 	for _, c := range cases {
 		got := parseMatrixList(c.in)
@@ -239,7 +245,7 @@ func TestExecuteRun_MatrixValuesFromInput(t *testing.T) {
 	run.Add(context.Background())                                                               //nolint:errcheck
 	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)       //nolint:errcheck
 	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id=?`, run.RunID) }) //nolint:errcheck
-	newWorkerPool().executeRun(context.Background(), run.RunID, wf.WorkflowID, "", "", "tu", run.Inputs)
+	newWorkerPool().executeRun(context.Background(), run.RunID, wf.WorkflowID, "", "", "tu", run.Inputs, 0)
 
 	got, _ := getRun(context.Background(), run.RunID)
 	if got.Status != StatusCompleted {
@@ -257,7 +263,7 @@ func TestExecuteRun_MatrixValuesFromInput(t *testing.T) {
 func resumeRun(t *testing.T, runID, workflowID string) WorkflowRun {
 	t.Helper()
 	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, runID) //nolint:errcheck
-	newWorkerPool().executeRun(context.Background(), runID, workflowID, "", "", "tu", map[string]string{})
+	newWorkerPool().executeRun(context.Background(), runID, workflowID, "", "", "tu", map[string]string{}, 0)
 	got, _ := getRun(context.Background(), runID)
 	return got
 }
@@ -495,7 +501,7 @@ func TestExecuteAction_OutputMapFieldBecomesOutput(t *testing.T) {
 		Async: &AsyncConfig{IDField: "execution_id", PollPath: "/executions/{id}", PollIntervalSecs: 1,
 			StatusField: "status", SuccessStates: []string{"completed"}, OutputField: "stdout", OutputMapField: "outputs"},
 	}
-	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"image": "alpine"})
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"image": "alpine"}, "", 0)
 	if err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
@@ -523,7 +529,7 @@ func TestExecuteAction_EmptyOutputMapYieldsNoOutput(t *testing.T) {
 		Async: &AsyncConfig{IDField: "execution_id", PollPath: "/executions/{id}", PollIntervalSecs: 1,
 			StatusField: "status", SuccessStates: []string{"completed"}, OutputField: "stdout", OutputMapField: "outputs"},
 	}
-	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{})
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{}, "", 0)
 	if err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
