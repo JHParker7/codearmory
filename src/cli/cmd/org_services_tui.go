@@ -133,9 +133,15 @@ var osvCols = []tuiColSpec{
 }
 
 func osvRow(r osvRecord) table.Row {
+	// Coming-soon services (source not in this repo) are forced disabled and can't be
+	// enabled yet — surface that in the ENABLED column instead of a plain empty dot.
+	enabled := frBoolDot(r, "enabled")
+	if osvBool(r, "coming_soon") {
+		enabled = "soon"
+	}
 	return table.Row{
 		gkStr(r, "service"),
-		frBoolDot(r, "enabled"),
+		enabled,
 		frDash(gkStr(r, "kind")),
 		frDash(gkStr(r, "source")),
 		frMapCount(r, "config"),
@@ -393,12 +399,22 @@ func (m orgServicesModel) keyList(msg tea.KeyMsg) (orgServicesModel, tea.Cmd) {
 				m.statusErr = true
 				return m, nil
 			}
+			if osvBool(rec, "coming_soon") {
+				m.status = "✗ " + gkStr(rec, "service") + " is coming soon and cannot be enabled yet"
+				m.statusErr = true
+				return m, nil
+			}
 			return m, osvToggle(rec)
 		}
 	case "e", "c":
 		if rec, ok := m.currentRecord(); ok {
 			if osvBool(rec, "core") {
 				m.status = "✗ core services cannot be configured"
+				m.statusErr = true
+				return m, nil
+			}
+			if osvBool(rec, "coming_soon") {
+				m.status = "✗ " + gkStr(rec, "service") + " is coming soon and cannot be configured yet"
 				m.statusErr = true
 				return m, nil
 			}

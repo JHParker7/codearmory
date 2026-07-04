@@ -38,6 +38,14 @@ const inputStyle = {
 const isCore = (s: OrgService) => !!s.core;
 
 /**
+ * Coming-soon services are spun off into their own repos: their images aren't built by
+ * this repo's CI yet, so builder forces them disabled and refuses to enable them. The UI
+ * shows a "coming soon" badge instead of the enable/configure controls. Trust the
+ * server's `coming_soon` flag rather than mirroring builder's set here.
+ */
+const isComingSoon = (s: OrgService) => !!s.coming_soon;
+
+/**
  * A row is removable only when an actual stored baseline row exists for it — a
  * configured platform service (source "default") or a registered custom service
  * (source "custom"). Catalog defaults and core services are not removable.
@@ -149,6 +157,7 @@ export function Builder() {
   };
 
   const toggle = async (svc: OrgService) => {
+    if (isComingSoon(svc)) { setError(`${svc.service} is coming soon and cannot be enabled yet`); return; }
     const body: SetOrgServiceBody = { enabled: !svc.enabled, kind: svc.kind || 'platform' };
     if (svc.config && Object.keys(svc.config).length > 0) body.config = svc.config;
     if (svc.kind === 'custom') { body.image = svc.image; body.port = svc.port; body.description = svc.description; }
@@ -319,16 +328,18 @@ export function Builder() {
             : services.map(svc => {
               const active = selected === svc.service && !creating;
               const core = isCore(svc);
+              const soon = isComingSoon(svc);
               return (
                 <button key={svc.service} onClick={() => { setSelected(svc.service); setCreating(false); }}
                   style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: active ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${active ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-                    <span style={{ width: 6, height: 6, borderRadius: 3, flexShrink: 0, background: core ? T.dim : svc.enabled ? T.green : T.red }} />
+                    <span style={{ width: 6, height: 6, borderRadius: 3, flexShrink: 0, background: core ? T.dim : soon ? T.amber : svc.enabled ? T.green : T.red }} />
                     <span style={{ fontSize: 13, fontWeight: 600, color: active ? T.textHi : T.text }}>{svc.service}</span>
                     {svc.kind === 'custom' && <span style={{ fontSize: 9, color: T.blue, border: `1px solid ${T.blue}`, padding: '0 4px' }}>custom</span>}
                     {core && <span style={{ fontSize: 9, color: T.dim, border: `1px solid ${T.dim}`, padding: '0 4px' }}>core</span>}
+                    {soon && <span style={{ fontSize: 9, color: T.amber, border: `1px solid ${T.amber}`, padding: '0 4px' }}>soon</span>}
                   </div>
-                  <div style={{ fontSize: 10, color: T.faint }}>{core ? 'always on' : svc.enabled ? 'enabled' : 'disabled'} · {svc.source}</div>
+                  <div style={{ fontSize: 10, color: T.faint }}>{core ? 'always on' : soon ? 'coming soon' : svc.enabled ? 'enabled' : 'disabled'} · {svc.source}</div>
                 </button>
               );
             })}
@@ -359,14 +370,16 @@ export function Builder() {
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   {isCore(selectedSvc)
                     ? <Pill tone="dim">core</Pill>
+                    : isComingSoon(selectedSvc)
+                    ? <Pill tone="amber">coming soon</Pill>
                     : <Pill tone={selectedSvc.enabled ? 'green' : 'red'}>{selectedSvc.enabled ? 'enabled' : 'disabled'}</Pill>}
-                  {!isCore(selectedSvc) && (
+                  {!isCore(selectedSvc) && !isComingSoon(selectedSvc) && (
                     <button onClick={() => toggle(selectedSvc)} disabled={busy === selectedSvc.service}
                       style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer', opacity: busy === selectedSvc.service ? 0.6 : 1 }}>
                       {busy === selectedSvc.service ? '[ · · · ]' : selectedSvc.enabled ? '[ disable ]' : '[ enable ]'}
                     </button>
                   )}
-                  {!isCore(selectedSvc) && (
+                  {!isCore(selectedSvc) && !isComingSoon(selectedSvc) && (
                     <button onClick={() => editing ? setEditing(false) : startEdit(selectedSvc)}
                       style={{ background: editing ? T.greenSoft : 'transparent', border: `1px solid ${editing ? T.green : T.border}`, color: editing ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
                       {editing ? '[ cancel ]' : '[ configure ]'}
@@ -388,6 +401,12 @@ export function Builder() {
               {isCore(selectedSvc) && (
                 <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '12px 14px', fontFamily: T.mono, fontSize: 12, color: T.faint, marginBottom: 16 }}>
                   → control-plane service · always enabled and cannot be configured
+                </div>
+              )}
+
+              {isComingSoon(selectedSvc) && (
+                <div style={{ background: T.amberSoft, border: `1px solid ${T.amber}`, padding: '12px 14px', fontFamily: T.mono, fontSize: 12, color: T.amber, marginBottom: 16 }}>
+                  → coming soon · this service isn't available in this bundle yet and cannot be enabled
                 </div>
               )}
 

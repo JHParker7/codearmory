@@ -245,7 +245,9 @@ func desiredWorkloads(ctx context.Context) (map[string]workloadSpec, error) {
 	}
 	out := map[string]workloadSpec{}
 	for _, row := range rows {
-		if coreServices[row.ServiceName] || !row.Enabled {
+		// Never deploy core (chart-shipped) or coming-soon (not-in-repo, images not
+		// built yet) services, even if a stale enabled row survives.
+		if coreServices[row.ServiceName] || comingSoonServices[row.ServiceName] || !row.Enabled {
 			continue
 		}
 		out[row.ServiceName] = specFromRow(row)

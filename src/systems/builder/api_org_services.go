@@ -156,6 +156,14 @@ func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 		enabled = *req.Enabled
 	}
 
+	// Coming-soon services (source not in this repo) can't be deployed yet; refuse to
+	// enable them. A disable request still passes through so a previously-enabled row
+	// can be turned off.
+	if enabled && comingSoonServices[service] {
+		http.Error(w, "service is coming soon and cannot be enabled yet", http.StatusBadRequest)
+		return
+	}
+
 	row := OrgService{
 		OrgID:       orgID,
 		ServiceName: service,
@@ -370,6 +378,15 @@ func mergeViews(catalog []catalogEntry, live map[string]bool, defaults []OrgServ
 		applyRow(views, d, "default")
 	}
 
+	// Coming-soon services (source not in this repo) can't be deployed yet, so force
+	// them disabled and flag them regardless of any catalog/registry/baseline state.
+	for name, v := range views {
+		if comingSoonServices[name] {
+			v.Enabled = false
+			v.ComingSoon = true
+		}
+	}
+
 	out := make([]serviceView, 0, len(views))
 	for _, v := range views {
 		out = append(out, *v)
@@ -457,6 +474,12 @@ func effectiveView(ctx context.Context, service string) (serviceView, error) {
 		applyRow(map[string]*serviceView{service: &v}, d, "default")
 	} else if !isNotFound(err) {
 		return serviceView{}, err
+	}
+	// Coming-soon services (source not in this repo) can't be deployed yet — force
+	// disabled and flag, mirroring mergeViews.
+	if comingSoonServices[service] {
+		v.Enabled = false
+		v.ComingSoon = true
 	}
 	return v, nil
 }

@@ -1432,6 +1432,10 @@ export interface OrgService {
   port?: number;
   description?: string;
   core?: boolean;
+  // coming_soon flags a spun-off service whose source is not in this repo: it can't be
+  // deployed yet, so builder forces it disabled and the UI shows a "coming soon" badge
+  // in place of the enable/configure controls.
+  coming_soon?: boolean;
   db_configured?: boolean;
   db_host?: string;
 }
