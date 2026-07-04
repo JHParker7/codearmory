@@ -246,6 +246,12 @@ type tuiModel struct {
 
 	form      tuiForm
 	runReturn tuiViewID // view to restore when the run form is cancelled
+
+	// runInputDefs are the declared inputs of the pipeline being run, fetched when
+	// the run form opens. When non-empty the run form renders one prompt per input
+	// (defaults pre-filled); when empty it falls back to the free-text KEY=VALUE
+	// field. It gates how tuiSubmitRun collects the inputs map.
+	runInputDefs []pipelineInputDef
 }
 
 func tuiTableStyles() table.Styles {
@@ -724,6 +730,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.view = tuiViewCreate
 		return m, cmd
 
+	case runInputsLoadedMsg:
+		// Only rebuild if we're still on the run form for this pipeline and it
+		// declares inputs; otherwise keep the free-text KEY=VALUE form.
+		if m.view == tuiViewRun && m.selPipeline != nil &&
+			m.selPipeline.WorkflowID == msg.workflowID && len(msg.inputs) > 0 {
+			m.runInputDefs = msg.inputs
+			var cmd tea.Cmd
+			m.form, cmd = newCIRunFormWithInputs(m.selPipeline.Name, msg.inputs)
+			return m, cmd
+		}
+		return m, nil
+
 	case tuiRunTriggeredMsg:
 		// Show the freshly-triggered run in the pipeline's run history.
 		m.submitting = false
@@ -1037,20 +1055,75 @@ func stepsToDSL(steps []tuiWorkflowStep) string {
 // ── Run form ──────────────────────────────────────────────────────────────────
 
 // openRunForm opens the manual-run dialog for m.selPipeline, remembering the
-// current view so a cancel returns the user to where they triggered it from.
+// current view so a cancel returns the user to where they triggered it from. It
+// shows the free-text KEY=VALUE form immediately and fetches the pipeline's
+// declared inputs; if it declares any, runInputsLoadedMsg rebuilds the form with
+// one prompt per input.
 func (m tuiModel) openRunForm() (tuiModel, tea.Cmd) {
 	m.runReturn = m.view
 	m.submitting = false
+	m.runInputDefs = nil
 	var cmd tea.Cmd
 	m.form, cmd = newCIRunForm(m.selPipeline.Name)
 	m.view = tuiViewRun
-	return m, cmd
+	return m, tea.Batch(cmd, tuiFetchRunInputs(m.selPipeline.WorkflowID))
 }
 
 func newCIRunForm(name string) (tuiForm, tea.Cmd) {
 	return newTUIForm("Run Pipeline: "+name,
 		formInput("inputs", "Inputs", "KEY=VALUE KEY=VALUE (optional)"),
 	)
+}
+
+// runInputsLoadedMsg carries a pipeline's declared inputs, resolved after the run
+// form opens so it can be rebuilt with a prompt per declared input. workflowID lets
+// the handler ignore a stale response for a pipeline the user has since navigated away from.
+type runInputsLoadedMsg struct {
+	workflowID string
+	name       string
+	inputs     []pipelineInputDef
+}
+
+// tuiFetchRunInputs loads a pipeline's declared inputs for the run form. A
+// fetch/parse failure degrades to no declared inputs (the free-text field stands)
+// rather than a tuiErrMsg, so it never hijacks the run dialog.
+func tuiFetchRunInputs(workflowID string) tea.Cmd {
+	return func() tea.Msg {
+		data, err := doRequest("GET", "/workflows/pipelines/"+workflowID, nil)
+		if err != nil {
+			return runInputsLoadedMsg{workflowID: workflowID}
+		}
+		var def struct {
+			Name   string             `json:"name"`
+			Inputs []pipelineInputDef `json:"inputs"`
+		}
+		if err := json.Unmarshal(data, &def); err != nil {
+			return runInputsLoadedMsg{workflowID: workflowID}
+		}
+		return runInputsLoadedMsg{workflowID: workflowID, name: def.Name, inputs: def.Inputs}
+	}
+}
+
+// newCIRunFormWithInputs builds the run form with one field per declared input,
+// pre-filling each default and marking required ones. Submitted values are read
+// back by tuiSubmitRun keyed on the input name.
+func newCIRunFormWithInputs(name string, inputs []pipelineInputDef) (tuiForm, tea.Cmd) {
+	fields := make([]formField, len(inputs))
+	for i, in := range inputs {
+		ph := in.Description
+		switch {
+		case in.Required && ph != "":
+			ph += " (required)"
+		case in.Required:
+			ph = "(required)"
+		case ph == "":
+			ph = "(optional)"
+		}
+		fields[i] = formInputDefault(in.Name, in.Name, ph, in.Default)
+	}
+	f, cmd := newTUIForm("Run Pipeline: "+name, fields...)
+	f.help = "declared inputs — required fields must be set; leave blank to use the pipeline default"
+	return f, cmd
 }
 
 func (m tuiModel) tuiKeyRun(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
@@ -1081,10 +1154,30 @@ func (m tuiModel) tuiSubmitRun() (tuiModel, tea.Cmd) {
 		m.form.errMsg = "no pipeline selected"
 		return m, nil
 	}
-	inputs, err := parseRunInputs(m.form.value("inputs"))
-	if err != nil {
-		m.form.errMsg = err.Error()
-		return m, nil
+	var inputs map[string]string
+	if len(m.runInputDefs) > 0 {
+		// Declared-input form: collect one value per input. A blank optional input
+		// is omitted so the backend applies its declared default; a blank required
+		// input is rejected inline before the trigger fires.
+		inputs = map[string]string{}
+		for _, in := range m.runInputDefs {
+			v := strings.TrimSpace(m.form.value(in.Name))
+			if v == "" {
+				if in.Required {
+					m.form.errMsg = in.Name + " is required"
+					return m, nil
+				}
+				continue
+			}
+			inputs[in.Name] = v
+		}
+	} else {
+		parsed, err := parseRunInputs(m.form.value("inputs"))
+		if err != nil {
+			m.form.errMsg = err.Error()
+			return m, nil
+		}
+		inputs = parsed
 	}
 	m.form.errMsg = ""
 	m.submitting = true

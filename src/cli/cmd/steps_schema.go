@@ -180,6 +180,13 @@ var stepActionSchema = map[string][]stepField{
 		{key: "workspace", label: "Workspace", placeholder: "workspace name (optional)"},
 		{key: "ttl_secs", label: "TTL secs", placeholder: "14400 (optional)", kind: stepFieldInt},
 	},
+	// Runs another pipeline as a sub-run. `pipeline` names the target (name or id);
+	// `inputs` are the KEY=VALUE parameters passed to it. The sub-run's declared
+	// outputs become this step's output, referenceable as ${steps.STEP.output.KEY}.
+	"workflows/trigger": {
+		{key: "pipeline", label: "Pipeline", placeholder: "target pipeline name or id (required)", required: true},
+		{key: "inputs", label: "Inputs", placeholder: "KEY=VALUE KEY=VALUE (passed to the sub-run)", kind: stepFieldEnv},
+	},
 }
 
 // schemaKey buckets an action for change-detection: a known action keys to itself,
