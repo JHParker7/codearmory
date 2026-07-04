@@ -34,6 +34,21 @@ var coreServices = map[string]bool{
 	"containers": true,
 }
 
+// comingSoonServices are the platform services whose source was spun out into its
+// own codearmory-<svc> repo and so is NOT in this monorepo. This repo's CI does not
+// build their images yet, so on the core-only bundle they are surfaced as
+// "coming soon": they still appear in the builder catalog, but the effective view
+// forces them disabled and the set-service API refuses to enable them until their
+// images ship. Keep this in sync with the spun-off set in CLAUDE.md.
+var comingSoonServices = map[string]bool{
+	"argo":              true,
+	"blueprints":        true,
+	"chaos":             true,
+	"gitea_integration": true,
+	"mcp":               true,
+	"notifications":     true,
+}
+
 // kinds of org-service rows.
 const (
 	kindPlatform = "platform" // a toggle/override of a registered platform service
@@ -66,7 +81,7 @@ type OrgService struct {
 	// service's Secret under its conventional key on provision.
 	SecretsCiphertext []byte    `json:"-"                 gorm:"column:secrets_ct"`
 	CreatedAt         time.Time `json:"created_at"        gorm:"column:created_at"`
-	UpdatedAt       time.Time `json:"updated_at"        gorm:"column:updated_at"`
+	UpdatedAt         time.Time `json:"updated_at"        gorm:"column:updated_at"`
 }
 
 func (OrgService) TableName() string { return "org_services" }
@@ -85,6 +100,10 @@ type serviceView struct {
 	Port        int            `json:"port,omitempty"`
 	Description string         `json:"description,omitempty"`
 	Core        bool           `json:"core,omitempty"`
+	// ComingSoon flags a spun-off service (source not in this repo, see
+	// comingSoonServices) that cannot be enabled yet. The view is forced disabled
+	// and every UI shows a "coming soon" badge instead of an enable control.
+	ComingSoon bool `json:"coming_soon,omitempty"`
 	// DBConfigured reports whether a per-service DB URL has been stored; DBHost is
 	// the redacted host for display. The URL itself is never returned.
 	DBConfigured bool   `json:"db_configured"`

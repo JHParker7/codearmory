@@ -299,8 +299,10 @@ forge:
     builderImage: ""
   # The forge/git-clone step (and any checkout-only execution that supplies no image)
   # runs on a forge-controlled minimal git image — users never pick or maintain one.
-  # Empty = the binary default (ghcr.io/code-armory-app/runner-git:latest). Override
-  # to pin a channel/digest or point at a private mirror in an air-gapped install.
+  # Empty = the runner-git image at this chart's imageRegistry and forge image tag
+  # (e.g. ghcr.io/code-armory-app/runner-git:alpha-0.1.0), which the release pipeline
+  # builds in lockstep with forge. Override to pin a digest or point at a private
+  # mirror in an air-gapped install.
   gitImage: ""
   secret:
     # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
@@ -327,9 +329,10 @@ forge:
   # Domain-allowlisting egress proxy for forge's sandbox traffic. Deployed by this
   # chart and ENABLED BY DEFAULT: sandbox executions reach the internet only through
   # this proxy, confined to allowedDomains. Automatically skipped when forge.kata.enabled
-  # is true (kata microVMs filter egress at the VM level, so the proxy is moot). NOT
-  # skipped under forge.gvisor.enabled: gVisor is a kernel sandbox, not a network
-  # boundary, so it still needs the proxy + NetworkPolicy to confine egress.
+  # is true — kata's microVM is the isolation boundary, so runners aren't forced through
+  # the proxy; a public-only egress NetworkPolicy (forge.kata.egress) blocks private IPs
+  # instead. NOT skipped under forge.gvisor.enabled: gVisor is a kernel sandbox, not a
+  # network boundary, so it still needs the proxy + NetworkPolicy to confine egress.
   egressProxy:
     enabled: true
     image:
@@ -364,12 +367,30 @@ forge:
   # Run sandbox jobs in hardware-isolated kata (Cloud Hypervisor) microVMs. When true:
   #   - forge runs RUNTIME=kata (env.k8sRuntimeClass MUST be set to the VM-isolating
   #     RuntimeClass, e.g. "kata", or the chart fails to render);
-  #   - the egress proxy + NetworkPolicy are skipped (the microVM filters egress itself);
+  #   - the egress PROXY is skipped (the microVM's kernel is the isolation boundary, so
+  #     runners don't need to be forced through the proxy) — but a public-only egress
+  #     NetworkPolicy is still applied (see kata.egress) so the VM boundary doesn't leave
+  #     cluster-internal / metadata IPs reachable;
   #   - forge seeds its default runner classes privileged (root + writable rootfs), since
   #     the VM — not the container — is the isolation boundary.
   # Mutually exclusive with forge.gvisor.enabled.
   kata:
     enabled: false
+    # Egress confinement for kata sandbox pods. A kata microVM is a KERNEL/VM boundary,
+    # not a network one: on its own a kata pod keeps the pod network's full reach, so
+    # untrusted code could still hit cluster services or the 169.254.169.254 cloud-metadata
+    # endpoint. This NetworkPolicy closes that: it allows egress to ALL public IPs and
+    # blocks every private/internal range (RFC1918 10/8·172.16/12·192.168/16, loopback
+    # 127/8, link-local/metadata 169.254/16, CGNAT 100.64/10) plus anything in `blocklist`,
+    # while still permitting DNS. IPv4 only — IPv6 egress is denied. Requires a
+    # NetworkPolicy-aware CNI; inert otherwise.
+    egress:
+      networkPolicy:
+        enabled: true
+      # Extra CIDRs to DENY on top of the built-in private ranges — e.g. specific public
+      # IPs/subnets you don't want sandboxes reaching. Each must be an IPv4 CIDR within
+      # 0.0.0.0/0, e.g. "203.0.113.7/32" or "198.51.100.0/24".
+      blocklist: []
   # Run sandbox jobs under gVisor (handler "runsc"): a userspace kernel (the Sentry)
   # intercepts each job's syscalls, giving strong isolation WITHOUT any hardware
   # virtualization — choose it over kata when nodes lack nested virt / /dev/kvm. When true:

@@ -35,6 +35,14 @@ type KubernetesRuntime struct {
 	client       kubernetes.Interface
 	namespace    string
 	runtimeClass *string
+	// egressProxy is the HTTP proxy URL (FORGE_EGRESS_PROXY, e.g.
+	// "http://egress-proxy:3128") injected as HTTP(S)_PROXY into every exec pod so
+	// sandbox traffic routes through the egress allowlist. The NetworkPolicy confines
+	// exec pods to that proxy, so without these env vars git/curl dial hosts directly
+	// and get blocked — a clone fails right after "Cloning into…". Empty when the
+	// backend isolates egress itself (kata) or the proxy is disabled. Mirrors the
+	// Docker runtime.
+	egressProxy string
 	// kernelIsolated is true for backends that give the job its OWN kernel: "kata"
 	// (a hardware-virtualized microVM) and "gvisor" (the gVisor userspace kernel /
 	// Sentry). There a runner class may opt into running the job as root
@@ -68,6 +76,20 @@ var k8sPollInterval = time.Duration(envIntOrDefault("FORGE_K8S_POLL_INTERVAL_MS"
 // few seconds apart captures the same peak while keeping the fast tick to the
 // job Get + pod List calls the QPS budget is sized for.
 const metricsSampleInterval = 5 * time.Second
+
+// podStartupGraceSecs is extra time added to a Job's ActiveDeadlineSeconds beyond
+// the command timeout, so pod startup does not consume the command's own budget.
+// Startup covers scheduling, binding+attaching+mounting a shared-workspace PVC, and
+// pulling the image — and a WaitForFirstConsumer StorageClass (the recommended mode)
+// provisions the volume only once the mounting pod schedules, so tens of seconds of
+// bind latency on network storage land in the exec Job, not create-volume. Without
+// this grace a short command timeout (default 30s) elapses while the runner is still
+// ContainerCreating, killing the pod before the command runs ("pod produced no logs:
+// ContainerCreating"). The command timeout itself is enforced from container start in
+// waitAndCollect, so this looser outer deadline never extends the command's runtime;
+// it only bounds a pod that never starts at all. Override with
+// FORGE_POD_STARTUP_GRACE_SECS.
+var podStartupGraceSecs = int64(envIntOrDefault("FORGE_POD_STARTUP_GRACE_SECS", 300))
 
 // newKubernetesRuntime builds a Kubernetes runtime. configRuntimeClass is the
 // backend's per-backend RuntimeClass (the "runtime_class" config key); see
@@ -109,6 +131,7 @@ func newKubernetesRuntime(configRuntimeClass string, kernelIsolated bool) (*Kube
 		namespace:      envOrDefault("K8S_NAMESPACE", "forge"),
 		runtimeClass:   resolveRuntimeClass(configRuntimeClass),
 		kernelIsolated: kernelIsolated,
+		egressProxy:    envOrDefault("FORGE_EGRESS_PROXY", ""),
 	}
 	rt.podMemoryMB = rt.fetchPodMemoryMB
 	return rt, nil
@@ -254,6 +277,15 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 	for k, v := range exec.Env {
 		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 	}
+	// Route sandbox egress through the proxy the NetworkPolicy confines exec pods to.
+	// A user-set value in exec.Env wins, matching the Docker runtime.
+	if r.egressProxy != "" {
+		for _, pair := range proxyEnvPairs(r.egressProxy) {
+			if _, exists := exec.Env[pair[0]]; !exists {
+				envVars = append(envVars, corev1.EnvVar{Name: pair[0], Value: pair[1]})
+			}
+		}
+	}
 
 	// privileged is honoured only on a kernel-isolated backend (kata's microVM or
 	// gvisor's Sentry): there root in the job is contained away from the host kernel,
@@ -316,7 +348,12 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 			// immediately on completion, but if the process crashes before that,
 			// K8s will clean it up after 5 minutes.
 			TTLSecondsAfterFinished: ptr(int32(300)),
-			ActiveDeadlineSeconds:   &exec.TimeoutSecs,
+			// The deadline is the command timeout plus a startup grace, since it
+			// counts from pod creation and so also covers ContainerCreating (volume
+			// bind/attach/mount + image pull). waitAndCollect enforces the command
+			// timeout precisely from container start, so this larger bound only trips
+			// for a pod that never starts. See podStartupGraceSecs.
+			ActiveDeadlineSeconds: ptr(exec.TimeoutSecs + podStartupGraceSecs),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{"app": "forge", "execution-id": exec.ExecutionID},
@@ -398,10 +435,11 @@ func podSecurityContexts(privileged bool) (*corev1.PodSecurityContext, *corev1.S
 }
 
 func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, jobName string) (RunResult, error) {
-	// Add 60 s over the job's ActiveDeadlineSeconds so the poll loop doesn't
-	// time out before K8s marks the job failed — otherwise we'd return an
-	// ambiguous context error instead of the clear "timed out after Ns" one.
-	deadline := time.Duration(exec.TimeoutSecs+60) * time.Second
+	// Add 60 s over the job's ActiveDeadlineSeconds (the command timeout plus the
+	// startup grace) so the poll loop doesn't time out before K8s marks the job
+	// failed — otherwise we'd return an ambiguous context error instead of the clear
+	// "timed out after Ns" one.
+	deadline := time.Duration(exec.TimeoutSecs+podStartupGraceSecs+60) * time.Second
 	pollCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 
@@ -427,6 +465,12 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 	// fast status tick doesn't spam metrics.k8s.io for data that only refreshes every
 	// ~15s. The zero value makes the first eligible tick sample immediately.
 	var lastMetricsSample time.Time
+	// cmdDeadline is when the command's own timeout expires, measured from the moment
+	// the runner container is first observed running — not from pod creation, so slow
+	// startup (volume bind + image pull, all ContainerCreating) does not count against
+	// it. Zero until the container starts; the Job's larger ActiveDeadlineSeconds is
+	// the backstop for a pod that never starts.
+	var cmdDeadline time.Time
 
 	for {
 		select {
@@ -453,6 +497,12 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 					peakMemMB = mb
 				}
 			}
+			// Start the command clock the moment the runner container leaves
+			// ContainerCreating, so pod-startup latency (which the Job's
+			// ActiveDeadlineSeconds also covers) is never charged against the command.
+			if cmdDeadline.IsZero() && runnerStarted(lastPod) {
+				cmdDeadline = time.Now().Add(time.Duration(exec.TimeoutSecs) * time.Second)
+			}
 
 			if j.Status.Succeeded > 0 {
 				exitCode = 0
@@ -463,7 +513,12 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 					if cond.Type != batchv1.JobFailed {
 						continue
 					}
-					if cond.Reason == "DeadlineExceeded" {
+					// Treat the outer deadline as a timeout only if the container
+					// actually started and overran; if it never started, the deadline
+					// bounded a stuck startup (unbindable volume, ImagePullBackOff), so
+					// leave timedOut false and let podFailureDetail below name the real
+					// blocker instead of a misleading "timed out after Ns".
+					if cond.Reason == "DeadlineExceeded" && runnerStarted(lastPod) {
 						timedOut = true
 					}
 					// Keep the job's own failure message (e.g. "Job has reached the
@@ -475,6 +530,16 @@ func (r *KubernetesRuntime) waitAndCollect(ctx context.Context, exec Execution, 
 						failedMsg = cond.Reason
 					}
 				}
+				exitCode = 1
+				goto done
+			}
+
+			// The command overran its own timeout, measured from container start. The
+			// Job's ActiveDeadlineSeconds is a looser bound (it also covers startup), so
+			// enforce the precise timeout here; the deferred deleteJob in Run terminates
+			// the still-running container on return.
+			if !cmdDeadline.IsZero() && time.Now().After(cmdDeadline) {
+				timedOut = true
 				exitCode = 1
 				goto done
 			}
@@ -764,6 +829,22 @@ func containerStateReason(pod *corev1.Pod) string {
 		}
 	}
 	return ""
+}
+
+// runnerStarted reports whether the runner container has left ContainerCreating —
+// it is running or has already terminated. The command timeout starts from this
+// point, and a Job that hits its ActiveDeadlineSeconds without ever reaching it is a
+// startup failure, not a command timeout. A nil pod (never scheduled) is not started.
+func runnerStarted(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "runner" {
+			return cs.State.Running != nil || cs.State.Terminated != nil
+		}
+	}
+	return false
 }
 
 // podExitCode reads the runner container's terminated exit code from a pod
