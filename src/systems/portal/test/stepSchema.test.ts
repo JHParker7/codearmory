@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import {
   schemaKey, schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX, RAW_WITH_KEY, GIT_CLONE_ENV,
-  actionSupportsGitRepo, gitRepoFromWith, withGitRepo,
+  actionSupportsGitRepo, gitRepoFromWith, withGitRepo, stepConfigIssues,
 } from '../src/pages/app/stepSchema.ts';
 
 // valueOf factory: reads prefixed keys ("with.<key>") from a plain map.
@@ -123,8 +123,14 @@ describe('formValsFromWith (secret_refs → advanced With)', () => {
 
 // Per-occurrence git repo helpers used by the pipeline builder's StepInputsEditor.
 describe('per-step git repo helpers', () => {
-  it('actionSupportsGitRepo is true only for forge steps', () => {
+  it('actionSupportsGitRepo is true only for the forge actions that clone a repo', () => {
+    // Only these two consume a per-step git repo.
     expect(actionSupportsGitRepo('forge/run')).to.equal(true);
+    expect(actionSupportsGitRepo('forge/git-clone')).to.equal(true);
+    // These forge actions do NOT clone, so no repo picker (it would only mislead).
+    expect(actionSupportsGitRepo('forge/create-volume')).to.equal(false);
+    expect(actionSupportsGitRepo('forge/build-image')).to.equal(false);
+    // Non-forge actions never take a repo.
     expect(actionSupportsGitRepo('tickets/create')).to.equal(false);
     expect(actionSupportsGitRepo('http')).to.equal(false);
   });
@@ -254,14 +260,15 @@ describe('forge/build-image', () => {
 });
 
 describe('forge/git-clone', () => {
-  it('nests path/ref/depth under a checkout object with a no-op run default', () => {
+  it('nests path/depth under a checkout object with a no-op run default (branch is per-occurrence)', () => {
+    // ref/branch is no longer a step-definition field — it is picked per-occurrence
+    // on the block (via BranchSelect), so buildStepWith nests only path/depth here.
     const out = buildStepWith('forge/git-clone', reader({
       [p('volumes')]: 'workspace:/src',
       [p('path')]: 'app',
-      [p('ref')]: 'main',
       [p('depth')]: '1',
     }));
-    expect(out.checkout).to.deep.equal({ path: 'app', ref: 'main', depth: 1 });
+    expect(out.checkout).to.deep.equal({ path: 'app', depth: 1 });
     // image is forge-controlled; the step must not send one.
     expect(out).to.not.have.property('image');
     expect(out.run).to.equal('true'); // no-op; the checkout prologue is woven in
@@ -290,16 +297,47 @@ describe('forge/git-clone', () => {
     const withMap = buildStepWith('forge/git-clone', reader({
       [p('volumes')]: 'workspace:/src',
       [p('path')]: 'app',
-      [p('ref')]: 'release',
       [p('depth')]: '0',
     }));
     const vals = formValsFromWith('forge/git-clone', withMap);
     expect(vals[p('path')]).to.equal('app');
-    expect(vals[p('ref')]).to.equal('release');
     expect(vals[p('depth')]).to.equal('0');
     expect(vals[p('volumes')]).to.equal('workspace:/src');
     expect(vals[p(RAW_WITH_KEY)]).to.equal(undefined);
     // And it re-nests identically.
     expect(buildStepWith('forge/git-clone', (k) => vals[k] ?? '')).to.deep.equal(withMap);
+  });
+});
+
+// Drives the pipeline builder's red "incomplete" block indicator.
+describe('stepConfigIssues', () => {
+  const gitCloneWith = buildStepWith('forge/git-clone', reader({ [p('volumes')]: 'workspace' }));
+
+  it('flags a git-clone with no repo, and clears once a repo is set', () => {
+    expect(stepConfigIssues('forge/git-clone', gitCloneWith, '')).to.have.lengthOf(1);
+    expect(stepConfigIssues('forge/git-clone', gitCloneWith, 'https://github.com/acme/w.git')).to.deep.equal([]);
+  });
+
+  it('flags a git-clone with no volume attached', () => {
+    expect(stepConfigIssues('forge/git-clone', {}, 'https://github.com/acme/w.git')).to.have.lengthOf(1);
+  });
+
+  it('flags a forge/run missing an image or a command', () => {
+    expect(stepConfigIssues('forge/run', {}, '')).to.have.lengthOf(2);
+    expect(stepConfigIssues('forge/run', { image: 'ubuntu:22.04', run: 'ls' }, '')).to.deep.equal([]);
+  });
+
+  it('never flags forge/create-volume (name defaults)', () => {
+    expect(stepConfigIssues('forge/create-volume', {}, '')).to.deep.equal([]);
+  });
+
+  it('flags a build-image missing a destination or a build runner', () => {
+    expect(stepConfigIssues('forge/build-image', {}, '')).to.have.lengthOf(2);
+    expect(stepConfigIssues('forge/build-image', { build: { destinations: ['reg/app:1'] }, runner_class: 'build-kata' }, '')).to.deep.equal([]);
+  });
+
+  it('falls back to a generic action\'s required schema fields', () => {
+    expect(stepConfigIssues('tickets/create', {}, '')).to.have.lengthOf(1); // title
+    expect(stepConfigIssues('tickets/create', { title: 'Build failed' }, '')).to.deep.equal([]);
   });
 });
