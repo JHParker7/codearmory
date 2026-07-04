@@ -2,6 +2,7 @@ import { expect } from 'chai';
 import {
   schemaKey, schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX, RAW_WITH_KEY, GIT_CLONE_ENV,
   actionSupportsGitRepo, gitRepoFromWith, withGitRepo, stepConfigIssues,
+  volumeAttachWith, volumeAttachFromWith,
 } from '../src/pages/app/stepSchema.ts';
 
 // valueOf factory: reads prefixed keys ("with.<key>") from a plain map.
@@ -178,36 +179,28 @@ describe('shared workspace volumes', () => {
     expect(out.workflow_id).to.equal('custom-scope');
   });
 
-  it('forge/run volume attach becomes the run-scoped volumes array', () => {
+  // The attached volume is now configured PER-OCCURRENCE on the block (it depends on the
+  // pipeline's create-volume step), so buildStepWith never bakes it into the step def;
+  // the block editor builds/reads it via volumeAttachWith / volumeAttachFromWith.
+  it('volumeAttachWith turns a name:/mount spec into the run-scoped volumes array', () => {
+    expect(volumeAttachWith('workspace:/src')).to.deep.equal([
+      { workflow_id: '${run_id}', name: 'workspace', mount_path: '/src', workdir: true },
+    ]);
+  });
+
+  it('forge/run does not bake volumes into the step def (attached per-occurrence)', () => {
     const out = buildStepWith('forge/run', reader({
       [p('image')]: 'alpine:3.19',
       [p('run')]: 'make build',
       [p('volumes')]: 'workspace:/src',
     }));
-    expect(out.volumes).to.deep.equal([
-      { workflow_id: '${run_id}', name: 'workspace', mount_path: '/src', workdir: true },
-    ]);
-  });
-
-  it('forge/run omits volumes when the attach field is blank', () => {
-    const out = buildStepWith('forge/run', reader({
-      [p('image')]: 'alpine:3.19',
-      [p('run')]: 'make build',
-    }));
     expect(out).to.not.have.property('volumes');
   });
 
-  it('round-trips a forge/run volume attach through formValsFromWith', () => {
-    const withMap = buildStepWith('forge/run', reader({
-      [p('image')]: 'alpine:3.19',
-      [p('run')]: 'make build',
-      [p('volumes')]: 'cache:/data',
-    }));
-    const vals = formValsFromWith('forge/run', withMap);
-    expect(vals[p('volumes')]).to.equal('cache:/data');
+  it('volumeAttachFromWith renders the run-scoped array back to a name / name:/mount spec', () => {
+    expect(volumeAttachFromWith([{ workflow_id: '${run_id}', name: 'cache', mount_path: '/data', workdir: true }])).to.equal('cache:/data');
     // The default-mount case renders as the bare name.
-    const bare = formValsFromWith('forge/run', { image: 'x', run: 'y', volumes: [{ workflow_id: '${run_id}', name: 'workspace', mount_path: '/workspace', workdir: true }] });
-    expect(bare[p('volumes')]).to.equal('workspace');
+    expect(volumeAttachFromWith([{ workflow_id: '${run_id}', name: 'workspace', mount_path: '/workspace', workdir: true }])).to.equal('workspace');
   });
 
   it('does not spill the default workflow_id into advanced With on edit', () => {
@@ -225,7 +218,6 @@ describe('forge/build-image', () => {
       [p('build_args')]: 'VERSION=1.0 COMMIT=abc',
       [p('target')]: 'prod',
       [p('registry_secret')]: 'my-registry',
-      [p('volumes')]: 'workspace:/src',
       [p('runner_class')]: 'build-kata',
     }));
     expect(out.build).to.deep.equal({
@@ -236,7 +228,8 @@ describe('forge/build-image', () => {
     });
     expect(out.secret_refs).to.deep.equal({ REGISTRY_AUTH: 'secret:my-registry' });
     expect(out.runner_class).to.equal('build-kata');
-    expect(out.volumes).to.be.an('array');
+    // The source volume is attached per-occurrence on the block, not in the def.
+    expect(out).to.not.have.property('volumes');
     expect(out).to.not.have.property('destinations'); // moved under build
   });
 
@@ -264,7 +257,6 @@ describe('forge/git-clone', () => {
     // ref/branch is no longer a step-definition field — it is picked per-occurrence
     // on the block (via BranchSelect), so buildStepWith nests only path/depth here.
     const out = buildStepWith('forge/git-clone', reader({
-      [p('volumes')]: 'workspace:/src',
       [p('path')]: 'app',
       [p('depth')]: '1',
     }));
@@ -272,37 +264,35 @@ describe('forge/git-clone', () => {
     // image is forge-controlled; the step must not send one.
     expect(out).to.not.have.property('image');
     expect(out.run).to.equal('true'); // no-op; the checkout prologue is woven in
-    expect(out.volumes).to.deep.equal([
-      { workflow_id: '${run_id}', name: 'workspace', mount_path: '/src', workdir: true },
-    ]);
+    // The clone-into volume is attached per-occurrence on the block, not in the def.
+    expect(out).to.not.have.property('volumes');
     // path/ref/depth moved under checkout, not left at the top level.
     expect(out).to.not.have.property('path');
   });
 
   it('always sets checkout (empty) and lets a post-clone command override run', () => {
     const out = buildStepWith('forge/git-clone', reader({
-      [p('volumes')]: 'workspace',
       [p('run')]: 'git submodule update --init',
     }));
     expect(out.checkout).to.deep.equal({});
     expect(out.run).to.equal('git submodule update --init');
   });
 
-  it('requires a volume (image is forge-controlled, not required)', () => {
-    expect(() => buildStepWith('forge/git-clone', reader({ [p('path')]: 'app' }))).to.throw(/Clone into volume is required/);
-    expect(() => buildStepWith('forge/git-clone', reader({ [p('volumes')]: 'workspace' }))).to.not.throw();
+  it('does not require or emit a volume in the def (attached per-occurrence) and sends no image', () => {
+    const out = buildStepWith('forge/git-clone', reader({ [p('path')]: 'app' }));
+    expect(out).to.not.have.property('volumes');
+    expect(out).to.not.have.property('image');
+    expect(out.checkout).to.deep.equal({ path: 'app' });
   });
 
   it('round-trips through formValsFromWith without leaking checkout into advanced With', () => {
     const withMap = buildStepWith('forge/git-clone', reader({
-      [p('volumes')]: 'workspace:/src',
       [p('path')]: 'app',
       [p('depth')]: '0',
     }));
     const vals = formValsFromWith('forge/git-clone', withMap);
     expect(vals[p('path')]).to.equal('app');
     expect(vals[p('depth')]).to.equal('0');
-    expect(vals[p('volumes')]).to.equal('workspace:/src');
     expect(vals[p(RAW_WITH_KEY)]).to.equal(undefined);
     // And it re-nests identically.
     expect(buildStepWith('forge/git-clone', (k) => vals[k] ?? '')).to.deep.equal(withMap);
@@ -311,7 +301,9 @@ describe('forge/git-clone', () => {
 
 // Drives the pipeline builder's red "incomplete" block indicator.
 describe('stepConfigIssues', () => {
-  const gitCloneWith = buildStepWith('forge/git-clone', reader({ [p('volumes')]: 'workspace' }));
+  // The block's EFFECTIVE with: the step def plus the per-occurrence volume attach the
+  // block editor adds (volumes is no longer a def field).
+  const gitCloneWith = { ...buildStepWith('forge/git-clone', reader({})), volumes: volumeAttachWith('workspace') };
 
   it('flags a git-clone with no repo, and clears once a repo is set', () => {
     expect(stepConfigIssues('forge/git-clone', gitCloneWith, '')).to.have.lengthOf(1);

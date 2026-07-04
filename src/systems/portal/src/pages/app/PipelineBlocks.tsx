@@ -28,7 +28,7 @@ import { useViewport, clamp } from '../../hooks/useViewport';
 import type { Step, GitRepo, WorkflowAction } from '../../api/bff';
 import { Block, StepRef, MatrixConfig, ApprovalGate, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
 import { StepInputsEditor, UpstreamOutput } from './StepInputsEditor';
-import { gitRepoFromWith, stepConfigIssues } from './stepSchema';
+import { gitRepoFromWith, stepConfigIssues, actionCreatesVolume, createdVolumeName } from './stepSchema';
 
 export interface PipelineBlocksProps {
   initialSteps: StepRef[];
@@ -105,6 +105,7 @@ interface BlockCardProps {
   selected: boolean;
   defWith: Record<string, unknown>;
   upstream: UpstreamOutput[];
+  upstreamVolumes: string[];
   repos: GitRepo[];
   token?: string;
   onSelect: () => void;
@@ -150,7 +151,7 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
   );
 }
 
-function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, repos, token, onSelect, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
+function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, upstreamVolumes, repos, token, onSelect, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
   const leftBar = isGate ? T.blue : block.matrix ? T.amber : inParallel ? T.green : T.dim;
   // Flag a block whose required config is still unset (e.g. a git-clone with no repo,
@@ -215,6 +216,14 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
             title={inParallel ? 'make sequential (run after the stage above)' : 'run in parallel with the stage above'}
             style={{ background: inParallel ? T.greenSoft : 'transparent', border: `1px solid ${inParallel ? T.green : T.border}`, color: inParallel ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>∥</button>
         )}
+        {/* Per-block matrix toggle: fans this one step out over a list of values. Only
+            on a solo (non-parallel) step, since matrix and parallel are mutually
+            exclusive. Toggling it on reveals the values editor below immediately. */}
+        {editable && !isGate && !inParallel && (
+          <button onPointerDown={stop} onClick={() => onSetMatrix(block.uid, isMatrix ? null : { var: '', values: [] })}
+            title={isMatrix ? 'remove matrix fan-out' : 'fan this step out over a list of values (matrix)'}
+            style={{ background: isMatrix ? T.amberSoft : 'transparent', border: `1px solid ${isMatrix ? T.amber : T.border}`, color: isMatrix ? T.amber : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>⊞</button>
+        )}
         {editable && (
           <button onPointerDown={stop} onClick={() => onRemove(block.uid)} title={isGate ? 'remove gate' : 'remove step'}
             style={{ background: 'transparent', border: 'none', color: T.faint, cursor: 'pointer', fontFamily: T.mono, fontSize: 12, lineHeight: 1, padding: 0 }}
@@ -225,7 +234,7 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
       {showMatrix && block.matrix && <MatrixEditor uid={block.uid} matrix={block.matrix} onSetMatrix={onSetMatrix} />}
       {editable && isGate && block.approval && <GateEditor uid={block.uid} gate={block.approval} onSetApproval={onSetApproval} />}
       {editable && !isGate && selected && (
-        <StepInputsEditor action={action} defWith={defWith} override={block.with ?? {}} upstream={upstream} repos={repos} token={token}
+        <StepInputsEditor action={action} defWith={defWith} override={block.with ?? {}} upstream={upstream} upstreamVolumes={upstreamVolumes} repos={repos} token={token}
           onChange={(o) => onSetWith(block.uid, o)} />
       )}
     </div>
@@ -397,6 +406,27 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     return out;
   };
 
+  // Names of workspace volumes created by forge/create-volume steps in stages BEFORE
+  // this block — the options its volume selector offers (a step attaches a volume an
+  // earlier step made).
+  const upstreamVolumesFor = (uid: string): string[] => {
+    const st = stagesOf(blocks);
+    const stageIdx = st.findIndex((stage) => stage.some((b) => b.uid === uid));
+    if (stageIdx <= 0) return [];
+    const names: string[] = [];
+    for (let i = 0; i < stageIdx; i++) {
+      for (const b of st[i]) {
+        if (b.approval) continue;
+        const def = catalog[b.stepId];
+        if (!def || !actionCreatesVolume(def.action)) continue;
+        const eff = { ...((def.with ?? {}) as Record<string, unknown>), ...(b.with ?? {}) };
+        const nm = createdVolumeName(eff);
+        if (nm && !names.includes(nm)) names.push(nm);
+      }
+    }
+    return names;
+  };
+
   const card = (b: Block, inParallel: boolean) => {
     const isGate = !!b.approval;
     const { label, action } = isGate ? { label: 'approval gate', action: 'manual approval' } : labelFor(catalog, b.stepId);
@@ -404,7 +434,8 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
       <BlockCard key={b.uid} block={b} label={label} action={action} editable={editable}
         canLink={(indexOf.get(b.uid) ?? 0) > 0} inParallel={inParallel} isGate={isGate}
         selected={selectedUid === b.uid} defWith={(catalog[b.stepId]?.with ?? {}) as Record<string, unknown>}
-        upstream={selectedUid === b.uid ? upstreamFor(b.uid) : []} repos={repos} token={token}
+        upstream={selectedUid === b.uid ? upstreamFor(b.uid) : []}
+        upstreamVolumes={selectedUid === b.uid ? upstreamVolumesFor(b.uid) : []} repos={repos} token={token}
         onSelect={() => select(b)} onRename={setName} onSetWith={setWith}
         onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onSetApproval={setApproval} onRemove={remove} />
     );
@@ -446,14 +477,27 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     </div>
   ) : null;
 
+  // Matrix mode has no canvas container (a matrix wraps a single step), so without
+  // this the amber palette highlight was the only cue — clicking "matrix" felt inert.
+  // Show the same active affordance parallel has: the next clicked step fans out, and
+  // any existing block can be turned into a matrix with its own ⊞ toggle.
+  const activeMatrixHint = editable && matrixMode ? (
+    <div style={{ border: `1px dashed ${T.amber}`, borderLeft: `3px solid ${T.amber}`, background: T.bgAlt }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.amber, letterSpacing: 1, textTransform: 'uppercase', padding: '5px 10px', borderBottom: `1px dashed ${T.border}` }}>
+        ⊞ matrix · active
+      </div>
+      <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, padding: 12 }}>→ click a step on the left to fan it out — or press ⊞ on any step below</div>
+    </div>
+  ) : null;
+
   const list = (
     <div style={{ display: 'flex', flexDirection: 'column', padding: 14, overflow: 'auto', flex: 1 }}>
-      {blocks.length === 0 && !activeEmptyParallel ? (
+      {blocks.length === 0 && !activeEmptyParallel && !activeMatrixHint ? (
         <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>
           → empty pipeline{editable ? ' — add steps from the left' : ''}
         </div>
       ) : (
-        <>{rows}{activeEmptyParallel}</>
+        <>{rows}{activeEmptyParallel}{activeMatrixHint}</>
       )}
     </div>
   );

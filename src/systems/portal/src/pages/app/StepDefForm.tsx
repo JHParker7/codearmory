@@ -174,7 +174,10 @@ export function StepDefForm({ token, initial, lockAction, onSaved, onCancel, aut
         const config = fields.filter(f => f.config);
         const advanced = fields.filter(f => f.key === RAW_WITH_KEY);
         const outputs = fields.filter(f => f.output);
-        const inputs = fields.filter(f => !f.config && !f.output && f.key !== RAW_WITH_KEY);
+        // `pipeline` fields (e.g. the attached volume) are configured per-occurrence in
+        // the pipeline block, not on the reusable step definition, so they render in
+        // neither config nor inputs here — the block's inputs editor owns them.
+        const inputs = fields.filter(f => !f.config && !f.output && !f.pipeline && f.key !== RAW_WITH_KEY);
         const section = (label: string, help: ReactNode, fs: typeof fields) => fs.length > 0 && (
           <>
             <div style={{ height: 1, background: T.border, margin: '10px 0 8px' }} />
