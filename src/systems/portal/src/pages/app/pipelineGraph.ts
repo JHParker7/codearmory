@@ -34,6 +34,22 @@ export interface ApprovalGate {
   approvers?: string[];
 }
 
+/** A pipeline-level run parameter. Mirrors the workflows API WorkflowInputDef; kept
+ * local so this module stays UI/library-free. */
+export interface WorkflowInputDef {
+  name: string;
+  default?: string;
+  required?: boolean;
+  description?: string;
+}
+
+/** A pipeline-level output published on completion. `value` is a `${...}` template
+ * (typically `${steps.STEP.output.KEY}`). Mirrors the API WorkflowOutputDef. */
+export interface WorkflowOutputDef {
+  name: string;
+  value: string;
+}
+
 /** A pipeline step reference as the workflows API stores/accepts it — EITHER a
  * reference to a stored step (step_id) OR an inline approval gate. */
 export interface StepRef {
@@ -216,18 +232,86 @@ export function duplicateStepNames(steps: StepRef[], defName: (stepId: string) =
   return [...counts.entries()].filter(([, c]) => c > 1).map(([n]) => n);
 }
 
+/** Sanitises pipeline-level input declarations for the payload/JSON: keeps only
+ * named rows and drops empty optional fields. Returns undefined when none remain,
+ * so the `inputs` key is omitted entirely. */
+export function inputsToPayload(inputs: WorkflowInputDef[]): WorkflowInputDef[] | undefined {
+  const out: WorkflowInputDef[] = [];
+  for (const i of inputs) {
+    const name = i.name.trim();
+    if (!name) continue;
+    const def: WorkflowInputDef = { name };
+    if (i.default != null && i.default !== '') def.default = i.default;
+    if (i.required) def.required = true;
+    if (i.description != null && i.description !== '') def.description = i.description;
+    out.push(def);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** Sanitises pipeline-level output declarations: keeps only rows with both a name
+ * and a value. Returns undefined when none remain, so the `outputs` key is omitted. */
+export function outputsToPayload(outputs: WorkflowOutputDef[]): WorkflowOutputDef[] | undefined {
+  const out: WorkflowOutputDef[] = [];
+  for (const o of outputs) {
+    const name = o.name.trim();
+    const value = o.value.trim();
+    if (!name || !value) continue;
+    out.push({ name, value });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 /** Renders the pipeline as the canonical config JSON (the saved payload).
- * description is omitted when empty. */
-export function configToJson(name: string, description: string, steps: StepRef[]): string {
+ * description/inputs/outputs are omitted when empty. */
+export function configToJson(name: string, description: string, steps: StepRef[], inputs: WorkflowInputDef[] = [], outputs: WorkflowOutputDef[] = []): string {
   const obj: Record<string, unknown> = { name };
   if (description) obj.description = description;
+  const ins = inputsToPayload(inputs);
+  if (ins) obj.inputs = ins;
+  const outs = outputsToPayload(outputs);
+  if (outs) obj.outputs = outs;
   obj.steps = stepsToPayload(steps);
   return JSON.stringify(obj, null, 2);
 }
 
+/** Reads pipeline-level input declarations back out of a parsed config object.
+ * Skips malformed rows; returns undefined when there are none, so a config with no
+ * inputs parses to an object without the key (matching an unset declaration). */
+function parseInputDefs(v: unknown): WorkflowInputDef[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: WorkflowInputDef[] = [];
+  for (const item of v) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.name !== 'string' || !o.name) continue;
+    const def: WorkflowInputDef = { name: o.name };
+    if (typeof o.default === 'string') def.default = o.default;
+    if (typeof o.required === 'boolean' && o.required) def.required = true;
+    if (typeof o.description === 'string') def.description = o.description;
+    out.push(def);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** Reads pipeline-level output declarations back out of a parsed config object.
+ * Skips rows missing a name or value; returns undefined when there are none. */
+function parseOutputDefs(v: unknown): WorkflowOutputDef[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: WorkflowOutputDef[] = [];
+  for (const item of v) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.name !== 'string' || !o.name || typeof o.value !== 'string') continue;
+    out.push({ name: o.name, value: o.value });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 /** Parses an edited config JSON back into builder state, throwing a user-facing
- * Error on malformed JSON or an unexpected shape so the panel can surface it. */
-export function parseConfig(raw: string): { name: string; description: string; steps: StepRef[] } {
+ * Error on malformed JSON or an unexpected shape so the panel can surface it. The
+ * inputs/outputs keys are present only when the config declares them. */
+export function parseConfig(raw: string): { name: string; description: string; steps: StepRef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[] } {
   const obj: unknown = JSON.parse(raw);
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('config must be a JSON object');
   const o = obj as Record<string, unknown>;
@@ -253,9 +337,14 @@ export function parseConfig(raw: string): { name: string; description: string; s
     if (so.matrix && typeof so.matrix === 'object' && !Array.isArray(so.matrix)) ref.matrix = so.matrix as MatrixConfig;
     return ref;
   });
-  return {
+  const result: { name: string; description: string; steps: StepRef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[] } = {
     name: typeof o.name === 'string' ? o.name : '',
     description: typeof o.description === 'string' ? o.description : '',
     steps,
   };
+  const inputs = parseInputDefs(o.inputs);
+  if (inputs) result.inputs = inputs;
+  const outputs = parseOutputDefs(o.outputs);
+  if (outputs) result.outputs = outputs;
+  return result;
 }

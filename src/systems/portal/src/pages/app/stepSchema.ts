@@ -74,10 +74,11 @@ export function volumeAttachFromWith(value: unknown): string {
 
 /**
  * Names a catalog that backs a field with a picker instead of free text:
- * `image` (the forge image allowlist). The field degrades to a plain text input
- * when its catalog is empty/unavailable.
+ * `image` (the forge image allowlist) or `pipeline` (the workflows list, for the
+ * workflows/trigger target). The field degrades to a plain text input when its
+ * catalog is empty/unavailable.
  */
-export type StepFieldCatalog = 'image';
+export type StepFieldCatalog = 'image' | 'pipeline';
 
 /**
  * Env var the per-step git repo is injected as. Picking a repo for a forge step in
@@ -262,6 +263,14 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
     // so it is intentionally NOT a step-definition field here.
     { key: 'depth', label: 'Depth', placeholder: '1 (default shallow; 0 = full clone)', kind: 'int', config: true },
     { key: 'run', label: 'Post-clone command', placeholder: 'true (optional; runs in the checkout after clone)', config: true },
+  ],
+  // Runs another pipeline as a sub-run. `pipeline` names the target (name or id);
+  // `inputs` feeds its declared inputs (wireable — an upstream ${steps.X.output.KEY}
+  // or a ${matrix.item}). The step's output is the sub-run's resolved outputs map, so
+  // downstream steps read ${steps.<triggerStep>.output.<KEY>}.
+  'workflows/trigger': [
+    { key: 'pipeline', label: 'Pipeline', placeholder: 'target pipeline name or id', required: true, config: true, catalog: 'pipeline' },
+    { key: 'inputs', label: 'Inputs', placeholder: 'KEY=VALUE (wire to ${steps.X.output} or ${matrix.item})', kind: 'env' },
   ],
   'tickets/create': [
     { key: 'title', label: 'Title', placeholder: 'Build failed', required: true },

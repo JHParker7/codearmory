@@ -229,6 +229,22 @@ export function RunView() {
         )}
       </div>
 
+      {/* Captured outputs: the pipeline-level outputs resolved at completion. Shown
+          above the panels so a finished run's published values read at a glance. */}
+      {run.outputs && Object.keys(run.outputs).length > 0 && (
+        <div style={{ padding: '10px 20px', borderBottom: `1px solid ${T.border}`, background: T.bg }}>
+          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>captured outputs</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {Object.entries(run.outputs).map(([k, v]) => (
+              <div key={k} style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.green, fontWeight: 600 }}>{k}</span>
+                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.text, wordBreak: 'break-word' }}>{v}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', flexDirection: narrow ? 'column' : 'row', flex: 1, overflow: 'hidden' }}>
         {/* Pipeline with live status */}
         <div style={{
