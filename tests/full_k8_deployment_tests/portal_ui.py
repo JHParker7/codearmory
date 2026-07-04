@@ -89,6 +89,16 @@ MATRIX_VALUES_FROM_INPUT = (By.CSS_SELECTOR, "input[placeholder^='or values from
 # Inline gate editor (PipelineBlocks.tsx) — only one gate exists.
 GATE_MESSAGE_INPUT = (By.CSS_SELECTOR, "input[placeholder^='message shown to approvers']")
 
+# Declared pipeline inputs/outputs editors (Workflows.tsx builder header) and the
+# workflows/trigger step fields.
+IO_TOGGLE = (By.CSS_SELECTOR, "button[title='declare pipeline inputs and outputs']")
+DECL_INPUT_ADD = (By.XPATH, "//button[normalize-space()='+ input']")
+DECL_OUTPUT_ADD = (By.XPATH, "//button[normalize-space()='+ output']")
+DECL_INPUT_DEFAULTS = (By.CSS_SELECTOR, "input[placeholder='default (optional)']")
+DECL_OUTPUT_VALUES = (By.CSS_SELECTOR, "input[placeholder^=\"${steps.build.output\"]")
+TRIGGER_PIPELINE_INPUT = (By.CSS_SELECTOR, "input[placeholder='target pipeline name or id']")
+TRIGGER_INPUTS_INPUT = (By.CSS_SELECTOR, "input[placeholder^='KEY=VALUE']")
+
 # RunView.tsx.
 APPROVAL_BANNER = (By.XPATH, "//div[contains(normalize-space(), 'NEEDS YOUR APPROVAL')]")
 APPROVE_BTN = (By.XPATH, "//button[contains(normalize-space(), 'approve')]")
@@ -282,6 +292,52 @@ class PortalUI:
         self._click(GATE_BTN)
         self._wait(self.timeout).until(lambda d: self._block_count() > before)
         self._type_into(GATE_MESSAGE_INPUT, message)
+
+    def _ensure_io_editor_open(self) -> None:
+        """The declared inputs/outputs editors sit behind a collapsed `▸ inputs/outputs`
+        toggle in the builder header; expand it if it isn't already open."""
+        if self.driver.find_elements(*DECL_INPUT_ADD):
+            return
+        self._click(IO_TOGGLE)
+        self._find(DECL_INPUT_ADD)
+
+    def add_declared_input(self, name: str, default: str = "") -> None:
+        """Add a declared pipeline input (name + optional default) via the builder's
+        inputs editor."""
+        self._ensure_io_editor_open()
+        before = len(self.driver.find_elements(*DECL_INPUT_DEFAULTS))
+        self._click(DECL_INPUT_ADD)
+        self._wait(self.timeout).until(lambda d: len(d.find_elements(*DECL_INPUT_DEFAULTS)) > before)
+        default_field = self.driver.find_elements(*DECL_INPUT_DEFAULTS)[-1]  # the new row
+        name_field = default_field.find_element(By.XPATH, "preceding-sibling::input[1]")
+        self._type(name_field, name)
+        if default:
+            self._type(default_field, default)
+
+    def add_declared_output(self, name: str, value: str) -> None:
+        """Add a declared pipeline output (name → ${...} value template) via the
+        builder's outputs editor."""
+        self._ensure_io_editor_open()
+        before = len(self.driver.find_elements(*DECL_OUTPUT_VALUES))
+        self._click(DECL_OUTPUT_ADD)
+        self._wait(self.timeout).until(lambda d: len(d.find_elements(*DECL_OUTPUT_VALUES)) > before)
+        value_field = self.driver.find_elements(*DECL_OUTPUT_VALUES)[-1]  # the new row
+        name_field = value_field.find_element(By.XPATH, "preceding-sibling::input[1]")
+        self._type(name_field, name)
+        self._type(value_field, value)
+
+    def add_trigger_step(self, name: str, pipeline: str, inputs_kv: str = "") -> None:
+        """Create a workflows/trigger step targeting `pipeline`, passing `inputs_kv`
+        (a 'KEY=VALUE ...' string). Drives the same palette-action → step-form flow as
+        a forge step, but with the pipeline picker + inputs map."""
+        before = self._block_count()
+        self._pick_action("workflows/trigger")
+        self._type_into(STEP_NAME_INPUT, name)
+        self._type_into(TRIGGER_PIPELINE_INPUT, pipeline)
+        self._dismiss_image_dropdown()  # closes the PipelineSelect filter dropdown
+        if inputs_kv:
+            self._type_into(TRIGGER_INPUTS_INPUT, inputs_kv)
+        self._submit_step_and_wait(before)
 
     def start_matrix_mode(self) -> None:
         """Arm matrix mode: the next step added from the palette becomes a matrix
