@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -252,10 +253,14 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 
 // wrapOutputEnv appends a trailer to a `[<shell> -c <script>]` command so that,
 // after the user's script runs in the SAME shell (so exported/computed vars are
-// visible), it prints each requested var as `NAME=value` after a unique marker
-// line. The worker then splits these back out of stdout (parseOutputEnv). A
-// non-`-c` command is returned unchanged — capture needs a shell trailer. Names
-// are validated POSIX identifiers, so they are safe to inject into the loop list.
+// visible), it prints each requested var as `NAME=<base64(value)>` after a unique
+// marker line. The value is base64-encoded so it round-trips intact regardless of
+// its content — newlines (e.g. a `find ... -printf '%f\n'` list), spaces, '=', or
+// binary — where the old raw `NAME=value` form was line-based and truncated any
+// value containing a newline to its first line. The worker splits and decodes these
+// back out of stdout (parseOutputEnv). A non-`-c` command is returned unchanged —
+// capture needs a shell trailer. Names are validated POSIX identifiers, so they are
+// safe to inject. base64 is present on every runner image (coreutils / busybox).
 func wrapOutputEnv(cmd, names []string, marker string) []string {
 	if len(cmd) < 3 || cmd[1] != "-c" || len(names) == 0 {
 		return cmd
@@ -264,10 +269,11 @@ func wrapOutputEnv(cmd, names []string, marker string) []string {
 	b.WriteString(cmd[2])
 	b.WriteString("\nprintf '\\n%s\\n' '" + marker + "'\n")
 	// One printf per name, expanding "$NAME" in the same shell so both exported and
-	// plain shell vars the script set are captured (an unset var emits empty). Names
-	// are validated POSIX identifiers, so the literal $NAME can't inject.
+	// plain shell vars the script set are captured (an unset var base64-encodes to an
+	// empty string). The value is piped through base64 (newlines stripped) so it stays
+	// on a single NAME= line. Names are validated POSIX identifiers, so $NAME can't inject.
 	for _, n := range names {
-		b.WriteString("printf '%s=%s\\n' '" + n + "' \"$" + n + "\"\n")
+		b.WriteString("printf '%s=%s\\n' '" + n + "' \"$(printf '%s' \"$" + n + "\" | base64 | tr -d '\\n')\"\n")
 	}
 	out := append([]string(nil), cmd...)
 	out[2] = b.String()
@@ -275,9 +281,11 @@ func wrapOutputEnv(cmd, names []string, marker string) []string {
 }
 
 // parseOutputEnv splits captured stdout at the marker emitted by wrapOutputEnv:
-// everything before is the real stdout; the `NAME=value` lines after it become the
-// captured map (restricted to the requested names). A missing marker (the script
-// failed before the trailer ran) yields the stdout unchanged and no captures.
+// everything before is the real stdout; the `NAME=<base64(value)>` lines after it
+// become the captured map (restricted to the requested names), with each value
+// base64-decoded so multi-line/arbitrary content round-trips. A missing marker (the
+// script failed before the trailer ran) yields the stdout unchanged and no captures;
+// a value that fails to decode is skipped rather than surfaced raw.
 func parseOutputEnv(stdout string, names []string, marker string) (string, map[string]string) {
 	before, after, found := strings.Cut(stdout, "\n"+marker+"\n")
 	if !found {
@@ -289,9 +297,15 @@ func parseOutputEnv(stdout string, names []string, marker string) (string, map[s
 	}
 	out := map[string]string{}
 	for _, line := range strings.Split(after, "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok && want[k] {
-			out[k] = v
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || !want[k] {
+			continue
 		}
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(v))
+		if err != nil {
+			continue
+		}
+		out[k] = string(decoded)
 	}
 	if len(out) == 0 {
 		out = nil

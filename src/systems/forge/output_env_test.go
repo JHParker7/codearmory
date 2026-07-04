@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -15,8 +16,10 @@ func TestWrapOutputEnv_AppendsTrailerToShellScript(t *testing.T) {
 	if !strings.HasPrefix(cmd[2], "export FOO=bar\n") {
 		t.Errorf("user script not preserved at the front: %q", cmd[2])
 	}
-	if !strings.Contains(cmd[2], "MARKER123") || !strings.Contains(cmd[2], `'FOO' "$FOO"`) || !strings.Contains(cmd[2], `'BAZ' "$BAZ"`) {
-		t.Errorf("trailer missing marker/vars: %q", cmd[2])
+	if !strings.Contains(cmd[2], "MARKER123") || !strings.Contains(cmd[2], "base64") ||
+		!strings.Contains(cmd[2], `'FOO'`) || !strings.Contains(cmd[2], `"$FOO"`) ||
+		!strings.Contains(cmd[2], `'BAZ'`) || !strings.Contains(cmd[2], `"$BAZ"`) {
+		t.Errorf("trailer missing marker/vars/base64: %q", cmd[2])
 	}
 }
 
@@ -30,10 +33,12 @@ func TestWrapOutputEnv_NonShellOrEmptyUnchanged(t *testing.T) {
 	}
 }
 
-// parseOutputEnv splits the real stdout from the marker-delimited NAME=value lines
-// and keeps only the requested names.
+// parseOutputEnv splits the real stdout from the marker-delimited NAME=<base64> lines,
+// base64-decodes each value, and keeps only the requested names.
 func TestParseOutputEnv_SplitsStdoutAndCaptures(t *testing.T) {
-	stdout := "build log line 1\nbuild log line 2\nMARKER\nFOO=bar\nVERSION=1.2.3\nIGNORED=x\n"
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	stdout := "build log line 1\nbuild log line 2\nMARKER\n" +
+		"FOO=" + enc("bar") + "\nVERSION=" + enc("1.2.3") + "\nIGNORED=" + enc("x") + "\n"
 	real, out := parseOutputEnv(stdout, []string{"FOO", "VERSION"}, "MARKER")
 	if real != "build log line 1\nbuild log line 2" {
 		t.Errorf("real stdout = %q", real)
@@ -43,6 +48,31 @@ func TestParseOutputEnv_SplitsStdoutAndCaptures(t *testing.T) {
 	}
 	if _, ok := out["IGNORED"]; ok {
 		t.Errorf("captured an unrequested var: %v", out)
+	}
+}
+
+// The regression this fixes: a value with embedded newlines (e.g. a
+// `find ... -printf '%f\n'` directory list) must be captured whole, not truncated to
+// its first line the way the old raw NAME=value line protocol did.
+func TestParseOutputEnv_MultilineValueRoundTrips(t *testing.T) {
+	list := "outpost-gateway\nbuilder\ngit"
+	stdout := "some log\nMARKER\nDIRS=" + base64.StdEncoding.EncodeToString([]byte(list)) + "\n"
+	real, out := parseOutputEnv(stdout, []string{"DIRS"}, "MARKER")
+	if real != "some log" {
+		t.Errorf("real stdout = %q", real)
+	}
+	if out["DIRS"] != list {
+		t.Errorf("DIRS = %q, want the full multi-line list %q", out["DIRS"], list)
+	}
+}
+
+// A value that isn't valid base64 (e.g. base64 missing on the runner image, so the
+// emit produced an empty/garbled field) is skipped rather than surfaced raw.
+func TestParseOutputEnv_SkipsUndecodableValue(t *testing.T) {
+	stdout := "log\nMARKER\nFOO=not!valid!base64!\n"
+	_, out := parseOutputEnv(stdout, []string{"FOO"}, "MARKER")
+	if _, ok := out["FOO"]; ok {
+		t.Errorf("expected undecodable value to be skipped, got %v", out)
 	}
 }
 

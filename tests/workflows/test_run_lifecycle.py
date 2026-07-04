@@ -100,6 +100,29 @@ def test_successful_step_surfaces_stdout_in_logs(bearer):
     requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf}", headers=bearer)
 
 
+def test_multiline_output_env_is_captured_whole(bearer):
+    # Regression: an output_env value with embedded newlines (e.g. a
+    # `find ... -printf '%f\n'` directory list) must be captured whole, not truncated
+    # to its first line. The read step sets DIRS to a 3-line value and captures it;
+    # all three lines must survive into the step's consumable output.
+    tag = uuid.uuid4().hex[:8]
+    a, b, c = f"alpha{tag}", f"beta{tag}", f"gamma{tag}"
+    step = make_step(bearer, "forge/run", {
+        "image": "alpine:3.19",
+        "run": f"DIRS=$(printf '%s\\n%s\\n%s\\n' {a} {b} {c})",
+        "output_env": ["DIRS"],
+    })
+    wf = make_pipeline(bearer, [{"step_id": step}])
+    run_id = trigger(bearer, wf)
+    result = poll_run(bearer, run_id, timeout=90)
+    assert result["status"] == "completed", f"expected completed, got {result['status']}: {result}"
+    blob = str(result.get("step_runs") or [])
+    for val in (a, b, c):
+        assert val in blob, f"multi-line output truncated — {val!r} missing from captured output: {blob!r}"
+    requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf}", headers=bearer)
+    requests.delete(f"{WORKFLOWS_URL}/steps/{step}", headers=bearer)
+
+
 def test_failed_step_surfaces_forge_error_message(bearer):
     # exit 127 with no stderr makes forge synthesize a "command not found"
     # diagnostic; the run must surface forge's actual message, not just the generic
