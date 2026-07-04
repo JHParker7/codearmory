@@ -103,6 +103,29 @@ export function actionSupportsGitRepo(action: string): boolean {
 }
 
 /**
+ * Whether an action ATTACHES a shared workspace volume (so the block shows a volume
+ * selector wired to an upstream forge/create-volume step). forge/run mounts one to
+ * share a checkout/artifacts, forge/git-clone clones into one, and forge/build-image
+ * builds from one. forge/create-volume itself creates rather than attaches.
+ */
+export function actionAttachesVolume(action: string): boolean {
+  return action === 'forge/run' || action === 'forge/build-image' || action === 'forge/git-clone';
+}
+
+/** Whether an action CREATES a shared workspace volume — the source of the names the
+ * attach selector offers to downstream steps. Only forge/create-volume does. */
+export function actionCreatesVolume(action: string): boolean {
+  return action === 'forge/create-volume';
+}
+
+/** The volume name a forge/create-volume step provisions: its `with.name`, or the
+ * default "workspace" when unset (matching the create-volume schema default). */
+export function createdVolumeName(withMap: Record<string, unknown>): string {
+  const n = withMap?.name;
+  return typeof n === 'string' && n.trim() !== '' ? n.trim() : DEFAULT_VOLUME_NAME;
+}
+
+/**
  * Reads the bare repo reference (a clone URL or a `${inputs.X}` template) back out of
  * a step's `with.secret_refs.GIT_CLONE_URL`, stripping the `git:` scheme. Returns ''
  * when there is no git: ref, so the picker shows empty rather than a malformed value.
@@ -193,6 +216,12 @@ export interface StepField {
    * with neither `config` nor `output` are INPUTS: parameters the pipeline supplies
    * (the value set here is the default), grouped under the form's "inputs" section. */
   config?: boolean;
+  /** Marks a field configured PER-OCCURRENCE in the pipeline block (not the step
+   * definition) because its value depends on other steps in that pipeline — e.g. the
+   * workspace volume a forge step attaches to, which is created by an upstream
+   * forge/create-volume step. Pipeline fields are hidden from the step-definition
+   * form and surfaced (as a selector where possible) in the block's inputs editor. */
+  pipeline?: boolean;
 }
 
 /**
@@ -205,7 +234,7 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
     { key: 'image', label: 'Image', placeholder: 'ubuntu:22.04 (required)', required: true, catalog: 'image', config: true },
     { key: 'run', label: 'Run', placeholder: 'go test ./...', required: true, multiline: true, config: true },
     { key: 'runner_class', label: 'Runner', placeholder: 'runner class (optional, default standard)', config: true },
-    { key: 'volumes', label: 'Attach volume', placeholder: 'workspace or workspace:/src (optional)', kind: 'volumeAttach', config: true },
+    { key: 'volumes', label: 'Attach volume', placeholder: 'workspace or workspace:/src (optional)', kind: 'volumeAttach', pipeline: true },
     { key: 'env', label: 'Input variables', placeholder: 'REPO_URL= BRANCH=main', kind: 'env' },
     { key: 'output_env', label: 'Output variables', placeholder: 'BUILD_ID, VERSION', kind: 'list', output: true },
   ],
@@ -222,11 +251,11 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
     { key: 'build_args', label: 'Build args', placeholder: 'VERSION=1.0 COMMIT=abc', kind: 'env', config: true },
     { key: 'target', label: 'Target stage', placeholder: 'multi-stage target (optional)', config: true },
     { key: 'registry_secret', label: 'Registry secret', placeholder: 'org secret holding a docker config.json (to push)', config: true },
-    { key: 'volumes', label: 'Source volume', placeholder: 'workspace or workspace:/src (attach the checkout)', kind: 'volumeAttach', config: true },
+    { key: 'volumes', label: 'Source volume', placeholder: 'workspace or workspace:/src (attach the checkout)', kind: 'volumeAttach', pipeline: true },
     { key: 'runner_class', label: 'Build runner', placeholder: 'privileged kata/gvisor class (required)', required: true, config: true },
   ],
   'forge/git-clone': [
-    { key: 'volumes', label: 'Clone into volume', placeholder: 'workspace or workspace:/src (create with forge/create-volume)', required: true, kind: 'volumeAttach', config: true },
+    { key: 'volumes', label: 'Clone into volume', placeholder: 'workspace or workspace:/src (create with forge/create-volume)', required: true, kind: 'volumeAttach', pipeline: true },
     { key: 'path', label: 'Clone dir', placeholder: 'volume root (default; a subdir relative to the volume)', config: true },
     // Branch/tag (checkout.ref) is chosen per-occurrence on the block via a BranchSelect
     // (like forge/run's checkout), since the repo it enumerates is also per-occurrence —
@@ -374,6 +403,10 @@ export function buildStepWith(action: string, valueOf: (key: string) => string):
   let base: Record<string, unknown> | undefined; // deferred from the advanced With JSON
 
   for (const f of schemaForAction(action)) {
+    // Pipeline fields (e.g. the attached volume) are configured per-occurrence on the
+    // block, not on the step definition, so the def form never renders them and they
+    // are not built into the step's `with` here — the block override carries them.
+    if (f.pipeline) continue;
     const raw = (valueOf(WITH_KEY_PREFIX + f.key) || '').trim();
 
     if (f.kind === 'json') {

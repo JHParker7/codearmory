@@ -8,7 +8,10 @@
  * from the step definition are kept, so the override stays minimal.
  */
 import { T } from '../../theme';
-import { schemaForAction, actionSupportsGitRepo, gitRepoFromWith, withGitRepo } from './stepSchema';
+import {
+  schemaForAction, actionSupportsGitRepo, gitRepoFromWith, withGitRepo,
+  actionAttachesVolume, volumeAttachWith, volumeAttachFromWith, DEFAULT_MOUNT_PATH,
+} from './stepSchema';
 import { RepoSelect } from '../../components/RepoSelect';
 import { BranchSelect } from '../../components/BranchSelect';
 import type { GitRepo } from '../../api/bff';
@@ -22,7 +25,9 @@ export type UpstreamOutput = { name: string; outputEnv: string[] };
 function nonInputKeys(action: string): Set<string> {
   const keys = new Set<string>();
   for (const f of schemaForAction(action)) {
-    if (f.config || f.output) keys.add(f.key);
+    // config/output belong to the step definition; pipeline fields (the volume) get a
+    // dedicated selector below — none are handled by the generic input rows.
+    if (f.config || f.output || f.pipeline) keys.add(f.key);
   }
   return keys;
 }
@@ -45,11 +50,14 @@ function WireSelect({ refs, onPick }: { refs: string[]; onPick: (ref: string) =>
   );
 }
 
-export function StepInputsEditor({ action, defWith, override, upstream, repos, token, onChange }: {
+export function StepInputsEditor({ action, defWith, override, upstream, upstreamVolumes, repos, token, onChange }: {
   action: string;
   defWith: Record<string, unknown>;
   override: Record<string, unknown>;
   upstream: UpstreamOutput[];
+  // Names of workspace volumes created by upstream forge/create-volume steps, offered
+  // as options in this step's volume selector (a step attaches a volume made earlier).
+  upstreamVolumes: string[];
   repos: GitRepo[];
   token?: string;
   onChange: (override: Record<string, unknown>) => void;
@@ -106,6 +114,33 @@ export function StepInputsEditor({ action, defWith, override, upstream, repos, t
       if (trimmed) next[k] = trimmed; else delete next[k];
     }
     setCheckout(next);
+  };
+
+  // Workspace volume (per-occurrence): which shared volume this step attaches to
+  // depends on the create-volume step in THIS pipeline, so it's wired here — as a
+  // selector over the volumes upstream steps created — not baked into the step def.
+  // eff.volumes is the run-scoped attach array; render it back to "name" / "name:/mount".
+  const showVolume = actionAttachesVolume(action);
+  const volSpec = volumeAttachFromWith(eff.volumes); // '' | 'name' | 'name:/mount'
+  const volColon = volSpec.indexOf(':');
+  const volName = volColon >= 0 ? volSpec.slice(0, volColon) : volSpec;
+  const volMount = volColon >= 0 ? volSpec.slice(volColon + 1) : '';
+  // Offer every upstream-created volume, plus the current selection if it isn't one of
+  // them (e.g. a name typed before the create-volume step existed), so it's never lost.
+  const volOptions = [...upstreamVolumes];
+  if (volName && !volOptions.includes(volName)) volOptions.push(volName);
+  const setVolume = (name: string, mount: string) => {
+    const n = name.trim();
+    if (!n) {
+      // Detach. If the step DEFINITION bakes in a volume (a legacy step, since volumes
+      // are now per-occurrence), an explicit empty array is needed to override it — a
+      // dropped/undefined override would let the def's volume persist. Otherwise just
+      // drop the key so the override stays minimal.
+      setKey('volumes', Array.isArray(defWith.volumes) ? [] : undefined);
+      return;
+    }
+    const m = mount.trim();
+    setKey('volumes', volumeAttachWith(m && m !== DEFAULT_MOUNT_PATH ? `${n}:${m}` : n));
   };
 
   // Config fields (image/run/runner) and outputs define what the step IS — they
@@ -168,7 +203,27 @@ export function StepInputsEditor({ action, defWith, override, upstream, repos, t
           )}
         </div>
       )}
-      {stringKeys.length === 0 && !env && !showRepo && (
+      {showVolume && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>workspace volume</span>
+          <select value={volName} onPointerDown={stop} onChange={(e) => setVolume(e.target.value, volMount)}
+            title="attach a workspace created by an upstream forge/create-volume step"
+            style={{ ...fieldStyle, cursor: 'pointer' }}>
+            <option value="">— none —</option>
+            {volOptions.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+          {volName && (
+            <input value={volMount} onPointerDown={stop} placeholder="/workspace (default mount)"
+              onChange={(e) => setVolume(volName, e.target.value)} style={{ ...fieldStyle, fontSize: 10 }} />
+          )}
+          <span style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, lineHeight: 1.4 }}>
+            {upstreamVolumes.length > 0
+              ? 'the shared workspace this step mounts — pick one an upstream forge/create-volume step made'
+              : 'no workspace created upstream yet — add a forge/create-volume step before this one'}
+          </span>
+        </div>
+      )}
+      {stringKeys.length === 0 && !env && !showRepo && !showVolume && (
         <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>this step has no editable inputs</div>
       )}
       {stringKeys.map((k) => (
