@@ -77,6 +77,8 @@ export function login(email: string, password: string) {
 
 export interface SetupStatus {
   initialized: boolean;
+  /** When true, registration is invite-only: only allowlisted emails may sign up. */
+  invite_only: boolean;
 }
 
 /**
@@ -288,12 +290,19 @@ export interface ApprovalGate {
 
 export interface WorkflowStepRef {
   step_id?: string;
+  // Inline step only (no step_id): the action it runs. On a GET the enriched inline
+  // step carries this; on save it declares a pipeline-local step (definition on the
+  // ref) rather than referencing a shared step.
+  action?: string;
+  // Inline step only: per-step timeout in seconds.
+  timeout?: number;
   // Per-occurrence name override (so a reused step can have distinct names). On a
   // GET it is the effective name; on save send it only when it differs from the
-  // step definition's name.
+  // step definition's name. For an inline step it is the step name.
   name?: string;
   // Per-occurrence `with` overrides (input wiring). On a GET this is the effective
   // (merged) with; on save send only the keys that differ from the step definition.
+  // For an inline step it is the full config.
   with?: Record<string, unknown> | null;
   parallel_group?: number | null;
   matrix?: MatrixConfig | null;
@@ -1296,6 +1305,42 @@ export function declineInvite(token: string, id: string) {
 
 export function deleteInvite(token: string, id: string) {
   return req<void>('DELETE', `/gatekeeper/invites/${id}`, token);
+}
+
+// ── Signup allowlist / invite-only policy (admin) ─────────────────────────────
+
+export interface SignupAllowlistEntry {
+  entry_id: string;
+  email: string;
+  note: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface SignupPolicy {
+  invite_only: boolean;
+  updated_at: string;
+  updated_by: string;
+}
+
+export function listSignupAllowlist(token: string) {
+  return req<SignupAllowlistEntry[]>('GET', '/gatekeeper/signup-allowlist', token);
+}
+
+export function addSignupAllowlist(token: string, email: string, note?: string) {
+  return req<SignupAllowlistEntry>('POST', '/gatekeeper/signup-allowlist', token, { email, note: note ?? '' });
+}
+
+export function deleteSignupAllowlist(token: string, id: string) {
+  return req<void>('DELETE', `/gatekeeper/signup-allowlist/${id}`, token);
+}
+
+export function getSignupPolicy(token: string) {
+  return req<SignupPolicy>('GET', '/gatekeeper/signup-policy', token);
+}
+
+export function setSignupPolicy(token: string, invite_only: boolean) {
+  return req<SignupPolicy>('PUT', '/gatekeeper/signup-policy', token, { invite_only });
 }
 
 // ── Orgs extended ─────────────────────────────────────────────────────────────

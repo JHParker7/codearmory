@@ -9,6 +9,7 @@ import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { T } from '../../theme';
 import { Logo } from '../../components/Logo';
 import { Icon, IconName } from '../../components/Icons';
+import { useResizablePane } from '../../components/ResizeHandle';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { logout, hydrateUser, hydratePermissions, hydrateRegisteredServices } from '../../store/authSlice';
 import { setCurrentProject, fetchKnownProjects } from '../../store/projectSlice';
@@ -201,6 +202,15 @@ export function AppLayout() {
   // width. Persisted so the choice sticks across reloads.
   const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem('nav.collapsed') === '1');
   useEffect(() => { localStorage.setItem('nav.collapsed', navCollapsed ? '1' : '0'); }, [navCollapsed]);
+  // When expanded, the sidebar width is user-draggable (persisted). The width
+  // transition is suspended mid-drag so it tracks the cursor crisply, then restored
+  // so the collapse/expand toggle still animates.
+  const shellRef = useRef<HTMLDivElement>(null);
+  const [navResizing, setNavResizing] = useState(false);
+  const [navW, navHandle] = useResizablePane('split.appshell.sidebar.w', 220, {
+    min: 180, max: 420, side: 'left', direction: 'horizontal', containerRef: shellRef, otherMin: 520,
+    onDragStart: () => setNavResizing(true), onDragEnd: () => setNavResizing(false),
+  });
 
   const activeSegment = pathname.replace(/^\/app\/?/, '').split('/')[0];
   const activeService = ROUTE_SERVICE[activeSegment];
@@ -238,9 +248,9 @@ export function AppLayout() {
   };
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: T.bg, fontFamily: T.mono, color: T.text, overflow: 'hidden' }}>
+    <div ref={shellRef} style={{ display: 'flex', height: '100vh', background: T.bg, fontFamily: T.mono, color: T.text, overflow: 'hidden' }}>
       {/* Sidebar */}
-      <aside style={{ width: navCollapsed ? 56 : 220, flexShrink: 0, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: 'width .14s ease' }}>
+      <aside style={{ width: navCollapsed ? 56 : navW, flexShrink: 0, background: T.bgAlt, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', transition: navResizing ? 'none' : 'width .14s ease' }}>
         {/* Logo + minimise toggle */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: navCollapsed ? 'center' : 'space-between', gap: 10, padding: navCollapsed ? '14px 0' : '14px 16px', borderBottom: `1px solid ${T.border}` }}>
           {!navCollapsed && (
@@ -308,6 +318,9 @@ export function AppLayout() {
           </button>
         </div>
       </aside>
+
+      {/* Drag to resize the sidebar (only while expanded). */}
+      {!navCollapsed && navHandle}
 
       {/* Main content */}
       <main style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>

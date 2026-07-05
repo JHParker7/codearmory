@@ -271,6 +271,63 @@ describe('inline approval gates', () => {
   });
 });
 
+describe('inline steps', () => {
+  it('round-trips an inline step through blocks (no step_id) and back', () => {
+    const steps: StepRef[] = [
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make' }, timeout: 60 },
+    ];
+    const blocks = blocksFromSteps(steps);
+    // The definition lives in inline.with; the per-occurrence override starts empty.
+    expect(blocks[0].stepId).to.equal('');
+    expect(blocks[0].name).to.equal('build');
+    expect(blocks[0].inline).to.deep.equal({ action: 'forge/run', timeout: 60, with: { image: 'alpine', run: 'make' } });
+    expect(blocks[0].with).to.deep.equal({});
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make' }, timeout: 60 },
+    ]);
+  });
+
+  it('collapses the inline def + per-occurrence override into one with on serialise', () => {
+    const blocks: Block[] = [{
+      uid: 'b0', stepId: '', parallelWithPrev: false, name: 'build',
+      inline: { action: 'forge/run', with: { image: 'alpine', run: 'make' } },
+      with: { run: 'make test' }, // wiring override wins over the def
+    }];
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make test' } },
+    ]);
+  });
+
+  it('stepsToPayload emits an inline step as {action,name,with,timeout} — never a step_id', () => {
+    expect(stepsToPayload([{ action: 'forge/run', name: 'build', with: { image: 'alpine' }, timeout: 60, parallel_group: null }]))
+      .to.deep.equal([{ action: 'forge/run', timeout: 60, name: 'build', with: { image: 'alpine' } }]);
+  });
+
+  it('carries a matrix on a solo inline step', () => {
+    const steps: StepRef[] = [{ action: 'forge/run', name: 'build', with: { image: 'alpine' }, matrix: { var: 'r', values: ['a', 'b'] } }];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[0].inline?.action).to.equal('forge/run');
+    expect(blocks[0].matrix).to.deep.equal({ var: 'r', values: ['a', 'b'] });
+    expect(stepsToPayload(stepsFromBlocks(blocks))).to.deep.equal([
+      { action: 'forge/run', matrix: { var: 'r', values: ['a', 'b'] }, name: 'build', with: { image: 'alpine' } },
+    ]);
+  });
+
+  it('configToJson/parseConfig round-trip an inline step', () => {
+    const steps: StepRef[] = [{ action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make' } }];
+    const parsed = parseConfig(configToJson('p', '', steps));
+    expect(parsed.steps).to.deep.equal([
+      { action: 'forge/run', parallel_group: null, name: 'build', with: { image: 'alpine', run: 'make' } },
+    ]);
+  });
+
+  it('does not misclassify a stored-step reference as inline', () => {
+    const blocks = blocksFromSteps([{ step_id: 'build', name: 'b' }]);
+    expect(blocks[0].inline).to.equal(undefined);
+    expect(blocks[0].stepId).to.equal('build');
+  });
+});
+
 describe('collectRefs (step inspector)', () => {
   it('extracts run inputs (named + bare) and upstream step outputs, ignoring matrix', () => {
     const refs = collectRefs({

@@ -50,14 +50,22 @@ export interface WorkflowOutputDef {
   value: string;
 }
 
-/** A pipeline step reference as the workflows API stores/accepts it — EITHER a
- * reference to a stored step (step_id) OR an inline approval gate. */
+/** A pipeline step reference as the workflows API stores/accepts it — exactly one of
+ * three kinds: a reference to a stored step (step_id), an INLINE step whose whole
+ * definition lives on the ref (action, no step_id), or an inline approval gate. */
 export interface StepRef {
   step_id?: string;
-  /** Per-occurrence name override; empty/absent = use the step definition's name. */
+  /** Inline step only: the action it runs. When set (and no step_id), `name` is the
+   * step name and `with` is its full config (not an override — nothing to merge over). */
+  action?: string;
+  /** Inline step only: per-step timeout in seconds (0/absent = service default). */
+  timeout?: number;
+  /** Inline step: the step name. Stored-step reference: per-occurrence name override
+   * (empty/absent = use the step definition's name). */
   name?: string;
-  /** Per-occurrence overrides for the step's `with` config (merged over the step's
-   * own with at run time) — how a pipeline wires a step's inputs to upstream outputs. */
+  /** Inline step: the full `with` config. Stored-step reference: per-occurrence
+   * overrides merged over the step's own with at run time — how a pipeline wires a
+   * step's inputs to upstream outputs. */
   with?: Record<string, unknown>;
   parallel_group?: number | null;
   matrix?: MatrixConfig | null;
@@ -71,9 +79,17 @@ export interface StepRef {
  * `approval` makes the block an inline manual-approval gate (no stepId). */
 export interface Block {
   uid: string;
+  /** '' for an inline step and for a gate; the stored step id otherwise. */
   stepId: string;
+  /** An INLINE step's definition, held on the block instead of the shared catalog
+   * (so `stepId` is ''). `inline.with` is the definition config (edited by the step
+   * form); `block.with` stays the per-occurrence override (input wiring) — exactly
+   * mirroring a stored step's def/override split, so the same editors work. The two
+   * layers are merged into one `with` when serialised (inline refs are single-layer). */
+  inline?: { action: string; timeout?: number; with?: Record<string, unknown> };
   parallelWithPrev: boolean;
-  /** Per-occurrence name override (undefined = use the step definition's name). */
+  /** Inline step: the step name. Stored reference: per-occurrence name override
+   * (undefined = use the step definition's name). */
   name?: string;
   /** Per-occurrence `with` overrides (input wiring). undefined/empty = none. */
   with?: Record<string, unknown>;
@@ -111,7 +127,18 @@ export function blocksFromSteps(steps: StepRef[]): Block[] {
   let i = 0;
   for (const stage of stagesFromSteps(steps)) {
     stage.forEach((stepId, idx) => {
-      blocks.push({ uid: `b${i}`, stepId, parallelWithPrev: idx > 0, name: steps[i]?.name || undefined, with: steps[i]?.with, matrix: steps[i]?.matrix ?? null, approval: steps[i]?.approval ?? null });
+      const s = steps[i];
+      // An inline ref (action, no step_id, no gate) becomes an inline block: its config
+      // goes into the definition layer (inline.with) with an empty override.
+      const isInline = !!s?.action && !s?.step_id && !s?.approval;
+      const inline = isInline ? { action: s!.action!, timeout: s!.timeout, with: s!.with } : undefined;
+      blocks.push({
+        uid: `b${i}`, stepId, parallelWithPrev: idx > 0,
+        name: s?.name || undefined,
+        with: isInline ? {} : s?.with,
+        inline,
+        matrix: s?.matrix ?? null, approval: s?.approval ?? null,
+      });
       i++;
     });
   }
@@ -136,23 +163,39 @@ export function stagesOf(blocks: Block[]): Block[][] {
 export function stepsFromBlocks(blocks: Block[]): StepRef[] {
   const out: StepRef[] = [];
   let group = 0;
-  const withExtras = (b: Block, ref: StepRef): StepRef => {
-    const r = { ...ref };
-    if (b.name) r.name = b.name;
-    if (b.with && Object.keys(b.with).length > 0) r.with = b.with;
-    return r;
+  // The base ref for a block, before parallel_group/matrix. An inline block collapses
+  // its two edit layers (inline.with def + block.with override) into one `with`.
+  const baseRef = (b: Block): StepRef => {
+    if (b.approval) return { approval: b.approval };
+    if (b.inline) {
+      const cfg = { ...(b.inline.with ?? {}), ...(b.with ?? {}) };
+      const ref: StepRef = { action: b.inline.action, name: b.name };
+      if (Object.keys(cfg).length > 0) ref.with = cfg;
+      if (b.inline.timeout && b.inline.timeout > 0) ref.timeout = b.inline.timeout;
+      return ref;
+    }
+    const ref: StepRef = { step_id: b.stepId };
+    if (b.name) ref.name = b.name;
+    if (b.with && Object.keys(b.with).length > 0) ref.with = b.with;
+    return ref;
   };
   for (const stage of stagesOf(blocks)) {
     if (stage.length > 1) {
       const g = group++;
-      // A gate can never be parallel, so it stays a solo gate even if grouped.
-      for (const b of stage) out.push(withExtras(b, b.approval ? { approval: b.approval } : { step_id: b.stepId, parallel_group: g }));
+      for (const b of stage) {
+        const ref = baseRef(b);
+        // A gate can never be parallel, so it stays a solo gate even if grouped.
+        if (!b.approval) ref.parallel_group = g;
+        out.push(ref);
+      }
     } else {
       const b = stage[0];
-      if (b.approval) { out.push(withExtras(b, { approval: b.approval })); continue; }
-      const ref: StepRef = { step_id: b.stepId, parallel_group: null };
-      if (b.matrix && b.matrix.var.trim()) ref.matrix = b.matrix;
-      out.push(withExtras(b, ref));
+      const ref = baseRef(b);
+      if (!b.approval) {
+        if (!b.inline) ref.parallel_group = null;
+        if (b.matrix && b.matrix.var.trim()) ref.matrix = b.matrix;
+      }
+      out.push(ref);
     }
   }
   return out;
@@ -170,6 +213,13 @@ export function stepsToPayload(steps: StepRef[]): StepRef[] {
   return steps.map((s) => {
     let ref: StepRef;
     if (s.approval) ref = { approval: s.approval };
+    else if (s.action) {
+      // Inline step: action + full config (+ optional timeout), plus group/matrix.
+      ref = { action: s.action };
+      if (s.timeout && s.timeout > 0) ref.timeout = s.timeout;
+      if (s.parallel_group != null) ref.parallel_group = s.parallel_group;
+      else if (s.matrix && s.matrix.var.trim()) ref.matrix = s.matrix;
+    }
     else if (s.parallel_group != null) ref = { step_id: s.step_id, parallel_group: s.parallel_group };
     else if (s.matrix && s.matrix.var.trim()) ref = { step_id: s.step_id, matrix: s.matrix };
     else ref = { step_id: s.step_id };
@@ -330,7 +380,16 @@ export function parseConfig(raw: string): { name: string; description: string; s
       if (Array.isArray(a.approvers)) gate.approvers = a.approvers.filter((x): x is string => typeof x === 'string');
       return { parallel_group: null, approval: gate, ...(name ? { name } : {}) };
     }
-    if (typeof so.step_id !== 'string' || !so.step_id) throw new Error(`steps[${i}]: a "step_id" string or an "approval" gate is required`);
+    // An inline step carries its definition (action) instead of a step_id.
+    if (typeof so.action === 'string' && so.action) {
+      const ref: StepRef = { action: so.action, parallel_group: typeof so.parallel_group === 'number' ? so.parallel_group : null };
+      if (name) ref.name = name;
+      if (withOverride && Object.keys(withOverride).length > 0) ref.with = withOverride;
+      if (typeof so.timeout === 'number' && so.timeout > 0) ref.timeout = so.timeout;
+      if (so.matrix && typeof so.matrix === 'object' && !Array.isArray(so.matrix)) ref.matrix = so.matrix as MatrixConfig;
+      return ref;
+    }
+    if (typeof so.step_id !== 'string' || !so.step_id) throw new Error(`steps[${i}]: a "step_id" string, an inline "action", or an "approval" gate is required`);
     const ref: StepRef = { step_id: so.step_id, parallel_group: typeof so.parallel_group === 'number' ? so.parallel_group : null };
     if (name) ref.name = name;
     if (withOverride && Object.keys(withOverride).length > 0) ref.with = withOverride;

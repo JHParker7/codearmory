@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"strings"
@@ -34,12 +35,20 @@ type approvalGate struct {
 }
 
 // workflowStepRef is the per-step payload inside a create/update workflow request.
-// With holds per-occurrence overrides merged over the step definition at run time
-// (the backend lets ref keys win) — how a pipeline assigns a repo to a reusable step
-// without baking it into the shared definition. See gitRepoStepWith / the DSL's
-// `name@repo` syntax.
+// It is exactly one of three kinds: a stored-step reference (StepID), an INLINE step
+// whose definition lives on the ref itself (Action, no StepID — private to this
+// pipeline), or an inline approval gate (Approval).
+//
+// For a reference, With holds per-occurrence overrides merged over the step definition
+// at run time (the backend lets ref keys win) — how a pipeline assigns a repo to a
+// reusable step without baking it into the shared definition (see gitRepoStepWith /
+// the DSL's `name@repo` syntax). For an inline step, Name is the step name, With is
+// its full config, and Timeout is the per-step timeout.
 type workflowStepRef struct {
 	StepID        string         `json:"step_id,omitempty"`
+	Action        string         `json:"action,omitempty"`
+	Timeout       int64          `json:"timeout,omitempty"`
+	Name          string         `json:"name,omitempty"`
 	With          map[string]any `json:"with,omitempty"`
 	ParallelGroup *int           `json:"parallel_group,omitempty"`
 	Matrix        *matrixConfig  `json:"matrix,omitempty"`
@@ -218,6 +227,70 @@ func dslToRefs(nodes []dslNode) ([]workflowStepRef, error) {
 		}
 	}
 	return refs, nil
+}
+
+// ── Raw pipeline helpers (convert-step / localize-step) ─────────────────────────
+
+// rawPipeline is a pipeline fetched with ?raw=true, exposing the stored, unenriched
+// step refs (the normal GET returns enriched steps with merged `with`, which would
+// bake a referenced step's definition into its override on re-PUT).
+type rawPipeline struct {
+	Name        string              `json:"name"`
+	Description string              `json:"description"`
+	Inputs      []pipelineInputDef  `json:"inputs,omitempty"`
+	Outputs     []pipelineOutputDef `json:"outputs,omitempty"`
+	StepRefs    []workflowStepRef   `json:"step_refs"`
+}
+
+func fetchRawPipeline(id string) (rawPipeline, error) {
+	data, err := doRequest("GET", "/workflows/pipelines/"+id+"?raw=true", nil)
+	if err != nil {
+		return rawPipeline{}, fmt.Errorf("fetching pipeline: %w", err)
+	}
+	var pl rawPipeline
+	if err := json.Unmarshal(data, &pl); err != nil {
+		return rawPipeline{}, fmt.Errorf("parsing pipeline: %w", err)
+	}
+	return pl, nil
+}
+
+func putRawPipeline(id string, pl rawPipeline) error {
+	payload := map[string]any{"name": pl.Name, "steps": pl.StepRefs}
+	if pl.Description != "" {
+		payload["description"] = pl.Description
+	}
+	if len(pl.Inputs) > 0 {
+		payload["inputs"] = pl.Inputs
+	}
+	if len(pl.Outputs) > 0 {
+		payload["outputs"] = pl.Outputs
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return apiCall("PUT", "/workflows/pipelines/"+id, body)
+}
+
+// fullStepDef is a stored step's definition, as returned by GET /workflows/steps/{id}.
+type fullStepDef struct {
+	StepID  string         `json:"step_id"`
+	Name    string         `json:"name"`
+	Action  string         `json:"action"`
+	With    map[string]any `json:"with"`
+	Timeout int64          `json:"timeout"`
+}
+
+func getStepDef(id string) (fullStepDef, error) {
+	data, err := doRequest("GET", "/workflows/steps/"+id, nil)
+	if err != nil {
+		return fullStepDef{}, err
+	}
+	var s fullStepDef
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fullStepDef{}, err
+	}
+	return s, nil
 }
 
 // ── Command tree ──────────────────────────────────────────────────────────────
@@ -451,16 +524,21 @@ DSL syntax — step names must match previously-created steps:
   armory pipelines create pipeline myrepo main push->unit_tests->deploy
   armory pipelines create pipeline myrepo main "push->[unit_tests,security_scan]->deploy"
 
-JSON file (-f) — uses step IDs directly:
+JSON file (-f) — a step is a stored-step reference, an inline step, or a gate:
   {
     "name": "optional name",
     "steps": [
       {"step_id": "<id>"},
+      {"action": "forge/run", "name": "build", "with": {"image": "alpine", "run": "make"}},
       {"step_id": "<id>", "parallel_group": 0},
-      {"step_id": "<id>", "parallel_group": 0},
-      {"step_id": "<id>"}
+      {"action": "forge/run", "name": "test", "with": {"run": "make test"}, "parallel_group": 0},
+      {"approval": {"message": "deploy to prod?"}}
     ]
-  }`,
+  }
+
+An inline step ({action,name,with,...}) is private to this pipeline — no separate
+step is created. Use "armory pipelines convert-step <id> <name>" to promote it to a
+reusable step, or "localize-step" to copy a shared step's definition inline.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) < 2 {
 				return fmt.Errorf("requires <repo> and <branch>")
@@ -637,7 +715,10 @@ JSON file (-f) — uses step IDs directly:
   armory pipelines update pipeline <id> -f pipeline.json
 
   # Override the name or description at the same time:
-  armory pipelines update pipeline <id> push->deploy --name "slim pipeline"`,
+  armory pipelines update pipeline <id> push->deploy --name "slim pipeline"
+
+The one-line DSL references stored steps by name; it cannot express inline steps,
+gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) < 1 {
 				return fmt.Errorf("requires <id>")
@@ -725,6 +806,105 @@ JSON file (-f) — uses step IDs directly:
 	updatePipelineCmd.Flags().StringVar(&updatePipelineName, "name", "", "Pipeline name (fetched automatically if omitted)")
 	updatePipelineCmd.Flags().StringVar(&updatePipelineDesc, "description", "", "Pipeline description")
 	ciUpdateCmd.AddCommand(updatePipelineCmd)
+
+	// ── armory pipelines convert-step ────────────────────────────────────────────────
+
+	ciCmd.AddCommand(&cobra.Command{
+		Use:   "convert-step <pipeline-id> <step-name>",
+		Short: "Promote an inline pipeline step into a reusable (general) step",
+		Long: `Create a shared, reusable step from an inline step and repoint the pipeline
+at it, so other pipelines can reference it by id. The inline step's config
+becomes the new step's definition.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, stepName := args[0], args[1]
+			pl, err := fetchRawPipeline(id)
+			if err != nil {
+				return err
+			}
+			idx := -1
+			for i, r := range pl.StepRefs {
+				if r.StepID == "" && r.Approval == nil && r.Action != "" && r.Name == stepName {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				return fmt.Errorf("no inline step named %q in pipeline %s", stepName, id)
+			}
+			ref := pl.StepRefs[idx]
+			stepBody, err := json.Marshal(map[string]any{
+				"name": ref.Name, "action": ref.Action, "with": ref.With, "timeout": ref.Timeout,
+			})
+			if err != nil {
+				return err
+			}
+			data, err := doRequest("POST", "/workflows/steps", stepBody)
+			if err != nil {
+				return fmt.Errorf("creating reusable step: %w", err)
+			}
+			var created stepDef
+			if err := json.Unmarshal(data, &created); err != nil || created.StepID == "" {
+				return fmt.Errorf("could not read created step id")
+			}
+			// Repoint the ref at the new step; keep grouping/matrix, drop the now-redundant
+			// per-occurrence name (it equals the new step's own name).
+			pl.StepRefs[idx] = workflowStepRef{StepID: created.StepID, ParallelGroup: ref.ParallelGroup, Matrix: ref.Matrix}
+			return putRawPipeline(id, pl)
+		},
+	})
+
+	// ── armory pipelines localize-step ───────────────────────────────────────────────
+
+	ciCmd.AddCommand(&cobra.Command{
+		Use:   "localize-step <pipeline-id> <step-name>",
+		Short: "Copy a shared step's definition inline (private to this pipeline)",
+		Long: `Replace a stored-step reference with an inline copy of its definition, so
+edits to the shared step no longer affect this pipeline (and vice versa).`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, stepName := args[0], args[1]
+			pl, err := fetchRawPipeline(id)
+			if err != nil {
+				return err
+			}
+			idx, def := -1, fullStepDef{}
+			for i, r := range pl.StepRefs {
+				if r.StepID == "" || r.Approval != nil {
+					continue
+				}
+				d, err := getStepDef(r.StepID)
+				if err != nil {
+					return fmt.Errorf("fetching step %s: %w", r.StepID, err)
+				}
+				eff := r.Name
+				if eff == "" {
+					eff = d.Name
+				}
+				if eff == stepName {
+					idx, def = i, d
+					break
+				}
+			}
+			if idx < 0 {
+				return fmt.Errorf("no stored-step reference named %q in pipeline %s", stepName, id)
+			}
+			ref := pl.StepRefs[idx]
+			// The inline config is the def merged with any per-occurrence override.
+			merged := map[string]any{}
+			maps.Copy(merged, def.With)
+			maps.Copy(merged, ref.With)
+			name := ref.Name
+			if name == "" {
+				name = def.Name
+			}
+			pl.StepRefs[idx] = workflowStepRef{
+				Action: def.Action, Name: name, Timeout: def.Timeout, With: merged,
+				ParallelGroup: ref.ParallelGroup, Matrix: ref.Matrix,
+			}
+			return putRawPipeline(id, pl)
+		},
+	})
 
 	// ── armory pipelines cancel run ──────────────────────────────────────────────────
 

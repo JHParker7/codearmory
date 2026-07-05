@@ -570,6 +570,9 @@ func TestHandleCreateWorkflow_MissingName(t *testing.T) {
 	}
 }
 
+// An empty ref is neither a stored-step reference, an inline step (needs an action),
+// nor a gate, so it is still rejected — inline steps are the {action,...} case, not
+// a bare {}.
 func TestHandleCreateWorkflow_StepWithoutID(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
 	body := `{"name":"my-wf","steps":[{}]}`

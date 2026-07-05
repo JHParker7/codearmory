@@ -125,3 +125,26 @@ func TestCollectWorkflowPermissions_TriggerGrantsTriggerAndPoll(t *testing.T) {
 		t.Fatalf("perms = %+v, want triggerRun + getRun on workflows/runs/*", perms)
 	}
 }
+
+// An inline step contributes its action's permission to the run role just like a
+// stored-step reference — the enriched WorkflowStep carries the same Action.
+func TestCollectWorkflowPermissions_InlineStepContributesPerms(t *testing.T) {
+	withCatalog(t, map[string]ActionDef{
+		"forge/run": {
+			Name:               "forge/run",
+			RequiredPermission: &PermissionSpec{Service: "forge", Action: "createExecution", Resource: "forge/executions"},
+		},
+	})
+	// An inline step is an enriched WorkflowStep with Action set and no StepID — the
+	// same shape collectWorkflowPermissions sees for any step.
+	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Name: "build", Action: "forge/run"}}})
+	var has bool
+	for _, p := range perms {
+		if p.Service == "forge" && p.Action == "createExecution" && p.Resource == "forge/executions" {
+			has = true
+		}
+	}
+	if !has {
+		t.Fatalf("perms = %+v, want forge:createExecution on an inline forge/run step", perms)
+	}
+}

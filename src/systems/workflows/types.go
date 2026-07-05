@@ -147,20 +147,34 @@ type ApprovalGate struct {
 }
 
 // WorkflowStepRef records how a step is used within a specific workflow. A ref is
-// EITHER a reference to a stored step (StepID) OR an inline Approval gate. A step
-// ref may additionally carry a parallel group or a matrix (mutually exclusive); a
-// gate is always solo. Stored as part of the workflow's `steps` JSON column, so no
-// field needs its own DB column.
+// exactly ONE of three kinds:
+//   - a reference to a stored, reusable step (StepID set), OR
+//   - an INLINE step whose definition lives on the ref itself (Action set, no
+//     StepID) — the step is private to this pipeline and not in the steps table, OR
+//   - an inline Approval gate (Approval set).
+//
+// A step ref (reference or inline) may additionally carry a parallel group or a
+// matrix (mutually exclusive); a gate is always solo. Stored as part of the
+// workflow's `steps` JSON column, so no field needs its own DB column.
 type WorkflowStepRef struct {
 	StepID string `json:"step_id,omitempty"`
-	// Name optionally overrides the display/reference name for THIS occurrence of the
-	// step, so the same step can appear more than once with distinct names and each
-	// is referenced unambiguously as ${steps.<name>.output}. Empty = use the step
-	// definition's own name (or "approval" for a gate).
+	// Action is set only for an INLINE step (StepID empty): the action the step runs,
+	// mirroring Step.Action. When set, Name is the step's name and With is its full
+	// config (not an override — there is no stored step to merge over).
+	Action string `json:"action,omitempty"`
+	// Timeout is the per-step timeout in seconds for an INLINE step (mirrors
+	// Step.Timeout; 0 = the service default). Ignored for a reference or a gate.
+	Timeout int64 `json:"timeout,omitempty"`
+	// Name is the step name for an inline step. For a stored-step reference it instead
+	// OVERRIDES the display/reference name for THIS occurrence, so the same step can
+	// appear more than once with distinct names, each referenced unambiguously as
+	// ${steps.<name>.output}. Empty = use the step definition's own name (or "approval"
+	// for a gate).
 	Name string `json:"name,omitempty"`
-	// With holds per-occurrence overrides for the step's With config, merged over the
-	// step definition's With at run time (these keys win). This is how a pipeline
-	// wires a step's inputs to earlier steps' outputs — e.g. With:{"env":{"TARGET":
+	// With is the full config for an inline step. For a stored-step reference it instead
+	// holds per-occurrence overrides for the step's With config, merged over the step
+	// definition's With at run time (these keys win). This is how a pipeline wires a
+	// step's inputs to earlier steps' outputs — e.g. With:{"env":{"TARGET":
 	// "${steps.build.output}"}} — without editing the shared step. The values support
 	// the same ${...} substitution as any With value.
 	With          map[string]any `json:"with,omitempty"`

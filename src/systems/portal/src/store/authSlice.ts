@@ -138,6 +138,7 @@ const PERMISSION_GATES = [
   { service: 'gatekeeper', action: 'listTeam',            resource: 'gatekeeper/teams' },
   { service: 'gatekeeper', action: 'listOrg',             resource: 'gatekeeper/orgs' },
   { service: 'gatekeeper', action: 'listInvite',          resource: 'gatekeeper/invites' },
+  { service: 'gatekeeper', action: 'listSignupAllowlist', resource: 'gatekeeper/signup-allowlist' },
   { service: 'gatekeeper', action: 'listSPR',             resource: 'gatekeeper/service-permission-requests' },
   { service: 'forge',      action: 'createRunnerClass',   resource: 'forge/runner-classes' },
   { service: 'forge',      action: 'createRuntimeBackend', resource: 'forge/runtime-backends' },

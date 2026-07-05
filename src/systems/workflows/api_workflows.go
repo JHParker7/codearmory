@@ -447,6 +447,18 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
+	// ?raw=true additionally exposes the stored, unenriched step refs (normally hidden:
+	// Workflow.StepRefs is json:"-"). A client that wants to mutate a pipeline (e.g. the
+	// CLI convert/localize) needs the raw refs so it can re-PUT them faithfully — the
+	// default `steps` are enriched with each stored step's merged With, which would bake
+	// a referenced step's definition into its per-occurrence override on round-trip.
+	if r.URL.Query().Get("raw") == "true" {
+		json.NewEncoder(w).Encode(struct { //nolint:errcheck
+			Workflow
+			StepRefs []WorkflowStepRef `json:"step_refs"`
+		}{Workflow: wf, StepRefs: wf.StepRefs})
+		return
+	}
 	json.NewEncoder(w).Encode(wf) //nolint:errcheck
 }
 

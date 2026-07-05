@@ -168,6 +168,34 @@ func TestValidateStepRefShape_MatrixParallelExclusive(t *testing.T) {
 	}
 }
 
+// An inline step carries its whole definition on the ref (no step_id). It is
+// validated like a stored step, must have a name, cannot double as a reference or a
+// gate, and cannot use the approval action.
+func TestValidateStepRefShape_Inline(t *testing.T) {
+	grp := 0
+	cases := []struct {
+		name string
+		ref  WorkflowStepRef
+		ok   bool
+	}{
+		{"valid inline", WorkflowStepRef{Action: "forge/run", Name: "build", With: map[string]any{"image": "alpine"}}, true},
+		{"inline with parallel group", WorkflowStepRef{Action: "forge/run", Name: "build", ParallelGroup: &grp}, true},
+		{"inline with matrix", WorkflowStepRef{Action: "forge/run", Name: "build", Matrix: &MatrixConfig{Var: "v", Values: []string{"a"}}}, true},
+		{"step_id and action", WorkflowStepRef{StepID: uuid.New().String(), Action: "forge/run", Name: "x"}, false},
+		{"neither step_id nor action", WorkflowStepRef{}, false},
+		{"inline missing name", WorkflowStepRef{Action: "forge/run"}, false},
+		{"inline approval action rejected", WorkflowStepRef{Action: ActionApproval, Name: "gate"}, false},
+		{"inline and gate", WorkflowStepRef{Action: "forge/run", Name: "x", Approval: &ApprovalGate{Message: "m"}}, false},
+		{"inline http missing service", WorkflowStepRef{Action: ActionHTTP, Name: "h", With: map[string]any{"path": "/x"}}, false},
+		{"inline http ok", WorkflowStepRef{Action: ActionHTTP, Name: "h", With: map[string]any{"service": "s", "path": "/x"}}, true},
+	}
+	for _, c := range cases {
+		if (validateStepRefShape(0, c.ref) == "") != c.ok {
+			t.Errorf("%s: validateStepRefShape(...) ok mismatch, want ok=%v", c.name, c.ok)
+		}
+	}
+}
+
 // ── Worker integration: matrix fan-out ─────────────────────────────────────────
 
 func seedApprovalStep(t *testing.T, user, org, message string, approvers []string) Step {
@@ -593,6 +621,71 @@ func TestExecuteRun_PerOccurrenceWithOverride(t *testing.T) {
 	// The override path won and the wired ${steps.build.output} resolved to "X".
 	if len(*paths) != 1 || (*paths)[0] != "/wired/X" {
 		t.Errorf("override+wiring not applied, paths = %v, want [/wired/X]", *paths)
+	}
+}
+
+// An inline step (definition on the ref, no stored step row) is enriched and
+// executed end-to-end just like a stored-step reference. Its With is the full
+// config (not an override), so with.path is used verbatim.
+func TestExecuteRun_InlineStepRuns(t *testing.T) {
+	requireDB(t)
+	stubGatekeeperRouting(t, "tu", "to")
+	paths := recordingService(t, "inlinesvc")
+	wf := createWorkflowWith(t, []map[string]any{
+		{"action": ActionHTTP, "name": "inline-hit", "with": map[string]any{"service": "inlinesvc", "path": "/inline"}},
+	})
+
+	got := runOnce(t, wf)
+	if got.Status != StatusCompleted {
+		t.Fatalf("status = %q, want completed", got.Status)
+	}
+	if len(*paths) != 1 || (*paths)[0] != "/inline" {
+		t.Errorf("inline step did not run as expected, paths = %v", *paths)
+	}
+	// The step run records the inline step's name (its ${steps.<name>.output} key).
+	srs, _ := getStepRuns(context.Background(), got.RunID)
+	if len(srs) != 1 || srs[0].StepName != "inline-hit" {
+		t.Errorf("inline step run = %+v", srs)
+	}
+}
+
+// A matrix over an inline step fans it out, exercising the inline enrich path's
+// ParallelGroup/Matrix pass-through.
+func TestExecuteRun_InlineStepMatrixFansOut(t *testing.T) {
+	requireDB(t)
+	stubGatekeeperRouting(t, "tu", "to")
+	paths := recordingService(t, "inlinematrix")
+	wf := createWorkflowWith(t, []map[string]any{
+		{"action": ActionHTTP, "name": "hit", "with": map[string]any{"service": "inlinematrix", "path": "/hit/${matrix.target}"},
+			"matrix": map[string]any{"var": "target", "values": []string{"a", "b", "c"}}},
+	})
+
+	got := runOnce(t, wf)
+	if got.Status != StatusCompleted {
+		t.Fatalf("status = %q, want completed", got.Status)
+	}
+	if len(*paths) != 3 {
+		t.Errorf("inline matrix did not fan out to 3, paths = %v", *paths)
+	}
+}
+
+// An inline step's name shares the per-pipeline uniqueness namespace with stored
+// references and gates — a collision is rejected at create time.
+func TestCreateWorkflow_InlineAndRefDuplicateNameRejected(t *testing.T) {
+	requireDB(t)
+	stubGatekeeperRouting(t, "tu", "to")
+	s0 := seedHTTPStep(t, "tu", "to", "dupsvc", "/a")
+	body, _ := json.Marshal(map[string]any{
+		"name": "wf-" + uuid.New().String(),
+		"steps": []map[string]any{
+			{"step_id": s0.StepID, "name": "dup"},
+			{"action": ActionHTTP, "name": "dup", "with": map[string]any{"service": "dupsvc", "path": "/b"}},
+		},
+	})
+	w := httptest.NewRecorder()
+	handleCreateWorkflow(w, authReq(http.MethodPost, "/pipelines", body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("inline+ref duplicate name got %d, want 400: %s", w.Code, w.Body.String())
 	}
 }
 

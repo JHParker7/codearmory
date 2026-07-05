@@ -427,6 +427,13 @@ class PortalUI:
         el = self._find((By.XPATH, f"//span[starts-with(normalize-space(), '{prefix}')]"), timeout)
         return el.text.strip()
 
+    def wait_logs_contains(self, text: str, timeout: int | None = None) -> None:
+        """Wait for a logs-panel <pre> whose text contains `text`. Used to assert a
+        specific step run's captured output/stdout is surfaced — each matrix
+        combination is its own selectable block showing its own output, so this
+        proves the run page did not collapse the fan-out into a single output."""
+        self._find((By.XPATH, f"//pre[contains(normalize-space(), \"{text}\")]"), timeout)
+
     def page_has_text(self, text: str) -> bool:
         return bool(self.driver.find_elements(By.XPATH, f"//*[contains(normalize-space(), \"{text}\")]"))
 

@@ -237,12 +237,6 @@ def test_full_pipeline_via_portal(driver, portal_url, creds, forge_image, volume
 
     ui.wait_for_status("COMPLETED")
 
-    # UI evidence of the matrix + parallel structure on the live run page.
-    assert ui.page_has_text("∥ parallel"), "run page did not render the parallel stage"
-    ui.select_step("echo-string")
-    binding = ui.wait_text_prefix("echo-string [item=")
-    assert binding.startswith("echo-string [item="), binding
-
     # ── authoritative deep assertions via the oracle: success AND output content ──
     run = fetch_run(portal_url, ui.token(), run_id)
     assert run["status"] == "completed", _diag(run)
@@ -251,6 +245,16 @@ def test_full_pipeline_via_portal(driver, portal_url, creds, forge_image, volume
     assert_volume_roundtrip(run, published)             # the write step produced those exact strings
     assert_matrix_fanned_out(run, published, base="echo-string")  # 3 runs, each echoed its string
     assert_parallel(run, "par-a", "par-b", a_log="parallel A", b_log="parallel B")
+
+    # UI evidence of the matrix + parallel structure on the live run page. Each
+    # matrix combination must be an individually selectable block that surfaces its
+    # OWN output — guarding against the run page collapsing the fan-out (which all
+    # share one step_index) into a single block/output.
+    assert ui.page_has_text("∥ parallel"), "run page did not render the parallel stage"
+    assert ui.page_has_text("⊞ matrix"), "run page did not render the matrix stage"
+    for value in published:
+        ui.select_step(f"echo-string [item={value}]")   # a per-combination block, not the bare step
+        ui.wait_logs_contains(f"matrix item: {value}")   # its own echoed stdout, not another run's
 
 
 # ── a focused, standalone parallel-block test ──────────────────────────────────

@@ -9,7 +9,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { T } from '../theme';
 import { Logo } from '../components/Logo';
 import { PromptField, StrengthBar } from '../components/AuthFields';
-import { useAppDispatch } from '../store/hooks';
+import { useAppDispatch, useAppSelector } from '../store/hooks';
 import { signupAndLogin } from '../store/authSlice';
 import { passwordScore } from '../utils';
 
@@ -17,6 +17,7 @@ import { passwordScore } from '../utils';
 export function Signup() {
   const navigate = useNavigate();
   const dispatch = useAppDispatch();
+  const inviteOnly = useAppSelector((s) => s.setup.inviteOnly);
 
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
@@ -92,6 +93,13 @@ export function Signup() {
               <span style={{ color: T.green }}>#</span> register a new identity — opentofu state, ci/cd, on one host.<br />
               <span style={{ color: T.green }}>#</span> free to self-host · up to 3 collaborators on day one.
             </div>
+
+            {inviteOnly && (
+              <div style={{ background: T.cardHi, border: `1px solid ${T.borderHi}`, padding: '10px 12px', marginBottom: 18, fontFamily: T.mono, fontSize: 11.5, color: T.dim, lineHeight: 1.6 }}>
+                <span style={{ color: T.green }}>invite-only</span> · this instance restricts sign-ups to invited email addresses.
+                Use the exact email you were invited with — others will be rejected. Ask an administrator to add you if needed.
+              </div>
+            )}
 
             {error && (
               <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', marginBottom: 16, fontFamily: T.mono, fontSize: 12, color: T.red }}>{error}</div>
