@@ -55,8 +55,12 @@ function ApprovalPanel({ gate, deciding, decideErr, onApprove, onReject }: {
   );
 }
 
-/** One step in the run, resolved from the workflow structure + its step run. */
+/** One block in the run, resolved from the workflow structure + its step run. A
+ * matrix step contributes several of these (one per combination). */
 interface RunStep {
+  /** Unique selection/React key: the step run's id once it has run, else a
+   * synthetic per-index key for a step still pending (no step run yet). */
+  key: string;
   index: number;
   label: string;
   /** The manual-approval gate config, when this step is a gate (so the block can
@@ -65,25 +69,52 @@ interface RunStep {
   sr?: WorkflowStepRun;
 }
 
-/** Group the run's steps into sequential stages of parallel steps. Uses the
- * workflow's parallel_group structure when available, else the flat step-run
- * order (a deleted workflow still shows its run as a sequence). */
-function buildStages(workflow: Workflow | null, stepRuns: WorkflowStepRun[], catalog: Record<string, Step>): RunStep[][] {
-  const byIndex = new Map<number, WorkflowStepRun>();
-  stepRuns.forEach((sr) => byIndex.set(sr.step_index, sr));
+/** A sequential stage of the run. `parallel` marks a real parallel_group of more
+ * than one workflow step — not a single step's matrix fan-out, which also yields
+ * several blocks (`steps`) but occupies one stage. */
+interface RunStage {
+  parallel: boolean;
+  steps: RunStep[];
+}
+
+/** Group the run's steps into sequential stages. Uses the workflow's
+ * parallel_group structure when available, else the flat step-run order (a deleted
+ * workflow still shows its run as a sequence). A matrix step fans out into several
+ * step runs that all share one step_index; each becomes its own block so every
+ * combination's status and output is shown — not just one. */
+function buildStages(workflow: Workflow | null, stepRuns: WorkflowStepRun[], catalog: Record<string, Step>): RunStage[] {
+  const byIndex = new Map<number, WorkflowStepRun[]>();
+  stepRuns.forEach((sr) => {
+    const arr = byIndex.get(sr.step_index);
+    if (arr) arr.push(sr);
+    else byIndex.set(sr.step_index, [sr]);
+  });
 
   if (workflow && workflow.steps.length > 0) {
-    const stages: RunStep[][] = [];
+    const stages: RunStage[] = [];
     let prev: number | null | undefined = undefined;
     workflow.steps.forEach((s, i) => {
       const g = s.parallel_group ?? null;
-      const sr = byIndex.get(i);
-      const label = s.approval
+      const runs = byIndex.get(i) ?? [];
+      const base = s.approval
         ? (s.name || 'approval gate')
-        : (s.name ?? catalog[s.step_id ?? '']?.name ?? sr?.step_name ?? (s.step_id ?? '').slice(0, 8) + '…');
-      const step: RunStep = { index: i, label, gate: s.approval, sr };
-      if (g !== null && g === prev) stages[stages.length - 1].push(step);
-      else stages.push([step]);
+        : (s.name ?? catalog[s.step_id ?? '']?.name ?? runs[0]?.step_name ?? (s.step_id ?? '').slice(0, 8) + '…');
+      // One block per matrix combination (labelled by its run's step_name, which
+      // carries the `[var=val]` suffix); otherwise a single block for the step. The
+      // backend returns fan-out runs in no fixed order within an index, so sort by
+      // name for a stable layout across live-poll refreshes.
+      const blocks: RunStep[] = runs.length > 1
+        ? [...runs]
+            .sort((a, b) => a.step_name.localeCompare(b.step_name))
+            .map((sr) => ({ key: sr.step_run_id, index: i, gate: s.approval, sr, label: sr.step_name || base }))
+        : [{ key: runs[0]?.step_run_id ?? `idx:${i}`, index: i, gate: s.approval, sr: runs[0], label: base }];
+      if (g !== null && g === prev) {
+        const stage = stages[stages.length - 1];
+        stage.steps.push(...blocks);
+        stage.parallel = true; // more than one workflow step shares this parallel_group
+      } else {
+        stages.push({ parallel: false, steps: blocks });
+      }
       prev = g;
     });
     return stages;
@@ -93,7 +124,7 @@ function buildStages(workflow: Workflow | null, stepRuns: WorkflowStepRun[], cat
   return stepRuns
     .slice()
     .sort((a, b) => a.step_index - b.step_index)
-    .map((sr) => [{ index: sr.step_index, label: sr.step_name, sr }]);
+    .map((sr) => ({ parallel: false, steps: [{ key: sr.step_run_id, index: sr.step_index, label: sr.step_name, sr }] }));
 }
 
 export function RunView() {
@@ -112,7 +143,10 @@ export function RunView() {
   const [catalog, setCatalog] = useState<Record<string, Step>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
+  // The selected block's key — a step_run_id (unique per matrix combination), or a
+  // synthetic `idx:N` for a still-pending step. Keyed per run, not per step_index,
+  // so matrix combinations (which share an index) are individually selectable.
+  const [selected, setSelected] = useState<string | null>(null);
   const [deciding, setDeciding] = useState(false);
   // Approve/reject failures show inline beside the gate controls rather than
   // replacing the whole run view (which `error` does for a failed load).
@@ -160,10 +194,10 @@ export function RunView() {
     const active = stepRuns.find((sr) => isRunActive(sr.status));
     const withOut = [...stepRuns].reverse().find((sr) => sr.logs || sr.output);
     const pick = active ?? withOut ?? stepRuns[stepRuns.length - 1];
-    if (pick) setSelected(pick.step_index);
+    if (pick) setSelected(pick.step_run_id);
   }, [stepRuns, selected]);
 
-  const selectedSr = useMemo(() => stepRuns.find((sr) => sr.step_index === selected) ?? null, [stepRuns, selected]);
+  const selectedSr = useMemo(() => stepRuns.find((sr) => sr.step_run_id === selected) ?? null, [stepRuns, selected]);
 
   const handleCancel = useCallback(async () => {
     if (!run) return;
@@ -257,9 +291,12 @@ export function RunView() {
           {stages.length === 0 ? (
             <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ {isRunActive(run.status) ? 'waiting for the first step…' : 'no steps recorded'}</div>
           ) : stages.map((stage, si) => {
-            const parallel = stage.length > 1;
+            const parallel = stage.parallel;
+            // A non-parallel stage with several blocks is a single step's matrix
+            // fan-out (each combination its own block).
+            const matrix = !parallel && stage.steps.length > 1;
             return (
-              <div key={stage[0].index}>
+              <div key={stage.steps[0].key}>
                 {si > 0 && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingLeft: 16, height: 16 }}>
                     <span style={{ width: 2, height: '100%', background: parallel ? T.green : T.border }} />
@@ -267,19 +304,23 @@ export function RunView() {
                   </div>
                 )}
                 {parallel && <div style={{ fontFamily: T.mono, fontSize: 9, color: T.green, letterSpacing: 1, textTransform: 'uppercase', padding: '2px 0 4px' }}>∥ parallel</div>}
+                {matrix && <div style={{ fontFamily: T.mono, fontSize: 9, color: T.amber, letterSpacing: 1, textTransform: 'uppercase', padding: '2px 0 4px' }}>⊞ matrix</div>}
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
-                  {stage.map((st) => {
+                  {stage.steps.map((st) => {
                     const status = st.sr?.status ?? 'pending';
                     const active = isRunActive(status);
                     const awaiting = status === 'awaiting_approval';
-                    const isSel = st.index === selected;
+                    const isSel = st.key === selected;
                     const dur = st.sr?.ended_at ? fmtDuration(st.sr.started_at, st.sr.ended_at) : (st.sr?.started_at && active ? fmtDuration(st.sr.started_at) : '');
                     // A gate waiting on a human gets a blue border so it reads apart
                     // from the amber of a step that is merely running.
                     const borderColor = isSel ? T.green : awaiting ? T.blue : active ? T.amber : T.border;
+                    // Lay matrix combinations out as wrapping cards too (there may
+                    // be many), not one full-width block per row.
+                    const wrap = parallel || matrix;
                     return (
-                      <div key={st.index} style={{ flex: parallel ? '1 1 150px' : undefined, width: parallel ? undefined : '100%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        <button onClick={() => setSelected(st.index)}
+                      <div key={st.key} style={{ flex: wrap ? '1 1 150px' : undefined, width: wrap ? undefined : '100%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <button onClick={() => setSelected(st.key)}
                           style={{ width: '100%', textAlign: 'left', minWidth: 0,
                             display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', cursor: 'pointer',
                             background: isSel ? T.cardHi : T.card, border: `1px solid ${borderColor}`,
