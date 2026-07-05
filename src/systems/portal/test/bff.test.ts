@@ -50,6 +50,11 @@ import {
   acceptInvite,
   declineInvite,
   deleteInvite,
+  listSignupAllowlist,
+  addSignupAllowlist,
+  deleteSignupAllowlist,
+  getSignupPolicy,
+  setSignupPolicy,
   listOrgs,
   updateOrg,
   deleteOrg,
@@ -933,6 +938,79 @@ describe('bff client', () => {
       } catch (err: unknown) {
         expect((err as { status: number }).status).to.equal(404);
       }
+    });
+  });
+
+  // ── Signup allowlist / invite-only policy ───────────────────────────────────
+
+  describe('listSignupAllowlist', () => {
+    it('GETs /api/gatekeeper/signup-allowlist', async () => {
+      fetchStub.resolves(mockResponse(200, []));
+      await listSignupAllowlist(TOKEN);
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/gatekeeper/signup-allowlist');
+      expect(opts.method).to.equal('GET');
+      expect((opts.headers as Record<string, string>)['Authorization']).to.equal(`Bearer ${TOKEN}`);
+    });
+  });
+
+  describe('addSignupAllowlist', () => {
+    it('POSTs to /api/gatekeeper/signup-allowlist with email and note', async () => {
+      fetchStub.resolves(mockResponse(201, { entry_id: 'e1', email: 'a@b.com', note: 'hi' }));
+      await addSignupAllowlist(TOKEN, 'a@b.com', 'hi');
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/gatekeeper/signup-allowlist');
+      expect(opts.method).to.equal('POST');
+      expect(JSON.parse(opts.body as string)).to.deep.equal({ email: 'a@b.com', note: 'hi' });
+    });
+
+    it('defaults note to an empty string when omitted', async () => {
+      fetchStub.resolves(mockResponse(201, { entry_id: 'e2', email: '@corp.com', note: '' }));
+      await addSignupAllowlist(TOKEN, '@corp.com');
+      const [, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(JSON.parse(opts.body as string)).to.deep.equal({ email: '@corp.com', note: '' });
+    });
+
+    it('throws 409 on a duplicate entry', async () => {
+      fetchStub.resolves(mockText(409, 'already on the signup allowlist'));
+      try {
+        await addSignupAllowlist(TOKEN, 'a@b.com');
+        expect.fail('should have thrown');
+      } catch (err: unknown) {
+        expect((err as { status: number }).status).to.equal(409);
+      }
+    });
+  });
+
+  describe('deleteSignupAllowlist', () => {
+    it('DELETEs /api/gatekeeper/signup-allowlist/:id', async () => {
+      fetchStub.resolves(mock204());
+      await deleteSignupAllowlist(TOKEN, 'e1');
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/gatekeeper/signup-allowlist/e1');
+      expect(opts.method).to.equal('DELETE');
+    });
+  });
+
+  describe('getSignupPolicy', () => {
+    it('GETs /api/gatekeeper/signup-policy', async () => {
+      fetchStub.resolves(mockResponse(200, { invite_only: true, updated_at: '', updated_by: 'admin' }));
+      const res = await getSignupPolicy(TOKEN);
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/gatekeeper/signup-policy');
+      expect(opts.method).to.equal('GET');
+      expect(res.invite_only).to.be.true;
+    });
+  });
+
+  describe('setSignupPolicy', () => {
+    it('PUTs /api/gatekeeper/signup-policy with invite_only', async () => {
+      fetchStub.resolves(mockResponse(200, { invite_only: true, updated_at: '', updated_by: 'admin' }));
+      await setSignupPolicy(TOKEN, true);
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/gatekeeper/signup-policy');
+      expect(opts.method).to.equal('PUT');
+      expect(JSON.parse(opts.body as string)).to.deep.equal({ invite_only: true });
     });
   });
 

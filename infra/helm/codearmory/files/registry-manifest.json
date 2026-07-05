@@ -328,6 +328,36 @@
         "resource": "gatekeeper/permission-checks"
       },
       {
+        "method": "POST",
+        "path": "/signup-allowlist",
+        "action": "createSignupAllowlist",
+        "resource": "gatekeeper/signup-allowlist"
+      },
+      {
+        "method": "GET",
+        "path": "/signup-allowlist",
+        "action": "listSignupAllowlist",
+        "resource": "gatekeeper/signup-allowlist"
+      },
+      {
+        "method": "DELETE",
+        "path": "/signup-allowlist/{id}",
+        "action": "deleteSignupAllowlist",
+        "resource": "gatekeeper/signup-allowlist/{id}"
+      },
+      {
+        "method": "GET",
+        "path": "/signup-policy",
+        "action": "getSignupPolicy",
+        "resource": "gatekeeper/signup-policy"
+      },
+      {
+        "method": "PUT",
+        "path": "/signup-policy",
+        "action": "updateSignupPolicy",
+        "resource": "gatekeeper/signup-policy"
+      },
+      {
         "method": "GET",
         "path": "/service-permission-requests",
         "action": "listSPR",

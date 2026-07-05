@@ -77,6 +77,8 @@ export function login(email: string, password: string) {
 
 export interface SetupStatus {
   initialized: boolean;
+  /** When true, registration is invite-only: only allowlisted emails may sign up. */
+  invite_only: boolean;
 }
 
 /**
@@ -1296,6 +1298,42 @@ export function declineInvite(token: string, id: string) {
 
 export function deleteInvite(token: string, id: string) {
   return req<void>('DELETE', `/gatekeeper/invites/${id}`, token);
+}
+
+// ── Signup allowlist / invite-only policy (admin) ─────────────────────────────
+
+export interface SignupAllowlistEntry {
+  entry_id: string;
+  email: string;
+  note: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface SignupPolicy {
+  invite_only: boolean;
+  updated_at: string;
+  updated_by: string;
+}
+
+export function listSignupAllowlist(token: string) {
+  return req<SignupAllowlistEntry[]>('GET', '/gatekeeper/signup-allowlist', token);
+}
+
+export function addSignupAllowlist(token: string, email: string, note?: string) {
+  return req<SignupAllowlistEntry>('POST', '/gatekeeper/signup-allowlist', token, { email, note: note ?? '' });
+}
+
+export function deleteSignupAllowlist(token: string, id: string) {
+  return req<void>('DELETE', `/gatekeeper/signup-allowlist/${id}`, token);
+}
+
+export function getSignupPolicy(token: string) {
+  return req<SignupPolicy>('GET', '/gatekeeper/signup-policy', token);
+}
+
+export function setSignupPolicy(token: string, invite_only: boolean) {
+  return req<SignupPolicy>('PUT', '/gatekeeper/signup-policy', token, { invite_only });
 }
 
 // ── Orgs extended ─────────────────────────────────────────────────────────────

@@ -10,7 +10,7 @@ func TestAdminScreens_SeparateFromUserHub(t *testing.T) {
 	for _, s := range adminScreens() {
 		adminTitles[s.Title] = true
 	}
-	for _, want := range []string{"Gatekeeper", "Forge Runtimes", "Audit Log"} {
+	for _, want := range []string{"Gatekeeper", "Forge Runtimes", "Audit Log", "Sign-ups"} {
 		if !adminTitles[want] {
 			t.Errorf("admin hub missing screen %q", want)
 		}
@@ -70,7 +70,7 @@ func TestAdminModules_FlaggedAdmin(t *testing.T) {
 	wantAdmin := map[string]bool{
 		"gatekeeper": true, "forge-runtimes": true, "audit": true,
 		"orgs": true, "teams": true, "users": true, "roles": true,
-		"permissions": true, "service-requests": true,
+		"permissions": true, "service-requests": true, "gatekeeper-signups": true,
 	}
 	seen := map[string]bool{}
 	for _, m := range activeModules() {

@@ -402,6 +402,37 @@ func handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Invite-only registration gate. When enabled, the email must match the signup
+	// allowlist (an exact address or a @domain rule). The genuine first-user
+	// bootstrap admin is exempt so an invite-only instance can always be
+	// initialised; once any account exists — including an env-seeded admin — the
+	// gate applies to every subsequent signup.
+	policy, err := getSignupPolicy(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "signup policy read failed")
+		slog.ErrorContext(ctx, "signup failed: could not read signup policy", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if policy.InviteOnly {
+		allowed, err := isSignupEmailAllowed(ctx, req.Email)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "allowlist check failed")
+			slog.ErrorContext(ctx, "signup failed: allowlist check error", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if !allowed && !signupBootstrapExempt(ctx) {
+			span.SetStatus(codes.Error, "invite-only: email not allowlisted")
+			slog.WarnContext(ctx, "signup rejected: invite-only mode and email not on allowlist", "username", req.Username)
+			meterSignups.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "invite_denied")))
+			http.Error(w, "sign-ups are invite-only; this email is not on the allowlist", http.StatusForbidden)
+			return
+		}
+	}
+
 	span.SetAttributes(attribute.String("user.username", req.Username))
 	slog.InfoContext(ctx, "creating new user", "username", req.Username)
 

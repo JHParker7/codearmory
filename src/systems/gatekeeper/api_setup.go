@@ -9,9 +9,12 @@ import (
 )
 
 // setupStatusResponse reports whether the instance has completed first-run setup.
-// Initialized is true once any user account exists (active or not).
+// Initialized is true once any user account exists (active or not). InviteOnly
+// mirrors the signup policy so the public signup page can show invite-only
+// messaging without needing an admin-gated read.
 type setupStatusResponse struct {
 	Initialized bool `json:"initialized"`
+	InviteOnly  bool `json:"invite_only"`
 }
 
 // handleSetupStatus is a public (unauthenticated) endpoint reporting whether the
@@ -38,9 +41,18 @@ func handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Best-effort: an error reading the policy must not break setup routing, so it
+	// falls back to invite_only=false (open registration).
+	inviteOnly := false
+	if policy, err := getSignupPolicy(ctx); err != nil {
+		span.RecordError(err)
+	} else {
+		inviteOnly = policy.InviteOnly
+	}
+
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(setupStatusResponse{Initialized: count > 0}); err != nil {
+	if err := json.NewEncoder(w).Encode(setupStatusResponse{Initialized: count > 0, InviteOnly: inviteOnly}); err != nil {
 		span.RecordError(err)
 	}
 }

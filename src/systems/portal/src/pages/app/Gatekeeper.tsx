@@ -20,14 +20,15 @@ import {
   listInvites, acceptInvite, declineInvite, deleteInvite,
   listServiceRequests, approveServiceRequest, declineServiceRequest,
   listOrgs, createOrg, updateOrg, deleteOrg, inviteToOrg,
+  listSignupAllowlist, addSignupAllowlist, deleteSignupAllowlist, getSignupPolicy, setSignupPolicy,
   getOrg, getTeam,
 } from '../../api/bff';
-import type { User, Role, Permission, Secret, Org, Team, Invite, ServiceRequest, SecretProvider, SecretProviderName } from '../../api/bff';
+import type { User, Role, Permission, Secret, Org, Team, Invite, ServiceRequest, SecretProvider, SecretProviderName, SignupAllowlistEntry } from '../../api/bff';
 import { timeAgo, shortId } from '../../utils';
 import { useUserNames } from '../../hooks/useNames';
 import { useResizableWidth } from '../../components/ResizeHandle';
 
-type Tab = 'users' | 'roles' | 'permissions' | 'secrets' | 'teams' | 'orgs' | 'invites' | 'service-requests';
+type Tab = 'users' | 'roles' | 'permissions' | 'secrets' | 'teams' | 'orgs' | 'invites' | 'allowlist' | 'service-requests';
 
 // ── Shared input style ─────────────────────────────────────────────────────────
 
@@ -1275,6 +1276,172 @@ function InvitesTab() {
   );
 }
 
+// ── Signup allowlist tab ──────────────────────────────────────────────────────
+
+/**
+ * signups tab: manage invite-only registration. A policy panel toggles invite-only
+ * mode on/off (setSignupPolicy); below it, an allowlist of permitted emails and
+ * @domain rules that may register while invite-only is on — add (addSignupAllowlist),
+ * list (listSignupAllowlist), and delete-with-confirm (deleteSignupAllowlist).
+ */
+function AllowlistTab() {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [entries, setEntries] = useState<SignupAllowlistEntry[]>([]);
+  const [inviteOnly, setInviteOnly] = useState<boolean | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newEmail, setNewEmail] = useState('');
+  const [newNote, setNewNote] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [togglingPolicy, setTogglingPolicy] = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const [list, policy] = await Promise.all([listSignupAllowlist(token), getSignupPolicy(token)]);
+      setEntries(list);
+      setInviteOnly(policy.invite_only);
+    } catch (e: unknown) { setError((e as Error).message); }
+    finally { setLoading(false); }
+  }, [token]);
+
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  const applyPolicy = async (next: boolean) => {
+    if (next === inviteOnly || togglingPolicy) return;
+    setTogglingPolicy(true); setError(null);
+    try {
+      const p = await setSignupPolicy(token, next);
+      setInviteOnly(p.invite_only);
+    } catch (e: unknown) { setError((e as Error).message); }
+    finally { setTogglingPolicy(false); }
+  };
+
+  const handleAdd = async () => {
+    const email = newEmail.trim();
+    if (!email || adding) return;
+    setAdding(true); setError(null);
+    try {
+      const entry = await addSignupAllowlist(token, email, newNote.trim() || undefined);
+      setEntries(prev => [entry, ...prev]);
+      setNewEmail(''); setNewNote(''); setShowCreate(false);
+    } catch (e: unknown) { setError((e as Error).message); }
+    finally { setAdding(false); }
+  };
+
+  const [confirm, confirmEl] = useConfirm();
+
+  const handleDelete = async (id: string) => {
+    const email = entries.find(e => e.entry_id === id)?.email;
+    if (!(await confirm({ message: `Remove ${email ?? id} from the sign-up allowlist? If invite-only is on, this email will no longer be able to register.` }))) return;
+    setDeletingId(id); setError(null);
+    try {
+      await deleteSignupAllowlist(token, id);
+      setEntries(prev => prev.filter(e => e.entry_id !== id));
+    } catch (e: unknown) { setError((e as Error).message); }
+    finally { setDeletingId(null); }
+  };
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
+      {confirmEl}
+
+      {/* Policy panel */}
+      <div style={{ background: T.card, border: `1px solid ${T.borderHi}`, padding: '14px 16px', marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+              <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1 }}>REGISTRATION POLICY</span>
+              {inviteOnly !== null && (
+                <Pill tone={inviteOnly ? 'green' : 'dim'}>{inviteOnly ? 'invite-only' : 'open'}</Pill>
+              )}
+            </div>
+            <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, lineHeight: 1.5 }}>
+              {inviteOnly
+                ? 'only emails matching the allowlist below can create an account.'
+                : 'anyone can create an account. enable invite-only to restrict sign-ups.'}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 0, border: `1px solid ${T.border}` }}>
+            <button onClick={() => applyPolicy(false)} disabled={togglingPolicy || inviteOnly === null}
+              style={{ background: inviteOnly === false ? T.greenSoft : 'transparent', border: 'none', borderRight: `1px solid ${T.border}`, color: inviteOnly === false ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '6px 14px', cursor: togglingPolicy ? 'default' : 'pointer' }}>
+              [ open ]
+            </button>
+            <button onClick={() => applyPolicy(true)} disabled={togglingPolicy || inviteOnly === null}
+              style={{ background: inviteOnly === true ? T.greenSoft : 'transparent', border: 'none', color: inviteOnly === true ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '6px 14px', cursor: togglingPolicy ? 'default' : 'pointer' }}>
+              [ invite-only ]
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Allowlist header + add */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+        <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1 }}>ALLOWLIST · {entries.length}</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => { setShowCreate(v => !v); setError(null); }}
+            style={{ background: showCreate ? T.greenSoft : 'transparent', border: `1px solid ${showCreate ? T.green : T.border}`, color: showCreate ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+            + add
+          </button>
+          <button onClick={fetchAll} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>↻</button>
+        </div>
+      </div>
+
+      {showCreate && (
+        <div style={{ background: T.card, border: `1px solid ${T.borderHi}`, padding: '16px', marginBottom: 20 }}>
+          {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>{error}</div>}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            <div>
+              <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>EMAIL OR @DOMAIN</div>
+              <input value={newEmail} onChange={e => setNewEmail(e.target.value)} autoFocus placeholder="you@company.dev or @company.dev"
+                onKeyDown={e => e.key === 'Enter' && handleAdd()} style={{ ...inputStyle, background: T.cardHi }} />
+            </div>
+            <div>
+              <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>NOTE (OPTIONAL)</div>
+              <input value={newNote} onChange={e => setNewNote(e.target.value)} placeholder="e.g. new hire, contractor"
+                onKeyDown={e => e.key === 'Enter' && handleAdd()} style={{ ...inputStyle, background: T.cardHi }} />
+            </div>
+          </div>
+          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 12, lineHeight: 1.5 }}>
+            → a full address (alice@co.com) matches one person; a @domain rule (@co.com) matches everyone at that domain.
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={handleAdd} disabled={!newEmail.trim() || adding}
+              style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 12, fontWeight: 600, padding: '7px 16px', cursor: 'pointer', opacity: (!newEmail.trim() || adding) ? 0.6 : 1 }}>
+              {adding ? '[ · · · ]' : '[ add ]'}
+            </button>
+            <button onClick={() => { setShowCreate(false); setNewEmail(''); setNewNote(''); }} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '7px 12px', cursor: 'pointer' }}>cancel</button>
+          </div>
+        </div>
+      )}
+      {error && !showCreate && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '10px 14px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 16 }}>{error}</div>}
+
+      {loading ? <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
+        : entries.length === 0 ? <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '20px', fontFamily: T.mono, fontSize: 12, color: T.faint, textAlign: 'center' }}>→ no allowlisted emails{inviteOnly ? ' — nobody can register until you add one' : ''}</div>
+        : (
+          <div style={{ background: T.card, border: `1px solid ${T.border}`, overflow: 'hidden' }}>
+            {entries.map((entry, i) => (
+              <div key={entry.entry_id} style={{ display: 'flex', alignItems: 'center', padding: '10px 14px', borderBottom: i < entries.length - 1 ? `1px solid ${T.border}` : 'none', gap: 12 }}>
+                {entry.email.startsWith('@') && <Pill tone="blue">domain</Pill>}
+                <span style={{ fontFamily: T.mono, fontSize: 13, color: T.textHi, fontWeight: 600 }}>{entry.email}</span>
+                {entry.note && <span style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, flex: 1 }}>{entry.note}</span>}
+                <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginLeft: entry.note ? 0 : 'auto' }}>{timeAgo(entry.created_at)} ago</span>
+                <button onClick={() => handleDelete(entry.entry_id)} disabled={deletingId === entry.entry_id}
+                  style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 8px', cursor: 'pointer', opacity: deletingId === entry.entry_id ? 0.5 : 1 }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
+                  [ delete ]
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+    </div>
+  );
+}
+
 // ── Service requests tab ──────────────────────────────────────────────────────
 
 /** service-requests tab: master/detail list of service-permission-requests (filterable by status); the detail pane shows the requested permissions and approves/declines pending ones via approveServiceRequest/declineServiceRequest. */
@@ -1418,6 +1585,7 @@ const ALL_TABS: { id: Tab; label: string; permission: string }[] = [
   { id: 'teams',            label: 'teams',        permission: 'gatekeeper:listTeam' },
   { id: 'orgs',             label: 'orgs',         permission: 'gatekeeper:listOrg' },
   { id: 'invites',          label: 'invites',      permission: 'gatekeeper:listInvite' },
+  { id: 'allowlist',        label: 'signups',      permission: 'gatekeeper:listSignupAllowlist' },
   { id: 'service-requests', label: 'svc requests', permission: 'gatekeeper:listSPR' },
 ];
 
@@ -1458,6 +1626,7 @@ export function Gatekeeper() {
         {tab === 'teams' && <TeamsTab />}
         {tab === 'orgs' && <OrgsTab />}
         {tab === 'invites' && <InvitesTab />}
+        {tab === 'allowlist' && <AllowlistTab />}
         {tab === 'service-requests' && <ServiceRequestsTab />}
       </div>
     </div>

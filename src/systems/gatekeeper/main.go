@@ -74,6 +74,16 @@ func envInt(key string, def int) int {
 	return def
 }
 
+// envBool reports whether key is set to a truthy value ("1", "true", "yes", "on",
+// case-insensitive). Any other value — including unset — is false.
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 func envDuration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
@@ -195,11 +205,13 @@ func main() {
 	initSecretsEncryption()
 
 	conn := connect()
-	conn.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{})
+	conn.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{})
 	applyForeignKeys(conn)
 	applyUniqueIndexes(conn)
 	seedServiceAccounts(ctx)
 	seedAdminUser(ctx)
+	seedSignupPolicy(ctx)
+	seedSignupAllowlist(ctx)
 	initOIDC()
 
 	if registryURL := os.Getenv("REGISTRY_URL"); registryURL != "" {
@@ -386,6 +398,13 @@ func buildMux() *http.ServeMux {
 	mux.Handle("GET /audit-logs", mw(handleListAuditLogs))
 	mux.Handle("GET /permission-checks", mw(handleListPermissionChecks))
 
+	// Invite-only registration: admin-managed signup allowlist + policy toggle.
+	mux.Handle("POST /signup-allowlist", mw(handleCreateSignupAllowlist))
+	mux.Handle("GET /signup-allowlist", mw(handleListSignupAllowlist))
+	mux.Handle("DELETE /signup-allowlist/{id}", mw(handleDeleteSignupAllowlist))
+	mux.Handle("GET /signup-policy", mw(handleGetSignupPolicy))
+	mux.Handle("PUT /signup-policy", mw(handleUpdateSignupPolicy))
+
 	// Secrets: user-authenticated CRUD (values write-only) + internal resolve for the workflow worker.
 	mux.Handle("POST /secrets", mw(handleCreateSecret))
 	mux.Handle("GET /secrets", mw(handleListSecrets))
@@ -463,6 +482,10 @@ func applyUniqueIndexes(db *gorm.DB) {
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_owner_name ON teams (owner_id, team_name) WHERE active AND org_id IS NULL`,
 		// OAuth clients are unique by name within their org.
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_oauth_clients_org_name ON oauth_clients (org_id, name) WHERE active`,
+		// A signup allowlist value (email or @domain rule) is unique among active
+		// entries; a soft-deleted value can be re-added. Stored already-lowercased,
+		// so the index is on the raw column.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_signup_allowlist_email ON signup_allowlist (email) WHERE active`,
 	}
 	for _, idx := range indexes {
 		if err := db.Exec(idx).Error; err != nil {

@@ -103,6 +103,44 @@ type Invite struct {
 	Active       bool      `json:"-"             gorm:"column:active;default:true"`
 }
 
+// SignupAllowlistEntry is a single permitted-email rule for invite-only signup.
+// Email holds either a full address ("alice@example.com") or a domain rule
+// ("@example.com", matching any address at that domain), always normalised to
+// lower case. Entries are managed by platform admins at runtime; the signup gate
+// consults them only when the SignupPolicy has InviteOnly set.
+type SignupAllowlistEntry struct {
+	EntryID   string    `json:"entry_id"   gorm:"column:entry_id;primaryKey"`
+	CreatedAt time.Time `json:"created_at" gorm:"column:created_at"`
+	UpdatedAt time.Time `json:"updated_at" gorm:"column:updated_at"`
+	Email     string    `json:"email"      gorm:"column:email"`
+	Note      string    `json:"note"       gorm:"column:note;default:''"`
+	CreatedBy string    `json:"created_by" gorm:"column:created_by"`
+	Active    bool      `json:"-"          gorm:"column:active;default:true"`
+}
+
+func (SignupAllowlistEntry) TableName() string { return "signup_allowlist" }
+
+// signupPolicySingletonID is the fixed primary key of the single SignupPolicy row.
+const signupPolicySingletonID = "singleton"
+
+// SignupPolicy is a single-row table holding instance-wide registration policy.
+// When InviteOnly is true, handleSignup rejects any email that is not matched by
+// the signup allowlist (the bootstrap admin's very first signup is exempt so the
+// instance can always be initialised). Seeded from GATEKEEPER_INVITE_ONLY at
+// startup, then changed by admins at runtime via PUT /signup-policy.
+//
+// InviteOnly deliberately carries no `default:` gorm tag: a default tag makes
+// GORM omit the field on Create when it holds its zero value (false), so the
+// column could not be explicitly stored false. It is always set explicitly.
+type SignupPolicy struct {
+	ID         string    `json:"-"          gorm:"column:id;primaryKey"`
+	InviteOnly bool      `json:"invite_only" gorm:"column:invite_only"`
+	UpdatedAt  time.Time `json:"updated_at" gorm:"column:updated_at"`
+	UpdatedBy  string    `json:"updated_by" gorm:"column:updated_by;default:''"`
+}
+
+func (SignupPolicy) TableName() string { return "signup_policy" }
+
 // Permissions defines a set of allowed actions on resources for a given service.
 type Permissions struct {
 	Name          string    `json:"name"           gorm:"column:name"`
