@@ -8,11 +8,12 @@ import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   listWorkflows, getWorkflow, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
-  createWorkflow, updateWorkflow, listSteps, listActions, listGitRepos,
+  createWorkflow, updateWorkflow, createStep, listSteps, listActions, listGitRepos,
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction, GitRepo, WorkflowInputDef, WorkflowOutputDef } from '../../api/bff';
 import { ResizeHandle, useResizableWidth } from '../../components/ResizeHandle';
-import { PipelineBlocks } from './PipelineBlocks';
+import { PipelineBlocks, blockDef } from './PipelineBlocks';
+import type { BlockSelection, PipelineBlocksHandle } from './PipelineBlocks';
 import { StepDefForm } from './StepDefForm';
 import { StepsTab } from './StepLibrary';
 import type { StepRef } from './pipelineGraph';
@@ -95,6 +96,18 @@ function PipelineBuilderOverlay({
 }) {
   const initialStepRefs = useMemo<StepRef[]>(
     () => initial ? initial.steps.map(s => {
+      // An inline step (no step_id, not a gate) round-trips its whole definition — the
+      // blocks layer re-splits it into a def (inline.with) + empty override.
+      if (!s.step_id && !s.approval && s.action) {
+        return {
+          action: s.action,
+          timeout: s.timeout ?? undefined,
+          name: s.name || undefined,
+          with: (s.with ?? undefined) as Record<string, unknown> | undefined,
+          parallel_group: s.parallel_group ?? null,
+          matrix: s.matrix ?? null,
+        };
+      }
       // The GET returns the effective (merged) name/with; recover the raw overrides
       // by keeping only what differs from the step definition, so unchanged steps
       // still track definition edits and the JSON/payload stay minimal.
@@ -163,13 +176,20 @@ function PipelineBuilderOverlay({
     return Math.max(280, Math.min(w - dx, total - 360));
   }), []);
   // The step block currently selected in the builder (null = none / an approval
-  // gate, whose config lives on the card). Its step is edited in the right panel.
-  const [inspectId, setInspectId] = useState<string | null>(null);
+  // gate, whose config lives on the card). Its step is edited in the right panel —
+  // an inline step edits its own def; a reference edits the shared step.
+  const [inspect, setInspect] = useState<BlockSelection | null>(null);
   // An action the user picked from the palette to create a step from: the right
   // panel shows an inline create form for it until saved or cancelled.
   const [creatingAction, setCreatingAction] = useState<WorkflowAction | null>(null);
-  // A freshly-created step handed to the block builder to add as a new block.
+  // A freshly-created step handed to the block builder to add as a new block (an
+  // inline step has step_id ""); PipelineBlocks embeds it as an inline block.
   const [pendingAdd, setPendingAdd] = useState<Step | null>(null);
+  // Imperative handle into the block builder, so convert-to-general / make-local /
+  // inline-def edits mutate the selected block without re-seeding the canvas.
+  const blocksApi = useRef<PipelineBlocksHandle | null>(null);
+  const [convertBusy, setConvertBusy] = useState(false);
+  const [convertError, setConvertError] = useState<string | null>(null);
   const [actions, setActions] = useState<WorkflowAction[]>([]);
   useEffect(() => { listActions(token).then(setActions).catch(() => {}); }, [token]);
   // Git repo catalog for the builder's per-step repo picker (forge blocks).
@@ -177,9 +197,10 @@ function PipelineBuilderOverlay({
   useEffect(() => { listGitRepos(token).then(setRepos).catch(() => {}); }, [token]);
   // Selecting a block shows that step in the editor and cancels any in-progress
   // create (picking a block wins over a half-started new step).
-  const onInspect = useCallback((stepId: string | null) => {
-    setInspectId(stepId);
+  const onInspect = useCallback((selection: BlockSelection | null) => {
+    setInspect(selection);
     setCreatingAction(null);
+    setConvertError(null);
     setRightTab('step');
   }, []);
   // Picking an action from the palette opens the inline create form for it.
@@ -187,6 +208,50 @@ function PipelineBuilderOverlay({
     setCreatingAction(a);
     setRightTab('step');
   }, []);
+
+  // Save an inline step's edited definition back onto its block (no API — the step is
+  // pipeline-local). Keeps the selection's def in sync for the output-reference helper.
+  const applyInlineEdit = useCallback((uid: string, saved: Step) => {
+    const def = { name: saved.name, action: saved.action, with: (saved.with ?? {}) as Record<string, unknown>, timeout: saved.timeout ?? undefined };
+    blocksApi.current?.patchBlock(uid, { name: saved.name, inline: { action: saved.action, timeout: saved.timeout ?? undefined, with: def.with } });
+    setInspect(prev => (prev && prev.uid === uid ? { ...prev, name: saved.name, def } : prev));
+  }, []);
+
+  // Convert an inline step into a shared/reusable Step: persist it (createStep), then
+  // repoint the block at the new step_id and clear its now-redundant override.
+  const convertToGeneral = useCallback(async () => {
+    if (!inspect || inspect.kind !== 'inline') return;
+    const b = blocksApi.current?.getBlock(inspect.uid);
+    const def = b ? blockDef(b, catalog) : inspect.def;
+    if (!def) return;
+    setConvertBusy(true); setConvertError(null);
+    try {
+      // Fold the def + any per-occurrence override into the shared step's config.
+      const withCfg = { ...(def.with ?? {}), ...((b?.with ?? {}) as Record<string, unknown>) };
+      const saved = await createStep(token, {
+        name: def.name, action: def.action,
+        with: Object.keys(withCfg).length ? withCfg : undefined,
+        timeout: def.timeout,
+      });
+      blocksApi.current?.patchBlock(inspect.uid, { stepId: saved.step_id, inline: undefined, with: {} });
+      onStepsChanged();
+      setInspect({ uid: inspect.uid, kind: 'ref', stepId: saved.step_id, name: undefined, def: { name: saved.name, action: saved.action, with: (saved.with ?? {}) as Record<string, unknown>, timeout: saved.timeout ?? undefined } });
+    } catch (e: unknown) { setConvertError((e as Error).message); }
+    finally { setConvertBusy(false); }
+  }, [inspect, catalog, token, onStepsChanged]);
+
+  // Make-local: copy a shared step's definition inline so edits stay in this pipeline.
+  // Merges the def's config with any per-occurrence override into the inline def.
+  const makeLocal = useCallback(() => {
+    if (!inspect || inspect.kind !== 'ref') return;
+    const b = blocksApi.current?.getBlock(inspect.uid);
+    const def = catalog[inspect.stepId];
+    if (!b || !def) return;
+    const merged = { ...((def.with ?? {}) as Record<string, unknown>), ...((b.with ?? {}) as Record<string, unknown>) };
+    const name = b.name || def.name;
+    blocksApi.current?.patchBlock(inspect.uid, { stepId: '', inline: { action: def.action, timeout: def.timeout ?? undefined, with: merged }, name, with: {} });
+    setInspect({ uid: inspect.uid, kind: 'inline', stepId: '', name, def: { name, action: def.action, with: merged, timeout: def.timeout ?? undefined } });
+  }, [inspect, catalog]);
   // A sensible, collision-free default name for a step created from an action:
   // the action slug (e.g. forge/run → forge-run), suffixed if already taken.
   const defaultStepName = useCallback((action: string) => {
@@ -293,7 +358,7 @@ function PipelineBuilderOverlay({
       )}
       <div ref={splitRow} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 3px 14px 14px' }}>
-          <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} actions={actions} repos={repos} token={token}
+          <PipelineBlocks ref={blocksApi} editable initialSteps={builderSeed} catalog={catalog} palette={palette} actions={actions} repos={repos} token={token}
             onChange={setSteps} onInspect={onInspect} onPickAction={onPickAction}
             pendingAdd={pendingAdd} onPendingConsumed={() => setPendingAdd(null)} />
         </div>
@@ -315,20 +380,45 @@ function PipelineBuilderOverlay({
           <div style={{ flex: 1, minHeight: 0, border: `1px solid ${T.border}`, background: T.bg, display: 'flex', flexDirection: 'column' }}>
             {rightTab === 'step' ? (
               creatingAction ? (
-                // Create a new step from the picked action; on save, drop it into the
-                // pipeline as a new block (pendingAdd) and refresh the catalog.
+                // Create a new step from the picked action — INLINE by default (its
+                // definition lives on the pipeline, not the shared step library). On
+                // save it drops into the pipeline as a new inline block (pendingAdd).
                 <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
-                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 }}>new step · {creatingAction.name}</div>
-                  <StepDefForm token={token} initial={null} lockAction={creatingAction.name} autoFocus
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 }}>new inline step · {creatingAction.name}</div>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 10 }}>this step is private to this pipeline — use “convert to general” after adding to reuse it elsewhere</div>
+                  <StepDefForm token={token} initial={null} inline lockAction={creatingAction.name} autoFocus
                     defaultName={defaultStepName(creatingAction.name)} createLabel="[ add step ]"
-                    onSaved={(saved) => { setPendingAdd(saved); setCreatingAction(null); onStepsChanged(); }}
+                    onSaved={(saved) => { setPendingAdd(saved); setCreatingAction(null); }}
                     onCancel={() => setCreatingAction(null)} />
                 </div>
-              ) : inspectId && catalog[inspectId] ? (
-                // Edit the step behind the selected block, inline.
+              ) : inspect?.kind === 'inline' && inspect.def ? (
+                // Edit the inline step's definition; changes stay on the block.
                 <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
-                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 }}>edit step</div>
-                  <StepDefForm key={inspectId} token={token} initial={catalog[inspectId]} lockAction={catalog[inspectId].action}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>inline step</div>
+                    <div style={{ flex: 1 }} />
+                    <button onClick={convertToGeneral} disabled={convertBusy} title="save this step to the reusable library so other pipelines can use it"
+                      style={{ background: 'transparent', border: `1px solid ${T.border}`, color: convertBusy ? T.faint : T.green, fontFamily: T.mono, fontSize: 10, padding: '4px 8px', cursor: convertBusy ? 'default' : 'pointer' }}>
+                      {convertBusy ? '[ · · · ]' : '⇪ convert to general'}
+                    </button>
+                  </div>
+                  {convertError && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{convertError}</div>}
+                  <StepDefForm key={inspect.uid} token={token} inline lockAction={inspect.def.action}
+                    initial={{ step_id: '', name: inspect.name ?? inspect.def.name, description: null, action: inspect.def.action, with: (inspect.def.with ?? null) as Record<string, unknown> | null, timeout: inspect.def.timeout ?? null, created_by: '', org_id: null, active: true, created_at: '', updated_at: '' }}
+                    onSaved={(saved) => applyInlineEdit(inspect.uid, saved)} />
+                </div>
+              ) : inspect?.kind === 'ref' && catalog[inspect.stepId] ? (
+                // Edit the shared step behind the selected block, inline.
+                <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 14 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>shared step · edits affect every pipeline</div>
+                    <div style={{ flex: 1 }} />
+                    <button onClick={makeLocal} title="copy this step's definition into this pipeline so edits don't affect other pipelines"
+                      style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '4px 8px', cursor: 'pointer' }}>
+                      ⇩ make local
+                    </button>
+                  </div>
+                  <StepDefForm key={inspect.stepId} token={token} initial={catalog[inspect.stepId]} lockAction={catalog[inspect.stepId].action}
                     onSaved={() => onStepsChanged()} />
                 </div>
               ) : (
@@ -353,7 +443,7 @@ function PipelineBuilderOverlay({
       </div>
       <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-          palette: ∥ parallel · ⊞ matrix · ⏸ approval gate · click an action to create a step · click a block to edit it · drag to reorder
+          palette: ∥ parallel · ⊞ matrix · ⏸ approval gate · click an action for an inline step (⇪ convert to general to reuse it) · click a block to edit it · drag to reorder
         </span>
         <div style={{ flex: 1 }} />
         {dupNames.length > 0 && (
@@ -486,7 +576,21 @@ function PipelinesTab() {
   // Stable per selected workflow so the read-only graph isn't re-seeded on every
   // render (runs polling, trigger, etc. re-render this component frequently).
   const detailSteps = useMemo<StepRef[]>(
-    () => selectedWorkflow ? selectedWorkflow.steps.map(s => ({ step_id: s.step_id, parallel_group: s.parallel_group ?? null, matrix: s.matrix ?? null, approval: s.approval ?? null })) : [],
+    () => selectedWorkflow ? selectedWorkflow.steps.map(s => {
+      // An inline step must carry its definition so the read-only diagram can label it
+      // (there is no shared catalog entry to resolve it from).
+      const isInline = !s.step_id && !s.approval && !!s.action;
+      return {
+        step_id: s.step_id,
+        action: isInline ? s.action : undefined,
+        name: isInline ? (s.name || undefined) : undefined,
+        timeout: isInline ? (s.timeout ?? undefined) : undefined,
+        with: isInline ? ((s.with ?? undefined) as Record<string, unknown> | undefined) : undefined,
+        parallel_group: s.parallel_group ?? null,
+        matrix: s.matrix ?? null,
+        approval: s.approval ?? null,
+      };
+    }) : [],
     [selectedWorkflow],
   );
 

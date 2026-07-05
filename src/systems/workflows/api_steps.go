@@ -347,9 +347,10 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 }
 
 // validateStepRefShape checks a single step reference's structural invariants
-// without touching the database. A ref is either an inline approval gate or a
-// reference to a stored step (with an optional parallel group or matrix). Returns
-// a user-facing message or "".
+// without touching the database. A ref is exactly one of: an inline approval gate,
+// an inline step (Action set, definition on the ref), or a reference to a stored
+// step (StepID set) — each optionally with a parallel group or matrix. Returns a
+// user-facing message or "".
 func validateStepRefShape(i int, ref WorkflowStepRef) string {
 	// A per-occurrence name (if given) becomes a ${steps.<name>.output} key, so it
 	// must be a clean single-segment name like a step name.
@@ -359,16 +360,40 @@ func validateStepRefShape(i int, ref WorkflowStepRef) string {
 		}
 	}
 	if ref.Approval != nil {
-		if ref.StepID != "" {
-			return fmt.Sprintf("step %d: cannot be both a step reference and an approval gate", i)
+		if ref.StepID != "" || ref.Action != "" {
+			return fmt.Sprintf("step %d: cannot be both a step and an approval gate", i)
 		}
 		if ref.ParallelGroup != nil || ref.Matrix != nil {
 			return fmt.Sprintf("step %d: an approval gate cannot have a parallel_group or matrix", i)
 		}
 		return ""
 	}
-	if ref.StepID == "" {
-		return fmt.Sprintf("step %d: step_id is required", i)
+	// An inline step carries its whole definition on the ref (no StepID). Validate it
+	// the same way createStep validates a stored step, so both authoring paths accept
+	// the same actions; the parallel/matrix checks below then apply to it too.
+	if ref.Action != "" {
+		if ref.StepID != "" {
+			return fmt.Sprintf("step %d: cannot be both a stored-step reference and an inline step", i)
+		}
+		if ref.Name == "" {
+			return fmt.Sprintf("step %d: an inline step requires a name", i)
+		}
+		if ref.Action == ActionApproval {
+			return fmt.Sprintf("step %d: use an approval gate rather than an inline %q step", i, ActionApproval)
+		}
+		if ref.Action == ActionHTTP {
+			if withString(ref.With, "service") == "" {
+				return fmt.Sprintf("step %d: http requires with.service", i)
+			}
+			if withString(ref.With, "path") == "" {
+				return fmt.Sprintf("step %d: http requires with.path", i)
+			}
+		}
+		if ref.Timeout < 0 || ref.Timeout > maxTimeout {
+			return fmt.Sprintf("step %d: timeout must be between 0 and %d seconds", i, maxTimeout)
+		}
+	} else if ref.StepID == "" {
+		return fmt.Sprintf("step %d: step_id or action is required", i)
 	}
 	if ref.ParallelGroup != nil && *ref.ParallelGroup < 0 {
 		return fmt.Sprintf("step %d: parallel_group must be non-negative", i)
@@ -404,9 +429,10 @@ func validateMatrix(m *MatrixConfig) string {
 	return ""
 }
 
-// validateStepRefs confirms every step-referencing ref exists and is accessible to
-// the caller. Inline approval gates carry no step_id, so they are skipped here
-// (their shape is checked in validateStepRefShape).
+// validateStepRefs confirms every stored-step reference exists and is accessible to
+// the caller. Inline steps and approval gates carry no step_id, so they are skipped
+// here (their shape is checked in validateStepRefShape); their names still take part
+// in the per-pipeline uniqueness check below.
 func validateStepRefs(ctx context.Context, refs []WorkflowStepRef, userID, orgID string, w http.ResponseWriter) error {
 	ids := make([]string, 0, len(refs))
 	for _, r := range refs {
@@ -436,7 +462,10 @@ func validateStepRefs(ctx context.Context, refs []WorkflowStepRef, userID, orgID
 	seenNames := make(map[string]int, len(refs))
 	for i, ref := range refs {
 		name := ref.Name
-		if ref.Approval == nil {
+		// Only a stored-step reference needs the existence/access lookup. An inline step
+		// (Approval nil, StepID empty) carries its own name via ref.Name — validated
+		// non-empty in validateStepRefShape — and a gate has no name here.
+		if ref.Approval == nil && ref.StepID != "" {
 			s, ok := found[ref.StepID]
 			if !ok {
 				err := fmt.Errorf("step %d: step %q not found", i, ref.StepID)

@@ -187,3 +187,79 @@ def test_delete_idempotent_second_call(bearer, healthz_step_id):
 
     res = requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf_id}", headers=bearer)
     assert res.status_code == 404
+
+
+# ── Inline steps ──────────────────────────────────────────────────────────────
+
+def _inline_http_step(name):
+    """An inline step (definition on the ref, no step_id) targeting gatekeeper/healthz."""
+    return {
+        "action": "http",
+        "name": name,
+        "with": {"service": "gatekeeper", "method": "GET", "path": "/healthz", "expected_status": 200},
+        "timeout": 10,
+    }
+
+
+@pytest.fixture
+def inline_workflow(bearer):
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines", headers=bearer, json={
+        "name": f"inline-pipe-{uuid.uuid4().hex[:6]}",
+        "steps": [_inline_http_step("inline-check")],
+    })
+    assert res.status_code == 201, f"inline create failed: {res.text}"
+    wf = res.json()
+    yield wf
+    requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf['workflow_id']}", headers=bearer)
+
+
+def test_inline_step_created_and_enriched(inline_workflow):
+    steps = inline_workflow["steps"]
+    assert len(steps) == 1
+    s = steps[0]
+    # An inline step is enriched from its own definition and carries no step_id.
+    assert s.get("step_id", "") == ""
+    assert s["action"] == "http"
+    assert s["name"] == "inline-check"
+
+
+def test_inline_step_not_in_shared_library(bearer, inline_workflow):
+    # An inline step must NOT create an entry in the reusable step library.
+    res = requests.get(f"{WORKFLOWS_URL}/steps", headers=bearer)
+    assert res.status_code == 200
+    assert "inline-check" not in [s["name"] for s in res.json()]
+
+
+def test_inline_step_triggers_a_run(bearer, inline_workflow):
+    wf_id = inline_workflow["workflow_id"]
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines/{wf_id}/runs", headers=bearer, json={"inputs": {}})
+    assert res.status_code in (200, 201, 202), res.text
+
+
+def test_raw_exposes_inline_step_refs(bearer, inline_workflow):
+    wf_id = inline_workflow["workflow_id"]
+    res = requests.get(f"{WORKFLOWS_URL}/pipelines/{wf_id}?raw=true", headers=bearer)
+    assert res.status_code == 200
+    body = res.json()
+    assert "step_refs" in body, "?raw=true must expose the stored step refs"
+    refs = body["step_refs"]
+    assert len(refs) == 1
+    assert refs[0]["action"] == "http"
+    assert refs[0]["name"] == "inline-check"
+    assert refs[0].get("step_id", "") == ""
+
+
+def test_inline_step_requires_name(bearer):
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines", headers=bearer, json={
+        "name": f"inline-noname-{uuid.uuid4().hex[:6]}",
+        "steps": [{"action": "http", "with": {"service": "gatekeeper", "path": "/healthz"}}],
+    })
+    assert res.status_code == 400
+
+
+def test_inline_step_rejects_step_id_and_action(bearer, healthz_step_id):
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines", headers=bearer, json={
+        "name": f"inline-both-{uuid.uuid4().hex[:6]}",
+        "steps": [{"step_id": healthz_step_id, "action": "http", "name": "x"}],
+    })
+    assert res.status_code == 400

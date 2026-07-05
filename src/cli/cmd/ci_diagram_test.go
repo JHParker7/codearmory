@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -532,5 +533,60 @@ func TestTuiRunDiagramPanel_FixedHeight(t *testing.T) {
 	}
 	if got := strings.Count(m.tuiRunDiagramPanel(), "\n") + 1; got != tuiDiagReserve {
 		t.Errorf("run diagram panel = %d lines, want exactly %d", got, tuiDiagReserve)
+	}
+}
+
+// ── inline steps (DSL guard + -f round-trip) ───────────────────────────────────
+
+// The one-line DSL only round-trips stored-step references (and @repo). Inline
+// steps, gates, matrices, and wired `with` overrides must be flagged non-expressible
+// so the TUI refuses to lossily edit them via the DSL.
+func TestStepDSLExpressible(t *testing.T) {
+	g := 0
+	cases := []struct {
+		name string
+		s    tuiWorkflowStep
+		ok   bool
+	}{
+		{"stored reference", tuiWorkflowStep{StepID: "s1", Name: "build"}, true},
+		{"reference with @repo only", tuiWorkflowStep{StepID: "s1", Name: "build", With: map[string]any{"secret_refs": map[string]any{gitCloneEnv: "git:https://x/r.git"}}}, true},
+		{"inline step", tuiWorkflowStep{Name: "build", Action: "forge/run", With: map[string]any{"image": "alpine"}}, false},
+		{"approval gate", tuiWorkflowStep{Approval: &approvalGate{Message: "ok?"}}, false},
+		{"matrix", tuiWorkflowStep{StepID: "s1", Name: "build", Matrix: &matrixConfig{Var: "v", Values: []string{"a"}}}, false},
+		{"wired with override", tuiWorkflowStep{StepID: "s1", Name: "build", With: map[string]any{"env": map[string]any{"X": "${steps.a.output}"}}}, false},
+		{"parallel reference", tuiWorkflowStep{StepID: "s1", Name: "build", ParallelGroup: &g}, true},
+	}
+	for _, c := range cases {
+		if stepDSLExpressible(c.s) != c.ok {
+			t.Errorf("%s: stepDSLExpressible = %v, want %v", c.name, !c.ok, c.ok)
+		}
+	}
+}
+
+// A -f pipeline file with an inline step must round-trip its action/name/with/timeout
+// into workflowStepRef (a regression guard: without the fields they were dropped).
+func TestPipelineFile_InlineStepRoundTrip(t *testing.T) {
+	raw := `{"name":"p","steps":[
+		{"step_id":"s1"},
+		{"action":"forge/run","name":"build","timeout":90,"with":{"image":"alpine","run":"make"}}
+	]}`
+	var pf pipelineFile
+	if err := json.Unmarshal([]byte(raw), &pf); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(pf.Steps) != 2 {
+		t.Fatalf("got %d steps, want 2", len(pf.Steps))
+	}
+	in := pf.Steps[1]
+	if in.StepID != "" || in.Action != "forge/run" || in.Name != "build" || in.Timeout != 90 {
+		t.Errorf("inline ref not preserved: %+v", in)
+	}
+	if in.With["image"] != "alpine" || in.With["run"] != "make" {
+		t.Errorf("inline with not preserved: %+v", in.With)
+	}
+	// It must re-marshal without a step_id (so the backend reads it as inline).
+	out, _ := json.Marshal(in)
+	if strings.Contains(string(out), "step_id") {
+		t.Errorf("inline ref marshalled with a step_id: %s", out)
 	}
 }

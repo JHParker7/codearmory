@@ -8,7 +8,7 @@ The service has two distinct concepts:
 
 **Step** — a reusable, named action definition stored in the `steps` table. A step declares *what to do* (`action` + `with` config) and can be referenced by many workflows. Changing a step's definition affects every pipeline that references it.
 
-**Workflow** — an ordered list of step references (`step_id` + optional `parallel_group`). The workflow declares *when and in what order* to run steps; it stores no action logic itself.
+**Workflow** — an ordered list of step references. The workflow declares *when and in what order* to run steps; a reference itself stores no action logic.
 
 ```
 Steps table          Workflows table
@@ -17,6 +17,18 @@ step A  ──────────►  [ref A, ref B, ref C]  ◄── work
 step B  ──┐
 step C  ──┘──────►   [ref B, ref C]         ◄── workflow "smoke-test"
 ```
+
+### Step-ref kinds
+
+Each entry in a workflow's `steps` array is exactly **one** of three kinds:
+
+- **Stored-step reference** — `{"step_id": "<id>"}`. Points at a reusable Step in the `steps` table; many pipelines can share it, and editing the Step affects them all. A ref may add per-occurrence overrides: `name` (a distinct `${steps.<name>.output}` key so a step can appear more than once) and `with` (input wiring merged over the step's own config, ref keys winning).
+- **Inline step** — `{"action": "...", "name": "...", "with": {...}, "timeout": N}` with **no `step_id`**. The step's whole definition lives on the pipeline; it is **private to that pipeline** and not in the `steps` table. This is the default in the portal builder — a step is only promoted to a shared Step on demand.
+- **Approval gate** — `{"approval": {"message": "...", "approvers": [...]}}`. An inline manual-approval pause; the run holds at `awaiting_approval` until approved/rejected.
+
+A reference or inline step may also carry a `parallel_group` or a `matrix` (mutually exclusive); a gate is always solo. `GET /pipelines/{ref}?raw=true` returns the stored, unenriched refs (in `step_refs`) so a client can mutate a pipeline without baking a referenced step's merged config into its override.
+
+**Convert / make-local.** An inline step can be promoted to a shared Step (portal: “⇪ convert to general”; CLI: `armory pipelines convert-step <pipeline> <step-name>`) — it is persisted to the `steps` table and the ref repointed at its `step_id`. The reverse copies a shared step's definition inline (portal: “⇩ make local”; CLI: `armory pipelines localize-step`), so later edits stay local to the pipeline.
 
 ## How it works
 

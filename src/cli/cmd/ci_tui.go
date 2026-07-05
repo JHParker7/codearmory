@@ -1012,8 +1012,36 @@ func tuiFetchPipelineForEdit(workflowID string) tea.Cmd {
 		if err := json.Unmarshal(data, &def); err != nil {
 			return pipelineEditLoadedMsg{err: err}
 		}
+		// The one-line DSL only expresses stored-step references (+ optional @repo). A
+		// pipeline with an inline step, a gate, a matrix, or wired inputs would be
+		// silently corrupted on a DSL round-trip (re-resolved by name / dropped), so
+		// refuse to open it in the DSL edit form and point at the faithful paths.
+		for _, s := range def.Steps {
+			if !stepDSLExpressible(s) {
+				return pipelineEditLoadedMsg{err: fmt.Errorf(
+					"this pipeline has steps the one-line DSL can't represent (inline steps, gates, a matrix, or wired inputs) — edit it with 'armory pipelines update %s -f <file>' or in the portal", def.WorkflowID)}
+			}
+		}
 		return pipelineEditLoadedMsg{workflowID: def.WorkflowID, name: def.Name, desc: def.Description, dsl: stepsToDSL(def.Steps)}
 	}
+}
+
+// stepDSLExpressible reports whether a step can be faithfully round-tripped through
+// the one-line pipeline DSL. The DSL only references stored steps by name (with an
+// optional @repo). Inline steps, gates, matrices, and any per-occurrence `with`
+// beyond a git repo have no DSL form, so editing such a pipeline via the DSL would
+// lose them — those must be edited via -f JSON or the portal.
+func stepDSLExpressible(s tuiWorkflowStep) bool {
+	if s.Approval != nil || s.Matrix != nil {
+		return false
+	}
+	if s.StepID == "" && s.Action != "" {
+		return false // inline step
+	}
+	if len(s.With) > 0 && gitRepoFromStepWith(s.With) == "" {
+		return false // a wired/override `with` the DSL can't encode
+	}
+	return true
 }
 
 // dslStepToken renders one step as its DSL token, appending "@<repo>" when the step

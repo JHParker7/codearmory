@@ -15,7 +15,7 @@
  * reports the derived StepRef[] through onChange; read-only mode is a static
  * diagram for the pipeline detail page.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   DndContext, PointerSensor, pointerWithin, closestCenter, useSensor, useSensors, useDroppable, MeasuringStrategy,
@@ -24,7 +24,7 @@ import type { DragEndEvent, DragStartEvent, CollisionDetection } from '@dnd-kit/
 import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { T } from '../../theme';
-import { useViewport, clamp } from '../../hooks/useViewport';
+import { useResizablePane } from '../../components/ResizeHandle';
 import type { Step, GitRepo, WorkflowAction } from '../../api/bff';
 import { Block, StepRef, MatrixConfig, ApprovalGate, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
 import { StepInputsEditor, UpstreamOutput } from './StepInputsEditor';
@@ -43,10 +43,10 @@ export interface PipelineBlocksProps {
   // Auth token, so the per-step checkout branch selector can enumerate a repo's branches.
   token?: string;
   onChange?: (steps: StepRef[]) => void;
-  // Reports the step_id and effective (occurrence) name of the selected block (null
-  // step for a gate or no selection), so the builder can show that step's
-  // inputs/output — referenced by the occurrence name — in an inspector panel.
-  onInspect?: (stepId: string | null, name?: string) => void;
+  // Reports the selected block's identity + resolved def (null = a gate or no
+  // selection), so the host's right panel can edit that step. A gate has no step to
+  // edit; an inline step edits its own def; a reference edits the shared step.
+  onInspect?: (selection: BlockSelection | null) => void;
   // Clicking an action block: the host opens an inline create form for that action.
   onPickAction?: (action: WorkflowAction) => void;
   // A freshly-created step to drop into the pipeline as a new block (honoring the
@@ -70,9 +70,32 @@ const paletteSection: React.CSSProperties = {
   letterSpacing: 1, textTransform: 'uppercase', background: T.bgAlt, borderBottom: `1px solid ${T.border}`,
 };
 
-function labelFor(catalog: Record<string, Step>, stepId: string): { label: string; action: string } {
-  const s = catalog[stepId];
-  return { label: s?.name ?? stepId.slice(0, 8) + '…', action: s?.action ?? '' };
+/** The resolved definition of a block's step — from the block's own inline def
+ * (inline step) or the shared catalog (stored reference). Undefined for a gate. */
+export interface BlockDef { name: string; action: string; with?: Record<string, unknown>; timeout?: number }
+
+export function blockDef(b: Block, catalog: Record<string, Step>): BlockDef | undefined {
+  if (b.approval) return undefined;
+  if (b.inline) return { name: b.name ?? '', action: b.inline.action, with: b.inline.with, timeout: b.inline.timeout };
+  const s = catalog[b.stepId];
+  return s ? { name: s.name, action: s.action, with: (s.with ?? {}) as Record<string, unknown>, timeout: s.timeout ?? undefined } : undefined;
+}
+
+/** What the builder reports up when a block is selected — enough for the host's right
+ * panel to render the step editor (an inline step edits its own def; a reference
+ * edits the shared step) without reaching back into block state. */
+export interface BlockSelection { uid: string; kind: 'gate' | 'ref' | 'inline'; stepId: string; name?: string; def?: BlockDef }
+
+/** Imperative handle the host uses to mutate the selected block (inline-def edit,
+ * convert-to-general, make-local) — block state lives here, so the host drives these
+ * through the handle rather than re-seeding (which would reset uids and selection). */
+export interface PipelineBlocksHandle {
+  patchBlock: (uid: string, patch: Partial<Block>) => void;
+  getBlock: (uid: string) => Block | undefined;
+}
+
+function selectionFor(b: Block, catalog: Record<string, Step>): BlockSelection {
+  return { uid: b.uid, kind: b.approval ? 'gate' : b.inline ? 'inline' : 'ref', stepId: b.stepId, name: b.name, def: blockDef(b, catalog) };
 }
 
 /** Sequential drop target between stages / at the end. id = `gap-<insertIndex>`.
@@ -241,8 +264,16 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
   );
 }
 
-export function PipelineBlocks({ initialSteps, catalog, editable = false, palette = [], actions = [], repos = [], token, onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed, height }: PipelineBlocksProps) {
+export const PipelineBlocks = forwardRef<PipelineBlocksHandle, PipelineBlocksProps>(function PipelineBlocks({ initialSteps, catalog, editable = false, palette = [], actions = [], repos = [], token, onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed, height }, ref) {
   const [blocks, setBlocks] = useState<Block[]>(() => blocksFromSteps(initialSteps));
+  // Mirror blocks in a ref so the imperative handle reads current state (not a stale
+  // closure) when the host converts / makes-local / edits an inline block's def.
+  const blocksRef = useRef<Block[]>(blocks);
+  blocksRef.current = blocks;
+  useImperativeHandle(ref, () => ({
+    patchBlock: (uid, patch) => setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, ...patch } : b))),
+    getBlock: (uid) => blocksRef.current.find((b) => b.uid === uid),
+  }), []);
   const [parallelMode, setParallelMode] = useState(false);
   const [parallelOpen, setParallelOpen] = useState(false);
   // matrixMode: the next step clicked from the palette becomes a matrix fan-out.
@@ -251,8 +282,12 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   const [dragging, setDragging] = useState(false);
   const seq = useRef(0);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
-  const { width } = useViewport();
-  const paletteW = clamp(Math.round(width * 0.2), 200, 300); // step palette scales with the screen
+  // The step palette is the draggable (and persisted) side of the builder split;
+  // the canvas takes the rest. Clamped so neither the palette nor the canvas shuts.
+  const splitRef = useRef<HTMLDivElement>(null);
+  const [paletteW, paletteHandle] = useResizablePane('split.pipelineblocks.palette.w', 260, {
+    min: 200, max: 460, side: 'left', direction: 'horizontal', containerRef: splitRef, otherMin: 320,
+  });
 
   useEffect(() => { setBlocks(blocksFromSteps(initialSteps)); setParallelMode(false); setParallelOpen(false); setMatrixMode(false); setSelectedUid(null); }, [initialSteps]);
   useEffect(() => { if (editable && onChange) onChange(stepsFromBlocks(blocks)); }, [blocks, editable, onChange]);
@@ -309,26 +344,36 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     });
   }, []);
 
-  // Select a block and report its step + occurrence name so the inspector updates.
+  // Select a block and report its identity + def so the inspector updates. A gate is
+  // reported as a selection with kind 'gate' (its config lives on the card).
   const select = useCallback((b: Block) => {
     setSelectedUid(b.uid);
-    onInspect?.(b.approval ? null : b.stepId, b.name);
-  }, [onInspect]);
+    onInspect?.(b.approval ? null : selectionFor(b, catalog));
+  }, [onInspect, catalog]);
 
   const addStep = useCallback((s: Step) => {
-    // In matrix mode the clicked step becomes a solo matrix fan-out (one block,
-    // then the mode ends — a matrix wraps a single step).
+    // A palette Step with an empty step_id is an INLINE step (created from an action):
+    // its definition rides on the block (inline.*), not the shared catalog.
+    const isInline = s.step_id === '';
     const uid = `add${seq.current++}`;
+    const mk = (extra: Partial<Block>): Block => isInline
+      ? { uid, stepId: '', parallelWithPrev: false, name: s.name, inline: { action: s.action, timeout: s.timeout ?? undefined, with: (s.with ?? {}) as Record<string, unknown> }, ...extra }
+      : { uid, stepId: s.step_id, parallelWithPrev: false, ...extra };
+    // In matrix mode the clicked step becomes a solo matrix fan-out (one block, then
+    // the mode ends — a matrix wraps a single step).
     if (matrixMode) {
-      setBlocks((bs) => [...bs, { uid, stepId: s.step_id, parallelWithPrev: false, matrix: { var: '', values: [] } }]);
+      setBlocks((bs) => [...bs, mk({ matrix: { var: '', values: [] } })]);
       setMatrixMode(false);
     } else {
-      setBlocks((bs) => [...bs, { uid, stepId: s.step_id, parallelWithPrev: parallelMode && parallelOpen }]);
+      setBlocks((bs) => [...bs, mk({ parallelWithPrev: parallelMode && parallelOpen })]);
       if (parallelMode) setParallelOpen(true);
     }
     setSelectedUid(uid);
-    onInspect?.(s.step_id); // show the freshly-added step's inputs/output
-  }, [parallelMode, parallelOpen, matrixMode, onInspect]);
+    // Show the freshly-added step's inputs/output (inline → its own def).
+    onInspect?.(isInline
+      ? { uid, kind: 'inline', stepId: '', name: s.name, def: { name: s.name, action: s.action, with: (s.with ?? {}) as Record<string, unknown>, timeout: s.timeout ?? undefined } }
+      : { uid, kind: 'ref', stepId: s.step_id, name: undefined, def: blockDef({ uid, stepId: s.step_id, parallelWithPrev: false }, catalog) });
+  }, [parallelMode, parallelOpen, matrixMode, onInspect, catalog]);
 
   // Drop a host-supplied freshly-created step in as a new block (honoring the active
   // parallel/matrix mode), each pendingAdd object consumed exactly once.
@@ -362,9 +407,9 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     // selected block is renamed.
     if (selectedUid === uid) {
       const b = blocks.find((x) => x.uid === uid);
-      onInspect?.(b?.approval ? null : (b?.stepId ?? null), name);
+      onInspect?.(b?.approval ? null : b ? selectionFor({ ...b, name }, catalog) : null);
     }
-  }, [selectedUid, blocks, onInspect]);
+  }, [selectedUid, blocks, onInspect, catalog]);
   // An approval gate is always its own sequential block (no step, no parallel).
   const addGate = useCallback(() => {
     const uid = `add${seq.current++}`;
@@ -395,7 +440,7 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     for (let i = 0; i < stageIdx; i++) {
       for (const b of st[i]) {
         if (b.approval) continue;
-        const def = catalog[b.stepId];
+        const def = blockDef(b, catalog);
         const nm = b.name || def?.name;
         if (!nm) continue;
         const dw = (def?.with ?? {}) as Record<string, unknown>;
@@ -417,7 +462,7 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
     for (let i = 0; i < stageIdx; i++) {
       for (const b of st[i]) {
         if (b.approval) continue;
-        const def = catalog[b.stepId];
+        const def = blockDef(b, catalog);
         if (!def || !actionCreatesVolume(def.action)) continue;
         const eff = { ...((def.with ?? {}) as Record<string, unknown>), ...(b.with ?? {}) };
         const nm = createdVolumeName(eff);
@@ -429,11 +474,17 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
 
   const card = (b: Block, inParallel: boolean) => {
     const isGate = !!b.approval;
-    const { label, action } = isGate ? { label: 'approval gate', action: 'manual approval' } : labelFor(catalog, b.stepId);
+    const def = blockDef(b, catalog);
+    // An inline step's name IS its own name; a reference falls back to the def name.
+    const label = isGate ? 'approval gate' : (b.name || def?.name || (b.stepId ? b.stepId.slice(0, 8) + '…' : 'inline step'));
+    const action = isGate ? 'manual approval' : (def?.action ?? '');
+    // The def config the per-occurrence override merges over: an inline step's def
+    // lives on the block (inline.with); a reference's on the shared catalog step.
+    const defWith = (def?.with ?? {}) as Record<string, unknown>;
     return (
       <BlockCard key={b.uid} block={b} label={label} action={action} editable={editable}
         canLink={(indexOf.get(b.uid) ?? 0) > 0} inParallel={inParallel} isGate={isGate}
-        selected={selectedUid === b.uid} defWith={(catalog[b.stepId]?.with ?? {}) as Record<string, unknown>}
+        selected={selectedUid === b.uid} defWith={defWith}
         upstream={selectedUid === b.uid ? upstreamFor(b.uid) : []}
         upstreamVolumes={selectedUid === b.uid ? upstreamVolumesFor(b.uid) : []} repos={repos} token={token}
         onSelect={() => select(b)} onRename={setName} onSetWith={setWith}
@@ -503,9 +554,9 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
   );
 
   return (
-    <div style={{ display: 'flex', height: height ?? '100%', minHeight: 200, border: `1px solid ${T.border}`, background: T.bg }}>
+    <div ref={splitRef} style={{ display: 'flex', height: height ?? '100%', minHeight: 200, border: `1px solid ${T.border}`, background: T.bg }}>
       {editable && (
-        <div style={{ width: paletteW, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.bgAlt, overflow: 'auto' }}>
+        <div style={{ width: paletteW, flexShrink: 0, background: T.bgAlt, overflow: 'auto' }}>
           <div style={{ padding: '12px 16px', fontFamily: T.mono, fontSize: 11, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', borderBottom: `1px solid ${T.border}` }}>
             blocks · click to add
           </div>
@@ -531,12 +582,13 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
             <div style={{ fontSize: 14, fontWeight: 700 }}>⏸ approval gate</div>
             <div style={{ fontSize: 11, color: T.faint, marginTop: 2 }}>pause for manual approval</div>
           </button>
-          {/* Actions — click to create & configure a new step inline from an action. */}
+          {/* Actions — click to create & configure a new INLINE step from an action
+              (private to this pipeline; can be converted to a reusable step later). */}
           {onPickAction && actions.length > 0 && (
             <>
-              <div style={paletteSection}>actions · create a step</div>
+              <div style={paletteSection}>actions · create an inline step</div>
               {actions.map((a) => (
-                <button key={a.name} onClick={() => onPickAction(a)} title="create & configure a new step from this action"
+                <button key={a.name} onClick={() => onPickAction(a)} title="create & configure a new inline step from this action (private to this pipeline)"
                   style={{ width: '100%', textAlign: 'left', padding: '10px 16px', background: 'transparent', border: 'none', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, cursor: 'pointer', color: T.text }}
                   onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = T.cardHi; }}
                   onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}>
@@ -561,6 +613,8 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
           ))}
         </div>
       )}
+      {/* Drag to rebalance the palette against the canvas. */}
+      {editable && paletteHandle}
       <DndContext
         sensors={sensors}
         collisionDetection={collisionDetection}
@@ -575,4 +629,4 @@ export function PipelineBlocks({ initialSteps, catalog, editable = false, palett
       </DndContext>
     </div>
   );
-}
+});

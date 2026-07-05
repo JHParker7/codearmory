@@ -6,16 +6,17 @@
  *
  * Reached at /app/workflows/runs/:runId (clicking a run in the Workflows page).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
+import { useResizablePane } from '../../components/ResizeHandle';
 import { useAppSelector } from '../../store/hooks';
 import { getRun, getWorkflow, listSteps, cancelRun, approveRun, rejectRun } from '../../api/bff';
 import type { WorkflowRun, Workflow, WorkflowStepRun, Step, ApprovalGate } from '../../api/bff';
 import { statusTone, isRunActive, fmtDuration, timeAgo, shortId } from '../../utils';
 import { useUserNames } from '../../hooks/useNames';
-import { useViewport, clamp } from '../../hooks/useViewport';
+import { useViewport } from '../../hooks/useViewport';
 
 /** Solid accent colour for a status (used for a step's left bar). */
 function statusColor(status: string): string {
@@ -134,9 +135,16 @@ export function RunView() {
   const userNames = useUserNames(token);
   const { width } = useViewport();
   // Below ~1000px the page splits vertically (pipeline over logs); above it, the
-  // pipeline panel scales with the viewport rather than a fixed width.
+  // panels sit side by side. Either way the split is user-draggable (and persisted)
+  // so the pipeline side can be grown or shrunk against the logs.
   const narrow = width < 1000;
-  const pipelineW = clamp(Math.round(width * 0.30), 320, 560);
+  const splitRef = useRef<HTMLDivElement>(null);
+  const [pipelineW, widthHandle] = useResizablePane('split.runview.pipeline.w', 400, {
+    min: 280, max: 900, side: 'left', direction: 'horizontal', containerRef: splitRef, otherMin: 320,
+  });
+  const [pipelineH, heightHandle] = useResizablePane('split.runview.pipeline.h', 320, {
+    min: 140, max: 1200, side: 'left', direction: 'vertical', containerRef: splitRef, otherMin: 200,
+  });
 
   const [run, setRun] = useState<WorkflowRun | null>(null);
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
@@ -279,13 +287,12 @@ export function RunView() {
         </div>
       )}
 
-      <div style={{ display: 'flex', flexDirection: narrow ? 'column' : 'row', flex: 1, overflow: 'hidden' }}>
-        {/* Pipeline with live status */}
+      <div ref={splitRef} style={{ display: 'flex', flexDirection: narrow ? 'column' : 'row', flex: 1, overflow: 'hidden' }}>
+        {/* Pipeline with live status — its size (width when side-by-side, height when
+            stacked) is the draggable side of the split; the divider follows. */}
         <div style={{
           flexShrink: 0, overflow: 'auto', padding: 16, background: T.bg,
-          ...(narrow
-            ? { width: '100%', maxHeight: '46vh', borderBottom: `1px solid ${T.border}` }
-            : { width: pipelineW, borderRight: `1px solid ${T.border}` }),
+          ...(narrow ? { width: '100%', height: pipelineH } : { width: pipelineW }),
         }}>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 }}>pipeline</div>
           {stages.length === 0 ? (
@@ -343,6 +350,9 @@ export function RunView() {
             );
           })}
         </div>
+
+        {/* Drag to rebalance the pipeline side against the logs side. */}
+        {narrow ? heightHandle : widthHandle}
 
         {/* Logs for the selected step */}
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: T.bg }}>

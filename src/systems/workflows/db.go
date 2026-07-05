@@ -374,6 +374,17 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 			result = append(result, ws)
 			continue
 		}
+		// An inline step carries its whole definition on the ref (no stored step to look
+		// up) — build the WorkflowStep directly. Must precede the byID lookup below, which
+		// would otherwise miss on the empty StepID and silently drop the step.
+		if ref.StepID == "" && ref.Action != "" {
+			result = append(result, WorkflowStep{
+				Step:          Step{Name: ref.Name, Action: ref.Action, With: ref.With, Timeout: ref.Timeout},
+				ParallelGroup: ref.ParallelGroup,
+				Matrix:        ref.Matrix,
+			})
+			continue
+		}
 		s, ok := byID[ref.StepID]
 		if !ok {
 			continue

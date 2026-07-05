@@ -35,8 +35,13 @@ export interface StepDefFormProps {
   /** When set, the action is fixed (create-from-a-chosen-action, or editing a step
    *  whose action defines it) and shown read-only instead of as a selector. */
   lockAction?: string;
+  /** Inline mode: the step is pipeline-local, not a shared/reusable Step, so save
+   *  does NOT call createStep/updateStep — it just hands the assembled definition
+   *  (a Step with step_id "") back via onSaved for the builder to embed in the block. */
+  inline?: boolean;
   /** Called after a successful create/update with the saved step and whether it was
-   *  a create (so a caller can add it to the pipeline as a new block). */
+   *  a create (so a caller can add it to the pipeline as a new block). In inline mode
+   *  the step's step_id is "" (it is not persisted). */
   onSaved: (step: Step, wasCreate: boolean) => void;
   onCancel?: () => void;
   /** Focus the name field on mount (in-panel create flows). */
@@ -48,7 +53,7 @@ export interface StepDefFormProps {
   createLabel?: string;
 }
 
-export function StepDefForm({ token, initial, lockAction, onSaved, onCancel, autoFocus, defaultName, createLabel }: StepDefFormProps) {
+export function StepDefForm({ token, initial, lockAction, inline, onSaved, onCancel, autoFocus, defaultName, createLabel }: StepDefFormProps) {
   const [actions, setActions] = useState<WorkflowAction[]>([]);
   const [images, setImages] = useState<string[]>([]);
   const [pipelines, setPipelines] = useState<Workflow[]>([]);
@@ -93,6 +98,17 @@ export function StepDefForm({ token, initial, lockAction, onSaved, onCancel, aut
         with: Object.keys(withMap).length > 0 ? withMap : undefined,
         timeout: timeoutSecs ? parseInt(timeoutSecs, 10) : undefined,
       };
+      // Inline: hand the assembled definition back without persisting a shared Step.
+      // step_id "" is the discriminator the builder uses to embed it as an inline block.
+      if (inline) {
+        onSaved({
+          step_id: initial?.step_id ?? '', name: payload.name, description: payload.description ?? null,
+          action: payload.action, with: payload.with ?? null, timeout: payload.timeout ?? null,
+          created_by: initial?.created_by ?? '', org_id: initial?.org_id ?? null, active: true,
+          created_at: initial?.created_at ?? '', updated_at: initial?.updated_at ?? '',
+        }, !initial);
+        return;
+      }
       const saved = initial
         ? await updateStep(token, initial.step_id, payload)
         : await createStep(token, payload);
