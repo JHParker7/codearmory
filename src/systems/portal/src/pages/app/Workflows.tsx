@@ -1,6 +1,6 @@
 /** Workflows page — the CI/CD control surface, a tabbed view over pipelines and the action catalog. pipelines tab creates/triggers/cancels/deletes workflows, lists their runs, and opens the visual builder (which now also hosts the reusable-step library); actions tab browses the read-only action catalog. all data goes through the typed BFF client (listWorkflows/createWorkflow/etc), never conductor directly. */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
@@ -10,7 +10,7 @@ import {
   listWorkflows, getWorkflow, deleteWorkflow, listWorkflowRuns, triggerWorkflow, cancelRun,
   createWorkflow, updateWorkflow, listSteps, listActions, listGitRepos,
 } from '../../api/bff';
-import type { Workflow, WorkflowRun, Step, WorkflowAction, GitRepo } from '../../api/bff';
+import type { Workflow, WorkflowRun, Step, WorkflowAction, GitRepo, WorkflowInputDef, WorkflowOutputDef } from '../../api/bff';
 import { ResizeHandle, useResizableWidth } from '../../components/ResizeHandle';
 import { PipelineBlocks } from './PipelineBlocks';
 import { StepDefForm } from './StepDefForm';
@@ -23,6 +23,56 @@ type MainTab = 'pipelines' | 'steps' | 'actions';
 
 // Run status helpers (statusTone / isRunActive / fmtDuration) live in ../../utils
 // so the run page (RunView) shares them. Clicking a run navigates to that page.
+
+// ── Pipeline inputs / outputs declaration editors ─────────────────────────────
+
+const declField: CSSProperties = { background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '4px 6px', outline: 'none' };
+const declAddBtn: CSSProperties = { alignSelf: 'flex-start', background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 8px', cursor: 'pointer' };
+const declRemoveBtn: CSSProperties = { background: 'transparent', border: 'none', color: T.faint, cursor: 'pointer', fontFamily: T.mono, fontSize: 12, lineHeight: 1, padding: 0 };
+
+/** Declares the pipeline's run parameters — rows of name / default / required. The
+ * value set here is a default the trigger can override; `required` makes the backend
+ * reject a trigger that leaves it unset. */
+function DeclInputsEditor({ inputs, onChange }: { inputs: WorkflowInputDef[]; onChange: (i: WorkflowInputDef[]) => void }) {
+  const set = (i: number, patch: Partial<WorkflowInputDef>) => onChange(inputs.map((row, idx) => (idx === i ? { ...row, ...patch } : row)));
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>inputs · run parameters</div>
+      {inputs.length === 0 && <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>none — the pipeline takes no parameters</div>}
+      {inputs.map((row, i) => (
+        <div key={i} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <input value={row.name} placeholder="NAME" onChange={e => set(i, { name: e.target.value })} style={{ ...declField, width: 120 }} />
+          <input value={row.default ?? ''} placeholder="default (optional)" onChange={e => set(i, { default: e.target.value })} style={{ ...declField, flex: 1, minWidth: 0 }} />
+          <label title="required at trigger time" style={{ display: 'flex', alignItems: 'center', gap: 3, fontFamily: T.mono, fontSize: 10, color: T.dim, cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!row.required} onChange={e => set(i, { required: e.target.checked })} /> req
+          </label>
+          <button onClick={() => onChange(inputs.filter((_, idx) => idx !== i))} title="remove input" style={declRemoveBtn}>✕</button>
+        </div>
+      ))}
+      <button onClick={() => onChange([...inputs, { name: '' }])} style={declAddBtn}>+ input</button>
+    </div>
+  );
+}
+
+/** Declares the pipeline's outputs — rows of name / value-expression. The value is a
+ * `${...}` template (typically `${steps.<step>.output.KEY}`) resolved at completion. */
+function DeclOutputsEditor({ outputs, onChange }: { outputs: WorkflowOutputDef[]; onChange: (o: WorkflowOutputDef[]) => void }) {
+  const set = (i: number, patch: Partial<WorkflowOutputDef>) => onChange(outputs.map((row, idx) => (idx === i ? { ...row, ...patch } : row)));
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>outputs · published on completion</div>
+      {outputs.length === 0 && <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>none — the pipeline publishes nothing</div>}
+      {outputs.map((row, i) => (
+        <div key={i} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <input value={row.name} placeholder="NAME" onChange={e => set(i, { name: e.target.value })} style={{ ...declField, width: 120 }} />
+          <input value={row.value} placeholder="${steps.build.output.VERSION}" onChange={e => set(i, { value: e.target.value })} style={{ ...declField, flex: 1, minWidth: 0 }} />
+          <button onClick={() => onChange(outputs.filter((_, idx) => idx !== i))} title="remove output" style={declRemoveBtn}>✕</button>
+        </div>
+      ))}
+      <button onClick={() => onChange([...outputs, { name: '', value: '' }])} style={declAddBtn}>+ output</button>
+    </div>
+  );
+}
 
 // ── Pipeline builder overlay ──────────────────────────────────────────────────
 
@@ -71,6 +121,12 @@ function PipelineBuilderOverlay({
 
   const [name, setName] = useState(initial?.name ?? '');
   const [desc, setDesc] = useState(initial?.description ?? '');
+  // Declared run parameters / published outputs, seeded from the edited workflow.
+  const [inputs, setInputs] = useState<WorkflowInputDef[]>(initial?.inputs ?? []);
+  const [outputs, setOutputs] = useState<WorkflowOutputDef[]>(initial?.outputs ?? []);
+  // The inputs/outputs declaration panel is collapsed by default, opened when the
+  // pipeline already declares any (so an edit surfaces them).
+  const [showDecl, setShowDecl] = useState<boolean>(!!(initial?.inputs?.length || initial?.outputs?.length));
   // `steps` is the live source of truth (mirrored from the visual builder via
   // onChange and from applying JSON edits); `builderSeed` is what re-seeds the
   // block builder — it changes only on a JSON apply, never on the builder's own
@@ -85,7 +141,7 @@ function PipelineBuilderOverlay({
 
   // Live, editable JSON mirror. The textarea drives `jsonDraft`; while the user is
   // typing in it (jsonFocused) builder-side updates don't overwrite their text.
-  const [jsonDraft, setJsonDraft] = useState(() => configToJson(initial?.name ?? '', initial?.description ?? '', initialStepRefs));
+  const [jsonDraft, setJsonDraft] = useState(() => configToJson(initial?.name ?? '', initial?.description ?? '', initialStepRefs, initial?.inputs ?? [], initial?.outputs ?? []));
   const [jsonError, setJsonError] = useState<string | null>(null);
   const jsonFocused = useRef(false);
 
@@ -146,7 +202,7 @@ function PipelineBuilderOverlay({
     () => steps.map(s => (s.name && s.step_id && s.name === catalog[s.step_id]?.name) ? { ...s, name: undefined } : s),
     [steps, catalog],
   );
-  const canonicalJson = useMemo(() => configToJson(name, desc, cleanedSteps), [name, desc, cleanedSteps]);
+  const canonicalJson = useMemo(() => configToJson(name, desc, cleanedSteps, inputs, outputs), [name, desc, cleanedSteps, inputs, outputs]);
 
   // Reflect builder/name/description changes into the JSON panel, unless the user
   // is actively editing the JSON (their text is authoritative then).
@@ -162,12 +218,14 @@ function PipelineBuilderOverlay({
   // an inline error and leaves the builder untouched.
   const applyJson = useCallback((raw: string) => {
     setJsonDraft(raw);
-    let parsed: { name: string; description: string; steps: StepRef[] };
+    let parsed: ReturnType<typeof parseConfig>;
     try { parsed = parseConfig(raw); }
     catch (e: unknown) { setJsonError((e as Error).message); return; }
     setJsonError(null);
     setName(parsed.name);
     setDesc(parsed.description);
+    setInputs(parsed.inputs ?? []);
+    setOutputs(parsed.outputs ?? []);
     if (configToJson('', '', parsed.steps) !== configToJson('', '', builderSeed)) {
       setBuilderSeed(parsed.steps);
       setSteps(parsed.steps);
@@ -187,10 +245,21 @@ function PipelineBuilderOverlay({
     if (!name.trim() || dupNames.length > 0) return;
     setSaving(true); setSaveError(null);
     try {
+      // Keep only well-formed declarations (named inputs, name+value outputs), matching
+      // the canonical JSON — so a half-typed row never reaches the API.
+      const cleanInputs = inputs.filter(i => i.name.trim()).map(i => ({
+        name: i.name.trim(),
+        ...(i.default != null && i.default !== '' ? { default: i.default } : {}),
+        ...(i.required ? { required: true } : {}),
+        ...(i.description != null && i.description !== '' ? { description: i.description } : {}),
+      }));
+      const cleanOutputs = outputs.filter(o => o.name.trim() && o.value.trim()).map(o => ({ name: o.name.trim(), value: o.value.trim() }));
       const payload = {
         name: name.trim(),
         description: desc.trim() || undefined,
         steps: stepsToPayload(cleanedSteps),
+        inputs: cleanInputs.length > 0 ? cleanInputs : undefined,
+        outputs: cleanOutputs.length > 0 ? cleanOutputs : undefined,
       };
       const wf = initial
         ? await updateWorkflow(token, initial.workflow_id, payload)
@@ -210,8 +279,18 @@ function PipelineBuilderOverlay({
           style={{ background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '5px 8px', outline: 'none', width: 200 }} />
         <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="description (optional)"
           style={{ flex: 1, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '5px 8px', outline: 'none' }} />
+        <button onClick={() => setShowDecl(s => !s)} title="declare pipeline inputs and outputs"
+          style={{ background: showDecl ? T.greenSoft : 'transparent', border: `1px solid ${showDecl ? T.green : T.border}`, color: showDecl ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+          {showDecl ? '▾' : '▸'} inputs/outputs{(inputs.length || outputs.length) ? ` (${inputs.length}/${outputs.length})` : ''}
+        </button>
         <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>✕ close</button>
       </div>
+      {showDecl && (
+        <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.border}`, background: T.bg, display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 320px', minWidth: 0 }}><DeclInputsEditor inputs={inputs} onChange={setInputs} /></div>
+          <div style={{ flex: '1 1 320px', minWidth: 0 }}><DeclOutputsEditor outputs={outputs} onChange={setOutputs} /></div>
+        </div>
+      )}
       <div ref={splitRow} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 3px 14px 14px' }}>
           <PipelineBlocks editable initialSteps={builderSeed} catalog={catalog} palette={palette} actions={actions} repos={repos} token={token}
@@ -359,9 +438,25 @@ function PipelinesTab() {
 
   const handleTrigger = async () => {
     if (!selected) return;
+    // If the pipeline declares inputs, collect them before triggering (prefilled with
+    // each declared default). A cancelled prompt aborts; a blank required input errors.
+    // The selected workflow carries its full inputs (merged in by selectWorkflow).
+    const decls = workflows.find(w => w.workflow_id === selected)?.inputs ?? [];
+    let inputs: Record<string, string> | undefined;
+    if (decls.length > 0) {
+      const collected: Record<string, string> = {};
+      for (const inp of decls) {
+        const prompt = `Input "${inp.name}"${inp.required ? ' (required)' : ''}${inp.description ? `\n${inp.description}` : ''}`;
+        const v = window.prompt(prompt, inp.default ?? '');
+        if (v === null) return; // cancelled the whole trigger
+        if (inp.required && v.trim() === '') { setError(`input "${inp.name}" is required`); return; }
+        if (v !== '') collected[inp.name] = v;
+      }
+      if (Object.keys(collected).length > 0) inputs = collected;
+    }
     setTriggering(true);
     try {
-      const run = await triggerWorkflow(token, selected);
+      const run = await triggerWorkflow(token, selected, inputs);
       setRuns(prev => [run, ...prev]);
       navigate(`/app/workflows/runs/${run.run_id}`); // straight to the new run's live page
     } catch (e: unknown) { setError((e as Error).message); }

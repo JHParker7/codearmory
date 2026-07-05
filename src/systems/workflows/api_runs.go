@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,6 +126,98 @@ type triggerRunRequest struct {
 	Inputs map[string]string `json:"inputs"`
 }
 
+// applyDeclaredInputs merges the trigger's provided inputs over the pipeline's
+// declared input defaults and enforces required inputs. Provided values win;
+// undeclared provided inputs are kept so free-form ${inputs.X} still works for
+// pipelines without a declared interface. Returns the effective input map, or a
+// user-facing message when a required input has no value and no default.
+func applyDeclaredInputs(defs []WorkflowInputDef, provided map[string]string) (map[string]string, string) {
+	out := map[string]string{}
+	for k, v := range provided {
+		out[k] = v
+	}
+	for _, d := range defs {
+		if _, ok := out[d.Name]; ok {
+			continue
+		}
+		if d.Default != "" {
+			out[d.Name] = d.Default
+			continue
+		}
+		if d.Required {
+			return nil, "missing required input: " + d.Name
+		}
+	}
+	return out, ""
+}
+
+// startWorkflowRun heals a stale run role, mints a scoped run token, and inserts a
+// pending run for wf, attributed to userID/orgID with the given inputs and sub-run
+// nesting (depth 0 / parentRunID "" for a top-level trigger). Returns the created
+// run, or a user-facing error message + HTTP status. Shared by the path-addressed
+// trigger and the body-addressed sub-pipeline trigger.
+func startWorkflowRun(ctx context.Context, wf *Workflow, userID, orgID string, inputs map[string]string, depth int, parentRunID string) (WorkflowRun, string, int) {
+	// Heal a stale scoped role. The run role is provisioned once at create/update and
+	// reused for every run, so a workflow created before a change to the permission-
+	// derivation logic keeps a role missing newer permissions and every affected step
+	// hangs (a forbidden poll). Re-provision (using the workflow owner/org, not the
+	// triggerer) when the stored role predates the current derivation version, only
+	// committing the bump when we have a usable role or the workflow needs none.
+	if wf.RolePermsVersion < workflowRolePermsVersion {
+		oldRole := wf.RoleID
+		newRole := provisionWorkflowRole(ctx, wf.WorkflowID, wf.CreatedBy, wf.OrgID, wf.Steps)
+		if newRole != "" || len(collectWorkflowPermissions(wf.Steps)) == 0 {
+			wf.RoleID = newRole
+			wf.RolePermsVersion = workflowRolePermsVersion
+			if err := wf.Update(ctx); err != nil {
+				slog.WarnContext(ctx, "trigger run: persist re-provisioned role", "workflow_id", wf.WorkflowID, "error", err)
+			} else {
+				slog.InfoContext(ctx, "trigger run: healed stale workflow role", "workflow_id", wf.WorkflowID, "role_id", newRole)
+				if oldRole != "" && oldRole != newRole {
+					deleteWorkflowRole(ctx, oldRole)
+				}
+			}
+		} else {
+			slog.WarnContext(ctx, "trigger run: role re-provision returned empty, using existing role", "workflow_id", wf.WorkflowID)
+		}
+	}
+
+	runToken, sessionID, err := createRunToken(ctx, userID, wf.RoleID)
+	if err != nil {
+		slog.ErrorContext(ctx, "trigger run: failed to create run token", "workflow_id", wf.WorkflowID, "user_id", userID, "error", err)
+		return WorkflowRun{}, "failed to provision run credentials", http.StatusInternalServerError
+	}
+	encToken, err := encryptToken(runToken)
+	if err != nil {
+		slog.ErrorContext(ctx, "trigger run: failed to encrypt run token", "workflow_id", wf.WorkflowID, "error", err)
+		revokeRunToken(context.Background(), sessionID)
+		return WorkflowRun{}, "failed to provision run credentials", http.StatusInternalServerError
+	}
+
+	run := WorkflowRun{
+		RunID:        uuid.New().String(),
+		WorkflowID:   wf.WorkflowID,
+		TriggeredBy:  userID,
+		OrgID:        orgID,
+		Project:      wf.Project,
+		Status:       StatusPending,
+		Inputs:       inputs,
+		Depth:        depth,
+		ParentRunID:  parentRunID,
+		Token:        encToken,
+		RunSessionID: sessionID,
+		StepRuns:     []WorkflowStepRun{},
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := run.Add(ctx); err != nil {
+		slog.ErrorContext(ctx, "trigger run: db error", "workflow_id", wf.WorkflowID, "user_id", userID, "error", err)
+		revokeRunToken(context.Background(), sessionID)
+		return WorkflowRun{}, "failed to trigger run", http.StatusInternalServerError
+	}
+	meterRunsTriggered.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow.id", wf.WorkflowID)))
+	return run, "", 0
+}
+
 // canAccessRun returns true when the caller may read the run:
 // the caller triggered it, or they share the same org.
 func canAccessRun(run WorkflowRun, userID, orgID string) bool {
@@ -182,83 +275,126 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength != 0 {
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
 	}
-	if req.Inputs == nil {
-		req.Inputs = map[string]string{}
-	}
-
-	// Heal a stale scoped role. The run role is provisioned once at create/update
-	// and reused for every run, so a workflow created before a change to the
-	// permission-derivation logic keeps a role missing newer permissions — e.g.
-	// the async-poll read grant — and every run hangs polling a forbidden status.
-	// Re-provision (using the workflow owner/org, not the triggerer) when the
-	// stored role predates the current derivation version. Only commit the bump
-	// when we have a usable role or the workflow legitimately needs none, so a
-	// transient gatekeeper error retries next trigger instead of locking in an
-	// empty role.
-	if wf.RolePermsVersion < workflowRolePermsVersion {
-		oldRole := wf.RoleID
-		newRole := provisionWorkflowRole(ctx, wf.WorkflowID, wf.CreatedBy, wf.OrgID, wf.Steps)
-		if newRole != "" || len(collectWorkflowPermissions(wf.Steps)) == 0 {
-			wf.RoleID = newRole
-			wf.RolePermsVersion = workflowRolePermsVersion
-			if err := wf.Update(ctx); err != nil {
-				slog.WarnContext(ctx, "trigger run: persist re-provisioned role", "workflow_id", wf.WorkflowID, "error", err)
-			} else {
-				slog.InfoContext(ctx, "trigger run: healed stale workflow role", "workflow_id", wf.WorkflowID, "role_id", newRole)
-				if oldRole != "" && oldRole != newRole {
-					deleteWorkflowRole(ctx, oldRole)
-				}
-			}
-		} else {
-			slog.WarnContext(ctx, "trigger run: role re-provision returned empty, using existing role", "workflow_id", wf.WorkflowID)
-		}
-	}
-
-	runToken, sessionID, err := createRunToken(ctx, userID, wf.RoleID)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "run token creation failed")
-		slog.ErrorContext(ctx, "trigger run: failed to create run token", "workflow_id", workflowID, "user_id", userID, "error", err)
-		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
-		return
-	}
-	encToken, err := encryptToken(runToken)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "run token encryption failed")
-		slog.ErrorContext(ctx, "trigger run: failed to encrypt run token", "workflow_id", workflowID, "user_id", userID, "error", err)
-		revokeRunToken(context.Background(), sessionID)
-		http.Error(w, "failed to provision run credentials", http.StatusInternalServerError)
+	inputs, msg := applyDeclaredInputs(wf.Inputs, req.Inputs)
+	if msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 
-	run := WorkflowRun{
-		RunID:        uuid.New().String(),
-		WorkflowID:   wf.WorkflowID,
-		TriggeredBy:  userID,
-		OrgID:        orgID,
-		Project:      wf.Project,
-		Status:       StatusPending,
-		Inputs:       req.Inputs,
-		Token:        encToken,
-		RunSessionID: sessionID,
-		StepRuns:     []WorkflowStepRun{},
-		CreatedAt:    time.Now().UTC(),
-	}
-
-	if err := run.Add(ctx); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "db insert failed")
-		slog.ErrorContext(ctx, "trigger run: db error", "workflow_id", workflowID, "user_id", userID, "error", err)
-		revokeRunToken(context.Background(), sessionID)
-		http.Error(w, "failed to trigger run", http.StatusInternalServerError)
+	run, errMsg, code := startWorkflowRun(ctx, &wf, userID, orgID, inputs, 0, "")
+	if errMsg != "" {
+		span.SetStatus(codes.Error, errMsg)
+		http.Error(w, errMsg, code)
 		return
 	}
 
-	meterRunsTriggered.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow.id", wf.WorkflowID)))
 	span.SetAttributes(attribute.String("run.id", run.RunID), attribute.String("workflow.id", wf.WorkflowID))
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "workflow run triggered", "run_id", run.RunID, "workflow_id", wf.WorkflowID, "user_id", userID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(run) //nolint:errcheck
+}
+
+type triggerByBodyRequest struct {
+	// Pipeline is the target pipeline id or name; Inputs are passed to its run.
+	Pipeline string            `json:"pipeline"`
+	Inputs   map[string]string `json:"inputs"`
+}
+
+// handleTriggerRunByBody triggers a run for the pipeline named in the request BODY
+// (not the path), so it can serve as the create endpoint of the async
+// workflows/trigger action — the async machinery can't put an id in the POST path,
+// so a sub-pipeline call posts {pipeline, inputs} here. The sub-run runs under its
+// OWN pipeline's role (via startWorkflowRun); the only authorization required is
+// triggerRun on the target. Nesting depth is read from X-Workflow-Run-Depth and
+// capped at maxRunDepth to stop runaway/cyclic sub-pipeline recursion.
+func handleTriggerRunByBody(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("workflows").Start(r.Context(), "handleTriggerRunByBody")
+	defer span.End()
+
+	var req triggerByBodyRequest
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+	}
+	if strings.TrimSpace(req.Pipeline) == "" {
+		http.Error(w, "pipeline is required", http.StatusBadRequest)
+		return
+	}
+
+	// A sub-run is one level deeper than the run whose trigger step created it.
+	parentDepth := 0
+	if v := r.Header.Get("X-Workflow-Run-Depth"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			parentDepth = n
+		}
+	}
+	childDepth := parentDepth + 1
+	if childDepth > maxRunDepth {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, fmt.Sprintf("sub-pipeline nesting exceeds the limit of %d", maxRunDepth), http.StatusUnprocessableEntity)
+		return
+	}
+	parentRunID := r.Header.Get("X-Workflow-Parent-Run")
+
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "triggerRun", "workflows/runs/"+req.Pipeline)
+	if !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+
+	wf, err := resolveWorkflowRef(ctx, req.Pipeline, userID, orgID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			span.SetStatus(codes.Ok, "")
+			http.Error(w, "workflow not found", http.StatusNotFound)
+			return
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db error")
+		slog.ErrorContext(ctx, "trigger run by body: get workflow", "pipeline", req.Pipeline, "error", err)
+		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
+		return
+	}
+	if !canAccessWorkflow(wf, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "workflow not found", http.StatusNotFound)
+		return
+	}
+	if len(wf.StepRefs) == 0 {
+		http.Error(w, "pipeline has no steps", http.StatusBadRequest)
+		return
+	}
+	if len(wf.Steps) < len(wf.StepRefs) {
+		http.Error(w, "one or more referenced steps no longer exist", http.StatusBadRequest)
+		return
+	}
+
+	inputs, msg := applyDeclaredInputs(wf.Inputs, req.Inputs)
+	if msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+
+	run, errMsg, code := startWorkflowRun(ctx, &wf, userID, orgID, inputs, childDepth, parentRunID)
+	if errMsg != "" {
+		span.SetStatus(codes.Error, errMsg)
+		http.Error(w, errMsg, code)
+		return
+	}
+
+	span.SetAttributes(
+		attribute.String("run.id", run.RunID),
+		attribute.String("workflow.id", wf.WorkflowID),
+		attribute.Int("run.depth", childDepth),
+	)
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "workflow sub-run triggered", "run_id", run.RunID, "workflow_id", wf.WorkflowID, "parent_run_id", parentRunID, "depth", childDepth)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(run) //nolint:errcheck

@@ -53,7 +53,7 @@ func TestDBMethods_UnderBrokenDB(t *testing.T) {
 		t.Error("WorkflowRun.Dequeue: expected error")
 	}
 	(WorkflowRun{RunID: "x"}).SetCurrentStep(ctx, 1) // logs internally; just exercise
-	(WorkflowRun{RunID: "x"}).Complete(ctx, StatusFailed)
+	(WorkflowRun{RunID: "x"}).Complete(ctx, StatusFailed, nil)
 
 	mustErr("WorkflowStepRun.Add", (WorkflowStepRun{StepRunID: "x"}).Add(ctx))
 	mustErr("WorkflowStepRun.Update", (WorkflowStepRun{StepRunID: "x"}).Update(ctx))

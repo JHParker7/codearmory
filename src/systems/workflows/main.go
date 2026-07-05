@@ -434,6 +434,9 @@ func buildMux(workers *WorkerPool) http.Handler {
 	mux.HandleFunc("POST /internal/pipelines/{id}/runs", handleInternalTriggerRun)
 	mux.HandleFunc("GET /internal/pipelines/{id}", handleInternalGetWorkflow)
 	mux.HandleFunc("GET /internal/runs/{id}", handleInternalGetRun)
+	// Body-addressed trigger: the create endpoint of the async workflows/trigger
+	// action (a sub-pipeline call), which can't put the pipeline id in the path.
+	mux.HandleFunc("POST /runs", handleTriggerRunByBody)
 	mux.HandleFunc("GET /runs", handleListRuns)
 	mux.HandleFunc("GET /runs/{id}", handleGetRun)
 	mux.HandleFunc("DELETE /runs/{id}", handleCancelRun(workers))

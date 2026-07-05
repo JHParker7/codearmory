@@ -62,7 +62,7 @@ func TestExecuteRun_HTTPStepCompletes(t *testing.T) {
 	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id = ?`, run.RunID) //nolint:errcheck
 
 	pool := newWorkerPool()
-	pool.executeRun(context.Background(), run.RunID, wf.WorkflowID, "tok", "sess", "wk", map[string]string{})
+	pool.executeRun(context.Background(), run.RunID, wf.WorkflowID, "tok", "sess", "wk", map[string]string{}, 0)
 
 	got, err := (WorkflowRun{RunID: run.RunID}).Get(context.Background())
 	if err != nil {

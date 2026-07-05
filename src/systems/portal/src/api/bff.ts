@@ -300,6 +300,23 @@ export interface WorkflowStepRef {
   approval?: ApprovalGate | null;
 }
 
+/** A run parameter a pipeline declares. `default` is applied when the trigger omits
+ * the input; `required` makes the backend reject a trigger that leaves it unset. */
+export interface WorkflowInputDef {
+  name: string;
+  default?: string;
+  required?: boolean;
+  description?: string;
+}
+
+/** A value a pipeline publishes on completion. `value` is a `${...}` template —
+ * typically `${steps.STEP.output.KEY}` — resolved from step outputs at run end and
+ * surfaced in WorkflowRun.outputs (and consumable by a parent workflows/trigger step). */
+export interface WorkflowOutputDef {
+  name: string;
+  value: string;
+}
+
 export interface Workflow {
   workflow_id: string;
   name: string;
@@ -310,6 +327,10 @@ export interface Workflow {
   org_id?: string | null;
   active: boolean;
   steps: WorkflowStepRef[];
+  /** Declared run parameters (defaults/required applied at trigger time). */
+  inputs?: WorkflowInputDef[];
+  /** Declared outputs published on completion (resolved into WorkflowRun.outputs). */
+  outputs?: WorkflowOutputDef[];
   created_at: string;
   updated_at: string;
 }
@@ -338,6 +359,8 @@ export interface WorkflowRun {
   status: string;
   current_step?: number | null;
   inputs?: Record<string, unknown> | null;
+  /** Declared pipeline outputs resolved from step outputs at completion. */
+  outputs?: Record<string, string> | null;
   step_runs?: WorkflowStepRun[];
   created_at: string;
   started_at?: string | null;
@@ -864,7 +887,7 @@ export function listActions(token: string) {
 
 export function createWorkflow(
   token: string,
-  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[] },
+  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[] },
 ) {
   return req<Workflow>('POST', '/workflows/pipelines', token, payload);
 }
@@ -872,7 +895,7 @@ export function createWorkflow(
 export function updateWorkflow(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[] }>,
+  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[] }>,
 ) {
   return req<Workflow>('PUT', `/workflows/pipelines/${id}`, token, payload);
 }

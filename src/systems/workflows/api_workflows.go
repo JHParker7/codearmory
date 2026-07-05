@@ -31,7 +31,9 @@ import (
 // v3 made forge/create-volume async, so the generic async-poll rule now also grants
 // getVolume on forge/volumes/* — without the bump, volume workflows created earlier
 // would 403 every create-volume status poll and hang until timeout.
-const workflowRolePermsVersion = 3
+// v4 added the workflows/trigger sub-pipeline step, whose run role needs triggerRun
+// + getRun on workflows/runs/* to create and poll the sub-run.
+const workflowRolePermsVersion = 4
 
 // collectWorkflowPermissions returns the deduplicated set of gatekeeper
 // permissions declared by the workflow's step actions in the current catalog.
@@ -90,6 +92,22 @@ func collectWorkflowPermissions(steps []WorkflowStep) []PermissionSpec {
 			if _, dup := seen[delKey]; !dup {
 				seen[delKey] = struct{}{}
 				out = append(out, delSpec)
+			}
+		}
+
+		// A workflows/trigger step creates a sub-run (triggerRun) and then polls it to
+		// a terminal state (getRun). Both checks are item-scoped (workflows/runs/<id>),
+		// which the generic async companion above does not cover (it only fires for
+		// "create*" actions and grants a collection-scoped poll). Grant both on the
+		// wildcard run space so the step can trigger and observe the sub-run.
+		if p.Action == "triggerRun" {
+			for _, act := range []string{"triggerRun", "getRun"} {
+				spec := PermissionSpec{Service: p.Service, Action: act, Resource: "workflows/runs/*"}
+				k := spec.Service + ":" + spec.Action + ":" + spec.Resource
+				if _, dup := seen[k]; !dup {
+					seen[k] = struct{}{}
+					out = append(out, spec)
+				}
 			}
 		}
 	}
@@ -208,10 +226,41 @@ func bearerToken(r *http.Request) string {
 }
 
 type createWorkflowRequest struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Project     string            `json:"project,omitempty"`
-	Steps       []WorkflowStepRef `json:"steps,omitempty"`
+	Name        string              `json:"name"`
+	Description string              `json:"description"`
+	Project     string              `json:"project,omitempty"`
+	Steps       []WorkflowStepRef   `json:"steps,omitempty"`
+	Inputs      []WorkflowInputDef  `json:"inputs,omitempty"`
+	Outputs     []WorkflowOutputDef `json:"outputs,omitempty"`
+}
+
+// validateWorkflowIO checks the declared inputs/outputs: unique, named, and every
+// output carries a value template. Returns "" when valid.
+func validateWorkflowIO(inputs []WorkflowInputDef, outputs []WorkflowOutputDef) string {
+	seenIn := map[string]bool{}
+	for _, in := range inputs {
+		if strings.TrimSpace(in.Name) == "" {
+			return "each declared input requires a name"
+		}
+		if seenIn[in.Name] {
+			return "duplicate input name: " + in.Name
+		}
+		seenIn[in.Name] = true
+	}
+	seenOut := map[string]bool{}
+	for _, o := range outputs {
+		if strings.TrimSpace(o.Name) == "" {
+			return "each declared output requires a name"
+		}
+		if seenOut[o.Name] {
+			return "duplicate output name: " + o.Name
+		}
+		seenOut[o.Name] = true
+		if strings.TrimSpace(o.Value) == "" {
+			return "output " + o.Name + " requires a value expression"
+		}
+	}
+	return ""
 }
 
 func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +306,10 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if msg := validateWorkflowIO(req.Inputs, req.Outputs); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
 
 	// Name is the workflow's resource identifier, so it must be unique per caller.
 	if exists, cerr := workflowNameExists(ctx, req.Name, userID, orgID); cerr != nil {
@@ -287,6 +340,8 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:   userID,
 		OrgID:       orgID,
 		Active:      true,
+		Inputs:      req.Inputs,
+		Outputs:     req.Outputs,
 		StepRefs:    refs,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -473,6 +528,10 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if msg := validateWorkflowIO(req.Inputs, req.Outputs); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
 	if err := validateStepRefs(ctx, req.Steps, userID, orgID, w); err != nil {
 		return
 	}
@@ -498,6 +557,8 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if req.Project != "" {
 		existing.Project = req.Project
 	}
+	existing.Inputs = req.Inputs
+	existing.Outputs = req.Outputs
 	existing.StepRefs = refs
 	existing.Steps = newSteps
 	existing.UpdatedAt = time.Now().UTC()

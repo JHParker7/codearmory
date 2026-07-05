@@ -27,6 +27,10 @@ type substContext struct {
 	outputs map[string]string // earlier step outputs, by step name
 	matrix  map[string]string // matrix bindings for this execution, by var name
 	runID   string            // this run's id, exposed as ${run_id} / ${run.id}
+	// depth is the run's sub-pipeline nesting depth, propagated to a workflows/trigger
+	// step so the created sub-run is one level deeper (not itself a substitution
+	// value, so it is excluded from empty()).
+	depth int
 }
 
 func (sc substContext) empty() bool {

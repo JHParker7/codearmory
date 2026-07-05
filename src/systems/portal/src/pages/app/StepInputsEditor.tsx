@@ -147,9 +147,15 @@ export function StepInputsEditor({ action, defWith, override, upstream, upstream
   // belong to the step definition, not per-occurrence wiring; so they're not
   // editable here. Everything else is an input the pipeline connects.
   const nonInput = nonInputKeys(action);
-  const stringKeys = Object.keys(eff).filter((k) => k !== 'env' && !nonInput.has(k) && typeof eff[k] === 'string');
-  const env = (eff.env && typeof eff.env === 'object' && !Array.isArray(eff.env)) ? eff.env as Record<string, unknown> : null;
-  const setEnv = (next: Record<string, unknown>) => setKey('env', next);
+  // The action's env-kind INPUT field (a KEY→VALUE map) is wired here row-by-row —
+  // forge/run's `env`, workflows/trigger's `inputs`, chaos's `params`. Derived from the
+  // schema (not the literal key 'env') so each action's map field is wireable.
+  const envField = schemaForAction(action).find((f) => f.kind === 'env' && !f.config && !f.output && !f.pipeline);
+  const envKey = envField?.key;
+  const envLabel = envField?.label?.toLowerCase() ?? 'env';
+  const stringKeys = Object.keys(eff).filter((k) => k !== envKey && !nonInput.has(k) && typeof eff[k] === 'string');
+  const env = (envKey && eff[envKey] && typeof eff[envKey] === 'object' && !Array.isArray(eff[envKey])) ? eff[envKey] as Record<string, unknown> : null;
+  const setEnv = (next: Record<string, unknown>) => { if (envKey) setKey(envKey, next); };
 
   const label: React.CSSProperties = { fontFamily: T.mono, fontSize: 10, color: T.faint, width: 64, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
 
@@ -235,7 +241,7 @@ export function StepInputsEditor({ action, defWith, override, upstream, upstream
       ))}
       {env && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>env</span>
+          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{envLabel}</span>
           {Object.entries(env).map(([ek, ev]) => (
             <div key={ek} style={{ display: 'flex', alignItems: 'center', gap: 4, paddingLeft: 8 }}>
               <span style={{ ...label, width: 56, color: T.amber }}>{ek}</span>

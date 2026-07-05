@@ -11,9 +11,11 @@ import (
 	"math/rand"
 	"net/http"
 	neturl "net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
@@ -161,11 +163,11 @@ func (p *WorkerPool) tryOne(ctx context.Context) bool {
 		run.Token = plainToken
 	}
 
-	p.executeRun(ctx, run.RunID, run.WorkflowID, run.Token, run.RunSessionID, run.TriggeredBy, run.Inputs)
+	p.executeRun(ctx, run.RunID, run.WorkflowID, run.Token, run.RunSessionID, run.TriggeredBy, run.Inputs, run.Depth)
 	return true
 }
 
-func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, sessionID, triggeredBy string, inputs map[string]string) {
+func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, sessionID, triggeredBy string, inputs map[string]string, depth int) {
 	runCtx, cancel := context.WithCancel(ctx)
 	p.cancels.Store(runID, cancel)
 	defer func() {
@@ -259,7 +261,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			continue
 		}
 
-		results, status := p.runTaskGroup(runCtx, store, runID, workflowID, tasks, inputs, visible)
+		results, status := p.runTaskGroup(runCtx, store, runID, workflowID, tasks, inputs, visible, depth)
 		if status != StatusCompleted {
 			if status == StatusCancelled && finalStatus == StatusCompleted {
 				finalStatus = StatusCancelled
@@ -291,9 +293,35 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	if workflowUsesVolumes(workflow.Steps) {
 		p.teardownRunVolumes(context.Background(), store, runID)
 	}
-	(WorkflowRun{RunID: runID}).Complete(context.Background(), finalStatus)
+	// Resolve the pipeline's declared outputs from the final step outputs — only on
+	// success, so a failed run exposes none. This map becomes the run's outputs and,
+	// for a sub-run, the parent's workflows/trigger step output.
+	var runOutputs map[string]string
+	if finalStatus == StatusCompleted {
+		runOutputs = resolveWorkflowOutputs(workflow.Outputs, substContext{inputs: inputs, outputs: stepOutputs, runID: runID})
+	}
+	(WorkflowRun{RunID: runID}).Complete(context.Background(), finalStatus, runOutputs)
 	revokeRunToken(context.Background(), store.getSessionID())
 	slog.InfoContext(ctx, "worker: run finished", "run_id", runID, "status", finalStatus)
+}
+
+// resolveWorkflowOutputs resolves each declared output's ${...} template against the
+// run's final step outputs, returning the name→value map (nil when none declared).
+func resolveWorkflowOutputs(defs []WorkflowOutputDef, sc substContext) map[string]string {
+	if len(defs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(defs))
+	for _, d := range defs {
+		if d.Name == "" {
+			continue
+		}
+		out[d.Name] = substitute(d.Value, sc)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ActionForgeCreateVolume is the catalog action a step uses to provision a shared
@@ -466,7 +494,12 @@ func resolveMatrixValues(m *MatrixConfig, sc substContext) ([]string, error) {
 }
 
 // parseMatrixList interprets a resolved values_from string as either a JSON array
-// (of strings or scalars) or a comma-separated list. Empty entries are dropped.
+// (of strings or scalars) or a flat list. The list form accepts BOTH the pipeline
+// convention (comma-separated) and the linux convention (whitespace-separated: the
+// natural shape of command output like `ls` or `echo a b c`), so a step that emits
+// a space- or newline-delimited list feeds a matrix directly. Any run of commas
+// and/or whitespace separates values and empty entries are dropped; values that
+// contain internal whitespace must use the JSON-array form to survive intact.
 func parseMatrixList(raw string) []string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -484,14 +517,9 @@ func parseMatrixList(raw string) []string {
 			return out
 		}
 	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
+	return strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
 }
 
 func matrixTaskName(base, varName, val string) string {
@@ -515,7 +543,7 @@ func aggregateTaskOutputs(results []taskResult) string {
 // in task order plus the group's overall status (Completed unless any task failed
 // or was cancelled). A single task still runs through this path so the matrix,
 // parallel, and sequential cases share one code path.
-func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID, workflowID string, tasks []stepTask, inputs, visible map[string]string) ([]taskResult, string) {
+func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID, workflowID string, tasks []stepTask, inputs, visible map[string]string, depth int) ([]taskResult, string) {
 	results := make([]taskResult, len(tasks))
 	stepRunIDs := make([]string, len(tasks))
 	for k, t := range tasks {
@@ -541,7 +569,7 @@ func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID,
 				return
 			}
 			defer func() { <-sem }() // release
-			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, runID: runID})
+			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, runID: runID, depth: depth})
 			resCh <- taskResult{name: t.name, output: res.Output, logs: res.Logs, usedMB: res.MemoryUsedMB, limitMB: res.MemoryLimitMB, err: err, idx: k}
 		}(k, t)
 	}
@@ -717,12 +745,15 @@ func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step St
 	}
 	stepCtx, cancel := context.WithTimeout(ctx, time.Duration(budget)*time.Second)
 	defer cancel()
-	return p.executeAction(stepCtx, store, def, with)
+	return p.executeAction(stepCtx, store, def, with, sc.runID, sc.depth)
 }
 
 // executeAction dispatches a catalog action: applies body transforms, sends the
-// HTTP request, then polls if the action is async.
-func (p *WorkerPool) executeAction(ctx context.Context, store *tokenStore, def ActionDef, with map[string]any) (stepResult, error) {
+// HTTP request, then polls if the action is async. parentRunID/depth identify the
+// run this action executes within; they are forwarded as X-Workflow-Parent-Run /
+// X-Workflow-Run-Depth so a workflows/trigger sub-run is created one level deeper
+// (harmless headers for every other action's target service).
+func (p *WorkerPool) executeAction(ctx context.Context, store *tokenStore, def ActionDef, with map[string]any, parentRunID string, depth int) (stepResult, error) {
 	body := make(map[string]any, len(with))
 	for k, v := range with {
 		body[k] = v
@@ -775,6 +806,11 @@ func (p *WorkerPool) executeAction(ctx context.Context, store *tokenStore, def A
 	req.Header.Set("Content-Type", "application/json")
 	if tok := store.getToken(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	// Sub-pipeline nesting context, read by the workflows/trigger create endpoint.
+	req.Header.Set("X-Workflow-Run-Depth", strconv.Itoa(depth))
+	if parentRunID != "" {
+		req.Header.Set("X-Workflow-Parent-Run", parentRunID)
 	}
 
 	resp, err := httpClient.Do(req)
@@ -1043,7 +1079,7 @@ func (p *WorkerPool) finishStepRun(stepRunID, status string, output, logs *strin
 }
 
 func (p *WorkerPool) failRun(runID, sessionID string) {
-	(WorkflowRun{RunID: runID}).Complete(context.Background(), StatusFailed)
+	(WorkflowRun{RunID: runID}).Complete(context.Background(), StatusFailed, nil)
 	revokeRunToken(context.Background(), sessionID)
 	slog.Warn("worker: run failed before first step", "run_id", runID)
 }

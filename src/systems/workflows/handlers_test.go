@@ -414,7 +414,7 @@ func TestExecuteAction_ThreadsForgeMemory(t *testing.T) {
 		},
 	}
 
-	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"image": "alpine"})
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"image": "alpine"}, "", 0)
 	if err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestExecuteAction_NonForgeNoMemory(t *testing.T) {
 		Name: "other/run", ServiceURL: srv.URL, Method: http.MethodPost, Path: "/jobs",
 		Async: &AsyncConfig{IDField: "id", PollPath: "/jobs/{id}", PollIntervalSecs: 1, StatusField: "state", SuccessStates: []string{"done"}, OutputField: "result"},
 	}
-	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{})
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{}, "", 0)
 	if err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}

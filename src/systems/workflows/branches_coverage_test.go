@@ -29,7 +29,7 @@ func TestPollAction_FailureState(t *testing.T) {
 			StatusField: "status", SuccessStates: []string{"completed"}, FailureStates: []string{"failed"},
 			OutputField: "stdout", ErrorFields: []string{"stderr"}},
 	}
-	if _, err := pool.executeAction(context.Background(), newTokenStore("", ""), def, nil); err == nil {
+	if _, err := pool.executeAction(context.Background(), newTokenStore("", ""), def, nil, "", 0); err == nil {
 		t.Error("expected error on failure state")
 	}
 }
@@ -46,7 +46,7 @@ func TestExecuteAction_BodyTransforms(t *testing.T) {
 		Name: "forge/run", ServiceURL: srv.URL, Method: http.MethodPost, Path: "/executions",
 		BodyTransforms: []BodyTransform{{FromKey: "run", ToKey: "command", Wrap: []string{"sh", "-c"}}},
 	}
-	if _, err := pool.executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"run": "echo hi"}); err != nil {
+	if _, err := pool.executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"run": "echo hi"}, "", 0); err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
 	cmd, ok := got["command"].([]any)

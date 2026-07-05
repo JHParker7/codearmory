@@ -82,11 +82,32 @@ func gitRepoFromStepWith(with map[string]any) string {
 	return bare
 }
 
-// pipelineFile is the JSON file format for -f pipeline creation.
+// pipelineInputDef declares a pipeline input parameter. The workflows backend
+// applies the default when an input is omitted at trigger time and rejects a run
+// that omits a required input with no default.
+type pipelineInputDef struct {
+	Name        string `json:"name"`
+	Default     string `json:"default,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// pipelineOutputDef declares a pipeline output: a name and a ${...} template value
+// (e.g. ${steps.STEP.output.KEY}). When this pipeline is invoked via the
+// workflows/trigger action, its outputs form the triggering step's output.
+type pipelineOutputDef struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// pipelineFile is the JSON file format for -f pipeline creation/update. inputs and
+// outputs are optional pipeline-level input/output declarations.
 type pipelineFile struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Steps       []workflowStepRef `json:"steps,omitempty"`
+	Name        string              `json:"name"`
+	Description string              `json:"description"`
+	Steps       []workflowStepRef   `json:"steps,omitempty"`
+	Inputs      []pipelineInputDef  `json:"inputs,omitempty"`
+	Outputs     []pipelineOutputDef `json:"outputs,omitempty"`
 }
 
 // ── DSL parser ────────────────────────────────────────────────────────────────
@@ -456,10 +477,12 @@ JSON file (-f) — uses step IDs directly:
 			repo, branch := args[0], args[1]
 
 			var payload struct {
-				Name        string            `json:"name"`
-				Description string            `json:"description"`
-				Project     string            `json:"project,omitempty"`
-				Steps       []workflowStepRef `json:"steps,omitempty"`
+				Name        string              `json:"name"`
+				Description string              `json:"description"`
+				Project     string              `json:"project,omitempty"`
+				Steps       []workflowStepRef   `json:"steps,omitempty"`
+				Inputs      []pipelineInputDef  `json:"inputs,omitempty"`
+				Outputs     []pipelineOutputDef `json:"outputs,omitempty"`
 			}
 
 			if pipelineFileFlag != "" {
@@ -474,6 +497,8 @@ JSON file (-f) — uses step IDs directly:
 				payload.Name = pf.Name
 				payload.Description = pf.Description
 				payload.Steps = pf.Steps
+				payload.Inputs = pf.Inputs
+				payload.Outputs = pf.Outputs
 			} else {
 				nodes, err := parseDSL(args[2])
 				if err != nil {
@@ -629,6 +654,8 @@ JSON file (-f) — uses step IDs directly:
 			id := args[0]
 
 			var steps []workflowStepRef
+			var inputs []pipelineInputDef
+			var outputs []pipelineOutputDef
 			if updatePipelineFile != "" {
 				data, err := os.ReadFile(updatePipelineFile)
 				if err != nil {
@@ -639,6 +666,8 @@ JSON file (-f) — uses step IDs directly:
 					return fmt.Errorf("parsing pipeline file: %w", err)
 				}
 				steps = pf.Steps
+				inputs = pf.Inputs
+				outputs = pf.Outputs
 				if updatePipelineName == "" {
 					updatePipelineName = pf.Name
 				}
@@ -677,6 +706,12 @@ JSON file (-f) — uses step IDs directly:
 			}
 			if updatePipelineDesc != "" {
 				payload["description"] = updatePipelineDesc
+			}
+			if len(inputs) > 0 {
+				payload["inputs"] = inputs
+			}
+			if len(outputs) > 0 {
+				payload["outputs"] = outputs
 			}
 
 			body, err := json.Marshal(payload)

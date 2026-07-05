@@ -19,8 +19,9 @@ import { useState, useEffect, useMemo } from 'react';
 import type { ReactNode, CSSProperties } from 'react';
 import { T } from '../../theme';
 import { ImageSelect } from '../../components/ImageSelect';
-import { createStep, updateStep, listActions, listForgeImages } from '../../api/bff';
-import type { Step, WorkflowAction } from '../../api/bff';
+import { PipelineSelect } from '../../components/PipelineSelect';
+import { createStep, updateStep, listActions, listForgeImages, listWorkflows } from '../../api/bff';
+import type { Step, WorkflowAction, Workflow } from '../../api/bff';
 import { schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX, RAW_WITH_KEY } from './stepSchema';
 
 const inputStyle: CSSProperties = { width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '6px 8px', outline: 'none', boxSizing: 'border-box', marginBottom: 6 };
@@ -50,6 +51,7 @@ export interface StepDefFormProps {
 export function StepDefForm({ token, initial, lockAction, onSaved, onCancel, autoFocus, defaultName, createLabel }: StepDefFormProps) {
   const [actions, setActions] = useState<WorkflowAction[]>([]);
   const [images, setImages] = useState<string[]>([]);
+  const [pipelines, setPipelines] = useState<Workflow[]>([]);
   const [name, setName] = useState(initial?.name ?? defaultName ?? '');
   const [description, setDescription] = useState(initial?.description ?? '');
   const [timeoutSecs, setTimeoutSecs] = useState(initial?.timeout != null ? String(initial.timeout) : '');
@@ -66,6 +68,8 @@ export function StepDefForm({ token, initial, lockAction, onSaved, onCancel, aut
   // helper) and the forge image allowlist (so the image field is a picker).
   useEffect(() => { listActions(token).then(setActions).catch(() => {}); }, [token]);
   useEffect(() => { listForgeImages(token).then(setImages).catch(() => {}); }, [token]);
+  // The pipeline list backs the workflows/trigger target picker (name → with.pipeline).
+  useEffect(() => { listWorkflows(token).then(setPipelines).catch(() => {}); }, [token]);
 
   const actionOptions = useMemo(() => {
     const names = actions.map(a => a.name);
@@ -157,6 +161,10 @@ export function StepDefForm({ token, initial, lockAction, onSaved, onCancel, aut
               {f.catalog === 'image' && images.length > 0 ? (
                 <div style={{ marginBottom: 6 }}>
                   <ImageSelect value={val} onChange={v => setWith(key, v)} options={images} placeholder={f.placeholder} fontSize={11} />
+                </div>
+              ) : f.catalog === 'pipeline' ? (
+                <div style={{ marginBottom: 6 }}>
+                  <PipelineSelect value={val} onChange={v => setWith(key, v)} workflows={pipelines} placeholder={f.placeholder} fontSize={11} />
                 </div>
               ) : f.multiline ? (
                 <textarea value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder}

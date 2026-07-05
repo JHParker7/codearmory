@@ -38,6 +38,18 @@ const (
 // ActionHTTP is the escape hatch for raw HTTP calls to any registered service.
 const ActionHTTP = "http"
 
+// ActionWorkflowsTrigger runs another pipeline as a sub-run and captures its
+// declared outputs as the step's output. It is an async catalog action (POST /runs
+// to create the sub-run, then poll GET /runs/{id} to a terminal state), so a matrix
+// or parallel group over it fans out whole sub-pipelines with no extra machinery.
+const ActionWorkflowsTrigger = "workflows/trigger"
+
+// maxRunDepth caps how deep pipeline-triggers-pipeline nesting may go so a cycle
+// (A→B→A) or a runaway fan-out can't spawn unbounded sub-runs. A top-level run is
+// depth 0; each sub-run is its parent's depth + 1 and a create past this cap is
+// rejected.
+const maxRunDepth = 8
+
 // AsyncConfig describes how to poll an async job to terminal state.
 type AsyncConfig struct {
 	IDField          string   `json:"id_field"`
@@ -113,7 +125,8 @@ const maxMatrixValues = 50
 // ${matrix.value}) bound to that value, so the same With template targets a
 // different input each time. The list is either the literal Values or, when
 // ValuesFrom is set, resolved at run time from a ${...} reference that yields a
-// JSON array or a comma-separated string (e.g. "${inputs.regions}"). Matrix
+// JSON array, a comma-separated string, or a whitespace-separated linux-style list
+// (e.g. "${inputs.regions}" or a step that emits `ls`-style output). Matrix
 // executions run concurrently (capped by maxParallelSteps) and the step's
 // aggregated output is the JSON array of each execution's output.
 type MatrixConfig struct {
@@ -167,6 +180,26 @@ type WorkflowStep struct {
 	Approval      *ApprovalGate `json:"approval,omitempty"`
 }
 
+// WorkflowInputDef declares a named input a pipeline accepts. Default is applied
+// when the trigger omits the input; a Required input left unset (with no default)
+// fails the trigger with 400. Inputs resolve as ${inputs.NAME} in step With values.
+type WorkflowInputDef struct {
+	Name        string `json:"name"`
+	Default     string `json:"default,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// WorkflowOutputDef declares a named output a pipeline produces. Value is a ${...}
+// template (typically ${steps.STEP.output.KEY}) resolved against the run's step
+// outputs when the run completes; the resolved name→value map becomes the run's
+// outputs, surfaced to a parent pipeline that triggered this one via a
+// workflows/trigger step (that step's output is this map).
+type WorkflowOutputDef struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 // Workflow is a named, ordered pipeline of step references.
 // StepRefs is the authoritative DB column (JSON array of WorkflowStepRef).
 // Steps is populated at query time by joining against the steps table.
@@ -189,8 +222,12 @@ type Workflow struct {
 	Active           bool              `json:"active"       gorm:"column:active;default:true"`
 	CreatedAt        time.Time         `json:"created_at"   gorm:"column:created_at"`
 	UpdatedAt        time.Time         `json:"updated_at"   gorm:"column:updated_at"`
-	StepRefs         []WorkflowStepRef `json:"-"            gorm:"column:steps;serializer:json"`
-	Steps            []WorkflowStep    `json:"steps"        gorm:"-"`
+	// Inputs/Outputs declare the pipeline's interface — JSON columns, so AutoMigrate
+	// adds them with no manual migration and existing rows read back as empty.
+	Inputs   []WorkflowInputDef  `json:"inputs,omitempty"  gorm:"column:inputs;serializer:json"`
+	Outputs  []WorkflowOutputDef `json:"outputs,omitempty" gorm:"column:outputs;serializer:json"`
+	StepRefs []WorkflowStepRef   `json:"-"            gorm:"column:steps;serializer:json"`
+	Steps    []WorkflowStep      `json:"steps"        gorm:"-"`
 }
 
 func (Workflow) TableName() string { return "workflows" }
@@ -208,8 +245,16 @@ type WorkflowRun struct {
 	Status       string            `json:"status"       gorm:"column:status;default:'pending'"`
 	CurrentStep  int               `json:"current_step" gorm:"column:current_step;default:0"`
 	Inputs       map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
-	Token        string            `json:"-"            gorm:"column:token"`
-	RunSessionID string            `json:"-"            gorm:"column:run_session_id"`
+	// Outputs is the resolved pipeline-output map, computed from the declared
+	// WorkflowOutputDefs when the run completes; empty until then. Surfaced to a
+	// parent run as the workflows/trigger step's output.
+	Outputs map[string]string `json:"outputs,omitempty" gorm:"column:outputs;serializer:json"`
+	// Depth is the sub-pipeline nesting depth (0 for a top-level run); ParentRunID
+	// links a sub-run to the run whose workflows/trigger step started it.
+	Depth        int    `json:"depth,omitempty"         gorm:"column:depth;default:0"`
+	ParentRunID  string `json:"parent_run_id,omitempty" gorm:"column:parent_run_id;default:''"`
+	Token        string `json:"-"            gorm:"column:token"`
+	RunSessionID string `json:"-"            gorm:"column:run_session_id"`
 	StepRuns     []WorkflowStepRun `json:"step_runs"    gorm:"-"`
 	CreatedAt    time.Time         `json:"created_at"   gorm:"column:created_at"`
 	StartedAt    *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`
