@@ -62,11 +62,18 @@ export const hydrateUser = createAsyncThunk(
   'auth/hydrateUser',
   async (_, { getState, rejectWithValue }) => {
     const { token, userId } = (getState() as { auth: AuthState }).auth;
-    if (!token || !userId) return rejectWithValue('no stored session');
+    if (!token || !userId) return rejectWithValue({ transient: false });
     try {
       return await getUser(token, userId);
-    } catch {
-      return rejectWithValue('session expired');
+    } catch (err: unknown) {
+      // Only a genuine auth rejection (401/403 — the token is gone/expired) ends
+      // the session. Anything else — offline, request timeout, a 5xx from an
+      // upstream blip — is transient: we keep the session so a dropped connection
+      // doesn't dump the user (and their in-progress work) back to the sign-in
+      // screen. AppLayout re-hydrates once the connection returns.
+      const status = (err as { status?: number }).status;
+      const transient = status !== 401 && status !== 403;
+      return rejectWithValue({ transient });
     }
   },
 );
@@ -243,7 +250,14 @@ const authSlice = createSlice({
         state.user = action.payload;
         state.status = 'succeeded';
       })
-      .addCase(hydrateUser.rejected, (state) => {
+      .addCase(hydrateUser.rejected, (state, action) => {
+        if ((action.payload as { transient?: boolean } | undefined)?.transient) {
+          // Transient failure (offline / timeout / 5xx): keep the token and let
+          // the app render. AppLayout re-dispatches hydrateUser on mount and when
+          // the browser comes back online, filling in the user once reachable.
+          state.status = 'succeeded';
+          return;
+        }
         localStorage.removeItem(TOKEN_KEY);
         state.token = null;
         state.userId = null;

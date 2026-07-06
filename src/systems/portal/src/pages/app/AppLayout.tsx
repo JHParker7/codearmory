@@ -10,6 +10,7 @@ import { T } from '../../theme';
 import { Logo } from '../../components/Logo';
 import { Icon, IconName } from '../../components/Icons';
 import { useResizablePane } from '../../components/ResizeHandle';
+import { useReloadOnReconnect } from '../../hooks/useReloadOnReconnect';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { logout, hydrateUser, hydratePermissions, hydrateRegisteredServices } from '../../store/authSlice';
 import { setCurrentProject, fetchKnownProjects } from '../../store/projectSlice';
@@ -224,9 +225,10 @@ export function AppLayout() {
     .filter(s => serviceUiPaths[s] && !BUNDLED_SERVICES.has(s))
     .sort();
 
-  useEffect(() => {
-    if (!user) dispatch(hydrateUser());
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Hydrate the user on mount, and again whenever the browser reconnects. Since a
+  // transient hydrate failure now keeps the session (rather than logging out), the
+  // reconnect retry is what fills the user back in once the connection returns.
+  useReloadOnReconnect(() => { if (!user) dispatch(hydrateUser()); }, []);
 
   useEffect(() => {
     if (user && !permissions) dispatch(hydratePermissions());
