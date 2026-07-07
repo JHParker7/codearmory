@@ -26,7 +26,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { T } from '../../theme';
 import { useResizablePane } from '../../components/ResizeHandle';
 import type { Step, GitRepo, WorkflowAction } from '../../api/bff';
-import { Block, StepRef, MatrixConfig, ApprovalGate, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
+import { Block, StepRef, MatrixConfig, ScatterConfig, ApprovalGate, blocksFromSteps, stepsFromBlocks, stagesOf } from './pipelineGraph';
 import { StepInputsEditor, UpstreamOutput } from './StepInputsEditor';
 import { gitRepoFromWith, stepConfigIssues, actionCreatesVolume, createdVolumeName } from './stepSchema';
 
@@ -137,6 +137,7 @@ interface BlockCardProps {
   onSetWith: (uid: string, override: Record<string, unknown>) => void;
   onToggleParallel: (uid: string) => void;
   onSetMatrix: (uid: string, matrix: MatrixConfig | null) => void;
+  onSetScatter: (uid: string, scatter: ScatterConfig | null) => void;
   onSetApproval: (uid: string, gate: ApprovalGate) => void;
   onRemove: (uid: string) => void;
 }
@@ -177,9 +178,36 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
   );
 }
 
-function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, upstreamVolumes, repos, token, onSelect, onToggle, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
+/** Inline scatter editor shown under a solo block. Fans the step out over the paths of
+ * a shared workspace matching a regex — each leg runs on its own clone (bound to
+ * ${scatter.path}), and owned outputs are gathered back into the base afterward. */
+function ScatterEditor({ uid, scatter, onSetScatter }: { uid: string; scatter: ScatterConfig; onSetScatter: (uid: string, s: ScatterConfig | null) => void }) {
+  const stop = (e: React.PointerEvent) => e.stopPropagation();
+  const field: React.CSSProperties = { background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '4px 6px', outline: 'none' };
+  return (
+    <div onPointerDown={stop} style={{ marginTop: 6, padding: 8, background: T.bg, border: `1px dashed ${T.border}`, borderLeft: `3px solid ${T.green}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.green, letterSpacing: 1, textTransform: 'uppercase' }}>⊟ scatter · one leg per matched path (own clone)</div>
+      <input value={scatter.regex} placeholder="regex matching workspace paths (^services/[^/]+$)" onPointerDown={stop}
+        onChange={(e) => onSetScatter(uid, { ...scatter, regex: e.target.value })} style={field} />
+      <div style={{ display: 'flex', gap: 6 }}>
+        <select value={scatter.mode ?? 'dir'} onPointerDown={stop} onChange={(e) => onSetScatter(uid, { ...scatter, mode: e.target.value })} style={{ ...field, flex: 1 }}>
+          <option value="dir">dir</option>
+          <option value="file">file</option>
+        </select>
+        <input value={scatter.volume ?? ''} placeholder="volume (default workspace)" onPointerDown={stop}
+          onChange={(e) => onSetScatter(uid, { ...scatter, volume: e.target.value || undefined })} style={{ ...field, flex: 1 }} />
+      </div>
+      <input value={(scatter.outputs ?? []).join(', ')} placeholder="owned outputs, comma-separated (${scatter.path}/dist) — gathered back" onPointerDown={stop}
+        onChange={(e) => onSetScatter(uid, { ...scatter, outputs: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) })} style={field} />
+      <input type="number" min={0} value={scatter.max_concurrent ?? ''} placeholder="max concurrent legs (blank = default 10)" onPointerDown={stop}
+        onChange={(e) => { const n = parseInt(e.target.value, 10); onSetScatter(uid, { ...scatter, max_concurrent: Number.isFinite(n) && n > 0 ? n : undefined }); }} style={field} />
+    </div>
+  );
+}
+
+function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, upstreamVolumes, repos, token, onSelect, onToggle, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetScatter, onSetApproval, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
-  const leftBar = isGate ? T.blue : block.matrix ? T.amber : inParallel ? T.green : T.dim;
+  const leftBar = isGate ? T.blue : block.scatter ? T.green : block.matrix ? T.amber : inParallel ? T.green : T.dim;
   // Flag a block whose required config is still unset (e.g. a git-clone with no repo,
   // or a run with no command) so it reads as incomplete — a red border + hint —
   // before the workflow is saved. Gates carry their own config on the card, so they
@@ -211,7 +239,9 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
   // palette ("⊞ matrix block"), not a per-card toggle.
   const isMatrix = !!block.matrix;
   const showMatrix = editable && isMatrix && !inParallel && !isGate;
-  const prefix = isGate ? '⏸ ' : isMatrix ? '⊞ ' : '';
+  const isScatter = !!block.scatter;
+  const showScatter = editable && isScatter && !inParallel && !isGate;
+  const prefix = isGate ? '⏸ ' : isScatter ? '⊟ ' : isMatrix ? '⊞ ' : '';
   return (
     <div ref={setNodeRef} style={style} {...(editable ? attributes : {})} {...(editable ? listeners : {})}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -229,7 +259,7 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
               <span onClick={onSelect} style={{ cursor: 'pointer', fontSize: 12.5, fontWeight: 700, color: isGate ? T.blue : T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
             )}
           </div>
-          <div onClick={editable ? onToggle : onSelect} title={editable ? (selected ? 'click to collapse this step' : 'click to edit this step') : undefined} style={{ fontSize: 10, color: T.faint, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{isMatrix ? ' · matrix fan-out' : ''}</div>
+          <div onClick={editable ? onToggle : onSelect} title={editable ? (selected ? 'click to collapse this step' : 'click to edit this step') : undefined} style={{ fontSize: 10, color: T.faint, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{isScatter ? ' · scatter fan-out' : isMatrix ? ' · matrix fan-out' : ''}</div>
           {incomplete && (
             <div onClick={onSelect} title={`incomplete — ${issues.join('; ')}`}
               style={{ fontSize: 9.5, color: T.red, cursor: 'pointer', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -237,7 +267,7 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
             </div>
           )}
         </div>
-        {editable && canLink && !isGate && !isMatrix && (
+        {editable && canLink && !isGate && !isMatrix && !isScatter && (
           <button onPointerDown={stop} onClick={() => onToggleParallel(block.uid)}
             title={inParallel ? 'make sequential (run after the stage above)' : 'run in parallel with the stage above'}
             style={{ background: inParallel ? T.greenSoft : 'transparent', border: `1px solid ${inParallel ? T.green : T.border}`, color: inParallel ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>∥</button>
@@ -245,10 +275,18 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
         {/* Per-block matrix toggle: fans this one step out over a list of values. Only
             on a solo (non-parallel) step, since matrix and parallel are mutually
             exclusive. Toggling it on reveals the values editor below immediately. */}
-        {editable && !isGate && !inParallel && (
+        {editable && !isGate && !inParallel && !isScatter && (
           <button onPointerDown={stop} onClick={() => onSetMatrix(block.uid, isMatrix ? null : { var: '', values: [] })}
             title={isMatrix ? 'remove matrix fan-out' : 'fan this step out over a list of values (matrix)'}
             style={{ background: isMatrix ? T.amberSoft : 'transparent', border: `1px solid ${isMatrix ? T.amber : T.border}`, color: isMatrix ? T.amber : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>⊞</button>
+        )}
+        {/* Per-block scatter toggle: fans an inline step out over the regex-matched paths
+            of a shared workspace, each leg on its own clone. Inline steps only (scatter
+            needs an action to run per leg), solo (not parallel), and exclusive with matrix. */}
+        {editable && !isGate && !inParallel && !isMatrix && !!block.inline && (
+          <button onPointerDown={stop} onClick={() => onSetScatter(block.uid, isScatter ? null : { regex: '', mode: 'dir' })}
+            title={isScatter ? 'remove scatter fan-out' : 'fan this step out over workspace paths matching a regex (scatter)'}
+            style={{ background: isScatter ? T.greenSoft : 'transparent', border: `1px solid ${isScatter ? T.green : T.border}`, color: isScatter ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '4px 7px', cursor: 'pointer' }}>⊟</button>
         )}
         {editable && (
           <button onPointerDown={stop} onClick={() => onRemove(block.uid)} title={isGate ? 'remove gate' : 'remove step'}
@@ -258,6 +296,7 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
         )}
       </div>
       {showMatrix && block.matrix && <MatrixEditor uid={block.uid} matrix={block.matrix} onSetMatrix={onSetMatrix} />}
+      {showScatter && block.scatter && <ScatterEditor uid={block.uid} scatter={block.scatter} onSetScatter={onSetScatter} />}
       {editable && isGate && block.approval && <GateEditor uid={block.uid} gate={block.approval} onSetApproval={onSetApproval} />}
       {editable && !isGate && selected && (
         <StepInputsEditor action={action} defWith={defWith} override={block.with ?? {}} upstream={upstream} upstreamVolumes={upstreamVolumes} repos={repos} token={token}
@@ -427,10 +466,14 @@ export const PipelineBlocks = forwardRef<PipelineBlocksHandle, PipelineBlocksPro
   const toggleMatrixMode = useCallback(() => { setMatrixMode((m) => !m); setParallelMode(false); setParallelOpen(false); }, []);
   const toggleParallel = useCallback((uid: string) => {
     // Joining a parallel group drops any matrix (the two are mutually exclusive).
-    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, parallelWithPrev: !b.parallelWithPrev, matrix: b.parallelWithPrev ? b.matrix : null } : b)));
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, parallelWithPrev: !b.parallelWithPrev, matrix: b.parallelWithPrev ? b.matrix : null, scatter: b.parallelWithPrev ? b.scatter : null } : b)));
   }, []);
   const setMatrix = useCallback((uid: string, matrix: MatrixConfig | null) => {
-    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, matrix } : b)));
+    // Matrix and scatter are mutually exclusive fan-outs on a solo step.
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, matrix, scatter: matrix ? null : b.scatter } : b)));
+  }, []);
+  const setScatter = useCallback((uid: string, scatter: ScatterConfig | null) => {
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, scatter, matrix: scatter ? null : b.matrix } : b)));
   }, []);
   const setApproval = useCallback((uid: string, approval: ApprovalGate) => {
     setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, approval } : b)));
@@ -525,7 +568,7 @@ export const PipelineBlocks = forwardRef<PipelineBlocksHandle, PipelineBlocksPro
         upstream={selectedUid === b.uid ? upstreamFor(b.uid) : []}
         upstreamVolumes={selectedUid === b.uid ? upstreamVolumesFor(b.uid) : []} repos={repos} token={token}
         onSelect={() => select(b)} onToggle={() => toggle(b)} onRename={setName} onSetWith={setWith}
-        onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onSetApproval={setApproval} onRemove={remove} />
+        onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onSetScatter={setScatter} onSetApproval={setApproval} onRemove={remove} />
     );
   };
 

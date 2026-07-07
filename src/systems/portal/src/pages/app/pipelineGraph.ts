@@ -33,6 +33,28 @@ export interface MatrixConfig {
   max_concurrent?: number;
 }
 
+/** Fans a step out over the regex-matched paths of a shared workspace: each match is
+ * one parallel leg running on its OWN clone (bound to ${scatter.path}), and owned
+ * outputs are gathered back into the base afterward. Only valid on an inline step. */
+export interface ScatterConfig {
+  /** Base workspace volume to scan/clone (default "workspace"). */
+  volume?: string;
+  /** Mount path of the (cloned) workspace in each leg (default "/workspace"). */
+  mount_path?: string;
+  /** POSIX ERE matched against each entry's path relative to the volume root. */
+  regex: string;
+  /** Match directories ("dir", default) or files ("file"). */
+  mode?: string;
+  max_depth?: number;
+  /** Paths each leg owns, unioned back into the base after all legs finish (may use
+   * ${scatter.path}). Overlap across legs fails. Empty = gather nothing. */
+  outputs?: string[];
+  size_mb?: number;
+  medium?: string;
+  /** Caps how many legs run at once (0/undefined = the service default). */
+  max_concurrent?: number;
+}
+
 /** An inline manual-approval gate: a pipeline pause point that needs no Step row.
  * A ref with an approval has no step_id and is always solo (no group/matrix). */
 export interface ApprovalGate {
@@ -75,6 +97,7 @@ export interface StepRef {
   with?: Record<string, unknown>;
   parallel_group?: number | null;
   matrix?: MatrixConfig | null;
+  scatter?: ScatterConfig | null;
   approval?: ApprovalGate | null;
 }
 
@@ -100,6 +123,7 @@ export interface Block {
   /** Per-occurrence `with` overrides (input wiring). undefined/empty = none. */
   with?: Record<string, unknown>;
   matrix?: MatrixConfig | null;
+  scatter?: ScatterConfig | null;
   approval?: ApprovalGate | null;
 }
 
@@ -156,7 +180,7 @@ export function blocksFromSteps(steps: StepRef[]): Block[] {
         name: s?.name || undefined,
         with: blockWith,
         inline,
-        matrix: s?.matrix ?? null, approval: s?.approval ?? null,
+        matrix: s?.matrix ?? null, scatter: s?.scatter ?? null, approval: s?.approval ?? null,
       });
       i++;
     });
@@ -212,7 +236,8 @@ export function stepsFromBlocks(blocks: Block[]): StepRef[] {
       const ref = baseRef(b);
       if (!b.approval) {
         if (!b.inline) ref.parallel_group = null;
-        if (b.matrix && b.matrix.var.trim()) ref.matrix = b.matrix;
+        if (b.scatter && b.scatter.regex.trim()) ref.scatter = b.scatter;
+        else if (b.matrix && b.matrix.var.trim()) ref.matrix = b.matrix;
       }
       out.push(ref);
     }
@@ -237,6 +262,7 @@ export function stepsToPayload(steps: StepRef[]): StepRef[] {
       ref = { action: s.action };
       if (s.timeout && s.timeout > 0) ref.timeout = s.timeout;
       if (s.parallel_group != null) ref.parallel_group = s.parallel_group;
+      else if (s.scatter && s.scatter.regex.trim()) ref.scatter = s.scatter;
       else if (s.matrix && s.matrix.var.trim()) ref.matrix = s.matrix;
     }
     else if (s.parallel_group != null) ref = { step_id: s.step_id, parallel_group: s.parallel_group };
@@ -406,6 +432,7 @@ export function parseConfig(raw: string): { name: string; description: string; s
       if (withOverride && Object.keys(withOverride).length > 0) ref.with = withOverride;
       if (typeof so.timeout === 'number' && so.timeout > 0) ref.timeout = so.timeout;
       if (so.matrix && typeof so.matrix === 'object' && !Array.isArray(so.matrix)) ref.matrix = so.matrix as MatrixConfig;
+      if (so.scatter && typeof so.scatter === 'object' && !Array.isArray(so.scatter)) ref.scatter = so.scatter as ScatterConfig;
       return ref;
     }
     if (typeof so.step_id !== 'string' || !so.step_id) throw new Error(`steps[${i}]: a "step_id" string, an inline "action", or an "approval" gate is required`);
