@@ -9,6 +9,7 @@
  */
 import { useEffect, useState } from 'react';
 import { listUsers, listWorkflows, listOrgs, listPermissions, listSecrets } from '../api/bff';
+import type { User } from '../api/bff';
 
 /** Fetch a catalog once and build an id→name map via `pick`; empty on permission/network error. */
 function useNameMap<T>(
@@ -30,6 +31,20 @@ function useNameMap<T>(
 /** user_id → username. */
 export const useUserNames = (token: string) =>
   useNameMap(token, listUsers, u => [u.user_id, u.username]);
+
+/**
+ * Full user catalog for pickers (e.g. a ticket assignee dropdown). Best-effort:
+ * empty on permission/network error, exactly like {@link useUserNames}.
+ */
+export function useUsers(token: string): User[] {
+  const [users, setUsers] = useState<User[]>([]);
+  useEffect(() => {
+    let active = true;
+    listUsers(token).then(u => { if (active) setUsers(u); }).catch(() => {});
+    return () => { active = false; };
+  }, [token]);
+  return users;
+}
 
 /** workflow_id → workflow name. */
 export const useWorkflowNames = (token: string) =>
