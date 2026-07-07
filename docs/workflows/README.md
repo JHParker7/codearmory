@@ -373,6 +373,29 @@ Steps 1 and 2 (group=1)    → run concurrently after step 0 finishes
 Step 3 (no group)          → runs after both group-1 steps finish
 ```
 
+### Scatter / gather
+
+A `scatter` block fans a step out over the paths of a shared workspace that match a regex — "partition the build, run the parts in parallel, recombine". Unlike a matrix (which just repeats a step over a value list), each scatter leg runs on its **own clone** of the workspace, so parallel legs never share a PVC (which on block storage would `Multi-Attach` across nodes) — and after all legs finish, each leg's declared owned outputs are **gathered** back into the base workspace as a disjoint union (two legs claiming the same path fails, rather than silently clobbering). It needs no ReadWriteMany volume and no CSI clone.
+
+```json
+{
+  "name": "build-services",
+  "action": "forge/run",
+  "with": { "run": "cd ${scatter.path} && make build && make test", "runner_class": "large" },
+  "scatter": {
+    "volume": "workspace",
+    "regex": "^services/[^/]+$",
+    "mode": "dir",
+    "outputs": ["${scatter.path}/dist"],
+    "max_concurrent": 4
+  }
+}
+```
+
+Under the hood the worker drives forge: `forge/resolve-paths` lists the matching paths (each becomes one leg, bound to `${scatter.path}`), `forge/create-volume` + `forge/volume-copy` clone the workspace per leg, the step's own action runs per leg on its clone, and `forge/volume-copy` gathers the owned `outputs` back into the base. Every leg is recorded as its own step run (`<name> [path=…]`), and the step's aggregated output is the JSON array of each leg's output. The per-leg clone volumes are scoped to the run and torn down with it. `scatter` is mutually exclusive with `matrix`/`parallel_group`, and requires an inline step action to run per leg.
+
+Fields: `volume` (base workspace, default `workspace`), `mount_path` (default `/workspace`), `regex` (required, POSIX ERE) with `mode` (`dir`/`file`) and `max_depth`, `outputs` (owned paths unioned back — may reference `${scatter.path}`; empty = gather nothing), `size_mb`/`medium` (per-leg clone size), and `max_concurrent` (fan-out cap, like a matrix).
+
 ### Workflow object
 
 When reading a single workflow (`GET /pipelines/{ref}`), the response enriches each step ref with the full step definition:

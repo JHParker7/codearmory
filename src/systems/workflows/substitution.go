@@ -26,7 +26,10 @@ type substContext struct {
 	inputs  map[string]string // run-level inputs, by name
 	outputs map[string]string // earlier step outputs, by step name
 	matrix  map[string]string // matrix bindings for this execution, by var name
-	runID   string            // this run's id, exposed as ${run_id} / ${run.id}
+	// scatterPath is the workspace path a scatter leg is bound to, exposed as
+	// ${scatter.path} so the leg's command targets its own partition.
+	scatterPath string
+	runID       string // this run's id, exposed as ${run_id} / ${run.id}
 	// depth is the run's sub-pipeline nesting depth, propagated to a workflows/trigger
 	// step so the created sub-run is one level deeper (not itself a substitution
 	// value, so it is excluded from empty()).
@@ -34,7 +37,7 @@ type substContext struct {
 }
 
 func (sc substContext) empty() bool {
-	return len(sc.inputs) == 0 && len(sc.outputs) == 0 && len(sc.matrix) == 0 && sc.runID == ""
+	return len(sc.inputs) == 0 && len(sc.outputs) == 0 && len(sc.matrix) == 0 && sc.scatterPath == "" && sc.runID == ""
 }
 
 var refPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
@@ -89,6 +92,13 @@ func (sc substContext) resolve(expr string) (string, bool) {
 			for _, v := range sc.matrix {
 				return v, true
 			}
+		}
+		return "", false
+	}
+	// ${scatter.path} resolves to the workspace path this scatter leg is bound to.
+	if key, ok := strings.CutPrefix(expr, "scatter."); ok {
+		if key == "path" {
+			return sc.scatterPath, sc.scatterPath != ""
 		}
 		return "", false
 	}

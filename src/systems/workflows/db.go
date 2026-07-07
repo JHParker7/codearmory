@@ -382,6 +382,7 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 				Step:          Step{Name: ref.Name, Action: ref.Action, With: ref.With, Timeout: ref.Timeout},
 				ParallelGroup: ref.ParallelGroup,
 				Matrix:        ref.Matrix,
+				Scatter:       ref.Scatter,
 			})
 			continue
 		}
@@ -404,7 +405,7 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 			maps.Copy(merged, ref.With)
 			s.With = merged
 		}
-		result = append(result, WorkflowStep{Step: s, ParallelGroup: ref.ParallelGroup, Matrix: ref.Matrix})
+		result = append(result, WorkflowStep{Step: s, ParallelGroup: ref.ParallelGroup, Matrix: ref.Matrix, Scatter: ref.Scatter})
 	}
 	return result, nil
 }

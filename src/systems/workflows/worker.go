@@ -239,6 +239,25 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			return
 		}
 
+		// Scatter: fan a step out over the regex-matched paths of a shared workspace,
+		// each leg on its own clone, then gather owned outputs back. Its own group
+		// handler owns the resolve/clone/run/gather orchestration (all forge calls),
+		// so it does not go through the task-group path below.
+		if len(group.steps) == 1 && group.steps[0].Scatter != nil {
+			ws := group.steps[0]
+			output, status := p.runScatterGroup(runCtx, store, runID, ws, group.indices[0], inputs, visible, depth)
+			if status != StatusCompleted {
+				if status == StatusCancelled && finalStatus == StatusCompleted {
+					finalStatus = StatusCancelled
+				} else if status == StatusFailed {
+					finalStatus = StatusFailed
+				}
+				break
+			}
+			stepOutputs[ws.Name] = output
+			continue
+		}
+
 		// Expand the group into the concrete executions to run: one task for a
 		// sequential step, one per member for a parallel group, or one per value
 		// for a matrix step.
@@ -337,7 +356,9 @@ const ActionForgeCreateVolume = "forge/create-volume"
 // run knows to tear volumes down (and to expect the deleteVolume grant on its role).
 func workflowUsesVolumes(steps []WorkflowStep) bool {
 	for _, ws := range steps {
-		if ws.Action == ActionForgeCreateVolume {
+		// A scatter step provisions per-leg clone volumes under the run id, so teardown
+		// must run to reap them even if the pipeline declares no create-volume step.
+		if ws.Action == ActionForgeCreateVolume || ws.Scatter != nil {
 			return true
 		}
 	}

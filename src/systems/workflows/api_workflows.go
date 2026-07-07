@@ -33,7 +33,7 @@ import (
 // would 403 every create-volume status poll and hang until timeout.
 // v4 added the workflows/trigger sub-pipeline step, whose run role needs triggerRun
 // + getRun on workflows/runs/* to create and poll the sub-run.
-const workflowRolePermsVersion = 4
+const workflowRolePermsVersion = 5
 
 // collectWorkflowPermissions returns the deduplicated set of gatekeeper
 // permissions declared by the workflow's step actions in the current catalog.
@@ -42,18 +42,20 @@ func collectWorkflowPermissions(steps []WorkflowStep) []PermissionSpec {
 	var out []PermissionSpec
 	actionCatalogMu.RLock()
 	defer actionCatalogMu.RUnlock()
-	for _, ws := range steps {
-		if ws.Action == ActionHTTP {
-			continue // ActionHTTP permissions are runtime-dynamic; can't enumerate statically
-		}
-		def, ok := actionCatalog[ws.Action]
+
+	// addAction grants the permissions a single catalog action needs: its required
+	// permission, the async-poll companion, and the deleteVolume companion for a
+	// create-volume. Factored out so a scatter step can also grant the forge actions it
+	// drives internally (resolve-paths, create-volume, volume-copy).
+	addAction := func(action string) {
+		def, ok := actionCatalog[action]
 		if !ok || def.RequiredPermission == nil {
-			continue
+			return
 		}
 		p := def.RequiredPermission
 		key := p.Service + ":" + p.Action + ":" + p.Resource
 		if _, dup := seen[key]; dup {
-			continue
+			return
 		}
 		seen[key] = struct{}{}
 		out = append(out, PermissionSpec{
@@ -109,6 +111,20 @@ func collectWorkflowPermissions(steps []WorkflowStep) []PermissionSpec {
 					out = append(out, spec)
 				}
 			}
+		}
+	}
+
+	for _, ws := range steps {
+		if ws.Action == ActionHTTP {
+			continue // ActionHTTP permissions are runtime-dynamic; can't enumerate statically
+		}
+		addAction(ws.Action)
+		// A scatter step drives forge itself to resolve paths, clone a volume per leg,
+		// and gather results — grant those forge actions on top of the leg action.
+		if ws.Scatter != nil {
+			addAction(actionForgeResolvePaths)
+			addAction(ActionForgeCreateVolume)
+			addAction(actionForgeVolumeCopy)
 		}
 	}
 	return out
