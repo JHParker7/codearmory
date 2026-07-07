@@ -109,6 +109,7 @@ function PipelineBuilderOverlay({
           with: (s.with ?? undefined) as Record<string, unknown> | undefined,
           parallel_group: s.parallel_group ?? null,
           matrix: s.matrix ?? null,
+          scatter: s.scatter ?? null,
         };
       }
       // The GET returns the effective (merged) name/with; recover the raw overrides
@@ -129,6 +130,7 @@ function PipelineBuilderOverlay({
         with: (!s.approval && Object.keys(wo).length) ? wo : undefined,
         parallel_group: s.parallel_group ?? null,
         matrix: s.matrix ?? null,
+        scatter: s.scatter ?? null,
         approval: s.approval ?? null,
       };
     }) : [],
@@ -669,6 +671,7 @@ function PipelinesTab() {
         with: isInline ? ((s.with ?? undefined) as Record<string, unknown> | undefined) : undefined,
         parallel_group: s.parallel_group ?? null,
         matrix: s.matrix ?? null,
+        scatter: s.scatter ?? null,
         approval: s.approval ?? null,
       };
     }) : [],

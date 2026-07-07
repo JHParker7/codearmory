@@ -406,6 +406,17 @@ func validateStepRefShape(i int, ref WorkflowStepRef) string {
 			return fmt.Sprintf("step %d: %s", i, msg)
 		}
 	}
+	if ref.Scatter != nil {
+		if ref.ParallelGroup != nil || ref.Matrix != nil {
+			return fmt.Sprintf("step %d: scatter is mutually exclusive with matrix and parallel_group", i)
+		}
+		if ref.Action == "" {
+			return fmt.Sprintf("step %d: scatter requires an inline step action to run per leg", i)
+		}
+		if msg := validateScatter(ref.Scatter); msg != "" {
+			return fmt.Sprintf("step %d: %s", i, msg)
+		}
+	}
 	return ""
 }
 

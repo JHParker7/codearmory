@@ -234,11 +234,18 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	// privileged-runner requirement are enforced once the runner class resolves its
 	// backend, below.
 	isBuild := req.Build != nil
+	// A volume-copy execution (the scatter-clone / gather primitive) derives its image
+	// (forge's minimal runner image) and command (a synthesised `cp` script) from the
+	// copy spec, so — like build — it bypasses the user image/command/allowlist checks.
+	isCopy := req.Copy != nil
+	// A resolve-paths execution (the scatter fan-out generator) likewise derives its
+	// image and command (a synthesised find | grep) from the resolve spec.
+	isResolve := req.Resolve != nil
 	// A checkout step that supplies no image of its own (the forge/git-clone action)
 	// runs on forge's controlled minimal git image: like the Kaniko builder it is
 	// forge-supplied and bypasses ALLOWED_IMAGES, so users never pick or maintain a
 	// git-capable image just to clone a repo into a shared volume.
-	isDefaultGitCheckout := !isBuild && req.Checkout != nil && req.Image == ""
+	isDefaultGitCheckout := !isBuild && !isCopy && !isResolve && req.Checkout != nil && req.Image == ""
 	switch {
 	case isBuild:
 		if err := validateBuild(req.Build, req.SecretRefs, req.Env); err != nil {
@@ -247,6 +254,13 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Timeout <= 0 {
 			req.Timeout = defaultBuildTimeoutSecs
+		}
+	case isCopy, isResolve:
+		// Command is materialised below, once the attached volumes have been shape- and
+		// ownership-validated (the scripts reference their mount paths).
+		req.Image = gitImage
+		if req.Timeout <= 0 {
+			req.Timeout = defaultTimeout
 		}
 	case isDefaultGitCheckout:
 		if len(req.Command) == 0 {
@@ -313,6 +327,27 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Materialise the copy command now that the volume mounts are validated: it copies
+	// declared paths between them (whole-tree clone, or a disjoint-checked gather union).
+	if isCopy {
+		if err := validateCopy(req.Copy, req.Volumes); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.Command = copyCommand(req.Copy, req.Volumes)
+	}
+	// Materialise the resolve scan and ensure its captured variable is in output_env so
+	// the matched-path list is returned as the step's structured output.
+	if isResolve {
+		if err := validateResolve(req.Resolve, req.Volumes); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.Command = resolveCommand(req.Resolve, req.Volumes)
+		if v := resolveOutputVar(req.Resolve); !containsString(req.OutputEnv, v) {
+			req.OutputEnv = append(req.OutputEnv, v)
+		}
+	}
 	if req.RunnerClass == "" {
 		req.RunnerClass = "standard"
 	}
@@ -366,6 +401,8 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		Checkout:    req.Checkout,
 		Volumes:     req.Volumes,
 		Build:       req.Build,
+		Copy:        req.Copy,
+		Resolve:     req.Resolve,
 		Status:      StatusPending,
 	}
 	if err := exec.Add(ctx); err != nil {

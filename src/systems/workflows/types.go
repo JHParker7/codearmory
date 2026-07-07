@@ -142,6 +142,39 @@ type MatrixConfig struct {
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
 }
 
+// ScatterConfig fans a step out over the paths in a shared workspace that match a
+// regex: forge resolves the matching directories/files, each becomes one parallel leg
+// running on its OWN clone of the workspace (so legs never share a PVC and never
+// Multi-Attach across nodes), and after all legs finish their declared owned outputs
+// are gathered back into the base workspace as a disjoint union. It is the "partition
+// the build, run in parallel, recombine" pattern — a matrix that also clones and
+// recombines the workspace. The matched path is bound to ${scatter.path} in the leg's
+// With. Legs run concurrently (capped by MaxConcurrent, like a matrix).
+type ScatterConfig struct {
+	// Volume is the base workspace volume name to scan and clone per leg (a
+	// create-volume step must have provisioned it earlier). Default "workspace".
+	Volume string `json:"volume,omitempty"`
+	// MountPath is where the (cloned) workspace mounts in resolve, each leg, and the
+	// gather. Default "/workspace".
+	MountPath string `json:"mount_path,omitempty"`
+	// Regex selects the paths to fan out over (POSIX ERE), Mode is "dir" (default) or
+	// "file", MaxDepth bounds descent (see forge/resolve-paths).
+	Regex    string `json:"regex"`
+	Mode     string `json:"mode,omitempty"`
+	MaxDepth int    `json:"max_depth,omitempty"`
+	// Outputs are the paths each leg owns, unioned back into the base workspace after
+	// all legs finish (gather). They may reference ${scatter.path}; overlap across legs
+	// fails the gather. Empty = gather nothing (legs are independent; collect their
+	// results via output_env instead).
+	Outputs []string `json:"outputs,omitempty"`
+	// SizeMB / Medium size the per-leg clone volumes (should hold the workspace copy).
+	// Empty = forge's create-volume defaults.
+	SizeMB int64  `json:"size_mb,omitempty"`
+	Medium string `json:"medium,omitempty"`
+	// MaxConcurrent caps how many legs run at once. 0 = the global ceiling.
+	MaxConcurrent int `json:"max_concurrent,omitempty"`
+}
+
 // ApprovalGate is an inline manual-approval pause declared directly on a pipeline
 // step ref — no separate Step row is required. When a ref carries one (and no
 // StepID), the run pauses at that position in StatusAwaitingApproval until an
@@ -187,7 +220,11 @@ type WorkflowStepRef struct {
 	With          map[string]any `json:"with,omitempty"`
 	ParallelGroup *int           `json:"parallel_group,omitempty"`
 	Matrix        *MatrixConfig  `json:"matrix,omitempty"`
-	Approval      *ApprovalGate  `json:"approval,omitempty"`
+	// Scatter fans this step out over the regex-matched paths of a shared workspace,
+	// each leg on its own clone, gathering owned outputs back afterward. Mutually
+	// exclusive with Matrix/ParallelGroup — see ScatterConfig.
+	Scatter  *ScatterConfig `json:"scatter,omitempty"`
+	Approval *ApprovalGate  `json:"approval,omitempty"`
 }
 
 // WorkflowStep enriches a WorkflowStepRef with the full Step definition.
@@ -196,9 +233,10 @@ type WorkflowStepRef struct {
 // carries the gate config back out so the editor can round-trip it.
 type WorkflowStep struct {
 	Step
-	ParallelGroup *int          `json:"parallel_group,omitempty"`
-	Matrix        *MatrixConfig `json:"matrix,omitempty"`
-	Approval      *ApprovalGate `json:"approval,omitempty"`
+	ParallelGroup *int           `json:"parallel_group,omitempty"`
+	Matrix        *MatrixConfig  `json:"matrix,omitempty"`
+	Scatter       *ScatterConfig `json:"scatter,omitempty"`
+	Approval      *ApprovalGate  `json:"approval,omitempty"`
 }
 
 // WorkflowInputDef declares a named input a pipeline accepts. Default is applied

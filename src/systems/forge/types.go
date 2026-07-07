@@ -78,8 +78,19 @@ type Execution struct {
 	// spec at submit, so the two fields above are materialised, not user-supplied.
 	// Stored for display only — the worker runs the materialised Command and never
 	// reads this back, so it is deliberately absent from claimPendingExecution's SELECT.
-	Build    *BuildSpec `gorm:"column:build;type:jsonb;serializer:json" json:"build,omitempty"`
-	Status   string     `gorm:"column:status;not null;default:pending"                  json:"status"`
+	Build *BuildSpec `gorm:"column:build;type:jsonb;serializer:json" json:"build,omitempty"`
+	// Copy, when set, makes this a volume-copy execution: forge derives the Image (its
+	// minimal runner image) and Command (a synthesised `cp` script) from the spec at
+	// submit, so the two are materialised, not user-supplied. Like Build it is stored
+	// for display only — the worker runs the materialised Command and never reads this
+	// back, so it is deliberately absent from claimPendingExecution's SELECT.
+	Copy *CopySpec `gorm:"column:copy;type:jsonb;serializer:json" json:"copy,omitempty"`
+	// Resolve, when set, makes this a resolve-paths execution: forge derives the Image
+	// and Command from the spec at submit and captures the matched paths via output_env.
+	// Stored for display only — the worker runs the materialised Command and never reads
+	// this back, so it is deliberately absent from claimPendingExecution's SELECT.
+	Resolve  *ResolveSpec `gorm:"column:resolve;type:jsonb;serializer:json" json:"resolve,omitempty"`
+	Status   string       `gorm:"column:status;not null;default:pending"                  json:"status"`
 	ExitCode *int       `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
 	Stdout   *string    `gorm:"column:stdout"                                           json:"stdout,omitempty"`
 	Stderr   *string    `gorm:"column:stderr"                                           json:"stderr,omitempty"`
@@ -140,6 +151,57 @@ type CheckoutSpec struct {
 	// Depth is the git clone --depth. Nil defaults to 1 (shallow, like
 	// actions/checkout); 0 means a full clone; a positive value sets that depth.
 	Depth *int `json:"depth,omitempty"`
+}
+
+// CopySpec configures a volume-copy execution: forge copies the declared paths from
+// one or more source volumes into the single destination volume (the mount marked
+// workdir: true), all attached via `volumes`. It is the sandbox-side primitive behind
+// scatter/gather, needing neither a CSI clone nor ReadWriteMany — every source and the
+// destination mount into one copy pod, so they attach to a single node, which RWO
+// allows. Two shapes:
+//   - clone (Disjoint false): one source, whole tree — seed a per-leg volume from the
+//     base workspace so parallel legs never share a PVC.
+//   - gather (Disjoint true): N sources, each with its declared owned paths — union
+//     them back into the base, failing if two legs claim the same path.
+type CopySpec struct {
+	// Sources are the read-only volumes to copy from and, per source, the relative
+	// paths within it to copy (default: the whole tree). Each Volume must name a mount
+	// present in `volumes` that is not the destination.
+	Sources []CopySource `json:"sources"`
+	// Disjoint fails the copy if two sources would write the same relative path,
+	// turning a multi-leg gather into a checked union instead of a silent
+	// last-writer-wins. Leave off for a single-source clone.
+	Disjoint bool `json:"disjoint,omitempty"`
+}
+
+// CopySource names one source volume mount and the relative paths to copy from it.
+type CopySource struct {
+	// Volume matches a VolumeMount.Name in the request's `volumes`.
+	Volume string `json:"volume"`
+	// Paths are relative to the source's mount root; "." or empty means the whole
+	// tree (not allowed in disjoint/gather mode, which unions declared paths).
+	Paths []string `json:"paths,omitempty"`
+}
+
+// ResolveSpec configures a resolve-paths execution: forge scans an attached volume and
+// captures the entries whose path (relative to the volume root) matches Regex, filtered
+// to directories or files. The matched, sorted, newline-separated list is captured as
+// the output variable named by Output (default "paths"), which a workflow reads as the
+// step output to drive a scatter's fan-out. Forge supplies the image and command.
+type ResolveSpec struct {
+	// Volume names the attached volume to scan (a `volumes[].name`). Defaults to the
+	// mount marked workdir: true, else the single attached mount.
+	Volume string `json:"volume,omitempty"`
+	// Regex filters matching entries (POSIX ERE / grep -E), applied to each entry's
+	// path relative to the volume root. Required.
+	Regex string `json:"regex"`
+	// Mode selects what to match: "dir" (default) or "file".
+	Mode string `json:"mode,omitempty"`
+	// MaxDepth bounds how deep to descend (find -maxdepth). 0/unset = unlimited.
+	MaxDepth int `json:"max_depth,omitempty"`
+	// Output names the env var / output key the matched-path list is captured into.
+	// Default "paths".
+	Output string `json:"output,omitempty"`
 }
 
 // RunnerClass defines the resource limits for a named execution tier. Every
@@ -239,6 +301,15 @@ type submitRequest struct {
 	// ignored. Requires a privileged runner class on a kata/gvisor backend. See
 	// BuildSpec.
 	Build *BuildSpec `json:"build"`
+	// Copy, when set, makes this a volume-copy execution: forge derives the image
+	// (its minimal runner image) and command (a synthesised `cp` script) from the
+	// spec, copying declared paths between the attached `volumes`. It is the primitive
+	// behind scatter-clone and gather — see CopySpec.
+	Copy *CopySpec `json:"copy"`
+	// Resolve, when set, makes this a resolve-paths execution: forge scans an attached
+	// volume and captures the paths matching a regex (as structured output), the
+	// fan-out set behind a scatter — see ResolveSpec.
+	Resolve *ResolveSpec `json:"resolve"`
 }
 
 // RunResult holds the output of a completed container run. ExitCode is a pointer

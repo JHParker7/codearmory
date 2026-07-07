@@ -281,6 +281,21 @@ export interface MatrixConfig {
   values_from?: string;
 }
 
+/** Fans an inline step out over the regex-matched paths of a shared workspace: each
+ * match is one parallel leg on its own clone (bound to ${scatter.path}), with owned
+ * outputs gathered back into the base afterward. */
+export interface ScatterConfig {
+  volume?: string;
+  mount_path?: string;
+  regex: string;
+  mode?: string;
+  max_depth?: number;
+  outputs?: string[];
+  size_mb?: number;
+  medium?: string;
+  max_concurrent?: number;
+}
+
 /** An inline manual-approval gate on a pipeline step ref — pauses the run with no
  * separate Step row. A ref carries either a step_id or an approval gate. */
 export interface ApprovalGate {
@@ -306,6 +321,7 @@ export interface WorkflowStepRef {
   with?: Record<string, unknown> | null;
   parallel_group?: number | null;
   matrix?: MatrixConfig | null;
+  scatter?: ScatterConfig | null;
   approval?: ApprovalGate | null;
 }
 
