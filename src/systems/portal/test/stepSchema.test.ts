@@ -2,7 +2,7 @@ import { expect } from 'chai';
 import {
   schemaKey, schemaForAction, buildStepWith, formValsFromWith, WITH_KEY_PREFIX, RAW_WITH_KEY, GIT_CLONE_ENV,
   actionSupportsGitRepo, gitRepoFromWith, withGitRepo, stepConfigIssues,
-  volumeAttachWith, volumeAttachFromWith,
+  volumeAttachWith, volumeAttachFromWith, splitPipelineWith,
 } from '../src/pages/app/stepSchema.ts';
 
 // valueOf factory: reads prefixed keys ("with.<key>") from a plain map.
@@ -207,6 +207,20 @@ describe('shared workspace volumes', () => {
     const withMap = buildStepWith('forge/create-volume', reader({ [p('name')]: 'workspace' }));
     const vals = formValsFromWith('forge/create-volume', withMap);
     expect(vals[p(RAW_WITH_KEY)]).to.equal(undefined);
+  });
+
+  it('splitPipelineWith separates the attached volume from the step definition', () => {
+    const volumes = volumeAttachWith('workspace');
+    const { def, pipeline } = splitPipelineWith('forge/run', { image: 'alpine', run: 'make', volumes });
+    // The volume (a `pipeline` field) is the per-occurrence part; the rest is the def.
+    expect(def).to.deep.equal({ image: 'alpine', run: 'make' });
+    expect(pipeline).to.deep.equal({ volumes });
+  });
+
+  it('splitPipelineWith leaves a def-only with entirely in the definition part', () => {
+    const { def, pipeline } = splitPipelineWith('forge/run', { image: 'alpine', run: 'make' });
+    expect(def).to.deep.equal({ image: 'alpine', run: 'make' });
+    expect(pipeline).to.deep.equal({});
   });
 });
 

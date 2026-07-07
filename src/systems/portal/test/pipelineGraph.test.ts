@@ -326,6 +326,37 @@ describe('inline steps', () => {
     expect(blocks[0].inline).to.equal(undefined);
     expect(blocks[0].stepId).to.equal('build');
   });
+
+  it('splits an inline step\'s attached volume into the block override, not the definition', () => {
+    // A volume attach is a per-occurrence PIPELINE field. On reload it must land in the
+    // block override (block.with), not the inline definition (inline.with) — the step
+    // definition form rebuilds inline.with and drops pipeline fields, so a volume left
+    // there would be silently removed the next time the step's definition is edited.
+    const volumes = [{ workflow_id: '${run_id}', name: 'workspace', mount_path: '/workspace', workdir: true }];
+    const blocks = blocksFromSteps([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make', volumes } },
+    ]);
+    expect(blocks[0].inline).to.deep.equal({ action: 'forge/run', timeout: undefined, with: { image: 'alpine', run: 'make' } });
+    expect(blocks[0].with).to.deep.equal({ volumes });
+    // The two layers still recombine into one `with` on serialise (volume preserved).
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make', volumes } },
+    ]);
+  });
+
+  it('preserves the volume when an inline step definition is edited (drops a def-only key)', () => {
+    const volumes = [{ workflow_id: '${run_id}', name: 'workspace', mount_path: '/workspace', workdir: true }];
+    const blocks = blocksFromSteps([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make', volumes } },
+    ]);
+    // Simulate a step-definition edit (StepDefForm → buildStepWith → applyInlineEdit):
+    // it rebuilds ONLY the inline.with definition layer (no pipeline fields), leaving
+    // the block override untouched.
+    blocks[0].inline = { action: 'forge/run', timeout: undefined, with: { image: 'alpine', run: 'make test' } };
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make test', volumes } },
+    ]);
+  });
 });
 
 describe('collectRefs (step inspector)', () => {

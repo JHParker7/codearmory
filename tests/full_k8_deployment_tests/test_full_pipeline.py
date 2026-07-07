@@ -246,15 +246,16 @@ def test_full_pipeline_via_portal(driver, portal_url, creds, forge_image, volume
     assert_matrix_fanned_out(run, published, base="echo-string")  # 3 runs, each echoed its string
     assert_parallel(run, "par-a", "par-b", a_log="parallel A", b_log="parallel B")
 
-    # UI evidence of the matrix + parallel structure on the live run page. Each
-    # matrix combination must be an individually selectable block that surfaces its
-    # OWN output — guarding against the run page collapsing the fan-out (which all
-    # share one step_index) into a single block/output.
+    # UI evidence of the matrix + parallel structure on the live run page. The
+    # matrix fan-out is collapsed into one block with a dropdown; each combination
+    # must be individually selectable there and surface its OWN output — guarding
+    # against the run page collapsing the fan-out (which all share one step_index)
+    # into a single shared output.
     assert ui.page_has_text("∥ parallel"), "run page did not render the parallel stage"
     assert ui.page_has_text("⊞ matrix"), "run page did not render the matrix stage"
     for value in published:
-        ui.select_step(f"echo-string [item={value}]")   # a per-combination block, not the bare step
-        ui.wait_logs_contains(f"matrix item: {value}")   # its own echoed stdout, not another run's
+        ui.select_matrix_combo(f"echo-string [item={value}]")  # pick this combo in the dropdown
+        ui.wait_logs_contains(f"matrix item: {value}")         # its own echoed stdout, not another run's
 
 
 # ── a focused, standalone parallel-block test ──────────────────────────────────
