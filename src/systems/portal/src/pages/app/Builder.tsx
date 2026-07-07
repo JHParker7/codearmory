@@ -7,12 +7,14 @@
  * the sidebar only links here for the system admin (builder:configureOrgService on
  * builder/orgs/default, which only the wildcard admin matches).
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useResizableWidth } from '../../components/ResizeHandle';
+import { useReloadOnReconnect } from '../../hooks/useReloadOnReconnect';
+import { loadDraft, saveDraft, clearDraft } from '../../draftStorage';
 import { useAppSelector, useAppDispatch } from '../../store/hooks';
 import { hydrateRegisteredServices } from '../../store/authSlice';
 import { listServices, setService, deleteService } from '../../api/bff';
@@ -109,6 +111,45 @@ interface FormState {
 
 const BLANK_FORM: FormState = { service: '', enabled: true, kind: 'custom', image: '', port: '', description: '', config: '', db_url: '', secrets: '' };
 
+// localStorage key prefix for an in-progress service form. Suffixed with "new"
+// (register) or the service name (configure) so drafts don't collide.
+const SERVICE_DRAFT_PREFIX = 'builder.service.draft:';
+
+/** Build the form for an existing service (the edit baseline). */
+const formFromService = (svc: OrgService): FormState => ({
+  service: svc.service,
+  enabled: svc.enabled,
+  kind: svc.kind || 'platform',
+  image: svc.image ?? '',
+  port: svc.port ? String(svc.port) : '',
+  description: svc.description ?? '',
+  config: svc.config && Object.keys(svc.config).length ? JSON.stringify(svc.config, null, 2) : '',
+  db_url: '',
+  secrets: '',
+});
+
+/**
+ * Serialise a form for persistence with the write-only credential fields blanked —
+ * we never want a db url or secrets bag sitting in localStorage. Doubles as the
+ * comparison key: a form whose non-secret fields match its baseline is "no unsaved
+ * changes" and isn't persisted.
+ */
+const redactForm = (f: FormState): string => JSON.stringify({ ...f, db_url: '', secrets: '' });
+
+/** Load a persisted form draft, or null if none / it matches `baseline` / it's corrupt. */
+const loadServiceDraft = (key: string, baseline: FormState): FormState | null => {
+  const raw = loadDraft(key);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as FormState;
+    if (redactForm(parsed) === redactForm(baseline)) return null; // nothing meaningfully unsaved
+    return { ...parsed, db_url: '', secrets: '' }; // secrets were never stored; re-enter them
+  } catch {
+    clearDraft(key);
+    return null;
+  }
+};
+
 /** Builder route: system-admin global service control plane. Left list of every platform/custom/core service against the single "default" baseline; right pane shows detail with enable/disable, configure, and remove-baseline actions, plus the register/edit form (formBlock) that submits enabled/kind/image/port/config/db_url/secrets via setService. */
 export function Builder() {
   const token = useAppSelector(s => s.auth.token)!;
@@ -129,6 +170,8 @@ export function Builder() {
   const [form, setForm] = useState<FormState>(BLANK_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // True when the open form was seeded from a persisted draft (shows the restore banner).
+  const [restoredDraft, setRestoredDraft] = useState(false);
 
   const fetchServices = useCallback(async (): Promise<OrgService[] | null> => {
     setLoading(true); setError(null);
@@ -141,11 +184,33 @@ export function Builder() {
     } finally { setLoading(false); }
   }, [token]);
 
-  useEffect(() => { fetchServices(); }, [fetchServices]);
+  // Load on mount and re-fetch on reconnect so the baseline list recovers from a
+  // fetch that failed during an outage instead of staying stuck empty.
+  useReloadOnReconnect(() => { fetchServices(); }, [fetchServices]);
   // Leaving a selection cancels any in-progress edit/confirm.
   useEffect(() => { setEditing(false); }, [selected]);
 
   const selectedSvc = services.find(s => s.service === selected) ?? null;
+
+  // ── Draft persistence ───────────────────────────────────────────────────────
+  // Mirror the open service form to localStorage so a reload — or a connection blip
+  // that bounces the app to sign-in — doesn't discard it. Keyed by "new" (register)
+  // or the service name (configure); credential fields are never persisted.
+  const draftKey = creating
+    ? `${SERVICE_DRAFT_PREFIX}new`
+    : (editing && selected ? `${SERVICE_DRAFT_PREFIX}${selected}` : null);
+  const formBaselineJson = useMemo(
+    () => creating
+      ? redactForm(BLANK_FORM)
+      : (editing && selectedSvc ? redactForm(formFromService(selectedSvc)) : null),
+    [creating, editing, selectedSvc],
+  );
+  useEffect(() => {
+    if (!draftKey) return;
+    const cur = redactForm(form);
+    if (cur === formBaselineJson) clearDraft(draftKey);
+    else saveDraft(draftKey, cur);
+  }, [draftKey, form, formBaselineJson]);
 
   // After any mutation: reload the baseline list, then re-resolve the sidebar's
   // routing table. Enabling a service makes builder deploy+register it; disabling
@@ -179,22 +244,26 @@ export function Builder() {
   };
 
   const startEdit = (svc: OrgService) => {
-    setForm({
-      service: svc.service,
-      enabled: svc.enabled,
-      kind: svc.kind || 'platform',
-      image: svc.image ?? '',
-      port: svc.port ? String(svc.port) : '',
-      description: svc.description ?? '',
-      config: svc.config && Object.keys(svc.config).length ? JSON.stringify(svc.config, null, 2) : '',
-      db_url: '',
-      secrets: '',
-    });
+    const baseline = formFromService(svc);
+    const draft = loadServiceDraft(`${SERVICE_DRAFT_PREFIX}${svc.service}`, baseline);
+    setForm(draft ?? baseline);
+    setRestoredDraft(!!draft);
     setFormError(null); setCreating(false); setEditing(true);
   };
 
   const startCreate = () => {
-    setForm(BLANK_FORM); setFormError(null); setSelected(null); setEditing(false); setCreating(true);
+    const draft = loadServiceDraft(`${SERVICE_DRAFT_PREFIX}new`, BLANK_FORM);
+    setForm(draft ?? BLANK_FORM);
+    setRestoredDraft(!!draft);
+    setFormError(null); setSelected(null); setEditing(false); setCreating(true);
+  };
+
+  // Cancel abandons the form and discards its draft (explicit intent, unlike a
+  // disconnect). Also used when toggling the configure button off.
+  const cancelForm = () => {
+    if (draftKey) clearDraft(draftKey);
+    setRestoredDraft(false);
+    setEditing(false); setCreating(false);
   };
 
   const submit = async (mode: 'edit' | 'create') => {
@@ -229,6 +298,9 @@ export function Builder() {
     setSaving(true); setFormError(null);
     try {
       await setService(token, name, body);
+      // Saved — drop the persisted draft for whichever form this was.
+      clearDraft(mode === 'create' ? `${SERVICE_DRAFT_PREFIX}new` : `${SERVICE_DRAFT_PREFIX}${name}`);
+      setRestoredDraft(false);
       setEditing(false); setCreating(false);
       setSelected(name);
       await afterMutation();
@@ -241,6 +313,16 @@ export function Builder() {
     const custom = mode === 'create' || form.kind === 'custom';
     return (
       <div style={{ background: T.card, border: `1px solid ${T.borderHi}`, padding: '16px', marginBottom: 20 }}>
+        {restoredDraft && (
+          <div style={{ background: T.greenSoft, border: `1px solid ${T.green}`, padding: '8px 12px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontFamily: T.mono, fontSize: 11, color: T.green }}>↩ restored unsaved changes from your last session</span>
+            <div style={{ flex: 1 }} />
+            <button onClick={cancelForm} title="discard the restored draft and close the form"
+              style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 10, padding: '3px 9px', cursor: 'pointer' }}>
+              discard draft
+            </button>
+          </div>
+        )}
         {formError && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>{formError}</div>}
         {mode === 'create' && (
           <Field label="service name">
@@ -288,7 +370,7 @@ export function Builder() {
             style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 12, fontWeight: 600, padding: '7px 16px', cursor: 'pointer', opacity: saving ? 0.6 : 1 }}>
             {saving ? '[ · · · ]' : mode === 'create' ? '[ register ]' : '[ save ]'}
           </button>
-          <button onClick={() => { setEditing(false); setCreating(false); }} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '7px 12px', cursor: 'pointer' }}>cancel</button>
+          <button onClick={cancelForm} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '7px 12px', cursor: 'pointer' }}>cancel</button>
         </div>
       </div>
     );
@@ -380,7 +462,7 @@ export function Builder() {
                     </button>
                   )}
                   {!isCore(selectedSvc) && !isComingSoon(selectedSvc) && (
-                    <button onClick={() => editing ? setEditing(false) : startEdit(selectedSvc)}
+                    <button onClick={() => editing ? cancelForm() : startEdit(selectedSvc)}
                       style={{ background: editing ? T.greenSoft : 'transparent', border: `1px solid ${editing ? T.green : T.border}`, color: editing ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
                       {editing ? '[ cancel ]' : '[ configure ]'}
                     </button>

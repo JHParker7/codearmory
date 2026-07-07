@@ -12,6 +12,8 @@ import {
 } from '../../api/bff';
 import type { Workflow, WorkflowRun, Step, WorkflowAction, GitRepo, WorkflowInputDef, WorkflowOutputDef } from '../../api/bff';
 import { ResizeHandle, useResizableWidth } from '../../components/ResizeHandle';
+import { useReloadOnReconnect } from '../../hooks/useReloadOnReconnect';
+import { loadDraft, saveDraft, clearDraft } from '../../draftStorage';
 import { PipelineBlocks, blockDef } from './PipelineBlocks';
 import type { BlockSelection, PipelineBlocksHandle } from './PipelineBlocks';
 import { StepDefForm } from './StepDefForm';
@@ -152,6 +154,27 @@ function PipelineBuilderOverlay({
   // immediately hidden by that filter. Only on create — an edit must not re-tag.
   const project = useAppSelector(s => s.project.current);
 
+  // ── Draft persistence ───────────────────────────────────────────────────────
+  // Mirror the in-progress pipeline to localStorage so a reload — or a connection
+  // blip that bounces the app to sign-in — doesn't discard it. Keyed by workflow id
+  // (or "new" when creating) so an edit and a fresh create don't clobber each other.
+  const draftKey = `ci.pipeline.draft:${initial?.workflow_id ?? 'new'}`;
+  // The saved workflow's config; a draft equal to this means "no unsaved changes",
+  // so it is neither persisted nor restored.
+  const baselineJson = useMemo(
+    () => configToJson(initial?.name ?? '', initial?.description ?? '', initialStepRefs, initial?.inputs ?? [], initial?.outputs ?? []),
+    [initial, initialStepRefs],
+  );
+  // Read any persisted draft ONCE, synchronously on first render — before the
+  // persist effect below can clear it — so the restore effect works off this
+  // snapshot rather than racing localStorage.
+  const pendingRestore = useRef<string | null | undefined>(undefined);
+  if (pendingRestore.current === undefined) {
+    const raw = loadDraft(draftKey);
+    pendingRestore.current = raw && raw !== baselineJson ? raw : null;
+  }
+  const [restoredDraft, setRestoredDraft] = useState(false);
+
   // Live, editable JSON mirror. The textarea drives `jsonDraft`; while the user is
   // typing in it (jsonFocused) builder-side updates don't overwrite their text.
   const [jsonDraft, setJsonDraft] = useState(() => configToJson(initial?.name ?? '', initial?.description ?? '', initialStepRefs, initial?.inputs ?? [], initial?.outputs ?? []));
@@ -190,11 +213,15 @@ function PipelineBuilderOverlay({
   const blocksApi = useRef<PipelineBlocksHandle | null>(null);
   const [convertBusy, setConvertBusy] = useState(false);
   const [convertError, setConvertError] = useState<string | null>(null);
+  // Action/repo option lists for the palette and per-step pickers. Loaded on mount
+  // and re-fetched on reconnect — a fetch that failed during an outage would
+  // otherwise leave these selectors permanently empty until a full page reload. On
+  // failure we keep the last-good list rather than blanking it.
   const [actions, setActions] = useState<WorkflowAction[]>([]);
-  useEffect(() => { listActions(token).then(setActions).catch(() => {}); }, [token]);
+  useReloadOnReconnect(() => { listActions(token).then(setActions).catch(() => {}); }, [token]);
   // Git repo catalog for the builder's per-step repo picker (forge blocks).
   const [repos, setRepos] = useState<GitRepo[]>([]);
-  useEffect(() => { listGitRepos(token).then(setRepos).catch(() => {}); }, [token]);
+  useReloadOnReconnect(() => { listGitRepos(token).then(setRepos).catch(() => {}); }, [token]);
   // Selecting a block shows that step in the editor and cancels any in-progress
   // create (picking a block wins over a half-started new step).
   const onInspect = useCallback((selection: BlockSelection | null) => {
@@ -269,6 +296,13 @@ function PipelineBuilderOverlay({
   );
   const canonicalJson = useMemo(() => configToJson(name, desc, cleanedSteps, inputs, outputs), [name, desc, cleanedSteps, inputs, outputs]);
 
+  // Persist the live config whenever it diverges from the saved workflow; clear the
+  // draft once it matches again (nothing unsaved to keep).
+  useEffect(() => {
+    if (canonicalJson === baselineJson) clearDraft(draftKey);
+    else saveDraft(draftKey, canonicalJson);
+  }, [canonicalJson, baselineJson, draftKey]);
+
   // Reflect builder/name/description changes into the JSON panel, unless the user
   // is actively editing the JSON (their text is authoritative then).
   useEffect(() => {
@@ -296,6 +330,30 @@ function PipelineBuilderOverlay({
       setSteps(parsed.steps);
     }
   }, [builderSeed]);
+
+  // Restore a persisted draft once, on mount (see pendingRestore above). Applying
+  // it through applyJson re-seeds the builder, JSON panel, name/desc and I/O decls
+  // in one go, exactly as a JSON edit would.
+  const didRestore = useRef(false);
+  useEffect(() => {
+    if (didRestore.current || !pendingRestore.current) return;
+    didRestore.current = true;
+    try {
+      parseConfig(pendingRestore.current); // validate before applying
+      applyJson(pendingRestore.current);
+      setRestoredDraft(true);
+    } catch {
+      clearDraft(draftKey); // corrupt draft — drop it
+    }
+  }, [applyJson, draftKey]);
+
+  // Discard the restored draft and revert to the saved workflow (empty for a new
+  // pipeline).
+  const discardDraft = useCallback(() => {
+    clearDraft(draftKey);
+    applyJson(baselineJson);
+    setRestoredDraft(false);
+  }, [applyJson, baselineJson, draftKey]);
 
   // Two blocks sharing one effective name collide in the run output map, so
   // ${steps.<name>.output} wiring silently resolves against the wrong step. The
@@ -329,6 +387,7 @@ function PipelineBuilderOverlay({
       const wf = initial
         ? await updateWorkflow(token, initial.workflow_id, payload)
         : await createWorkflow(token, { ...payload, project: project ?? undefined });
+      clearDraft(draftKey); // saved — the persisted draft is now redundant
       onSaved(wf);
     } catch (e: unknown) { setSaveError((e as Error).message); }
     finally { setSaving(false); }
@@ -350,6 +409,18 @@ function PipelineBuilderOverlay({
         </button>
         <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>✕ close</button>
       </div>
+      {restoredDraft && (
+        <div style={{ padding: '7px 20px', borderBottom: `1px solid ${T.border}`, background: T.greenSoft, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontFamily: T.mono, fontSize: 11, color: T.green }}>
+            ↩ restored unsaved changes from your last session
+          </span>
+          <div style={{ flex: 1 }} />
+          <button onClick={discardDraft} title="discard the restored draft and revert to the last saved version"
+            style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 10, padding: '3px 9px', cursor: 'pointer' }}>
+            discard draft
+          </button>
+        </div>
+      )}
       {showDecl && (
         <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.border}`, background: T.bg, display: 'flex', gap: 24, flexWrap: 'wrap' }}>
           <div style={{ flex: '1 1 320px', minWidth: 0 }}><DeclInputsEditor inputs={inputs} onChange={setInputs} /></div>
@@ -498,7 +569,9 @@ function PipelinesTab() {
   // reloadSteps is also handed to the builder's embedded step library so the
   // palette refreshes when a definition is created/edited/deleted in place.
   const reloadSteps = useCallback(() => { listSteps(token).then(setCatalog).catch(() => {}); }, [token]);
-  useEffect(() => { reloadSteps(); }, [reloadSteps]);
+  // Load on mount and re-fetch on reconnect so the palette recovers from a fetch
+  // that failed during an outage (keeping the last-good catalog on failure).
+  useReloadOnReconnect(reloadSteps, [reloadSteps]);
   const catalogMap = useMemo(() => Object.fromEntries(catalog.map(s => [s.step_id, s])) as Record<string, Step>, [catalog]);
 
   // Live-refresh the runs list while any run is in flight, so statuses/durations
