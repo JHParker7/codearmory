@@ -1323,6 +1323,95 @@ func TestTuiStepRunRows_AllSequential_NoBrackets(t *testing.T) {
 	}
 }
 
+// A matrix step's runs all share one step index; the run-detail table must bracket
+// them into a single ⊞-marked stage — showing every combination, not collapsing
+// the fan-out to one — while keeping rows 1:1 with the step runs.
+func TestTuiStepRunRows_GroupsMatrixFanOut(t *testing.T) {
+	steps := []tuiStepRun{
+		{StepIndex: 0, StepName: "build", Status: "completed"},
+		{StepIndex: 1, StepName: "deploy [env=dev]", Status: "completed"},
+		{StepIndex: 1, StepName: "deploy [env=staging]", Status: "completed"},
+		{StepIndex: 1, StepName: "deploy [env=prod]", Status: "running"},
+		{StepIndex: 2, StepName: "notify", Status: "pending"},
+	}
+	rows := tuiStepRunRows(steps)
+	if len(rows) != len(steps) {
+		t.Fatalf("rows = %d, want %d (1:1 with step runs — every combination shown)", len(rows), len(steps))
+	}
+	// The three matrix runs share stage 2: number + ⊞ marker on the first row only.
+	if rows[1][0] != "2" || !strings.HasPrefix(rows[1][1], "┌ ⊞ ") {
+		t.Errorf("row1 = %q/%q, want stage 2 with ┌ ⊞ matrix marker", rows[1][0], rows[1][1])
+	}
+	if rows[2][0] != "" || !strings.HasPrefix(rows[2][1], "├ ") {
+		t.Errorf("row2 = %q/%q, want blank stage with ├ bracket", rows[2][0], rows[2][1])
+	}
+	if rows[3][0] != "" || !strings.HasPrefix(rows[3][1], "└ ") {
+		t.Errorf("row3 = %q/%q, want blank stage with └ bracket", rows[3][0], rows[3][1])
+	}
+	// Each combination keeps its own name so it stays individually identifiable.
+	if !strings.Contains(rows[1][1], "deploy [env=dev]") || !strings.Contains(rows[3][1], "deploy [env=prod]") {
+		t.Errorf("matrix rows lost their per-combination names: %q … %q", rows[1][1], rows[3][1])
+	}
+	// Sequential numbering resumes at stage 3 after the fan-out.
+	if rows[4][0] != "3" || rows[4][1] != "notify" {
+		t.Errorf("row4 = %q/%q, want 3/notify", rows[4][0], rows[4][1])
+	}
+}
+
+// The parallel batch must now carry a ∥ marker so it reads apart from a matrix
+// fan-out (both bracket into one stage).
+func TestTuiStepRunRows_ParallelCarriesMarker(t *testing.T) {
+	g := 0
+	rows := tuiStepRunRows([]tuiStepRun{
+		{StepIndex: 0, StepName: "build", Status: "completed"},
+		{StepIndex: 1, StepName: "test", Status: "completed", ParallelGroup: &g},
+		{StepIndex: 2, StepName: "lint", Status: "completed", ParallelGroup: &g},
+	})
+	if !strings.HasPrefix(rows[1][1], "┌ ∥ ") {
+		t.Errorf("parallel first row = %q, want ┌ ∥ marker", rows[1][1])
+	}
+}
+
+func TestTuiRunStageLegend(t *testing.T) {
+	g := 0
+	seq := []tuiStepRun{{StepIndex: 0, StepName: "a"}, {StepIndex: 1, StepName: "b"}}
+	par := []tuiStepRun{{StepIndex: 0, StepName: "a", ParallelGroup: &g}, {StepIndex: 1, StepName: "b", ParallelGroup: &g}}
+	mat := []tuiStepRun{{StepIndex: 0, StepName: "m [v=1]"}, {StepIndex: 0, StepName: "m [v=2]"}}
+	both := []tuiStepRun{
+		{StepIndex: 0, StepName: "a", ParallelGroup: &g},
+		{StepIndex: 1, StepName: "b", ParallelGroup: &g},
+		{StepIndex: 2, StepName: "m [v=1]"},
+		{StepIndex: 2, StepName: "m [v=2]"},
+	}
+	cases := []struct {
+		name       string
+		steps      []tuiStepRun
+		wantHasPar bool
+		wantHasMat bool
+		wantEmpty  bool
+	}{
+		{"sequential", seq, false, false, true},
+		{"parallel", par, true, false, false},
+		{"matrix", mat, false, true, false},
+		{"both", both, true, true, false},
+	}
+	for _, c := range cases {
+		got := tuiRunStageLegend(c.steps)
+		if c.wantEmpty {
+			if got != "" {
+				t.Errorf("%s: legend = %q, want empty", c.name, got)
+			}
+			continue
+		}
+		if c.wantHasPar && !strings.Contains(got, "∥") {
+			t.Errorf("%s: legend %q missing ∥", c.name, got)
+		}
+		if c.wantHasMat && !strings.Contains(got, "⊞") {
+			t.Errorf("%s: legend %q missing ⊞", c.name, got)
+		}
+	}
+}
+
 func TestTuiRunHasParallel(t *testing.T) {
 	g, other := 1, 1
 	cases := []struct {

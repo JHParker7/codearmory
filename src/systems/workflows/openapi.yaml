@@ -43,8 +43,9 @@ info:
     different value of its `with` template. Values come from a literal `values`
     list or a `values_from` reference (a JSON array or comma-separated string,
     e.g. `${inputs.regions}`). The executions run concurrently and the step's
-    output is the JSON array of their outputs. `matrix` and `parallel_group` are
-    mutually exclusive.
+    output is the JSON array of their outputs. Set `max_concurrent` to throttle
+    how many run at once — useful when each value spins up a resource-heavy
+    runner. `matrix` and `parallel_group` are mutually exclusive.
 
     ## Authentication
 
@@ -813,9 +814,10 @@ components:
         execution runs the same step with `${matrix.<var>}` (and the generic
         `${matrix.value}`) bound to that value, so the same `with` template
         targets a different input each time. Executions run concurrently (capped
-        at 10) and the step's output is the JSON array of each execution's
-        output, addressable as `${steps.<name>.output}`. Mutually exclusive with
-        `parallel_group`; not allowed on an `approval` step. Capped at 50 values.
+        at 10, or fewer via `max_concurrent`) and the step's output is the JSON
+        array of each execution's output, addressable as `${steps.<name>.output}`.
+        Mutually exclusive with `parallel_group`; not allowed on an `approval`
+        step. Capped at 50 values.
       required:
         - var
       properties:
@@ -836,6 +838,15 @@ components:
             array or a comma-separated string (e.g. "${inputs.regions}").
             Exactly one of values or values_from is required.
           example: ${inputs.regions}
+        max_concurrent:
+          type: integer
+          minimum: 0
+          description: |
+            Caps how many fan-out executions run at once. 0 (unset) uses the
+            global concurrency ceiling (10); a smaller positive value throttles
+            the fan-out so a matrix over resource-heavy runners doesn't launch
+            every value simultaneously. Values above the ceiling have no effect.
+          example: 3
 
     ApprovalGate:
       type: object

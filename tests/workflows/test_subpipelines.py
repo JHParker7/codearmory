@@ -125,12 +125,14 @@ def test_matrix_over_trigger_fans_out_subpipelines(bearer, cleanup):
     child_name = _make_child(bearer, tag, cleanup)
 
     # One trigger step, matrixed over two names — each value runs its own sub-run.
+    # max_concurrent=1 throttles the fan-out to one sub-run at a time; both must
+    # still complete, proving the concurrency cap is accepted and honored.
     trig = make_step(bearer, "workflows/trigger", {
         "pipeline": child_name, "inputs": {"who": "${matrix.item}"},
     }, name=f"fan-{tag}")
     cleanup.append(("steps", trig))
     parent = make_pipeline(bearer, f"matrix-parent-{tag}", [
-        {"step_id": trig, "matrix": {"var": "item", "values": ["alice", "bob"]}},
+        {"step_id": trig, "matrix": {"var": "item", "values": ["alice", "bob"], "max_concurrent": 1}},
     ])
     cleanup.append(("pipelines", parent))
 

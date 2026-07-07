@@ -127,12 +127,19 @@ const maxMatrixValues = 50
 // ValuesFrom is set, resolved at run time from a ${...} reference that yields a
 // JSON array, a comma-separated string, or a whitespace-separated linux-style list
 // (e.g. "${inputs.regions}" or a step that emits `ls`-style output). Matrix
-// executions run concurrently (capped by maxParallelSteps) and the step's
-// aggregated output is the JSON array of each execution's output.
+// executions run concurrently (capped by maxParallelSteps, or by MaxConcurrent when
+// it is set to a smaller value) and the step's aggregated output is the JSON array
+// of each execution's output.
 type MatrixConfig struct {
 	Var        string   `json:"var"`
 	Values     []string `json:"values,omitempty"`
 	ValuesFrom string   `json:"values_from,omitempty"`
+	// MaxConcurrent caps how many of the fan-out executions run at once. 0 (unset)
+	// runs as many as the global maxParallelSteps ceiling allows; a positive value
+	// lowers that ceiling so a matrix over resource-heavy runners (large sandboxes,
+	// image builds) can throttle itself rather than launching every value at once and
+	// exhausting cluster capacity. Values above maxParallelSteps have no extra effect.
+	MaxConcurrent int `json:"max_concurrent,omitempty"`
 }
 
 // ApprovalGate is an inline manual-approval pause declared directly on a pipeline

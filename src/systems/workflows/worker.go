@@ -252,16 +252,20 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			break
 		}
 		if len(tasks) == 0 {
-			// An empty matrix (its source list resolved to nothing) runs no
-			// executions; publish an empty aggregate so downstream refs resolve.
-			if aggregateName != "" {
-				stepOutputs[aggregateName] = "[]"
+			// A matrix whose source list resolved to nothing ran no executions. Fail
+			// the run rather than silently skipping the step: a matrix that fans out
+			// to zero did no work, so quietly dropping the whole step and passing is
+			// misleading — the step vanishes from the run view while the run still
+			// shows as passed. Record a visible failed step run naming the cause.
+			if sid := uuid.New().String(); p.startStepRun(runID, sid, group.indices[0], group.steps[0].Name) == nil {
+				p.finishStepRun(sid, StatusFailed, strPtr("matrix produced no values to run"), nil, nil, nil)
 			}
-			slog.WarnContext(ctx, "worker: matrix produced no values, skipping step", "run_id", runID, "step", group.indices[0])
-			continue
+			slog.WarnContext(ctx, "worker: matrix produced no values, failing run", "run_id", runID, "step", group.indices[0])
+			finalStatus = StatusFailed
+			break
 		}
 
-		results, status := p.runTaskGroup(runCtx, store, runID, workflowID, tasks, inputs, visible, depth)
+		results, status := p.runTaskGroup(runCtx, store, runID, workflowID, tasks, inputs, visible, depth, groupConcurrency(group))
 		if status != StatusCompleted {
 			if status == StatusCancelled && finalStatus == StatusCompleted {
 				finalStatus = StatusCancelled
@@ -474,6 +478,21 @@ func buildGroupTasks(group stepGroup, sc substContext) (tasks []stepTask, aggreg
 	return tasks, "", nil
 }
 
+// groupConcurrency reports how many of a group's tasks may run at once. It is the
+// global maxParallelSteps ceiling, lowered by a matrix step's MaxConcurrent when
+// that is set to a smaller positive value — so a matrix over resource-heavy runners
+// can throttle its fan-out below the default instead of launching every value at
+// once. Parallel and sequential groups always use the full ceiling.
+func groupConcurrency(group stepGroup) int {
+	limit := maxParallelSteps
+	if len(group.steps) == 1 && group.steps[0].Matrix != nil {
+		if mc := group.steps[0].Matrix.MaxConcurrent; mc > 0 && mc < limit {
+			limit = mc
+		}
+	}
+	return limit
+}
+
 // resolveMatrixValues produces the matrix's value list at run time, resolving any
 // ${...} references first. ValuesFrom pulls the list from a reference yielding a
 // JSON array or comma-separated string; otherwise each literal Value is resolved.
@@ -538,12 +557,13 @@ func aggregateTaskOutputs(results []taskResult) string {
 	return string(b)
 }
 
-// runTaskGroup executes every task in a group concurrently (capped by
-// maxParallelSteps), records each as a step run, and returns the per-task results
-// in task order plus the group's overall status (Completed unless any task failed
-// or was cancelled). A single task still runs through this path so the matrix,
+// runTaskGroup executes every task in a group concurrently (capped by concurrency,
+// which is the global maxParallelSteps ceiling or a matrix step's lower
+// MaxConcurrent), records each as a step run, and returns the per-task results in
+// task order plus the group's overall status (Completed unless any task failed or
+// was cancelled). A single task still runs through this path so the matrix,
 // parallel, and sequential cases share one code path.
-func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID, workflowID string, tasks []stepTask, inputs, visible map[string]string, depth int) ([]taskResult, string) {
+func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID, workflowID string, tasks []stepTask, inputs, visible map[string]string, depth int, concurrency int) ([]taskResult, string) {
 	results := make([]taskResult, len(tasks))
 	stepRunIDs := make([]string, len(tasks))
 	for k, t := range tasks {
@@ -558,8 +578,12 @@ func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID,
 	resCh := make(chan taskResult, len(tasks))
 	// sem is a counting semaphore: acquire by sending, release by receiving. The
 	// select lets a cancelled context bypass the semaphore so the goroutine exits
-	// immediately rather than blocking on a full channel.
-	sem := make(chan struct{}, maxParallelSteps)
+	// immediately rather than blocking on a full channel. concurrency is clamped to
+	// at least 1 so a stray zero can never make the semaphore block forever.
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	sem := make(chan struct{}, concurrency)
 	for k, t := range tasks {
 		go func(k int, t stepTask) {
 			select {
