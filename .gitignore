@@ -18,6 +18,7 @@ src/systems/chaos/chaos
 src/systems/argo/argo
 src/systems/outpost/outpost
 src/systems/builder/builder
+src/systems/portal-bff/portal-bff
 src/cli/armory
 
 # SQLite databases

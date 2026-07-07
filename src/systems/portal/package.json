@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "npm --prefix bff run dev",
+    "dev": "vite",
     "dev:spa": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",

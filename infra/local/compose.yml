@@ -225,13 +225,16 @@ services:
     restart: on-failure
 
   portal:
+    # The portal BFF is a static Go binary (portal-bff) that serves the built SPA and
+    # proxies /api to conductor — no Node runtime in the image. The build context is
+    # src/systems so the Dockerfile can reach both ./portal (SPA source) and ./portal-bff.
     build:
-      context: ../../src/systems/portal
+      context: ../../src/systems
+      dockerfile: portal-bff/Dockerfile
     environment:
       <<: *otel-env
       PORT: "3001"
       CONDUCTOR_URL: http://conductor:8080
-      METRICS_ENABLED: "true"
     ports:
       - "3001:3001"
     depends_on:

@@ -184,6 +184,18 @@ jobs:
       - name: Run outpost unit tests
         run: cd src/systems/outpost; go test .
 
+  portal-bff-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run portal-bff unit tests
+        run: cd src/systems/portal-bff; GOWORK=off go test ./...
+
   release:
     needs:
       - gatekeeper-unit-test
@@ -200,6 +212,7 @@ jobs:
       - containers-unit-test
       - outpost-gateway-unit-test
       - outpost-unit-test
+      - portal-bff-unit-test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -276,7 +289,8 @@ jobs:
           - name: outpost
             context: src/systems/outpost
           - name: portal
-            context: src/systems/portal
+            context: src/systems
+            dockerfile: portal-bff/Dockerfile
           - name: runner-git
             context: infra/runner-images/git
           - name: gatekeeper-tests
@@ -312,6 +326,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile && format('{0}/{1}', matrix.context, matrix.dockerfile) || format('{0}/Dockerfile', matrix.context) }}
           platforms: linux/amd64
           push: true
           tags: |
