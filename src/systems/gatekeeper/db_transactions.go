@@ -146,10 +146,34 @@ func acceptInviteAtomic(ctx context.Context, inviteID, callerID string, invite I
 		}
 		switch invite.ResourceType {
 		case "org":
-			if freshCaller.OrgID != nil && *freshCaller.OrgID != invite.ResourceID {
+			// Multi-org: record a membership rather than overwriting the single org.
+			// Reject only if the caller is already a member of this org (idempotency);
+			// belonging to other orgs is fine. If the caller has no active org yet,
+			// this org becomes their active one.
+			var existing int64
+			if err := tx.Model(&UserOrgMembership{}).
+				Where("user_id = ? AND org_id = ? AND active = ?", callerID, invite.ResourceID, true).
+				Count(&existing).Error; err != nil {
+				return err
+			}
+			if existing > 0 {
 				return errors.New("already in org")
 			}
-			freshCaller.OrgID = &invite.ResourceID
+			now := time.Now()
+			membership := UserOrgMembership{
+				MembershipID: uuid.New().String(),
+				UserID:       callerID,
+				OrgID:        invite.ResourceID,
+				Active:       true,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			if err := tx.Create(&membership).Error; err != nil {
+				return err
+			}
+			if freshCaller.OrgID == nil {
+				freshCaller.OrgID = &invite.ResourceID
+			}
 		case "team":
 			if freshCaller.TeamID != nil && *freshCaller.TeamID != invite.ResourceID {
 				return errors.New("already in team")

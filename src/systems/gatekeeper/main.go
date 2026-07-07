@@ -205,9 +205,15 @@ func main() {
 	initSecretsEncryption()
 
 	conn := connect()
-	conn.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{})
+	conn.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{})
 	applyForeignKeys(conn)
 	applyUniqueIndexes(conn)
+	// Give existing single-org accounts a membership row so they participate in the
+	// user↔org join table. Idempotent; non-fatal so a transient DB hiccup here never
+	// blocks startup.
+	if err := backfillMemberships(ctx); err != nil {
+		slog.Warn("membership backfill failed; existing users may not appear in their org memberships until re-run", "error", err)
+	}
 	seedServiceAccounts(ctx)
 	seedAdminUser(ctx)
 	seedSignupPolicy(ctx)
@@ -365,6 +371,11 @@ func buildMux() *http.ServeMux {
 	mux.Handle("GET /orgs", mw(handleListOrgs))
 	mux.Handle("PUT /orgs/{id}", mw(handleUpdateOrg))
 	mux.Handle("DELETE /orgs/{id}", mw(handleDeleteOrg))
+	// Multi-org membership: switch the caller's active org, or leave an org. Both
+	// are gated (in the registry manifest) by getOrg on the target org, which every
+	// member already holds; the handlers additionally enforce membership.
+	mux.Handle("POST /orgs/{id}/switch", mw(handleSwitchOrg))
+	mux.Handle("POST /orgs/{id}/leave", mw(handleLeaveOrg))
 
 	mux.Handle("POST /teams", mw(handleCreateTeam))
 	mux.Handle("GET /teams", mw(handleListTeams))
@@ -447,6 +458,8 @@ func applyForeignKeys(db *gorm.DB) {
 		`DO $$ BEGIN ALTER TABLE users ADD CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES orgs(org_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE users ADD CONSTRAINT fk_users_role FOREIGN KEY (role_id) REFERENCES roles(role_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE users ADD CONSTRAINT fk_users_team FOREIGN KEY (team_id) REFERENCES teams(team_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE user_org_memberships ADD CONSTRAINT fk_memberships_user FOREIGN KEY (user_id) REFERENCES users(user_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE user_org_memberships ADD CONSTRAINT fk_memberships_org FOREIGN KEY (org_id) REFERENCES orgs(org_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE sessions ADD CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users(user_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE teams ADD CONSTRAINT fk_teams_user FOREIGN KEY (owner_id) REFERENCES users(user_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE invites ADD CONSTRAINT fk_invites_inviter FOREIGN KEY (inviter_id) REFERENCES users(user_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
@@ -482,6 +495,9 @@ func applyUniqueIndexes(db *gorm.DB) {
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_owner_name ON teams (owner_id, team_name) WHERE active AND org_id IS NULL`,
 		// OAuth clients are unique by name within their org.
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_oauth_clients_org_name ON oauth_clients (org_id, name) WHERE active`,
+		// A user holds at most one active membership per org; a soft-deleted (left)
+		// membership can be re-added by accepting a fresh invite.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_user_org_memberships ON user_org_memberships (user_id, org_id) WHERE active`,
 		// A signup allowlist value (email or @domain rule) is unique among active
 		// entries; a soft-deleted value can be re-added. Stored already-lowercased,
 		// so the index is on the raw column.

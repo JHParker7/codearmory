@@ -67,6 +67,27 @@ type User struct {
 	Active               bool      `gorm:"column:active;default:true"`
 }
 
+// UserOrgMembership records that a user belongs to an org. A user may hold many
+// memberships at once (they can be in multiple orgs); User.OrgID names the single
+// org they are currently *acting in* — the "active org" — which must always match
+// one of their active membership rows. Membership is what invite-accept grants and
+// what the org switch/leave endpoints add and remove; the active org is a pointer
+// into the membership set that drives every per-request org scoping decision (list
+// results, secrets, permission stamping, the service gate, and the org_id returned
+// by check_permissions that downstream services read). Keeping the active org on
+// User.OrgID means no downstream service needs to change: they still see one org
+// per request.
+type UserOrgMembership struct {
+	MembershipID string    `json:"membership_id" gorm:"column:membership_id;primaryKey"`
+	UserID       string    `json:"user_id"       gorm:"column:user_id"`
+	OrgID        string    `json:"org_id"        gorm:"column:org_id"`
+	CreatedAt    time.Time `json:"created_at"    gorm:"column:created_at"`
+	UpdatedAt    time.Time `json:"updated_at"    gorm:"column:updated_at"`
+	Active       bool      `json:"-"             gorm:"column:active;default:true"`
+}
+
+func (UserOrgMembership) TableName() string { return "user_org_memberships" }
+
 // Session holds the per-session ECDSA public key used to verify the JWT signature.
 // The JWT itself is never stored — authMiddleware re-validates the signature on
 // each request using the stored PubKey, so retaining the token would be redundant
