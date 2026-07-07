@@ -220,6 +220,46 @@
           "output_map_field": "outputs",
           "error_fields": ["stderr"]
         }
+      },
+      {
+        "name": "forge/volume-copy",
+        "summary": "Copy files between shared volumes (scatter-clone / gather)",
+        "description": "Copies declared paths between attached shared workspace volumes inside the sandbox — the primitive behind scatter/gather, needing no CSI clone and no ReadWriteMany. Attach the volumes via `volumes` (the destination marked `workdir: true`, sources read_only) and pass `copy` = { sources: [{ volume, paths }], disjoint }. Two shapes: a CLONE (one source, no paths → whole tree) seeds a per-leg volume from the base workspace so parallel legs never share a PVC and never Multi-Attach across nodes; a GATHER (several sources each with their declared owned paths, `disjoint: true`) unions the finished legs back into the base, failing loudly if two legs claim the same path instead of silently clobbering. Forge derives the image (its minimal runner image) and command (a synthesised `cp` script) from `copy`, so `image`/`command` are ignored. Because every source plus the destination mounts into one copy pod they attach to a single node, so it works on any ReadWriteOnce backend.",
+        "method": "POST",
+        "path": "/executions",
+        "required_permission": { "action": "createExecution", "resource": "forge/executions" },
+        "async": {
+          "id_field": "execution_id",
+          "poll_path": "/executions/{id}",
+          "poll_interval_secs": 2,
+          "status_field": "status",
+          "success_states": ["completed"],
+          "failure_states": ["failed", "timed_out"],
+          "cancel_states": ["cancelled"],
+          "output_field": "stdout",
+          "output_map_field": "outputs",
+          "error_fields": ["stderr"]
+        }
+      },
+      {
+        "name": "forge/resolve-paths",
+        "summary": "List volume paths matching a regex (scatter fan-out set)",
+        "description": "Scans an attached shared volume and returns the entries — directories or files, relative to the volume root — whose path matches a regex. It is the fan-out set generator behind a scatter: each matched path becomes one parallel leg. Attach the volume via `volumes` and pass `resolve` = { volume (defaults to the workdir mount), regex (POSIX ERE / grep -E), mode (dir|file), max_depth, output (default \"paths\") }. Forge derives the image (its minimal runner image) and command (a synthesised find | grep) from `resolve`, so `image`/`command` are ignored, and captures the sorted, newline-separated match list as the named output so a workflow reads it via `outputs`. An empty match set is valid (zero legs).",
+        "method": "POST",
+        "path": "/executions",
+        "required_permission": { "action": "createExecution", "resource": "forge/executions" },
+        "async": {
+          "id_field": "execution_id",
+          "poll_path": "/executions/{id}",
+          "poll_interval_secs": 2,
+          "status_field": "status",
+          "success_states": ["completed"],
+          "failure_states": ["failed", "timed_out"],
+          "cancel_states": ["cancelled"],
+          "output_field": "stdout",
+          "output_map_field": "outputs",
+          "error_fields": ["stderr"]
+        }
       }
     ],
     "default_grants": [

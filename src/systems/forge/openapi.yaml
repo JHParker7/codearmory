@@ -659,6 +659,88 @@ components:
             Kaniko (daemonless). Requires a **privileged** runner class on a **kata**
             or **gvisor** backend (root + writable rootfs, safe behind the VM/Sentry
             boundary); rejected on the shared-kernel docker/kubernetes backends.
+        copy:
+          allOf:
+            - $ref: '#/components/schemas/CopySpec'
+          description: |
+            When set, this is a volume-copy execution: forge derives `image` (its
+            minimal runner image) and `command` (a synthesised `cp` script) from the
+            spec, so any `image`/`command` you send are ignored. Copies declared paths
+            between the attached `volumes` — the primitive behind scatter-clone (seed a
+            per-leg volume from the base workspace) and gather (union finished legs back
+            into the base). Needs no CSI clone and no ReadWriteMany.
+        resolve:
+          allOf:
+            - $ref: '#/components/schemas/ResolveSpec'
+          description: |
+            When set, this is a resolve-paths execution: forge derives `image` (its
+            minimal runner image) and `command` (a synthesised find | grep) from the
+            spec, so any `image`/`command` you send are ignored. Scans an attached
+            volume and captures the entries whose path matches a regex (the fan-out set
+            behind a scatter) as the named `output`, read back via `outputs`.
+
+    ResolveSpec:
+      type: object
+      required: [regex]
+      description: |
+        Resolve-paths configuration (see SubmitRequest.resolve). Lists the entries of an
+        attached volume whose relative path matches a regex.
+      properties:
+        volume:
+          type: string
+          description: Name of the attached volume to scan (a `volumes[].name`). Defaults to the workdir mount, else the single mount.
+        regex:
+          type: string
+          description: POSIX ERE (grep -E) matched against each entry's path relative to the volume root.
+          example: ^services/[^/]+$
+        mode:
+          type: string
+          enum: [dir, file]
+          description: Match directories (default) or files.
+        max_depth:
+          type: integer
+          description: Bound how deep to descend (find -maxdepth). 0/unset = unlimited.
+        output:
+          type: string
+          description: Env var / output key the sorted, newline-separated match list is captured into. Default "paths".
+
+    CopySpec:
+      type: object
+      required: [sources]
+      description: |
+        Volume-copy configuration (see SubmitRequest.copy). Copies files between
+        attached shared volumes; the destination is the mount marked `workdir: true`,
+        sources are the other mounts (attach them read_only).
+      properties:
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/CopySource'
+          description: Read-only source volumes to copy from, each with the paths to copy.
+        disjoint:
+          type: boolean
+          description: |
+            Fail the copy if two sources would write the same relative path — turns a
+            multi-leg gather into a checked union instead of a silent last-writer-wins.
+            Leave off for a single-source clone. The whole-tree "." path is not allowed
+            when set.
+
+    CopySource:
+      type: object
+      required: [volume]
+      description: One source volume and the relative paths to copy from it.
+      properties:
+        volume:
+          type: string
+          description: Name of an attached volume (a `volumes[].name`) that is not the destination.
+        paths:
+          type: array
+          items:
+            type: string
+          description: |
+            Relative paths within the source's mount to copy (preserving their relative
+            location under the destination). Empty or ["."] means the whole tree (clone);
+            not allowed when `disjoint` is set.
 
     BuildSpec:
       type: object
