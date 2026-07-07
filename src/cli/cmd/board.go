@@ -289,6 +289,27 @@ func (m boardModel) regroup() boardModel {
 	return m
 }
 
+// boardTerminalStatuses are the statuses that mark a ticket as done, so it is
+// not counted as "open" in a board's open/total tally. Mirrors the tickets
+// service's terminalStatuses and the portal's isTerminal().
+var boardTerminalStatuses = map[string]bool{"resolved": true, "closed": true}
+
+// boardCounts returns the open (not resolved/closed) and total active ticket
+// counts for the active board filter, computed from the loaded tickets so they
+// track exactly what the board shows.
+func (m boardModel) boardCounts() (open, total int) {
+	for _, t := range m.allTickets {
+		if !m.ticketInFilter(t) {
+			continue
+		}
+		total++
+		if !boardTerminalStatuses[t.Status] {
+			open++
+		}
+	}
+	return open, total
+}
+
 // ticketInFilter reports whether a ticket matches the active board filter.
 func (m boardModel) ticketInFilter(t boardTicket) bool {
 	switch m.boardFilter {
@@ -627,7 +648,8 @@ func (m boardModel) View() string {
 		cols[i] = m.renderBoardCol(i, cw, perCol)
 	}
 
-	statusPrefix := "board: " + m.boardFilterLabel() + "  ·  "
+	open, total := m.boardCounts()
+	statusPrefix := fmt.Sprintf("board: %s (%d open · %d total)  ·  ", m.boardFilterLabel(), open, total)
 	if m.status != "" {
 		statusPrefix = m.status + "  ·  " + statusPrefix
 	}

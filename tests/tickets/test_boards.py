@@ -59,6 +59,39 @@ def test_board_get_other_user_not_visible(bearer, other_bearer):
     assert requests.get(f"{TICKETS_URL}/boards/{bid}", headers=other_bearer).status_code == 404
 
 
+# ── Open / total ticket counts ─────────────────────────────────────────────────
+
+def test_board_list_and_get_report_open_and_total_counts(bearer):
+    # A board with three tickets: two still open (open + in_progress) and one
+    # resolved. total_count counts all active tickets; open_count only those not
+    # in a terminal (resolved/closed) status.
+    name = f"Counts {uuid.uuid4().hex[:8]}"
+    bid = requests.post(f"{TICKETS_URL}/boards", headers=bearer, json={"name": name}).json()["board_id"]
+    for status in ("open", "in_progress", "resolved"):
+        r = requests.post(f"{TICKETS_URL}/tickets", headers=bearer,
+                          json={"title": f"{status} ticket", "board_id": bid, "status": status})
+        assert r.status_code == 201, r.text
+
+    # Counts appear on the list endpoint...
+    board = next(b for b in requests.get(f"{TICKETS_URL}/boards", headers=bearer).json()
+                 if b["board_id"] == bid)
+    assert board["total_count"] == 3
+    assert board["open_count"] == 2
+
+    # ...and on the single-board get endpoint.
+    got = requests.get(f"{TICKETS_URL}/boards/{bid}", headers=bearer).json()
+    assert got["total_count"] == 3
+    assert got["open_count"] == 2
+
+
+def test_board_counts_are_zero_for_empty_board(bearer):
+    name = f"Empty {uuid.uuid4().hex[:8]}"
+    bid = requests.post(f"{TICKETS_URL}/boards", headers=bearer, json={"name": name}).json()["board_id"]
+    got = requests.get(f"{TICKETS_URL}/boards/{bid}", headers=bearer).json()
+    assert got["total_count"] == 0
+    assert got["open_count"] == 0
+
+
 # ── Update ─────────────────────────────────────────────────────────────────────
 
 def test_board_update_name_and_color(bearer):

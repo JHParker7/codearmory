@@ -5,10 +5,13 @@
  * users can create and delete boards there. The main panel shows the selected
  * board's tickets as columns by status; drag a card between columns to change its
  * status, or open the column editor to configure the status columns. Clicking a
- * card opens a detail drawer with description, refs, comments, and
- * close/reopen + delete. Data via the bff.
+ * card opens a detail drawer showing the full detail set — reporter, assignee,
+ * timescale, due date, project, description, refs, and comments — with edit,
+ * close/reopen, and delete. The create/edit form (TicketFormModal) exposes the
+ * same fields, matching the CLI board form. Data via the bff.
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import type { CSSProperties } from 'react';
 import { T } from '../../theme';
 import { useResizableWidth } from '../../components/ResizeHandle';
 import { Pill } from '../../components/Pill';
@@ -19,9 +22,9 @@ import {
   listTicketFieldDefs, createTicketFieldDef, updateTicketFieldDef, deleteTicketFieldDef,
   listBoards, createBoard, deleteBoard,
 } from '../../api/bff';
-import type { Ticket, TicketFieldDef, Board } from '../../api/bff';
+import type { Ticket, TicketFieldDef, Board, User } from '../../api/bff';
 import { timeAgo, shortId } from '../../utils';
-import { useUserNames, useWorkflowNames } from '../../hooks/useNames';
+import { useUsers, useWorkflowNames } from '../../hooks/useNames';
 
 /** Column statuses used when the org has not configured custom status field defs (mirrors the CLI board fallback). */
 const DEFAULT_STATUSES: TicketFieldDef[] = [
@@ -60,6 +63,17 @@ function isTerminal(status: string): boolean {
   return status === 'resolved' || status === 'closed';
 }
 
+/** Today's date as YYYY-MM-DD in local time, for comparing against a ticket's due date. */
+function todayStr(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** A ticket is overdue when it has a past due date and is not yet in a terminal status. */
+function isOverdue(t: Ticket): boolean {
+  return !!t.due_date && !isTerminal(t.status) && t.due_date.slice(0, 10) < todayStr();
+}
+
 /** Map a ticket priority to a theme color (high/critical→red, medium→amber, else dim). */
 function priorityColor(priority: string | null | undefined): string {
   if (priority === 'high' || priority === 'critical') return T.red;
@@ -72,54 +86,95 @@ function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
-/** Modal form for a new ticket; submits title/description/status/priority via createTicket and hands the created ticket back. */
-function CreateModal({ boardId, statuses, onCreated, onClose }: { boardId?: string; statuses: TicketFieldDef[]; onCreated: (t: Ticket) => void; onClose: () => void }) {
+/**
+ * Modal form to create or edit a ticket. In `create` mode it POSTs a new ticket
+ * onto the active board; in `edit` mode it is seeded from `ticket` and PUTs the
+ * changes. Both modes expose the full ticket detail set — title, description,
+ * priority, status, timescale, due date, and assignee — to match the CLI form.
+ */
+function TicketFormModal({ mode, ticket, boardId, statuses, users, onSaved, onClose }: {
+  mode: 'create' | 'edit';
+  ticket?: Ticket;
+  boardId?: string;
+  statuses: TicketFieldDef[];
+  users: User[];
+  onSaved: (t: Ticket) => void;
+  onClose: () => void;
+}) {
   const token = useAppSelector(s => s.auth.token)!;
-  // Status columns left-to-right; the new ticket defaults to the left-most.
+  // Status columns left-to-right; a new ticket defaults to the left-most.
   const ordered = useMemo(() => [...statuses].sort((a, b) => a.position - b.position), [statuses]);
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [priority, setPriority] = useState('medium');
-  const [status, setStatus] = useState(ordered[0]?.value ?? 'open');
+  const [title, setTitle] = useState(ticket?.title ?? '');
+  const [description, setDescription] = useState(ticket?.description ?? '');
+  const [priority, setPriority] = useState(ticket?.priority ?? 'medium');
+  const [status, setStatus] = useState(ticket?.status ?? ordered[0]?.value ?? 'open');
+  const [timescale, setTimescale] = useState(ticket?.timescale ?? '');
+  const [dueDate, setDueDate] = useState(ticket?.due_date ? ticket.due_date.slice(0, 10) : '');
+  const [assigneeId, setAssigneeId] = useState(ticket?.assignee_id ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // The standard three priorities, plus the ticket's own value if it uses a
+  // custom one (e.g. "critical") so an edit never silently drops it.
+  const priorityOptions = useMemo(() => {
+    const base = ['low', 'medium', 'high'];
+    return priority && !base.includes(priority) ? [...base, priority] : base;
+  }, [priority]);
+
+  const sortedUsers = useMemo(() => [...users].sort((a, b) => a.username.localeCompare(b.username)), [users]);
 
   const handleSubmit = async () => {
     if (!title.trim()) return;
     setSubmitting(true);
     setError(null);
     try {
-      // Place the new ticket on the active board so it shows up where the user is looking.
-      onCreated(await createTicket(token, { title: title.trim(), description: description.trim() || undefined, status, priority, board_id: boardId }));
+      if (mode === 'edit' && ticket) {
+        // "" clears the due date / unassigns; timescale "" is ignored server-side.
+        onSaved(await updateTicket(token, ticket.ticket_id, {
+          title: title.trim(), description: description.trim(), status, priority,
+          timescale: timescale.trim(), due_date: dueDate, assignee_id: assigneeId,
+        }));
+      } else {
+        // Place the new ticket on the active board so it shows up where the user is looking.
+        onSaved(await createTicket(token, {
+          title: title.trim(), description: description.trim() || undefined, status, priority, board_id: boardId,
+          timescale: timescale.trim() || undefined, due_date: dueDate || undefined, assignee_id: assigneeId || undefined,
+        }));
+      }
     } catch (e: unknown) {
       setError((e as Error).message);
       setSubmitting(false);
     }
   };
 
+  const fieldLabel = (text: string) => (
+    <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>{text}</div>
+  );
+  const inputStyle: CSSProperties = { width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '8px 10px', outline: 'none', boxSizing: 'border-box' };
+
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div onClick={e => e.stopPropagation()} style={{ width: 480, background: T.card, border: `1px solid ${T.borderHi}` }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: `1px solid ${T.border}`, background: T.cardHi }}>
-          <span style={{ fontFamily: T.mono, fontSize: 12, color: T.dim }}>new ticket</span>
+      <div onClick={e => e.stopPropagation()} style={{ width: 480, maxHeight: '90vh', overflowY: 'auto', background: T.card, border: `1px solid ${T.borderHi}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: `1px solid ${T.border}`, background: T.cardHi, position: 'sticky', top: 0 }}>
+          <span style={{ fontFamily: T.mono, fontSize: 12, color: T.dim }}>{mode === 'edit' ? 'edit ticket' : 'new ticket'}</span>
           <button onClick={onClose} style={{ background: 'transparent', border: 0, color: T.faint, cursor: 'pointer', fontSize: 16 }}>×</button>
         </div>
         <div style={{ padding: '16px 20px' }}>
           {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>{error}</div>}
           <div style={{ marginBottom: 12 }}>
-            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>TITLE</div>
+            {fieldLabel('TITLE')}
             <input value={title} onChange={e => setTitle(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSubmit()} autoFocus
-              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 13, padding: '8px 10px', outline: 'none', boxSizing: 'border-box' }} />
+              style={{ ...inputStyle, fontSize: 13 }} />
           </div>
           <div style={{ marginBottom: 12 }}>
-            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>DESCRIPTION</div>
+            {fieldLabel('DESCRIPTION')}
             <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3}
-              style={{ width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '8px 10px', outline: 'none', resize: 'vertical', boxSizing: 'border-box' }} />
+              style={{ ...inputStyle, resize: 'vertical' }} />
           </div>
           <div style={{ marginBottom: 12 }}>
-            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>PRIORITY</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {(['low', 'medium', 'high'] as const).map(p => (
+            {fieldLabel('PRIORITY')}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {priorityOptions.map(p => (
                 <button key={p} onClick={() => setPriority(p)}
                   style={{ background: priority === p ? T.greenSoft : 'transparent', border: `1px solid ${priority === p ? T.green : T.border}`, color: priority === p ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
                   {p}
@@ -128,8 +183,8 @@ function CreateModal({ boardId, statuses, onCreated, onClose }: { boardId?: stri
             </div>
           </div>
           {ordered.length > 0 && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>STATUS</div>
+            <div style={{ marginBottom: 12 }}>
+              {fieldLabel('STATUS')}
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {ordered.map(s => {
                   const active = status === s.value;
@@ -145,10 +200,29 @@ function CreateModal({ boardId, statuses, onCreated, onClose }: { boardId?: stri
               </div>
             </div>
           )}
+          <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
+            <div style={{ flex: 1 }}>
+              {fieldLabel('TIMESCALE')}
+              <input value={timescale} onChange={e => setTimescale(e.target.value)} placeholder="e.g. Q1 2026" style={inputStyle} />
+            </div>
+            <div style={{ flex: 1 }}>
+              {fieldLabel('DUE DATE')}
+              <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} style={{ ...inputStyle, colorScheme: 'dark' }} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            {fieldLabel('ASSIGNEE')}
+            <select value={assigneeId} onChange={e => setAssigneeId(e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>
+              <option value="">unassigned</option>
+              {/* Keep the current assignee selectable even if they aren't in the fetched catalog (e.g. no list permission). */}
+              {assigneeId && !sortedUsers.some(u => u.user_id === assigneeId) && <option value={assigneeId}>{shortId(assigneeId)}</option>}
+              {sortedUsers.map(u => <option key={u.user_id} value={u.user_id}>{u.username}</option>)}
+            </select>
+          </div>
           <div style={{ display: 'flex', gap: 10 }}>
             <button onClick={handleSubmit} disabled={!title.trim() || submitting}
               style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 13, fontWeight: 600, padding: '9px 14px', cursor: 'pointer', opacity: (!title.trim() || submitting) ? 0.6 : 1 }}>
-              {submitting ? '[ · · · ]' : '[ create ticket ]'}
+              {submitting ? '[ · · · ]' : mode === 'edit' ? '[ save changes ]' : '[ create ticket ]'}
             </button>
             <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 12, padding: '9px 14px', cursor: 'pointer' }}>cancel</button>
           </div>
@@ -291,7 +365,9 @@ function ColumnsModal({ statuses, boardId, boardName, onChanged, onClose }: { st
 /** Ticket kanban: first-class board switcher + status columns with drag-to-move, a detail drawer, and column config. */
 export function Tickets() {
   const token = useAppSelector(s => s.auth.token)!;
-  const userNames = useUserNames(token);
+  const users = useUsers(token);
+  // Derive the id→username map from the same catalog the assignee picker uses, to avoid a second fetch.
+  const userNames = useMemo(() => Object.fromEntries(users.map(u => [u.user_id, u.username])), [users]);
   const workflowNames = useWorkflowNames(token);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [boards, setBoards] = useState<Board[]>([]);
@@ -302,6 +378,11 @@ export function Tickets() {
   const [board, setBoard] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  // The ticket currently being edited in the form modal (null = not editing), plus
+  // the status columns of that ticket's own board — which can differ from the board
+  // being viewed (e.g. on the "all" view), so the edit form scopes to the ticket.
+  const [editing, setEditing] = useState<Ticket | null>(null);
+  const [editStatuses, setEditStatuses] = useState<TicketFieldDef[]>(DEFAULT_STATUSES);
   const [showNewBoard, setShowNewBoard] = useState(false);
   const [showColumns, setShowColumns] = useState(false);
   const [newComment, setNewComment] = useState('');
@@ -324,6 +405,16 @@ export function Tickets() {
       setStatuses(DEFAULT_STATUSES);
     }
   }, [token, scopedBoardId]);
+
+  // Open the edit form for a ticket, loading its own board's status columns so the
+  // status picker matches where the ticket lives, not the currently-viewed board.
+  const openEdit = useCallback((t: Ticket) => {
+    setEditing(t);
+    setEditStatuses(statuses); // sensible placeholder until the ticket's board columns load
+    listTicketFieldDefs(token, 'status', t.board_id ?? undefined)
+      .then(defs => setEditStatuses(defs.length > 0 ? [...defs].sort((a, b) => a.position - b.position) : DEFAULT_STATUSES))
+      .catch(() => setEditStatuses(DEFAULT_STATUSES));
+  }, [token, statuses]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -353,6 +444,17 @@ export function Tickets() {
   }, [board, boards]);
 
   const unassignedCount = useMemo(() => tickets.filter(t => !t.board_id).length, [tickets]);
+  // Open (not resolved/closed) tallies for the "all" and "unassigned" rows, which
+  // aren't backed by a Board row carrying server-computed counts.
+  const openCount = useMemo(() => tickets.filter(t => !isTerminal(t.status)).length, [tickets]);
+  const unassignedOpen = useMemo(() => tickets.filter(t => !t.board_id && !isTerminal(t.status)).length, [tickets]);
+
+  // Open/total for a real board: prefer the server-computed counts (accurate
+  // beyond the ticket-list page cap), falling back to the loaded tickets.
+  const boardCounts = useCallback((b: Board) => ({
+    open: b.open_count ?? tickets.filter(t => t.board_id === b.board_id && !isTerminal(t.status)).length,
+    total: b.total_count ?? tickets.filter(t => t.board_id === b.board_id).length,
+  }), [tickets]);
 
   const visibleTickets = useMemo(() => {
     if (board === null) return tickets;
@@ -442,8 +544,8 @@ export function Tickets() {
   // The board_id to tag newly-created tickets with: the active board, or undefined on "all"/"unassigned".
   const createBoardId = board && board !== UNASSIGNED ? board : undefined;
 
-  /** A board switcher row: name + count, highlighted when active, with an optional delete affordance. */
-  const BoardRow = ({ label, value, count, deletable }: { label: string; value: string | null; count: number; deletable?: Board }) => {
+  /** A board switcher row: name + open/total ticket counts, highlighted when active, with an optional delete affordance. */
+  const BoardRow = ({ label, value, open, total, deletable }: { label: string; value: string | null; open: number; total: number; deletable?: Board }) => {
     const active = board === value;
     return (
       <div style={{ display: 'flex', alignItems: 'center', background: active ? T.greenSoft : 'transparent', borderLeft: `2px solid ${active ? T.green : 'transparent'}` }}
@@ -452,7 +554,10 @@ export function Tickets() {
         <button onClick={() => setBoard(value)}
           style={{ flex: 1, textAlign: 'left', padding: '9px 6px 9px 12px', background: 'transparent', border: 0, fontFamily: T.mono, cursor: 'pointer', color: active ? T.textHi : T.text, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
           <span style={{ fontSize: 13, fontWeight: active ? 700 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
-          <span style={{ fontSize: 10, color: T.faint, flexShrink: 0 }}>{count}</span>
+          <span title={`${open} open · ${total} total`} style={{ fontSize: 10, flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>
+            <span style={{ color: open > 0 ? T.amber : T.faint }}>{open}</span>
+            <span style={{ color: T.faint }}>/{total}</span>
+          </span>
         </button>
         {deletable && (
           <button data-del onClick={() => handleDeleteBoard(deletable)} title="delete board"
@@ -487,11 +592,12 @@ export function Tickets() {
             <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 11, color: T.red }}>{error}</div>
           ) : (
             <>
-              <BoardRow label="◆ all" value={null} count={tickets.length} />
-              {boards.map(b => (
-                <BoardRow key={b.board_id} label={b.name} value={b.board_id} count={tickets.filter(t => t.board_id === b.board_id).length} deletable={b} />
-              ))}
-              {unassignedCount > 0 && <BoardRow label="· unassigned" value={UNASSIGNED} count={unassignedCount} />}
+              <BoardRow label="◆ all" value={null} open={openCount} total={tickets.length} />
+              {boards.map(b => {
+                const c = boardCounts(b);
+                return <BoardRow key={b.board_id} label={b.name} value={b.board_id} open={c.open} total={c.total} deletable={b} />;
+              })}
+              {unassignedCount > 0 && <BoardRow label="· unassigned" value={UNASSIGNED} open={unassignedOpen} total={unassignedCount} />}
               {boards.length === 0 && (
                 <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 10, color: T.faint, lineHeight: 1.6 }}>
                   → create a board to group your tickets
@@ -550,9 +656,11 @@ export function Tickets() {
                           onClick={() => setSelected(ticket.ticket_id)}
                           style={{ background: T.card, border: `1px solid ${selected === ticket.ticket_id ? T.green : T.border}`, borderLeft: `2px solid ${priorityColor(ticket.priority)}`, padding: '9px 11px', cursor: 'grab', fontFamily: T.mono, opacity: dragId === ticket.ticket_id ? 0.4 : 1, transition: 'border-color .12s, opacity .12s' }}>
                           <div style={{ fontSize: 12.5, fontWeight: 600, color: T.text, lineHeight: 1.35, marginBottom: 5, wordBreak: 'break-word' }}>{ticket.title}</div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: T.faint }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: T.faint, flexWrap: 'wrap' }}>
                             <span style={{ color: priorityColor(ticket.priority) }}>● {ticket.priority ?? 'none'}</span>
                             <span>· {timeAgo(ticket.updated_at)} ago</span>
+                            {ticket.due_date && <span style={{ color: isOverdue(ticket) ? T.red : T.faint }}>· ⏱ {ticket.due_date.slice(5, 10)}</span>}
+                            {ticket.assignee_id && <span style={{ color: T.dim }}>· @{userNames[ticket.assignee_id] ?? shortId(ticket.assignee_id)}</span>}
                           </div>
                           {/* Show the board tag on "all" / "unassigned" views, where cards span boards. */}
                           {board !== ticket.board_id && onBoard && (
@@ -578,6 +686,10 @@ export function Tickets() {
                 <span style={{ color: T.green }}>$</span> {selectedTicket.title}
               </div>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                <button onClick={() => openEdit(selectedTicket)}
+                  style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+                  [ ✎ edit ]
+                </button>
                 <button onClick={handleStatusToggle}
                   style={{ background: T.greenSoft, border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
                   [ {isTerminal(selectedTicket.status) ? '↺ reopen' : '✓ close'} ]
@@ -600,9 +712,33 @@ export function Tickets() {
                   </span>
                 )}
               </div>
-              <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginBottom: 20 }}>
+              <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginBottom: 12 }}>
                 created {timeAgo(selectedTicket.created_at)} ago · updated {timeAgo(selectedTicket.updated_at)} ago
                 {selectedTicket.board_id && boards.find(b => b.board_id === selectedTicket.board_id) && <> · ◆ {boards.find(b => b.board_id === selectedTicket.board_id)!.name}</>}
+              </div>
+
+              {/* Detail metadata — reporter/assignee/timescale/due date/project (edit via the ✎ edit form). */}
+              <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '10px 14px', marginBottom: 20, fontFamily: T.mono, fontSize: 11, display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 14, rowGap: 6, alignItems: 'baseline' }}>
+                <span style={{ color: T.faint }}>reporter</span>
+                <span style={{ color: T.dim }}>{userNames[selectedTicket.created_by] ?? shortId(selectedTicket.created_by)}</span>
+                <span style={{ color: T.faint }}>assignee</span>
+                <span style={{ color: selectedTicket.assignee_id ? T.dim : T.faint }}>
+                  {selectedTicket.assignee_id ? (userNames[selectedTicket.assignee_id] ?? shortId(selectedTicket.assignee_id)) : 'unassigned'}
+                </span>
+                {selectedTicket.timescale && <>
+                  <span style={{ color: T.faint }}>timescale</span>
+                  <span style={{ color: T.dim }}>{selectedTicket.timescale}</span>
+                </>}
+                {selectedTicket.due_date && <>
+                  <span style={{ color: T.faint }}>due</span>
+                  <span style={{ color: isOverdue(selectedTicket) ? T.red : T.dim }}>
+                    {selectedTicket.due_date.slice(0, 10)}{isOverdue(selectedTicket) ? ' · overdue' : ''}
+                  </span>
+                </>}
+                {selectedTicket.project && <>
+                  <span style={{ color: T.faint }}>project</span>
+                  <span style={{ color: T.dim }}>{selectedTicket.project}</span>
+                </>}
               </div>
 
               {selectedTicket.description && (
@@ -648,11 +784,24 @@ export function Tickets() {
       )}
 
       {showCreate && (
-        <CreateModal
+        <TicketFormModal
+          mode="create"
           boardId={createBoardId}
           statuses={statuses}
-          onCreated={t => { setTickets(prev => [t, ...prev]); setSelected(t.ticket_id); setShowCreate(false); }}
+          users={users}
+          onSaved={t => { setTickets(prev => [t, ...prev]); setSelected(t.ticket_id); setShowCreate(false); }}
           onClose={() => setShowCreate(false)}
+        />
+      )}
+      {editing && (
+        <TicketFormModal
+          mode="edit"
+          ticket={editing}
+          // editStatuses is scoped to the ticket's own board (loaded in openEdit).
+          statuses={editStatuses}
+          users={users}
+          onSaved={t => { applyUpdated(t); setEditing(null); }}
+          onClose={() => setEditing(null)}
         />
       )}
       {showNewBoard && (

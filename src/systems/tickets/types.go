@@ -27,6 +27,11 @@ const (
 var validStatuses = []string{StatusOpen, StatusInProgress, StatusResolved, StatusClosed}
 var validPriorities = []string{PriorityLow, PriorityMedium, PriorityHigh, PriorityCritical}
 
+// terminalStatuses are the statuses that mark a ticket as done (no longer
+// counted as "open") for the per-board open/total tallies. Mirrors the portal's
+// isTerminal().
+var terminalStatuses = []string{StatusResolved, StatusClosed}
+
 const maxBodyBytes = 64 * 1024
 
 // Ticket is a task or issue belonging to a user and optionally an org.
@@ -85,6 +90,11 @@ type Board struct {
 	Active      bool      `json:"-"            gorm:"column:active;default:true"`
 	CreatedAt   time.Time `json:"created_at"   gorm:"column:created_at"`
 	UpdatedAt   time.Time `json:"updated_at"   gorm:"column:updated_at"`
+	// OpenCount/TotalCount are computed on read (not stored): TotalCount is every
+	// active ticket on the board and OpenCount those still open (not in a terminal
+	// status). They are populated by the list/get board handlers.
+	OpenCount  int64 `json:"open_count"  gorm:"-"`
+	TotalCount int64 `json:"total_count" gorm:"-"`
 }
 
 // TableName sets the GORM table name for Board.

@@ -527,6 +527,10 @@ export interface Ticket {
   description?: string | null;
   status: string;
   priority?: string | null;
+  /** A scheduling bucket (e.g. "Q1 2026") — a custom `timescale` field-def value or free text. */
+  timescale?: string | null;
+  /** Due date as an ISO timestamp (only the date part is meaningful); null/absent when none is set. */
+  due_date?: string | null;
   /** Free-text project (workspace) label this ticket is tagged with. */
   project?: string;
   /** The board this ticket belongs to. New tickets always have a board; null/absent only for legacy rows. */
@@ -550,12 +554,13 @@ export function getTicket(token: string, id: string) {
   return req<Ticket>('GET', `/tickets/tickets/${id}`, token);
 }
 
-export function createTicket(token: string, payload: { title: string; description?: string; status?: string; priority?: string; project?: string; board_id?: string }) {
+export function createTicket(token: string, payload: { title: string; description?: string; status?: string; priority?: string; project?: string; board_id?: string; timescale?: string; due_date?: string; assignee_id?: string }) {
   return req<Ticket>('POST', '/tickets/tickets', token, payload);
 }
 
 // board_id: a string assigns the ticket to that board; "" re-homes it to the default board; omit to leave unchanged.
-export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string; board_id: string }>) {
+// due_date accepts YYYY-MM-DD; "" clears it. assignee_id "" unassigns. timescale "" is ignored server-side (kept).
+export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string; board_id: string; timescale: string; due_date: string }>) {
   return req<Ticket>('PUT', `/tickets/tickets/${id}`, token, payload);
 }
 
@@ -608,6 +613,9 @@ export interface Board {
   org_id?: string | null;
   created_at: string;
   updated_at: string;
+  /** Server-computed ticket tallies for this board: open = not resolved/closed, total = all active. */
+  open_count?: number;
+  total_count?: number;
 }
 
 export function listBoards(token: string) {
@@ -633,7 +641,8 @@ export function deleteBoard(token: string, id: string, confirmName: string) {
 export interface PipelineRule {
   rule_id: string;
   name: string;
-  repo: string;
+  /** Webhook source repo this rule matches (e.g. "owner/repo"). The hooks service serialises this as `source`. */
+  source: string;
   events: string[];
   ref_filter?: string | null;
   workflow_id: string;
@@ -657,7 +666,8 @@ export interface HookTrigger {
 
 export interface HookEvent {
   event_id: string;
-  repo: string;
+  /** Source repo the delivery came from (e.g. "owner/repo"). Serialised as `source` by the hooks service. */
+  source: string;
   event_type: string;
   ref?: string | null;
   payload?: unknown;
@@ -675,11 +685,17 @@ export function getRule(token: string, id: string) {
   return req<PipelineRule>('GET', `/hooks/rules/${id}`, token);
 }
 
-export function createRule(token: string, payload: { name: string; repo: string; events: string[]; ref_filter?: string; workflow_id: string; input_mapping?: Record<string, string> }) {
+// Create a rule. The hooks service requires a non-empty `secret` (the HMAC secret
+// that authenticates deliveries) and a `workflow_id` that resolves to a workflow
+// in the caller's org.
+export function createRule(token: string, payload: { name: string; source: string; events: string[]; ref_filter?: string; workflow_id: string; secret: string; input_mapping?: Record<string, string> }) {
   return req<PipelineRule>('POST', '/hooks/rules', token, payload);
 }
 
-export function updateRule(token: string, id: string, payload: Partial<{ name: string; repo: string; events: string[]; ref_filter: string; workflow_id: string; input_mapping: Record<string, string> }>) {
+// Update a rule. Send the full rule (name/source/events/workflow_id are all
+// required by the service). Omit `secret` to keep the existing one; a non-empty
+// value replaces it. An empty-string secret is rejected server-side.
+export function updateRule(token: string, id: string, payload: Partial<{ name: string; source: string; events: string[]; ref_filter: string; workflow_id: string; secret: string; input_mapping: Record<string, string> }>) {
   return req<PipelineRule>('PUT', `/hooks/rules/${id}`, token, payload);
 }
 
