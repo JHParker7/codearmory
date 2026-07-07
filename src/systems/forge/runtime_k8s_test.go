@@ -231,6 +231,63 @@ func TestNoPodError(t *testing.T) {
 	}
 }
 
+// TestClarifyNoLogFailure verifies the opaque Kubernetes reasons behind a no-logs
+// failure are rewritten into plain-language, actionable messages, while an
+// unrecognised reason is passed through under the original prefix.
+func TestClarifyNoLogFailure(t *testing.T) {
+	const budget = int64(330)
+	cases := []struct {
+		name   string
+		detail string
+		want   []string // all substrings must be present
+	}{
+		{
+			name:   "still ContainerCreating reads as a startup timeout",
+			detail: "ContainerCreating",
+			want:   []string{"timed out after 330s", "still starting", "ContainerCreating"},
+		},
+		{
+			name:   "ContainerStatusUnknown reads as a startup timeout",
+			detail: "ContainerStatusUnknown: The container could not be located when the pod was terminated",
+			want:   []string{"timed out after 330s", "still starting", "FORGE_POD_STARTUP_GRACE_SECS"},
+		},
+		{
+			name:   "insufficient cpu names the runner class as the cause",
+			detail: "FailedScheduling: 0/3 nodes are available: 3 Insufficient cpu.",
+			want:   []string{"could not be scheduled", "runner class requests more", "Insufficient cpu"},
+		},
+		{
+			name:   "generic scheduling failure keeps the raw detail",
+			detail: "FailedScheduling: 0/3 nodes are available: no node has the kata-fc handler",
+			want:   []string{"could not be scheduled", "RuntimeClass", "kata-fc"},
+		},
+		{
+			name:   "unrecognised reason passes through under the original prefix",
+			detail: "OOMKilled",
+			want:   []string{"pod produced no logs: OOMKilled"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clarifyNoLogFailure(tc.detail, budget)
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("clarifyNoLogFailure(%q) = %q, want substring %q", tc.detail, got, w)
+				}
+			}
+		})
+	}
+}
+
+// TestNoPodError_InsufficientResources checks the pod-never-scheduled path also
+// names the runner class when the scheduler reported insufficient CPU/memory.
+func TestNoPodError_InsufficientResources(t *testing.T) {
+	got := noPodError("FailedScheduling: 0/3 nodes are available: 3 Insufficient cpu.", "").Error()
+	if !strings.Contains(got, "runner class") || !strings.Contains(got, "Insufficient cpu") {
+		t.Errorf("noPodError = %q, want the runner-class hint plus the raw reason", got)
+	}
+}
+
 // TestJobFailureReason verifies forge surfaces the real cause of a VM/kata runner
 // that never scheduled a pod — the FailedCreate Warning event naming a missing
 // RuntimeClass — rather than the opaque "no pod found" message. It also confirms

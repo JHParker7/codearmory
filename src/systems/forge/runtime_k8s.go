@@ -583,7 +583,7 @@ done:
 		// container/pod state and the Warning events that outlive the pod, with a
 		// clean, actionable message as the last resort.
 		if detail := r.podFailureDetail(pod, jobName); detail != "" {
-			logErr = fmt.Errorf("pod produced no logs: %s", detail)
+			logErr = fmt.Errorf("%s", clarifyNoLogFailure(detail, exec.TimeoutSecs+podStartupGraceSecs))
 		} else {
 			logErr = podRemovedError()
 		}
@@ -597,7 +597,7 @@ done:
 		// gate below requires a non-zero exit), so a silent successful run is safe.
 		if strings.TrimSpace(stdout) == "" {
 			if detail := r.podFailureDetail(pod, jobName); detail != "" {
-				logErr = fmt.Errorf("pod produced no logs: %s", detail)
+				logErr = fmt.Errorf("%s", clarifyNoLogFailure(detail, exec.TimeoutSecs+podStartupGraceSecs))
 			} else if apierrors.IsNotFound(logErr) {
 				// The pod was found at `done` but deleted out from under us before
 				// the log stream opened (the eviction/GC race), so collectLogs
@@ -660,6 +660,10 @@ func (r *KubernetesRuntime) findPod(ctx context.Context, executionID string) (*c
 // admitted), then the job's own failure-condition message, then a generic hint.
 func noPodError(eventReason, condMsg string) error {
 	switch {
+	case strings.Contains(eventReason, "Insufficient cpu"), strings.Contains(eventReason, "Insufficient memory"):
+		return fmt.Errorf("no pod could be scheduled — the runner class requests more CPU/memory "+
+			"than any node has free. Choose a smaller runner class or add cluster capacity. "+
+			"(kubernetes reported: %s)", eventReason)
 	case eventReason != "":
 		return fmt.Errorf("no pod ran for execution: %s", eventReason)
 	case condMsg != "":
@@ -775,6 +779,45 @@ func (r *KubernetesRuntime) collectLogs(podName string) (string, error) {
 	var buf bytes.Buffer
 	io.Copy(&buf, io.LimitReader(stream, maxOutputBytes)) //nolint:errcheck
 	return buf.String(), nil
+}
+
+// clarifyNoLogFailure turns the opaque Kubernetes reason behind a no-logs failure
+// (detail, as produced by podFailureDetail) into a plain-language, actionable
+// message, and returns the full "forge:"-less error string. It recognises the two
+// classes users actually hit and cannot decode themselves:
+//
+//   - startup timeout: the Job's ActiveDeadlineSeconds fired while the runner was
+//     still ContainerCreating, so the kubelet either leaves the container Waiting
+//     ("ContainerCreating") or, having torn the pod down, marks it terminated
+//     ("ContainerStatusUnknown: The container could not be located when the pod was
+//     terminated"). Either way the command never ran — this is a startup timeout,
+//     not a mysterious internal error, and the fix is more time or a lighter image.
+//   - unschedulable: the scheduler placed the pod on no node ("FailedScheduling"),
+//     almost always because the runner class requests more CPU/memory than any node
+//     has free ("Insufficient cpu"/"Insufficient memory").
+//
+// startupBudget is the pod's total ActiveDeadlineSeconds (command timeout + startup
+// grace) so the message can state exactly how long it waited. Any reason it does not
+// recognise is returned verbatim under the original "pod produced no logs:" prefix,
+// so a novel failure still surfaces its raw detail.
+func clarifyNoLogFailure(detail string, startupBudget int64) string {
+	switch {
+	case strings.Contains(detail, "ContainerStatusUnknown"),
+		strings.Contains(detail, "ContainerCreating"):
+		return fmt.Sprintf("timed out after %ds while the container was still starting — "+
+			"it never began running the command. This is usually a slow image pull or volume bind; "+
+			"raise the runner timeout or FORGE_POD_STARTUP_GRACE_SECS, or use a smaller/pre-pulled image. "+
+			"(kubernetes reported: %s)", startupBudget, detail)
+	case strings.Contains(detail, "Insufficient cpu"), strings.Contains(detail, "Insufficient memory"):
+		return fmt.Sprintf("could not be scheduled onto any node — the runner class requests more "+
+			"CPU/memory than any node has free. Choose a smaller runner class or add cluster capacity. "+
+			"(kubernetes reported: %s)", detail)
+	case strings.Contains(detail, "FailedScheduling"):
+		return fmt.Sprintf("could not be scheduled onto any node. "+
+			"Check node taints, selectors, and the RuntimeClass. (kubernetes reported: %s)", detail)
+	default:
+		return "pod produced no logs: " + detail
+	}
 }
 
 // podFailureDetail explains why a pod that exists produced no usable logs: first
