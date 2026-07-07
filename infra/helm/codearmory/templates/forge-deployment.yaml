@@ -69,6 +69,27 @@ spec:
               {{- end }}
             - name: ALLOWED_IMAGES
               value: {{ .Values.forge.env.allowedImages | quote }}
+            {{- with .Values.forge.admission }}
+            # Admission control: count caps per org/user plus cluster-wide CPU/memory
+            # budgets that pace a large fan-out to what the cluster can actually run.
+            # Each is emitted only when non-zero; a 0/unset value keeps that gate off.
+            {{- if .maxConcurrentPerOrg }}
+            - name: FORGE_MAX_CONCURRENT_PER_ORG
+              value: {{ .maxConcurrentPerOrg | quote }}
+            {{- end }}
+            {{- if .maxConcurrentPerUser }}
+            - name: FORGE_MAX_CONCURRENT_PER_USER
+              value: {{ .maxConcurrentPerUser | quote }}
+            {{- end }}
+            {{- if .maxTotalCpuMillicores }}
+            - name: FORGE_MAX_TOTAL_CPU_MILLICORES
+              value: {{ .maxTotalCpuMillicores | quote }}
+            {{- end }}
+            {{- if .maxTotalMemoryMB }}
+            - name: FORGE_MAX_TOTAL_MEMORY_MB
+              value: {{ .maxTotalMemoryMB | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.forge.volumes }}
             # Shared workspace volumes: per-workflow total-size cap (0 disables the
             # feature), optional per-volume cap, PVC StorageClass/access mode, and the

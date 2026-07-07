@@ -118,6 +118,24 @@ Setting it to empty blocks all egress.
 
 Resource limits are controlled per execution by runner classes — see [Runner classes](#runner-classes).
 
+### Admission control (queue pacing)
+
+Submitted executions are queued as `pending` rows and claimed one at a time by a worker pool (10 workers). Before an execution is claimed and its Job sent to the backend, it must pass the admission gate. All limits default to `0` (unlimited); with everything unset, forge dequeues strictly FIFO up to the worker-pool size.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FORGE_MAX_CONCURRENT_PER_ORG` | `0` | Max simultaneously-running executions per org (`0` = unlimited). Per-org overrides can be set at runtime in the `concurrency_limits` table. |
+| `FORGE_MAX_CONCURRENT_PER_USER` | `0` | Max simultaneously-running executions per user (`0` = unlimited). |
+| `FORGE_MAX_TOTAL_CPU_MILLICORES` | `0` | Cluster-wide CPU budget in millicores. A pending execution is only admitted when the summed `cpu_millicores` of all running runner classes plus its own fits the budget. `0` = unlimited. |
+| `FORGE_MAX_TOTAL_MEMORY_MB` | `0` | Cluster-wide memory budget in MB, gated the same way against running runner classes' `memory_mb`. `0` = unlimited. |
+
+The resource budgets are the pacing mechanism for large fan-outs (e.g. a matrix of `large` runners). Without them, forge sends every Job to the backend at once and the excess pods sit `Pending` until they time out. With a budget set, forge counts the resources running runners are using and holds the next runner in the queue until enough finish to free the space it needs — so runners are sent to Kubernetes only when the cluster can actually run them. Set the budget to a fraction of cluster capacity to reserve headroom for other workloads.
+
+Two admission details worth knowing:
+
+- **Skip-ahead:** forge claims the *oldest pending execution that fits* the budget, so a too-large head-of-line job does not block smaller ones queued behind it.
+- **Idle escape:** when nothing is running, the oldest pending execution is admitted even if it alone exceeds the budget — that is its best chance to run, and it prevents a single oversized job (or one larger than the whole budget) from deadlocking the queue. The backend then reports a clear "insufficient CPU/memory" error if it genuinely cannot be scheduled.
+
 ## Runner classes
 
 Runner classes define the resource limits applied to execution containers. They are stored in PostgreSQL and can be updated at runtime via the API without restarting Forge.
