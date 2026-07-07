@@ -260,24 +260,51 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 	var raw pendingRow
 
 	// Pick the oldest pending execution whose org and user are both under their
-	// effective running caps. Running counts come from CTEs; the effective cap is
-	// the concurrency_limits override for the scope (LEFT JOIN) or the env default
+	// effective running caps AND whose runner class fits the cluster-wide resource
+	// budget. Running counts come from CTEs; the effective cap is the
+	// concurrency_limits override for the scope (LEFT JOIN) or the env default
 	// (@defOrg / @defUser) when no row exists; <= 0 means unlimited. org_id='' skips
 	// the org cap so org-less users are gated on the per-user cap only rather than
-	// being lumped together under the empty org key. FOR UPDATE OF e SKIP LOCKED
-	// locks only the chosen executions row, so a sibling claim (holding the advisory
-	// lock) never runs concurrently, and a row being cancelled is skipped, not waited
-	// on. With both defaults 0 and no overrides this reduces to the original FIFO
-	// dequeue.
+	// being lumped together under the empty org key.
+	//
+	// The resource gate is the pacing mechanism for large fan-outs: running_resources
+	// sums the CPU/memory of the runner classes of everything currently running
+	// (LEFT JOIN so a since-deleted class counts 0, matching the count CTEs which
+	// don't need the class), and a pending row is admitted only when
+	// running + its own class fits the @cpuBudget / @memBudget (<= 0 = unlimited).
+	// cand LEFT JOINs the candidate's class — a missing class costs 0 so it still gets
+	// claimed and then fails with a clear "runner class not found" in the worker rather
+	// than being silently wedged in the queue. The `rr.cpu = 0` / `rr.mem = 0` escape
+	// admits a job when nothing is running even if it alone exceeds the budget: that is
+	// the best chance it will ever get, and it prevents an oversized job (or one bigger
+	// than the whole budget) from deadlocking the queue forever — the backend then
+	// reports the clear "insufficient CPU/memory" error. Ordering by created_at with
+	// this filter yields the oldest pending row that fits, so a too-big head-of-line job
+	// does not block smaller ones behind it (skip-ahead, consistent with the count gates).
+	//
+	// FOR UPDATE OF e SKIP LOCKED locks only the chosen executions row, so a sibling
+	// claim (holding the advisory lock) never runs concurrently, and a row being
+	// cancelled is skipped, not waited on. With every default 0 and no overrides this
+	// reduces to the original FIFO dequeue.
 	result := tx.Raw(`
 		WITH org_running AS (
 			SELECT org_id, count(*) AS c FROM executions WHERE status = 'running' AND org_id <> '' GROUP BY org_id
 		),
 		user_running AS (
 			SELECT user_id, count(*) AS c FROM executions WHERE status = 'running' GROUP BY user_id
+		),
+		running_resources AS (
+			SELECT
+				COALESCE(SUM(rc.cpu_millicores), 0) AS cpu,
+				COALESCE(SUM(rc.memory_mb), 0)      AS mem
+			FROM executions e
+			LEFT JOIN runner_classes rc ON rc.name = e.runner_class
+			WHERE e.status = 'running'
 		)
 		SELECT e.execution_id, e.user_id, e.image, e.command, e.env, e.timeout_secs, e.runner_class, e.backend, e.org_id, e.secret_refs, e.output_env, e.checkout, e.volumes
 		FROM executions e
+		CROSS JOIN running_resources rr
+		LEFT JOIN runner_classes cand ON cand.name = e.runner_class
 		LEFT JOIN org_running  orr ON orr.org_id  = e.org_id
 		LEFT JOIN user_running urr ON urr.user_id = e.user_id
 		LEFT JOIN concurrency_limits ol ON ol.scope = 'org'  AND ol.scope_id = e.org_id
@@ -285,10 +312,13 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		WHERE e.status = 'pending'
 		  AND (e.org_id = '' OR COALESCE(ol.max_concurrent, @defOrg) <= 0 OR COALESCE(orr.c, 0) < COALESCE(ol.max_concurrent, @defOrg))
 		  AND (COALESCE(ul.max_concurrent, @defUser) <= 0 OR COALESCE(urr.c, 0) < COALESCE(ul.max_concurrent, @defUser))
+		  AND (@cpuBudget <= 0 OR rr.cpu = 0 OR rr.cpu + COALESCE(cand.cpu_millicores, 0) <= @cpuBudget)
+		  AND (@memBudget <= 0 OR rr.mem = 0 OR rr.mem + COALESCE(cand.memory_mb, 0) <= @memBudget)
 		ORDER BY e.created_at
 		LIMIT 1
 		FOR UPDATE OF e SKIP LOCKED
-	`, sql.Named("defOrg", defaultMaxConcurrentPerOrg), sql.Named("defUser", defaultMaxConcurrentPerUser)).Scan(&raw)
+	`, sql.Named("defOrg", defaultMaxConcurrentPerOrg), sql.Named("defUser", defaultMaxConcurrentPerUser),
+		sql.Named("cpuBudget", maxTotalCPUMillicores), sql.Named("memBudget", maxTotalMemoryMB)).Scan(&raw)
 	if result.Error != nil {
 		tx.Rollback() //nolint:errcheck
 		span.RecordError(result.Error)

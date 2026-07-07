@@ -289,6 +289,21 @@ forge:
     # Seconds before an orphaned volume is reaped. Empty = binary default
     # (longest possible run + 1h), which is safely above any live run.
     maxAgeSecs: ""
+  # Admission control paces how fast queued executions are sent to the backend, so a
+  # large fan-out (e.g. a matrix of `large` runners) does not dump every Job on the
+  # kube-scheduler at once and leave the excess Pending until it times out. All limits
+  # default to 0 (unlimited); with everything 0, forge dequeues FIFO up to the worker
+  # pool size. The resource budgets are the pacing knob: forge admits a queued runner
+  # only when the summed CPU/memory of already-running runners plus its own fits the
+  # budget, holding the rest in the queue until running ones finish and free space.
+  admission:
+    # Max simultaneously-running executions per org / per user (0 = unlimited).
+    maxConcurrentPerOrg: 0
+    maxConcurrentPerUser: 0
+    # Cluster-wide CPU/memory budgets the scheduler admits runners against. Set them to
+    # a fraction of cluster capacity to reserve headroom for other workloads. 0 = off.
+    maxTotalCpuMillicores: 0
+    maxTotalMemoryMB: 0
   # Image building (the forge/build-image workflow action). Builds run with Kaniko
   # (daemonless, no privileged container) and REQUIRE a privileged runner class on a
   # kata or gvisor backend (create one via the forge runner-classes API, backed by a
