@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	gormlogger "gorm.io/gorm/logger"
 )
 
@@ -197,9 +199,26 @@ func (e Execution) Complete(_ context.Context, status string, result RunResult) 
 	return nil
 }
 
+// claimSchedulerLockKey serialises the pending-execution scheduling decision
+// across all worker goroutines and forge replicas via a transaction-scoped
+// Postgres advisory lock. Only one claim transaction runs its count-and-pick step
+// at a time, so the per-org / per-user running counts a claim reads are never
+// stale relative to a sibling claim that is mid-flight (uncommitted status
+// updates are invisible under READ COMMITTED, which would otherwise let two
+// workers both see "under cap" and both claim, blowing past the limit). The lock
+// is held only for the fast pick+mark step (the actual run happens after commit),
+// and it is released automatically when the transaction ends. The value is the
+// ASCII of "forge".
+const claimSchedulerLockKey int64 = 0x666f726765
+
 // claimPendingExecution atomically dequeues one pending execution and marks it
-// as running. Returns the claimed execution and true on success; false when no
-// pending work is available.
+// as running. It respects per-org and per-user concurrency limits: it only claims
+// a pending execution whose org and user are both below their effective running
+// caps (a concurrency_limits override, else the FORGE_MAX_CONCURRENT_PER_ORG /
+// _PER_USER env default; <= 0 means unlimited, and org_id=” skips the org cap).
+// An execution over a cap stays pending and is retried on a later poll once a
+// running peer of the same scope finishes. Returns the claimed execution and true
+// on success; false when no eligible pending work is available.
 func claimPendingExecution(ctx context.Context) (Execution, bool) {
 	ctx, span := otel.Tracer("forge").Start(ctx, "db.claim_pending_execution")
 	defer span.End()
@@ -208,6 +227,16 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 	if tx.Error != nil {
 		span.RecordError(tx.Error)
 		span.SetStatus(codes.Error, tx.Error.Error())
+		return Execution{}, false
+	}
+
+	// Serialise the scheduling decision so concurrent claims see accurate running
+	// counts (see claimSchedulerLockKey). Auto-released at commit/rollback.
+	if err := tx.Exec(`SELECT pg_advisory_xact_lock(?)`, claimSchedulerLockKey).Error; err != nil {
+		tx.Rollback() //nolint:errcheck
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		slog.ErrorContext(ctx, "worker: acquire scheduler lock", "error", err)
 		return Execution{}, false
 	}
 
@@ -230,12 +259,36 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 	}
 	var raw pendingRow
 
-	// FOR UPDATE SKIP LOCKED lets multiple workers run in parallel: each goroutine
-	// locks exactly one pending row and skips any already locked by a sibling.
+	// Pick the oldest pending execution whose org and user are both under their
+	// effective running caps. Running counts come from CTEs; the effective cap is
+	// the concurrency_limits override for the scope (LEFT JOIN) or the env default
+	// (@defOrg / @defUser) when no row exists; <= 0 means unlimited. org_id='' skips
+	// the org cap so org-less users are gated on the per-user cap only rather than
+	// being lumped together under the empty org key. FOR UPDATE OF e SKIP LOCKED
+	// locks only the chosen executions row, so a sibling claim (holding the advisory
+	// lock) never runs concurrently, and a row being cancelled is skipped, not waited
+	// on. With both defaults 0 and no overrides this reduces to the original FIFO
+	// dequeue.
 	result := tx.Raw(`
-		SELECT execution_id, user_id, image, command, env, timeout_secs, runner_class, backend, org_id, secret_refs, output_env, checkout, volumes
-		FROM executions WHERE status = 'pending' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
-	`).Scan(&raw)
+		WITH org_running AS (
+			SELECT org_id, count(*) AS c FROM executions WHERE status = 'running' AND org_id <> '' GROUP BY org_id
+		),
+		user_running AS (
+			SELECT user_id, count(*) AS c FROM executions WHERE status = 'running' GROUP BY user_id
+		)
+		SELECT e.execution_id, e.user_id, e.image, e.command, e.env, e.timeout_secs, e.runner_class, e.backend, e.org_id, e.secret_refs, e.output_env, e.checkout, e.volumes
+		FROM executions e
+		LEFT JOIN org_running  orr ON orr.org_id  = e.org_id
+		LEFT JOIN user_running urr ON urr.user_id = e.user_id
+		LEFT JOIN concurrency_limits ol ON ol.scope = 'org'  AND ol.scope_id = e.org_id
+		LEFT JOIN concurrency_limits ul ON ul.scope = 'user' AND ul.scope_id = e.user_id
+		WHERE e.status = 'pending'
+		  AND (e.org_id = '' OR COALESCE(ol.max_concurrent, @defOrg) <= 0 OR COALESCE(orr.c, 0) < COALESCE(ol.max_concurrent, @defOrg))
+		  AND (COALESCE(ul.max_concurrent, @defUser) <= 0 OR COALESCE(urr.c, 0) < COALESCE(ul.max_concurrent, @defUser))
+		ORDER BY e.created_at
+		LIMIT 1
+		FOR UPDATE OF e SKIP LOCKED
+	`, sql.Named("defOrg", defaultMaxConcurrentPerOrg), sql.Named("defUser", defaultMaxConcurrentPerUser)).Scan(&raw)
 	if result.Error != nil {
 		tx.Rollback() //nolint:errcheck
 		span.RecordError(result.Error)
@@ -506,6 +559,110 @@ func (b RuntimeBackend) List(ctx context.Context, _ int, _ int) ([]db, error) {
 	rows := make([]db, len(backends))
 	for i, be := range backends {
 		rows[i] = be
+	}
+	return rows, nil
+}
+
+// ── ConcurrencyLimit ──────────────────────────────────────────────────────────
+
+func (c ConcurrencyLimit) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.concurrencylimit.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("concurrency_limit.scope", c.Scope), attribute.String("concurrency_limit.scope_id", c.ScopeID))
+	if err := connect().WithContext(ctx).Create(&c).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// Update changes an existing limit row's cap. Returns gorm.ErrRecordNotFound when
+// no row matches (scope, scope_id). The admin PUT handler uses Save (upsert)
+// instead; this exists to satisfy the db interface.
+func (c ConcurrencyLimit) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.concurrencylimit.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("concurrency_limit.scope", c.Scope), attribute.String("concurrency_limit.scope_id", c.ScopeID))
+	result := connect().WithContext(ctx).Model(&ConcurrencyLimit{}).
+		Where("scope = ? AND scope_id = ?", c.Scope, c.ScopeID).
+		Updates(map[string]any{"max_concurrent": c.MaxConcurrent, "updated_at": gorm.Expr("now()")})
+	if result.Error != nil {
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// Save upserts the limit by (scope, scope_id): it creates the row or overwrites
+// its cap, refreshing updated_at. This is the admin "set limit" write path — a
+// PUT should not care whether an override already existed.
+func (c ConcurrencyLimit) Save(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.concurrencylimit.save")
+	defer span.End()
+	span.SetAttributes(attribute.String("concurrency_limit.scope", c.Scope), attribute.String("concurrency_limit.scope_id", c.ScopeID))
+	if err := connect().WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "scope"}, {Name: "scope_id"}},
+		DoUpdates: clause.Assignments(map[string]any{"max_concurrent": c.MaxConcurrent, "updated_at": gorm.Expr("now()")}),
+	}).Create(&c).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (c ConcurrencyLimit) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.concurrencylimit.remove")
+	defer span.End()
+	span.SetAttributes(attribute.String("concurrency_limit.scope", c.Scope), attribute.String("concurrency_limit.scope_id", c.ScopeID))
+	result := connect().WithContext(ctx).Where("scope = ? AND scope_id = ?", c.Scope, c.ScopeID).Delete(&ConcurrencyLimit{})
+	if result.Error != nil {
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (c ConcurrencyLimit) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.concurrencylimit.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("concurrency_limit.scope", c.Scope), attribute.String("concurrency_limit.scope_id", c.ScopeID))
+	var out ConcurrencyLimit
+	if err := connect().WithContext(ctx).Where("scope = ? AND scope_id = ?", c.Scope, c.ScopeID).First(&out).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return out, nil
+}
+
+func (c ConcurrencyLimit) List(ctx context.Context, _ int, _ int) ([]db, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.concurrencylimit.list")
+	defer span.End()
+	var limits []ConcurrencyLimit
+	if err := connect().WithContext(ctx).Order("scope, scope_id").Find(&limits).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	rows := make([]db, len(limits))
+	for i, l := range limits {
+		rows[i] = l
 	}
 	return rows, nil
 }

@@ -132,6 +132,7 @@ interface BlockCardProps {
   repos: GitRepo[];
   token?: string;
   onSelect: () => void;
+  onToggle: () => void;
   onRename: (uid: string, name: string | undefined) => void;
   onSetWith: (uid: string, override: Record<string, unknown>) => void;
   onToggleParallel: (uid: string) => void;
@@ -170,11 +171,13 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
         onChange={(e) => onSetMatrix(uid, { ...matrix, values: e.target.value.split(',').map((v) => v.trim()).filter(Boolean), values_from: undefined })} style={field} />
       <input value={matrix.values_from ?? ''} placeholder="or values from a reference (${inputs.regions})" onPointerDown={stop}
         onChange={(e) => onSetMatrix(uid, { ...matrix, values_from: e.target.value, values: e.target.value ? [] : matrix.values })} style={field} />
+      <input type="number" min={0} value={matrix.max_concurrent ?? ''} placeholder="max concurrent (blank = default 10)" onPointerDown={stop}
+        onChange={(e) => { const n = parseInt(e.target.value, 10); onSetMatrix(uid, { ...matrix, max_concurrent: Number.isFinite(n) && n > 0 ? n : undefined }); }} style={field} />
     </div>
   );
 }
 
-function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, upstreamVolumes, repos, token, onSelect, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
+function BlockCard({ block, label, action, editable, canLink, inParallel, isGate, selected, defWith, upstream, upstreamVolumes, repos, token, onSelect, onToggle, onRename, onSetWith, onToggleParallel, onSetMatrix, onSetApproval, onRemove }: BlockCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: block.uid, disabled: !editable });
   const leftBar = isGate ? T.blue : block.matrix ? T.amber : inParallel ? T.green : T.dim;
   // Flag a block whose required config is still unset (e.g. a git-clone with no repo,
@@ -226,7 +229,7 @@ function BlockCard({ block, label, action, editable, canLink, inParallel, isGate
               <span onClick={onSelect} style={{ cursor: 'pointer', fontSize: 12.5, fontWeight: 700, color: isGate ? T.blue : T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
             )}
           </div>
-          <div onClick={onSelect} style={{ fontSize: 10, color: T.faint, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{isMatrix ? ' · matrix fan-out' : ''}</div>
+          <div onClick={editable ? onToggle : onSelect} title={editable ? (selected ? 'click to collapse this step' : 'click to edit this step') : undefined} style={{ fontSize: 10, color: T.faint, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{action}{isMatrix ? ' · matrix fan-out' : ''}</div>
           {incomplete && (
             <div onClick={onSelect} title={`incomplete — ${issues.join('; ')}`}
               style={{ fontSize: 9.5, color: T.red, cursor: 'pointer', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -350,6 +353,40 @@ export const PipelineBlocks = forwardRef<PipelineBlocksHandle, PipelineBlocksPro
     setSelectedUid(b.uid);
     onInspect?.(b.approval ? null : selectionFor(b, catalog));
   }, [onInspect, catalog]);
+
+  // Clear the current selection so its inline editor collapses and the inspector
+  // returns to its neutral state — no need to close the whole builder to stop
+  // editing a step (Escape, or clicking the empty canvas, also lands here).
+  const deselect = useCallback(() => {
+    setSelectedUid(null);
+    onInspect?.(null);
+  }, [onInspect]);
+
+  // Clicking a block toggles it: open its editor, or collapse it if already open.
+  const toggle = useCallback((b: Block) => {
+    setSelectedUid((cur) => {
+      if (cur === b.uid) { onInspect?.(null); return null; }
+      onInspect?.(b.approval ? null : selectionFor(b, catalog));
+      return b.uid;
+    });
+  }, [onInspect, catalog]);
+
+  // Escape deselects the open step — only bound while one is selected, so it never
+  // fights any parent-level Escape when nothing is being edited. Ignored while a
+  // form field has focus so it can't discard in-progress typing (clicking the block
+  // again or the empty canvas still deselects regardless of focus).
+  useEffect(() => {
+    if (!editable || selectedUid === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const el = document.activeElement;
+      const tag = el?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (el as HTMLElement | null)?.isContentEditable) return;
+      deselect();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [editable, selectedUid, deselect]);
 
   const addStep = useCallback((s: Step) => {
     // A palette Step with an empty step_id is an INLINE step (created from an action):
@@ -487,7 +524,7 @@ export const PipelineBlocks = forwardRef<PipelineBlocksHandle, PipelineBlocksPro
         selected={selectedUid === b.uid} defWith={defWith}
         upstream={selectedUid === b.uid ? upstreamFor(b.uid) : []}
         upstreamVolumes={selectedUid === b.uid ? upstreamVolumesFor(b.uid) : []} repos={repos} token={token}
-        onSelect={() => select(b)} onRename={setName} onSetWith={setWith}
+        onSelect={() => select(b)} onToggle={() => toggle(b)} onRename={setName} onSetWith={setWith}
         onToggleParallel={toggleParallel} onSetMatrix={setMatrix} onSetApproval={setApproval} onRemove={remove} />
     );
   };
@@ -542,7 +579,9 @@ export const PipelineBlocks = forwardRef<PipelineBlocksHandle, PipelineBlocksPro
   ) : null;
 
   const list = (
-    <div style={{ display: 'flex', flexDirection: 'column', padding: 14, overflow: 'auto', flex: 1 }}>
+    // Clicking the empty canvas (not a card) deselects the open step.
+    <div onClick={(e) => { if (editable && e.target === e.currentTarget) deselect(); }}
+      style={{ display: 'flex', flexDirection: 'column', padding: 14, overflow: 'auto', flex: 1 }}>
       {blocks.length === 0 && !activeEmptyParallel && !activeMatrixHint ? (
         <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>
           → empty pipeline{editable ? ' — add steps from the left' : ''}

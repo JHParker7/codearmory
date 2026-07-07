@@ -159,6 +159,12 @@ func handleGetBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Decorate with the board's open/total ticket counts (best-effort — see
+	// attachBoardCounts).
+	boards := []Board{b}
+	attachBoardCounts(ctx, userID, orgID, boards)
+	b = boards[0]
+
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(b) //nolint:errcheck

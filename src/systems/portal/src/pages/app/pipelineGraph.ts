@@ -15,8 +15,11 @@
  *   stagesOf         blocks         -> blocks grouped into stage bands (rendering)
  *
  * Node/library types are kept out of here so the mapping can be tested under
- * mocha without the UI; the block component adapts these shapes.
+ * mocha without the UI; the block component adapts these shapes. (stepSchema is
+ * likewise a pure, UI-free module, so importing its pipeline-field split keeps the
+ * mocha-testability.)
  */
+import { splitPipelineWith } from './stepSchema';
 
 /** Fans a step out into one execution per value in a list, binding
  * ${matrix.<var>} per execution. Mutually exclusive with parallel_group. Mirrors
@@ -25,6 +28,9 @@ export interface MatrixConfig {
   var: string;
   values?: string[];
   values_from?: string;
+  /** Caps how many fan-out executions run at once (0/undefined = the service
+   * default). Lower it when each value spins up a resource-heavy runner. */
+  max_concurrent?: number;
 }
 
 /** An inline manual-approval gate: a pipeline pause point that needs no Step row.
@@ -128,14 +134,27 @@ export function blocksFromSteps(steps: StepRef[]): Block[] {
   for (const stage of stagesFromSteps(steps)) {
     stage.forEach((stepId, idx) => {
       const s = steps[i];
-      // An inline ref (action, no step_id, no gate) becomes an inline block: its config
-      // goes into the definition layer (inline.with) with an empty override.
+      // An inline ref (action, no step_id, no gate) becomes an inline block. Its `with`
+      // is split so the definition (config + input defaults) goes into the definition
+      // layer (inline.with) while any per-occurrence PIPELINE fields (e.g. an attached
+      // volume) go into the block override — mirroring a stored-step reference, which
+      // keeps such fields in its override. Left in inline.with they would be dropped
+      // the next time the inline step's definition is edited (the def form rebuilds
+      // inline.with without pipeline fields).
       const isInline = !!s?.action && !s?.step_id && !s?.approval;
-      const inline = isInline ? { action: s!.action!, timeout: s!.timeout, with: s!.with } : undefined;
+      let inline: Block['inline'];
+      let blockWith: Record<string, unknown> | undefined;
+      if (isInline) {
+        const { def, pipeline } = splitPipelineWith(s!.action!, (s!.with ?? {}) as Record<string, unknown>);
+        inline = { action: s!.action!, timeout: s!.timeout, with: Object.keys(def).length ? def : undefined };
+        blockWith = Object.keys(pipeline).length ? pipeline : {};
+      } else {
+        blockWith = s?.with;
+      }
       blocks.push({
         uid: `b${i}`, stepId, parallelWithPrev: idx > 0,
         name: s?.name || undefined,
-        with: isInline ? {} : s?.with,
+        with: blockWith,
         inline,
         matrix: s?.matrix ?? null, approval: s?.approval ?? null,
       });

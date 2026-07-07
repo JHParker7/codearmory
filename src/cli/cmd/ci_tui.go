@@ -1518,8 +1518,8 @@ func (m tuiModel) tuiViewRunDetail() string {
 	if d.StartedAt != nil {
 		meta += "  started: " + d.StartedAt.Local().Format("Jan 02 15:04:05")
 	}
-	if tuiRunHasParallel(d.StepRuns) {
-		meta += "\n┌├└ bracketed steps ran in parallel"
+	if legend := tuiRunStageLegend(d.StepRuns); legend != "" {
+		meta += "\n" + legend
 	}
 	diagram := tuiClampHeight(
 		tuiMetaStyle.Render("▾ live pipeline")+"\n"+tuiRunDiagram(d.StepRuns, m.width),
@@ -1561,24 +1561,60 @@ func tuiStepRunContent(sr tuiStepRun) string {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// tuiStepRunRows builds the run-detail table rows, collapsing each parallel
-// batch — consecutive step runs sharing the same non-nil ParallelGroup — into a
-// bracketed block that shares one stage number, so it is visually obvious those
-// steps ran concurrently. Sequential steps render as a normal single row. Rows
-// stay 1:1 with stepRuns in order, so the table cursor still indexes StepRuns.
+// tuiSameStage reports whether two consecutive step runs belong to the same
+// run-detail stage. Two runs group when they either share a non-nil parallel
+// group (a parallel batch — its members each carry a distinct step index) or
+// share a step index (a matrix fan-out — every combination of one matrix step is
+// recorded under that step's single index, with a "[var=val]" name suffix).
+// Sequential steps have distinct indices and no shared group, so they never
+// group. Comparing against the batch's first run (not its previous one) matches
+// how a parallel group is defined by a single shared value.
+func tuiSameStage(a, b tuiStepRun) bool {
+	if a.ParallelGroup != nil && b.ParallelGroup != nil && *a.ParallelGroup == *b.ParallelGroup {
+		return true
+	}
+	return a.StepIndex == b.StepIndex
+}
+
+// tuiStageExtent returns j, the end (exclusive) of the stage beginning at index
+// i: run i plus any following runs in the same stage (see tuiSameStage). j is
+// i+1 for a solo sequential step.
+func tuiStageExtent(stepRuns []tuiStepRun, i int) int {
+	j := i + 1
+	for j < len(stepRuns) && tuiSameStage(stepRuns[i], stepRuns[j]) {
+		j++
+	}
+	return j
+}
+
+// tuiBatchIsMatrix reports whether a multi-run stage is a matrix fan-out — every
+// run shares the one step index of the matrix step — as opposed to a parallel
+// group, whose members carry distinct indices. A solo run is neither.
+func tuiBatchIsMatrix(batch []tuiStepRun) bool {
+	if len(batch) < 2 {
+		return false
+	}
+	for _, sr := range batch[1:] {
+		if sr.StepIndex != batch[0].StepIndex {
+			return false
+		}
+	}
+	return true
+}
+
+// tuiStepRunRows builds the run-detail table rows, collapsing each stage —
+// consecutive step runs sharing one parallel group (a parallel batch) or one step
+// index (a matrix step's fan-out) — into a bracketed block that shares one stage
+// number, so it is visually obvious those runs belong together. The first row's
+// marker says which kind: ∥ parallel or ⊞ matrix. Sequential steps render as a
+// normal single row. Rows stay 1:1 with stepRuns in order, so the table cursor
+// still indexes StepRuns.
 func tuiStepRunRows(stepRuns []tuiStepRun) []table.Row {
 	rows := make([]table.Row, 0, len(stepRuns))
 	stage := 0
-	i := 0
-	for i < len(stepRuns) {
+	for i := 0; i < len(stepRuns); {
 		stage++
-		// Extent of this batch: consecutive runs sharing the same non-nil group.
-		j := i + 1
-		if g := stepRuns[i].ParallelGroup; g != nil {
-			for j < len(stepRuns) && stepRuns[j].ParallelGroup != nil && *stepRuns[j].ParallelGroup == *g {
-				j++
-			}
-		}
+		j := tuiStageExtent(stepRuns, i)
 		batch := stepRuns[i:j]
 		if len(batch) == 1 {
 			sr := batch[0]
@@ -1593,9 +1629,16 @@ func tuiStepRunRows(stepRuns []tuiStepRun) []table.Row {
 			i = j
 			continue
 		}
+		// A bracketed stage is either a matrix step's fan-out (⊞, all runs share one
+		// step index) or a parallel group (∥); mark the first row so the two don't
+		// read alike now that both bracket.
+		mark := "∥ "
+		if tuiBatchIsMatrix(batch) {
+			mark = "⊞ "
+		}
 		for k, sr := range batch {
 			// ┌/├/└ bracket the members into one group; the stage number sits on
-			// the first row only so the block reads as a single parallel stage.
+			// the first row only so the block reads as a single stage.
 			glyph, num := "├ ", ""
 			switch {
 			case k == 0:
@@ -1603,9 +1646,13 @@ func tuiStepRunRows(stepRuns []tuiStepRun) []table.Row {
 			case k == len(batch)-1:
 				glyph = "└ "
 			}
+			name := glyph + sr.StepName
+			if k == 0 {
+				name = glyph + mark + sr.StepName
+			}
 			rows = append(rows, table.Row{
 				num,
-				glyph + sr.StepName,
+				name,
 				sr.Status,
 				tuiFormatMemShort(sr.MemoryUsedMB, sr.MemoryLimitMB),
 				tuiFormatTime(sr.StartedAt),
@@ -1760,17 +1807,14 @@ func tuiStatusColor(status string) lipgloss.Color {
 	return lipgloss.Color(activeTheme.Muted)
 }
 
-// tuiRunBatches groups ordered step runs into stages for the diagram: runs of
-// consecutive steps sharing the same non-nil parallel group form one stage.
+// tuiRunBatches groups ordered step runs into stages for the diagram: consecutive
+// runs sharing one parallel group, or one step index (a matrix step's fan-out),
+// collapse into a single stage so its members stack in one diagram box (see
+// tuiStageExtent).
 func tuiRunBatches(stepRuns []tuiStepRun) [][]tuiStepRun {
 	var out [][]tuiStepRun
 	for i := 0; i < len(stepRuns); {
-		j := i + 1
-		if g := stepRuns[i].ParallelGroup; g != nil {
-			for j < len(stepRuns) && stepRuns[j].ParallelGroup != nil && *stepRuns[j].ParallelGroup == *g {
-				j++
-			}
-		}
+		j := tuiStageExtent(stepRuns, i)
 		out = append(out, stepRuns[i:j])
 		i = j
 	}
@@ -1878,6 +1922,33 @@ func tuiRunHasParallel(stepRuns []tuiStepRun) bool {
 		}
 	}
 	return false
+}
+
+// tuiRunStageLegend describes the bracketed stages a run contains — a parallel
+// group (∥), a matrix fan-out (⊞), or both — so the run-detail view can explain
+// its ┌├└ blocks. Returns "" when the run has no bracketed stage, so the legend
+// only appears when it explains something.
+func tuiRunStageLegend(stepRuns []tuiStepRun) string {
+	par, mat := false, false
+	for _, b := range tuiRunBatches(stepRuns) {
+		if len(b) < 2 {
+			continue
+		}
+		if tuiBatchIsMatrix(b) {
+			mat = true
+		} else {
+			par = true
+		}
+	}
+	switch {
+	case par && mat:
+		return "┌├└ one stage · ∥ parallel · ⊞ matrix fan-out"
+	case par:
+		return "┌├└ ∥ bracketed steps ran in parallel"
+	case mat:
+		return "┌├└ ⊞ bracketed runs are one matrix step's fan-out"
+	}
+	return ""
 }
 
 func tuiShortID(id string) string {

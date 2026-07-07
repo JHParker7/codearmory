@@ -426,6 +426,9 @@ func validateMatrix(m *MatrixConfig) string {
 	if hasValues && len(m.Values) > maxMatrixValues {
 		return fmt.Sprintf("matrix has %d values, exceeding the limit of %d", len(m.Values), maxMatrixValues)
 	}
+	if m.MaxConcurrent < 0 {
+		return "matrix.max_concurrent must not be negative"
+	}
 	return ""
 }
 

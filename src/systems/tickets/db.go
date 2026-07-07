@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -248,7 +249,7 @@ func getBoard(ctx context.Context, id string) (Board, error) {
 }
 
 // listBoards returns active boards accessible to the caller (owned or same-org),
-// ordered by position then name.
+// ordered by position then name, each with its open/total ticket counts.
 func listBoards(ctx context.Context, userID, orgID string) ([]Board, error) {
 	var boards []Board
 	if err := connectRead().WithContext(ctx).
@@ -260,7 +261,60 @@ func listBoards(ctx context.Context, userID, orgID string) ([]Board, error) {
 	if boards == nil {
 		boards = []Board{}
 	}
+	attachBoardCounts(ctx, userID, orgID, boards)
 	return boards, nil
+}
+
+// attachBoardCounts populates OpenCount/TotalCount on each board from a single
+// grouped ticket query. Best-effort: a query failure leaves the counts at zero
+// and logs rather than failing the board list, since the counts are decorative.
+func attachBoardCounts(ctx context.Context, userID, orgID string, boards []Board) {
+	if len(boards) == 0 {
+		return
+	}
+	total, open, err := boardTicketCounts(ctx, userID, orgID)
+	if err != nil {
+		slog.WarnContext(ctx, "board counts: query failed", "user_id", userID, "error", err)
+		return
+	}
+	for i := range boards {
+		boards[i].TotalCount = total[boards[i].BoardID]
+		boards[i].OpenCount = open[boards[i].BoardID]
+	}
+}
+
+// boardTicketCounts returns, keyed by board_id, the number of active tickets
+// visible to the caller on each board (total) and how many are still open (not
+// in a terminal status). Boards with no visible tickets are absent from both
+// maps (their count is the zero value).
+func boardTicketCounts(ctx context.Context, userID, orgID string) (total, open map[string]int64, err error) {
+	// FILTER is Postgres-native; terminalStatuses are compile-time constants so
+	// building the IN list from them carries no injection risk.
+	quoted := make([]string, len(terminalStatuses))
+	for i, s := range terminalStatuses {
+		quoted[i] = "'" + s + "'"
+	}
+	openExpr := "COUNT(*) FILTER (WHERE status NOT IN (" + strings.Join(quoted, ",") + ")) AS open_count"
+	type countRow struct {
+		BoardID   string `gorm:"column:board_id"`
+		Total     int64  `gorm:"column:total_count"`
+		OpenCount int64  `gorm:"column:open_count"`
+	}
+	var rows []countRow
+	if err := connectRead().WithContext(ctx).Model(&Ticket{}).
+		Select("board_id, COUNT(*) AS total_count, "+openExpr).
+		Where("active = ? AND board_id IS NOT NULL AND board_id <> '' AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID).
+		Group("board_id").
+		Scan(&rows).Error; err != nil {
+		return nil, nil, err
+	}
+	total = make(map[string]int64, len(rows))
+	open = make(map[string]int64, len(rows))
+	for _, r := range rows {
+		total[r.BoardID] = r.Total
+		open[r.BoardID] = r.OpenCount
+	}
+	return total, open, nil
 }
 
 // boardNameTaken reports whether an active board with the same name already

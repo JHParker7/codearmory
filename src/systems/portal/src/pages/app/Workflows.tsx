@@ -20,6 +20,7 @@ import { StepDefForm } from './StepDefForm';
 import { StepsTab } from './StepLibrary';
 import type { StepRef } from './pipelineGraph';
 import { stepsToPayload, configToJson, parseConfig, duplicateStepNames } from './pipelineGraph';
+import { splitPipelineWith } from './stepSchema';
 import { timeAgo, statusTone, isRunActive, fmtDuration } from '../../utils';
 
 type MainTab = 'pipelines' | 'steps' | 'actions';
@@ -245,7 +246,10 @@ function PipelineBuilderOverlay({
   }, []);
 
   // Convert an inline step into a shared/reusable Step: persist it (createStep), then
-  // repoint the block at the new step_id and clear its now-redundant override.
+  // repoint the block at the new step_id. Only the DEFINITION (config + input defaults)
+  // is folded into the shared step; per-occurrence PIPELINE fields (e.g. an attached
+  // volume) stay on the block as its per-occurrence override, so they aren't baked into
+  // a step other pipelines reuse.
   const convertToGeneral = useCallback(async () => {
     if (!inspect || inspect.kind !== 'inline') return;
     const b = blocksApi.current?.getBlock(inspect.uid);
@@ -253,14 +257,14 @@ function PipelineBuilderOverlay({
     if (!def) return;
     setConvertBusy(true); setConvertError(null);
     try {
-      // Fold the def + any per-occurrence override into the shared step's config.
-      const withCfg = { ...(def.with ?? {}), ...((b?.with ?? {}) as Record<string, unknown>) };
+      const merged = { ...(def.with ?? {}), ...((b?.with ?? {}) as Record<string, unknown>) };
+      const { def: sharedWith, pipeline } = splitPipelineWith(def.action, merged);
       const saved = await createStep(token, {
         name: def.name, action: def.action,
-        with: Object.keys(withCfg).length ? withCfg : undefined,
+        with: Object.keys(sharedWith).length ? sharedWith : undefined,
         timeout: def.timeout,
       });
-      blocksApi.current?.patchBlock(inspect.uid, { stepId: saved.step_id, inline: undefined, with: {} });
+      blocksApi.current?.patchBlock(inspect.uid, { stepId: saved.step_id, inline: undefined, with: pipeline });
       onStepsChanged();
       setInspect({ uid: inspect.uid, kind: 'ref', stepId: saved.step_id, name: undefined, def: { name: saved.name, action: saved.action, with: (saved.with ?? {}) as Record<string, unknown>, timeout: saved.timeout ?? undefined } });
     } catch (e: unknown) { setConvertError((e as Error).message); }
@@ -268,16 +272,20 @@ function PipelineBuilderOverlay({
   }, [inspect, catalog, token, onStepsChanged]);
 
   // Make-local: copy a shared step's definition inline so edits stay in this pipeline.
-  // Merges the def's config with any per-occurrence override into the inline def.
+  // Merges the def's config with any per-occurrence override, then re-splits it so
+  // per-occurrence PIPELINE fields (e.g. an attached volume) stay in the block override
+  // rather than the inline definition — mirroring blocksFromSteps, so a later
+  // definition edit can't drop them.
   const makeLocal = useCallback(() => {
     if (!inspect || inspect.kind !== 'ref') return;
     const b = blocksApi.current?.getBlock(inspect.uid);
     const def = catalog[inspect.stepId];
     if (!b || !def) return;
     const merged = { ...((def.with ?? {}) as Record<string, unknown>), ...((b.with ?? {}) as Record<string, unknown>) };
+    const { def: inlineWith, pipeline } = splitPipelineWith(def.action, merged);
     const name = b.name || def.name;
-    blocksApi.current?.patchBlock(inspect.uid, { stepId: '', inline: { action: def.action, timeout: def.timeout ?? undefined, with: merged }, name, with: {} });
-    setInspect({ uid: inspect.uid, kind: 'inline', stepId: '', name, def: { name, action: def.action, with: merged, timeout: def.timeout ?? undefined } });
+    blocksApi.current?.patchBlock(inspect.uid, { stepId: '', inline: { action: def.action, timeout: def.timeout ?? undefined, with: inlineWith }, name, with: pipeline });
+    setInspect({ uid: inspect.uid, kind: 'inline', stepId: '', name, def: { name, action: def.action, with: inlineWith, timeout: def.timeout ?? undefined } });
   }, [inspect, catalog]);
   // A sensible, collision-free default name for a step created from an action:
   // the action slug (e.g. forge/run → forge-run), suffixed if already taken.
@@ -514,7 +522,7 @@ function PipelineBuilderOverlay({
       </div>
       <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-          palette: ∥ parallel · ⊞ matrix · ⏸ approval gate · click an action for an inline step (⇪ convert to general to reuse it) · click a block to edit it · drag to reorder
+          palette: ∥ parallel · ⊞ matrix · ⏸ approval gate · click an action for an inline step (⇪ convert to general to reuse it) · click a block to edit it (again, Esc, or the empty canvas to close) · drag to reorder
         </span>
         <div style={{ flex: 1 }} />
         {dupNames.length > 0 && (

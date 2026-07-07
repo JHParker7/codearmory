@@ -25,6 +25,9 @@ type matrixConfig struct {
 	Var        string   `json:"var"`
 	Values     []string `json:"values,omitempty"`
 	ValuesFrom string   `json:"values_from,omitempty"`
+	// MaxConcurrent caps how many fan-out executions run at once (0 = the service
+	// default). Lower it when each value spins up a resource-heavy runner.
+	MaxConcurrent int `json:"max_concurrent,omitempty"`
 }
 
 // approvalGate is an inline manual-approval pause on a pipeline step ref — no

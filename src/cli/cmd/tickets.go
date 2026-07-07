@@ -110,6 +110,7 @@ func init() {
 		listTimescale string
 		listAssignee  string
 		listBoard     string
+		listJSON      bool
 	)
 
 	listTicketsCmd := &cobra.Command{
@@ -140,6 +141,16 @@ func init() {
 			if len(q) > 0 {
 				path += "?" + q.Encode()
 			}
+			if listJSON {
+				// Emit the raw API response verbatim (pretty-printed), skipping
+				// the human-readable renderer.
+				data, err := doRequest("GET", path, nil)
+				if err != nil {
+					return err
+				}
+				printJSON(data)
+				return nil
+			}
 			return apiCall("GET", path, nil)
 		},
 	}
@@ -148,17 +159,31 @@ func init() {
 	listTicketsCmd.Flags().StringVar(&listTimescale, "timescale", "", "Filter by timescale value")
 	listTicketsCmd.Flags().StringVar(&listAssignee, "assignee", "", "Filter by assignee user ID")
 	listTicketsCmd.Flags().StringVar(&listBoard, "board", "", "Filter by board ID (\"none\" for unassigned)")
+	listTicketsCmd.Flags().BoolVar(&listJSON, "json", false, "Print the full ticket list as raw JSON instead of a formatted table")
 
 	// ── armory tickets get ────────────────────────────────────────────────────
+
+	var getJSON bool
 
 	getTicketCmd := &cobra.Command{
 		Use:   "get <id>",
 		Short: "Get a ticket with its comments",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if getJSON {
+				// Emit the raw API response verbatim (pretty-printed), skipping
+				// the human-readable renderer.
+				data, err := doRequest("GET", "/tickets/tickets/"+args[0], nil)
+				if err != nil {
+					return err
+				}
+				printJSON(data)
+				return nil
+			}
 			return apiCall("GET", "/tickets/tickets/"+args[0], nil)
 		},
 	}
+	getTicketCmd.Flags().BoolVar(&getJSON, "json", false, "Print the full ticket as raw JSON instead of a formatted summary")
 
 	// ── armory tickets update ─────────────────────────────────────────────────
 

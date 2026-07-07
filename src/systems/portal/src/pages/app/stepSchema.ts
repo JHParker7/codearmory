@@ -127,6 +127,29 @@ export function createdVolumeName(withMap: Record<string, unknown>): string {
 }
 
 /**
+ * Splits a step's `with` map into its DEFINITION part (config + input defaults) and
+ * its PER-OCCURRENCE pipeline part — the keys the action schema marks `pipeline`
+ * (e.g. the attached `volumes`), whose value depends on other steps in the pipeline.
+ *
+ * Inline steps mirror the def/override split of a stored-step reference: the
+ * definition lives in `inline.with` (edited by the step-definition form) and the
+ * pipeline part lives in the block override (`block.with`, edited by the block's
+ * inputs editor). Keeping pipeline fields OUT of the definition layer is essential —
+ * the step-definition form rebuilds `inline.with` via buildStepWith, which drops
+ * pipeline fields, so a volume left in the definition would be silently removed the
+ * next time the inline step's definition is edited.
+ */
+export function splitPipelineWith(action: string, withMap: Record<string, unknown>): { def: Record<string, unknown>; pipeline: Record<string, unknown> } {
+  const pipelineKeys = new Set(schemaForAction(action).filter(f => f.pipeline).map(f => f.key));
+  const def: Record<string, unknown> = {};
+  const pipeline: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(withMap)) {
+    if (pipelineKeys.has(k)) pipeline[k] = v; else def[k] = v;
+  }
+  return { def, pipeline };
+}
+
+/**
  * Reads the bare repo reference (a clone URL or a `${inputs.X}` template) back out of
  * a step's `with.secret_refs.GIT_CLONE_URL`, stripping the `git:` scheme. Returns ''
  * when there is no git: ref, so the picker shows empty rather than a malformed value.

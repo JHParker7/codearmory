@@ -38,45 +38,19 @@ func handleListOrgs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Always scope results to the caller's own org.
-	var filter Org
-	if callerRow, err := (User{UserID: callerID}).Get(ctx); err == nil {
-		if oid := callerRow.(User).OrgID; oid != nil {
-			filter.OrgID = *oid
-		}
-	}
-	// A caller with no org has nothing to list — return empty rather than leaking all orgs.
-	// (GORM's Where(struct) ignores zero-value fields, so an empty OrgID would match all.)
-	if filter.OrgID == "" {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]Org{}) //nolint:errcheck
-		span.SetStatus(codes.Ok, "")
-		return
-	}
-
+	// Scope results to every org the caller is a member of. With multi-org
+	// membership a user can belong to more than one org, so this returns the full
+	// membership set (not just the active org). Optional org_id / org_name query
+	// params narrow within that set; an org the caller is not a member of yields
+	// nothing rather than leaking other orgs.
 	q := r.URL.Query()
-	if v := q.Get("org_id"); v != "" && v != filter.OrgID {
-		// Caller requested a specific org_id that doesn't match their own — nothing to return.
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]Org{}) //nolint:errcheck
-		span.SetStatus(codes.Ok, "")
-		return
-	}
-	if v := q.Get("org_name"); v != "" {
-		filter.OrgName = v
-	}
-
-	rows, err := filter.List(ctx, limit, offset)
+	orgs, err := listOrgsForUser(ctx, callerID, q.Get("org_id"), q.Get("org_name"), limit, offset)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "list orgs failed")
 		slog.WarnContext(ctx, "list orgs: db error", "caller_id", callerID, "error", err)
 		http.Error(w, "failed to list orgs", http.StatusInternalServerError)
 		return
-	}
-	orgs := make([]Org, len(rows))
-	for i, row := range rows {
-		orgs[i] = row.(Org)
 	}
 	span.AddEvent("db.read")
 	span.SetStatus(codes.Ok, "")
@@ -142,6 +116,16 @@ func handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to assign owner to org")
 		slog.ErrorContext(ctx, "create org: failed to assign owner to org", "caller_id", callerID, "org_id", org.OrgID, "owner_id", userID, "error", err)
+		http.Error(w, "failed to put user in org", http.StatusInternalServerError)
+		return
+	}
+
+	// Record the owner's membership so they appear in their own org list and the
+	// active org (owner.OrgID) has a backing membership row like any other member.
+	if err := addMembership(ctx, userID, org.OrgID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to record owner membership")
+		slog.ErrorContext(ctx, "create org: failed to record owner membership", "caller_id", callerID, "org_id", org.OrgID, "owner_id", userID, "error", err)
 		http.Error(w, "failed to put user in org", http.StatusInternalServerError)
 		return
 	}
@@ -327,24 +311,177 @@ func handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("db.soft_delete", trace.WithAttributes(attribute.String("org.id", id)))
 
-	// Capture member IDs before clearing org_id so we can invalidate their cached
-	// User entries — otherwise checkPermissions keeps reading the stale OrgID (and
-	// scoping resources/secrets under the deleted org) for up to entityTTL.
-	memberIDs, memberErr := getUserIDsByOrg(ctx, id)
-	if memberErr != nil {
-		slog.ErrorContext(ctx, "delete org: failed to load member IDs for cache invalidation", "caller_id", callerID, "org_id", id, "error", memberErr)
+	// Deactivate every membership in the deleted org and move each affected user's
+	// active org to another org they still belong to (or clear it). Cached User
+	// rows for those users are invalidated — otherwise checkPermissions keeps
+	// reading the stale OrgID (and scoping resources/secrets under the deleted org)
+	// for up to entityTTL.
+	affected, cleanupErr := reassignActiveOrgAfterOrgDelete(ctx, id)
+	if cleanupErr != nil {
+		slog.ErrorContext(ctx, "delete org: failed to reassign active org / clear memberships", "caller_id", callerID, "org_id", id, "error", cleanupErr)
 	}
-	if err := clearOrgMembership(ctx, id); err != nil {
-		slog.ErrorContext(ctx, "delete org: failed to clear org membership", "caller_id", callerID, "org_id", id, "error", err)
-	} else {
-		for _, uid := range memberIDs {
-			cacheDel(ctx, "gk:user:"+uid)
-		}
-		slog.InfoContext(ctx, "delete org: cleared org membership", "caller_id", callerID, "org_id", id)
+	for _, uid := range affected {
+		cacheDel(ctx, "gk:user:"+uid)
 	}
+	slog.InfoContext(ctx, "delete org: cleared org memberships", "caller_id", callerID, "org_id", id, "reassigned_users", len(affected))
 
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "delete org: success", "caller_id", callerID, "org_id", id)
 	writeAudit(ctx, callerID, "user", "org.delete", id, "")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSwitchOrg changes the caller's active org (User.OrgID) to the org named in
+// the path. The caller must be a member of that org — membership, not just the
+// getOrg permission (which an admin holds on every org), is the real gate. The
+// active org drives every per-request org scoping decision, so switching it
+// changes which org's resources, secrets and list results the caller sees.
+func handleSwitchOrg(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleSwitchOrg")
+	defer span.End()
+	r = r.WithContext(ctx)
+
+	id := r.PathValue("id")
+	callerID, _ := ctx.Value(userIDKey).(string)
+	span.SetAttributes(attribute.String("user.id", callerID), attribute.String("org.id", id))
+	slog.InfoContext(ctx, "switch org request", "caller_id", callerID, "org_id", id)
+
+	if !requirePermission(w, r, "getOrg", "gatekeeper/orgs/"+id) {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	span.AddEvent("permission.granted")
+
+	member, err := userIsOrgMember(ctx, callerID, id)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "membership lookup failed")
+		slog.ErrorContext(ctx, "switch org: membership lookup failed", "caller_id", callerID, "org_id", id, "error", err)
+		http.Error(w, "failed to switch org", http.StatusInternalServerError)
+		return
+	}
+	if !member {
+		span.SetStatus(codes.Ok, "not a member")
+		slog.WarnContext(ctx, "switch org: caller is not a member", "caller_id", callerID, "org_id", id)
+		http.Error(w, "you are not a member of this org", http.StatusForbidden)
+		return
+	}
+
+	row, err := (User{UserID: callerID}).Get(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "caller not found")
+		slog.ErrorContext(ctx, "switch org: failed to load caller", "caller_id", callerID, "error", err)
+		http.Error(w, "failed to switch org", http.StatusInternalServerError)
+		return
+	}
+	u := row.(User)
+	if u.OrgID == nil || *u.OrgID != id {
+		orgID := id
+		u.OrgID = &orgID
+		if err := u.Update(ctx); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "db update failed")
+			slog.ErrorContext(ctx, "switch org: db update failed", "caller_id", callerID, "org_id", id, "error", err)
+			http.Error(w, "failed to switch org", http.StatusInternalServerError)
+			return
+		}
+		writeAudit(ctx, callerID, "user", "org.switch", id, "")
+	}
+
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "switch org: success", "caller_id", callerID, "org_id", id)
+	row, _ = (User{UserID: callerID}).Get(ctx)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(toUserResponse(row.(User))) //nolint:errcheck
+}
+
+// handleLeaveOrg removes the caller's membership in the org named in the path. The
+// org owner cannot leave their own org (they must delete or transfer it). If the
+// org being left is the caller's active org, the active org is moved to another
+// org they still belong to, or cleared when none remain.
+func handleLeaveOrg(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleLeaveOrg")
+	defer span.End()
+	r = r.WithContext(ctx)
+
+	id := r.PathValue("id")
+	callerID, _ := ctx.Value(userIDKey).(string)
+	span.SetAttributes(attribute.String("user.id", callerID), attribute.String("org.id", id))
+	slog.InfoContext(ctx, "leave org request", "caller_id", callerID, "org_id", id)
+
+	if !requirePermission(w, r, "getOrg", "gatekeeper/orgs/"+id) {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	span.AddEvent("permission.granted")
+
+	orgRow, err := (Org{OrgID: id}).Get(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "org not found")
+		slog.WarnContext(ctx, "leave org: org not found", "caller_id", callerID, "org_id", id)
+		http.Error(w, "org not found", http.StatusNotFound)
+		return
+	}
+	if orgRow.(Org).OwnerID == callerID {
+		span.SetStatus(codes.Ok, "owner cannot leave")
+		slog.WarnContext(ctx, "leave org: owner cannot leave own org", "caller_id", callerID, "org_id", id)
+		http.Error(w, "the org owner cannot leave; delete the org instead", http.StatusConflict)
+		return
+	}
+
+	member, err := userIsOrgMember(ctx, callerID, id)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "membership lookup failed")
+		slog.ErrorContext(ctx, "leave org: membership lookup failed", "caller_id", callerID, "org_id", id, "error", err)
+		http.Error(w, "failed to leave org", http.StatusInternalServerError)
+		return
+	}
+	if !member {
+		span.SetStatus(codes.Ok, "not a member")
+		slog.WarnContext(ctx, "leave org: caller is not a member", "caller_id", callerID, "org_id", id)
+		http.Error(w, "you are not a member of this org", http.StatusConflict)
+		return
+	}
+
+	if err := removeMembership(ctx, callerID, id); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to remove membership")
+		slog.ErrorContext(ctx, "leave org: failed to remove membership", "caller_id", callerID, "org_id", id, "error", err)
+		http.Error(w, "failed to leave org", http.StatusInternalServerError)
+		return
+	}
+
+	// If the org just left was the active one, move the active org to another
+	// membership (oldest first) or clear it. User.Update invalidates the cache.
+	row, err := (User{UserID: callerID}).Get(ctx)
+	if err == nil {
+		u := row.(User)
+		if u.OrgID != nil && *u.OrgID == id {
+			remaining, remErr := membershipOrgIDsForUser(ctx, callerID)
+			if remErr != nil {
+				slog.ErrorContext(ctx, "leave org: failed to load remaining memberships", "caller_id", callerID, "org_id", id, "error", remErr)
+			}
+			if len(remaining) > 0 {
+				next := remaining[0]
+				u.OrgID = &next
+			} else {
+				u.OrgID = nil
+			}
+			if err := u.Update(ctx); err != nil {
+				slog.ErrorContext(ctx, "leave org: failed to reassign active org", "caller_id", callerID, "org_id", id, "error", err)
+			}
+		} else {
+			// Active org unchanged, but the membership set changed — drop any cached
+			// User row defensively.
+			cacheDel(ctx, "gk:user:"+callerID)
+		}
+	}
+
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "leave org: success", "caller_id", callerID, "org_id", id)
+	writeAudit(ctx, callerID, "user", "org.leave", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }

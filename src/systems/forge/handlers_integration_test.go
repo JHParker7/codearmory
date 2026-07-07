@@ -35,7 +35,7 @@ func setupForgeTestDB() {
 	gormDB = conn
 	gormDBMu.Unlock()
 
-	if err := conn.AutoMigrate(&Execution{}, &RunnerClass{}, &RuntimeBackend{}, &Volume{}); err != nil {
+	if err := conn.AutoMigrate(&Execution{}, &RunnerClass{}, &RuntimeBackend{}, &Volume{}, &ConcurrencyLimit{}); err != nil {
 		return
 	}
 	// Seed the default runner classes and the "default" runtime backend exactly as

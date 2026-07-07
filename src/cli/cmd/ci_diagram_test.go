@@ -309,17 +309,38 @@ func TestTuiStageStatus_Precedence(t *testing.T) {
 
 func TestTuiRunBatches_GroupsParallel(t *testing.T) {
 	g := 0
+	// Parallel members carry distinct step indices (only their shared group binds
+	// them); sequential steps get their own indices too.
 	batches := tuiRunBatches([]tuiStepRun{
-		{StepName: "build"},
-		{StepName: "lint", ParallelGroup: &g},
-		{StepName: "test", ParallelGroup: &g},
-		{StepName: "deploy"},
+		{StepIndex: 0, StepName: "build"},
+		{StepIndex: 1, StepName: "lint", ParallelGroup: &g},
+		{StepIndex: 2, StepName: "test", ParallelGroup: &g},
+		{StepIndex: 3, StepName: "deploy"},
 	})
 	if len(batches) != 3 {
 		t.Fatalf("batches = %d, want 3", len(batches))
 	}
 	if len(batches[1]) != 2 {
 		t.Errorf("middle batch = %d steps, want 2 (parallel)", len(batches[1]))
+	}
+}
+
+// A matrix step's per-value runs all share its single step index; the diagram
+// must collapse them into one stage so the fan-out stacks in one box rather than
+// reading as several sequential steps.
+func TestTuiRunBatches_GroupsMatrixFanOut(t *testing.T) {
+	batches := tuiRunBatches([]tuiStepRun{
+		{StepIndex: 0, StepName: "build"},
+		{StepIndex: 1, StepName: "deploy [env=dev]"},
+		{StepIndex: 1, StepName: "deploy [env=staging]"},
+		{StepIndex: 1, StepName: "deploy [env=prod]"},
+		{StepIndex: 2, StepName: "notify"},
+	})
+	if len(batches) != 3 {
+		t.Fatalf("batches = %d, want 3 (build, matrix fan-out, notify)", len(batches))
+	}
+	if len(batches[1]) != 3 || !tuiBatchIsMatrix(batches[1]) {
+		t.Errorf("middle batch = %d runs (matrix=%v), want 3 grouped matrix runs", len(batches[1]), tuiBatchIsMatrix(batches[1]))
 	}
 }
 
@@ -356,8 +377,8 @@ func TestTuiFillPendingSteps_SkipsTerminalRun(t *testing.T) {
 
 func TestTuiRunDiagram_RendersGlyphsNamesArrows(t *testing.T) {
 	d := tuiRunDiagram([]tuiStepRun{
-		{StepName: "build", Status: "completed"},
-		{StepName: "deploy", Status: "running"},
+		{StepIndex: 0, StepName: "build", Status: "completed"},
+		{StepIndex: 1, StepName: "deploy", Status: "running"},
 	}, 100)
 	for _, want := range []string{"build", "deploy", "✓", "●", "→"} {
 		if !strings.Contains(d, want) {
@@ -374,9 +395,9 @@ func TestTuiRunDiagram_Empty(t *testing.T) {
 
 func TestTuiRunDiagram_NarrowFallsBackToCompact(t *testing.T) {
 	d := tuiRunDiagram([]tuiStepRun{
-		{StepName: "build", Status: "completed"},
-		{StepName: "test", Status: "running"},
-		{StepName: "deploy", Status: "pending"},
+		{StepIndex: 0, StepName: "build", Status: "completed"},
+		{StepIndex: 1, StepName: "test", Status: "running"},
+		{StepIndex: 2, StepName: "deploy", Status: "pending"},
 	}, 12)
 	if strings.ContainsAny(d, "╭╮╰╯") {
 		t.Errorf("narrow live diagram should drop the boxed form, got:\n%s", d)

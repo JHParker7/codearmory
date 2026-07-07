@@ -125,6 +125,85 @@ func TestBuildGroupTasks(t *testing.T) {
 	}
 }
 
+func TestGroupConcurrency(t *testing.T) {
+	mk := func(m *MatrixConfig) stepGroup {
+		return stepGroup{steps: []WorkflowStep{{Step: Step{Name: "s", Action: "http"}, Matrix: m}}, indices: []int{0}}
+	}
+	cases := []struct {
+		name  string
+		group stepGroup
+		want  int
+	}{
+		{"matrix throttled below cap", mk(&MatrixConfig{Var: "v", Values: []string{"a"}, MaxConcurrent: 3}), 3},
+		{"matrix cap of 1", mk(&MatrixConfig{Var: "v", Values: []string{"a"}, MaxConcurrent: 1}), 1},
+		{"matrix above cap uses ceiling", mk(&MatrixConfig{Var: "v", Values: []string{"a"}, MaxConcurrent: 99}), maxParallelSteps},
+		{"matrix unset uses ceiling", mk(&MatrixConfig{Var: "v", Values: []string{"a"}}), maxParallelSteps},
+		{"parallel group uses ceiling", stepGroup{steps: []WorkflowStep{{Step: Step{Name: "a"}}, {Step: Step{Name: "b"}}}, indices: []int{0, 1}}, maxParallelSteps},
+		{"sequential step uses ceiling", stepGroup{steps: []WorkflowStep{{Step: Step{Name: "a"}}}, indices: []int{0}}, maxParallelSteps},
+	}
+	for _, c := range cases {
+		if got := groupConcurrency(c.group); got != c.want {
+			t.Errorf("%s: groupConcurrency = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRunTaskGroup_MatrixMaxConcurrent drives a real matrix fan-out through the
+// worker's semaphore and asserts that no more than MaxConcurrent executions are
+// ever in flight at once — the throttle a resource-heavy matrix relies on.
+func TestRunTaskGroup_MatrixMaxConcurrent(t *testing.T) {
+	if !testDBReady {
+		t.Skip("test DB not ready")
+	}
+	const maxConcurrent = 2
+	var mu sync.Mutex
+	var inFlight, peak int
+	fakeService(t, "forgeconc", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond) // hold the slot so overlap is observable
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
+	})
+
+	// Six matrix values, throttled to two at a time: peak must never exceed two.
+	mstep := WorkflowStep{
+		Step:   Step{Name: "deploy", Action: ActionHTTP, With: map[string]any{"service": "forgeconc", "path": "/run", "method": "GET"}},
+		Matrix: &MatrixConfig{Var: "v", Values: []string{"1", "2", "3", "4", "5", "6"}, MaxConcurrent: maxConcurrent},
+	}
+	group := stepGroup{steps: []WorkflowStep{mstep}, indices: []int{0}}
+	tasks, _, err := buildGroupTasks(group, substContext{})
+	if err != nil {
+		t.Fatalf("buildGroupTasks: %v", err)
+	}
+	runID := uuid.New().String()
+	if err := (WorkflowRun{RunID: runID, WorkflowID: uuid.New().String(), Status: StatusRunning}).Add(context.Background()); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	results, status := (&WorkerPool{}).runTaskGroup(context.Background(), newTokenStore("", ""), runID, "wf", tasks, nil, nil, 0, groupConcurrency(group))
+	if status != StatusCompleted {
+		t.Fatalf("group status = %s, want completed", status)
+	}
+	if len(results) != 6 {
+		t.Fatalf("results = %d, want 6", len(results))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if peak > maxConcurrent {
+		t.Errorf("peak concurrency = %d, want <= %d", peak, maxConcurrent)
+	}
+	if peak < 2 {
+		t.Errorf("peak concurrency = %d, expected the throttle to still allow parallelism", peak)
+	}
+}
+
 func TestAggregateTaskOutputs_PreservesOrder(t *testing.T) {
 	// Results may arrive out of order; aggregation keys on idx.
 	results := []taskResult{
@@ -151,6 +230,8 @@ func TestValidateMatrix(t *testing.T) {
 		{"no source", MatrixConfig{Var: "v"}, false},
 		{"literal ok", MatrixConfig{Var: "v", Values: []string{"a"}}, true},
 		{"from ok", MatrixConfig{Var: "v", ValuesFrom: "${inputs.x}"}, true},
+		{"negative max_concurrent", MatrixConfig{Var: "v", Values: []string{"a"}, MaxConcurrent: -1}, false},
+		{"positive max_concurrent ok", MatrixConfig{Var: "v", Values: []string{"a"}, MaxConcurrent: 3}, true},
 	}
 	for _, c := range cases {
 		msg := validateMatrix(&c.m)

@@ -352,15 +352,9 @@ func TestListOrgs_Success(t *testing.T) {
 	}
 	t.Cleanup(func() { o.Remove(context.Background()) })
 
-	// Actor must be a member of the org — listOrgs is scoped to the caller's own org.
+	// Actor must be a member of the org — listOrgs returns the caller's memberships.
 	actor := createAuthorizedUser(t, "listOrg", "gatekeeper/orgs")
-	fetched, err := (User{UserID: actor.UserID}).Get(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	full := fetched.(User)
-	full.OrgID = &o.OrgID
-	if err := full.Update(context.Background()); err != nil {
+	if err := addMembership(context.Background(), actor.UserID, o.OrgID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -389,13 +383,7 @@ func TestListOrgs_ExcludesDeleted(t *testing.T) {
 	t.Cleanup(func() { o.Remove(context.Background()) })
 
 	actor := createAuthorizedUser(t, "listOrg", "gatekeeper/orgs")
-	fetched, err := (User{UserID: actor.UserID}).Get(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	full := fetched.(User)
-	full.OrgID = &o.OrgID
-	if err := full.Update(context.Background()); err != nil {
+	if err := addMembership(context.Background(), actor.UserID, o.OrgID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -424,13 +412,7 @@ func TestListOrgs_FilterByOrgID(t *testing.T) {
 	t.Cleanup(func() { o.Remove(context.Background()) })
 
 	actor := createAuthorizedUser(t, "listOrg", "gatekeeper/orgs")
-	fetched, err := (User{UserID: actor.UserID}).Get(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	full := fetched.(User)
-	full.OrgID = &o.OrgID
-	if err := full.Update(context.Background()); err != nil {
+	if err := addMembership(context.Background(), actor.UserID, o.OrgID); err != nil {
 		t.Fatal(err)
 	}
 

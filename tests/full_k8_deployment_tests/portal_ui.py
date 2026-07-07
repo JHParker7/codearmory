@@ -102,6 +102,9 @@ TRIGGER_INPUTS_INPUT = (By.CSS_SELECTOR, "input[placeholder^='KEY=VALUE']")
 # RunView.tsx.
 APPROVAL_BANNER = (By.XPATH, "//div[contains(normalize-space(), 'NEEDS YOUR APPROVAL')]")
 APPROVE_BTN = (By.XPATH, "//button[contains(normalize-space(), 'approve')]")
+# A matrix step's fan-out is collapsed into one block with a <select> to choose
+# which combination's logs to view (MatrixBlock in RunView.tsx).
+MATRIX_SELECT = (By.XPATH, "//select[contains(@title, 'pick a matrix combination')]")
 
 
 class PortalUI:
@@ -420,6 +423,20 @@ class PortalUI:
         """Click a step card in the RunView pipeline column by its visible label."""
         self._click((By.XPATH, f"//button[.//span[normalize-space()='{label}']]"))
 
+    def select_matrix_combo(self, label: str) -> None:
+        """Pick a matrix combination in the RunView dropdown by its block label
+        (e.g. 'echo-string [item=<value>]'). A matrix fan-out is collapsed into a
+        single block with a <select> to choose which combination's logs to view,
+        so combinations are chosen here — not by clicking a per-combo card. Option
+        text is '<label> · <status>', so match on the label prefix and select by
+        the option's value (the step_run_id, stable as the status changes)."""
+        sel = Select(self._find(MATRIX_SELECT))
+        for opt in sel.options:
+            if opt.text.strip().startswith(label):
+                sel.select_by_value(opt.get_attribute("value"))
+                return
+        raise AssertionError(f"no matrix combination option for {label!r}")
+
     def wait_text_prefix(self, prefix: str, timeout: int | None = None) -> str:
         """Wait for a <span> whose text starts with `prefix` (e.g. the logs-panel
         header 'echo-string [item=<value>]' the matrix expansion surfaces) and
@@ -430,8 +447,9 @@ class PortalUI:
     def wait_logs_contains(self, text: str, timeout: int | None = None) -> None:
         """Wait for a logs-panel <pre> whose text contains `text`. Used to assert a
         specific step run's captured output/stdout is surfaced — each matrix
-        combination is its own selectable block showing its own output, so this
-        proves the run page did not collapse the fan-out into a single output."""
+        combination is individually selectable (via the fan-out dropdown) and shows
+        its own output, so this proves the run page did not collapse the fan-out
+        into a single shared output."""
         self._find((By.XPATH, f"//pre[contains(normalize-space(), \"{text}\")]"), timeout)
 
     def page_has_text(self, text: str) -> bool:

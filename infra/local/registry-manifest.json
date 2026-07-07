@@ -130,6 +130,10 @@
       { "method": "GET",    "path": "/runtime-backends/{name}",  "action": "getRuntimeBackend",    "resource": "forge/runtime-backends/{name}" },
       { "method": "PUT",    "path": "/runtime-backends/{name}",  "action": "updateRuntimeBackend", "resource": "forge/runtime-backends/{name}" },
       { "method": "DELETE", "path": "/runtime-backends/{name}",  "action": "deleteRuntimeBackend", "resource": "forge/runtime-backends/{name}" },
+      { "method": "GET",    "path": "/concurrency-limits",                    "action": "listConcurrencyLimit",   "resource": "forge/concurrency-limits" },
+      { "method": "GET",    "path": "/concurrency-limits/{scope}/{scope_id}", "action": "getConcurrencyLimit",    "resource": "forge/concurrency-limits/{scope}/{scope_id}" },
+      { "method": "PUT",    "path": "/concurrency-limits/{scope}/{scope_id}", "action": "setConcurrencyLimit",    "resource": "forge/concurrency-limits/{scope}/{scope_id}" },
+      { "method": "DELETE", "path": "/concurrency-limits/{scope}/{scope_id}", "action": "deleteConcurrencyLimit", "resource": "forge/concurrency-limits/{scope}/{scope_id}" },
       { "method": "POST",   "path": "/volumes",                  "action": "createVolume",      "resource": "forge/volumes" },
       { "method": "GET",    "path": "/volumes",                  "action": "listVolume",        "resource": "forge/volumes" },
       { "method": "DELETE", "path": "/volumes",                  "action": "deleteVolume",      "resource": "forge/volumes" }

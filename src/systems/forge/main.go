@@ -188,6 +188,18 @@ func main() {
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS executions_user_project ON executions (user_id, project) WHERE project <> ''`).Error; err != nil {
 		slog.Warn("failed to create executions project index", "error", err)
 	}
+	// Partial indexes backing the per-org / per-user running-count subqueries in
+	// claimPendingExecution's concurrency-limit gate.
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS executions_running_org ON executions (org_id) WHERE status = 'running'`).Error; err != nil {
+		slog.Warn("failed to create executions running-org index", "error", err)
+	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS executions_running_user ON executions (user_id) WHERE status = 'running'`).Error; err != nil {
+		slog.Warn("failed to create executions running-user index", "error", err)
+	}
+	if err := migrateConcurrencyLimits(); err != nil {
+		slog.Error("failed to migrate concurrency limits", "error", err)
+		os.Exit(1)
+	}
 	if err := migrateAndSeedRunnerClasses(); err != nil {
 		slog.Error("failed to migrate runner classes", "error", err)
 		os.Exit(1)
@@ -216,6 +228,7 @@ func main() {
 	initVolumeConfig()
 	initBuildConfig()
 	initCheckoutConfig()
+	initConcurrencyConfig()
 
 	// Rotate the gatekeeper service key every 25 minutes. GATEKEEPER_SERVICE_KEY
 	// must match the key in GATEKEEPER_SERVICES on gatekeeper. No-op if unset.
@@ -254,6 +267,10 @@ func main() {
 	mux.HandleFunc("GET /runtime-backends/{name}", handleGetRuntimeBackend)
 	mux.HandleFunc("PUT /runtime-backends/{name}", handleUpdateRuntimeBackend(reg))
 	mux.HandleFunc("DELETE /runtime-backends/{name}", handleDeleteRuntimeBackend(reg))
+	mux.HandleFunc("GET /concurrency-limits", handleListConcurrencyLimits)
+	mux.HandleFunc("GET /concurrency-limits/{scope}/{scope_id}", handleGetConcurrencyLimit)
+	mux.HandleFunc("PUT /concurrency-limits/{scope}/{scope_id}", handleSetConcurrencyLimit)
+	mux.HandleFunc("DELETE /concurrency-limits/{scope}/{scope_id}", handleDeleteConcurrencyLimit)
 
 	port := envOrDefault("PORT", "8083")
 	wrapped := otelhttp.NewHandler(&logger{mux}, "forge",

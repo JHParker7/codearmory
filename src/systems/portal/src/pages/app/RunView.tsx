@@ -128,6 +128,76 @@ function buildStages(workflow: Workflow | null, stepRuns: WorkflowStepRun[], cat
     .map((sr) => ({ parallel: false, steps: [{ key: sr.step_run_id, index: sr.step_index, label: sr.step_name, sr }] }));
 }
 
+/** A matrix step's fan-out collapsed into a single block: one status card plus a
+ * dropdown to pick which combination's logs to view. Replaces the previous
+ * one-card-per-combination layout, which overwhelmed the pipeline column once a
+ * matrix fanned out over more than a handful of values. Picking a combination in
+ * the dropdown drives the shared logs panel (`setSelected`); the card mirrors the
+ * chosen combination's status/duration and, if it is a gate, its approval panel. */
+function MatrixBlock({ steps, selected, setSelected, deciding, decideErr, onApprove, onReject }: {
+  steps: RunStep[];
+  selected: string | null;
+  setSelected: (key: string) => void;
+  deciding: boolean;
+  decideErr: string | null;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  // The combination the block reflects: the globally-selected one when it belongs
+  // to this matrix, otherwise a sensible preview — an awaiting gate first (so it
+  // surfaces without a click), then a running one, else the first combination.
+  const preferred = steps.find((s) => s.sr?.status === 'awaiting_approval')
+    ?? steps.find((s) => isRunActive(s.sr?.status ?? '')) ?? steps[0];
+  const shown = steps.find((s) => s.key === selected) ?? preferred;
+  const status = shown.sr?.status ?? 'pending';
+  const active = isRunActive(status);
+  const awaiting = status === 'awaiting_approval';
+  const isSel = shown.key === selected;
+  const dur = shown.sr?.ended_at
+    ? fmtDuration(shown.sr.started_at, shown.sr.ended_at)
+    : (shown.sr?.started_at && active ? fmtDuration(shown.sr.started_at) : '');
+  const borderColor = isSel ? T.green : awaiting ? T.blue : active ? T.amber : T.border;
+  // Failing/running counts so the collapsed matrix still flags trouble at a glance.
+  const failed = steps.filter((s) => statusTone(s.sr?.status ?? 'pending') === 'red').length;
+  const running = steps.filter((s) => isRunActive(s.sr?.status ?? '') && s.sr?.status !== 'awaiting_approval').length;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{
+        display: 'flex', flexDirection: 'column', gap: 8, padding: '8px 10px',
+        background: isSel ? T.cardHi : T.card, border: `1px solid ${borderColor}`,
+        borderLeft: `3px solid ${statusColor(status)}`,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <Pill tone={statusTone(status)}>{status}</Pill>
+          {dur && <span style={{ fontFamily: T.mono, fontSize: 10, color: active ? T.amber : T.faint }}>{active ? '⟳ ' : ''}{dur}</span>}
+          <span style={{ flex: 1 }} />
+          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{steps.length} combinations</span>
+          {running > 0 && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.amber }}>{running} running</span>}
+          {failed > 0 && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.red }}>{failed} failed</span>}
+        </div>
+        <select
+          title="pick a matrix combination to view its logs"
+          value={shown.key}
+          onChange={(e) => setSelected(e.target.value)}
+          style={{
+            width: '100%', minWidth: 0, background: T.bg, color: T.textHi,
+            border: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 12,
+            padding: '6px 8px', cursor: 'pointer',
+          }}>
+          {steps.map((st) => (
+            <option key={st.key} value={st.key}>
+              {st.label} · {st.sr?.status ?? 'pending'}
+            </option>
+          ))}
+        </select>
+      </div>
+      {awaiting && (
+        <ApprovalPanel gate={shown.gate} deciding={deciding} decideErr={decideErr} onApprove={onApprove} onReject={onReject} />
+      )}
+    </div>
+  );
+}
+
 export function RunView() {
   const { runId = '' } = useParams();
   const navigate = useNavigate();
@@ -312,6 +382,12 @@ export function RunView() {
                 )}
                 {parallel && <div style={{ fontFamily: T.mono, fontSize: 9, color: T.green, letterSpacing: 1, textTransform: 'uppercase', padding: '2px 0 4px' }}>∥ parallel</div>}
                 {matrix && <div style={{ fontFamily: T.mono, fontSize: 9, color: T.amber, letterSpacing: 1, textTransform: 'uppercase', padding: '2px 0 4px' }}>⊞ matrix</div>}
+                {matrix ? (
+                  <div style={{ marginBottom: 4 }}>
+                    <MatrixBlock steps={stage.steps} selected={selected} setSelected={setSelected}
+                      deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
+                  </div>
+                ) : (
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
                   {stage.steps.map((st) => {
                     const status = st.sr?.status ?? 'pending';
@@ -322,9 +398,9 @@ export function RunView() {
                     // A gate waiting on a human gets a blue border so it reads apart
                     // from the amber of a step that is merely running.
                     const borderColor = isSel ? T.green : awaiting ? T.blue : active ? T.amber : T.border;
-                    // Lay matrix combinations out as wrapping cards too (there may
-                    // be many), not one full-width block per row.
-                    const wrap = parallel || matrix;
+                    // Parallel siblings wrap as cards; a lone sequential step spans
+                    // the full width. (Matrix fan-outs take the dropdown branch above.)
+                    const wrap = parallel;
                     return (
                       <div key={st.key} style={{ flex: wrap ? '1 1 150px' : undefined, width: wrap ? undefined : '100%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
                         <button onClick={() => setSelected(st.key)}
@@ -346,6 +422,7 @@ export function RunView() {
                     );
                   })}
                 </div>
+                )}
               </div>
             );
           })}

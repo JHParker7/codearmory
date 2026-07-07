@@ -11,6 +11,13 @@ const (
 	StatusCancelled = "cancelled"
 )
 
+// Concurrency-limit scopes. A ConcurrencyLimit row keys on one of these plus the
+// scope's id (an org_id or a user_id).
+const (
+	ConcurrencyScopeOrg  = "org"
+	ConcurrencyScopeUser = "user"
+)
+
 const (
 	maxOutputBytes = 1 * 1024 * 1024 // 1 MB per stream stored in DB
 	maxBodyBytes   = 64 * 1024
@@ -181,6 +188,25 @@ type RuntimeBackend struct {
 	Config     map[string]string `gorm:"column:config;type:jsonb;not null;default:'{}';serializer:json"      json:"config"`
 	SecretRefs map[string]string `gorm:"column:secret_refs;type:jsonb;not null;default:'{}';serializer:json" json:"secret_refs"`
 	CreatedAt  time.Time         `gorm:"column:created_at;not null;default:now()"                   json:"created_at"`
+}
+
+// ConcurrencyLimit caps how many executions may be RUNNING at once for a single
+// scope — one org (Scope="org", ScopeID=org_id) or one user (Scope="user",
+// ScopeID=user_id). It is an admin-managed override of the global env defaults
+// (FORGE_MAX_CONCURRENT_PER_ORG / FORGE_MAX_CONCURRENT_PER_USER): a row sets an
+// explicit cap for one org/user and its absence falls back to the default.
+// MaxConcurrent <= 0 means unlimited.
+//
+// Limits are enforced at claim time (claimPendingExecution), not at submit: an
+// execution over its scope's cap stays pending (queued) until a running peer
+// finishes, rather than being rejected. Forge workers are slow to provision, so
+// excess work queues and drains instead of failing — which is the whole point of
+// the cap (it lets an operator size the worker fleet to a known ceiling).
+type ConcurrencyLimit struct {
+	Scope         string    `gorm:"column:scope;primaryKey"                  json:"scope"`
+	ScopeID       string    `gorm:"column:scope_id;primaryKey"               json:"scope_id"`
+	MaxConcurrent int       `gorm:"column:max_concurrent;not null"           json:"max_concurrent"`
+	UpdatedAt     time.Time `gorm:"column:updated_at;not null;default:now()" json:"updated_at"`
 }
 
 type submitRequest struct {

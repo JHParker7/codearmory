@@ -81,6 +81,10 @@ import {
   setService,
   deleteService,
   listRegisteredServices,
+  listRules,
+  createRule,
+  updateRule,
+  deleteRule,
 } from '../src/api/bff.ts';
 import type { WorkspaceView } from '../src/api/bff.ts';
 
@@ -473,6 +477,53 @@ describe('bff client', () => {
       } catch (err: unknown) {
         expect((err as { status: number }).status).to.equal(404);
       }
+    });
+  });
+
+  describe('hooks rules', () => {
+    it('listRules GETs /api/hooks/rules', async () => {
+      const rules = [{ rule_id: 'r1', name: 'ci', source: 'org/repo', events: ['push'], workflow_id: 'w1', created_by: 'u1', created_at: '', updated_at: '' }];
+      fetchStub.resolves(mockResponse(200, rules));
+      const res = await listRules(TOKEN);
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/hooks/rules');
+      expect(opts.method).to.equal('GET');
+      expect(res[0].source).to.equal('org/repo');
+    });
+
+    it('createRule POSTs /api/hooks/rules with source + secret', async () => {
+      const payload = { name: 'ci', source: 'org/repo', events: ['push', 'pull_request'], workflow_id: 'w1', secret: 'hmac', ref_filter: 'refs/heads/main' };
+      fetchStub.resolves(mockResponse(201, { rule_id: 'r1', ...payload, created_by: 'u1', created_at: '', updated_at: '' }));
+      const res = await createRule(TOKEN, payload);
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/hooks/rules');
+      expect(opts.method).to.equal('POST');
+      const body = JSON.parse(opts.body as string);
+      // The service keys the repo field `source` and requires the HMAC `secret`.
+      expect(body.source).to.equal('org/repo');
+      expect(body.secret).to.equal('hmac');
+      expect(body).to.not.have.property('repo');
+      expect(res.rule_id).to.equal('r1');
+    });
+
+    it('updateRule PUTs /api/hooks/rules/:id, omitting secret keeps the current one', async () => {
+      const payload = { name: 'ci', source: 'org/repo', events: ['push'], workflow_id: 'w1', ref_filter: '', input_mapping: {} };
+      fetchStub.resolves(mockResponse(200, { rule_id: 'r1', ...payload, created_by: 'u1', created_at: '', updated_at: '' }));
+      await updateRule(TOKEN, 'r1', payload);
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/hooks/rules/r1');
+      expect(opts.method).to.equal('PUT');
+      const body = JSON.parse(opts.body as string);
+      expect(body.source).to.equal('org/repo');
+      expect(body).to.not.have.property('secret');
+    });
+
+    it('deleteRule DELETEs /api/hooks/rules/:id', async () => {
+      fetchStub.resolves(mock204());
+      await deleteRule(TOKEN, 'r1');
+      const [url, opts] = fetchStub.firstCall.args as [string, RequestInit];
+      expect(url).to.equal('/api/hooks/rules/r1');
+      expect(opts.method).to.equal('DELETE');
     });
   });
 
