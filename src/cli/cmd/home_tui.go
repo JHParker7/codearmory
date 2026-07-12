@@ -299,8 +299,7 @@ func (w standaloneWrap) View() string { return w.inner.View() }
 
 func runHomeTUI() error {
 	p := tea.NewProgram(newAppModel(), tea.WithAltScreen())
-	_, err := p.Run()
-	return err
+	return runTUIProgram(p)
 }
 
 func init() {

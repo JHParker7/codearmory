@@ -2032,8 +2032,7 @@ var ciTUICmd = &cobra.Command{
 
 func startCITUI() error {
 	p := tea.NewProgram(standaloneWrap{newTUIModel()}, tea.WithAltScreen())
-	_, err := p.Run()
-	return err
+	return runTUIProgram(p)
 }
 
 func init() {
