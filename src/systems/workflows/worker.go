@@ -23,8 +23,15 @@ import (
 )
 
 // maxParallelSteps caps concurrent step goroutines within a single parallel group
-// to avoid goroutine explosion on large workflows.
+// to avoid goroutine explosion on large workflows. It is the absolute ceiling a
+// matrix/scatter max_concurrent can raise its fan-out to.
 const maxParallelSteps = 10
+
+// defaultFanoutConcurrency is how many legs a matrix or scatter runs at once when it
+// declares no max_concurrent — a conservative default (rather than the full ceiling)
+// so an unthrottled fan-out does not swamp a small cluster. Explicit max_concurrent
+// still raises it up to maxParallelSteps.
+const defaultFanoutConcurrency = 3
 
 // tokenStore holds the current run token and session ID, safe for concurrent
 // reads by parallel step goroutines and writes by the rotation goroutine.
@@ -499,19 +506,23 @@ func buildGroupTasks(group stepGroup, sc substContext) (tasks []stepTask, aggreg
 	return tasks, "", nil
 }
 
-// groupConcurrency reports how many of a group's tasks may run at once. It is the
-// global maxParallelSteps ceiling, lowered by a matrix step's MaxConcurrent when
-// that is set to a smaller positive value — so a matrix over resource-heavy runners
-// can throttle its fan-out below the default instead of launching every value at
-// once. Parallel and sequential groups always use the full ceiling.
+// groupConcurrency reports how many of a group's tasks may run at once. A matrix step
+// runs defaultFanoutConcurrency legs at once by default, raised to MaxConcurrent when
+// set (capped at the maxParallelSteps ceiling), or pinned to 1 when Sequential. Plain
+// parallel and sequential step groups always use the full ceiling.
 func groupConcurrency(group stepGroup) int {
-	limit := maxParallelSteps
 	if len(group.steps) == 1 && group.steps[0].Matrix != nil {
-		if mc := group.steps[0].Matrix.MaxConcurrent; mc > 0 && mc < limit {
-			limit = mc
+		m := group.steps[0].Matrix
+		switch {
+		case m.Sequential:
+			return 1
+		case m.MaxConcurrent > 0:
+			return min(m.MaxConcurrent, maxParallelSteps)
+		default:
+			return defaultFanoutConcurrency
 		}
 	}
-	return limit
+	return maxParallelSteps
 }
 
 // resolveMatrixValues produces the matrix's value list at run time, resolving any

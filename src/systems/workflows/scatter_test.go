@@ -32,7 +32,9 @@ func TestValidateScatter(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "valid", cfg: ScatterConfig{Regex: "svc/.*", Mode: "dir"}},
-		{name: "regex required", cfg: ScatterConfig{}, wantErr: true},
+		{name: "valid paths_from", cfg: ScatterConfig{PathsFrom: "${inputs.services}"}},
+		{name: "one source required", cfg: ScatterConfig{}, wantErr: true},
+		{name: "regex and paths_from mutually exclusive", cfg: ScatterConfig{Regex: ".*", PathsFrom: "${inputs.x}"}, wantErr: true},
 		{name: "bad mode", cfg: ScatterConfig{Regex: ".*", Mode: "socket"}, wantErr: true},
 		{name: "negative depth", cfg: ScatterConfig{Regex: ".*", MaxDepth: -1}, wantErr: true},
 		{name: "negative concurrency", cfg: ScatterConfig{Regex: ".*", MaxConcurrent: -1}, wantErr: true},

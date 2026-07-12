@@ -172,8 +172,13 @@ function MatrixEditor({ uid, matrix, onSetMatrix }: { uid: string; matrix: Matri
         onChange={(e) => onSetMatrix(uid, { ...matrix, values: e.target.value.split(',').map((v) => v.trim()).filter(Boolean), values_from: undefined })} style={field} />
       <input value={matrix.values_from ?? ''} placeholder="or values from a reference (${inputs.regions})" onPointerDown={stop}
         onChange={(e) => onSetMatrix(uid, { ...matrix, values_from: e.target.value, values: e.target.value ? [] : matrix.values })} style={field} />
-      <input type="number" min={0} value={matrix.max_concurrent ?? ''} placeholder="max concurrent (blank = default 10)" onPointerDown={stop}
-        onChange={(e) => { const n = parseInt(e.target.value, 10); onSetMatrix(uid, { ...matrix, max_concurrent: Number.isFinite(n) && n > 0 ? n : undefined }); }} style={field} />
+      <input type="number" min={0} value={matrix.max_concurrent ?? ''} placeholder="max concurrent (blank = default 3)" onPointerDown={stop} disabled={!!matrix.sequential}
+        onChange={(e) => { const n = parseInt(e.target.value, 10); onSetMatrix(uid, { ...matrix, max_concurrent: Number.isFinite(n) && n > 0 ? n : undefined }); }} style={{ ...field, opacity: matrix.sequential ? 0.5 : 1 }} />
+      <label onPointerDown={stop} style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: T.mono, fontSize: 11, color: T.text, cursor: 'pointer' }}>
+        <input type="checkbox" checked={!!matrix.sequential} onPointerDown={stop}
+          onChange={(e) => onSetMatrix(uid, { ...matrix, sequential: e.target.checked || undefined })} />
+        run sequentially (one at a time)
+      </label>
     </div>
   );
 }
@@ -199,7 +204,7 @@ function ScatterEditor({ uid, scatter, onSetScatter }: { uid: string; scatter: S
       </div>
       <input value={(scatter.outputs ?? []).join(', ')} placeholder="owned outputs, comma-separated (${scatter.path}/dist) — gathered back" onPointerDown={stop}
         onChange={(e) => onSetScatter(uid, { ...scatter, outputs: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) })} style={field} />
-      <input type="number" min={0} value={scatter.max_concurrent ?? ''} placeholder="max concurrent legs (blank = default 10)" onPointerDown={stop}
+      <input type="number" min={0} value={scatter.max_concurrent ?? ''} placeholder="max concurrent legs (blank = default 3)" onPointerDown={stop}
         onChange={(e) => { const n = parseInt(e.target.value, 10); onSetScatter(uid, { ...scatter, max_concurrent: Number.isFinite(n) && n > 0 ? n : undefined }); }} style={field} />
     </div>
   );

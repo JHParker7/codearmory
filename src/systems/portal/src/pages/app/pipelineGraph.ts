@@ -31,6 +31,9 @@ export interface MatrixConfig {
   /** Caps how many fan-out executions run at once (0/undefined = the service
    * default). Lower it when each value spins up a resource-heavy runner. */
   max_concurrent?: number;
+  /** Runs the values one at a time instead of in parallel (the simple form of
+   * max_concurrent: 1); takes precedence over max_concurrent. */
+  sequential?: boolean;
 }
 
 /** Fans a step out over the regex-matched paths of a shared workspace: each match is

@@ -28,6 +28,28 @@ type matrixConfig struct {
 	// MaxConcurrent caps how many fan-out executions run at once (0 = the service
 	// default). Lower it when each value spins up a resource-heavy runner.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
+	// Sequential runs the values one at a time instead of in parallel (the simple
+	// form of max_concurrent: 1); takes precedence over MaxConcurrent.
+	Sequential bool `json:"sequential,omitempty"`
+}
+
+// scatterConfig fans a step out over a set of workspace paths — each runs the step on
+// its OWN clone of the workspace, and after all legs finish their declared owned
+// outputs are gathered back into the base as a disjoint union. The path set comes from
+// exactly one of regex (a workspace scan) or paths_from (a ${...} list from an input or
+// earlier step). Mirrors the workflows ScatterConfig; mutually exclusive with
+// matrix/parallel_group, and requires an inline step action.
+type scatterConfig struct {
+	Volume        string   `json:"volume,omitempty"`      // base workspace volume; default "workspace"
+	MountPath     string   `json:"mount_path,omitempty"`  // where the workspace mounts; default "/workspace"
+	Regex         string   `json:"regex,omitempty"`       // regex source: POSIX ERE scan of the workspace
+	Mode          string   `json:"mode,omitempty"`        // "dir" (default) | "file"
+	MaxDepth      int      `json:"max_depth,omitempty"`   // find -maxdepth; 0/unset = unlimited
+	PathsFrom     string   `json:"paths_from,omitempty"`  // list source: ${...} ref (input/step output), mutually exclusive with regex
+	Outputs       []string `json:"outputs,omitempty"`    // owned paths gathered back; may ref ${scatter.path}
+	SizeMB        int64    `json:"size_mb,omitempty"`    // per-leg clone volume size
+	Medium        string   `json:"medium,omitempty"`     // "memory" (default) | "disk"
+	MaxConcurrent int      `json:"max_concurrent,omitempty"`
 }
 
 // approvalGate is an inline manual-approval pause on a pipeline step ref — no
@@ -55,6 +77,7 @@ type workflowStepRef struct {
 	With          map[string]any `json:"with,omitempty"`
 	ParallelGroup *int           `json:"parallel_group,omitempty"`
 	Matrix        *matrixConfig  `json:"matrix,omitempty"`
+	Scatter       *scatterConfig `json:"scatter,omitempty"`
 	Approval      *approvalGate  `json:"approval,omitempty"`
 }
 

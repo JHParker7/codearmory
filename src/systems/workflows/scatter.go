@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -55,11 +56,13 @@ func (c *ScatterConfig) mount() string {
 	return defaultScatterMountPath
 }
 
-// validateScatter checks a scatter config's shape (the regex is required and the mode
-// must be dir/file). Returns "" when valid.
+// validateScatter checks a scatter config's shape: exactly one path source (regex or
+// paths_from) and, for the regex source, a valid mode. Returns "" when valid.
 func validateScatter(c *ScatterConfig) string {
-	if c.Regex == "" {
-		return "scatter.regex is required"
+	hasRegex := strings.TrimSpace(c.Regex) != ""
+	hasFrom := strings.TrimSpace(c.PathsFrom) != ""
+	if hasRegex == hasFrom {
+		return "scatter requires exactly one of regex or paths_from"
 	}
 	switch c.Mode {
 	case "", "dir", "file":
@@ -197,20 +200,30 @@ func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, run
 	c := ws.Scatter
 	base := substContext{inputs: inputs, outputs: visible, runID: runID, depth: depth}
 
-	// Substitute run-level references in the config that can carry them (regex/paths may
-	// reference inputs), then resolve the fan-out paths.
+	// Produce the fan-out path set. Both sources are substituted for run-level
+	// references (${inputs.*}/${steps.*}) first: paths_from takes the list straight from
+	// a reference (like a matrix values_from, no workspace scan); otherwise the regex
+	// drives a forge/resolve-paths scan of the base workspace.
 	cfg := *c
-	cfg.Regex = substitute(cfg.Regex, base)
-	resolveOut, err := p.executeStep(ctx, store, scatterResolveStep(&cfg, runID), base)
-	if err != nil {
-		return "", p.scatterFail(runID, stepIndex, ws.Name, "resolve paths: "+err.Error())
-	}
-	paths := parseScatterPaths(resolveOut.Output)
-	if len(paths) == 0 {
-		return "", p.scatterFail(runID, stepIndex, ws.Name, fmt.Sprintf("scatter regex %q matched no paths", cfg.Regex))
+	var paths []string
+	if strings.TrimSpace(cfg.PathsFrom) != "" {
+		paths = parseMatrixList(substitute(cfg.PathsFrom, base))
+		if len(paths) == 0 {
+			return "", p.scatterFail(runID, stepIndex, ws.Name, fmt.Sprintf("scatter paths_from %q produced no paths", cfg.PathsFrom))
+		}
+	} else {
+		cfg.Regex = substitute(cfg.Regex, base)
+		resolveOut, err := p.executeStep(ctx, store, scatterResolveStep(&cfg, runID), base)
+		if err != nil {
+			return "", p.scatterFail(runID, stepIndex, ws.Name, "resolve paths: "+err.Error())
+		}
+		paths = parseScatterPaths(resolveOut.Output)
+		if len(paths) == 0 {
+			return "", p.scatterFail(runID, stepIndex, ws.Name, fmt.Sprintf("scatter regex %q matched no paths", cfg.Regex))
+		}
 	}
 	if len(paths) > maxMatrixValues {
-		return "", p.scatterFail(runID, stepIndex, ws.Name, fmt.Sprintf("scatter matched %d paths, exceeding the limit of %d", len(paths), maxMatrixValues))
+		return "", p.scatterFail(runID, stepIndex, ws.Name, fmt.Sprintf("scatter expanded to %d paths, exceeding the limit of %d", len(paths), maxMatrixValues))
 	}
 
 	// One leg per matched path: create a clone volume, seed it from the base, then run
@@ -228,9 +241,11 @@ func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, run
 		}
 	}
 
-	limit := maxParallelSteps
-	if c.MaxConcurrent > 0 && c.MaxConcurrent < limit {
-		limit = c.MaxConcurrent
+	// Default the fan-out to defaultFanoutConcurrency; an explicit max_concurrent
+	// raises it up to the maxParallelSteps ceiling.
+	limit := defaultFanoutConcurrency
+	if c.MaxConcurrent > 0 {
+		limit = min(c.MaxConcurrent, maxParallelSteps)
 	}
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup

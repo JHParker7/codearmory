@@ -136,8 +136,10 @@ func TestGroupConcurrency(t *testing.T) {
 	}{
 		{"matrix throttled below cap", mk(&MatrixConfig{Var: "v", Values: []string{"a"}, MaxConcurrent: 3}), 3},
 		{"matrix cap of 1", mk(&MatrixConfig{Var: "v", Values: []string{"a"}, MaxConcurrent: 1}), 1},
+		{"matrix sequential pins to 1", mk(&MatrixConfig{Var: "v", Values: []string{"a", "b"}, Sequential: true}), 1},
+		{"matrix sequential overrides max_concurrent", mk(&MatrixConfig{Var: "v", Values: []string{"a"}, MaxConcurrent: 5, Sequential: true}), 1},
 		{"matrix above cap uses ceiling", mk(&MatrixConfig{Var: "v", Values: []string{"a"}, MaxConcurrent: 99}), maxParallelSteps},
-		{"matrix unset uses ceiling", mk(&MatrixConfig{Var: "v", Values: []string{"a"}}), maxParallelSteps},
+		{"matrix unset defaults to 3", mk(&MatrixConfig{Var: "v", Values: []string{"a"}}), defaultFanoutConcurrency},
 		{"parallel group uses ceiling", stepGroup{steps: []WorkflowStep{{Step: Step{Name: "a"}}, {Step: Step{Name: "b"}}}, indices: []int{0, 1}}, maxParallelSteps},
 		{"sequential step uses ceiling", stepGroup{steps: []WorkflowStep{{Step: Step{Name: "a"}}}, indices: []int{0}}, maxParallelSteps},
 	}

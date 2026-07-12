@@ -135,11 +135,18 @@ type MatrixConfig struct {
 	Values     []string `json:"values,omitempty"`
 	ValuesFrom string   `json:"values_from,omitempty"`
 	// MaxConcurrent caps how many of the fan-out executions run at once. 0 (unset)
-	// runs as many as the global maxParallelSteps ceiling allows; a positive value
-	// lowers that ceiling so a matrix over resource-heavy runners (large sandboxes,
-	// image builds) can throttle itself rather than launching every value at once and
-	// exhausting cluster capacity. Values above maxParallelSteps have no extra effect.
+	// runs the default fan-out concurrency (3); a positive value sets a different cap,
+	// up to the global maxParallelSteps ceiling (values above it have no extra effect).
+	// Lower it for a matrix over resource-heavy runners (large sandboxes, image builds)
+	// so it does not exhaust cluster capacity; raise it (up to the ceiling) to fan out
+	// wider than the default.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
+	// Sequential runs the values strictly one at a time (concurrency 1), instead of
+	// the default parallel fan-out — the simple form of MaxConcurrent: 1 for when a
+	// matrix must not launch its executions simultaneously (e.g. a shared external
+	// resource, or to avoid overwhelming a small cluster). Takes precedence over
+	// MaxConcurrent when set.
+	Sequential bool `json:"sequential,omitempty"`
 }
 
 // ScatterConfig fans a step out over the paths in a shared workspace that match a
@@ -157,11 +164,18 @@ type ScatterConfig struct {
 	// MountPath is where the (cloned) workspace mounts in resolve, each leg, and the
 	// gather. Default "/workspace".
 	MountPath string `json:"mount_path,omitempty"`
-	// Regex selects the paths to fan out over (POSIX ERE), Mode is "dir" (default) or
-	// "file", MaxDepth bounds descent (see forge/resolve-paths).
-	Regex    string `json:"regex"`
-	Mode     string `json:"mode,omitempty"`
-	MaxDepth int    `json:"max_depth,omitempty"`
+	// The fan-out path set is produced one of two ways (exactly one is required):
+	//   - Regex scans the base workspace via forge/resolve-paths and fans out over the
+	//     matching entries. Mode is "dir" (default) or "file", MaxDepth bounds descent.
+	//   - PathsFrom skips the scan and takes the list directly from a ${...} reference
+	//     resolved at run time (e.g. "${inputs.services}" or "${steps.discover.output}"),
+	//     parsed like a matrix values_from (JSON array, or comma/whitespace-separated).
+	// Either source is substituted for ${inputs.*}/${steps.*} before use, and each
+	// resulting value is bound to ${scatter.path} in one leg (still on its own clone).
+	Regex     string `json:"regex,omitempty"`
+	Mode      string `json:"mode,omitempty"`
+	MaxDepth  int    `json:"max_depth,omitempty"`
+	PathsFrom string `json:"paths_from,omitempty"`
 	// Outputs are the paths each leg owns, unioned back into the base workspace after
 	// all legs finish (gather). They may reference ${scatter.path}; overlap across legs
 	// fails the gather. Empty = gather nothing (legs are independent; collect their
@@ -171,7 +185,8 @@ type ScatterConfig struct {
 	// Empty = forge's create-volume defaults.
 	SizeMB int64  `json:"size_mb,omitempty"`
 	Medium string `json:"medium,omitempty"`
-	// MaxConcurrent caps how many legs run at once. 0 = the global ceiling.
+	// MaxConcurrent caps how many legs run at once. 0 = the default fan-out
+	// concurrency (3); a positive value sets a different cap up to the global ceiling.
 	MaxConcurrent int `json:"max_concurrent,omitempty"`
 }
 
