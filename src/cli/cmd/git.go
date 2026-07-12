@@ -173,7 +173,7 @@ func init() {
 			if err != nil {
 				return err
 			}
-			return apiCall("POST", "/git/backends", body)
+			return apiCall("POST", "/git_connector/backends", body)
 		},
 	}
 	addCmd.Flags().StringVar(&addName, "name", "", "Backend name (required)")
@@ -209,7 +209,7 @@ resolved from the URL. The secret is redacted unless --show is passed.
 			if err != nil {
 				return err
 			}
-			data, err := doRequest("POST", "/git/credentials", body)
+			data, err := doRequest("POST", "/git_connector/credentials", body)
 			if err != nil {
 				return err
 			}
@@ -235,7 +235,7 @@ resolved from the URL. The secret is redacted unless --show is passed.
 			Short: "List git backends",
 			Args:  cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return apiCall("GET", "/git/backends", nil)
+				return apiCall("GET", "/git_connector/backends", nil)
 			},
 		},
 		&cobra.Command{
@@ -243,7 +243,7 @@ resolved from the URL. The secret is redacted unless --show is passed.
 			Short: "Get a git backend",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return apiCall("GET", "/git/backends/"+args[0], nil)
+				return apiCall("GET", "/git_connector/backends/"+args[0], nil)
 			},
 		},
 		addCmd,
@@ -252,7 +252,7 @@ resolved from the URL. The secret is redacted unless --show is passed.
 			Short: "Delete a git backend",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return apiCall("DELETE", "/git/backends/"+args[0], nil)
+				return apiCall("DELETE", "/git_connector/backends/"+args[0], nil)
 			},
 		},
 		&cobra.Command{
@@ -260,7 +260,7 @@ resolved from the URL. The secret is redacted unless --show is passed.
 			Short: "Test a git backend's connection",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return apiCall("POST", "/git/backends/"+args[0]+"/test", nil)
+				return apiCall("POST", "/git_connector/backends/"+args[0]+"/test", nil)
 			},
 		},
 		credsCmd,
@@ -269,7 +269,7 @@ resolved from the URL. The secret is redacted unless --show is passed.
 	RegisterModule(Module{
 		Name:    "git",
 		Slot:    "git",
-		Service: "git",
+		Service: "git_connector",
 		Order:   78,
 		Command: gitCmd,
 		Screens: []HubScreen{{

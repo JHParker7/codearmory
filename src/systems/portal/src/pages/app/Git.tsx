@@ -1,11 +1,11 @@
 /**
- * Git page: the `git` core service — a backend-agnostic git credential broker.
+ * Git page: the `git_connector` core service — a backend-agnostic git credential broker.
  * Left is the list of registered backends plus a create form whose auth fields
  * reveal themselves per (type, mode); right is the selected backend's detail with
  * a "test" probe, a confirm-gated delete, and a small "mint credential" tool that
  * resolves a repo URL to a clone URL (masking the minted secret by default). All
  * calls go through the BFF (listGitBackends / createGitBackend / testGitBackend /
- * mintGitCredential / …) which passes through verbatim to /api/git/*.
+ * mintGitCredential / …) which passes through verbatim to /api/git_connector/*.
  */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';

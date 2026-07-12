@@ -97,7 +97,7 @@ func TestRegisteredServices_FailsOpenUnderTest(t *testing.T) {
 var knownPlatformServices = map[string]bool{
 	"gatekeeper": true, "conductor": true, "registry": true, "builder": true,
 	"blueprints": true, "forge": true, "workflows": true, "tickets": true,
-	"hooks": true, "containers": true, "gitea_integration": true, "git": true,
+	"hooks": true, "containers": true, "gitea_integration": true, "git_connector": true,
 	"chaos": true, "argo": true, "outpost-gateway": true, "notifications": true,
 }
 

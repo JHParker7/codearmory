@@ -23,7 +23,7 @@ func checkGatekeeper(ctx context.Context, w http.ResponseWriter, r *http.Request
 	}
 
 	body, _ := json.Marshal(map[string]string{
-		"service":  "git",
+		"service":  "git_connector",
 		"resource": resource,
 		"action":   action,
 	})

@@ -20,8 +20,8 @@ func TestGitCmd_Backends_RunE(t *testing.T) {
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("git backends: %v", err)
 	}
-	if rec.Method != "GET" || rec.Path != "/git/backends" {
-		t.Errorf("request = %s %s, want GET /git/backends", rec.Method, rec.Path)
+	if rec.Method != "GET" || rec.Path != "/git_connector/backends" {
+		t.Errorf("request = %s %s, want GET /git_connector/backends", rec.Method, rec.Path)
 	}
 }
 
@@ -38,8 +38,8 @@ func TestGitCmd_Add_PostsAuthByMode(t *testing.T) {
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("git add: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/git/backends" {
-		t.Errorf("request = %s %s, want POST /git/backends", rec.Method, rec.Path)
+	if rec.Method != "POST" || rec.Path != "/git_connector/backends" {
+		t.Errorf("request = %s %s, want POST /git_connector/backends", rec.Method, rec.Path)
 	}
 	var got map[string]any
 	json.Unmarshal(rec.Body, &got) //nolint:errcheck
@@ -75,8 +75,8 @@ func TestGitCmd_Rm_Deletes(t *testing.T) {
 	if err := sub.RunE(sub, []string{"b1"}); err != nil {
 		t.Fatalf("git rm: %v", err)
 	}
-	if rec.Method != "DELETE" || rec.Path != "/git/backends/b1" {
-		t.Errorf("request = %s %s, want DELETE /git/backends/b1", rec.Method, rec.Path)
+	if rec.Method != "DELETE" || rec.Path != "/git_connector/backends/b1" {
+		t.Errorf("request = %s %s, want DELETE /git_connector/backends/b1", rec.Method, rec.Path)
 	}
 }
 
@@ -89,8 +89,8 @@ func TestGitCmd_Test_PostsToTest(t *testing.T) {
 	if err := sub.RunE(sub, []string{"b1"}); err != nil {
 		t.Fatalf("git test: %v", err)
 	}
-	if rec.Method != "POST" || rec.Path != "/git/backends/b1/test" {
-		t.Errorf("request = %s %s, want POST /git/backends/b1/test", rec.Method, rec.Path)
+	if rec.Method != "POST" || rec.Path != "/git_connector/backends/b1/test" {
+		t.Errorf("request = %s %s, want POST /git_connector/backends/b1/test", rec.Method, rec.Path)
 	}
 }
 
@@ -105,8 +105,8 @@ func TestGitCmd_Creds_RedactsByDefault(t *testing.T) {
 			t.Fatalf("git creds: %v", err)
 		}
 	})
-	if rec.Method != "POST" || rec.Path != "/git/credentials" {
-		t.Errorf("request = %s %s, want POST /git/credentials", rec.Method, rec.Path)
+	if rec.Method != "POST" || rec.Path != "/git_connector/credentials" {
+		t.Errorf("request = %s %s, want POST /git_connector/credentials", rec.Method, rec.Path)
 	}
 	var body map[string]any
 	json.Unmarshal(rec.Body, &body) //nolint:errcheck
@@ -189,8 +189,8 @@ func TestGtFetchBackends_Success(t *testing.T) {
 	srv, rec := recordingServer(t, http.StatusOK, `[{"id":"b1","name":"gh","type":"github","host":"github.com","auth_mode":"pat"}]`)
 	setupCLI(t, srv)
 	msg := gtFetchBackends()
-	if rec.Path != "/git/backends" {
-		t.Errorf("path = %q, want /git/backends", rec.Path)
+	if rec.Path != "/git_connector/backends" {
+		t.Errorf("path = %q, want /git_connector/backends", rec.Path)
 	}
 	backends, ok := msg.(gtBackendsMsg)
 	if !ok || len(backends) != 1 || backends[0].Name != "gh" {
@@ -205,8 +205,8 @@ func TestGtCreateBackend_PostsPayload(t *testing.T) {
 	if _, ok := msg.(gtDoneMsg); !ok {
 		t.Fatalf("msg = %T, want gtDoneMsg", msg)
 	}
-	if rec.Method != "POST" || rec.Path != "/git/backends" {
-		t.Errorf("request = %s %s, want POST /git/backends", rec.Method, rec.Path)
+	if rec.Method != "POST" || rec.Path != "/git_connector/backends" {
+		t.Errorf("request = %s %s, want POST /git_connector/backends", rec.Method, rec.Path)
 	}
 }
 
@@ -214,8 +214,8 @@ func TestGtTestBackend_PostsToTest(t *testing.T) {
 	srv, rec := recordingServer(t, http.StatusOK, `{"ok":true,"backend_type":"github","auth_mode":"pat","expires_at":"2026-01-01"}`)
 	setupCLI(t, srv)
 	msg := gtTestBackend(gtBackend{ID: "b1", Name: "gh"})()
-	if rec.Method != "POST" || rec.Path != "/git/backends/b1/test" {
-		t.Errorf("request = %s %s, want POST /git/backends/b1/test", rec.Method, rec.Path)
+	if rec.Method != "POST" || rec.Path != "/git_connector/backends/b1/test" {
+		t.Errorf("request = %s %s, want POST /git_connector/backends/b1/test", rec.Method, rec.Path)
 	}
 	res, ok := msg.(gtResultMsg)
 	if !ok || !strings.Contains(res.content, "✓ ok") {
@@ -227,8 +227,8 @@ func TestGtMintCreds_RedactsUntilRevealed(t *testing.T) {
 	srv, rec := recordingServer(t, http.StatusOK, `{"secret":"TOPSECRET","clone_url":"https://x/y.git","backend":"gh"}`)
 	setupCLI(t, srv)
 	msg := gtMintCreds("https://x/y.git")()
-	if rec.Method != "POST" || rec.Path != "/git/credentials" {
-		t.Errorf("request = %s %s, want POST /git/credentials", rec.Method, rec.Path)
+	if rec.Method != "POST" || rec.Path != "/git_connector/credentials" {
+		t.Errorf("request = %s %s, want POST /git_connector/credentials", rec.Method, rec.Path)
 	}
 	cm, ok := msg.(gtCredsMsg)
 	if !ok || cm.creds.Secret != "TOPSECRET" {

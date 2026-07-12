@@ -1,6 +1,6 @@
-# Git
+# git_connector
 
-Backend-agnostic **git credential broker**. Users link one or more git backends (GitHub, GitLab, Forgejo, or a generic git server); the broker mints — or just-in-time brokers — clone credentials on demand for whatever backend a repository belongs to. Credential material is encrypted at rest and is never returned by backend reads.
+The `git_connector` service (in-repo directory `src/systems/git`) is a backend-agnostic **git credential broker**. Users link one or more git backends (GitHub, GitLab, Forgejo, or a generic git server); the broker mints — or just-in-time brokers — clone credentials on demand for whatever backend a repository belongs to. Credential material is encrypted at rest and is never returned by backend reads.
 
 This is the **core git integration**. It is *not* a repository-management service: it does not create repos, branches, or pull requests. (Repo management lives in the optional, non-core [`gitea_integration`](#relationship-to-gitea_integration) service.) Git's only job is to answer the question *"give me an authenticated clone URL for this repo"* — for a user, or for Forge/Workflows running a job on the user's behalf.
 

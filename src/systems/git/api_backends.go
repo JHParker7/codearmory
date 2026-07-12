@@ -28,7 +28,7 @@ func handleListBackends(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("git").Start(r.Context(), "handleListBackends")
 	defer span.End()
 
-	userID, ok := checkGatekeeper(ctx, w, r, "listBackend", "git/backends")
+	userID, ok := checkGatekeeper(ctx, w, r, "listBackend", "git_connector/backends")
 	if !ok {
 		return
 	}
@@ -50,7 +50,7 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("git").Start(r.Context(), "handleCreateBackend")
 	defer span.End()
 
-	userID, ok := checkGatekeeper(ctx, w, r, "createBackend", "git/backends")
+	userID, ok := checkGatekeeper(ctx, w, r, "createBackend", "git_connector/backends")
 	if !ok {
 		return
 	}
@@ -115,7 +115,7 @@ func handleGetBackend(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, ok := checkGatekeeper(ctx, w, r, "getBackend", "git/backends/"+id)
+	userID, ok := checkGatekeeper(ctx, w, r, "getBackend", "git_connector/backends/"+id)
 	if !ok {
 		return
 	}
@@ -138,7 +138,7 @@ func handleUpdateBackend(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, ok := checkGatekeeper(ctx, w, r, "updateBackend", "git/backends/"+id)
+	userID, ok := checkGatekeeper(ctx, w, r, "updateBackend", "git_connector/backends/"+id)
 	if !ok {
 		return
 	}
@@ -198,7 +198,7 @@ func handleDeleteBackend(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, ok := checkGatekeeper(ctx, w, r, "deleteBackend", "git/backends/"+id)
+	userID, ok := checkGatekeeper(ctx, w, r, "deleteBackend", "git_connector/backends/"+id)
 	if !ok {
 		return
 	}
@@ -224,7 +224,7 @@ func handleTestBackend(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, ok := checkGatekeeper(ctx, w, r, "testBackend", "git/backends/"+id)
+	userID, ok := checkGatekeeper(ctx, w, r, "testBackend", "git_connector/backends/"+id)
 	if !ok {
 		return
 	}

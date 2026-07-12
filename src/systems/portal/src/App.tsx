@@ -72,7 +72,7 @@ const LANDING_MODULES: { path: string; service: string }[] = [
   { path: 'tickets', service: 'tickets' },
   { path: 'hooks', service: 'hooks' },
   { path: 'containers', service: 'containers' },
-  { path: 'git', service: 'git' },
+  { path: 'git', service: 'git_connector' },
   { path: 'outposts', service: 'outpost-gateway' },
 ];
 

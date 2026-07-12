@@ -40,7 +40,7 @@ func handleMintCredential(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("git").Start(r.Context(), "handleMintCredential")
 	defer span.End()
 
-	userID, ok := checkGatekeeper(ctx, w, r, "mintCredential", "git/credentials")
+	userID, ok := checkGatekeeper(ctx, w, r, "mintCredential", "git_connector/credentials")
 	if !ok {
 		return
 	}

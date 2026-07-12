@@ -352,7 +352,7 @@ export function AppLayout() {
             <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navCollapsed} icon="forge" />
             <NavItem to="/app/hooks" label="hooks/" desc="Trigger actions from webhooks" service="hooks" collapsed={navCollapsed} icon="hooks" />
             <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navCollapsed} icon="containers" />
-            <NavItem to="/app/git" label="git/" desc="Connect & clone your repositories" service="git" collapsed={navCollapsed} icon="git" />
+            <NavItem to="/app/git" label="git/" desc="Connect & clone your repositories" service="git_connector" collapsed={navCollapsed} icon="git" />
             <NavItem to="/app/outposts" label="outposts/" desc="Link your Kubernetes clusters" service="outpost-gateway" collapsed={navCollapsed} icon="outposts" />
             {/* Generic iframe-hosted services (blueprints, chaos, argo, and any future
                 non-core service that advertises a ui_path) — discovered at runtime,

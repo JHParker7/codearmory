@@ -38,7 +38,7 @@ Browser / CLI
         ├── POST /signup, POST /login ──► Gatekeeper :8081  (public)
         │
         ├── /executions/...       ──────► Forge      :8083  (sandboxed runners)
-        ├── /git/...              ──────► Git        :8096  (clone-credential broker)
+        ├── /git_connector/...    ──────► git_connector :8096  (clone-credential broker)
         ├── /workflows/...        ──────► Workflows  :8085  (pipelines)
         └── /hooks/...            ──────► Hooks      :8087  (webhook receiver)
 
@@ -205,7 +205,7 @@ Forge is registered as a named service in the Workflows `SERVICES` env var. A wo
 
 **Port:** 8096
 
-Git is the core **credential broker** for source control. Users link one or more git backends — **GitHub, GitLab, Forgejo, or a generic git server** — and the broker mints (or just-in-time brokers) clone credentials on demand for whatever backend a repository belongs to. It is *not* a repository-management service; it does not create repos or pull requests. Its sole job is answering *"give me an authenticated clone URL for this repo"* — for a user directly, or for Forge/Workflows running a job on their behalf.
+The **git_connector** service (in-repo directory `src/systems/git`) is the core **credential broker** for source control. Users link one or more git backends — **GitHub, GitLab, Forgejo, or a generic git server** — and the broker mints (or just-in-time brokers) clone credentials on demand for whatever backend a repository belongs to. It is *not* a repository-management service; it does not create repos or pull requests. Its sole job is answering *"give me an authenticated clone URL for this repo"* — for a user directly, or for Forge/Workflows running a job on their behalf.
 
 ### How it works
 

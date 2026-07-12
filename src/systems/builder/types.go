@@ -23,15 +23,15 @@ const defaultOrgID = "default"
 // repo management) is NOT core — most users do not run Forgejo, so builder deploys it
 // on demand from files/services/gitea_integration.json.
 var coreServices = map[string]bool{
-	"gatekeeper": true,
-	"conductor":  true,
-	"registry":   true,
-	"builder":    true,
-	"forge":      true,
-	"workflows":  true,
-	"tickets":    true,
-	"git":        true,
-	"containers": true,
+	"gatekeeper":    true,
+	"conductor":     true,
+	"registry":      true,
+	"builder":       true,
+	"forge":         true,
+	"workflows":     true,
+	"tickets":       true,
+	"git_connector": true,
+	"containers":    true,
 }
 
 // comingSoonServices are the platform services whose source was spun out into its

@@ -50,7 +50,7 @@ gatekeeper:
     # Comma-separated list of service names permitted to register. Core services
     # deployed by this chart (incl. the forge + workflows CI/CD pair) are listed
     # here; non-core services are auto-permitted at runtime when builder registers them.
-    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git,containers"
+    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git_connector,containers"
     # Comma-separated services allowed to resolve org secrets via the internal
     # lookup endpoint (deny-all when empty). Defaults to "forge" so forge can resolve
     # "secret:<name>" job secret_refs; add "containers" to let the container registry

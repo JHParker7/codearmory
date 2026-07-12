@@ -22,7 +22,7 @@ func handleListRepos(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("git").Start(r.Context(), "handleListRepos")
 	defer span.End()
 
-	userID, ok := checkGatekeeper(ctx, w, r, "listRepo", "git/repos")
+	userID, ok := checkGatekeeper(ctx, w, r, "listRepo", "git_connector/repos")
 	if !ok {
 		return
 	}
@@ -60,7 +60,7 @@ func handleListBranches(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("git").Start(r.Context(), "handleListBranches")
 	defer span.End()
 
-	userID, ok := checkGatekeeper(ctx, w, r, "listRepo", "git/repos")
+	userID, ok := checkGatekeeper(ctx, w, r, "listRepo", "git_connector/repos")
 	if !ok {
 		return
 	}
@@ -105,7 +105,7 @@ func handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("git").Start(r.Context(), "handleCreateRepo")
 	defer span.End()
 
-	userID, ok := checkGatekeeper(ctx, w, r, "createRepo", "git/repos")
+	userID, ok := checkGatekeeper(ctx, w, r, "createRepo", "git_connector/repos")
 	if !ok {
 		return
 	}
@@ -157,7 +157,7 @@ func handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, ok := checkGatekeeper(ctx, w, r, "deleteRepo", "git/repos/"+id)
+	userID, ok := checkGatekeeper(ctx, w, r, "deleteRepo", "git_connector/repos/"+id)
 	if !ok {
 		return
 	}

@@ -132,7 +132,7 @@ func (m *gitModel) applyTableLayout() {
 // ── Fetch / mutate ────────────────────────────────────────────────────────────
 
 func gtFetchBackends() tea.Msg {
-	data, err := doRequest("GET", "/git/backends", nil)
+	data, err := doRequest("GET", "/git_connector/backends", nil)
 	if err != nil {
 		return gtErrMsg{err}
 	}
@@ -148,7 +148,7 @@ func gtFetchBackends() tea.Msg {
 // forge, and steps TUIs. On any failure it returns an empty catalog so the
 // callers degrade to a free-text URL field rather than erroring.
 func fetchGitRepos() kvCatalog {
-	data, err := doRequest("GET", "/git/repos", nil)
+	data, err := doRequest("GET", "/git_connector/repos", nil)
 	if err != nil {
 		return kvCatalog{}
 	}
@@ -180,7 +180,7 @@ func gtFetchRepos() tea.Msg { return gtReposMsg(fetchGitRepos()) }
 func gtCreateBackend(payload map[string]any) tea.Cmd {
 	return func() tea.Msg {
 		body, _ := json.Marshal(payload)
-		if _, err := doRequest("POST", "/git/backends", body); err != nil {
+		if _, err := doRequest("POST", "/git_connector/backends", body); err != nil {
 			return gtFormErrMsg{err}
 		}
 		return gtDoneMsg{status: "✓ backend created"}
@@ -189,7 +189,7 @@ func gtCreateBackend(payload map[string]any) tea.Cmd {
 
 func gtDeleteBackend(b gtBackend) tea.Cmd {
 	return func() tea.Msg {
-		if _, err := doRequest("DELETE", "/git/backends/"+b.ID, nil); err != nil {
+		if _, err := doRequest("DELETE", "/git_connector/backends/"+b.ID, nil); err != nil {
 			return gtErrMsg{err}
 		}
 		return gtDoneMsg{status: "✓ deleted " + b.Name}
@@ -198,7 +198,7 @@ func gtDeleteBackend(b gtBackend) tea.Cmd {
 
 func gtTestBackend(b gtBackend) tea.Cmd {
 	return func() tea.Msg {
-		data, err := doRequest("POST", "/git/backends/"+b.ID+"/test", nil)
+		data, err := doRequest("POST", "/git_connector/backends/"+b.ID+"/test", nil)
 		if err != nil {
 			return gtErrMsg{err}
 		}
@@ -219,7 +219,7 @@ func gtTestBackend(b gtBackend) tea.Cmd {
 func gtMintCreds(repoURL string) tea.Cmd {
 	return func() tea.Msg {
 		body, _ := json.Marshal(map[string]string{"repo_url": repoURL})
-		data, err := doRequest("POST", "/git/credentials", body)
+		data, err := doRequest("POST", "/git_connector/credentials", body)
 		if err != nil {
 			return gtFormErrMsg{err}
 		}

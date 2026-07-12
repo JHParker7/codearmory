@@ -1233,33 +1233,33 @@ export interface GitCredential {
 }
 
 export function listGitBackends(token: string) {
-  return req<GitBackend[]>('GET', '/git/backends', token);
+  return req<GitBackend[]>('GET', '/git_connector/backends', token);
 }
 
 export function getGitBackend(token: string, id: string) {
-  return req<GitBackend>('GET', `/git/backends/${id}`, token);
+  return req<GitBackend>('GET', `/git_connector/backends/${id}`, token);
 }
 
 export function createGitBackend(token: string, payload: GitBackendCreate) {
-  return req<GitBackend>('POST', '/git/backends', token, payload);
+  return req<GitBackend>('POST', '/git_connector/backends', token, payload);
 }
 
 export function updateGitBackend(token: string, id: string, payload: Partial<GitBackendCreate>) {
-  return req<GitBackend>('PUT', `/git/backends/${id}`, token, payload);
+  return req<GitBackend>('PUT', `/git_connector/backends/${id}`, token, payload);
 }
 
 export function deleteGitBackend(token: string, id: string) {
-  return req<void>('DELETE', `/git/backends/${id}`, token);
+  return req<void>('DELETE', `/git_connector/backends/${id}`, token);
 }
 
 /** Probe a backend's stored credentials against its host, returning the broker's verdict. */
 export function testGitBackend(token: string, id: string) {
-  return req<GitBackendTest>('POST', `/git/backends/${id}/test`, token);
+  return req<GitBackendTest>('POST', `/git_connector/backends/${id}/test`, token);
 }
 
 /** Mint a short-lived clone credential for a repo URL (the broker picks the matching backend by host). */
 export function mintGitCredential(token: string, repoUrl: string) {
-  return req<GitCredential>('POST', '/git/credentials', token, { repo_url: repoUrl });
+  return req<GitCredential>('POST', '/git_connector/credentials', token, { repo_url: repoUrl });
 }
 
 /**
@@ -1278,17 +1278,17 @@ export interface GitRepo {
 
 /** List clone targets: repos enumerated across the caller's linked backends plus any pinned manually. */
 export function listGitRepos(token: string) {
-  return req<GitRepo[]>('GET', '/git/repos', token);
+  return req<GitRepo[]>('GET', '/git_connector/repos', token);
 }
 
 /** Pin a repo to the selector (for generic backends that can't be enumerated, or to surface extras). */
 export function createGitRepo(token: string, payload: { url: string; name?: string }) {
-  return req<GitRepo>('POST', '/git/repos', token, payload);
+  return req<GitRepo>('POST', '/git_connector/repos', token, payload);
 }
 
 /** Remove a pinned (manual) repo. */
 export function deleteGitRepo(token: string, id: string) {
-  return req<void>('DELETE', `/git/repos/${id}`, token);
+  return req<void>('DELETE', `/git_connector/repos/${id}`, token);
 }
 
 /** One branch of a repo; `default` flags the remote's default branch. */
@@ -1303,7 +1303,7 @@ export interface GitBranch {
  * falls back to a free-text ref. `cloneURL` is the repo's HTTPS clone URL.
  */
 export function listGitBranches(token: string, cloneURL: string) {
-  return req<GitBranch[]>('GET', `/git/repos/branches?url=${encodeURIComponent(cloneURL)}`, token);
+  return req<GitBranch[]>('GET', `/git_connector/repos/branches?url=${encodeURIComponent(cloneURL)}`, token);
 }
 
 // ── Invites ───────────────────────────────────────────────────────────────────

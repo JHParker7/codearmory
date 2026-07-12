@@ -160,7 +160,7 @@ func main() {
 		slog.Warn("GIT_INTERNAL_KEY not set — /internal/clone-token will reject all forge/workflows requests")
 	}
 
-	registry.StartKeyRotation(ctx, gatekeeperURL, "git",
+	registry.StartKeyRotation(ctx, gatekeeperURL, "git_connector",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	mux := telemetry.NewMux()
