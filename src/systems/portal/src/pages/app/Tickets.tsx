@@ -376,6 +376,8 @@ export function Tickets() {
   const [error, setError] = useState<string | null>(null);
   // Selected board key: null = "all", UNASSIGNED = no-board pile, otherwise a board_id.
   const [board, setBoard] = useState<string | null>(null);
+  // When on, the board switcher lists only boards that have at least one open ticket.
+  const [openBoardsOnly, setOpenBoardsOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   // The ticket currently being edited in the form modal (null = not editing), plus
@@ -576,6 +578,7 @@ export function Tickets() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>boards/</span>
             <div style={{ display: 'flex', gap: 6 }}>
+              <button onClick={() => setOpenBoardsOnly(v => !v)} title={openBoardsOnly ? 'showing boards with open tickets — click to show all' : 'show only boards with open tickets'} style={{ background: openBoardsOnly ? T.amberSoft : 'transparent', border: `1px solid ${openBoardsOnly ? T.amber : T.border}`, color: openBoardsOnly ? T.amber : T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>open</button>
               <button onClick={() => setShowNewBoard(true)} title="new board" style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>+ board</button>
               <button onClick={() => { fetchData(); fetchStatuses(board); }} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 7px', cursor: 'pointer' }}>↻</button>
             </div>
@@ -593,10 +596,12 @@ export function Tickets() {
           ) : (
             <>
               <BoardRow label="◆ all" value={null} open={openCount} total={tickets.length} />
-              {boards.map(b => {
-                const c = boardCounts(b);
-                return <BoardRow key={b.board_id} label={b.name} value={b.board_id} open={c.open} total={c.total} deletable={b} />;
-              })}
+              {boards
+                .filter(b => !openBoardsOnly || boardCounts(b).open > 0 || b.board_id === board)
+                .map(b => {
+                  const c = boardCounts(b);
+                  return <BoardRow key={b.board_id} label={b.name} value={b.board_id} open={c.open} total={c.total} deletable={b} />;
+                })}
               {unassignedCount > 0 && <BoardRow label="· unassigned" value={UNASSIGNED} open={unassignedOpen} total={unassignedCount} />}
               {boards.length === 0 && (
                 <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 10, color: T.faint, lineHeight: 1.6 }}>
