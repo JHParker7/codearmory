@@ -51,7 +51,12 @@ func TestLogin_Success(t *testing.T) {
 	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
 	orig := readPassword
 	readPassword = func() (string, error) { return "supersecret", nil }
-	t.Cleanup(func() { readPassword = orig })
+	// These cases are the interactive login (they stub the password prompt), so they
+	// must present as a terminal — otherwise resolvePassword refuses to prompt and
+	// directs the user to CODEARMORY_PASSWORD / --password-stdin instead.
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { readPassword = orig; stdinIsTerminal = origTerm })
 
 	if err := loginCmd.RunE(loginCmd, nil); err != nil {
 		t.Fatalf("login: %v", err)
@@ -231,7 +236,12 @@ func TestLogin_KeychainUnavailable_NoPlaintext(t *testing.T) {
 	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
 	orig := readPassword
 	readPassword = func() (string, error) { return "supersecret", nil }
-	t.Cleanup(func() { readPassword = orig })
+	// These cases are the interactive login (they stub the password prompt), so they
+	// must present as a terminal — otherwise resolvePassword refuses to prompt and
+	// directs the user to CODEARMORY_PASSWORD / --password-stdin instead.
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { readPassword = orig; stdinIsTerminal = origTerm })
 
 	if err := loginCmd.RunE(loginCmd, nil); err != nil {
 		t.Fatalf("login should succeed on a keychain-less host, got %v", err)
