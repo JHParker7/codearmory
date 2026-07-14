@@ -974,6 +974,17 @@ func (sr WorkflowStepRun) Complete(_ context.Context, status string, output, log
 	span.SetStatus(codes.Ok, "")
 }
 
+// SetStatus updates a step run's live (non-terminal) display status — used to move it
+// between 'running' and 'waiting_for_resources' as the backing job leaves and re-enters
+// the target service's admission queue. Guarded to rows that are still live so a poll
+// racing Complete() can never resurrect a finished step: ended_at IS NULL is the
+// terminal marker Complete() always sets.
+func (sr WorkflowStepRun) SetStatus(_ context.Context, status string) {
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — display-only; the terminal status is authoritative
+		`UPDATE workflow_step_runs SET status=? WHERE step_run_id=? AND ended_at IS NULL`,
+		status, sr.StepRunID)
+}
+
 // recoverStuckRunsDB marks any runs left in 'running' state as 'failed' on startup.
 func recoverStuckRunsDB() int64 {
 	result := connect().Exec(

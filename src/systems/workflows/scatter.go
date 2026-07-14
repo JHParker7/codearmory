@@ -323,7 +323,7 @@ func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, run
 				results[i] = taskResult{idx: i, err: context.Canceled}
 				return
 			}
-			results[i] = p.runScatterLeg(ctx, store, runID, workflowID, ws, &cfg, shards[i], paths[i], inputs, visible, depth)
+			results[i] = p.runScatterLeg(withStepRunID(ctx, stepRunIDs[i]), store, runID, workflowID, ws, &cfg, shards[i], paths[i], inputs, visible, depth)
 		}(i)
 	}
 	wg.Wait()

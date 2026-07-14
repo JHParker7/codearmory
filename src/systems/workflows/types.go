@@ -20,6 +20,15 @@ const (
 	// and from stuck-run recovery (only 'running' is reaped), so a paused run
 	// survives a worker restart untouched until someone approves or rejects it.
 	StatusAwaitingApproval = "awaiting_approval"
+	// StatusWaitingResources is a non-terminal display state for a step whose backing
+	// job has been submitted but is still QUEUED by the target service — forge holds an
+	// execution until the summed CPU/memory of running runners plus its own fits the
+	// admission budget (FORGE_MAX_TOTAL_*). Without it a fan-out of 15 legs all read
+	// "running" while only 5 have a container, which reads as a hang rather than a
+	// queue doing its job. Only the step run's display status is affected: it is never
+	// persisted as a run status, never claimed by Dequeue, and never reaped by
+	// stuck-run recovery (both of which key off 'pending'/'running' on the RUN).
+	StatusWaitingResources = "waiting_for_resources"
 )
 
 // ActionApproval is a built-in gate action (like ActionHTTP it is not a registry
@@ -59,6 +68,13 @@ type AsyncConfig struct {
 	SuccessStates    []string `json:"success_states"`
 	FailureStates    []string `json:"failure_states"`
 	CancelStates     []string `json:"cancel_states"`
+	// QueuedStates are the non-terminal states meaning "accepted but not started" —
+	// the job is sitting in the target service's admission queue waiting for capacity.
+	// While the poll reports one of these the step run displays StatusWaitingResources
+	// instead of "running". Defaults to ["pending"] (what forge reports for a queued
+	// execution) when an async action does not declare it, so existing manifests get
+	// the behaviour with no change.
+	QueuedStates []string `json:"queued_states,omitempty"`
 	OutputField      string   `json:"output_field"`
 	// OutputMapField names a response field holding an object (e.g. forge's captured
 	// output_env map). When set, it is the ONLY source of the SUCCESS step output:
