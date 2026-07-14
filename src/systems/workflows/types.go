@@ -181,8 +181,28 @@ type ScatterConfig struct {
 	// fails the gather. Empty = gather nothing (legs are independent; collect their
 	// results via output_env instead).
 	Outputs []string `json:"outputs,omitempty"`
+	// ShareBase mounts the base workspace READ-ONLY into every leg instead of giving each
+	// leg its own clone — no per-leg volume, and no per-leg volume-copy (which is itself a
+	// sandbox pod: on a kernel-isolated backend that is one microVM boot per leg, just to
+	// duplicate a source tree none of the legs will write to).
+	//
+	// Use it for read-only fan-outs — compile/test/lint each partition — where legs write
+	// nothing back into the workspace. The saving is not disk (a source tree is small); it
+	// is the N clone volumes and N copy pods. It also lets legs share ONE writable cache
+	// volume (declared in the step's own `volumes`), so they reuse compiled artifacts
+	// instead of each starting from a cold cache — the thing a per-leg clone makes
+	// impossible, since a cache seeded into the base would be duplicated N times.
+	//
+	// The trade-off is deliberate and is why this is opt-in: every leg attaches the SAME
+	// PVC, which is exactly what cloning exists to avoid. On ReadWriteOnce block storage
+	// that only works while all legs land on ONE node; across nodes it Multi-Attach fails.
+	// Safe on a single-node cluster, or on a ReadOnlyMany/ReadWriteMany storage class.
+	//
+	// Mutually exclusive with Outputs: there are no per-leg volumes, so there is nothing
+	// to gather. Legs return results via output_env.
+	ShareBase bool `json:"share_base,omitempty"`
 	// SizeMB / Medium size the per-leg clone volumes (should hold the workspace copy).
-	// Empty = forge's create-volume defaults.
+	// Empty = forge's create-volume defaults. Ignored when ShareBase is set.
 	SizeMB int64  `json:"size_mb,omitempty"`
 	Medium string `json:"medium,omitempty"`
 	// MaxConcurrent caps how many legs run at once. 0 = the default fan-out
