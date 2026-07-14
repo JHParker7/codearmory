@@ -980,9 +980,18 @@ func (sr WorkflowStepRun) Complete(_ context.Context, status string, output, log
 // racing Complete() can never resurrect a finished step: ended_at IS NULL is the
 // terminal marker Complete() always sets.
 func (sr WorkflowStepRun) SetStatus(_ context.Context, status string) {
+	// Restamp started_at when a queued step is finally admitted. A step run row is created
+	// — and started_at stamped — for EVERY leg of a fan-out up front, long before most of
+	// them have capacity to run. Left alone, a leg that waited 20 minutes in the admission
+	// queue reports that wait as runtime, and every leg of a scatter reports an identical
+	// duration spanning the whole group (15 legs all claiming ~1352s when only 5 ever had
+	// a container). started_at should mark when the work began, not when it was enqueued.
 	connect().WithContext(context.Background()).Exec( //nolint:errcheck — display-only; the terminal status is authoritative
-		`UPDATE workflow_step_runs SET status=? WHERE step_run_id=? AND ended_at IS NULL`,
-		status, sr.StepRunID)
+		`UPDATE workflow_step_runs
+		    SET status = ?,
+		        started_at = CASE WHEN ? = ? THEN CURRENT_TIMESTAMP ELSE started_at END
+		  WHERE step_run_id = ? AND ended_at IS NULL`,
+		status, status, StatusRunning, sr.StepRunID)
 }
 
 // recoverStuckRunsDB marks any runs left in 'running' state as 'failed' on startup.
