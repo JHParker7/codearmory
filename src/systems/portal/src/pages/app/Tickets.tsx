@@ -34,8 +34,16 @@ const DEFAULT_STATUSES: TicketFieldDef[] = [
   { field_def_id: 'closed', kind: 'status', value: 'closed', label: 'closed', position: 3 },
 ];
 
-/** Sentinel board key for the "unassigned" pile (tickets with no board). */
-const UNASSIGNED = '\0unassigned';
+/** Priority options used when a board has none of its own configured (mirrors the seeded defaults). */
+const DEFAULT_PRIORITIES: TicketFieldDef[] = [
+  { field_def_id: 'low', kind: 'priority', value: 'low', label: 'low', position: 0 },
+  { field_def_id: 'medium', kind: 'priority', value: 'medium', label: 'medium', position: 1 },
+  { field_def_id: 'high', kind: 'priority', value: 'high', label: 'high', position: 2 },
+  { field_def_id: 'critical', kind: 'priority', value: 'critical', label: 'critical', position: 3 },
+];
+
+/** localStorage key remembering the last board the user had open, restored on next visit. */
+const LAST_BOARD_KEY = 'ca.tickets.lastBoard';
 
 /** Map a ticket status to a UI tone for its pill (closed/resolved→green, open→amber, blocked→red, else dim). */
 function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
@@ -92,11 +100,12 @@ function slugify(s: string): string {
  * changes. Both modes expose the full ticket detail set — title, description,
  * priority, status, timescale, due date, and assignee — to match the CLI form.
  */
-function TicketFormModal({ mode, ticket, boardId, statuses, users, onSaved, onClose }: {
+function TicketFormModal({ mode, ticket, boardId, statuses, priorities, users, onSaved, onClose }: {
   mode: 'create' | 'edit';
   ticket?: Ticket;
   boardId?: string;
   statuses: TicketFieldDef[];
+  priorities: TicketFieldDef[];
   users: User[];
   onSaved: (t: Ticket) => void;
   onClose: () => void;
@@ -114,12 +123,13 @@ function TicketFormModal({ mode, ticket, boardId, statuses, users, onSaved, onCl
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // The standard three priorities, plus the ticket's own value if it uses a
-  // custom one (e.g. "critical") so an edit never silently drops it.
+  // This board's own priority options (per-board, never merged across boards), plus
+  // the ticket's current value if it isn't among them so an edit never silently
+  // drops it.
   const priorityOptions = useMemo(() => {
-    const base = ['low', 'medium', 'high'];
+    const base = [...priorities].sort((a, b) => a.position - b.position).map(p => p.value);
     return priority && !base.includes(priority) ? [...base, priority] : base;
-  }, [priority]);
+  }, [priorities, priority]);
 
   const sortedUsers = useMemo(() => [...users].sort((a, b) => a.username.localeCompare(b.username)), [users]);
 
@@ -372,10 +382,13 @@ export function Tickets() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [boards, setBoards] = useState<Board[]>([]);
   const [statuses, setStatuses] = useState<TicketFieldDef[]>(DEFAULT_STATUSES);
+  const [priorities, setPriorities] = useState<TicketFieldDef[]>(DEFAULT_PRIORITIES);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // Selected board key: null = "all", UNASSIGNED = no-board pile, otherwise a board_id.
-  const [board, setBoard] = useState<string | null>(null);
+  // Selected board key: always a board_id (every ticket belongs to a board — there is
+  // no "all" or unassigned view). null only briefly before the first board resolves.
+  // Seeded from the last board the user had open; the default is picked once boards load.
+  const [board, setBoard] = useState<string | null>(() => localStorage.getItem(LAST_BOARD_KEY));
   // When on, the board switcher lists only boards that have at least one open ticket.
   const [openBoardsOnly, setOpenBoardsOnly] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
@@ -385,6 +398,7 @@ export function Tickets() {
   // being viewed (e.g. on the "all" view), so the edit form scopes to the ticket.
   const [editing, setEditing] = useState<Ticket | null>(null);
   const [editStatuses, setEditStatuses] = useState<TicketFieldDef[]>(DEFAULT_STATUSES);
+  const [editPriorities, setEditPriorities] = useState<TicketFieldDef[]>(DEFAULT_PRIORITIES);
   const [showNewBoard, setShowNewBoard] = useState(false);
   const [showColumns, setShowColumns] = useState(false);
   const [newComment, setNewComment] = useState('');
@@ -393,30 +407,42 @@ export function Tickets() {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
 
-  // Resolve a board switcher key to the board_id used for board-scoped status
-  // columns ("all"/"unassigned" → undefined = org/global columns).
-  const scopedBoardId = useCallback((key: string | null) => (key && key !== UNASSIGNED ? key : undefined), []);
+  // Resolve a board key to the board_id used for board-scoped field defs. board is
+  // always a real id once loaded; null (pre-load) → undefined = org/global fallback.
+  const scopedBoardId = useCallback((key: string | null) => key ?? undefined, []);
 
-  // Status columns are owned per-board, so they are fetched for the selected
-  // board separately from the (board-independent) ticket and board lists.
+  // Status columns AND priority options are owned per-board (never merged across
+  // boards), so both are fetched for the selected board — separately from the
+  // board-independent ticket and board lists. Named fetchStatuses for its callers.
   const fetchStatuses = useCallback(async (key: string | null) => {
+    const bid = scopedBoardId(key);
     try {
-      const defs = await listTicketFieldDefs(token, 'status', scopedBoardId(key));
-      setStatuses(defs.length > 0 ? [...defs].sort((a, b) => a.position - b.position) : DEFAULT_STATUSES);
+      const [st, pr] = await Promise.all([
+        listTicketFieldDefs(token, 'status', bid),
+        listTicketFieldDefs(token, 'priority', bid),
+      ]);
+      setStatuses(st.length > 0 ? [...st].sort((a, b) => a.position - b.position) : DEFAULT_STATUSES);
+      setPriorities(pr.length > 0 ? [...pr].sort((a, b) => a.position - b.position) : DEFAULT_PRIORITIES);
     } catch {
       setStatuses(DEFAULT_STATUSES);
+      setPriorities(DEFAULT_PRIORITIES);
     }
   }, [token, scopedBoardId]);
 
-  // Open the edit form for a ticket, loading its own board's status columns so the
-  // status picker matches where the ticket lives, not the currently-viewed board.
+  // Open the edit form for a ticket, loading its own board's status columns and
+  // priority options so both pickers match where the ticket lives, not the viewed board.
   const openEdit = useCallback((t: Ticket) => {
     setEditing(t);
-    setEditStatuses(statuses); // sensible placeholder until the ticket's board columns load
-    listTicketFieldDefs(token, 'status', t.board_id ?? undefined)
+    setEditStatuses(statuses); // sensible placeholders until the ticket's board defs load
+    setEditPriorities(priorities);
+    const bid = t.board_id ?? undefined;
+    listTicketFieldDefs(token, 'status', bid)
       .then(defs => setEditStatuses(defs.length > 0 ? [...defs].sort((a, b) => a.position - b.position) : DEFAULT_STATUSES))
       .catch(() => setEditStatuses(DEFAULT_STATUSES));
-  }, [token, statuses]);
+    listTicketFieldDefs(token, 'priority', bid)
+      .then(defs => setEditPriorities(defs.length > 0 ? [...defs].sort((a, b) => a.position - b.position) : DEFAULT_PRIORITIES))
+      .catch(() => setEditPriorities(DEFAULT_PRIORITIES));
+  }, [token, statuses, priorities]);
 
   // silent skips the loading flash + error banner, for the background 5s poll so it
   // doesn't blink the board or clobber a transient error the user is reading.
@@ -451,33 +477,41 @@ export function Tickets() {
     return () => clearInterval(id);
   }, [fetchData, fetchStatuses, board, dragId]);
 
-  // If the selected board disappears (deleted elsewhere), fall back to "all".
+  // Remember the open board so the next visit restores it (see LAST_BOARD_KEY).
+  useEffect(() => { if (board) localStorage.setItem(LAST_BOARD_KEY, board); }, [board]);
+
+  // Pick the default board once boards load — and re-pick if the selected one
+  // disappears (deleted elsewhere). Every ticket belongs to a board, so there is no
+  // "all"/unassigned fallback: choose the last board the user had open, else the
+  // board with the most recent ticket activity, else the first board.
   useEffect(() => {
-    if (board !== null && board !== UNASSIGNED && !boards.some(b => b.board_id === board)) setBoard(null);
-  }, [board, boards]);
+    if (boards.length === 0) return;
+    if (board && boards.some(b => b.board_id === board)) return; // current selection still valid
+    const last = localStorage.getItem(LAST_BOARD_KEY);
+    if (last && boards.some(b => b.board_id === last)) { setBoard(last); return; }
+    const latest = new Map<string, number>();
+    for (const t of tickets) {
+      if (!t.board_id) continue;
+      latest.set(t.board_id, Math.max(latest.get(t.board_id) ?? 0, new Date(t.updated_at).getTime()));
+    }
+    const byActivity = [...boards]
+      .filter(b => latest.has(b.board_id))
+      .sort((a, b) => latest.get(b.board_id)! - latest.get(a.board_id)!);
+    setBoard((byActivity[0] ?? boards[0]).board_id);
+  }, [boards, tickets, board]);
 
-  const unassignedCount = useMemo(() => tickets.filter(t => !t.board_id).length, [tickets]);
-  // Open (not resolved/closed) tallies for the "all" and "unassigned" rows, which
-  // aren't backed by a Board row carrying server-computed counts.
-  const openCount = useMemo(() => tickets.filter(t => !isTerminal(t.status)).length, [tickets]);
-  const unassignedOpen = useMemo(() => tickets.filter(t => !t.board_id && !isTerminal(t.status)).length, [tickets]);
-
-  // Open/total for a real board: prefer the server-computed counts (accurate
-  // beyond the ticket-list page cap), falling back to the loaded tickets.
+  // Open/total for a board: prefer the server-computed counts (accurate beyond the
+  // ticket-list page cap), falling back to the loaded tickets.
   const boardCounts = useCallback((b: Board) => ({
     open: b.open_count ?? tickets.filter(t => t.board_id === b.board_id && !isTerminal(t.status)).length,
     total: b.total_count ?? tickets.filter(t => t.board_id === b.board_id).length,
   }), [tickets]);
 
-  const visibleTickets = useMemo(() => {
-    if (board === null) return tickets;
-    if (board === UNASSIGNED) return tickets.filter(t => !t.board_id);
-    return tickets.filter(t => t.board_id === board);
-  }, [tickets, board]);
+  const visibleTickets = useMemo(() => tickets.filter(t => t.board_id === board), [tickets, board]);
 
   const selectedTicket = tickets.find(t => t.ticket_id === selected);
   const selectedBoard = boards.find(b => b.board_id === board);
-  const boardLabel = board === null ? 'all' : board === UNASSIGNED ? 'unassigned' : selectedBoard?.name ?? '';
+  const boardLabel = selectedBoard?.name ?? '';
 
   /** Replace a ticket in local state with the server's updated copy. */
   const applyUpdated = (updated: Ticket) =>
@@ -554,8 +588,8 @@ export function Tickets() {
     }
   };
 
-  // The board_id to tag newly-created tickets with: the active board, or undefined on "all"/"unassigned".
-  const createBoardId = board && board !== UNASSIGNED ? board : undefined;
+  // The board_id to tag newly-created tickets with: always the active board.
+  const createBoardId = board ?? undefined;
 
   /** A board switcher row: name + open/total ticket counts, highlighted when active, with an optional delete affordance. */
   const BoardRow = ({ label, value, open, total, deletable }: { label: string; value: string | null; open: number; total: number; deletable?: Board }) => {
@@ -606,14 +640,12 @@ export function Tickets() {
             <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 11, color: T.red }}>{error}</div>
           ) : (
             <>
-              <BoardRow label="◆ all" value={null} open={openCount} total={tickets.length} />
               {boards
                 .filter(b => !openBoardsOnly || boardCounts(b).open > 0 || b.board_id === board)
                 .map(b => {
                   const c = boardCounts(b);
                   return <BoardRow key={b.board_id} label={b.name} value={b.board_id} open={c.open} total={c.total} deletable={b} />;
                 })}
-              {unassignedCount > 0 && <BoardRow label="· unassigned" value={UNASSIGNED} open={unassignedOpen} total={unassignedCount} />}
               {boards.length === 0 && (
                 <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 10, color: T.faint, lineHeight: 1.6 }}>
                   → create a board to group your tickets
@@ -804,6 +836,7 @@ export function Tickets() {
           mode="create"
           boardId={createBoardId}
           statuses={statuses}
+          priorities={priorities}
           users={users}
           onSaved={t => { setTickets(prev => [t, ...prev]); setSelected(t.ticket_id); setShowCreate(false); }}
           onClose={() => setShowCreate(false)}
@@ -813,8 +846,9 @@ export function Tickets() {
         <TicketFormModal
           mode="edit"
           ticket={editing}
-          // editStatuses is scoped to the ticket's own board (loaded in openEdit).
+          // editStatuses/editPriorities are scoped to the ticket's own board (loaded in openEdit).
           statuses={editStatuses}
+          priorities={editPriorities}
           users={users}
           onSaved={t => { applyUpdated(t); setEditing(null); }}
           onClose={() => setEditing(null)}
