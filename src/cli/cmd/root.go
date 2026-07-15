@@ -93,11 +93,9 @@ func bearerToken() string {
 		}
 		return t
 	}
-	t := loadConfig().Token
-	if exp, ok := jwtExpiry(t); ok && time.Now().After(exp) {
-		return ""
-	}
-	return t
+	// No plaintext config-file fallback: on a keychain-less host the token lives in
+	// the CODEARMORY_TOKEN env var (handled above), never on disk.
+	return ""
 }
 
 // isSignedIn reports whether a usable (non-expired) auth token is available. The
@@ -106,31 +104,34 @@ func bearerToken() string {
 // list every service.
 func isSignedIn() bool { return bearerToken() != "" }
 
-// storeToken saves the token to the OS keychain. If the keychain is
-// unavailable (e.g. headless server), it falls back to the config file.
-// Returns a human-readable description of where the token was stored.
+// storeToken saves the token to the OS keychain. When the keychain is unavailable
+// (e.g. a headless server) it does NOT write the token to disk — the token is a
+// secret and the config file is plaintext. Instead it prints an `export
+// CODEARMORY_TOKEN=…` line so the user can keep the token in their environment (the
+// env var already takes precedence in bearerToken). Returns a human-readable
+// description of where the token was stored, or "" when it was only printed for the
+// user to export.
 func storeToken(token string) (string, error) {
 	// A new token means a (possibly different) caller; drop the cached
 	// per-token routing-table probe so the TUI hub re-resolves it after sign-in.
 	defer resetRegisteredServices()
 	if err := keyring.Set(keychainService, keychainAccount, token); err == nil {
-		return "keychain", nil
+		return "the OS keychain", nil
 	}
-	fmt.Fprintf(os.Stderr, "warning: OS keychain unavailable; token stored in plaintext at %s\n", configPath())
-	cfg := loadConfig()
-	cfg.Token = token
-	if err := saveConfig(cfg); err != nil {
-		return "", err
-	}
-	return configPath(), nil
+	fmt.Fprintf(os.Stderr,
+		"OS keychain unavailable — not writing the token to disk. Export it to authenticate future commands:\n\n    export CODEARMORY_TOKEN=%s\n\n", token)
+	return "", nil
 }
 
-// clearToken removes the token from both the keychain and the config file.
+// clearToken removes the token from the keychain and clears any token left in the
+// config file by older CLI versions (current versions never write it there).
 func clearToken() {
 	keyring.Delete(keychainService, keychainAccount) //nolint:errcheck
 	cfg := loadConfig()
-	cfg.Token = ""
-	saveConfig(cfg) //nolint:errcheck
+	if cfg.Token != "" {
+		cfg.Token = ""
+		saveConfig(cfg) //nolint:errcheck
+	}
 }
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -225,7 +226,10 @@ Token lookup order (highest to lowest precedence):
   1. --token flag
   2. CODEARMORY_TOKEN environment variable
   3. OS keychain (Secret Service on Linux, Keychain on macOS)
-  4. ~/.config/codearmory/config.json (fallback when keychain is unavailable)
+
+When the OS keychain is unavailable (e.g. a headless server), the token is never
+written to disk: 'armory auth login' prints an 'export CODEARMORY_TOKEN=…' line to
+set in your shell instead.
 
 The CODEARMORY_URL environment variable and --url flag override the stored URL.`,
 }

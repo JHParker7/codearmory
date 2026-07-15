@@ -148,28 +148,36 @@ func TestBearerTokenPrecedence(t *testing.T) {
 		t.Errorf("step 1: got %q, want empty", got)
 	}
 
-	// 2. Config file
-	saveConfig(cliConfig{Token: "config-tok"})
-	if got := bearerToken(); got != "config-tok" {
-		t.Errorf("step 2: got %q, want config-tok", got)
-	}
-
-	// 3. Keychain overrides config
+	// 2. Keychain — there is no plaintext config-file fallback.
 	keyring.Set(keychainService, keychainAccount, "keychain-tok")
 	if got := bearerToken(); got != "keychain-tok" {
-		t.Errorf("step 3: got %q, want keychain-tok", got)
+		t.Errorf("step 2: got %q, want keychain-tok", got)
 	}
 
-	// 4. Env var overrides keychain
+	// 3. Env var overrides keychain
 	t.Setenv("CODEARMORY_TOKEN", "env-tok")
 	if got := bearerToken(); got != "env-tok" {
-		t.Errorf("step 4: got %q, want env-tok", got)
+		t.Errorf("step 3: got %q, want env-tok", got)
 	}
 
-	// 5. Flag overrides all
+	// 4. Flag overrides all
 	flagToken = "flag-tok"
 	if got := bearerToken(); got != "flag-tok" {
-		t.Errorf("step 5: got %q, want flag-tok", got)
+		t.Errorf("step 4: got %q, want flag-tok", got)
+	}
+}
+
+func TestBearerToken_NoConfigFileFallback(t *testing.T) {
+	// A token sitting in the config file (e.g. written by an older CLI) is ignored —
+	// the token must come from the keychain or CODEARMORY_TOKEN, never plaintext.
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	t.Cleanup(func() { flagToken = "" })
+
+	saveConfig(cliConfig{Token: "stale-plaintext-tok"})
+	if got := bearerToken(); got != "" {
+		t.Errorf("bearerToken read a plaintext config token %q; it must be ignored", got)
 	}
 }
 
@@ -216,8 +224,8 @@ func TestStoreToken_UsesKeychain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("storeToken: %v", err)
 	}
-	if where != "keychain" {
-		t.Errorf("where = %q, want keychain", where)
+	if where != "the OS keychain" {
+		t.Errorf("where = %q, want the OS keychain", where)
 	}
 
 	got, err := keyring.Get(keychainService, keychainAccount)
@@ -318,45 +326,29 @@ func TestParseData_StdinInvalidJSON(t *testing.T) {
 	}
 }
 
-// ── storeToken config-file fallback ──────────────────────────────────────────
+// ── storeToken keychain-unavailable path ──────────────────────────────────────
 
-func TestStoreToken_FallbackToConfigFile(t *testing.T) {
-	// Force keyring to fail so storeToken falls back to the config file.
-	keyring.MockInitWithError(fmt.Errorf("keyring unavailable"))
-	t.Cleanup(func() { keyring.MockInit() }) // restore to working mock afterwards
-	isolateHome(t)
-	silenceStdout(t) // storeToken writes a warning to stderr; silence for cleanliness
-
-	where, err := storeToken("fallback-token")
-	if err != nil {
-		t.Fatalf("storeToken: %v", err)
-	}
-	if where != configPath() {
-		t.Errorf("where = %q, want configPath = %q", where, configPath())
-	}
-	cfg := loadConfig()
-	if cfg.Token != "fallback-token" {
-		t.Errorf("config token = %q, want fallback-token", cfg.Token)
-	}
-}
-
-func TestStoreToken_FallbackSaveConfigFails(t *testing.T) {
-	// Both keyring and saveConfig fail — storeToken must return an error.
+func TestStoreToken_KeychainUnavailable_NoDiskWrite(t *testing.T) {
+	// Force keyring to fail. storeToken must NOT persist the token to disk — it
+	// prints an `export CODEARMORY_TOKEN=…` line for the user instead.
 	keyring.MockInitWithError(fmt.Errorf("keyring unavailable"))
 	t.Cleanup(func() { keyring.MockInit() })
 	isolateHome(t)
-	silenceStdout(t)
+	silenceStdout(t) // storeToken prints the export instruction to stderr
 
-	// Make $HOME/.config a regular file so os.MkdirAll (called by saveConfig) fails.
-	home, _ := os.UserHomeDir()
-	cfgParent := filepath.Join(home, ".config")
-	if err := os.WriteFile(cfgParent, []byte("not a dir"), 0600); err != nil {
-		t.Fatalf("setup: %v", err)
+	where, err := storeToken("secret-token")
+	if err != nil {
+		t.Fatalf("storeToken: %v", err)
 	}
-
-	_, err := storeToken("doomed-token")
-	if err == nil {
-		t.Fatal("expected error when both keyring and saveConfig fail, got nil")
+	if where != "" {
+		t.Errorf("where = %q, want \"\" (token only printed, not stored)", where)
+	}
+	// The token must not have been written to the config file.
+	if cfg := loadConfig(); cfg.Token != "" {
+		t.Errorf("config token = %q, want empty — the token must never be written to plaintext", cfg.Token)
+	}
+	if _, err := os.Stat(configPath()); err == nil {
+		t.Error("config file was written on the keychain-unavailable path; it must not be")
 	}
 }
 
