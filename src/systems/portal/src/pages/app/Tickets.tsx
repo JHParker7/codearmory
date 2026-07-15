@@ -657,8 +657,9 @@ export function Tickets() {
       </div>
       {railHandle}
 
-      {/* Right panel — the kanban board for the selected board */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Right panel — the kanban board for the selected board. order 3 keeps it to
+          the right of the detail panel (order 2) when a ticket is open. */}
+      <div style={{ order: 3, flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
             <span style={{ color: T.green }}>$</span> armory tickets board{boardLabel ? ` · ${boardLabel}` : ''}
@@ -725,10 +726,12 @@ export function Tickets() {
         )}
       </div>
 
-      {/* Detail drawer */}
+      {/* Ticket detail — an inline panel immediately right of the board selector,
+          ~1/4 of the screen wide; the kanban (order 3) fills the space to its right.
+          flex `order` places it between the rail and the board without moving the JSX. */}
       {selectedTicket && (
-        <div onClick={() => setSelected(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 40, display: 'flex', justifyContent: 'flex-end' }}>
-          <div onClick={e => e.stopPropagation()} style={{ width: 520, maxWidth: '90vw', height: '100%', background: T.bg, borderLeft: `1px solid ${T.borderHi}`, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ order: 2, width: '25%', minWidth: 300, flexShrink: 0, height: '100%', display: 'flex' }}>
+          <div style={{ flex: 1, background: T.bg, borderRight: `1px solid ${T.borderHi}`, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 <span style={{ color: T.green }}>$</span> {selectedTicket.title}
