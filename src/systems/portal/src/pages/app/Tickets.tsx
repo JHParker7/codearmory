@@ -418,9 +418,10 @@ export function Tickets() {
       .catch(() => setEditStatuses(DEFAULT_STATUSES));
   }, [token, statuses]);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  // silent skips the loading flash + error banner, for the background 5s poll so it
+  // doesn't blink the board or clobber a transient error the user is reading.
+  const fetchData = useCallback(async (silent = false) => {
+    if (!silent) { setLoading(true); setError(null); }
     try {
       const [tk, bd] = await Promise.all([
         listTickets(token),
@@ -429,9 +430,9 @@ export function Tickets() {
       setTickets(tk);
       setBoards(bd);
     } catch (e: unknown) {
-      setError((e as Error).message);
+      if (!silent) setError((e as Error).message);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [token]);
 
@@ -439,6 +440,16 @@ export function Tickets() {
 
   // Refetch the status columns whenever the selected board changes.
   useEffect(() => { fetchStatuses(board); }, [board, fetchStatuses]);
+
+  // Live-refresh the board every 5s so ticket changes — status moves, new tickets,
+  // comments, including ones made from the CLI — appear without a manual reload.
+  // Silent (no loading flash) and paused mid-drag so a background refetch never yanks
+  // the board out from under a drag in progress.
+  useEffect(() => {
+    if (dragId) return;
+    const id = setInterval(() => { fetchData(true); fetchStatuses(board); }, 5000);
+    return () => clearInterval(id);
+  }, [fetchData, fetchStatuses, board, dragId]);
 
   // If the selected board disappears (deleted elsewhere), fall back to "all".
   useEffect(() => {

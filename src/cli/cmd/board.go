@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -74,6 +75,15 @@ type boardDataMsg struct {
 type boardStatusesMsg struct{ statuses []boardFieldDef }
 type boardMovedMsg struct{}
 type boardErrMsg struct{ err error }
+
+// boardTickMsg drives the periodic auto-refresh (see boardTick).
+type boardTickMsg struct{}
+
+// boardTick fires a boardTickMsg every 5s so the board live-refreshes without the
+// user pressing r; each tick reschedules the next from Update.
+func boardTick() tea.Cmd {
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg { return boardTickMsg{} })
+}
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -422,7 +432,7 @@ func sendMoveTicket(t boardTicket, newStatus string) tea.Cmd {
 
 // ── Init / Update / View ─────────────────────────────────────────────────────
 
-func (m boardModel) Init() tea.Cmd { return fetchBoardData(m.boardFilter) }
+func (m boardModel) Init() tea.Cmd { return tea.Batch(fetchBoardData(m.boardFilter), boardTick()) }
 
 func (m boardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Mode-independent messages.
@@ -490,6 +500,18 @@ func (m boardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading, m.err = false, msg.err
 		m.mode = boardModeNav
 		return m, nil
+	case boardTickMsg:
+		// Auto-refresh every 5s so board changes (from the web UI or another CLI)
+		// appear without pressing r — but only in nav mode (never mid-form) and not
+		// during the initial load. Follow the selected ticket so the cursor doesn't
+		// jump when the columns rebuild. Always reschedule the tick.
+		if m.mode == boardModeNav && !m.loading {
+			if m.col >= 0 && m.col < len(m.cols) && m.row >= 0 && m.row < len(m.cols[m.col]) {
+				m.followID = m.cols[m.col][m.row].ID
+			}
+			return m, tea.Batch(fetchBoardData(m.boardFilter), boardTick())
+		}
+		return m, boardTick()
 	}
 
 	switch m.mode {
