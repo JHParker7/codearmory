@@ -389,6 +389,10 @@ type Workflow struct {
 	Ticket   *TicketConfig     `json:"ticket,omitempty" gorm:"column:ticket;serializer:json"`
 	StepRefs []WorkflowStepRef `json:"-"            gorm:"column:steps;serializer:json"`
 	Steps    []WorkflowStep    `json:"steps"        gorm:"-"`
+	// LastRunAt is the trigger time of this workflow's most recent run, or nil if it
+	// has never run. Not a stored column — computed by listWorkflows from the runs
+	// table so the UIs can show a "last ran" column.
+	LastRunAt *time.Time `json:"last_run_at,omitempty" gorm:"-"`
 }
 
 func (Workflow) TableName() string { return "workflows" }

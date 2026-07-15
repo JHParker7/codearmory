@@ -370,7 +370,46 @@ func listWorkflows(ctx context.Context, userID, orgID, projectFilter string) ([]
 	if wfs == nil {
 		wfs = []Workflow{}
 	}
+	populateLastRunAt(ctx, wfs)
 	return wfs, nil
+}
+
+// populateLastRunAt sets each workflow's LastRunAt to the trigger time of its most
+// recent run, in a single grouped query over the runs of the listed workflows. It is
+// best-effort: a query error leaves LastRunAt nil (the list still renders, just
+// without the "last ran" value) rather than failing the whole listing.
+func populateLastRunAt(ctx context.Context, wfs []Workflow) {
+	if len(wfs) == 0 {
+		return
+	}
+	ids := make([]string, len(wfs))
+	for i := range wfs {
+		ids[i] = wfs[i].WorkflowID
+	}
+	type lastRun struct {
+		WorkflowID string    `gorm:"column:workflow_id"`
+		LastRunAt  time.Time `gorm:"column:last_run_at"`
+	}
+	var rows []lastRun
+	if err := connectRead().WithContext(ctx).
+		Model(&WorkflowRun{}).
+		Select("workflow_id, MAX(created_at) AS last_run_at").
+		Where("workflow_id IN ?", ids).
+		Group("workflow_id").
+		Scan(&rows).Error; err != nil {
+		slog.WarnContext(ctx, "listWorkflows: last-run lookup failed", "error", err)
+		return
+	}
+	byID := make(map[string]time.Time, len(rows))
+	for _, r := range rows {
+		byID[r.WorkflowID] = r.LastRunAt
+	}
+	for i := range wfs {
+		if t, ok := byID[wfs[i].WorkflowID]; ok {
+			at := t
+			wfs[i].LastRunAt = &at
+		}
+	}
 }
 
 // enrichStepRefs looks up the full Step definition for each step ref and assembles

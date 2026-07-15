@@ -86,11 +86,12 @@ func tuiRunStatusActive(s string) bool {
 // ── API types ─────────────────────────────────────────────────────────────────
 
 type tuiPipeline struct {
-	WorkflowID  string    `json:"workflow_id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Active      bool      `json:"active"`
-	CreatedAt   time.Time `json:"created_at"`
+	WorkflowID  string     `json:"workflow_id"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Active      bool       `json:"active"`
+	CreatedAt   time.Time  `json:"created_at"`
+	LastRunAt   *time.Time `json:"last_run_at"`
 }
 
 type tuiRun struct {
@@ -353,6 +354,7 @@ var (
 		{"DESCRIPTION", 20, 3},
 		{"ACTIVE", 6, 0},
 		{"CREATED", 14, 0},
+		{"LAST RAN", 14, 0},
 	}
 	// Runs have no human name; the runs list is already scoped to one pipeline
 	// (its name is in the view title), so the primary label is meaningful context
@@ -737,11 +739,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !p.Active {
 				active = "○"
 			}
+			lastRan := "—"
+			if p.LastRunAt != nil {
+				lastRan = p.LastRunAt.Local().Format("Jan 02 15:04")
+			}
 			rows[i] = table.Row{
 				p.Name,
 				p.Description,
 				active,
 				p.CreatedAt.Local().Format("Jan 02 15:04"),
+				lastRan,
 			}
 		}
 		m.pTable.SetRows(rows)

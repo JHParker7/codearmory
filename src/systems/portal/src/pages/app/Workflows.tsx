@@ -754,6 +754,9 @@ function PipelinesTab() {
                   {wf.steps.length} step{wf.steps.length !== 1 ? 's' : ''} ·{' '}
                   {wf.active ? <span style={{ color: T.green }}>active</span> : <span style={{ color: T.dim }}>inactive</span>}
                 </div>
+                <div style={{ fontSize: 10, color: T.faint, marginTop: 2 }}>
+                  last ran: {wf.last_run_at ? `${timeAgo(wf.last_run_at)} ago` : <span style={{ color: T.dim }}>never</span>}
+                </div>
                 {/* Show the project tag only when unfiltered — under a filter every row shares it. */}
                 {!project && wf.project && <div style={{ fontSize: 10, color: T.green, marginTop: 3 }}>◆ {wf.project}</div>}
               </button>
