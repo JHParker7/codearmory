@@ -100,12 +100,14 @@ function slugify(s: string): string {
  * changes. Both modes expose the full ticket detail set — title, description,
  * priority, status, timescale, due date, and assignee — to match the CLI form.
  */
-function TicketFormModal({ mode, ticket, boardId, statuses, priorities, users, onSaved, onClose }: {
+function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOptions, users, onSaved, onClose }: {
   mode: 'create' | 'edit';
   ticket?: Ticket;
   boardId?: string;
   statuses: TicketFieldDef[];
   priorities: TicketFieldDef[];
+  // Candidate parent tickets (same board, excluding this ticket) for the parent picker.
+  parentOptions: Ticket[];
   users: User[];
   onSaved: (t: Ticket) => void;
   onClose: () => void;
@@ -120,6 +122,7 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, users, o
   const [timescale, setTimescale] = useState(ticket?.timescale ?? '');
   const [dueDate, setDueDate] = useState(ticket?.due_date ? ticket.due_date.slice(0, 10) : '');
   const [assigneeId, setAssigneeId] = useState(ticket?.assignee_id ?? '');
+  const [parent, setParent] = useState(ticket?.parent_id ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -142,13 +145,14 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, users, o
         // "" clears the due date / unassigns; timescale "" is ignored server-side.
         onSaved(await updateTicket(token, ticket.ticket_id, {
           title: title.trim(), description: description.trim(), status, priority,
-          timescale: timescale.trim(), due_date: dueDate, assignee_id: assigneeId,
+          timescale: timescale.trim(), due_date: dueDate, assignee_id: assigneeId, parent_id: parent,
         }));
       } else {
         // Place the new ticket on the active board so it shows up where the user is looking.
         onSaved(await createTicket(token, {
           title: title.trim(), description: description.trim() || undefined, status, priority, board_id: boardId,
           timescale: timescale.trim() || undefined, due_date: dueDate || undefined, assignee_id: assigneeId || undefined,
+          parent_id: parent || undefined,
         }));
       }
     } catch (e: unknown) {
@@ -227,6 +231,15 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, users, o
               {/* Keep the current assignee selectable even if they aren't in the fetched catalog (e.g. no list permission). */}
               {assigneeId && !sortedUsers.some(u => u.user_id === assigneeId) && <option value={assigneeId}>{shortId(assigneeId)}</option>}
               {sortedUsers.map(u => <option key={u.user_id} value={u.user_id}>{u.username}</option>)}
+            </select>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            {fieldLabel('PARENT TICKET')}
+            <select value={parent} onChange={e => setParent(e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>
+              <option value="">— none (top-level) —</option>
+              {/* Keep the current parent selectable even if it's off this board / not in the list. */}
+              {parent && !parentOptions.some(t => t.ticket_id === parent) && <option value={parent}>{shortId(parent)}</option>}
+              {parentOptions.map(t => <option key={t.ticket_id} value={t.ticket_id}>{t.title}</option>)}
             </select>
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
@@ -790,7 +803,31 @@ export function Tickets() {
                   <span style={{ color: T.faint }}>project</span>
                   <span style={{ color: T.dim }}>{selectedTicket.project}</span>
                 </>}
+                {selectedTicket.parent_id && <>
+                  <span style={{ color: T.faint }}>parent</span>
+                  <span onClick={() => setSelected(selectedTicket.parent_id!)}
+                    style={{ color: T.green, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    ↑ {tickets.find(t => t.ticket_id === selectedTicket.parent_id)?.title ?? shortId(selectedTicket.parent_id)}
+                  </span>
+                </>}
               </div>
+
+              {(() => {
+                const children = tickets.filter(t => t.parent_id === selectedTicket.ticket_id);
+                if (children.length === 0) return null;
+                return (
+                  <div style={{ marginBottom: 20 }}>
+                    <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 8 }}>SUB-TICKETS · {children.length}</div>
+                    {children.map(c => (
+                      <div key={c.ticket_id} onClick={() => setSelected(c.ticket_id)}
+                        style={{ background: T.card, border: `1px solid ${T.border}`, borderLeft: `2px solid ${priorityColor(c.priority)}`, padding: '7px 11px', marginBottom: 6, cursor: 'pointer', fontFamily: T.mono, fontSize: 12, color: T.text, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.title}</span>
+                        <Pill tone={statusTone(c.status)}>{c.status}</Pill>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
 
               {selectedTicket.description && (
                 <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '12px 16px', fontFamily: T.mono, fontSize: 13, color: T.text, lineHeight: 1.6, marginBottom: 20, whiteSpace: 'pre-wrap' }}>
@@ -840,6 +877,7 @@ export function Tickets() {
           boardId={createBoardId}
           statuses={statuses}
           priorities={priorities}
+          parentOptions={visibleTickets}
           users={users}
           onSaved={t => { setTickets(prev => [t, ...prev]); setSelected(t.ticket_id); setShowCreate(false); }}
           onClose={() => setShowCreate(false)}
@@ -852,6 +890,7 @@ export function Tickets() {
           // editStatuses/editPriorities are scoped to the ticket's own board (loaded in openEdit).
           statuses={editStatuses}
           priorities={editPriorities}
+          parentOptions={tickets.filter(t => t.board_id === editing.board_id && t.ticket_id !== editing.ticket_id)}
           users={users}
           onSaved={t => { applyUpdated(t); setEditing(null); }}
           onClose={() => setEditing(null)}
