@@ -90,7 +90,7 @@ func handleCreateBoard(w http.ResponseWriter, r *http.Request) {
 	// Give the board its own copy of the status columns so they can be edited
 	// independently. Best-effort: on failure the board falls back to the
 	// org/global status set, so this never blocks board creation.
-	if err := seedBoardStatuses(ctx, b); err != nil {
+	if err := seedBoardFieldDefs(ctx, b); err != nil {
 		span.RecordError(err)
 		slog.WarnContext(ctx, "create board: seed status columns failed", "board_id", b.BoardID, "user_id", userID, "error", err)
 	}

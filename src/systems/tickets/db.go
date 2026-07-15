@@ -399,7 +399,7 @@ func getOrCreateDefaultBoard(ctx context.Context, userID, orgID string) (Board, 
 	}
 	// Best-effort, matching handleCreateBoard: on failure the board falls back to
 	// the org/global status set rather than failing ticket creation.
-	if err := seedBoardStatuses(ctx, b); err != nil {
+	if err := seedBoardFieldDefs(ctx, b); err != nil {
 		slog.WarnContext(ctx, "default board: seed status columns failed", "board_id", b.BoardID, "error", err)
 	}
 	return b, nil
@@ -721,40 +721,54 @@ func queryFieldDefs(ctx context.Context, orgID, kind, boardID string) ([]TicketF
 // replace the org/global set, falling back to org/global when the board has
 // configured none (or boardID==""). Priority/timescale defs are always
 // org/global. Results are ordered by position within each kind.
+// boardScopedKind reports whether a field kind is owned per-board — each board has
+// its own set, falling back to the org/global set only when it has none of its own.
+// Status and priority are board-scoped (each board defines its own columns and its
+// own priority options, never merged across boards); timescale stays org/global.
+func boardScopedKind(kind string) bool {
+	return kind == FieldKindStatus || kind == FieldKindPriority
+}
+
+// resolveBoardScopedDefs returns a board's effective set for one board-scoped kind:
+// the board's own defs, or the org/global defs when the board configured none.
+func resolveBoardScopedDefs(ctx context.Context, orgID, kind, boardID string) ([]TicketFieldDef, error) {
+	if boardID != "" {
+		own, err := queryFieldDefs(ctx, orgID, kind, boardID)
+		if err != nil {
+			return nil, err
+		}
+		if len(own) > 0 {
+			return own, nil
+		}
+	}
+	return queryFieldDefs(ctx, orgID, kind, "")
+}
+
 func listFieldDefs(ctx context.Context, orgID, kind, boardID string) ([]TicketFieldDef, error) {
-	// Non-status kinds are never board-scoped.
-	if kind != "" && kind != FieldKindStatus {
+	// A single non-board-scoped kind (timescale): always org/global.
+	if kind != "" && !boardScopedKind(kind) {
 		return queryFieldDefs(ctx, orgID, kind, "")
 	}
-
-	// Resolve the effective status set: the board's own columns, else org/global.
-	var statuses []TicketFieldDef
-	if boardID != "" {
-		own, err := queryFieldDefs(ctx, orgID, FieldKindStatus, boardID)
+	// A single board-scoped kind: the board's own set, else org/global.
+	if kind != "" {
+		return resolveBoardScopedDefs(ctx, orgID, kind, boardID)
+	}
+	// kind == "": all kinds — board-scoped status+priority resolved for the board,
+	// plus org/global for every non-board-scoped kind (timescale).
+	var out []TicketFieldDef
+	for _, k := range []string{FieldKindStatus, FieldKindPriority} {
+		defs, err := resolveBoardScopedDefs(ctx, orgID, k, boardID)
 		if err != nil {
 			return nil, err
 		}
-		statuses = own
+		out = append(out, defs...)
 	}
-	if len(statuses) == 0 {
-		base, err := queryFieldDefs(ctx, orgID, FieldKindStatus, "")
-		if err != nil {
-			return nil, err
-		}
-		statuses = base
-	}
-	if kind == FieldKindStatus {
-		return statuses, nil
-	}
-
-	// kind == "": all kinds — board-scoped statuses plus org/global others.
 	others, err := queryFieldDefs(ctx, orgID, "", "")
 	if err != nil {
 		return nil, err
 	}
-	out := statuses
 	for _, d := range others {
-		if d.Kind != FieldKindStatus {
+		if !boardScopedKind(d.Kind) {
 			out = append(out, d)
 		}
 	}
@@ -801,34 +815,52 @@ func builtinStatusDefs() []TicketFieldDef {
 	}
 }
 
-// seedBoardStatuses gives a freshly-created board its own copy of the effective
-// org/global status columns so its columns can be edited independently of other
-// boards. Best-effort: a failure leaves the board falling back to org/global
-// statuses, so callers log rather than fail board creation.
-func seedBoardStatuses(ctx context.Context, b Board) error {
-	base, err := queryFieldDefs(ctx, b.OrgID, FieldKindStatus, "")
-	if err != nil {
-		return err
+// builtinPriorityDefs returns the hard-coded default priority options, used to seed
+// a board's priorities when the org/global priority set is somehow empty.
+func builtinPriorityDefs() []TicketFieldDef {
+	return []TicketFieldDef{
+		{Kind: FieldKindPriority, Value: PriorityLow, Label: "Low", Color: "#4a5346", Position: 0},
+		{Kind: FieldKindPriority, Value: PriorityMedium, Label: "Medium", Color: "#7d8a78", Position: 1},
+		{Kind: FieldKindPriority, Value: PriorityHigh, Label: "High", Color: "#c9b060", Position: 2},
+		{Kind: FieldKindPriority, Value: PriorityCritical, Label: "Critical", Color: "#d46b55", Position: 3},
 	}
-	if len(base) == 0 {
-		base = builtinStatusDefs()
-	}
+}
+
+// seedBoardFieldDefs gives a freshly-created board its own copy of the effective
+// org/global status AND priority sets, so each board owns both independently —
+// per-board columns and per-board priority options, never merged across boards.
+// Best-effort: a failure leaves the board falling back to org/global, so callers
+// log rather than fail board creation.
+func seedBoardFieldDefs(ctx context.Context, b Board) error {
 	now := time.Now().UTC()
-	defs := make([]TicketFieldDef, 0, len(base))
-	for i, s := range base {
-		defs = append(defs, TicketFieldDef{
-			FieldDefID: uuid.New().String(),
-			OrgID:      b.OrgID,
-			BoardID:    b.BoardID,
-			Kind:       FieldKindStatus,
-			Value:      s.Value,
-			Label:      s.Label,
-			Color:      s.Color,
-			Position:   i,
-			Active:     true,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		})
+	var defs []TicketFieldDef
+	for _, kind := range []string{FieldKindStatus, FieldKindPriority} {
+		base, err := queryFieldDefs(ctx, b.OrgID, kind, "")
+		if err != nil {
+			return err
+		}
+		if len(base) == 0 {
+			if kind == FieldKindStatus {
+				base = builtinStatusDefs()
+			} else {
+				base = builtinPriorityDefs()
+			}
+		}
+		for i, s := range base {
+			defs = append(defs, TicketFieldDef{
+				FieldDefID: uuid.New().String(),
+				OrgID:      b.OrgID,
+				BoardID:    b.BoardID,
+				Kind:       kind,
+				Value:      s.Value,
+				Label:      s.Label,
+				Color:      s.Color,
+				Position:   i,
+				Active:     true,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			})
+		}
 	}
 	if len(defs) == 0 {
 		return nil

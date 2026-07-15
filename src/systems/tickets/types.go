@@ -103,11 +103,11 @@ func (Board) TableName() string { return "ticket_boards" }
 // TicketFieldDef defines a custom status, priority, or timescale value.
 // OrgID="" means it is a system-wide default visible to all orgs.
 //
-// BoardID scopes a status def to a single board so each board owns its own
-// status columns ("linked to the board"). BoardID="" is the org/global level
-// used by no-board tickets and as the fallback for boards that have not
-// configured their own columns. Only status defs are ever board-scoped;
-// priority/timescale defs always keep BoardID="".
+// BoardID scopes a def to a single board so each board owns its own status columns
+// AND its own priority options ("linked to the board"), never merged across boards.
+// BoardID="" is the org/global level used as the fallback for boards that have not
+// configured their own. Status and priority defs are board-scoped; timescale defs
+// always keep BoardID="".
 type TicketFieldDef struct {
 	FieldDefID string    `json:"field_def_id"        gorm:"column:field_def_id;primaryKey"`
 	OrgID      string    `json:"org_id"              gorm:"column:org_id;default:''"`

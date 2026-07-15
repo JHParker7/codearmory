@@ -110,9 +110,9 @@ func handleCreateFieldDef(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "label is required", http.StatusBadRequest)
 		return
 	}
-	// Only status columns can be board-scoped; priority/timescale are org-wide.
-	if req.BoardID != "" && req.Kind != FieldKindStatus {
-		http.Error(w, "only status columns can be board-scoped", http.StatusBadRequest)
+	// Status and priority columns can be board-scoped; timescale stays org-wide.
+	if req.BoardID != "" && !boardScopedKind(req.Kind) {
+		http.Error(w, "only status and priority columns can be board-scoped", http.StatusBadRequest)
 		return
 	}
 	if req.BoardID != "" {
