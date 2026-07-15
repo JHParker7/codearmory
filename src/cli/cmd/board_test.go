@@ -250,13 +250,16 @@ func TestUpdate_KeysIgnoredWhileLoading(t *testing.T) {
 // ── message handling ──────────────────────────────────────────────────────────
 
 func TestUpdate_BoardLoadedMsg_PopulatesColumns(t *testing.T) {
-	m := boardModel{loading: true}
+	bid := "board-1"
+	m := boardModel{loading: true, boardFilter: bid}
 	msg := boardDataMsgDefaults()
-	// Two open tickets (col 0) and one resolved (col 2); the model regroups by status.
+	msg.boards = []boardInfo{{ID: bid, Name: "B1"}}
+	// Two open tickets (col 0) and one resolved (col 2) on the selected board; the
+	// model regroups by status. Every ticket belongs to a board (no all/unassigned view).
 	msg.tickets = []boardTicket{
-		{ID: testUUID, Title: "a", Status: "open"},
-		{ID: testUUID, Title: "b", Status: "open"},
-		{ID: testUUID, Title: "c", Status: "resolved"},
+		{ID: testUUID, Title: "a", Status: "open", BoardID: &bid},
+		{ID: testUUID, Title: "b", Status: "open", BoardID: &bid},
+		{ID: testUUID, Title: "c", Status: "resolved", BoardID: &bid},
 	}
 
 	next, _ := m.Update(msg)
