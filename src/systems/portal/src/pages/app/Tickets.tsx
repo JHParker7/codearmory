@@ -123,6 +123,7 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOp
   const [dueDate, setDueDate] = useState(ticket?.due_date ? ticket.due_date.slice(0, 10) : '');
   const [assigneeId, setAssigneeId] = useState(ticket?.assignee_id ?? '');
   const [parent, setParent] = useState(ticket?.parent_id ?? '');
+  const [project, setProject] = useState(ticket?.project ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -146,13 +147,14 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOp
         onSaved(await updateTicket(token, ticket.ticket_id, {
           title: title.trim(), description: description.trim(), status, priority,
           timescale: timescale.trim(), due_date: dueDate, assignee_id: assigneeId, parent_id: parent,
+          project: project.trim(),
         }));
       } else {
         // Place the new ticket on the active board so it shows up where the user is looking.
         onSaved(await createTicket(token, {
           title: title.trim(), description: description.trim() || undefined, status, priority, board_id: boardId,
           timescale: timescale.trim() || undefined, due_date: dueDate || undefined, assignee_id: assigneeId || undefined,
-          parent_id: parent || undefined,
+          parent_id: parent || undefined, project: project.trim() || undefined,
         }));
       }
     } catch (e: unknown) {
@@ -223,6 +225,10 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOp
               {fieldLabel('DUE DATE')}
               <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} style={{ ...inputStyle, colorScheme: 'dark' }} />
             </div>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            {fieldLabel('PROJECT')}
+            <input value={project} onChange={e => setProject(e.target.value)} placeholder="e.g. platform-migration" style={inputStyle} />
           </div>
           <div style={{ marginBottom: 16 }}>
             {fieldLabel('ASSIGNEE')}

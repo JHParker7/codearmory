@@ -644,7 +644,7 @@ export function createTicket(token: string, payload: { title: string; descriptio
 
 // board_id: a string assigns the ticket to that board; "" re-homes it to the default board; omit to leave unchanged.
 // due_date accepts YYYY-MM-DD; "" clears it. assignee_id "" unassigns. timescale "" is ignored server-side (kept).
-export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string; board_id: string; parent_id: string; timescale: string; due_date: string }>) {
+export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string; board_id: string; parent_id: string; project: string; timescale: string; due_date: string }>) {
   return req<Ticket>('PUT', `/tickets/tickets/${id}`, token, payload);
 }
 
