@@ -220,17 +220,24 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
  * In the collapsed rail there is no header to click, so items always render (matching
  * today's slim-rail behaviour), and per-section state is left untouched.
  */
-function NavSection({ title, sidebarCollapsed, children }: { title: string; sidebarCollapsed: boolean; children: ReactNode }) {
-  const storageKey = `nav.section.${title}`;
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(storageKey) === '1');
-  useEffect(() => { localStorage.setItem(storageKey, collapsed ? '1' : '0'); }, [collapsed, storageKey]);
+function NavSection({ title, sidebarCollapsed, defaultCollapsed = false, children }: { title: string; sidebarCollapsed: boolean; defaultCollapsed?: boolean; children: ReactNode }) {
+  // v2 namespace: bumped when the default expansion changed (only tools stays open by
+  // default) so the new defaults apply even in browsers that persisted the old ones.
+  // We persist only on an explicit toggle, so an untouched section always follows
+  // defaultCollapsed while a user's own choice still sticks across reloads.
+  const storageKey = `nav.section.v2.${title}`;
+  const [collapsed, setCollapsed] = useState(() => {
+    const stored = localStorage.getItem(storageKey);
+    return stored === null ? defaultCollapsed : stored === '1';
+  });
+  const toggle = () => setCollapsed(c => { const next = !c; localStorage.setItem(storageKey, next ? '1' : '0'); return next; });
 
   // Slim rail: no header to toggle, so show the items as-is.
   if (sidebarCollapsed) return <>{children}</>;
 
   return (
     <>
-      <button onClick={() => setCollapsed(c => !c)} title={collapsed ? `expand ${title}` : `minimise ${title}`}
+      <button onClick={toggle} title={collapsed ? `expand ${title}` : `minimise ${title}`}
         style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
           background: 'transparent', border: 'none', color: T.faint, fontFamily: T.mono, fontSize: 10,
           letterSpacing: 1, padding: '6px 14px 4px', textTransform: 'uppercase', cursor: 'pointer', transition: 'color .12s' }}
@@ -349,7 +356,7 @@ export function AppLayout() {
             <NavItem to="/app/git" label="git/" desc="Connect & clone your repositories" service="git_connector" collapsed={navCollapsed} icon="git" />
           </NavSection>
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="modules" sidebarCollapsed={navCollapsed}>
+          <NavSection title="modules" sidebarCollapsed={navCollapsed} defaultCollapsed>
             <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navCollapsed} icon="forge" />
             <NavItem to="/app/hooks" label="hooks/" desc="Trigger actions from webhooks" service="hooks" collapsed={navCollapsed} icon="hooks" />
             <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navCollapsed} icon="containers" />
@@ -362,13 +369,13 @@ export function AppLayout() {
             ))}
           </NavSection>
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="admin" sidebarCollapsed={navCollapsed}>
+          <NavSection title="admin" sidebarCollapsed={navCollapsed} defaultCollapsed>
             {permissions?.['builder:configureOrgService'] && <NavItem to="/app/builder" label="builder/" desc="Deploy & configure services" collapsed={navCollapsed} icon="builder" />}
             {permissions?.['gatekeeper:listAuditLog'] && <NavItem to="/app/audit" label="audit/" desc="Who changed what, and when" collapsed={navCollapsed} icon="audit" />}
             <NavItem to="/app/gatekeeper" label="gatekeeper/" desc="Access control — users & roles" collapsed={navCollapsed} icon="gatekeeper" />
           </NavSection>
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
-          <NavSection title="account" sidebarCollapsed={navCollapsed}>
+          <NavSection title="account" sidebarCollapsed={navCollapsed} defaultCollapsed>
             <NavItem to="/app/settings" label="settings/" desc="Theme, account & preferences" collapsed={navCollapsed} icon="settings" />
           </NavSection>
         </nav>
