@@ -320,24 +320,40 @@ func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, run
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
+				// Cancelled while still queued: the leg never ran, so leave its
+				// started_at NULL (zero duration) and just record the terminal state.
 				results[i] = taskResult{idx: i, err: context.Canceled}
+				p.finishStepRun(stepRunIDs[i], StatusCancelled, nil, nil, nil, nil)
 				return
 			}
-			results[i] = p.runScatterLeg(withStepRunID(ctx, stepRunIDs[i]), store, runID, workflowID, ws, &cfg, shards[i], paths[i], inputs, visible, depth)
+			r := p.runScatterLeg(withStepRunID(ctx, stepRunIDs[i]), store, runID, workflowID, ws, &cfg, shards[i], paths[i], inputs, visible, depth)
+			results[i] = r
+			// Record this leg's own terminal time the moment it finishes, so each leg
+			// shows its real end instead of the instant the whole group's barrier was
+			// reached (which made every leg display an identical end time). started_at is
+			// stamped by the withStepRunID poller path (queued→running), so no begin here.
+			st := StatusCompleted
+			switch {
+			case r.err != nil && ctx.Err() != nil:
+				st = StatusCancelled
+			case r.err != nil:
+				st = StatusFailed
+			}
+			p.finishStepRun(stepRunIDs[i], st, strPtrOrNil(r.output), strPtrOrNil(r.logs), r.usedMB, r.limitMB)
 		}(i)
 	}
 	wg.Wait()
 
+	// Aggregate the group's overall status from the per-leg results; each leg already
+	// recorded its own step-run terminal state above.
 	status := StatusCompleted
-	for i, r := range results {
-		st := StatusCompleted
+	for _, r := range results {
 		switch {
 		case r.err != nil && ctx.Err() != nil:
-			st, status = StatusCancelled, worstStatus(status, StatusCancelled)
+			status = worstStatus(status, StatusCancelled)
 		case r.err != nil:
-			st, status = StatusFailed, StatusFailed
+			status = StatusFailed
 		}
-		p.finishStepRun(stepRunIDs[i], st, strPtrOrNil(r.output), strPtrOrNil(r.logs), r.usedMB, r.limitMB)
 	}
 	if status != StatusCompleted {
 		return "", status
