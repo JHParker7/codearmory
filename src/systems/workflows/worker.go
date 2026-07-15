@@ -251,6 +251,19 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	(WorkflowRun{RunID: runID}).Complete(context.Background(), finalStatus, runOutputs)
 	revokeRunToken(context.Background(), store.getSessionID())
 	slog.InfoContext(ctx, "worker: run finished", "run_id", runID, "status", finalStatus)
+
+	// Garbage-collect this run's role if the workflow has since been re-provisioned
+	// (update or role-heal) onto a newer role and no other active run still uses the
+	// old one. The role was intentionally kept alive while this run was in flight
+	// (deleteWorkflowRoleIfUnused); now that the run is terminal it can be reclaimed.
+	// Re-fetch the workflow so we compare against its *current* role, not the one read
+	// at run start (which a mid-run update would have left stale). Best-effort.
+	bg := context.Background()
+	if roleID := runRoleID(bg, runID); roleID != "" {
+		if cur, err := getWorkflow(bg, workflowID); err == nil {
+			deleteWorkflowRoleIfUnused(bg, roleID, cur.RoleID)
+		}
+	}
 }
 
 // resolveWorkflowOutputs resolves each declared output's ${...} template against the

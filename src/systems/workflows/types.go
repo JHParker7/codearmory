@@ -400,13 +400,20 @@ type WorkflowRun struct {
 	// it resumes, and without this it would open a second ticket for the same run; and
 	// it is the link a client follows from a run to its ticket, which the tickets API
 	// cannot serve in reverse (it has no run_id filter).
-	TicketID     string            `json:"ticket_id,omitempty" gorm:"column:ticket_id;default:''"`
-	Token        string            `json:"-"            gorm:"column:token"`
-	RunSessionID string            `json:"-"            gorm:"column:run_session_id"`
-	StepRuns     []WorkflowStepRun `json:"step_runs"    gorm:"-"`
-	CreatedAt    time.Time         `json:"created_at"   gorm:"column:created_at"`
-	StartedAt    *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`
-	EndedAt      *time.Time        `json:"ended_at,omitempty"   gorm:"column:ended_at"`
+	TicketID     string `json:"ticket_id,omitempty" gorm:"column:ticket_id;default:''"`
+	Token        string `json:"-"            gorm:"column:token"`
+	RunSessionID string `json:"-"            gorm:"column:run_session_id"`
+	// RoleID is the workflow role the run's token was scoped to at trigger time.
+	// Recorded per-run (not just on the Workflow) because the workflow's role is
+	// re-provisioned on update: a run keeps authenticating against the role it started
+	// with, so that role must not be deleted while the run is still active, and it is
+	// garbage-collected once the last run using it finishes. AutoMigrate backfills
+	// existing rows to '' (harmless — those runs are already terminal).
+	RoleID    string            `json:"-"            gorm:"column:role_id;default:''"`
+	StepRuns  []WorkflowStepRun `json:"step_runs"    gorm:"-"`
+	CreatedAt time.Time         `json:"created_at"   gorm:"column:created_at"`
+	StartedAt *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`
+	EndedAt   *time.Time        `json:"ended_at,omitempty"   gorm:"column:ended_at"`
 }
 
 func (WorkflowRun) TableName() string { return "workflow_runs" }

@@ -173,9 +173,10 @@ func startWorkflowRun(ctx context.Context, wf *Workflow, userID, orgID string, i
 				slog.WarnContext(ctx, "trigger run: persist re-provisioned role", "workflow_id", wf.WorkflowID, "error", err)
 			} else {
 				slog.InfoContext(ctx, "trigger run: healed stale workflow role", "workflow_id", wf.WorkflowID, "role_id", newRole)
-				if oldRole != "" && oldRole != newRole {
-					deleteWorkflowRole(ctx, oldRole)
-				}
+				// Delete the superseded role only if no sibling run of this workflow is
+				// still using it; otherwise defer to that run's completion GC so a heal
+				// never revokes an in-flight run's permissions.
+				deleteWorkflowRoleIfUnused(ctx, oldRole, newRole)
 			}
 		} else {
 			slog.WarnContext(ctx, "trigger run: role re-provision returned empty, using existing role", "workflow_id", wf.WorkflowID)
@@ -206,6 +207,7 @@ func startWorkflowRun(ctx context.Context, wf *Workflow, userID, orgID string, i
 		ParentRunID:  parentRunID,
 		Token:        encToken,
 		RunSessionID: sessionID,
+		RoleID:       wf.RoleID,
 		StepRuns:     []WorkflowStepRun{},
 		CreatedAt:    time.Now().UTC(),
 	}

@@ -320,6 +320,38 @@ func getWorkflow(ctx context.Context, id string) (Workflow, error) {
 	return wf, nil
 }
 
+// roleInUseByActiveRun reports whether any pending or running run still
+// authenticates with roleID. Used to hold off deleting a workflow role that an
+// in-flight run's token is scoped to (a mid-run re-provision must not pull the run's
+// permissions out from under it). awaiting_approval runs are excluded: they hold no
+// live worker and re-mint a fresh token against the current role when they resume.
+func roleInUseByActiveRun(ctx context.Context, roleID string) (bool, error) {
+	if roleID == "" {
+		return false, nil
+	}
+	var n int64
+	if err := connectRead().WithContext(ctx).
+		Model(&WorkflowRun{}).
+		Where("role_id = ? AND status IN ('pending','running')", roleID).
+		Limit(1).
+		Count(&n).Error; err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// runRoleID returns the role a run was triggered with, or "" if unknown.
+func runRoleID(ctx context.Context, runID string) string {
+	var run WorkflowRun
+	if err := connectRead().WithContext(ctx).
+		Select("role_id").
+		Where("run_id = ?", runID).
+		First(&run).Error; err != nil {
+		return ""
+	}
+	return run.RoleID
+}
+
 // listWorkflows returns active workflows accessible to the caller, with an
 // optional project filter (a view filter, not a security boundary).
 func listWorkflows(ctx context.Context, userID, orgID, projectFilter string) ([]Workflow, error) {
