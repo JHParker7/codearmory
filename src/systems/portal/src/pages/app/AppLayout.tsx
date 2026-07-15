@@ -346,13 +346,13 @@ export function AppLayout() {
           <NavSection title="tools" sidebarCollapsed={navCollapsed}>
             <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navCollapsed} icon="workflows" />
             <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navCollapsed} icon="tickets" />
+            <NavItem to="/app/git" label="git/" desc="Connect & clone your repositories" service="git_connector" collapsed={navCollapsed} icon="git" />
           </NavSection>
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
           <NavSection title="modules" sidebarCollapsed={navCollapsed}>
             <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navCollapsed} icon="forge" />
             <NavItem to="/app/hooks" label="hooks/" desc="Trigger actions from webhooks" service="hooks" collapsed={navCollapsed} icon="hooks" />
             <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navCollapsed} icon="containers" />
-            <NavItem to="/app/git" label="git/" desc="Connect & clone your repositories" service="git_connector" collapsed={navCollapsed} icon="git" />
             <NavItem to="/app/outposts" label="outposts/" desc="Link your Kubernetes clusters" service="outpost-gateway" collapsed={navCollapsed} icon="outposts" />
             {/* Generic iframe-hosted services (blueprints, chaos, argo, and any future
                 non-core service that advertises a ui_path) — discovered at runtime,
