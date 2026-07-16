@@ -129,6 +129,12 @@ spec:
             # pipeline publishes only from the main branch, so an alpha/beta deployment
             # would try to pull a tag that was never built (ImagePullBackOff). Override
             # gitImage to pin a digest or point at a private mirror.
+            # Where the artifact store lives. Forge config, never a request field: a
+            # sandbox must not be able to aim a workspace upload at an arbitrary host.
+            {{- if .Values.artifacts.enabled }}
+            - name: FORGE_ARTIFACTS_URL
+              value: "http://{{ include "codearmory.fullname" . }}-artifacts:{{ .Values.artifacts.port }}"
+            {{- end }}
             - name: FORGE_GIT_IMAGE
             {{- if .Values.forge.gitImage }}
               value: {{ .Values.forge.gitImage | quote }}

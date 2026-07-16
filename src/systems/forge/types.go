@@ -310,6 +310,11 @@ type submitRequest struct {
 	// volume and captures the paths matching a regex (as structured output), the
 	// fan-out set behind a scatter — see ResolveSpec.
 	Resolve *ResolveSpec `json:"resolve"`
+	// Artifact, when set, makes this an artifact transfer: forge derives the image
+	// (its minimal runner image) and command (a synthesised tar|curl) from the spec,
+	// moving a path between an attached volume and the artifact store. It is how a
+	// build cache or a binary survives a run — see ArtifactSpec.
+	Artifact *ArtifactSpec `json:"artifact"`
 }
 
 // RunResult holds the output of a completed container run. ExitCode is a pointer

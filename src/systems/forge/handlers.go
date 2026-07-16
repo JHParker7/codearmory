@@ -241,11 +241,16 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	// A resolve-paths execution (the scatter fan-out generator) likewise derives its
 	// image and command (a synthesised find | grep) from the resolve spec.
 	isResolve := req.Resolve != nil
+	// An artifact transfer derives its image (forge's minimal runner) and command (a
+	// synthesised tar|curl) from the spec, so like copy/resolve it bypasses the user
+	// image/command/allowlist checks — the caller never picks an image just to move a
+	// cache in or out.
+	isArtifact := req.Artifact != nil
 	// A checkout step that supplies no image of its own (the forge/git-clone action)
 	// runs on forge's controlled minimal git image: like the Kaniko builder it is
 	// forge-supplied and bypasses ALLOWED_IMAGES, so users never pick or maintain a
 	// git-capable image just to clone a repo into a shared volume.
-	isDefaultGitCheckout := !isBuild && !isCopy && !isResolve && req.Checkout != nil && req.Image == ""
+	isDefaultGitCheckout := !isBuild && !isCopy && !isResolve && !isArtifact && req.Checkout != nil && req.Image == ""
 	switch {
 	case isBuild:
 		if err := validateBuild(req.Build, req.SecretRefs, req.Env); err != nil {
@@ -254,6 +259,17 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Timeout <= 0 {
 			req.Timeout = defaultBuildTimeoutSecs
+		}
+	case isArtifact:
+		if err := validateArtifact(req.Artifact, req.SecretRefs, req.Env, req.Volumes); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Command is materialised below, once the attached volumes are validated (the
+		// script cds into the workdir mount).
+		req.Image = gitImage
+		if req.Timeout <= 0 {
+			req.Timeout = defaultTimeout
 		}
 	case isCopy, isResolve:
 		// Command is materialised below, once the attached volumes have been shape- and
@@ -326,6 +342,11 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("volume %q is not owned by the caller", m.Name), http.StatusForbidden)
 			return
 		}
+	}
+	// Materialise the artifact transfer now that the volume mounts are validated: the
+	// script cds into the workdir mount and streams tar to/from the store.
+	if isArtifact {
+		req.Command = artifactCommand(req.Artifact, req.Volumes)
 	}
 	// Materialise the copy command now that the volume mounts are validated: it copies
 	// declared paths between them (whole-tree clone, or a disjoint-checked gather union).

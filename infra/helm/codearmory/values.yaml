@@ -406,6 +406,12 @@ forge:
       # IPs/subnets you don't want sandboxes reaching. Each must be an IPv4 CIDR within
       # 0.0.0.0/0, e.g. "203.0.113.7/32" or "198.51.100.0/24".
       blocklist: []
+      # Allow sandboxes to reach the artifact store (that service's pods, on its port
+      # only) so forge/save-artifact and forge/restore-artifact work. This is the one
+      # internal service a sandbox may talk to; set false to deny it and give up
+      # artifact caching. Access is still authenticated per user — a step can only
+      # touch artifacts the token you wire into it allows.
+      allowArtifacts: true
   # Run sandbox jobs under gVisor (handler "runsc"): a userspace kernel (the Sentry)
   # intercepts each job's syscalls, giving strong isolation WITHOUT any hardware
   # virtualization — choose it over kata when nodes lack nested virt / /dev/kvm. When true:

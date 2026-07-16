@@ -851,6 +851,70 @@
             "stderr"
           ]
         }
+      },
+      {
+        "name": "forge/save-artifact",
+        "summary": "Save a path from a shared volume to the artifact store",
+        "description": "Archives `path` from the attached workspace volume and stores it under `name` in the artifact store, where it OUTLIVES the run \u2014 so the next run can restore it. This is how a build cache or a compiled binary survives, since forge volumes are run-scoped and reaped at the end of a run. Saving the same name replaces it, which is what makes it usable as a cache. Forge derives the image and command (a streamed `tar | curl`), so `image`/`command` are ignored; attach the source via `volumes` with `workdir: true`, and wire the store bearer with `secret_refs` (default env ARTIFACTS_TOKEN, e.g. \"ARTIFACTS_TOKEN\": \"secret:my-artifacts-token\"). The upload is refused if it would exceed your per-user quota.",
+        "method": "POST",
+        "path": "/executions",
+        "required_permission": {
+          "action": "createExecution",
+          "resource": "forge/executions"
+        },
+        "async": {
+          "id_field": "execution_id",
+          "poll_path": "/executions/{id}",
+          "poll_interval_secs": 2,
+          "status_field": "status",
+          "success_states": [
+            "completed"
+          ],
+          "failure_states": [
+            "failed",
+            "timed_out"
+          ],
+          "cancel_states": [
+            "cancelled"
+          ],
+          "output_field": "stdout",
+          "output_map_field": "outputs",
+          "error_fields": [
+            "stderr"
+          ]
+        }
+      },
+      {
+        "name": "forge/restore-artifact",
+        "summary": "Restore a stored artifact into a shared volume",
+        "description": "Downloads the artifact `name` and extracts it into `path` of the attached workspace volume \u2014 the other half of forge/save-artifact. Set `optional: true` so a missing artifact is a no-op rather than a failure, which is what lets a cache warm on the FIRST run instead of failing it. Forge derives the image and command; attach the destination via `volumes` with `workdir: true` and wire the bearer with `secret_refs` (default env ARTIFACTS_TOKEN).",
+        "method": "POST",
+        "path": "/executions",
+        "required_permission": {
+          "action": "createExecution",
+          "resource": "forge/executions"
+        },
+        "async": {
+          "id_field": "execution_id",
+          "poll_path": "/executions/{id}",
+          "poll_interval_secs": 2,
+          "status_field": "status",
+          "success_states": [
+            "completed"
+          ],
+          "failure_states": [
+            "failed",
+            "timed_out"
+          ],
+          "cancel_states": [
+            "cancelled"
+          ],
+          "output_field": "stdout",
+          "output_map_field": "outputs",
+          "error_fields": [
+            "stderr"
+          ]
+        }
       }
     ],
     "default_grants": [
