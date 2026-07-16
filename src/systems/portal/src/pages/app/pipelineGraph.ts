@@ -97,7 +97,9 @@ export interface StepRef {
   /** Inline step: the full `with` config. Stored-step reference: per-occurrence
    * overrides merged over the step's own with at run time — how a pipeline wires a
    * step's inputs to upstream outputs. */
-  with?: Record<string, unknown>;
+  // Nullable because the API returns an enriched step with `with: null` when it has
+  // no config; the editor treats null and absent alike.
+  with?: Record<string, unknown> | null;
   parallel_group?: number | null;
   matrix?: MatrixConfig | null;
   scatter?: ScatterConfig | null;
@@ -224,7 +226,9 @@ export function blocksFromSteps(steps: StepRef[]): Block[] {
         inline = { action: s!.action!, timeout: s!.timeout, with: Object.keys(def).length ? def : undefined };
         blockWith = Object.keys(pipeline).length ? pipeline : {};
       } else {
-        blockWith = s?.with;
+        // The API returns `with: null` for a step with no config; the block model
+        // uses undefined for "none", so normalise here.
+        blockWith = s?.with ?? undefined;
       }
       blocks.push({
         uid: `b${i}`, stepId, parallelWithPrev: idx > 0,

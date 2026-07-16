@@ -1,8 +1,12 @@
 /**
- * Run page — a live view of a single pipeline run: the pipeline laid out as
- * stages with each step's status (the running step highlighted), beside a logs
- * panel showing the selected step's captured output. While the run is in flight
- * it re-polls so statuses, durations, and logs update on their own.
+ * Run page — a live view of a single pipeline run: the pipeline drawn as the GRAPH
+ * it actually is, each node carrying its status, beside a logs panel showing the
+ * selected step's captured output. While the run is in flight it re-polls so
+ * statuses, durations, and logs update on their own.
+ *
+ * The graph is rendered by the same PipelineCanvas the editor uses, so the run and
+ * the pipeline you authored are drawn by one renderer and cannot disagree. Selecting
+ * a node lists its executions (a matrix or map step has several) for the logs panel.
  *
  * Reached at /app/workflows/runs/:runId (clicking a run in the Workflows page).
  */
@@ -17,6 +21,7 @@ import type { WorkflowRun, Workflow, WorkflowStepRun, Step, ApprovalGate } from 
 import { statusTone, isRunActive, fmtDuration, timeAgo, shortId } from '../../utils';
 import { useUserNames } from '../../hooks/useNames';
 import { useViewport } from '../../hooks/useViewport';
+import { PipelineCanvas } from './PipelineCanvas';
 
 /** Solid accent colour for a status (used for a step's left bar). */
 function statusColor(status: string): string {
@@ -266,6 +271,54 @@ export function RunView() {
   const stepRuns = useMemo(() => run?.step_runs ?? [], [run]);
   const stages = useMemo(() => buildStages(workflow, stepRuns, catalog), [workflow, stepRuns, catalog]);
 
+  /** The run's blocks regrouped by the workflow step they belong to — a matrix or
+   * map step contributes several (one per value), all sharing one step index. */
+  const legsByIndex = useMemo(() => {
+    const m = new Map<number, RunStep[]>();
+    for (const st of stages) for (const b of st.steps) {
+      const arr = m.get(b.index);
+      if (arr) arr.push(b); else m.set(b.index, [b]);
+    }
+    return m;
+  }, [stages]);
+
+  /** Node status for the graph, keyed by step NAME (the graph's node identity).
+   * A node's status is the worst of its executions — a single failed matrix leg
+   * makes the step red — and `legs` is how many it fanned out into. */
+  const runStatus = useMemo(() => {
+    const out: Record<string, { status: string; legs: number }> = {};
+    (workflow?.steps ?? []).forEach((s, i) => {
+      const legs = legsByIndex.get(i) ?? [];
+      if (legs.length === 0) return; // never ran (e.g. a route that wasn't taken)
+      const statuses = legs.map((l) => l.sr?.status ?? 'pending');
+      const worst = statuses.find((x) => x === 'failed')
+        ?? statuses.find((x) => x === 'awaiting_approval')
+        ?? statuses.find((x) => x === 'running')
+        ?? statuses.find((x) => x === 'cancelled')
+        ?? statuses[0];
+      const name = s.name ?? catalog[s.step_id ?? '']?.name ?? legs[0].label;
+      out[name] = { status: worst, legs: legs.length };
+    });
+    return out;
+  }, [workflow, legsByIndex, catalog]);
+
+  /** The node the logs panel is showing, so the graph can highlight it. */
+  const activeNode = useMemo(() => {
+    for (const [i, legs] of legsByIndex) {
+      if (!legs.some((l) => l.key === selected)) continue;
+      const s = workflow?.steps[i];
+      return s?.name ?? catalog[s?.step_id ?? '']?.name ?? legs[0].label;
+    }
+    return null;
+  }, [legsByIndex, selected, workflow, catalog]);
+
+  /** Clicking a graph node selects its first execution for the logs panel; its
+   * other executions are listed beneath the graph. */
+  const selectedLegs = useMemo(() => {
+    for (const [, legs] of legsByIndex) if (legs.some((l) => l.key === selected)) return legs;
+    return [];
+  }, [legsByIndex, selected]);
+
   // Default the logs panel to the running step (or the last step with output).
   useEffect(() => {
     if (selected !== null) return;
@@ -365,67 +418,40 @@ export function RunView() {
           ...(narrow ? { width: '100%', height: pipelineH } : { width: pipelineW }),
         }}>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 }}>pipeline</div>
-          {stages.length === 0 ? (
+          {stepRuns.length === 0 && !workflow ? (
             <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ {isRunActive(run.status) ? 'waiting for the first step…' : 'no steps recorded'}</div>
-          ) : stages.map((stage, si) => {
-            const parallel = stage.parallel;
-            // A non-parallel stage with several blocks is a single step's matrix
-            // fan-out (each combination its own block).
-            const matrix = !parallel && stage.steps.length > 1;
-            return (
-              <div key={stage.steps[0].key}>
-                {si > 0 && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingLeft: 16, height: 16 }}>
-                    <span style={{ width: 2, height: '100%', background: parallel ? T.green : T.border }} />
-                    <span style={{ fontFamily: T.mono, fontSize: 9, color: parallel ? T.green : T.faint }}>{parallel ? '∥' : '↓'}</span>
-                  </div>
-                )}
-                {parallel && <div style={{ fontFamily: T.mono, fontSize: 9, color: T.green, letterSpacing: 1, textTransform: 'uppercase', padding: '2px 0 4px' }}>∥ parallel</div>}
-                {matrix && <div style={{ fontFamily: T.mono, fontSize: 9, color: T.amber, letterSpacing: 1, textTransform: 'uppercase', padding: '2px 0 4px' }}>⊞ matrix</div>}
-                {matrix ? (
-                  <div style={{ marginBottom: 4 }}>
-                    <MatrixBlock steps={stage.steps} selected={selected} setSelected={setSelected}
-                      deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
-                  </div>
-                ) : (
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
-                  {stage.steps.map((st) => {
-                    const status = st.sr?.status ?? 'pending';
-                    const active = isRunActive(status);
-                    const awaiting = status === 'awaiting_approval';
-                    const isSel = st.key === selected;
-                    const dur = st.sr?.ended_at ? fmtDuration(st.sr.started_at, st.sr.ended_at) : (st.sr?.started_at && active ? fmtDuration(st.sr.started_at) : '');
-                    // A gate waiting on a human gets a blue border so it reads apart
-                    // from the amber of a step that is merely running.
-                    const borderColor = isSel ? T.green : awaiting ? T.blue : active ? T.amber : T.border;
-                    // Parallel siblings wrap as cards; a lone sequential step spans
-                    // the full width. (Matrix fan-outs take the dropdown branch above.)
-                    const wrap = parallel;
-                    return (
-                      <div key={st.key} style={{ flex: wrap ? '1 1 150px' : undefined, width: wrap ? undefined : '100%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        <button onClick={() => setSelected(st.key)}
-                          style={{ width: '100%', textAlign: 'left', minWidth: 0,
-                            display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', cursor: 'pointer',
-                            background: isSel ? T.cardHi : T.card, border: `1px solid ${borderColor}`,
-                            borderLeft: `3px solid ${statusColor(status)}`, fontFamily: T.mono,
-                            // The gate draws the eye with colour + its action panel, so
-                            // skip the pulse there; keep it for steps that are running.
-                            animation: active && !awaiting ? 'pulse 1.4s ease-in-out infinite' : undefined }}>
-                          <Pill tone={statusTone(status)}>{status}</Pill>
-                          <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 600, color: T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{st.label}</span>
-                          {dur && <span style={{ fontSize: 10, color: active ? T.amber : T.faint }}>{active ? '⟳ ' : ''}{dur}</span>}
-                        </button>
-                        {awaiting && (
-                          <ApprovalPanel gate={st.gate} deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                )}
+          ) : (
+            <>
+              {/* The run drawn as the graph it is — same renderer as the editor, so
+                  the two can never disagree about the pipeline's shape. A node with
+                  no execution (a route that was not taken) stays neutral. */}
+              <div style={{ minHeight: 240, marginBottom: 12 }}>
+                <PipelineCanvas
+                  initialSteps={workflow?.steps ?? []}
+                  initialRoutes={workflow?.routes ?? []}
+                  initialMaps={workflow?.maps ?? []}
+                  catalog={catalog}
+                  runStatus={runStatus}
+                  activeNode={activeNode}
+                  onInspect={(sel) => {
+                    if (!sel) return;
+                    // Select this node's first execution for the logs panel; the rest
+                    // are listed below.
+                    const idx = (workflow?.steps ?? []).findIndex((st, i) =>
+                      (st.name ?? catalog[st.step_id ?? '']?.name ?? (legsByIndex.get(i) ?? [])[0]?.label) === sel.name);
+                    const legs = legsByIndex.get(idx) ?? [];
+                    if (legs.length > 0) setSelected(legs[0].key);
+                  }}
+                />
               </div>
-            );
-          })}
+              {/* The selected node's executions: one for a plain step, several for a
+                  matrix or map fan-out. MatrixBlock also carries the gate controls. */}
+              {selectedLegs.length > 0 && (
+                <MatrixBlock steps={selectedLegs} selected={selected} setSelected={setSelected}
+                  deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
+              )}
+            </>
+          )}
         </div>
 
         {/* Drag to rebalance the pipeline side against the logs side. */}

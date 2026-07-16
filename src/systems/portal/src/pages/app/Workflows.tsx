@@ -541,7 +541,7 @@ function PipelineBuilderOverlay({
       </div>
       <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
-          palette: ∥ parallel · ⊞ matrix · ⏸ approval gate · click an action for an inline step (⇪ convert to general to reuse it) · click a block to edit it (again, Esc, or the empty canvas to close) · drag to reorder
+          click an action for an inline step (⇪ convert to general to reuse it) · click a step to edit it · ▾ then ▾ to route between steps · click a route to give it a condition · ⊞ matrix / ⊟ scatter fan one step out · ⟳ map repeats several steps per value · steps run in parallel by routing into them from the same step
         </span>
         <div style={{ flex: 1 }} />
         {dupNames.length > 0 && (

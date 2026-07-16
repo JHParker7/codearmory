@@ -6,11 +6,12 @@
  * is a linked list: it cannot express a step depending on two non-adjacent steps, a
  * diamond join, or a conditional branch — the reason routes exist.
  *
- * Layout is derived, not dragged: a node's column is its depth from an entry step
- * (layoutGraph), so an edge always points rightward and a join always sits past
- * every branch feeding it. There are no free-floating coordinates to persist, and
- * the drawing is a pure function of the graph — what you see is what the worker
- * executes, because the layout mirrors the engine's own derivation.
+ * Layout is derived, not dragged: a node's ROW is its depth from an entry step
+ * (layoutGraph), so the run flows DOWNWARD — an edge always points down the page and
+ * a join always sits below every branch feeding it, with siblings spread across a
+ * row. There are no free-floating coordinates to persist, and the drawing is a pure
+ * function of the graph — what you see is what the worker executes, because the
+ * layout mirrors the engine's own derivation.
  *
  * Editing:
  *   click a palette entry     add a node (an entry step until you route into it)
@@ -30,11 +31,12 @@ import type {
 } from './pipelineGraph';
 import type { Step, WorkflowAction, GitRepo } from '../../api/bff';
 
-/** Node box geometry. Kept here (not in theme) because the edge maths depends on it. */
+/** Node box geometry. Kept here (not in theme) because the edge maths depends on it.
+ * The flow is top-down, so GAP_Y is the tall one: that is where the edges live. */
 const NODE_W = 190;
 const NODE_H = 62;
-const GAP_X = 96; // horizontal room between columns — where the edges live
-const GAP_Y = 26;
+const GAP_X = 30; // between siblings across a row
+const GAP_Y = 76; // between depths — the edges run through here
 const PAD = 28;
 
 /** The canvas reports the same selection shape the block builder did, so the host's
@@ -65,6 +67,13 @@ interface PipelineCanvasProps {
   onPickAction?: (action: WorkflowAction) => void;
   pendingAdd?: Step | null;
   onPendingConsumed?: () => void;
+  /** Per-step run state, keyed by step NAME. When set the canvas draws a RUN: each
+   * node takes its status colour and shows how many executions it fanned out into
+   * (a matrix or map step has several). The same renderer draws the editor, the
+   * pipeline detail and the run, so all three agree on the shape. */
+  runStatus?: Record<string, { status: string; legs: number }>;
+  /** Highlights the node whose logs the host is showing. */
+  activeNode?: string | null;
 }
 
 const field: React.CSSProperties = {
@@ -176,16 +185,16 @@ function GateEditor({ uid, gate, onSet }: { uid: string; gate: ApprovalGate; onS
   );
 }
 
-/** A cubic bezier between two ports, bulging horizontally so parallel edges stay
- * distinguishable rather than overlapping as straight lines. */
+/** A cubic bezier from one node's bottom port to another's top port, bulging
+ * vertically so sibling edges stay distinguishable rather than overlapping. */
 function edgePath(x1: number, y1: number, x2: number, y2: number): string {
-  const dx = Math.max(36, Math.abs(x2 - x1) * 0.5);
-  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  const dy = Math.max(28, Math.abs(y2 - y1) * 0.5);
+  return `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2}`;
 }
 
 export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasProps>(function PipelineCanvas({
   initialSteps, initialRoutes, initialMaps, catalog, editable = false, palette = [], actions = [],
-  onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed,
+  onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed, runStatus, activeNode,
 }: PipelineCanvasProps, ref) {
   const defName = useCallback((id: string) => catalog[id]?.name, [catalog]);
 
@@ -238,8 +247,8 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
   const posOf = useMemo(() => {
     const m = new Map<string, { x: number; y: number }>();
     placed.forEach((p) => m.set(p.uid, {
-      x: PAD + p.layer * (NODE_W + GAP_X),
-      y: PAD + p.row * (NODE_H + GAP_Y),
+      x: PAD + p.row * (NODE_W + GAP_X),
+      y: PAD + p.layer * (NODE_H + GAP_Y),
     }));
     return m;
   }, [placed]);
@@ -267,8 +276,8 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       return { def: m, x, y, w: x2 - x, h: y2 - y };
     }).filter(Boolean) as { def: MapDef; x: number; y: number; w: number; h: number }[];
   }, [maps, blocks, posOf]);
-  const width = Math.max(...placed.map((p) => PAD + (p.layer + 1) * (NODE_W + GAP_X)), 400);
-  const height = Math.max(...placed.map((p) => PAD * 2 + (p.row + 1) * (NODE_H + GAP_Y)), 260);
+  const width = Math.max(...placed.map((p) => PAD * 2 + (p.row + 1) * (NODE_W + GAP_X)), 400);
+  const height = Math.max(...placed.map((p) => PAD * 2 + (p.layer + 1) * (NODE_H + GAP_Y)), 260);
 
   const addStep = (stepId: string, name: string) => {
     const uid = `n${seq.current++}-${Date.now()}`;
@@ -392,9 +401,9 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               </button>
             ))}
             <div style={{ marginTop: 14, fontSize: 10.5, color: T.faint, lineHeight: 1.5, fontFamily: T.mono }}>
-              Click a step's <span style={{ color: T.green }}>▸</span> then another step's{' '}
-              <span style={{ color: T.green }}>▸</span> to route between them. A step with no
-              incoming route starts the run.
+              Click a step's lower <span style={{ color: T.green }}>▾</span> then another step's
+              upper <span style={{ color: T.green }}>▾</span> to route between them. A step with no
+              incoming route starts the run; the flow runs top to bottom.
               <div style={{ marginTop: 8 }}>
                 <span style={{ color: T.green }}>∥ parallel</span> is the shape of the graph:
                 route one step to <b>two</b> steps and they run at the same time. Route both
@@ -453,8 +462,8 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               const a = posOf.get(byName.get(r.from) ?? '');
               const b = posOf.get(byName.get(r.to) ?? '');
               if (!a || !b) return null; // endpoint gone; pruned on save
-              const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2;
-              const x2 = b.x, y2 = b.y + NODE_H / 2;
+              const x1 = a.x + NODE_W / 2, y1 = a.y + NODE_H;
+              const x2 = b.x + NODE_W / 2, y2 = b.y;
               const sel = selectedEdge === i;
               return (
                 <g key={`${r.from}->${r.to}-${i}`}>
@@ -467,7 +476,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                     style={{ pointerEvents: editable ? 'stroke' : 'none', cursor: 'pointer' }}
                     onClick={() => { setSelectedEdge(i); setSelectedUid(null); }} />
                   {r.when && (
-                    <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 6} textAnchor="middle"
+                    <text x={(x1 + x2) / 2 + 6} y={(y1 + y2) / 2} textAnchor="start"
                       fill={sel ? T.green : T.faint} fontSize={9} fontFamily={T.mono}
                       style={{ pointerEvents: 'none' }}>
                       {r.when.length > 28 ? `${r.when.slice(0, 27)}…` : r.when}
@@ -486,13 +495,18 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
             const isEntry = !routes.some((r) => r.to === name);
             const isGate = action === 'approval' || !!b.approval;
             const linking = linkFrom === b.uid;
+            const run = runStatus?.[name];
+            // A run colours the node by outcome; the editor colours it by role.
+            const bar = run ? runColor(run.status) : isGate ? T.amber : isEntry ? T.green : T.border;
+            const isActive = activeNode === name;
             return (
               <div key={b.uid} style={{
                 position: 'absolute', left: p.x, top: p.y, width: NODE_W, height: NODE_H,
                 boxSizing: 'border-box',
-                background: selectedUid === b.uid ? T.greenSoft : T.bgAlt,
-                border: `1px solid ${selectedUid === b.uid ? T.green : T.border}`,
-                borderLeft: `3px solid ${isGate ? (T.amber) : isEntry ? T.green : T.border}`,
+                background: selectedUid === b.uid || isActive ? T.greenSoft : T.bgAlt,
+                border: `1px solid ${selectedUid === b.uid || isActive ? T.green : T.border}`,
+                // A run colours the node by outcome; the editor colours it by role.
+                borderLeft: `3px solid ${bar}`,
                 display: 'flex', flexDirection: 'column', justifyContent: 'center',
                 padding: '6px 10px', cursor: 'pointer',
               }} onClick={() => select(b)}>
@@ -506,21 +520,29 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                   )}
                 </div>
                 <div style={{ fontFamily: T.mono, fontSize: 9.5, color: T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {isGate ? 'manual approval' : action}
-                  {b.matrix?.var ? ` · ⊞ ${b.matrix.var}` : ''}
-                  {b.scatter?.regex ? ' · ⊟ scatter' : ''}
+                  {run ? (
+                    <span style={{ color: runColor(run.status) }}>
+                      {run.status}{run.legs > 1 ? ` · ${run.legs}×` : ''}
+                    </span>
+                  ) : (
+                    <>
+                      {isGate ? 'manual approval' : action}
+                      {b.matrix?.var ? ` · ⊞ ${b.matrix.var}` : ''}
+                      {b.scatter?.regex ? ' · ⊟ scatter' : ''}
+                    </>
+                  )}
                 </div>
-                {isEntry && <div style={{ position: 'absolute', top: -7, left: 6, fontSize: 8, fontFamily: T.mono, color: T.green, background: T.bg, padding: '0 3px' }}>START</div>}
+                {isEntry && !runStatus && <div style={{ position: 'absolute', top: -7, left: 6, fontSize: 8, fontFamily: T.mono, color: T.green, background: T.bg, padding: '0 3px' }}>START</div>}
 
                 {editable && (
                   <>
                     {/* in-port: completes a link started elsewhere */}
                     <button title="route into this step" onClick={(e) => { e.stopPropagation(); completeLink(b.uid); }}
                       disabled={!linkFrom || linkFrom === b.uid}
-                      style={{ ...port, left: -9, borderColor: linkFrom && linkFrom !== b.uid ? T.green : T.border, cursor: linkFrom ? 'pointer' : 'default' }}>▸</button>
+                      style={{ ...port, top: -9, borderColor: linkFrom && linkFrom !== b.uid ? T.green : T.border, cursor: linkFrom ? 'pointer' : 'default' }}>▾</button>
                     {/* out-port: starts a link */}
                     <button title="route out of this step" onClick={(e) => { e.stopPropagation(); setLinkFrom(linking ? null : b.uid); }}
-                      style={{ ...port, right: -9, borderColor: linking ? T.green : T.border, color: linking ? T.green : T.faint }}>▸</button>
+                      style={{ ...port, bottom: -9, borderColor: linking ? T.green : T.border, color: linking ? T.green : T.faint }}>▾</button>
                   </>
                 )}
               </div>
@@ -622,13 +644,26 @@ const paletteBtn: React.CSSProperties = {
   fontFamily: T.mono, fontSize: 11, padding: '5px 7px', cursor: 'pointer',
 };
 
+/** A run status's accent colour, mirroring the run page's own palette. A step that
+ * never ran (a not-taken branch) has no step run at all, so it stays neutral. */
+function runColor(status: string): string {
+  switch (status) {
+    case 'completed': return T.green;
+    case 'failed': return T.red;
+    case 'running': return T.blue;
+    case 'awaiting_approval': return T.amber;
+    case 'cancelled': return T.dim;
+    default: return T.dim;
+  }
+}
+
 const toggleBtn: React.CSSProperties = {
   background: 'none', border: `1px solid ${T.border}`, fontFamily: T.mono,
   fontSize: 10, padding: '2px 6px', cursor: 'pointer',
 };
 
 const port: React.CSSProperties = {
-  position: 'absolute', top: NODE_H / 2 - 9, width: 18, height: 18,
+  position: 'absolute', left: NODE_W / 2 - 9, width: 18, height: 18,
   background: T.bg, border: `1px solid ${T.border}`, borderRadius: '50%',
   color: T.faint, fontSize: 9, lineHeight: '1', padding: 0,
   display: 'flex', alignItems: 'center', justifyContent: 'center',
