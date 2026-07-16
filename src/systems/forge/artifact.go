@@ -13,11 +13,12 @@ import (
 // as with the scatter clone/gather (CopySpec) — forge synthesises a helper container
 // that mounts the volume and streams the transfer, on its own controlled image.
 //
-// Auth is deliberately NOT invented here. The helper reads a bearer from an env var
-// the caller wires with an ordinary secret_ref ("secret:<name>" → a gatekeeper org
-// secret). That keeps this from silently handing a sandbox a token it did not have:
-// granting artifact access stays an explicit act by the pipeline author, using the
-// same mechanism that already carries git and registry credentials.
+// Auth: forge MINTS a short-lived bearer scoped to this user's own artifacts and
+// injects it (see artifact_token.go), the same way it mints a clone URL for a git
+// step. It is not the caller's own token — that would hand a sandbox whatever the
+// caller can do — and it is not a standing secret someone has to create and rotate.
+// The token can read and write that user's artifacts and nothing else, so a step
+// gains no authority it did not already need.
 
 const (
 	// defaultArtifactTokenEnv is the env var the helper reads its bearer from.
@@ -46,7 +47,8 @@ type ArtifactSpec struct {
 	// archive on save / extract into on restore. Default "." (the whole volume).
 	Path string `json:"path,omitempty"`
 	// TokenEnv names the env var holding the bearer for the artifacts service.
-	// Default ARTIFACTS_TOKEN; wire it with secret_refs.
+	// Default ARTIFACTS_TOKEN. Forge wires it automatically; override only to supply
+	// your own credential via secret_refs.
 	TokenEnv string `json:"token_env,omitempty"`
 	// Optional, restore only: succeed when the artifact does not exist yet, leaving
 	// the volume untouched. This is what makes a cache restore safe on the FIRST
@@ -93,12 +95,13 @@ func validateArtifact(a *ArtifactSpec, secretRefs, env map[string]string, mounts
 	if !hasWorkdirMount(mounts) {
 		return fmt.Errorf("artifact requires an attached volume marked workdir: true")
 	}
-	// Fail fast when the token is wired nowhere: the alternative is a helper that
-	// runs, 401s, and reports a confusing failure from inside the sandbox.
+	// The token is normally auto-wired by the handler (forge mints one scoped to this
+	// user's artifacts), so reaching here with nothing means a caller explicitly
+	// cleared it. Fail fast rather than run a helper that 401s from inside a sandbox.
 	tok := a.tokenEnv()
 	if _, ok := secretRefs[tok]; !ok {
 		if _, ok := env[tok]; !ok {
-			return fmt.Errorf("artifact needs %s: wire it with secret_refs (e.g. %q: \"secret:my-artifacts-token\")", tok, tok)
+			return fmt.Errorf("artifact needs %s: forge wires it automatically, or set it yourself via secret_refs", tok)
 		}
 	}
 	return nil
@@ -146,6 +149,11 @@ func artifactCommand(a *ArtifactSpec, mounts []VolumeMount) []string {
 
 	// Restore. An optional restore treats "not stored yet" as success, so a cache
 	// warms on the first run instead of failing it.
+	//
+	// The archive is extracted at the volume ROOT, not into path: `tar czf - cache`
+	// stores entries already prefixed with "cache/", so extracting -C cache would
+	// nest it one level deeper on every run (cache/cache/runs.txt) and the restore
+	// would silently never be seen. Save and restore have to be symmetric.
 	sb.WriteString(fmt.Sprintf("echo '==> restoring %s into %s'\n", a.Name, a.path()))
 	sb.WriteString(fmt.Sprintf("code=$(curl --silent --show-error -o /tmp/a.tgz -w '%%{http_code}' "+
 		"-H \"Authorization: Bearer %s\" %q) || true\n", tok, url+"/content"))
@@ -153,8 +161,7 @@ func artifactCommand(a *ArtifactSpec, mounts []VolumeMount) []string {
 		sb.WriteString("if [ \"$code\" = \"404\" ]; then echo '==> no artifact stored yet, skipping'; exit 0; fi\n")
 	}
 	sb.WriteString("if [ \"$code\" != \"200\" ]; then echo \"restore failed: HTTP $code\"; cat /tmp/a.tgz 2>/dev/null; exit 1; fi\n")
-	sb.WriteString(fmt.Sprintf("mkdir -p %s\n", a.path()))
-	sb.WriteString(fmt.Sprintf("tar xzf /tmp/a.tgz -C %s\n", a.path()))
+	sb.WriteString("tar xzf /tmp/a.tgz\n")
 	sb.WriteString(fmt.Sprintf("echo '==> restored %s'\n", a.Name))
 	return []string{"sh", "-c", sb.String()}
 }

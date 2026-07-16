@@ -97,7 +97,7 @@ func handleCreateRunToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if svc.ServiceName != "workflows" {
+	if !canMintScopedRoles(svc.ServiceName) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -195,7 +195,7 @@ func handleRevokeRunToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if svc.ServiceName != "workflows" {
+	if !canMintScopedRoles(svc.ServiceName) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -230,12 +230,24 @@ type permissionSpec struct {
 // actually holds that permission before including it — so the workflow role can
 // never exceed the owner's own access. The resulting role_id is stored in the
 // Workflow row and used to scope run tokens.
+// canMintScopedRoles reports whether a service may provision a minimal-permission
+// role and mint run tokens against it.
+//
+// workflows does this for a run; forge does it for an artifact step, where a sandbox
+// needs a bearer for the artifact store. Both are safe for the same reason: every
+// permission in the request is verified against the OWNER's own access before it is
+// included, so a minted role can never exceed what the user already has — the caller
+// is choosing a subset, not granting itself authority.
+func canMintScopedRoles(service string) bool {
+	return service == "workflows" || service == "forge"
+}
+
 func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 	svc, ok := requireServiceAuth(w, r)
 	if !ok {
 		return
 	}
-	if svc.ServiceName != "workflows" {
+	if !canMintScopedRoles(svc.ServiceName) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -343,7 +355,7 @@ func handleDeleteWorkflowRole(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if svc.ServiceName != "workflows" {
+	if !canMintScopedRoles(svc.ServiceName) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

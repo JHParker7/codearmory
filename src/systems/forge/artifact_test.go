@@ -89,13 +89,18 @@ func TestArtifactCommand_Restore(t *testing.T) {
 	s := cmd[2]
 	for _, want := range []string{
 		"/artifacts/gocache/content", // the download endpoint, not the metadata one
-		"tar xzf",                    // extracts
-		"-C cache",                   // into the requested path
+		"tar xzf /tmp/a.tgz",         // extracts
+		"cd /workspace",              // at the volume root
 		`if [ "$code" != "200" ]`,    // a non-200 fails the step
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("restore script missing %q:\n%s", want, s)
 		}
+	}
+	// The archive already carries the "cache/" prefix (tar czf - cache), so extracting
+	// INTO cache would nest it deeper every run and the cache would never be found.
+	if strings.Contains(s, "-C cache") {
+		t.Error("restore must extract at the volume root, not into the path: the archive is already prefixed")
 	}
 	// Not optional: a missing artifact must FAIL, so a typo'd name is not silently ignored.
 	if strings.Contains(s, `"404"`) {

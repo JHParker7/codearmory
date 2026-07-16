@@ -17,6 +17,13 @@ const (
 	refSchemeSecret = "secret" // secret:<gatekeeper-org-secret-name>  — e.g. a git SSH key / token for GitHub, Bitbucket, …
 	refSchemeGitea  = "gitea"  // gitea:<owner>/<repo>                 — mints a short-lived Forgejo clone URL
 	refSchemeGit    = "git"    // git:<https-repo-url>                 — broker mints creds for the URL's backend
+	// token:artifacts — forge mints a SHORT-LIVED bearer scoped to this user's own
+	// artifacts (see artifact_token.go). It exists so an artifact step needs no
+	// standing credential and never carries the caller's own (possibly admin) token
+	// into a sandbox: the minted token can do exactly one thing.
+	refSchemeToken = "token"
+	// tokenArgArtifacts is the only audience token: accepts today.
+	tokenArgArtifacts = "artifacts"
 )
 
 var (
@@ -44,7 +51,7 @@ var (
 func parseCredentialRef(ref string) (scheme, arg string, err error) {
 	scheme, arg, ok := strings.Cut(ref, ":")
 	if !ok || arg == "" {
-		return "", "", fmt.Errorf("reference must be \"secret:<name>\", \"git:<repo-url>\", or \"gitea:<owner>/<repo>\"")
+		return "", "", fmt.Errorf("reference must be \"secret:<name>\", \"git:<repo-url>\", \"gitea:<owner>/<repo>\", or \"token:artifacts\"")
 	}
 	switch scheme {
 	case refSchemeSecret:
@@ -53,6 +60,11 @@ func parseCredentialRef(ref string) (scheme, arg string, err error) {
 		owner, repo, ok := strings.Cut(arg, "/")
 		if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
 			return "", "", fmt.Errorf("gitea reference must be \"gitea:<owner>/<repo>\"")
+		}
+		return scheme, arg, nil
+	case refSchemeToken:
+		if arg != tokenArgArtifacts {
+			return "", "", fmt.Errorf("token reference must be \"token:%s\"", tokenArgArtifacts)
 		}
 		return scheme, arg, nil
 	case refSchemeGit:
@@ -117,6 +129,8 @@ func resolveCredentials(ctx context.Context, exec Execution) (map[string]string,
 			value, err = mintGiteaCloneURL(ctx, exec.UserID, arg)
 		case refSchemeGit:
 			value, err = mintGitCloneURL(ctx, exec.UserID, arg)
+		case refSchemeToken:
+			value, err = mintArtifactToken(ctx, exec.UserID, exec.OrgID)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", target, err)

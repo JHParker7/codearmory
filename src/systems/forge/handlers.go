@@ -261,6 +261,16 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 			req.Timeout = defaultBuildTimeoutSecs
 		}
 	case isArtifact:
+		// Wire the store bearer automatically unless the caller supplied their own.
+		// Forge mints one scoped to this user's artifacts alone, so save/restore needs
+		// no configuration and no standing credential — and the sandbox gets authority
+		// over nothing else.
+		if tok := req.Artifact.tokenEnv(); req.SecretRefs[tok] == "" && req.Env[tok] == "" {
+			if req.SecretRefs == nil {
+				req.SecretRefs = map[string]string{}
+			}
+			req.SecretRefs[tok] = refSchemeToken + ":" + tokenArgArtifacts
+		}
 		if err := validateArtifact(req.Artifact, req.SecretRefs, req.Env, req.Volumes); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
