@@ -373,6 +373,49 @@ Steps 1 and 2 (group=1)    → run concurrently after step 0 finishes
 Step 3 (no group)          → runs after both group-1 steps finish
 ```
 
+The group integer is a **run-length delimiter, not a set label**: only equality with the immediately preceding step matters, so `[a(group=0), b(group=1), c(group=0)]` is three groups (a plain chain), not two. This encoding cannot express a step depending on two non-adjacent steps, a diamond join, or any conditional branch — for those, use **routes**.
+
+### Routes (the graph model)
+
+A pipeline is a graph. The steps are its nodes — identified by **step name**, the same identity `${steps.<name>.output}` already uses — and `routes` are the directed edges between them. A step with no inbound route is an entry step; there is no entry sentinel.
+
+Omit `routes` and the edges are **derived** from `parallel_group` at run time, reproducing the ordering above exactly — so a pipeline authored before routes existed keeps working with nothing stored and nothing to migrate. Supply `routes` and they are used as given. The two are mutually exclusive: combining `routes` with any `parallel_group` is a 400, because silently ignoring the group would leave a pipeline that doesn't do what its JSON says.
+
+```json
+{
+  "name": "build-and-release",
+  "steps": [
+    { "action": "forge/run", "name": "build",   "with": { "run": "make build" } },
+    { "action": "forge/run", "name": "publish", "with": { "run": "make publish" } },
+    { "action": "forge/run", "name": "cleanup", "with": { "run": "make clean" } }
+  ],
+  "routes": [
+    { "from": "build", "to": "publish", "when": "steps.build.json.published == true" },
+    { "from": "build", "to": "cleanup", "when": "steps.build.status == \"failed\"" }
+  ]
+}
+```
+
+A step runs once **every** inbound route is resolved and **at least one** was taken. A step whose inbound routes all resolve to not-taken is **skipped** — which is what lets a conditional diamond join: if `a→b` is taken and `a→c` is not, `c` is skipped, `c→d` resolves not-taken, `b→d` is taken, and `d` still runs.
+
+Failure is opt-in to route past: a route with no `when` is taken only if its source **completed**, so an unhandled failure skips everything downstream transitively and the run fails — exactly as before. A route conditioned on `status == "failed"` runs a handler. A failed step always fails the run, even if a handler ran.
+
+#### Route conditions
+
+`when` is an expression (not `${...}` templating — see below). It must evaluate to a boolean, and it is compiled when the pipeline is saved, so a typo like `steps.build.stauts` is a 400 at authoring time rather than a silently dead branch at 3am.
+
+Available: `steps.<name>.status` (`completed`/`failed`/`skipped`/`cancelled`), `steps.<name>.output` (the raw string), `steps.<name>.json.<field>` (the output parsed as JSON, absent when it isn't), `inputs.<name>`, and `run.id`. Only steps in a terminal state are visible.
+
+```
+steps.test.status == "completed" && inputs.env == "prod"
+steps.scan.json.critical_count > 0
+steps.gate.output contains "approved"
+```
+
+> `when` and `${...}` are deliberately different languages. `${...}` is a string template over arbitrary step config and is **tolerant** — an unknown reference is left as a literal, since a `with` value may legitimately contain `${SOMETHING}` meant for a downstream shell. A route condition is **strict**: an unknown identifier is an error, because a typo that silently evaluates false would kill a branch with no signal. The identifier namespace is kept aligned (`${steps.x.output.a}` ↔ `steps.x.json.a`).
+
+A step sees only the outputs of its **transitive ancestors**. Referencing a step that isn't an ancestor can never resolve — including a sibling in the same parallel band, which under the old engine silently read as an empty string.
+
 ### Scatter / gather
 
 A `scatter` block fans a step out over the paths of a shared workspace that match a regex — "partition the build, run the parts in parallel, recombine". Unlike a matrix (which just repeats a step over a value list), each scatter leg runs on its **own clone** of the workspace, so parallel legs never share a PVC (which on block storage would `Multi-Attach` across nodes) — and after all legs finish, each leg's declared owned outputs are **gathered** back into the base workspace as a disjoint union (two legs claiming the same path fails, rather than silently clobbering). It needs no ReadWriteMany volume and no CSI clone.

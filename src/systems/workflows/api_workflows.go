@@ -248,6 +248,10 @@ type createWorkflowRequest struct {
 	Steps       []WorkflowStepRef   `json:"steps,omitempty"`
 	Inputs      []WorkflowInputDef  `json:"inputs,omitempty"`
 	Outputs     []WorkflowOutputDef `json:"outputs,omitempty"`
+	// Routes are the explicit edges between steps. Omit them to keep the ordered
+	// steps[]/parallel_group encoding, whose edges are derived at run time — which
+	// is what lets a client that predates routes carry on unchanged.
+	Routes []WorkflowRoute `json:"routes,omitempty"`
 }
 
 // validateWorkflowIO checks the declared inputs/outputs: unique, named, and every
@@ -358,6 +362,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		Active:      true,
 		Inputs:      req.Inputs,
 		Outputs:     req.Outputs,
+		Routes:      req.Routes,
 		StepRefs:    refs,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -372,6 +377,14 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wf.Steps = steps
+
+	// Routes are validated against the ENRICHED steps, since a route names a step
+	// by the name it actually runs under (a stored-step reference may override it).
+	if msg := validateGraph(wf.Steps, wf.Routes); msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
 
 	// Provision a scoped service role before persisting so the role_id is stored atomically.
 	wf.RoleID = provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps)
@@ -577,9 +590,16 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if msg := validateGraph(newSteps, req.Routes); msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+
 	oldRoleID := existing.RoleID
 	existing.Name = req.Name
 	existing.Description = req.Description
+	existing.Routes = req.Routes
 	// Guard like tickets: a partial PUT that omits project must not silently
 	// wipe the stored label (the CLI/TUI update payloads don't send project).
 	if req.Project != "" {

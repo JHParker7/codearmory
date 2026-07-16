@@ -13,11 +13,21 @@ info:
     referenced by many workflows. Changing a step affects every pipeline that
     references it.
 
-    A **Workflow** is an ordered list of step references (`step_id` +
-    optional `parallel_group` or `matrix`). Steps sharing the same non-nil
-    `parallel_group` execute concurrently; the run waits for all before
-    advancing. A step reference with a `matrix` fans the step out over a list of
-    values (see below).
+    A **Workflow** is a set of step references (`step_id` + optional
+    `parallel_group` or `matrix`) plus the `routes` between them — a graph. A
+    step runs once every inbound route is resolved and at least one was taken,
+    and a route may carry a `when` condition, so a pipeline can branch, join,
+    and handle failure. A step reference with a `matrix` fans the step out over
+    a list of values (see below); that fan-out is internal to the step, so a
+    matrix step is one node, not many.
+
+    Omit `routes` and the edges are derived from the ordered steps and their
+    `parallel_group` values: steps sharing the same non-nil `parallel_group`
+    execute concurrently and the run waits for all before advancing. That
+    encoding is a run-length delimiter (only equality with the immediately
+    preceding step matters), so it cannot express a non-adjacent dependency, a
+    diamond join, or a conditional branch — supply `routes` for those. The two
+    are mutually exclusive.
 
     ## Action types
 
@@ -939,6 +949,13 @@ components:
         active:
           type: boolean
           readOnly: true
+        routes:
+          type: array
+          description: |
+            Explicit edges between steps. Absent/empty means the edges are derived
+            from the ordered steps and their parallel_group values.
+          items:
+            $ref: '#/components/schemas/WorkflowRoute'
         steps:
           type: array
           description: |
@@ -976,6 +993,52 @@ components:
           items:
             $ref: '#/components/schemas/WorkflowStepRef'
           maxItems: 50
+        routes:
+          type: array
+          description: |
+            Explicit edges between steps, forming a graph. Omit to keep the
+            ordered steps[]/parallel_group encoding, whose edges are derived at
+            run time — the two are mutually exclusive, and combining routes with
+            any parallel_group is rejected. Maximum 200.
+          items:
+            $ref: '#/components/schemas/WorkflowRoute'
+          maxItems: 200
+
+    WorkflowRoute:
+      type: object
+      description: |
+        A directed edge between two steps, identified by step name. A step with no
+        inbound route is an entry step. A step runs once every inbound route is
+        resolved and at least one was taken; a step whose inbound routes all
+        resolve to not-taken is skipped, which is what lets a conditional diamond
+        join rather than deadlock.
+      required: [from, to]
+      properties:
+        from:
+          type: string
+          description: Name of the source step.
+        to:
+          type: string
+          description: Name of the target step.
+        when:
+          type: string
+          description: |
+            Optional boolean expression deciding whether this edge is taken,
+            evaluated once `from` reaches a terminal state. Omit for the default:
+            taken only if `from` completed, so an unhandled failure skips
+            everything downstream. Condition a route on
+            `steps.<name>.status == "failed"` to run a failure handler.
+
+            Available: steps.<name>.status (completed|failed|skipped|cancelled),
+            steps.<name>.output (raw string), steps.<name>.json.<field> (output
+            parsed as JSON; absent when it isn't), inputs.<name>, run.id. Only
+            steps in a terminal state are visible.
+
+            This is an expression, NOT ${...} templating: it is compiled when the
+            pipeline is saved, so an unknown identifier is a 400 here rather than
+            a silently dead branch at run time.
+          example: steps.build.json.published == true
+          maxLength: 1000
 
     TriggerRunRequest:
       type: object
