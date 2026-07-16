@@ -208,6 +208,9 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
   const [selectedEdge, setSelectedEdge] = useState<number | null>(null);
   /** The out-port awaiting a target: the first half of drawing a route. */
   const [linkFrom, setLinkFrom] = useState<string | null>(null);
+  /** A palette fan-out armed for the NEXT step added (only when nothing is selected).
+   * Mirrors the old block palette's matrix/parallel "modes". */
+  const [pendingFanout, setPendingFanout] = useState<'matrix' | 'scatter' | 'map' | null>(null);
   const seq = useRef(0);
 
   // Mirror blocks in a ref so the imperative handle reads current state (not a
@@ -229,7 +232,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     setBlocks(bs);
     setRoutes(initialRoutes && initialRoutes.length > 0 ? initialRoutes : routesFromBlocks(bs, (id) => catalog[id]?.name));
     setMaps(initialMaps ?? []);
-    setSelectedUid(null); setSelectedEdge(null); setLinkFrom(null);
+    setSelectedUid(null); setSelectedEdge(null); setLinkFrom(null); setPendingFanout(null);
   }, [initialSteps, initialRoutes, initialMaps, catalog]);
 
   // Report the graph up on every edit. Routes are pruned first so a deleted or
@@ -282,6 +285,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
   const addStep = (stepId: string, name: string) => {
     const uid = `n${seq.current++}-${Date.now()}`;
     setBlocks((bs) => [...bs, { uid, stepId, parallelWithPrev: false, name: undefined }]);
+    consumeFanout(uid);
     void name;
   };
 
@@ -292,6 +296,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     let unique = name; let n = 2;
     while (taken.has(unique)) unique = `${name}-${n++}`;
     setBlocks((bs) => [...bs, { uid, stepId: '', parallelWithPrev: false, name: unique, inline: { action, with: w, timeout } }]);
+    consumeFanout(uid);
   };
 
   useEffect(() => {
@@ -341,6 +346,44 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
 
   const setMapDef = (def: MapDef) => setMaps((ms) => ms.map((m) => (m.id === def.id ? def : m)));
 
+  /** Give a step a fan-out from the palette. With a step selected it toggles on that
+   * step; with nothing selected it ARMS, and the next step added takes it — which is
+   * how the old block palette's modes behaved.
+   *
+   * A map is the exception to "toggle": joining an EXISTING map is the common case
+   * (that is what makes a multi-step body), so it adds to the most recent map rather
+   * than always creating a new one. */
+  const applyFanout = (kind: 'matrix' | 'scatter' | 'map') => {
+    if (!selectedNode) {
+      setPendingFanout((cur) => (cur === kind ? null : kind));
+      return;
+    }
+    const uid = selectedNode.uid;
+    if (kind === 'matrix') {
+      setMatrix(uid, selectedNode.matrix ? null : { var: '', values: [] });
+    } else if (kind === 'scatter') {
+      if (!selectedNode.inline) return; // scatter needs a pipeline-local step
+      setScatter(uid, selectedNode.scatter ? null : { regex: '', mode: 'dir' });
+    } else if (selectedNode.mapId) {
+      setNodeMap(uid, undefined);
+    } else if (maps.length > 0) {
+      setNodeMap(uid, maps[maps.length - 1].id);
+    } else {
+      addMapWithNode(uid);
+    }
+  };
+
+  /** Apply an armed palette fan-out to a freshly added step, then disarm. */
+  const consumeFanout = (uid: string) => {
+    if (!pendingFanout) return;
+    const kind = pendingFanout;
+    setPendingFanout(null);
+    if (kind === 'matrix') setMatrix(uid, { var: '', values: [] });
+    else if (kind === 'scatter') setScatter(uid, { regex: '', mode: 'dir' });
+    else if (maps.length > 0) setNodeMap(uid, maps[maps.length - 1].id);
+    else addMapWithNode(uid);
+  };
+
   const removeNode = (uid: string) => {
     const name = nodeName(blocks.find((b) => b.uid === uid) as Block, defName);
     setBlocks((bs) => bs.filter((b) => b.uid !== uid));
@@ -386,6 +429,31 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       {editable && (
         <>
           <div style={{ width: paletteW, flexShrink: 0, overflowY: 'auto', borderRight: `1px solid ${T.border}`, background: T.bgAlt, padding: 10 }}>
+            {/* Fan-out is a property OF a step, not a step you add — so these apply to
+                the selected step, or arm the next one you add (as the old block
+                palette's modes did). Kept on the palette because that is where they
+                are looked for. */}
+            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 0.5, marginBottom: 8 }}>
+              FAN OUT {selectedNode ? `· ${nodeName(selectedNode, defName) || 'selected step'}` : '· next step added'}
+            </div>
+            {([
+              { kind: 'matrix' as const, label: '⊞ matrix', hint: 'one run per value, of this step alone', color: T.amber, on: !!selectedNode?.matrix },
+              { kind: 'scatter' as const, label: '⊟ scatter', hint: 'one leg per workspace path, each on its own clone', color: T.green, on: !!selectedNode?.scatter },
+              { kind: 'map' as const, label: '⟳ map', hint: 'repeat SEVERAL steps per value — add others to the same map', color: T.blue, on: !!selectedNode?.mapId },
+            ]).map((f) => {
+              const armed = pendingFanout === f.kind;
+              const active = f.on || armed;
+              return (
+                <button key={f.kind} onClick={() => applyFanout(f.kind)} title={f.hint}
+                  style={{ ...paletteBtn, borderColor: active ? f.color : T.border, color: active ? f.color : T.text }}>
+                  {f.label}{armed ? ' · arming…' : ''}
+                </button>
+              );
+            })}
+            <div style={{ fontSize: 10, color: T.faint, lineHeight: 1.4, fontFamily: T.mono, margin: '2px 0 12px' }}>
+              {selectedNode ? 'applies to the selected step' : 'select a step, or click one of these then add a step'}
+            </div>
+
             <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 0.5, marginBottom: 8 }}>ADD STEP</div>
             <button onClick={addGate} style={paletteBtn}>
               ⏸ approval gate
