@@ -621,20 +621,39 @@ func (run WorkflowRun) PauseForApproval(ctx context.Context, step int) error {
 		step, run.RunID).Error
 }
 
-// resumeAfterApproval marks the approval step run completed and re-queues the
+// resumeAfterApproval marks one approval step run completed and re-queues the
 // paused run (awaiting_approval → pending) so a worker resumes it. decision is the
-// audit line stored as the step's output (e.g. "approved by alice"). The two
-// writes share a transaction so a run is never left half-resumed.
+// audit line stored as the step's output (e.g. "approved by alice"). The writes
+// share a transaction so a run is never left half-resumed.
+//
+// A graph run can park on several gates at once, so the run is only re-queued once
+// the LAST one is decided; deciding one of several leaves the run paused. The
+// step-run update is guarded on status so two simultaneous decisions on the same
+// gate cannot both win — the loser updates 0 rows and gets errRunNotAwaiting.
 func resumeAfterApproval(ctx context.Context, runID, stepRunID, decision string) error {
 	tx := connect().WithContext(ctx).Begin()
 	if tx.Error != nil {
 		return tx.Error
 	}
 	defer tx.Rollback() //nolint:errcheck
-	if err := tx.Exec(
-		`UPDATE workflow_step_runs SET status='completed', response_body=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=?`,
-		decision, stepRunID).Error; err != nil {
+	sr := tx.Exec(
+		`UPDATE workflow_step_runs SET status='completed', response_body=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=? AND status=?`,
+		decision, stepRunID, StatusAwaitingApproval)
+	if sr.Error != nil {
+		return sr.Error
+	}
+	if sr.RowsAffected == 0 {
+		return errRunNotAwaiting
+	}
+	var remaining int64
+	if err := tx.Raw(
+		`SELECT count(*) FROM workflow_step_runs WHERE run_id=? AND status=?`,
+		runID, StatusAwaitingApproval).Scan(&remaining).Error; err != nil {
 		return err
+	}
+	if remaining > 0 {
+		// Other branches are still parked; the run stays awaiting_approval.
+		return tx.Commit().Error
 	}
 	r := tx.Exec(`UPDATE workflow_runs SET status='pending' WHERE run_id=? AND status='awaiting_approval'`, runID)
 	if r.Error != nil {
@@ -654,9 +673,21 @@ func rejectAfterApproval(ctx context.Context, runID, stepRunID, decision string)
 		return tx.Error
 	}
 	defer tx.Rollback() //nolint:errcheck
+	sr := tx.Exec(
+		`UPDATE workflow_step_runs SET status='failed', response_body=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=? AND status=?`,
+		decision, stepRunID, StatusAwaitingApproval)
+	if sr.Error != nil {
+		return sr.Error
+	}
+	if sr.RowsAffected == 0 {
+		return errRunNotAwaiting
+	}
+	// One rejection fails the whole run, so any sibling gate parked on another
+	// branch is cancelled rather than left stranded in awaiting_approval under a
+	// failed run.
 	if err := tx.Exec(
-		`UPDATE workflow_step_runs SET status='failed', response_body=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=?`,
-		decision, stepRunID).Error; err != nil {
+		`UPDATE workflow_step_runs SET status='cancelled', ended_at=CURRENT_TIMESTAMP WHERE run_id=? AND status=?`,
+		runID, StatusAwaitingApproval).Error; err != nil {
 		return err
 	}
 	r := tx.Exec(
@@ -673,12 +704,27 @@ func rejectAfterApproval(ctx context.Context, runID, stepRunID, decision string)
 
 // approvalStepRun returns the step run a paused run is currently awaiting approval
 // on. gorm.ErrRecordNotFound means the run has no pending gate.
+//
+// A graph run can park on several gates at once, so prefer approvalStepRuns and
+// let the caller disambiguate; this returns the lowest-indexed gate and exists for
+// callers that only need "is there a gate, and which step is it".
 func approvalStepRun(ctx context.Context, runID string) (WorkflowStepRun, error) {
 	var sr WorkflowStepRun
 	err := connectRead().WithContext(ctx).
 		Where("run_id=? AND status=?", runID, StatusAwaitingApproval).
 		Order("step_index").First(&sr).Error
 	return sr, err
+}
+
+// approvalStepRuns returns every gate a paused run is currently awaiting, in step
+// order. A run parked on two concurrent branches has two; a linear pipeline can
+// only ever have one, since a gate cannot share a parallel group.
+func approvalStepRuns(ctx context.Context, runID string) ([]WorkflowStepRun, error) {
+	var srs []WorkflowStepRun
+	err := connectRead().WithContext(ctx).
+		Where("run_id=? AND status=?", runID, StatusAwaitingApproval).
+		Order("step_index").Find(&srs).Error
+	return srs, err
 }
 
 // Complete marks the run with its final status, records its resolved output map

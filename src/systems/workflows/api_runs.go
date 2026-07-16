@@ -511,6 +511,34 @@ func handleGetRun(w http.ResponseWriter, r *http.Request) {
 type approvalDecisionRequest struct {
 	// Comment is an optional note recorded in the gate's audit line.
 	Comment string `json:"comment"`
+	// StepRunID selects WHICH gate to decide, for a run parked on more than one
+	// concurrent branch. Optional: with a single pending gate (the only case a
+	// linear pipeline can produce) it may be omitted, which is what keeps existing
+	// clients working. With several pending, omitting it is a 409 listing them.
+	StepRunID string `json:"step_run_id,omitempty"`
+}
+
+// selectApprovalGate resolves which pending gate a decision applies to.
+//
+// A run can park on several gates at once, so an ambiguous decision must not
+// silently pick one: approving the wrong branch is unrecoverable.
+func selectApprovalGate(gates []WorkflowStepRun, stepRunID string) (WorkflowStepRun, string) {
+	if stepRunID != "" {
+		for _, g := range gates {
+			if g.StepRunID == stepRunID {
+				return g, ""
+			}
+		}
+		return WorkflowStepRun{}, "no such pending approval gate on this run"
+	}
+	if len(gates) == 1 {
+		return gates[0], ""
+	}
+	var names []string
+	for _, g := range gates {
+		names = append(names, g.StepName+" ("+g.StepRunID+")")
+	}
+	return WorkflowStepRun{}, "run is awaiting approval on multiple gates; specify step_run_id: " + strings.Join(names, ", ")
 }
 
 // handleApproveRun resumes a run paused on a manual-approval gate.
@@ -565,16 +593,29 @@ func approvalDecision(w http.ResponseWriter, r *http.Request, approve bool) {
 		return
 	}
 
-	sr, err := approvalStepRun(ctx, id)
+	var req approvalDecisionRequest
+	if r.ContentLength != 0 {
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+	}
+
+	gates, err := approvalStepRuns(ctx, id)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			span.SetStatus(codes.Ok, "")
-			http.Error(w, "run is not awaiting approval", http.StatusConflict)
-			return
-		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
 		http.Error(w, "failed to load approval gate", http.StatusInternalServerError)
+		return
+	}
+	if len(gates) == 0 {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "run is not awaiting approval", http.StatusConflict)
+		return
+	}
+	sr, selErr := selectApprovalGate(gates, req.StepRunID)
+	if selErr != "" {
+		span.SetStatus(codes.Ok, "")
+		// Ambiguous or unknown selector: 409 rather than guessing, since deciding
+		// the wrong branch cannot be undone.
+		http.Error(w, selErr, http.StatusConflict)
 		return
 	}
 
@@ -600,10 +641,6 @@ func approvalDecision(w http.ResponseWriter, r *http.Request, approve bool) {
 		}
 	}
 
-	var req approvalDecisionRequest
-	if r.ContentLength != 0 {
-		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-	}
 	verb := "approved"
 	if !approve {
 		verb = "rejected"
