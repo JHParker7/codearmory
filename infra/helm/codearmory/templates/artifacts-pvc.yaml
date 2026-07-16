@@ -1,0 +1,33 @@
+{{- if and .Values.artifacts.enabled .Values.artifacts.storage.enabled }}
+{{- $fullname := include "codearmory.fullname" . }}
+# Blob storage for the artifact store. Artifacts exist precisely to OUTLIVE a run, so
+# unlike forge's run-scoped volumes this claim is never reaped — the whole point is
+# that the next run finds last run's cache.
+#
+# ReadWriteOnce: a single artifacts replica serves every read and write, so nothing
+# needs shared access. Scaling out would need RWX (or an object store) — deliberately
+# not attempted here, since one replica in front of a filesystem is the simplest thing
+# that works and the service is IO-bound, not CPU-bound.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $fullname }}-artifacts
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifacts
+  {{- if .Values.artifacts.storage.retain }}
+  # Keep the claim (and its data) when the release is removed: dropping a cache is
+  # cheap, but dropping published CLI binaries is not.
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.artifacts.storage.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.artifacts.storage.size | quote }}
+{{- end }}

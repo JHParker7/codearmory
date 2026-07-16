@@ -23,6 +23,7 @@ const defaultOrgID = "default"
 // repo management) is NOT core — most users do not run Forgejo, so builder deploys it
 // on demand from files/services/gitea_integration.json.
 var coreServices = map[string]bool{
+	"artifacts":     true,
 	"gatekeeper":    true,
 	"conductor":     true,
 	"registry":      true,

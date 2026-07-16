@@ -748,9 +748,14 @@ func loadManifestEntry(ctx context.Context, e manifestEntry) {
 		}
 		slog.InfoContext(ctx, "manifest: service created", "service", e.Name)
 	} else {
+		// url must be updated too: the manifest is the source of truth for where a
+		// core service lives, and omitting it here pinned an existing row to whatever
+		// URL it was first created with. A service that moved — a renamed Kubernetes
+		// Service, a changed port — would keep the stale address forever, and the only
+		// remedy would be deleting the row by hand.
 		if err := conn.Exec(
-			`UPDATE services SET description = ?, forward_auth = ?, service_key = ?, ui_path = ?, active = true, updated_at = now() WHERE service_id = ?`,
-			e.Description, e.ForwardAuth, hashedKey, e.UIPath, svcModel.ServiceID,
+			`UPDATE services SET url = ?, description = ?, forward_auth = ?, service_key = ?, ui_path = ?, active = true, updated_at = now() WHERE service_id = ?`,
+			e.URL, e.Description, e.ForwardAuth, hashedKey, e.UIPath, svcModel.ServiceID,
 		).Error; err != nil {
 			slog.ErrorContext(ctx, "manifest: failed to update service", "service", e.Name, "error", err)
 			return

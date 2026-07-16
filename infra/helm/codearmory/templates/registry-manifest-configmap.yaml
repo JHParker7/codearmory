@@ -18,6 +18,9 @@
 {{- if .Values.git.enabled -}}
 {{- $manifest = replace "http://git:"               (printf "http://%s-git:" $fullname)               $manifest -}}
 {{- end -}}
+{{- if .Values.artifacts.enabled -}}
+{{- $manifest = replace "http://artifacts:"         (printf "http://%s-artifacts:" $fullname)         $manifest -}}
+{{- end -}}
 {{- if .Values.containers.enabled -}}
 {{- $manifest = replace "http://containers:"        (printf "http://%s-containers:" $fullname)        $manifest -}}
 {{- end -}}

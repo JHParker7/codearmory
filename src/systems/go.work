@@ -1,6 +1,7 @@
 go 1.25.6
 
 use (
+	./artifacts
 	./builder
 	./conductor
 	./containers

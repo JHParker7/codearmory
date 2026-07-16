@@ -466,6 +466,54 @@ workflows:
 # ── Tickets ─────────────────────────────────────────────────────────────────
 # Issue/task tracking. Source lives in the codearmory-tickets repo; the chart deploys
 # its published image as a CORE service (registered via the registry manifest).
+# Artifact store — named, user-owned blobs that OUTLIVE a run: a Go build cache to
+# restore next time, a CLI binary to publish after the run that made it. Forge volumes
+# are run-scoped and reaped, so without this there is nowhere for either to live.
+artifacts:
+  enabled: true
+  image:
+    repository: artifacts
+    tag: ""
+  replicaCount: 1
+  port: 8097
+  # The default per-user allowance, in megabytes. An admin overrides an individual
+  # user at runtime (PUT /artifacts/quotas/user/{id}); this is the fallback for
+  # everyone without an override. 0 blocks storage by default.
+  defaultQuotaMB: 5120
+  storage:
+    # A PVC for the blobs. Disable ONLY for a throwaway environment: without it the
+    # store is an emptyDir and every restart loses the cache, which defeats the point.
+    enabled: true
+    size: 20Gi
+    # Empty uses the cluster default StorageClass.
+    storageClass: ""
+    mountPath: /data
+    # Keep the PVC when the release is uninstalled — a cache is cheap to lose, a
+    # published binary is not.
+    retain: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
+    databaseUrl: ""
+    # Must match the artifacts entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades.
+    gatekeeperServiceKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
 tickets:
   enabled: true
   image:
@@ -750,3 +798,4 @@ postgresql:
           CREATE DATABASE workflows;
           CREATE DATABASE tickets;
           CREATE DATABASE git;
+          CREATE DATABASE artifacts;

@@ -13,3 +13,4 @@ CREATE DATABASE outpost_gateway;
 CREATE DATABASE chaos;
 CREATE DATABASE argo;
 CREATE DATABASE builder;
+CREATE DATABASE artifacts;
