@@ -115,6 +115,37 @@ describe('stepsFromNodes', () => {
   });
 });
 
+describe('stepsFromNodes: fan-out and gates survive the graph editor', () => {
+  it('emits a gate as an approval ref, never as an inline action', () => {
+    // The backend rejects an inline step whose action is "approval" ("use a gate"),
+    // so building one that way would 400 on save.
+    const gate: Block = { uid: 'g', stepId: '', parallelWithPrev: false, name: 'approve', approval: { message: 'ship it?' } };
+    const refs = stepsFromNodes([gate]);
+    expect(refs[0]).to.have.property('approval');
+    expect(refs[0].approval).to.deep.equal({ message: 'ship it?' });
+    expect(refs[0]).to.not.have.property('action');
+  });
+
+  it('keeps a matrix on a node — and, unlike the old model, its siblings can be parallel', () => {
+    const b: Block = { ...mk('build'), matrix: { var: 'os', values: ['linux', 'mac'] } };
+    const refs = stepsFromNodes([b]);
+    expect(refs[0].matrix).to.deep.equal({ var: 'os', values: ['linux', 'mac'] });
+    // parallel_group was mutually exclusive with matrix; routes are not, so the
+    // node keeps its fan-out with no group to conflict with.
+    expect(refs[0]).to.not.have.property('parallel_group');
+  });
+
+  it('keeps a scatter on an inline node', () => {
+    const b: Block = { ...mk('build'), scatter: { regex: '^services/[^/]+$', mode: 'dir' } };
+    expect(stepsFromNodes([b])[0].scatter).to.deep.equal({ regex: '^services/[^/]+$', mode: 'dir' });
+  });
+
+  it('drops an incomplete matrix rather than sending a var-less fan-out', () => {
+    const b: Block = { ...mk('build'), matrix: { var: '  ', values: [] } };
+    expect(stepsFromNodes([b])[0]).to.not.have.property('matrix');
+  });
+});
+
 describe('nodeName', () => {
   it('prefers the block name, falling back to the referenced step definition', () => {
     expect(nodeName(mk('build'), noCatalog)).to.equal('build');

@@ -24,7 +24,9 @@ import { useResizablePane } from '../../components/ResizeHandle';
 import {
   layoutGraph, findCycle, nodeName, pruneRoutes, stepsFromNodes, routesFromBlocks, blocksFromSteps, blockDef,
 } from './pipelineGraph';
-import type { Block, Route, StepRef, BlockSelection } from './pipelineGraph';
+import type {
+  Block, Route, StepRef, BlockSelection, MatrixConfig, ScatterConfig, ApprovalGate,
+} from './pipelineGraph';
 import type { Step, WorkflowAction, GitRepo } from '../../api/bff';
 
 /** Node box geometry. Kept here (not in theme) because the edge maths depends on it. */
@@ -60,6 +62,74 @@ interface PipelineCanvasProps {
   onPickAction?: (action: WorkflowAction) => void;
   pendingAdd?: Step | null;
   onPendingConsumed?: () => void;
+}
+
+const field: React.CSSProperties = {
+  background: T.cardHi, border: `1px solid ${T.border}`, color: T.text,
+  fontFamily: T.mono, fontSize: 11, padding: '4px 6px', outline: 'none',
+};
+
+/** Fans the step out over a list: a comma-separated literal, or a ${...} reference
+ * resolved at run time. Typing in one source clears the other (the backend accepts
+ * exactly one). The fan-out is internal to the node — its legs share one step index
+ * and recombine into one output — so a matrix node is still a single node here. */
+function MatrixEditor({ uid, matrix, onSet }: { uid: string; matrix: MatrixConfig; onSet: (uid: string, m: MatrixConfig | null) => void }) {
+  return (
+    <div style={{ padding: 8, background: T.bg, border: `1px dashed ${T.border}`, borderLeft: `3px solid ${T.amber}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.amber, letterSpacing: 1, textTransform: 'uppercase' }}>⊞ matrix · one run per value</div>
+      <input value={matrix.var} placeholder="var (e.g. region) → ${matrix.region}"
+        onChange={(e) => onSet(uid, { ...matrix, var: e.target.value })} style={field} />
+      <input value={(matrix.values ?? []).join(', ')} placeholder="values, comma-separated (a, b, c)"
+        onChange={(e) => onSet(uid, { ...matrix, values: e.target.value.split(',').map((v) => v.trim()).filter(Boolean), values_from: undefined })} style={field} />
+      <input value={matrix.values_from ?? ''} placeholder="or values from a reference (${inputs.regions})"
+        onChange={(e) => onSet(uid, { ...matrix, values_from: e.target.value, values: e.target.value ? [] : matrix.values })} style={field} />
+      <input type="number" min={0} value={matrix.max_concurrent ?? ''} placeholder="max concurrent (blank = default 3)" disabled={!!matrix.sequential}
+        onChange={(e) => { const n = parseInt(e.target.value, 10); onSet(uid, { ...matrix, max_concurrent: Number.isFinite(n) && n > 0 ? n : undefined }); }}
+        style={{ ...field, opacity: matrix.sequential ? 0.5 : 1 }} />
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: T.mono, fontSize: 11, color: T.text, cursor: 'pointer' }}>
+        <input type="checkbox" checked={!!matrix.sequential}
+          onChange={(e) => onSet(uid, { ...matrix, sequential: e.target.checked || undefined })} />
+        run sequentially (one at a time)
+      </label>
+    </div>
+  );
+}
+
+/** Fans the step out over the workspace paths matching a regex — each leg on its own
+ * clone (bound to ${scatter.path}), with owned outputs gathered back afterward. */
+function ScatterEditor({ uid, scatter, onSet }: { uid: string; scatter: ScatterConfig; onSet: (uid: string, s: ScatterConfig | null) => void }) {
+  return (
+    <div style={{ padding: 8, background: T.bg, border: `1px dashed ${T.border}`, borderLeft: `3px solid ${T.green}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.green, letterSpacing: 1, textTransform: 'uppercase' }}>⊟ scatter · one leg per matched path (own clone)</div>
+      <input value={scatter.regex} placeholder="regex matching workspace paths (^services/[^/]+$)"
+        onChange={(e) => onSet(uid, { ...scatter, regex: e.target.value })} style={field} />
+      <div style={{ display: 'flex', gap: 6 }}>
+        <select value={scatter.mode ?? 'dir'} onChange={(e) => onSet(uid, { ...scatter, mode: e.target.value })} style={{ ...field, flex: 1 }}>
+          <option value="dir">dir</option>
+          <option value="file">file</option>
+        </select>
+        <input value={scatter.volume ?? ''} placeholder="volume (default workspace)"
+          onChange={(e) => onSet(uid, { ...scatter, volume: e.target.value || undefined })} style={{ ...field, flex: 1 }} />
+      </div>
+      <input value={(scatter.outputs ?? []).join(', ')} placeholder="owned outputs, comma-separated (${scatter.path}/dist) — gathered back"
+        onChange={(e) => onSet(uid, { ...scatter, outputs: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) })} style={field} />
+      <input type="number" min={0} value={scatter.max_concurrent ?? ''} placeholder="max concurrent legs (blank = default 3)"
+        onChange={(e) => { const n = parseInt(e.target.value, 10); onSet(uid, { ...scatter, max_concurrent: Number.isFinite(n) && n > 0 ? n : undefined }); }} style={field} />
+    </div>
+  );
+}
+
+/** An approval gate's prompt and optional approver allow-list. */
+function GateEditor({ uid, gate, onSet }: { uid: string; gate: ApprovalGate; onSet: (uid: string, g: ApprovalGate) => void }) {
+  return (
+    <div style={{ padding: 8, background: T.bg, border: `1px dashed ${T.border}`, borderLeft: `3px solid ${T.blue}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.blue, letterSpacing: 1, textTransform: 'uppercase' }}>⏸ pauses until approved</div>
+      <input value={gate.message ?? ''} placeholder="message shown to approvers (e.g. deploy to prod?)"
+        onChange={(e) => onSet(uid, { ...gate, message: e.target.value })} style={field} />
+      <input value={(gate.approvers ?? []).join(', ')} placeholder="approvers (usernames, comma-separated; empty = anyone with permission)"
+        onChange={(e) => onSet(uid, { ...gate, approvers: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) })} style={field} />
+    </div>
+  );
 }
 
 /** A cubic bezier between two ports, bulging horizontally so parallel edges stay
@@ -130,6 +200,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     return m;
   }, [blocks, defName]);
 
+  const selectedNode = useMemo(() => blocks.find((b) => b.uid === selectedUid) ?? null, [blocks, selectedUid]);
   const cycle = useMemo(() => findCycle(blocks, routes, defName), [blocks, routes, defName]);
   const width = Math.max(...placed.map((p) => PAD + (p.layer + 1) * (NODE_W + GAP_X)), 400);
   const height = Math.max(...placed.map((p) => PAD * 2 + (p.row + 1) * (NODE_H + GAP_Y)), 260);
@@ -155,6 +226,27 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     onPendingConsumed?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingAdd]);
+
+  /** Add a manual-approval gate. A gate carries an `approval` config and no action:
+   * the backend rejects an inline step whose action is "approval", so it must not be
+   * built as one. */
+  const addGate = () => {
+    const uid = `n${seq.current++}-${Date.now()}`;
+    const taken = new Set(blocks.map((b) => nodeName(b, defName)));
+    let unique = 'approval'; let n = 2;
+    while (taken.has(unique)) unique = `approval-${n++}`;
+    setBlocks((bs) => [...bs, { uid, stepId: '', parallelWithPrev: false, name: unique, approval: {} }]);
+  };
+
+  // Matrix and scatter are both a fan-out OF ONE NODE, so they are mutually
+  // exclusive with each other — but no longer with parallelism, which is now the
+  // graph's shape rather than a field on the step.
+  const setMatrix = (uid: string, m: MatrixConfig | null) =>
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, matrix: m, scatter: m ? null : b.scatter } : b)));
+  const setScatter = (uid: string, s: ScatterConfig | null) =>
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, scatter: s, matrix: s ? null : b.matrix } : b)));
+  const setApproval = (uid: string, g: ApprovalGate) =>
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, approval: g } : b)));
 
   const removeNode = (uid: string) => {
     const name = nodeName(blocks.find((b) => b.uid === uid) as Block, defName);
@@ -202,7 +294,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
         <>
           <div style={{ width: paletteW, flexShrink: 0, overflowY: 'auto', borderRight: `1px solid ${T.border}`, background: T.bgAlt, padding: 10 }}>
             <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 0.5, marginBottom: 8 }}>ADD STEP</div>
-            <button onClick={() => addInline('approval', 'approval')} style={paletteBtn}>
+            <button onClick={addGate} style={paletteBtn}>
               ⏸ approval gate
             </button>
             {actions.map((a) => (
@@ -219,6 +311,15 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               Click a step's <span style={{ color: T.green }}>▸</span> then another step's{' '}
               <span style={{ color: T.green }}>▸</span> to route between them. A step with no
               incoming route starts the run.
+              <div style={{ marginTop: 8 }}>
+                <span style={{ color: T.green }}>∥ parallel</span> is the shape of the graph:
+                route one step to <b>two</b> steps and they run at the same time. Route both
+                into a third and it waits for both.
+              </div>
+              <div style={{ marginTop: 8 }}>
+                Select a step to fan it out (<span style={{ color: T.amber }}>⊞ matrix</span> /{' '}
+                <span style={{ color: T.green }}>⊟ scatter</span>), or a route to give it a condition.
+              </div>
             </div>
           </div>
           <div {...paletteHandle} />
@@ -327,6 +428,43 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
           })}
         </div>
 
+        {/* Node inspector: a step's fan-out (matrix/scatter) and gate config. The
+            step's own action/inputs are edited in the host's right-hand panel via
+            onInspect; this is only what the graph itself owns. */}
+        {editable && selectedNode && (
+          <div style={{ position: 'sticky', bottom: 0, background: T.bgAlt, borderTop: `1px solid ${T.border}`, padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontFamily: T.mono, fontSize: 11, color: T.textHi }}>
+                {nodeName(selectedNode, defName) || 'unnamed'}
+              </span>
+              {!selectedNode.approval && (
+                <>
+                  <button onClick={() => setMatrix(selectedNode.uid, selectedNode.matrix ? null : { var: '', values: [] })}
+                    title="fan this step out over a list of values"
+                    style={{ ...toggleBtn, borderColor: selectedNode.matrix ? T.amber : T.border, color: selectedNode.matrix ? T.amber : T.faint }}>
+                    ⊞ matrix
+                  </button>
+                  <button onClick={() => setScatter(selectedNode.uid, selectedNode.scatter ? null : { regex: '', mode: 'dir' })}
+                    disabled={!selectedNode.inline}
+                    title={selectedNode.inline ? 'fan this step out over matching workspace paths' : 'scatter needs a pipeline-local (inline) step'}
+                    style={{ ...toggleBtn, borderColor: selectedNode.scatter ? T.green : T.border, color: selectedNode.scatter ? T.green : T.faint, opacity: selectedNode.inline ? 1 : 0.4 }}>
+                    ⊟ scatter
+                  </button>
+                </>
+              )}
+            </div>
+            {selectedNode.approval && <GateEditor uid={selectedNode.uid} gate={selectedNode.approval} onSet={setApproval} />}
+            {selectedNode.matrix && <MatrixEditor uid={selectedNode.uid} matrix={selectedNode.matrix} onSet={setMatrix} />}
+            {selectedNode.scatter && <ScatterEditor uid={selectedNode.uid} scatter={selectedNode.scatter} onSet={setScatter} />}
+            {!selectedNode.approval && !selectedNode.matrix && !selectedNode.scatter && (
+              <div style={{ fontSize: 10, color: T.faint, fontFamily: T.mono, lineHeight: 1.45 }}>
+                Runs once. Fan it out with ⊞ matrix (one run per value) or ⊟ scatter (one leg per
+                workspace path). To run steps <b>in parallel</b>, route into them from the same step.
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Route inspector: the only place a condition is authored. */}
         {editable && selectedEdge != null && routes[selectedEdge] && (
           <div style={{ position: 'sticky', bottom: 0, background: T.bgAlt, borderTop: `1px solid ${T.border}`, padding: 10 }}>
@@ -360,6 +498,11 @@ const paletteBtn: React.CSSProperties = {
   display: 'block', width: '100%', textAlign: 'left', marginBottom: 4,
   background: T.bg, border: `1px solid ${T.border}`, color: T.text,
   fontFamily: T.mono, fontSize: 11, padding: '5px 7px', cursor: 'pointer',
+};
+
+const toggleBtn: React.CSSProperties = {
+  background: 'none', border: `1px solid ${T.border}`, fontFamily: T.mono,
+  fontSize: 10, padding: '2px 6px', cursor: 'pointer',
 };
 
 const port: React.CSSProperties = {
