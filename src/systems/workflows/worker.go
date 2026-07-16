@@ -209,7 +209,12 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	g := workflow.buildGraph()
 	st := newRunState(g, stepOutputs, completed)
 
-	finalStatus := p.runGraph(runCtx, g, st, store, runID, workflowID, inputs, depth)
+	// One run-wide leg budget, shared by every node in the frontier, every matrix or
+	// scatter fan-out, and every map iteration. maxParallelSteps was a true ceiling
+	// in the batch engine only because a fan-out step was always alone in its group;
+	// a frontier of N such nodes would otherwise multiply it.
+	legSem := make(chan struct{}, maxParallelSteps)
+	finalStatus := p.runGraph(runCtx, g, st, store, runID, workflowID, inputs, depth, iterCtx{}, legSem)
 
 	// One or more approval gates parked and the rest of the frontier drained, so
 	// every runnable node is finished and recorded. Pause the run: return without
@@ -237,7 +242,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	// token carries the deleteVolume grant. Best-effort: forge's age reaper is the
 	// backstop for the crash-before-teardown case (and for stuck-run recovery, which
 	// has no token). Uses a background context so a cancelled run still cleans up.
-	if workflowUsesVolumes(workflow.Steps) {
+	if workflowUsesVolumes(workflow.Steps, workflow.Maps) {
 		p.teardownRunVolumes(context.Background(), store, runID)
 	}
 	// Resolve the pipeline's declared outputs from the final step outputs — only on
@@ -278,11 +283,18 @@ const ActionForgeCreateVolume = "forge/create-volume"
 
 // workflowUsesVolumes reports whether any step provisions a shared volume, so the
 // run knows to tear volumes down (and to expect the deleteVolume grant on its role).
-func workflowUsesVolumes(steps []WorkflowStep) bool {
+func workflowUsesVolumes(steps []WorkflowStep, maps []MapDef) bool {
 	for _, ws := range steps {
 		// A scatter step provisions per-leg clone volumes under the run id, so teardown
 		// must run to reap them even if the pipeline declares no create-volume step.
 		if ws.Action == ActionForgeCreateVolume || ws.Scatter != nil {
+			return true
+		}
+	}
+	// A map region with a volume clones the workspace per iteration under the run id,
+	// so those clones need reaping for the same reason.
+	for _, d := range maps {
+		if d.Volume != "" {
 			return true
 		}
 	}
@@ -333,6 +345,9 @@ type stepTask struct {
 	stepIndex int
 	name      string
 	matrix    map[string]string
+	// mapVars are the enclosing map iteration's ${map.*} bindings, if this task runs
+	// inside a region. Separate from matrix so a mapped step can still fan out.
+	mapVars map[string]string
 }
 
 // taskResult is the outcome of one stepTask, keyed back to its position so the
@@ -547,7 +562,7 @@ func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID,
 				return
 			}
 			defer func() { <-sem }() // release
-			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, runID: runID, depth: depth})
+			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, mapVars: t.mapVars, runID: runID, depth: depth})
 			resCh <- taskResult{name: t.name, output: res.Output, logs: res.Logs, usedMB: res.MemoryUsedMB, limitMB: res.MemoryLimitMB, err: err, idx: k}
 		}(k, t)
 	}

@@ -82,6 +82,21 @@ type workflowGraph struct {
 	// reach n. It scopes each node's visible outputs, which is what keeps a run
 	// deterministic once nodes stop executing in lockstep batches.
 	ancestors map[string]map[string]bool
+	// regions are the map regions over this node set, by id; regionOf maps a node to
+	// its region ("" when in none). A region schedules as ONE super-node: it expands
+	// into N iterations of its own subgraph and its successors wait for all of them.
+	// See mapregion.go.
+	regions  map[string]*mapRegion
+	regionOf map[string]string
+}
+
+// withMaps attaches the workflow's map regions. Deliberately not part of newGraph, so
+// a graph stays constructible from just (nodes, edges) — which is what keeps the pure
+// graph helpers testable without a whole workflow.
+func (g *workflowGraph) withMaps(defs []MapDef) *workflowGraph {
+	g.regions = regionsOf(g.steps, defs)
+	g.regionOf = regionOfNode(g.regions)
+	return g
 }
 
 // names returns the step names of a group, in order.
@@ -274,7 +289,7 @@ func (wf Workflow) buildGraph() *workflowGraph {
 	if len(routes) == 0 {
 		routes = deriveRoutes(wf.Steps)
 	}
-	return newGraph(wf.Steps, routes)
+	return newGraph(wf.Steps, routes).withMaps(wf.Maps)
 }
 
 // validateGraph checks a node set and its routes, returning a user-facing message
@@ -283,7 +298,10 @@ func (wf Workflow) buildGraph() *workflowGraph {
 //
 // It assumes step names are already known unique (validateUniqueStepNames runs
 // first on the create/update path), since names are the node identity here.
-func validateGraph(steps []WorkflowStep, routes []WorkflowRoute) string {
+func validateGraph(steps []WorkflowStep, routes []WorkflowRoute, maps []MapDef) string {
+	if msg := validateMaps(steps, maps, routes); msg != "" {
+		return msg
+	}
 	if len(routes) == 0 {
 		return ""
 	}

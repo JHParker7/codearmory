@@ -111,7 +111,7 @@ func TestCollectWorkflowPermissions_TriggerGrantsTriggerAndPoll(t *testing.T) {
 			Async:              &AsyncConfig{PollPath: "/runs/{id}"},
 		},
 	})
-	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Action: ActionWorkflowsTrigger}}})
+	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Action: ActionWorkflowsTrigger}}}, nil)
 	var hasTrigger, hasPoll bool
 	for _, p := range perms {
 		if p.Service == "workflows" && p.Action == "triggerRun" && p.Resource == "workflows/runs/*" {
@@ -137,7 +137,7 @@ func TestCollectWorkflowPermissions_InlineStepContributesPerms(t *testing.T) {
 	})
 	// An inline step is an enriched WorkflowStep with Action set and no StepID — the
 	// same shape collectWorkflowPermissions sees for any step.
-	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Name: "build", Action: "forge/run"}}})
+	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Name: "build", Action: "forge/run"}}}, nil)
 	var has bool
 	for _, p := range perms {
 		if p.Service == "forge" && p.Action == "createExecution" && p.Resource == "forge/executions" {

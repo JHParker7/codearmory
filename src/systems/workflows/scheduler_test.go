@@ -43,7 +43,7 @@ func TestScheduler_ConditionalDiamondJoinRuns(t *testing.T) {
 		{From: "b", To: "d"},
 		{From: "c", To: "d"},
 	}
-	if msg := validateGraph(steps, routes); msg != "" {
+	if msg := validateGraph(steps, routes, nil); msg != "" {
 		t.Fatalf("graph invalid: %s", msg)
 	}
 	g := newGraph(steps, routes)

@@ -33,11 +33,15 @@ import (
 // would 403 every create-volume status poll and hang until timeout.
 // v4 added the workflows/trigger sub-pipeline step, whose run role needs triggerRun
 // + getRun on workflows/runs/* to create and poll the sub-run.
-const workflowRolePermsVersion = 5
+// v5 added map regions: a region with a volume clones the workspace per iteration and
+// gathers outputs back, so — exactly like a scatter step — its run role needs forge's
+// create-volume and volume-copy on top of the body's own actions. Without the bump, a
+// workflow created earlier would 403 its first clone and hang.
+const workflowRolePermsVersion = 6
 
 // collectWorkflowPermissions returns the deduplicated set of gatekeeper
 // permissions declared by the workflow's step actions in the current catalog.
-func collectWorkflowPermissions(steps []WorkflowStep) []PermissionSpec {
+func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef) []PermissionSpec {
 	seen := map[string]struct{}{}
 	var out []PermissionSpec
 	actionCatalogMu.RLock()
@@ -127,14 +131,22 @@ func collectWorkflowPermissions(steps []WorkflowStep) []PermissionSpec {
 			addAction(actionForgeVolumeCopy)
 		}
 	}
+	// A map region with a volume clones the base workspace per iteration and gathers
+	// owned outputs back, driving the same forge actions a scatter step does.
+	for _, d := range maps {
+		if d.Volume != "" {
+			addAction(ActionForgeCreateVolume)
+			addAction(actionForgeVolumeCopy)
+		}
+	}
 	return out
 }
 
 // provisionWorkflowRole asks gatekeeper to create a minimal-permission role for
 // workflowID. Returns the new role_id, or "" when the key is unconfigured or the
 // permission list is empty (runs will use the user's full session permissions).
-func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string, steps []WorkflowStep) string {
-	perms := collectWorkflowPermissions(steps)
+func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string, steps []WorkflowStep, maps []MapDef) string {
+	perms := collectWorkflowPermissions(steps, maps)
 	if len(perms) == 0 {
 		return ""
 	}
@@ -252,6 +264,8 @@ type createWorkflowRequest struct {
 	// steps[]/parallel_group encoding, whose edges are derived at run time — which
 	// is what lets a client that predates routes carry on unchanged.
 	Routes []WorkflowRoute `json:"routes,omitempty"`
+	// Maps declare the map regions steps join via map_id — see MapDef.
+	Maps []MapDef `json:"maps,omitempty"`
 }
 
 // validateWorkflowIO checks the declared inputs/outputs: unique, named, and every
@@ -363,6 +377,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		Inputs:      req.Inputs,
 		Outputs:     req.Outputs,
 		Routes:      req.Routes,
+		Maps:        req.Maps,
 		StepRefs:    refs,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -380,14 +395,14 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	// Routes are validated against the ENRICHED steps, since a route names a step
 	// by the name it actually runs under (a stored-step reference may override it).
-	if msg := validateGraph(wf.Steps, wf.Routes); msg != "" {
+	if msg := validateGraph(wf.Steps, wf.Routes, wf.Maps); msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 
 	// Provision a scoped service role before persisting so the role_id is stored atomically.
-	wf.RoleID = provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps)
+	wf.RoleID = provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps, wf.Maps)
 	wf.RolePermsVersion = workflowRolePermsVersion
 
 	if err := wf.Add(ctx); err != nil {
@@ -590,7 +605,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if msg := validateGraph(newSteps, req.Routes); msg != "" {
+	if msg := validateGraph(newSteps, req.Routes, req.Maps); msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
 		return
@@ -600,6 +615,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing.Name = req.Name
 	existing.Description = req.Description
 	existing.Routes = req.Routes
+	existing.Maps = req.Maps
 	// Guard like tickets: a partial PUT that omits project must not silently
 	// wipe the stored label (the CLI/TUI update payloads don't send project).
 	if req.Project != "" {
@@ -612,7 +628,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing.UpdatedAt = time.Now().UTC()
 
 	// Re-provision the role with the updated step set.
-	existing.RoleID = provisionWorkflowRole(ctx, existing.WorkflowID, userID, orgID, newSteps)
+	existing.RoleID = provisionWorkflowRole(ctx, existing.WorkflowID, userID, orgID, newSteps, req.Maps)
 	existing.RolePermsVersion = workflowRolePermsVersion
 
 	if err := existing.Update(ctx); err != nil {

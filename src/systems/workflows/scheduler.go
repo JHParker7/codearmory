@@ -85,11 +85,17 @@ func newRunState(g *workflowGraph, outputs map[string]string, completed map[stri
 	return st
 }
 
-// nodeResult is one finished node, reported back to the scheduler goroutine.
+// nodeResult is one finished unit, reported back to the scheduler goroutine: either
+// a single node (name/output) or a whole map region (region/regionOutputs).
 type nodeResult struct {
 	name   string
 	state  nodeState
 	output string
+	// region is set when this result is a map region rather than one node; every
+	// member then takes `state`, and regionOutputs carries each member's aggregated
+	// output across iterations.
+	region        *mapRegion
+	regionOutputs map[string]string
 }
 
 // resolveOutbound decides every outbound route of a node that has just reached a
@@ -177,30 +183,127 @@ func (g *workflowGraph) anyTaken(st *runState, node string) bool {
 	return false
 }
 
-// readyNodes returns the pending nodes that may launch now.
+// nodeReady is the join rule: ALL-INBOUND-RESOLVED, AT-LEAST-ONE-TAKEN.
 //
-// The join rule is ALL-INBOUND-RESOLVED, AT-LEAST-ONE-TAKEN. The "resolved"
-// half rather than "completed" is what makes a conditional diamond work: given
-// A->B (when x), A->C (when !x), B->D, C->D, exactly one of B/C runs and the
+// "Resolved" rather than "completed" is what makes a conditional diamond work:
+// given A->B (when x), A->C (when !x), B->D, C->D, exactly one of B/C runs and the
 // other is skipped; C->D then resolves not-taken, B->D is taken, and D sees all
-// inbound resolved with one taken, so D runs. Under an all-inbound-COMPLETED
-// rule D would wait on C forever.
+// inbound resolved with one taken, so D runs. Under an all-inbound-COMPLETED rule D
+// would wait on C forever.
+func (g *workflowGraph) nodeReady(st *runState, n string) bool {
+	if st.nodes[n] != nodePending {
+		return false
+	}
+	if len(g.in[n]) == 0 {
+		return true // entry node
+	}
+	return g.allResolved(st, n) && g.anyTaken(st, n)
+}
+
+// readyNodes returns the pending non-region nodes that may launch now.
 func (g *workflowGraph) readyNodes(st *runState) []string {
 	var ready []string
 	for _, ws := range g.steps {
-		n := ws.Name
-		if st.nodes[n] != nodePending {
-			continue
+		if g.regionOf[ws.Name] != "" {
+			continue // region members launch as a unit, via readyRegions
 		}
-		if len(g.in[n]) == 0 {
-			ready = append(ready, n) // entry node
-			continue
-		}
-		if g.allResolved(st, n) && g.anyTaken(st, n) {
-			ready = append(ready, n)
+		if g.nodeReady(st, ws.Name) {
+			ready = append(ready, ws.Name)
 		}
 	}
 	return ready
+}
+
+// boundary splits a region's inbound route indices (from outside in) from the rest.
+// Routes wholly inside the region belong to an iteration's subgraph, not to the
+// region's own readiness.
+func (g *workflowGraph) inboundOf(region *mapRegion) []int {
+	inside := make(map[string]bool, len(region.nodes))
+	for _, n := range region.nodes {
+		inside[n] = true
+	}
+	var in []int
+	for _, n := range region.nodes {
+		for _, ri := range g.in[n] {
+			if !inside[g.routes[ri].From] {
+				in = append(in, ri)
+			}
+		}
+	}
+	return in
+}
+
+// regionReady reports whether a map region may expand now.
+//
+// A region is ONE super-node: it waits on the routes crossing INTO it, using the same
+// all-resolved/at-least-one-taken rule a node does. With no external inbound routes it
+// is an entry unit, ready at t=0.
+func (g *workflowGraph) regionReady(st *runState, region *mapRegion) bool {
+	pending := false
+	for _, n := range region.nodes {
+		if st.nodes[n] == nodePending {
+			pending = true
+		} else {
+			return false // already expanded (or skipped): never re-enter
+		}
+	}
+	if !pending {
+		return false
+	}
+	inbound := g.inboundOf(region)
+	if len(inbound) == 0 {
+		return true
+	}
+	taken := false
+	for _, ri := range inbound {
+		switch st.edges[ri] {
+		case edgePending:
+			return false
+		case edgeTaken:
+			taken = true
+		}
+	}
+	return taken
+}
+
+// regionSkipped reports whether every route into a region resolved with none taken,
+// so the whole region is skipped — the region-level twin of a skipped node.
+func (g *workflowGraph) regionSkipped(st *runState, region *mapRegion) bool {
+	for _, n := range region.nodes {
+		if st.nodes[n] != nodePending {
+			return false
+		}
+	}
+	inbound := g.inboundOf(region)
+	if len(inbound) == 0 {
+		return false
+	}
+	for _, ri := range inbound {
+		if st.edges[ri] != edgeNotTaken {
+			return false
+		}
+	}
+	return true
+}
+
+// readyRegions returns the map regions that may expand now.
+func (g *workflowGraph) readyRegions(st *runState) []*mapRegion {
+	var out []*mapRegion
+	for _, ws := range g.steps {
+		id := g.regionOf[ws.Name]
+		if id == "" {
+			continue
+		}
+		r := g.regions[id]
+		// Offer each region once: only when the iteration reaches its first node.
+		if r == nil || r.nodes[0] != ws.Name {
+			continue
+		}
+		if g.regionReady(st, r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // awaitingNodes returns the parked approval gates, in array order.
@@ -218,16 +321,31 @@ func (g *workflowGraph) awaitingNodes(st *runState) []string {
 // approval gate parked, so the caller pauses the run instead of completing it.
 const statusPaused = "paused"
 
+// iterCtx scopes a subgraph run to one map iteration: its ${map.*} bindings, how its
+// step runs are labelled, and the clone volume its steps run against. The zero value
+// is the main graph — no iteration, no relabelling, no injected volume.
+type iterCtx struct {
+	mapVars map[string]string
+	label   func(base string) string
+	volume  map[string]any
+}
+
+// name applies the iteration's labelling to a step name.
+func (ic iterCtx) name(base string) string {
+	if ic.label == nil {
+		return base
+	}
+	return ic.label(base)
+}
+
 // runGraph is the frontier loop. It returns a terminal run status, or statusPaused
 // when the run stopped on one or more approval gates.
-func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runState, store *tokenStore, runID, workflowID string, inputs map[string]string, depth int) string {
+//
+// It is re-entered per map iteration (with the region's subgraph and an iterCtx), so
+// a region's body branches and joins with exactly the main graph's semantics.
+func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runState, store *tokenStore, runID, workflowID string, inputs map[string]string, depth int, ic iterCtx, legSem chan struct{}) string {
 	finalStatus := StatusCompleted
-	resCh := make(chan nodeResult, len(g.steps))
-	// One run-wide leg semaphore. The batch engine's maxParallelSteps was a true
-	// ceiling only because a matrix step was always alone in its group; a frontier
-	// of N nodes each fanning out would otherwise multiply it. Legs are leaves —
-	// they never wait on another leg — so a shared semaphore cannot deadlock.
-	legSem := make(chan struct{}, maxParallelSteps)
+	resCh := make(chan nodeResult, len(g.steps)+1)
 	inFlight := 0
 
 	// Seed: a resumed run's already-completed nodes must resolve their outbound
@@ -240,12 +358,25 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 
 	for {
 		if ctx.Err() == nil {
+			// Map regions expand as one unit: every member launches together and the
+			// region's successors wait for all its iterations.
+			for _, region := range g.readyRegions(st) {
+				for _, n := range region.nodes {
+					st.nodes[n] = nodeRunning
+				}
+				visible := g.visibleForRegion(region, st.outputs)
+				inFlight++
+				go func(region *mapRegion, visible map[string]string) {
+					agg, status := p.runMapRegion(ctx, store, runID, workflowID, g, region, inputs, visible, depth, legSem)
+					resCh <- nodeResult{region: region, state: statusToNodeState(status), regionOutputs: agg}
+				}(region, visible)
+			}
 			for _, n := range g.readyNodes(st) {
 				ws := g.steps[g.index[n]]
 				// An approval gate parks its branch; it does NOT pause the run here.
 				// Pausing with siblings in flight would abandon their goroutines,
 				// orphan their step runs in `running`, and re-execute them on resume.
-				if ws.Action == ActionApproval {
+				if ws.Action == ActionApproval || ws.Approval != nil {
 					st.nodes[n] = nodeAwaiting
 					continue
 				}
@@ -254,9 +385,10 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 				idx := g.index[n]
 				inFlight++
 				go func(n string, ws WorkflowStep, idx int, visible map[string]string) {
-					resCh <- p.runNode(ctx, store, runID, workflowID, ws, idx, inputs, visible, depth, legSem)
+					resCh <- p.runNode(ctx, store, runID, workflowID, ws, idx, inputs, visible, depth, ic, legSem)
 				}(n, ws, idx, visible)
 			}
+			p.skipSkippedRegions(ctx, g, st, runID, inputs)
 			p.publishCurrentStep(ctx, g, st, runID)
 		} else if finalStatus == StatusCompleted {
 			finalStatus = StatusCancelled
@@ -272,9 +404,22 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 		// terminal run status while step runs were still being written.
 		r := <-resCh
 		inFlight--
-		st.nodes[r.name] = r.state
-		if r.state == nodeCompleted {
-			st.outputs[r.name] = r.output
+		// A region reports once for all its members: they share its state, and each
+		// publishes the JSON array of that node's output across iterations — the same
+		// shape a matrix step publishes, so a downstream ${steps.build.output} reads
+		// uniformly whether build was mapped or not.
+		names := []string{r.name}
+		if r.region != nil {
+			names = r.region.nodes
+			for n, out := range r.regionOutputs {
+				st.outputs[n] = out
+			}
+		}
+		for _, n := range names {
+			st.nodes[n] = r.state
+			if r.region == nil && r.state == nodeCompleted {
+				st.outputs[n] = r.output
+			}
 		}
 		switch r.state {
 		case nodeFailed:
@@ -285,13 +430,55 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 				finalStatus = StatusCancelled
 			}
 		}
-		p.resolveOutbound(ctx, g, st, runID, inputs, r.name)
+		for _, n := range names {
+			p.resolveOutbound(ctx, g, st, runID, inputs, n)
+		}
 	}
 
 	if finalStatus == StatusCompleted && len(g.awaitingNodes(st)) > 0 {
 		return statusPaused
 	}
 	return finalStatus
+}
+
+// skipSkippedRegions marks every member of a region whose inbound routes all resolved
+// not-taken, then cascades — the region-level twin of a skipped node, so a map behind
+// an untaken branch does not wedge the frontier.
+func (p *WorkerPool) skipSkippedRegions(ctx context.Context, g *workflowGraph, st *runState, runID string, inputs map[string]string) {
+	for _, r := range g.regions {
+		if !g.regionSkipped(st, r) {
+			continue
+		}
+		for _, n := range r.nodes {
+			st.nodes[n] = nodeSkipped
+		}
+		for _, n := range r.nodes {
+			p.resolveOutbound(ctx, g, st, runID, inputs, n)
+		}
+	}
+}
+
+// visibleForRegion is the output view a map region's iterations start from: the union
+// of its members' ancestors, minus the region's own nodes (an iteration's own outputs
+// are produced inside it). This is what lets a body reference a step upstream of the
+// map, e.g. ${steps.discover.output}.
+func (g *workflowGraph) visibleForRegion(region *mapRegion, outputs map[string]string) map[string]string {
+	inside := make(map[string]bool, len(region.nodes))
+	for _, n := range region.nodes {
+		inside[n] = true
+	}
+	v := map[string]string{}
+	for _, n := range region.nodes {
+		for a := range g.ancestors[n] {
+			if inside[a] {
+				continue
+			}
+			if out, ok := outputs[a]; ok {
+				v[a] = out
+			}
+		}
+	}
+	return v
 }
 
 // publishCurrentStep keeps WorkflowRun.CurrentStep meaningful as a progress hint:
@@ -318,7 +505,14 @@ func (p *WorkerPool) publishCurrentStep(ctx context.Context, g *workflowGraph, s
 // legs share the node's step index and re-collapse into one output), so the
 // scheduler never sees legs. Wrapping the node in a single-member stepGroup lets
 // buildGroupTasks, groupConcurrency, and runTaskGroup be reused verbatim.
-func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, workflowID string, ws WorkflowStep, idx int, inputs, visible map[string]string, depth int, legSem chan struct{}) nodeResult {
+func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, workflowID string, ws WorkflowStep, idx int, inputs, visible map[string]string, depth int, ic iterCtx, legSem chan struct{}) nodeResult {
+	// Inside a map iteration the step runs against that iteration's workspace clone,
+	// and its step run is labelled with the binding so the run view can tell the
+	// iterations apart.
+	if ic.volume != nil {
+		ws.With = withIterVolume(ws.With, ic.volume)
+	}
+
 	// Scatter owns its whole resolve/clone/run/gather orchestration.
 	if ws.Scatter != nil {
 		output, status := p.runScatterGroup(ctx, store, runID, ws, idx, inputs, visible, depth, legSem)
@@ -326,7 +520,7 @@ func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, work
 	}
 
 	group := stepGroup{steps: []WorkflowStep{ws}, indices: []int{idx}}
-	tasks, aggregateName, terr := buildGroupTasks(group, substContext{inputs: inputs, outputs: visible, runID: runID})
+	tasks, aggregateName, terr := buildGroupTasks(group, substContext{inputs: inputs, outputs: visible, mapVars: ic.mapVars, runID: runID})
 	if terr != nil {
 		if sid := uuid.New().String(); p.startStepRun(runID, sid, idx, ws.Name) == nil {
 			p.finishStepRun(sid, StatusFailed, strPtr(terr.Error()), nil, nil, nil)
@@ -343,6 +537,13 @@ func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, work
 		}
 		slog.WarnContext(ctx, "worker: matrix produced no values, failing run", "run_id", runID, "step", idx)
 		return nodeResult{name: ws.Name, state: nodeFailed}
+	}
+
+	// Relabel this iteration's step runs (build -> "build [dir=src/cli]"), mirroring
+	// how a matrix labels its legs.
+	for i := range tasks {
+		tasks[i].name = ic.name(tasks[i].name)
+		tasks[i].mapVars = ic.mapVars
 	}
 
 	results, status := p.runTaskGroup(ctx, store, runID, workflowID, tasks, inputs, visible, depth, groupConcurrency(group), legSem)

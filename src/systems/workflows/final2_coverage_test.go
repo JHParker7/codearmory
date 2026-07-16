@@ -34,7 +34,7 @@ func TestProvisionWorkflowRole_ErrorResponses(t *testing.T) {
 	}))
 	defer srv1.Close()
 	gatekeeperURL = srv1.URL
-	if rid := provisionWorkflowRole(context.Background(), "wf", "u", "o", steps); rid != "" {
+	if rid := provisionWorkflowRole(context.Background(), "wf", "u", "o", steps, nil); rid != "" {
 		t.Errorf("non-201 should yield empty role id, got %q", rid)
 	}
 
@@ -45,7 +45,7 @@ func TestProvisionWorkflowRole_ErrorResponses(t *testing.T) {
 	}))
 	defer srv2.Close()
 	gatekeeperURL = srv2.URL
-	if rid := provisionWorkflowRole(context.Background(), "wf", "u", "o", steps); rid != "" {
+	if rid := provisionWorkflowRole(context.Background(), "wf", "u", "o", steps, nil); rid != "" {
 		t.Errorf("bad JSON should yield empty role id, got %q", rid)
 	}
 }
@@ -57,7 +57,7 @@ func TestProvisionWorkflowRole_NoKey(t *testing.T) {
 	origKey := gatekeeperKey
 	gatekeeperKey = func() string { return "" }
 	t.Cleanup(func() { gatekeeperKey = origKey })
-	if rid := provisionWorkflowRole(context.Background(), "wf", "u", "o", []WorkflowStep{{Step: Step{Action: "forge/run"}}}); rid != "" {
+	if rid := provisionWorkflowRole(context.Background(), "wf", "u", "o", []WorkflowStep{{Step: Step{Action: "forge/run"}}}, nil); rid != "" {
 		t.Errorf("no key should yield empty role id, got %q", rid)
 	}
 }

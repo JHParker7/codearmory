@@ -240,7 +240,55 @@ type WorkflowStepRef struct {
 	// exclusive with Matrix/ParallelGroup — see ScatterConfig.
 	Scatter  *ScatterConfig `json:"scatter,omitempty"`
 	Approval *ApprovalGate  `json:"approval,omitempty"`
+	// MapID puts this step inside the named map region (see MapDef): the region's
+	// whole subgraph is repeated once per value, so unlike Matrix — which repeats a
+	// single step — a map body can be several routed steps. Mutually exclusive with
+	// Matrix/Scatter/ParallelGroup on the same step, since those are the step's own
+	// fan-out and would nest inside the region's.
+	MapID string `json:"map_id,omitempty"`
 }
+
+// MapDef declares a map region: a SUBGRAPH repeated once per value.
+//
+// It is the region-scoped counterpart of MatrixConfig. A matrix fans out one step;
+// a map fans out every step carrying its MapID, along with the routes between them —
+// so an iteration can build, then test, then conditionally push, which is what a
+// matrix cannot express.
+//
+// Volume, when set, gives each iteration its OWN CLONE of that workspace (the same
+// mechanism scatter uses). This is the reason the region exists rather than being
+// composed from a matrix over sub-pipelines: volumes are ReadWriteOnce, so parallel
+// iterations cannot share one checkout, and nothing else both clones per iteration
+// and runs a multi-step body.
+type MapDef struct {
+	// ID is the region's name, referenced by WorkflowStepRef.MapID.
+	ID string `json:"id"`
+	// Var is the binding name: each iteration sees its value as ${map.<var>}.
+	Var string `json:"var"`
+	// Exactly one of Values / ValuesFrom, mirroring MatrixConfig. ValuesFrom is a
+	// ${...} reference resolved when the region starts (typically an earlier step's
+	// output), which is what makes the fan-out dynamic.
+	Values     []string `json:"values,omitempty"`
+	ValuesFrom string   `json:"values_from,omitempty"`
+	// MaxConcurrent caps iterations in flight (0 = defaultFanoutConcurrency);
+	// Sequential pins it to 1.
+	MaxConcurrent int  `json:"max_concurrent,omitempty"`
+	Sequential    bool `json:"sequential,omitempty"`
+	// Volume names the base workspace to clone per iteration; empty = no clone (the
+	// body then attaches whatever volumes it declares itself). MountPath/SizeMB/
+	// Medium configure the clone, and Outputs are the paths each iteration owns,
+	// gathered back into the base afterward — all as in ScatterConfig.
+	Volume    string   `json:"volume,omitempty"`
+	MountPath string   `json:"mount_path,omitempty"`
+	SizeMB    int64    `json:"size_mb,omitempty"`
+	Medium    string   `json:"medium,omitempty"`
+	Outputs   []string `json:"outputs,omitempty"`
+}
+
+// maxMapValues caps a map region's fan-out, matching maxMatrixValues: a region
+// iteration is far heavier than a matrix leg (a whole subgraph, optionally a volume
+// clone), so the same ceiling is deliberately conservative.
+const maxMapValues = 50
 
 // WorkflowStep enriches a WorkflowStepRef with the full Step definition.
 // It is assembled at request/execution time and never stored in the DB. For an
@@ -252,6 +300,8 @@ type WorkflowStep struct {
 	Matrix        *MatrixConfig  `json:"matrix,omitempty"`
 	Scatter       *ScatterConfig `json:"scatter,omitempty"`
 	Approval      *ApprovalGate  `json:"approval,omitempty"`
+	// MapID is the map region this step belongs to — see MapDef.
+	MapID string `json:"map_id,omitempty"`
 }
 
 // WorkflowInputDef declares a named input a pipeline accepts. Default is applied
@@ -300,6 +350,9 @@ type Workflow struct {
 	// adds them with no manual migration and existing rows read back as empty.
 	Inputs  []WorkflowInputDef  `json:"inputs,omitempty"  gorm:"column:inputs;serializer:json"`
 	Outputs []WorkflowOutputDef `json:"outputs,omitempty" gorm:"column:outputs;serializer:json"`
+	// Maps declare the map regions this workflow contains — see MapDef. A step joins
+	// a region by naming it in WorkflowStepRef.MapID.
+	Maps []MapDef `json:"maps,omitempty" gorm:"column:maps;serializer:json"`
 	// Routes are the explicit edges between steps — see WorkflowRoute. Empty means
 	// the edges are DERIVED from parallel_group at load time (deriveRoutes), which
 	// is why a pipeline authored before routes existed needs no migration. The two

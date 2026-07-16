@@ -35,7 +35,7 @@ func TestCollectWorkflowPermissions(t *testing.T) {
 		{Step: Step{Action: "forge/run"}}, {Step: Step{Action: "forge/run"}}, // dup collapses
 		{Step: Step{Action: ActionHTTP}},    // skipped (runtime-dynamic)
 		{Step: Step{Action: "unknown/act"}}, // not in catalog → skipped
-	})
+	}, nil)
 	if len(perms) != 1 || perms[0].Action != "createExecution" {
 		t.Fatalf("perms = %+v, want one createExecution", perms)
 	}
@@ -52,7 +52,7 @@ func TestCollectWorkflowPermissions_AsyncGrantsPollPermission(t *testing.T) {
 			Async:              &AsyncConfig{PollPath: "/executions/{id}"},
 		},
 	})
-	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Action: "forge/run"}}})
+	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Action: "forge/run"}}}, nil)
 	var hasCreate, hasPoll bool
 	for _, p := range perms {
 		if p.Service == "forge" && p.Action == "createExecution" && p.Resource == "forge/executions" {
@@ -87,7 +87,7 @@ func TestProvisionAndDeleteWorkflowRole_Success(t *testing.T) {
 	gatekeeperKey = func() string { return "k" }
 	t.Cleanup(func() { gatekeeperURL = origURL; gatekeeperKey = origKey })
 
-	rid := provisionWorkflowRole(context.Background(), "wf1", "u1", "o1", []WorkflowStep{{Step: Step{Action: "forge/run"}}})
+	rid := provisionWorkflowRole(context.Background(), "wf1", "u1", "o1", []WorkflowStep{{Step: Step{Action: "forge/run"}}}, nil)
 	if rid != "role-9" {
 		t.Fatalf("role id = %q, want role-9", rid)
 	}
@@ -100,7 +100,7 @@ func TestProvisionAndDeleteWorkflowRole_Success(t *testing.T) {
 func TestProvisionWorkflowRole_EmptyPerms(t *testing.T) {
 	withCatalog(t, map[string]ActionDef{})
 	// No catalog permissions → returns "" without calling gatekeeper.
-	if rid := provisionWorkflowRole(context.Background(), "wf", "u", "o", []WorkflowStep{{Step: Step{Action: ActionHTTP}}}); rid != "" {
+	if rid := provisionWorkflowRole(context.Background(), "wf", "u", "o", []WorkflowStep{{Step: Step{Action: ActionHTTP}}}, nil); rid != "" {
 		t.Errorf("expected empty role id, got %q", rid)
 	}
 }
@@ -240,7 +240,7 @@ func TestCollectWorkflowPermissions_CreateVolumeGrantsDeleteAndPoll(t *testing.T
 			Async:              &AsyncConfig{IDField: "resource_name", PollPath: "/volumes/{id}", StatusField: "status", SuccessStates: []string{"ready"}, FailureStates: []string{"failed"}},
 		},
 	})
-	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Action: "forge/create-volume"}}})
+	perms := collectWorkflowPermissions([]WorkflowStep{{Step: Step{Action: "forge/create-volume"}}}, nil)
 	var hasCreate, hasDelete, hasGet bool
 	for _, p := range perms {
 		if p.Service != "forge" {
@@ -261,10 +261,10 @@ func TestCollectWorkflowPermissions_CreateVolumeGrantsDeleteAndPoll(t *testing.T
 }
 
 func TestWorkflowUsesVolumes(t *testing.T) {
-	if !workflowUsesVolumes([]WorkflowStep{{Step: Step{Action: "forge/run"}}, {Step: Step{Action: ActionForgeCreateVolume}}}) {
+	if !workflowUsesVolumes([]WorkflowStep{{Step: Step{Action: "forge/run"}}, {Step: Step{Action: ActionForgeCreateVolume}}}, nil) {
 		t.Error("want true when a create-volume step is present")
 	}
-	if workflowUsesVolumes([]WorkflowStep{{Step: Step{Action: "forge/run"}}}) {
+	if workflowUsesVolumes([]WorkflowStep{{Step: Step{Action: "forge/run"}}}, nil) {
 		t.Error("want false when no create-volume step")
 	}
 }
