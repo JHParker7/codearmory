@@ -233,7 +233,11 @@ func (g *workflowGraph) subGraph(region *mapRegion) *workflowGraph {
 			routes = append(routes, r)
 		}
 	}
-	return newGraph(steps, routes)
+	sub := newGraph(steps, routes)
+	// Keep the workflow-level step indices: an iteration's step runs must still name
+	// the step they came from, not a position within the region.
+	sub.outerIndex = g.index
+	return sub
 }
 
 // runMapRegion expands a region and runs every iteration, returning the region's
@@ -404,7 +408,7 @@ func (p *WorkerPool) mapFail(runID string, g *workflowGraph, region *mapRegion, 
 		return StatusFailed
 	}
 	name := region.nodes[0]
-	if sid := uuid.New().String(); p.startStepRun(runID, sid, g.index[name], name) == nil {
+	if sid := uuid.New().String(); p.startStepRun(runID, sid, g.stepIndex(name), name) == nil {
 		p.finishStepRun(sid, StatusFailed, strPtr(msg), nil, nil, nil)
 	}
 	return StatusFailed

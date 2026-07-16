@@ -80,6 +80,26 @@ func TestMapRegion_SubGraphExcludesBoundaryRoutes(t *testing.T) {
 	}
 }
 
+// An iteration's step runs must carry the step's index in the WORKFLOW's array, not
+// its position within the region — StepIndex is the join key back to the definition
+// (wf.Steps[sr.StepIndex]), so re-indexing would make every mapped step run name the
+// wrong step.
+func TestMapRegion_SubGraphKeepsWorkflowStepIndices(t *testing.T) {
+	steps, defs, routes := mapPipeline()
+	g := newGraph(steps, routes).withMaps(defs)
+	sub := g.subGraph(g.regions["m1"])
+
+	for name, want := range map[string]int{"build": 1, "test": 2, "push": 3} {
+		if got := sub.stepIndex(name); got != want {
+			t.Errorf("subgraph stepIndex(%s) = %d, want %d (its position in the workflow)", name, got, want)
+		}
+	}
+	// The local index still addresses this graph's own slice, so fetching a node works.
+	if sub.steps[sub.index["build"]].Name != "build" {
+		t.Error("local index must still address the subgraph's own step slice")
+	}
+}
+
 // The region waits on its inbound routes as a unit, and its members never launch
 // individually — that is what makes deploy run once, after every iteration.
 func TestMapRegion_ReadyOnlyAfterInboundTaken(t *testing.T) {

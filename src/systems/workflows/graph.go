@@ -88,6 +88,24 @@ type workflowGraph struct {
 	// See mapregion.go.
 	regions  map[string]*mapRegion
 	regionOf map[string]string
+	// outerIndex overrides the step index REPORTED for a node, when this graph is a
+	// map region's subgraph. `index` is the position within THIS graph's step slice
+	// (used to fetch a node), but WorkflowStepRun.StepIndex must stay the position in
+	// the WORKFLOW's array — it is the join key between a run record and the
+	// definition (wf.Steps[sr.StepIndex]). Without this a subgraph would re-index
+	// from zero and an iteration's step runs would name the wrong step.
+	outerIndex map[string]int
+}
+
+// stepIndex is the index to RECORD for a node: its position in the workflow's step
+// array, even when running inside a map region's subgraph.
+func (g *workflowGraph) stepIndex(n string) int {
+	if g.outerIndex != nil {
+		if i, ok := g.outerIndex[n]; ok {
+			return i
+		}
+	}
+	return g.index[n]
 }
 
 // withMaps attaches the workflow's map regions. Deliberately not part of newGraph, so

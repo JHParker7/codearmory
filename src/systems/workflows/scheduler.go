@@ -150,7 +150,7 @@ func (p *WorkerPool) decideRoute(ctx context.Context, g *workflowGraph, st *runS
 		// A condition that cannot be evaluated must not silently vanish: record a
 		// visible failed step run naming the route, and leave the edge not-taken.
 		slog.WarnContext(ctx, "worker: route condition failed", "run_id", runID, "from", r.From, "to", r.To, "error", err)
-		if sid := uuid.New().String(); p.startStepRun(runID, sid, g.index[r.To], "route "+r.From+"->"+r.To) == nil {
+		if sid := uuid.New().String(); p.startStepRun(runID, sid, g.stepIndex(r.To), "route "+r.From+"->"+r.To) == nil {
 			p.finishStepRun(sid, StatusFailed, strPtr(err.Error()), nil, nil, nil)
 		}
 		return edgeNotTaken
@@ -382,7 +382,7 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 				}
 				st.nodes[n] = nodeRunning
 				visible := g.visibleFor(n, st.outputs)
-				idx := g.index[n]
+				idx := g.stepIndex(n)
 				inFlight++
 				go func(n string, ws WorkflowStep, idx int, visible map[string]string) {
 					resCh <- p.runNode(ctx, store, runID, workflowID, ws, idx, inputs, visible, depth, ic, legSem)
@@ -489,7 +489,7 @@ func (p *WorkerPool) publishCurrentStep(ctx context.Context, g *workflowGraph, s
 	lowest := -1
 	for _, ws := range g.steps {
 		if st.nodes[ws.Name] == nodeRunning {
-			if i := g.index[ws.Name]; lowest < 0 || i < lowest {
+			if i := g.stepIndex(ws.Name); lowest < 0 || i < lowest {
 				lowest = i
 			}
 		}
@@ -572,7 +572,7 @@ func (p *WorkerPool) pauseAtGates(ctx context.Context, g *workflowGraph, st *run
 	awaiting := g.awaitingNodes(st)
 	lowest := -1
 	for _, n := range awaiting {
-		i := g.index[n]
+		i := g.stepIndex(n)
 		if lowest < 0 || i < lowest {
 			lowest = i
 		}
