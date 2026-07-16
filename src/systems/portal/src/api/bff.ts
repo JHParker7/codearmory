@@ -319,10 +319,27 @@ export interface WorkflowStepRef {
   // (merged) with; on save send only the keys that differ from the step definition.
   // For an inline step it is the full config.
   with?: Record<string, unknown> | null;
+  // The legacy ordered-list encoding: consecutive steps sharing a non-nil group run
+  // concurrently. Superseded by `routes` on the Workflow, and rejected alongside
+  // them — the graph editor never sends it.
   parallel_group?: number | null;
   matrix?: MatrixConfig | null;
   scatter?: ScatterConfig | null;
   approval?: ApprovalGate | null;
+}
+
+/** A directed edge between two steps, identified by step name — the workflows API's
+ * WorkflowRoute. A step with no inbound route is an entry step.
+ *
+ * `when` is a boolean expression (NOT `${...}` templating) deciding whether the
+ * edge is taken, evaluated once `from` reaches a terminal state; empty means "taken
+ * iff `from` completed". Reads steps.NAME.status/.output/.json.FIELD, inputs.NAME,
+ * run.id. It is compiled when the pipeline is saved, so a typo is a 400 rather than
+ * a silently dead branch at run time. */
+export interface WorkflowRoute {
+  from: string;
+  to: string;
+  when?: string;
 }
 
 /** A run parameter a pipeline declares. `default` is applied when the trigger omits
@@ -352,6 +369,10 @@ export interface Workflow {
   org_id?: string | null;
   active: boolean;
   steps: WorkflowStepRef[];
+  /** The edges between steps. Absent/empty means this pipeline still uses the
+   * ordered steps[]/parallel_group encoding, whose edges the backend derives at run
+   * time — the graph editor shows those derived edges and writes routes on save. */
+  routes?: WorkflowRoute[];
   /** Declared run parameters (defaults/required applied at trigger time). */
   inputs?: WorkflowInputDef[];
   /** Declared outputs published on completion (resolved into WorkflowRun.outputs). */
@@ -928,7 +949,7 @@ export function listActions(token: string) {
 
 export function createWorkflow(
   token: string,
-  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[] },
+  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; routes?: WorkflowRoute[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[] },
 ) {
   return req<Workflow>('POST', '/workflows/pipelines', token, payload);
 }
@@ -936,7 +957,7 @@ export function createWorkflow(
 export function updateWorkflow(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[] }>,
+  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; routes: WorkflowRoute[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[] }>,
 ) {
   return req<Workflow>('PUT', `/workflows/pipelines/${id}`, token, payload);
 }

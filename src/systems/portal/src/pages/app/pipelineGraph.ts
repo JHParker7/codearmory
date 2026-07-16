@@ -104,11 +104,27 @@ export interface StepRef {
   approval?: ApprovalGate | null;
 }
 
+/** A directed edge between two steps, identified by STEP NAME — the same identity
+ * `${steps.<name>.output}` uses, and the workflows API's WorkflowRoute.
+ *
+ * `when` is an expression (NOT `${...}` templating) deciding whether the edge is
+ * taken, evaluated once `from` reaches a terminal state; empty means "taken iff
+ * `from` completed". A step with no inbound route is an entry step. */
+export interface Route {
+  from: string;
+  to: string;
+  when?: string;
+}
+
 /** One step occurrence in the builder. `parallelWithPrev` links it into the same
  * stage as the block above (they run concurrently). The first block is always a
  * stage start, so its flag is forced false. `uid` is unique per occurrence so the
  * same step can appear more than once. `matrix` fans a solo block out over a list;
- * `approval` makes the block an inline manual-approval gate (no stepId). */
+ * `approval` makes the block an inline manual-approval gate (no stepId).
+ *
+ * `parallelWithPrev` is the LEGACY ordered-list encoding: it is still read when
+ * loading a pipeline authored before routes existed (so its edges can be derived
+ * for display), but the graph editor writes routes instead and never sets it. */
 export interface Block {
   uid: string;
   /** '' for an inline step and for a gate; the stored step id otherwise. */
@@ -246,6 +262,153 @@ export function stepsFromBlocks(blocks: Block[]): StepRef[] {
     }
   }
   return out;
+}
+
+/** The resolved definition of a step node — from its own inline def (inline step)
+ * or the shared catalog (stored reference). Undefined for a gate. */
+export interface BlockDef { name: string; action: string; with?: Record<string, unknown>; timeout?: number }
+
+export function blockDef(b: Block, catalog: Record<string, StepLike>): BlockDef | undefined {
+  if (b.approval) return undefined;
+  if (b.inline) return { name: b.name ?? '', action: b.inline.action, with: b.inline.with, timeout: b.inline.timeout };
+  const s = catalog[b.stepId];
+  return s ? { name: s.name, action: s.action, with: (s.with ?? {}) as Record<string, unknown>, timeout: s.timeout ?? undefined } : undefined;
+}
+
+/** The catalog shape blockDef needs — structurally the API's Step, declared here so
+ * this module stays free of the API client and remains testable under mocha. */
+export interface StepLike { name: string; action: string; with?: Record<string, unknown> | null; timeout?: number | null }
+
+/** What the editor reports up when a node is selected — enough for the host's right
+ * panel to render the step editor (an inline step edits its own def; a reference
+ * edits the shared step) without reaching back into node state. */
+export interface BlockSelection { uid: string; kind: 'gate' | 'ref' | 'inline'; stepId: string; name?: string; def?: BlockDef }
+
+// ── The graph model ─────────────────────────────────────────────────────────────
+// A pipeline is a graph: the steps are its nodes (identified by name) and `routes`
+// are the edges. The ordered steps[]/parallel_group encoding is the legacy shape —
+// still accepted by the backend, which derives the same edges from it at run time.
+// These helpers mirror the Go engine (graph.go) so the editor draws exactly what
+// the worker will execute.
+
+/** The name a block is addressed by in the graph — its own name, or the referenced
+ * step definition's name. This IS the node identity (it is already the
+ * `${steps.<name>.output}` key), so the editor never invents a separate node id. */
+export function nodeName(b: Block, defName: (id: string) => string | undefined): string {
+  if (b.name && b.name.trim()) return b.name.trim();
+  if (b.approval) return 'approval';
+  return defName(b.stepId) ?? '';
+}
+
+/** Legacy ordered blocks -> the routes they imply, so a pipeline authored before
+ * routes existed opens in the graph editor as the graph it already was.
+ *
+ * Mirrors deriveRoutes in the Go engine: the cross product between adjacent stages
+ * IS the barrier — every node of a stage depends on every node of the one before.
+ * Reuses stagesOf, so it decodes parallel_group exactly as the backend does. */
+export function routesFromBlocks(blocks: Block[], defName: (id: string) => string | undefined): Route[] {
+  const routes: Route[] = [];
+  let prev: string[] = [];
+  for (const stage of stagesOf(blocks)) {
+    const cur = stage.map((b) => nodeName(b, defName)).filter(Boolean);
+    for (const from of prev) for (const to of cur) routes.push({ from, to });
+    if (cur.length > 0) prev = cur;
+  }
+  return routes;
+}
+
+/** A node placed on the canvas: `layer` is its column (depth from an entry step)
+ * and `row` its position within that column. */
+export interface Placed {
+  uid: string;
+  name: string;
+  layer: number;
+  row: number;
+}
+
+/**
+ * Assign every node a layer and a row for rendering.
+ *
+ * layer(n) = 0 when n has no inbound route, else max(layer(pred)) + 1 — the
+ * longest path from an entry, so an edge always points rightward and a join sits
+ * past every branch that feeds it. Rows pack nodes within a layer in block order,
+ * keeping the layout stable as the graph is edited.
+ *
+ * Cycles cannot be laid out; the iteration is bounded by the node count and any
+ * node left in a cycle simply stops advancing (the editor flags the cycle
+ * separately, and the backend rejects it).
+ */
+export function layoutGraph(blocks: Block[], routes: Route[], defName: (id: string) => string | undefined): Placed[] {
+  const names = blocks.map((b) => nodeName(b, defName));
+  const layer = new Map<string, number>();
+  names.forEach((n) => layer.set(n, 0));
+  // Relax layers until stable, bounded by the node count so a cycle terminates.
+  for (let i = 0; i < names.length; i++) {
+    let changed = false;
+    for (const r of routes) {
+      if (!layer.has(r.from) || !layer.has(r.to)) continue;
+      const want = (layer.get(r.from) as number) + 1;
+      if (want > (layer.get(r.to) as number)) {
+        layer.set(r.to, want);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  const rowOf = new Map<number, number>();
+  return blocks.map((b, i) => {
+    const name = names[i];
+    const l = layer.get(name) ?? 0;
+    const row = rowOf.get(l) ?? 0;
+    rowOf.set(l, row + 1);
+    return { uid: b.uid, name, layer: l, row };
+  });
+}
+
+/** Reports the cycle-forming routes, if any: a graph is acyclic exactly when a
+ * topological sort (Kahn) can emit every node. Mirrors the backend's check so the
+ * editor can refuse to save before the API does. Returns the names left unemitted. */
+export function findCycle(blocks: Block[], routes: Route[], defName: (id: string) => string | undefined): string[] {
+  const names = blocks.map((b) => nodeName(b, defName)).filter(Boolean);
+  const known = new Set(names);
+  const indeg = new Map<string, number>();
+  names.forEach((n) => indeg.set(n, 0));
+  const out = new Map<string, string[]>();
+  for (const r of routes) {
+    if (!known.has(r.from) || !known.has(r.to)) continue;
+    indeg.set(r.to, (indeg.get(r.to) ?? 0) + 1);
+    out.set(r.from, [...(out.get(r.from) ?? []), r.to]);
+  }
+  const queue = names.filter((n) => (indeg.get(n) ?? 0) === 0);
+  let emitted = 0;
+  while (queue.length > 0) {
+    const n = queue.shift() as string;
+    emitted++;
+    for (const to of out.get(n) ?? []) {
+      indeg.set(to, (indeg.get(to) as number) - 1);
+      if (indeg.get(to) === 0) queue.push(to);
+    }
+  }
+  if (emitted === names.length) return [];
+  return names.filter((n) => (indeg.get(n) ?? 0) > 0);
+}
+
+/** Builder blocks -> step refs for a GRAPH pipeline: the same shape as
+ * stepsFromBlocks minus parallel_group, which routes replace (the backend rejects
+ * the two together). Order is preserved because it is still the step index the run
+ * records join on. */
+export function stepsFromNodes(blocks: Block[]): StepRef[] {
+  return stepsFromBlocks(blocks.map((b) => ({ ...b, parallelWithPrev: false }))).map((ref) => {
+    const { parallel_group: _drop, ...rest } = ref;
+    return rest as StepRef;
+  });
+}
+
+/** Drops routes whose endpoints no longer exist — e.g. after a step is deleted or
+ * renamed — so a stale edge can never be saved. */
+export function pruneRoutes(routes: Route[], names: string[]): Route[] {
+  const known = new Set(names.filter(Boolean));
+  return routes.filter((r) => known.has(r.from) && known.has(r.to));
 }
 
 // ── Pipeline config ⇄ JSON ──────────────────────────────────────────────────────

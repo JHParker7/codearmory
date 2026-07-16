@@ -14,12 +14,13 @@ import type { Workflow, WorkflowRun, Step, WorkflowAction, GitRepo, WorkflowInpu
 import { ResizeHandle, useResizableWidth } from '../../components/ResizeHandle';
 import { useReloadOnReconnect } from '../../hooks/useReloadOnReconnect';
 import { loadDraft, saveDraft, clearDraft } from '../../draftStorage';
-import { PipelineBlocks, blockDef } from './PipelineBlocks';
-import type { BlockSelection, PipelineBlocksHandle } from './PipelineBlocks';
+import { PipelineCanvas } from './PipelineCanvas';
+import type { CanvasSelection, PipelineCanvasHandle } from './PipelineCanvas';
+
 import { StepDefForm } from './StepDefForm';
 import { StepsTab } from './StepLibrary';
-import type { StepRef } from './pipelineGraph';
-import { stepsToPayload, configToJson, parseConfig, duplicateStepNames } from './pipelineGraph';
+import type { StepRef, Route } from './pipelineGraph';
+import { stepsToPayload, configToJson, parseConfig, duplicateStepNames, blockDef } from './pipelineGraph';
 import { splitPipelineWith } from './stepSchema';
 import { timeAgo, statusTone, isRunActive, fmtDuration } from '../../utils';
 
@@ -151,6 +152,12 @@ function PipelineBuilderOverlay({
   // edits, so dragging blocks doesn't reset them.
   const [steps, setSteps] = useState<StepRef[]>(initialStepRefs);
   const [builderSeed, setBuilderSeed] = useState<StepRef[]>(initialStepRefs);
+  // The pipeline's edges. A pipeline saved before routes existed has none stored, so
+  // the canvas derives them from its ordered steps and shows the graph it already
+  // implicitly was; saving then writes those edges out explicitly.
+  const initialRoutes = useMemo<Route[]>(() => initial?.routes ?? [], [initial]);
+  const [routes, setRoutes] = useState<Route[]>(initialRoutes);
+  const onGraphChange = useCallback((s: StepRef[], r: Route[]) => { setSteps(s); setRoutes(r); }, []);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Tag a brand-new pipeline with the active project (workspace) so it isn't
@@ -204,7 +211,7 @@ function PipelineBuilderOverlay({
   // The step block currently selected in the builder (null = none / an approval
   // gate, whose config lives on the card). Its step is edited in the right panel —
   // an inline step edits its own def; a reference edits the shared step.
-  const [inspect, setInspect] = useState<BlockSelection | null>(null);
+  const [inspect, setInspect] = useState<CanvasSelection | null>(null);
   // An action the user picked from the palette to create a step from: the right
   // panel shows an inline create form for it until saved or cancelled.
   const [creatingAction, setCreatingAction] = useState<WorkflowAction | null>(null);
@@ -213,7 +220,7 @@ function PipelineBuilderOverlay({
   const [pendingAdd, setPendingAdd] = useState<Step | null>(null);
   // Imperative handle into the block builder, so convert-to-general / make-local /
   // inline-def edits mutate the selected block without re-seeding the canvas.
-  const blocksApi = useRef<PipelineBlocksHandle | null>(null);
+  const canvasApi = useRef<PipelineCanvasHandle | null>(null);
   const [convertBusy, setConvertBusy] = useState(false);
   const [convertError, setConvertError] = useState<string | null>(null);
   // Action/repo option lists for the palette and per-step pickers. Loaded on mount
@@ -227,7 +234,7 @@ function PipelineBuilderOverlay({
   useReloadOnReconnect(() => { listGitRepos(token).then(setRepos).catch(() => {}); }, [token]);
   // Selecting a block shows that step in the editor and cancels any in-progress
   // create (picking a block wins over a half-started new step).
-  const onInspect = useCallback((selection: BlockSelection | null) => {
+  const onInspect = useCallback((selection: CanvasSelection | null) => {
     setInspect(selection);
     setCreatingAction(null);
     setConvertError(null);
@@ -243,7 +250,7 @@ function PipelineBuilderOverlay({
   // pipeline-local). Keeps the selection's def in sync for the output-reference helper.
   const applyInlineEdit = useCallback((uid: string, saved: Step) => {
     const def = { name: saved.name, action: saved.action, with: (saved.with ?? {}) as Record<string, unknown>, timeout: saved.timeout ?? undefined };
-    blocksApi.current?.patchBlock(uid, { name: saved.name, inline: { action: saved.action, timeout: saved.timeout ?? undefined, with: def.with } });
+    canvasApi.current?.patchBlock(uid, { name: saved.name, inline: { action: saved.action, timeout: saved.timeout ?? undefined, with: def.with } });
     setInspect(prev => (prev && prev.uid === uid ? { ...prev, name: saved.name, def } : prev));
   }, []);
 
@@ -254,7 +261,7 @@ function PipelineBuilderOverlay({
   // a step other pipelines reuse.
   const convertToGeneral = useCallback(async () => {
     if (!inspect || inspect.kind !== 'inline') return;
-    const b = blocksApi.current?.getBlock(inspect.uid);
+    const b = canvasApi.current?.getBlock(inspect.uid);
     const def = b ? blockDef(b, catalog) : inspect.def;
     if (!def) return;
     setConvertBusy(true); setConvertError(null);
@@ -266,7 +273,7 @@ function PipelineBuilderOverlay({
         with: Object.keys(sharedWith).length ? sharedWith : undefined,
         timeout: def.timeout,
       });
-      blocksApi.current?.patchBlock(inspect.uid, { stepId: saved.step_id, inline: undefined, with: pipeline });
+      canvasApi.current?.patchBlock(inspect.uid, { stepId: saved.step_id, inline: undefined, with: pipeline });
       onStepsChanged();
       setInspect({ uid: inspect.uid, kind: 'ref', stepId: saved.step_id, name: undefined, def: { name: saved.name, action: saved.action, with: (saved.with ?? {}) as Record<string, unknown>, timeout: saved.timeout ?? undefined } });
     } catch (e: unknown) { setConvertError((e as Error).message); }
@@ -280,13 +287,13 @@ function PipelineBuilderOverlay({
   // definition edit can't drop them.
   const makeLocal = useCallback(() => {
     if (!inspect || inspect.kind !== 'ref') return;
-    const b = blocksApi.current?.getBlock(inspect.uid);
+    const b = canvasApi.current?.getBlock(inspect.uid);
     const def = catalog[inspect.stepId];
     if (!b || !def) return;
     const merged = { ...((def.with ?? {}) as Record<string, unknown>), ...((b.with ?? {}) as Record<string, unknown>) };
     const { def: inlineWith, pipeline } = splitPipelineWith(def.action, merged);
     const name = b.name || def.name;
-    blocksApi.current?.patchBlock(inspect.uid, { stepId: '', inline: { action: def.action, timeout: def.timeout ?? undefined, with: inlineWith }, name, with: pipeline });
+    canvasApi.current?.patchBlock(inspect.uid, { stepId: '', inline: { action: def.action, timeout: def.timeout ?? undefined, with: inlineWith }, name, with: pipeline });
     setInspect({ uid: inspect.uid, kind: 'inline', stepId: '', name, def: { name, action: def.action, with: inlineWith, timeout: def.timeout ?? undefined } });
   }, [inspect, catalog]);
   // A sensible, collision-free default name for a step created from an action:
@@ -391,6 +398,10 @@ function PipelineBuilderOverlay({
         name: name.trim(),
         description: desc.trim() || undefined,
         steps: stepsToPayload(cleanedSteps),
+        // Routes and parallel_group are mutually exclusive server-side, and
+        // stepsFromNodes never emits a group — so sending the graph's edges is what
+        // converts a legacy ordered pipeline into an explicit one on its next save.
+        routes: routes.length > 0 ? routes : undefined,
         inputs: cleanInputs.length > 0 ? cleanInputs : undefined,
         outputs: cleanOutputs.length > 0 ? cleanOutputs : undefined,
       };
@@ -439,8 +450,9 @@ function PipelineBuilderOverlay({
       )}
       <div ref={splitRow} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 3px 14px 14px' }}>
-          <PipelineBlocks ref={blocksApi} editable initialSteps={builderSeed} catalog={catalog} palette={palette} actions={actions} repos={repos} token={token}
-            onChange={setSteps} onInspect={onInspect} onPickAction={onPickAction}
+          <PipelineCanvas ref={canvasApi} editable initialSteps={builderSeed} initialRoutes={initialRoutes}
+            catalog={catalog} palette={palette} actions={actions} repos={repos} token={token}
+            onChange={onGraphChange} onInspect={onInspect} onPickAction={onPickAction}
             pendingAdd={pendingAdd} onPendingConsumed={() => setPendingAdd(null)} />
         </div>
         {/* Drag to rebalance the builder vs. step-editor/JSON panes. */}
@@ -796,8 +808,11 @@ function PipelinesTab() {
               {selectedWorkflow.steps.length > 0 && (
                 <>
                   <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 8 }}>PIPELINE</div>
+                  {/* Read-only: the same canvas, so the detail view and the editor
+                      draw one pipeline the same way. A pipeline with no stored
+                      routes shows the edges derived from its ordered steps. */}
                   <div style={{ height: 300, marginBottom: 20 }}>
-                    <PipelineBlocks initialSteps={detailSteps} catalog={catalogMap} height={300} />
+                    <PipelineCanvas initialSteps={detailSteps} initialRoutes={selectedWorkflow.routes ?? []} catalog={catalogMap} />
                   </div>
                 </>
               )}
