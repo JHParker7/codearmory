@@ -195,120 +195,37 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	go p.rotateToken(runCtx, store, runID, triggeredBy, workflow.RoleID)
 
 	// stepOutputs accumulates each completed step's output by name so later steps
-	// can interpolate ${steps.NAME.output...} into their With values. Only outputs
-	// from prior groups are visible to a group, so each group is handed a snapshot
-	// taken before it starts — never the live map (which the result loop mutates).
-	// On resume (a run re-dequeued after an approval pause) it is seeded from the
-	// already-completed step runs, and `completed` holds their indices so finished
-	// groups are skipped rather than re-executed.
+	// can interpolate ${steps.NAME.output...} into their With values. A step sees
+	// only its transitive ancestors' outputs (workflowGraph.visibleFor), handed to
+	// it as a snapshot at launch — never the live map, which only the scheduler
+	// goroutine mutates. On resume (a run re-dequeued after an approval pause) it is
+	// seeded from the already-completed step runs, and `completed` names them so
+	// finished nodes are skipped rather than re-executed.
 	stepOutputs, completed := rebuildResumeState(runCtx, runID, workflow.Steps)
 
-	finalStatus := StatusCompleted
-	for _, group := range groupSteps(workflow.Steps) {
+	// The graph is the execution plan: a workflow's stored routes, or — for one
+	// authored as an ordered array — the edges derived from parallel_group, which
+	// reproduce the old batching exactly.
+	g := workflow.buildGraph()
+	st := newRunState(g, stepOutputs, completed)
+
+	finalStatus := p.runGraph(runCtx, g, st, store, runID, workflowID, inputs, depth)
+
+	// One or more approval gates parked and the rest of the frontier drained, so
+	// every runnable node is finished and recorded. Pause the run: return without
+	// completing or revoking the token; the approval API re-mints a fresh run token
+	// before re-queueing the run.
+	if finalStatus == statusPaused {
 		if runCtx.Err() != nil {
+			// Cancelled just as we reached the gate: take the normal cancel path
+			// (which revokes the token) rather than pausing on a dead run.
 			finalStatus = StatusCancelled
-			break
-		}
-		// Skip any group that already finished on an earlier attempt (resume).
-		if groupComplete(group, completed) {
-			continue
-		}
-
-		(WorkflowRun{RunID: runID}).SetCurrentStep(runCtx, group.indices[0])
-		visible := snapshotOutputs(stepOutputs)
-
-		// Manual-approval gate: a single approval step pauses the run until an
-		// authorized user approves (run → pending, resumes here) or rejects it
-		// (run → failed). Return without completing or revoking the token; the
-		// approval API re-mints a fresh run token before re-queueing the run.
-		if len(group.steps) == 1 && group.steps[0].Action == ActionApproval {
-			// If the run was cancelled just before the gate, take the normal cancel
-			// path (which revokes the token) rather than pausing on a dead run.
-			if runCtx.Err() != nil {
-				finalStatus = StatusCancelled
-				break
-			}
-			ws := group.steps[0]
-			i := group.indices[0]
-			msg := substitute(withString(ws.With, "message"), substContext{inputs: inputs, outputs: visible, runID: runID})
-			stepRunID := uuid.New().String()
-			if err := p.startApprovalStepRun(runID, stepRunID, i, ws.Name, msg); err != nil {
-				slog.ErrorContext(ctx, "worker: start approval step run", "run_id", runID, "step", i, "error", err)
-				finalStatus = StatusFailed
-				break
-			}
-			if err := (WorkflowRun{RunID: runID}).PauseForApproval(runCtx, i); err != nil {
-				slog.ErrorContext(ctx, "worker: pause for approval", "run_id", runID, "step", i, "error", err)
-				finalStatus = StatusFailed
-				break
-			}
-			slog.InfoContext(ctx, "worker: run paused awaiting approval", "run_id", runID, "step", i)
-			return
-		}
-
-		// Scatter: fan a step out over the regex-matched paths of a shared workspace,
-		// each leg on its own clone, then gather owned outputs back. Its own group
-		// handler owns the resolve/clone/run/gather orchestration (all forge calls),
-		// so it does not go through the task-group path below.
-		if len(group.steps) == 1 && group.steps[0].Scatter != nil {
-			ws := group.steps[0]
-			output, status := p.runScatterGroup(runCtx, store, runID, ws, group.indices[0], inputs, visible, depth)
-			if status != StatusCompleted {
-				if status == StatusCancelled && finalStatus == StatusCompleted {
-					finalStatus = StatusCancelled
-				} else if status == StatusFailed {
-					finalStatus = StatusFailed
-				}
-				break
-			}
-			stepOutputs[ws.Name] = output
-			continue
-		}
-
-		// Expand the group into the concrete executions to run: one task for a
-		// sequential step, one per member for a parallel group, or one per value
-		// for a matrix step.
-		tasks, aggregateName, terr := buildGroupTasks(group, substContext{inputs: inputs, outputs: visible, runID: runID})
-		if terr != nil {
-			if sid := uuid.New().String(); p.startStepRun(runID, sid, group.indices[0], group.steps[0].Name) == nil {
-				p.finishStepRun(sid, StatusFailed, strPtr(terr.Error()), nil, nil, nil)
-			}
-			slog.WarnContext(ctx, "worker: matrix expansion failed", "run_id", runID, "step", group.indices[0], "error", terr)
+		} else if err := p.pauseAtGates(runCtx, g, st, runID, inputs); err != nil {
+			slog.ErrorContext(ctx, "worker: pause for approval", "run_id", runID, "error", err)
 			finalStatus = StatusFailed
-			break
-		}
-		if len(tasks) == 0 {
-			// A matrix whose source list resolved to nothing ran no executions. Fail
-			// the run rather than silently skipping the step: a matrix that fans out
-			// to zero did no work, so quietly dropping the whole step and passing is
-			// misleading — the step vanishes from the run view while the run still
-			// shows as passed. Record a visible failed step run naming the cause.
-			if sid := uuid.New().String(); p.startStepRun(runID, sid, group.indices[0], group.steps[0].Name) == nil {
-				p.finishStepRun(sid, StatusFailed, strPtr("matrix produced no values to run"), nil, nil, nil)
-			}
-			slog.WarnContext(ctx, "worker: matrix produced no values, failing run", "run_id", runID, "step", group.indices[0])
-			finalStatus = StatusFailed
-			break
-		}
-
-		results, status := p.runTaskGroup(runCtx, store, runID, workflowID, tasks, inputs, visible, depth, groupConcurrency(group))
-		if status != StatusCompleted {
-			if status == StatusCancelled && finalStatus == StatusCompleted {
-				finalStatus = StatusCancelled
-			} else if status == StatusFailed {
-				finalStatus = StatusFailed
-			}
-			break
-		}
-		// Publish outputs only after the whole group succeeds, so the next group
-		// can reference them. A matrix step's per-value executions combine into one
-		// JSON-array output under the base step name; other groups publish by name.
-		if aggregateName != "" {
-			stepOutputs[aggregateName] = aggregateTaskOutputs(results)
 		} else {
-			for _, r := range results {
-				stepOutputs[r.name] = r.output
-			}
+			slog.InfoContext(ctx, "worker: run paused awaiting approval", "run_id", runID)
+			return
 		}
 	}
 
@@ -430,14 +347,20 @@ type taskResult struct {
 	idx     int
 }
 
-// rebuildResumeState seeds the run's step-output map and completed-index set from
+// rebuildResumeState seeds the run's step-output map and completed-node set from
 // step runs that finished on an earlier attempt. It only matters when a run is
 // re-dequeued after an approval pause — a crashed run is reaped by recoverStuckRuns
-// and never resumed, so partially-finished groups never reach here. A matrix step's
+// and never resumed, so partially-finished nodes never reach here. A matrix step's
 // already-completed executions are recombined into its JSON-array output.
-func rebuildResumeState(ctx context.Context, runID string, steps []WorkflowStep) (outputs map[string]string, completed map[int]bool) {
+//
+// Grouping stays keyed by StepIndex even though the result is keyed by name: a
+// matrix leg's StepName is the per-leg label ("build [os=linux]"), not the node's
+// name, so grouping by name would shatter a matrix node into one phantom node per
+// leg and lose the JSON-array re-aggregation below. StepIndex remains the array
+// position, which is exactly the node's identity in the graph.
+func rebuildResumeState(ctx context.Context, runID string, steps []WorkflowStep) (outputs map[string]string, completed map[string]bool) {
 	outputs = map[string]string{}
-	completed = map[int]bool{}
+	completed = map[string]bool{}
 	stepRuns, err := getStepRuns(ctx, runID)
 	if err != nil || len(stepRuns) == 0 {
 		return outputs, completed
@@ -449,11 +372,11 @@ func rebuildResumeState(ctx context.Context, runID string, steps []WorkflowStep)
 		}
 	}
 	for idx, runs := range byIndex {
-		completed[idx] = true
 		if idx < 0 || idx >= len(steps) {
 			continue
 		}
 		name := steps[idx].Name
+		completed[name] = true
 		if steps[idx].Matrix != nil {
 			outs := make([]string, 0, len(runs))
 			for _, r := range runs {
@@ -466,17 +389,6 @@ func rebuildResumeState(ctx context.Context, runID string, steps []WorkflowStep)
 		}
 	}
 	return outputs, completed
-}
-
-// groupComplete reports whether every step index in the group already finished on
-// an earlier attempt, so a resumed run skips it.
-func groupComplete(group stepGroup, completed map[int]bool) bool {
-	for _, idx := range group.indices {
-		if !completed[idx] {
-			return false
-		}
-	}
-	return true
 }
 
 // buildGroupTasks expands a step group into the executions to run. A matrix step
@@ -595,7 +507,12 @@ func aggregateTaskOutputs(results []taskResult) string {
 // task order plus the group's overall status (Completed unless any task failed or
 // was cancelled). A single task still runs through this path so the matrix,
 // parallel, and sequential cases share one code path.
-func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID, workflowID string, tasks []stepTask, inputs, visible map[string]string, depth int, concurrency int) ([]taskResult, string) {
+//
+// legSem is the run-wide leg budget, shared with every other node in the frontier
+// and with scatter; concurrency is this node's own cap within that budget. A task
+// takes legSem first, then the node's own slot, so a task holding a node slot only
+// ever waits on legs that are themselves making progress.
+func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID, workflowID string, tasks []stepTask, inputs, visible map[string]string, depth int, concurrency int, legSem chan struct{}) ([]taskResult, string) {
 	results := make([]taskResult, len(tasks))
 	stepRunIDs := make([]string, len(tasks))
 	for k, t := range tasks {
@@ -618,6 +535,11 @@ func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID,
 	sem := make(chan struct{}, concurrency)
 	for k, t := range tasks {
 		go func(k int, t stepTask) {
+			if !acquireLeg(ctx, legSem) {
+				resCh <- taskResult{name: t.name, idx: k, err: context.Canceled}
+				return
+			}
+			defer releaseLeg(legSem)
 			select {
 			case sem <- struct{}{}: // acquire
 			case <-ctx.Done():

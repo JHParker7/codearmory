@@ -196,7 +196,9 @@ func parseScatterPaths(resolveOutput string) []string {
 // output (a JSON array, like a matrix) and the group status. It records a step run per
 // leg for the run view, plus a synthetic step run for a resolve/gather failure so the
 // cause is visible rather than a silently failed run.
-func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, runID string, ws WorkflowStep, stepIndex int, inputs, visible map[string]string, depth int) (string, string) {
+// legSem is the run-wide leg budget shared with every other node in the frontier;
+// cfg.MaxConcurrent still caps this scatter's own fan-out within it.
+func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, runID string, ws WorkflowStep, stepIndex int, inputs, visible map[string]string, depth int, legSem chan struct{}) (string, string) {
 	c := ws.Scatter
 	base := substContext{inputs: inputs, outputs: visible, runID: runID, depth: depth}
 
@@ -253,6 +255,11 @@ func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, run
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			if !acquireLeg(ctx, legSem) {
+				results[i] = taskResult{idx: i, err: context.Canceled}
+				return
+			}
+			defer releaseLeg(legSem)
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()

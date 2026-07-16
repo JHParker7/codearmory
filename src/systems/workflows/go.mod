@@ -4,6 +4,7 @@ go 1.25.6
 
 require (
 	github.com/code-armory-app/codearmory_sdk v0.2.0
+	github.com/expr-lang/expr v1.17.8
 	github.com/google/uuid v1.6.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/otel v1.43.0

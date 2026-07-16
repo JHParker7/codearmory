@@ -298,10 +298,17 @@ type Workflow struct {
 	UpdatedAt        time.Time         `json:"updated_at"   gorm:"column:updated_at"`
 	// Inputs/Outputs declare the pipeline's interface — JSON columns, so AutoMigrate
 	// adds them with no manual migration and existing rows read back as empty.
-	Inputs   []WorkflowInputDef  `json:"inputs,omitempty"  gorm:"column:inputs;serializer:json"`
-	Outputs  []WorkflowOutputDef `json:"outputs,omitempty" gorm:"column:outputs;serializer:json"`
-	StepRefs []WorkflowStepRef   `json:"-"            gorm:"column:steps;serializer:json"`
-	Steps    []WorkflowStep      `json:"steps"        gorm:"-"`
+	Inputs  []WorkflowInputDef  `json:"inputs,omitempty"  gorm:"column:inputs;serializer:json"`
+	Outputs []WorkflowOutputDef `json:"outputs,omitempty" gorm:"column:outputs;serializer:json"`
+	// Routes are the explicit edges between steps — see WorkflowRoute. Empty means
+	// the edges are DERIVED from parallel_group at load time (deriveRoutes), which
+	// is why a pipeline authored before routes existed needs no migration. The two
+	// encodings are mutually exclusive: validateGraph rejects routes combined with
+	// parallel_group, so a stored graph can never disagree with the array.
+	// A JSON column, so AutoMigrate adds it and existing rows read back empty.
+	Routes   []WorkflowRoute   `json:"routes,omitempty" gorm:"column:routes;serializer:json"`
+	StepRefs []WorkflowStepRef `json:"-"            gorm:"column:steps;serializer:json"`
+	Steps    []WorkflowStep    `json:"steps"        gorm:"-"`
 }
 
 func (Workflow) TableName() string { return "workflows" }

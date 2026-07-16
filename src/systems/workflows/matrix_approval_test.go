@@ -189,7 +189,7 @@ func TestRunTaskGroup_MatrixMaxConcurrent(t *testing.T) {
 	if err := (WorkflowRun{RunID: runID, WorkflowID: uuid.New().String(), Status: StatusRunning}).Add(context.Background()); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
-	results, status := (&WorkerPool{}).runTaskGroup(context.Background(), newTokenStore("", ""), runID, "wf", tasks, nil, nil, 0, groupConcurrency(group))
+	results, status := (&WorkerPool{}).runTaskGroup(context.Background(), newTokenStore("", ""), runID, "wf", tasks, nil, nil, 0, groupConcurrency(group), nil)
 	if status != StatusCompleted {
 		t.Fatalf("group status = %s, want completed", status)
 	}
@@ -790,8 +790,11 @@ func TestRebuildResumeState(t *testing.T) {
 		{Step: Step{Name: "deploy"}, Matrix: &MatrixConfig{Var: "v", Values: []string{"a", "b"}}},
 	}
 	outputs, completed := rebuildResumeState(context.Background(), runID, steps)
-	if !completed[0] || !completed[1] {
-		t.Fatalf("completed indices = %v", completed)
+	// Completed nodes are keyed by step name (the graph's node identity), while the
+	// underlying grouping stays by step index so a matrix step's legs still
+	// recombine into one node rather than one node per leg.
+	if !completed["build"] || !completed["deploy"] {
+		t.Fatalf("completed nodes = %v", completed)
 	}
 	if outputs["build"] != out0 {
 		t.Errorf("build output = %q", outputs["build"])
