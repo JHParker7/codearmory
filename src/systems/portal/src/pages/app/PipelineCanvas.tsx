@@ -185,6 +185,13 @@ function GateEditor({ uid, gate, onSet }: { uid: string; gate: ApprovalGate; onS
   );
 }
 
+/** A starting condition for a new route: the commonest branch is on the source
+ * step's outcome, and it compiles, so the editor never seeds something the backend
+ * would reject. */
+function seedCondition(from: string): string {
+  return `steps.${from}.status == "completed"`;
+}
+
 /** A cubic bezier from one node's bottom port to another's top port, bulging
  * vertically so sibling edges stay distinguishable rather than overlapping. */
 function edgePath(x1: number, y1: number, x2: number, y2: number): string {
@@ -211,6 +218,9 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
   /** A palette fan-out armed for the NEXT step added (only when nothing is selected).
    * Mirrors the old block palette's matrix/parallel "modes". */
   const [pendingFanout, setPendingFanout] = useState<'matrix' | 'scatter' | 'map' | null>(null);
+  /** True when the palette's if/else is armed: the next route drawn gets a condition
+   * and opens for editing, so branching does not require drawing then hunting. */
+  const [pendingIf, setPendingIf] = useState(false);
   const seq = useRef(0);
 
   // Mirror blocks in a ref so the imperative handle reads current state (not a
@@ -232,7 +242,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     setBlocks(bs);
     setRoutes(initialRoutes && initialRoutes.length > 0 ? initialRoutes : routesFromBlocks(bs, (id) => catalog[id]?.name));
     setMaps(initialMaps ?? []);
-    setSelectedUid(null); setSelectedEdge(null); setLinkFrom(null); setPendingFanout(null);
+    setSelectedUid(null); setSelectedEdge(null); setLinkFrom(null); setPendingFanout(null); setPendingIf(false);
   }, [initialSteps, initialRoutes, initialMaps, catalog]);
 
   // Report the graph up on every edit. Routes are pruned first so a deleted or
@@ -373,6 +383,22 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     }
   };
 
+  /** Give a route a condition from the palette. With a route selected it seeds one
+   * there; otherwise it ARMS, and the next route drawn gets one — mirroring how the
+   * fan-out buttons arm.
+   *
+   * A condition belongs to an EDGE, not a step: "if/else" in a graph is two routes
+   * out of one step, each with a condition. So this seeds the condition rather than
+   * adding an "if" node.
+   */
+  const addIfElse = () => {
+    if (selectedEdge != null && routes[selectedEdge]) {
+      if (!routes[selectedEdge].when) patchRoute(selectedEdge, { when: seedCondition(routes[selectedEdge].from) });
+      return;
+    }
+    setPendingIf((v) => !v);
+  };
+
   /** Apply an armed palette fan-out to a freshly added step, then disarm. */
   const consumeFanout = (uid: string) => {
     if (!pendingFanout) return;
@@ -400,7 +426,17 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     const to = nodeName(blocks.find((b) => b.uid === toUid) as Block, defName);
     setLinkFrom(null);
     if (!from || !to || from === to) return;
-    setRoutes((rs) => (rs.some((r) => r.from === from && r.to === to) ? rs : [...rs, { from, to }]));
+    setRoutes((rs) => {
+      if (rs.some((r) => r.from === from && r.to === to)) return rs;
+      const next = [...rs, pendingIf ? { from, to, when: seedCondition(from) } : { from, to }];
+      if (pendingIf) {
+        // Select the new route so its condition is there to edit straight away.
+        setSelectedEdge(next.length - 1);
+        setSelectedUid(null);
+        setPendingIf(false);
+      }
+      return next;
+    });
   };
 
   /** Mirrors PipelineBlocks' selectionFor: a gate has no step to edit, an inline
@@ -454,10 +490,23 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               {selectedNode ? 'applies to the selected step' : 'select a step, or click one of these then add a step'}
             </div>
 
-            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 0.5, marginBottom: 8 }}>ADD STEP</div>
-            <button onClick={addGate} style={paletteBtn}>
+            {/* Flow control: the two things that change what runs NEXT, rather than
+                what a step does. Grouped because they are reached for together. */}
+            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 0.5, marginBottom: 8 }}>FLOW</div>
+            <button onClick={addGate} style={paletteBtn} title="pause the run here until someone approves">
               ⏸ approval gate
             </button>
+            <button onClick={addIfElse} style={{ ...paletteBtn, borderColor: pendingIf ? T.green : T.border, color: pendingIf ? T.green : T.text }}
+              title={selectedEdge != null ? 'give this route a condition' : 'the next route you draw gets a condition'}>
+              ⑂ if / else{pendingIf ? ' · arming…' : ''}
+            </button>
+            <div style={{ fontSize: 10, color: T.faint, lineHeight: 1.4, fontFamily: T.mono, margin: '2px 0 12px' }}>
+              {selectedEdge != null
+                ? 'adds a condition to the selected route'
+                : 'route a step to two steps, then give each route a condition'}
+            </div>
+
+            <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 0.5, marginBottom: 8 }}>ADD STEP</div>
             {actions.map((a) => (
               <button key={a.name} onClick={() => onPickAction?.(a)} style={paletteBtn} title={a.summary ?? undefined}>
                 {a.name}
@@ -543,12 +592,18 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                   <path d={edgePath(x1, y1, x2, y2)} fill="none" stroke="transparent" strokeWidth={12}
                     style={{ pointerEvents: editable ? 'stroke' : 'none', cursor: 'pointer' }}
                     onClick={() => { setSelectedEdge(i); setSelectedUid(null); }} />
+                  {/* A conditional route is marked with a compact badge, not its
+                      expression: printing every condition along every edge buried the
+                      graph in text. The expression lives in the inspector (and the
+                      tooltip), where there is room to read it. */}
                   {r.when && (
-                    <text x={(x1 + x2) / 2 + 6} y={(y1 + y2) / 2} textAnchor="start"
-                      fill={sel ? T.green : T.faint} fontSize={9} fontFamily={T.mono}
-                      style={{ pointerEvents: 'none' }}>
-                      {r.when.length > 28 ? `${r.when.slice(0, 27)}…` : r.when}
-                    </text>
+                    <g style={{ pointerEvents: 'none' }}>
+                      <title>{r.when}</title>
+                      <circle cx={(x1 + x2) / 2} cy={(y1 + y2) / 2} r={8}
+                        fill={T.bg} stroke={sel ? T.green : T.faint} strokeWidth={1} />
+                      <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 + 3} textAnchor="middle"
+                        fill={sel ? T.green : T.faint} fontSize={9} fontFamily={T.mono}>⑂</text>
+                    </g>
                   )}
                 </g>
               );
