@@ -111,6 +111,7 @@ function PipelineBuilderOverlay({
           parallel_group: s.parallel_group ?? null,
           matrix: s.matrix ?? null,
           scatter: s.scatter ?? null,
+          map_id: s.map_id || undefined,
         };
       }
       // The GET returns the effective (merged) name/with; recover the raw overrides
@@ -133,6 +134,9 @@ function PipelineBuilderOverlay({
         matrix: s.matrix ?? null,
         scatter: s.scatter ?? null,
         approval: s.approval ?? null,
+        // Map membership is part of the pipeline's shape, not the step definition —
+        // dropping it here would silently dissolve the region on the next save.
+        map_id: s.map_id || undefined,
       };
     }) : [],
     [initial, catalog],
@@ -690,6 +694,7 @@ function PipelinesTab() {
         matrix: s.matrix ?? null,
         scatter: s.scatter ?? null,
         approval: s.approval ?? null,
+        map_id: s.map_id || undefined,
       };
     }) : [],
     [selectedWorkflow],

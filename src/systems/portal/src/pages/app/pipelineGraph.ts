@@ -526,6 +526,10 @@ export function stepsToPayload(steps: StepRef[]): StepRef[] {
     else ref = { step_id: s.step_id };
     if (s.name) ref.name = s.name;
     if (s.with && Object.keys(s.with).length > 0) ref.with = s.with;
+    // Map membership is part of the pipeline's shape. This function rebuilds a ref
+    // field by field, so anything not copied here is silently dropped on save —
+    // omitting map_id would dissolve the region the moment the pipeline is re-saved.
+    if (s.map_id) ref.map_id = s.map_id;
     return ref;
   });
 }

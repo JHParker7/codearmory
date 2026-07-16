@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import {
   routesFromBlocks, layoutGraph, findCycle, nodeName, pruneRoutes, stepsFromNodes,
-  blocksFromSteps, regionMembers, pruneMaps, mapIssues,
+  blocksFromSteps, regionMembers, pruneMaps, mapIssues, stepsToPayload,
 } from '../src/pages/app/pipelineGraph';
 import type { Block, Route, MapDef } from '../src/pages/app/pipelineGraph';
 
@@ -165,6 +165,22 @@ describe('map regions', () => {
     ]);
     expect(blocks[0].mapId).to.equal('m1');
     expect(blocks[1].mapId).to.equal(undefined);
+  });
+
+  // stepsToPayload rebuilds each ref field by field, so anything it forgets is
+  // dropped on save. Losing map_id here would silently dissolve the region the next
+  // time the pipeline was saved — the step would keep running, just not as a map.
+  it('carries map_id through the save payload', () => {
+    const refs = stepsToPayload([
+      { action: 'forge/run', name: 'discover' },
+      { action: 'forge/run', name: 'build', map_id: 'm1' },
+      { step_id: 'abc', name: 'test', map_id: 'm1' },
+      { approval: { message: 'ok?' }, name: 'gate' },
+    ]);
+    expect(refs[0].map_id).to.equal(undefined);
+    expect(refs[1].map_id).to.equal('m1');
+    expect(refs[2].map_id).to.equal('m1', 'a stored-step reference must keep its map too');
+    expect(refs[3].map_id).to.equal(undefined);
   });
 
   it('groups members in step order', () => {
