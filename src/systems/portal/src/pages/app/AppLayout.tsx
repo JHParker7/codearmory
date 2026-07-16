@@ -30,7 +30,7 @@ const ROUTE_SERVICE: Record<string, string> = {
   tickets: 'tickets',
   hooks: 'hooks',
   containers: 'containers',
-  git: 'git',
+  git: 'git_connector',
   outposts: 'outpost-gateway',
 };
 
@@ -41,7 +41,7 @@ const ROUTE_SERVICE: Record<string, string> = {
 // services (gatekeeper, builder) are bundled and never iframe-hosted.
 const BUNDLED_SERVICES = new Set<string>([
   'forge', 'workflows', 'hooks', 'gatekeeper', 'builder',
-  'tickets', 'git', 'containers', 'outpost-gateway',
+  'tickets', 'git_connector', 'containers', 'outpost-gateway',
 ]);
 
 /**
