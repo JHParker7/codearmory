@@ -276,6 +276,29 @@ func TestResolveMapValues(t *testing.T) {
 	}
 }
 
+// A region records its first node's WORKFLOW index, so a failure in its own
+// orchestration (the clone/gather, which are not user-authored steps) still lands on
+// a real step index in the run view rather than defaulting to 0.
+func TestRegionsOf_FirstIndexIsWorkflowScoped(t *testing.T) {
+	steps, defs, _ := mapPipeline()
+	r := regionsOf(steps, defs)["m1"]
+	if r.firstIndex != 1 {
+		t.Fatalf("firstIndex = %d, want 1 (build's position in the workflow)", r.firstIndex)
+	}
+}
+
+// Clone names are per-iteration and deterministic, which is what lets an iteration
+// release its own clone the moment it finishes — so the concurrent volume footprint
+// tracks max_concurrent rather than the value count.
+func TestIterVolume_IsPerIterationAndDeterministic(t *testing.T) {
+	if a, b := iterVolume("workspace", 0), iterVolume("workspace", 1); a == b {
+		t.Fatal("iterations must not share a clone name")
+	}
+	if iterVolume("workspace", 3) != iterVolume("workspace", 3) {
+		t.Fatal("clone name must be stable for a given iteration")
+	}
+}
+
 func TestMapConcurrency(t *testing.T) {
 	if got := mapConcurrency(MapDef{}); got != defaultFanoutConcurrency {
 		t.Errorf("default = %d, want %d", got, defaultFanoutConcurrency)

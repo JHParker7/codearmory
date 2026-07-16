@@ -307,6 +307,15 @@ func workflowUsesVolumes(steps []WorkflowStep, maps []MapDef) bool {
 // removes whatever is left. Must run before the run token is revoked; the token
 // carries the deleteVolume grant via the create-volume companion permission.
 func (p *WorkerPool) teardownRunVolumes(ctx context.Context, store *tokenStore, runID string) {
+	p.deleteRunVolumes(ctx, store, runID, "")
+}
+
+// deleteRunVolumes deletes this run's shared volumes, or just the one named. Naming
+// one is how a map iteration releases its workspace clone the moment it finishes:
+// without that, clones accumulate for the whole run and the concurrent volume
+// footprint scales with the VALUE COUNT rather than with max_concurrent, which
+// trips forge's per-workflow volume cap on any sizeable fan-out.
+func (p *WorkerPool) deleteRunVolumes(ctx context.Context, store *tokenStore, runID, name string) {
 	serviceURLsMu.RLock()
 	baseURL, ok := serviceURLs["forge"]
 	serviceURLsMu.RUnlock()
@@ -315,6 +324,9 @@ func (p *WorkerPool) teardownRunVolumes(ctx context.Context, store *tokenStore, 
 		return
 	}
 	reqURL := strings.TrimRight(baseURL, "/") + "/volumes?workflow_id=" + neturl.QueryEscape(runID)
+	if name != "" {
+		reqURL += "&name=" + neturl.QueryEscape(name)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
 	if err != nil {
 		slog.ErrorContext(ctx, "worker: build volume teardown request", "run_id", runID, "error", err)

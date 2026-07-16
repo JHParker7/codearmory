@@ -32,6 +32,10 @@ import (
 type mapRegion struct {
 	def   MapDef
 	nodes []string // step names in the region, in step order
+	// firstIndex is the workflow-level step index of nodes[0], used to record a step
+	// run for the region's own orchestration (clone/gather) — which belongs to no
+	// user-authored step of its own.
+	firstIndex int
 }
 
 // validateMaps checks the map regions of a workflow, returning a user-facing message
@@ -142,11 +146,14 @@ func regionsOf(steps []WorkflowStep, defs []MapDef) map[string]*mapRegion {
 	for _, d := range defs {
 		byID[d.ID] = &mapRegion{def: d}
 	}
-	for _, ws := range steps {
+	for i, ws := range steps {
 		if ws.MapID == "" {
 			continue
 		}
 		if r, ok := byID[ws.MapID]; ok {
+			if len(r.nodes) == 0 {
+				r.firstIndex = i
+			}
 			r.nodes = append(r.nodes, ws.Name)
 		}
 	}
@@ -317,10 +324,16 @@ func (p *WorkerPool) runIteration(
 	// Give the iteration its own clone of the base workspace, if one is configured.
 	// This is the whole reason a region exists rather than a matrix over sub-runs:
 	// volumes are ReadWriteOnce, so iterations cannot share a checkout.
+	//
+	// The clone is released as soon as the iteration ends, so the concurrent volume
+	// footprint tracks max_concurrent rather than the number of values — otherwise a
+	// fan-out over N items would need N clones alive at once and trip forge's
+	// per-workflow volume cap.
 	if region.def.Volume != "" {
-		if st := p.prepareIterVolume(ctx, store, runID, region, i, depth); st != StatusCompleted {
+		if st := p.prepareIterVolume(ctx, store, runID, region, i, val, depth); st != StatusCompleted {
 			return nil, st
 		}
+		defer p.deleteRunVolumes(context.Background(), store, runID, iterVolume(region.def.Volume, i))
 	}
 
 	// The iteration runs on its own state: its nodes start pending, and its visible
@@ -364,7 +377,11 @@ func iterVolumeMount(region *mapRegion, runID string, i int) map[string]any {
 
 // prepareIterVolume provisions and fills one iteration's clone, reusing scatter's
 // create+copy steps so both fan-outs clone a workspace the same way.
-func (p *WorkerPool) prepareIterVolume(ctx context.Context, store *tokenStore, runID string, region *mapRegion, i int, depth int) string {
+//
+// A failure here records a VISIBLE step run against the region's first node: the
+// clone is not a user-authored step, so without one the run view would show every
+// step green under a failed run and never say why.
+func (p *WorkerPool) prepareIterVolume(ctx context.Context, store *tokenStore, runID string, region *mapRegion, i int, val string, depth int) string {
 	cfg := &ScatterConfig{
 		Volume:    region.def.Volume,
 		MountPath: region.def.MountPath,
@@ -375,10 +392,24 @@ func (p *WorkerPool) prepareIterVolume(ctx context.Context, store *tokenStore, r
 	for _, step := range []Step{scatterCreateShardStep(cfg, runID, shard), scatterCloneStep(cfg, runID, shard)} {
 		if _, err := p.executeStep(ctx, store, step, substContext{runID: runID, depth: depth}); err != nil {
 			slog.WarnContext(ctx, "worker: map iteration volume prepare failed", "run_id", runID, "map", region.def.ID, "iter", i, "error", err)
+			p.iterFail(runID, region, val, "preparing this iteration's workspace clone: "+err.Error())
 			return StatusFailed
 		}
 	}
 	return StatusCompleted
+}
+
+// iterFail records a failed step run for one iteration's own orchestration (its
+// clone or gather), labelled like the iteration's body steps so it lands beside them
+// in the run view.
+func (p *WorkerPool) iterFail(runID string, region *mapRegion, val, msg string) {
+	if len(region.nodes) == 0 {
+		return
+	}
+	name := mapIterName(region.nodes[0], region.def.Var, val)
+	if sid := uuid.New().String(); p.startStepRun(runID, sid, region.firstIndex, name) == nil {
+		p.finishStepRun(sid, StatusFailed, strPtr(msg), nil, nil, nil)
+	}
 }
 
 // gatherIter unions an iteration's owned outputs back into the base workspace.
@@ -396,6 +427,7 @@ func (p *WorkerPool) gatherIter(ctx context.Context, store *tokenStore, runID st
 	}
 	if _, err := p.executeStep(ctx, store, step, sc); err != nil {
 		slog.WarnContext(ctx, "worker: map iteration gather failed", "run_id", runID, "map", region.def.ID, "iter", i, "error", err)
+		p.iterFail(runID, region, mapVars[region.def.Var], "gathering this iteration's outputs: "+err.Error())
 		return StatusFailed
 	}
 	return StatusCompleted
