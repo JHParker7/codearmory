@@ -19,7 +19,7 @@ import type { CanvasSelection, PipelineCanvasHandle } from './PipelineCanvas';
 
 import { StepDefForm } from './StepDefForm';
 import { StepsTab } from './StepLibrary';
-import type { StepRef, Route } from './pipelineGraph';
+import type { StepRef, Route, MapDef } from './pipelineGraph';
 import { stepsToPayload, configToJson, parseConfig, duplicateStepNames, blockDef } from './pipelineGraph';
 import { splitPipelineWith } from './stepSchema';
 import { timeAgo, statusTone, isRunActive, fmtDuration } from '../../utils';
@@ -157,7 +157,11 @@ function PipelineBuilderOverlay({
   // implicitly was; saving then writes those edges out explicitly.
   const initialRoutes = useMemo<Route[]>(() => initial?.routes ?? [], [initial]);
   const [routes, setRoutes] = useState<Route[]>(initialRoutes);
-  const onGraphChange = useCallback((s: StepRef[], r: Route[]) => { setSteps(s); setRoutes(r); }, []);
+  // The pipeline's map regions — a subgraph repeated per value. Steps join one via
+  // map_id; the canvas owns both halves and reports them together.
+  const initialMaps = useMemo<MapDef[]>(() => initial?.maps ?? [], [initial]);
+  const [maps, setMaps] = useState<MapDef[]>(initialMaps);
+  const onGraphChange = useCallback((s: StepRef[], r: Route[], m: MapDef[]) => { setSteps(s); setRoutes(r); setMaps(m); }, []);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Tag a brand-new pipeline with the active project (workspace) so it isn't
@@ -402,6 +406,7 @@ function PipelineBuilderOverlay({
         // stepsFromNodes never emits a group — so sending the graph's edges is what
         // converts a legacy ordered pipeline into an explicit one on its next save.
         routes: routes.length > 0 ? routes : undefined,
+        maps: maps.length > 0 ? maps : undefined,
         inputs: cleanInputs.length > 0 ? cleanInputs : undefined,
         outputs: cleanOutputs.length > 0 ? cleanOutputs : undefined,
       };
@@ -450,7 +455,7 @@ function PipelineBuilderOverlay({
       )}
       <div ref={splitRow} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 3px 14px 14px' }}>
-          <PipelineCanvas ref={canvasApi} editable initialSteps={builderSeed} initialRoutes={initialRoutes}
+          <PipelineCanvas ref={canvasApi} editable initialSteps={builderSeed} initialRoutes={initialRoutes} initialMaps={initialMaps}
             catalog={catalog} palette={palette} actions={actions} repos={repos} token={token}
             onChange={onGraphChange} onInspect={onInspect} onPickAction={onPickAction}
             pendingAdd={pendingAdd} onPendingConsumed={() => setPendingAdd(null)} />
@@ -812,7 +817,7 @@ function PipelinesTab() {
                       draw one pipeline the same way. A pipeline with no stored
                       routes shows the edges derived from its ordered steps. */}
                   <div style={{ height: 300, marginBottom: 20 }}>
-                    <PipelineCanvas initialSteps={detailSteps} initialRoutes={selectedWorkflow.routes ?? []} catalog={catalogMap} />
+                    <PipelineCanvas initialSteps={detailSteps} initialRoutes={selectedWorkflow.routes ?? []} initialMaps={selectedWorkflow.maps ?? []} catalog={catalogMap} />
                   </div>
                 </>
               )}

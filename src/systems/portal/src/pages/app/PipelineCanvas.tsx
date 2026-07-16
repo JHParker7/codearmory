@@ -23,9 +23,10 @@ import { T } from '../../theme';
 import { useResizablePane } from '../../components/ResizeHandle';
 import {
   layoutGraph, findCycle, nodeName, pruneRoutes, stepsFromNodes, routesFromBlocks, blocksFromSteps, blockDef,
+  regionMembers, pruneMaps, mapIssues,
 } from './pipelineGraph';
 import type {
-  Block, Route, StepRef, BlockSelection, MatrixConfig, ScatterConfig, ApprovalGate,
+  Block, Route, StepRef, BlockSelection, MatrixConfig, ScatterConfig, ApprovalGate, MapDef,
 } from './pipelineGraph';
 import type { Step, WorkflowAction, GitRepo } from '../../api/bff';
 
@@ -50,6 +51,8 @@ interface PipelineCanvasProps {
   /** Stored routes. Empty for a legacy pipeline, whose edges are derived from its
    * ordered steps so it opens as the graph it already implicitly was. */
   initialRoutes?: Route[];
+  /** The pipeline's map regions — see MapDef. */
+  initialMaps?: MapDef[];
   catalog: Record<string, Step>;
   editable?: boolean;
   palette?: Step[];
@@ -57,7 +60,7 @@ interface PipelineCanvasProps {
   /** The git-broker repo catalog, threaded through to the host's step editor. */
   repos?: GitRepo[];
   token?: string;
-  onChange?: (steps: StepRef[], routes: Route[]) => void;
+  onChange?: (steps: StepRef[], routes: Route[], maps: MapDef[]) => void;
   onInspect?: (selection: CanvasSelection | null) => void;
   onPickAction?: (action: WorkflowAction) => void;
   pendingAdd?: Step | null;
@@ -119,6 +122,47 @@ function ScatterEditor({ uid, scatter, onSet }: { uid: string; scatter: ScatterC
   );
 }
 
+/** A map region's fan-out: the value list its body repeats over, and the workspace
+ * each iteration gets its own clone of. Unlike a matrix — which repeats one step —
+ * every step assigned to this map repeats together, with the routes between them, so
+ * an iteration can build then test then conditionally push. */
+function MapEditor({ def, members, onSet }: { def: MapDef; members: string[]; onSet: (m: MapDef) => void }) {
+  return (
+    <div style={{ padding: 8, background: T.bg, border: `1px dashed ${T.border}`, borderLeft: `3px solid ${T.blue}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ fontFamily: T.mono, fontSize: 9, color: T.blue, letterSpacing: 1, textTransform: 'uppercase' }}>
+        ⟳ map {def.id} · repeats {members.join(' → ') || '(no steps)'} per value
+      </div>
+      <input value={def.var} placeholder="var (e.g. dir) → ${map.dir}"
+        onChange={(e) => onSet({ ...def, var: e.target.value })} style={field} />
+      <input value={(def.values ?? []).join(', ')} placeholder="values, comma-separated (a, b, c)"
+        onChange={(e) => onSet({ ...def, values: e.target.value.split(',').map((v) => v.trim()).filter(Boolean), values_from: undefined })} style={field} />
+      <input value={def.values_from ?? ''} placeholder="or values from a step's output (${steps.discover.output.DIRS})"
+        onChange={(e) => onSet({ ...def, values_from: e.target.value, values: e.target.value ? [] : def.values })} style={field} />
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input value={def.volume ?? ''} placeholder="workspace to clone per iteration (blank = none)"
+          onChange={(e) => onSet({ ...def, volume: e.target.value || undefined })} style={{ ...field, flex: 2 }} />
+        <input type="number" min={0} value={def.max_concurrent ?? ''} placeholder="max at once (3)" disabled={!!def.sequential}
+          onChange={(e) => { const n = parseInt(e.target.value, 10); onSet({ ...def, max_concurrent: Number.isFinite(n) && n > 0 ? n : undefined }); }}
+          style={{ ...field, flex: 1, opacity: def.sequential ? 0.5 : 1 }} />
+      </div>
+      {def.volume && (
+        <input value={(def.outputs ?? []).join(', ')} placeholder="owned outputs, comma-separated (${map.dir}/dist) — gathered back"
+          onChange={(e) => onSet({ ...def, outputs: e.target.value.split(',').map((v) => v.trim()).filter(Boolean) })} style={field} />
+      )}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: T.mono, fontSize: 11, color: T.text, cursor: 'pointer' }}>
+        <input type="checkbox" checked={!!def.sequential}
+          onChange={(e) => onSet({ ...def, sequential: e.target.checked || undefined })} />
+        run iterations one at a time
+      </label>
+      <div style={{ fontSize: 10, color: T.faint, fontFamily: T.mono, lineHeight: 1.45 }}>
+        Steps after the map wait for <b>every</b> iteration, and read all of them as a
+        JSON array via <code>{'${steps.<step>.output}'}</code>. A cloned workspace gives each
+        iteration its own checkout — parallel iterations cannot share one.
+      </div>
+    </div>
+  );
+}
+
 /** An approval gate's prompt and optional approver allow-list. */
 function GateEditor({ uid, gate, onSet }: { uid: string; gate: ApprovalGate; onSet: (uid: string, g: ApprovalGate) => void }) {
   return (
@@ -140,7 +184,7 @@ function edgePath(x1: number, y1: number, x2: number, y2: number): string {
 }
 
 export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasProps>(function PipelineCanvas({
-  initialSteps, initialRoutes, catalog, editable = false, palette = [], actions = [],
+  initialSteps, initialRoutes, initialMaps, catalog, editable = false, palette = [], actions = [],
   onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed,
 }: PipelineCanvasProps, ref) {
   const defName = useCallback((id: string) => catalog[id]?.name, [catalog]);
@@ -150,6 +194,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     initialRoutes && initialRoutes.length > 0
       ? initialRoutes
       : routesFromBlocks(blocksFromSteps(initialSteps), (id) => catalog[id]?.name));
+  const [maps, setMaps] = useState<MapDef[]>(() => initialMaps ?? []);
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<number | null>(null);
   /** The out-port awaiting a target: the first half of drawing a route. */
@@ -174,16 +219,20 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     const bs = blocksFromSteps(initialSteps);
     setBlocks(bs);
     setRoutes(initialRoutes && initialRoutes.length > 0 ? initialRoutes : routesFromBlocks(bs, (id) => catalog[id]?.name));
+    setMaps(initialMaps ?? []);
     setSelectedUid(null); setSelectedEdge(null); setLinkFrom(null);
-  }, [initialSteps, initialRoutes, catalog]);
+  }, [initialSteps, initialRoutes, initialMaps, catalog]);
 
   // Report the graph up on every edit. Routes are pruned first so a deleted or
   // renamed step can never leave an edge pointing at nothing.
   useEffect(() => {
     if (!editable || !onChange) return;
     const names = blocks.map((b) => nodeName(b, defName));
-    onChange(stepsFromNodes(blocks), pruneRoutes(routes, names));
-  }, [blocks, routes, editable, onChange, defName]);
+    // Prune first: a deleted or renamed step must not leave an edge pointing at
+    // nothing, and dropping a map's last member drops the map (the backend rejects
+    // a declared region with no steps).
+    onChange(stepsFromNodes(blocks), pruneRoutes(routes, names), pruneMaps(maps, blocks));
+  }, [blocks, routes, maps, editable, onChange, defName]);
 
   const placed = useMemo(() => layoutGraph(blocks, routes, defName), [blocks, routes, defName]);
   const posOf = useMemo(() => {
@@ -202,6 +251,22 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
 
   const selectedNode = useMemo(() => blocks.find((b) => b.uid === selectedUid) ?? null, [blocks, selectedUid]);
   const cycle = useMemo(() => findCycle(blocks, routes, defName), [blocks, routes, defName]);
+  const members = useMemo(() => regionMembers(blocks, defName), [blocks, defName]);
+  const issues = useMemo(() => mapIssues(blocks, maps, routes, defName), [blocks, maps, routes, defName]);
+
+  /** The bounding box of each region's nodes, so a map reads as an enclosure rather
+   * than a per-node label — its body is a subgraph, and the drawing should say so. */
+  const regionBoxes = useMemo(() => {
+    return maps.map((m) => {
+      const pts = blocks.filter((b) => b.mapId === m.id).map((b) => posOf.get(b.uid)).filter(Boolean) as { x: number; y: number }[];
+      if (pts.length === 0) return null;
+      const x = Math.min(...pts.map((p) => p.x)) - 14;
+      const y = Math.min(...pts.map((p) => p.y)) - 22;
+      const x2 = Math.max(...pts.map((p) => p.x)) + NODE_W + 14;
+      const y2 = Math.max(...pts.map((p) => p.y)) + NODE_H + 14;
+      return { def: m, x, y, w: x2 - x, h: y2 - y };
+    }).filter(Boolean) as { def: MapDef; x: number; y: number; w: number; h: number }[];
+  }, [maps, blocks, posOf]);
   const width = Math.max(...placed.map((p) => PAD + (p.layer + 1) * (NODE_W + GAP_X)), 400);
   const height = Math.max(...placed.map((p) => PAD * 2 + (p.row + 1) * (NODE_H + GAP_Y)), 260);
 
@@ -247,6 +312,25 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, scatter: s, matrix: s ? null : b.matrix } : b)));
   const setApproval = (uid: string, g: ApprovalGate) =>
     setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, approval: g } : b)));
+
+  /** Put a node in a map region (or take it out). Assigning clears the node's own
+   * matrix/scatter: those are the STEP's fan-out and would nest inside the region's,
+   * which the backend rejects. */
+  const setNodeMap = (uid: string, mapID: string | undefined) => {
+    setBlocks((bs) => bs.map((b) => (b.uid === uid ? { ...b, mapId: mapID, matrix: mapID ? null : b.matrix, scatter: mapID ? null : b.scatter } : b)));
+  };
+
+  /** Create a region and put the node in it. Ids are internal, so they are generated
+   * rather than typed — the user names the VARIABLE, which is what they reference. */
+  const addMapWithNode = (uid: string) => {
+    const taken = new Set(maps.map((m) => m.id));
+    let id = 'map1'; let n = 2;
+    while (taken.has(id)) id = `map${n++}`;
+    setMaps((ms) => [...ms, { id, var: '', values: [] }]);
+    setNodeMap(uid, id);
+  };
+
+  const setMapDef = (def: MapDef) => setMaps((ms) => ms.map((m) => (m.id === def.id ? def : m)));
 
   const removeNode = (uid: string) => {
     const name = nodeName(blocks.find((b) => b.uid === uid) as Block, defName);
@@ -327,9 +411,11 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       )}
 
       <div style={{ flex: 1, minWidth: 0, overflow: 'auto', position: 'relative' }}>
-        {cycle.length > 0 && (
-          <div style={{ position: 'sticky', top: 0, zIndex: 5, background: T.redSoft, color: T.red, padding: '6px 10px', fontFamily: T.mono, fontSize: 11 }}>
-            routes form a cycle involving: {cycle.join(', ')} — the run would never start
+        {/* What a save would be rejected for, shown before the API says so. */}
+        {(cycle.length > 0 || issues.length > 0) && (
+          <div style={{ position: 'sticky', top: 0, zIndex: 5, background: T.redSoft, color: T.red, padding: '6px 10px', fontFamily: T.mono, fontSize: 11, lineHeight: 1.5 }}>
+            {cycle.length > 0 && <div>routes form a cycle involving: {cycle.join(', ')} — the run would never start</div>}
+            {issues.map((m) => <div key={m}>{m}</div>)}
           </div>
         )}
         {blocks.length === 0 && (
@@ -339,6 +425,20 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
         )}
 
         <div style={{ position: 'relative', width, height }}>
+          {/* Region enclosures, behind everything: a map's body is a subgraph, so it
+              is drawn as a box around its steps rather than a badge on each one. */}
+          {regionBoxes.map((r) => (
+            <div key={r.def.id} style={{
+              position: 'absolute', left: r.x, top: r.y, width: r.w, height: r.h,
+              border: `1px dashed ${T.blue}`, background: T.blueSoft, pointerEvents: 'none',
+            }}>
+              <span style={{ position: 'absolute', top: -8, left: 8, background: T.bg, padding: '0 4px', fontFamily: T.mono, fontSize: 9, color: T.blue }}>
+                ⟳ map · per {r.def.var || '?'}
+                {r.def.volume ? ' · own workspace' : ''}
+                {r.def.sequential ? ' · one at a time' : ''}
+              </span>
+            </div>
+          ))}
           {/* Edges are drawn under the nodes so a route never covers a step's text. */}
           <svg width={width} height={height} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
             <defs>
@@ -440,26 +540,48 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               {!selectedNode.approval && (
                 <>
                   <button onClick={() => setMatrix(selectedNode.uid, selectedNode.matrix ? null : { var: '', values: [] })}
-                    title="fan this step out over a list of values"
-                    style={{ ...toggleBtn, borderColor: selectedNode.matrix ? T.amber : T.border, color: selectedNode.matrix ? T.amber : T.faint }}>
+                    disabled={!!selectedNode.mapId}
+                    title={selectedNode.mapId ? 'a step in a map cannot also have its own matrix' : 'fan this step out over a list of values'}
+                    style={{ ...toggleBtn, borderColor: selectedNode.matrix ? T.amber : T.border, color: selectedNode.matrix ? T.amber : T.faint, opacity: selectedNode.mapId ? 0.4 : 1 }}>
                     ⊞ matrix
                   </button>
                   <button onClick={() => setScatter(selectedNode.uid, selectedNode.scatter ? null : { regex: '', mode: 'dir' })}
-                    disabled={!selectedNode.inline}
-                    title={selectedNode.inline ? 'fan this step out over matching workspace paths' : 'scatter needs a pipeline-local (inline) step'}
-                    style={{ ...toggleBtn, borderColor: selectedNode.scatter ? T.green : T.border, color: selectedNode.scatter ? T.green : T.faint, opacity: selectedNode.inline ? 1 : 0.4 }}>
+                    disabled={!selectedNode.inline || !!selectedNode.mapId}
+                    title={selectedNode.mapId ? 'a step in a map cannot also have its own scatter' : selectedNode.inline ? 'fan this step out over matching workspace paths' : 'scatter needs a pipeline-local (inline) step'}
+                    style={{ ...toggleBtn, borderColor: selectedNode.scatter ? T.green : T.border, color: selectedNode.scatter ? T.green : T.faint, opacity: selectedNode.inline && !selectedNode.mapId ? 1 : 0.4 }}>
                     ⊟ scatter
                   </button>
+                  {/* Map membership: a region repeats EVERY step assigned to it,
+                      together with the routes between them. */}
+                  <select value={selectedNode.mapId ?? ''} style={{ ...toggleBtn, color: selectedNode.mapId ? T.blue : T.faint, borderColor: selectedNode.mapId ? T.blue : T.border }}
+                    title="repeat this step (with the others in the same map) once per value"
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === '__new') addMapWithNode(selectedNode.uid);
+                      else setNodeMap(selectedNode.uid, v || undefined);
+                    }}>
+                    <option value="">⟳ not in a map</option>
+                    {maps.map((m) => (
+                      <option key={m.id} value={m.id}>⟳ in map · per {m.var || m.id}</option>
+                    ))}
+                    <option value="__new">⟳ + new map…</option>
+                  </select>
                 </>
               )}
             </div>
             {selectedNode.approval && <GateEditor uid={selectedNode.uid} gate={selectedNode.approval} onSet={setApproval} />}
             {selectedNode.matrix && <MatrixEditor uid={selectedNode.uid} matrix={selectedNode.matrix} onSet={setMatrix} />}
             {selectedNode.scatter && <ScatterEditor uid={selectedNode.uid} scatter={selectedNode.scatter} onSet={setScatter} />}
-            {!selectedNode.approval && !selectedNode.matrix && !selectedNode.scatter && (
+            {selectedNode.mapId && maps.find((m) => m.id === selectedNode.mapId) && (
+              <MapEditor def={maps.find((m) => m.id === selectedNode.mapId) as MapDef}
+                members={members[selectedNode.mapId] ?? []} onSet={setMapDef} />
+            )}
+            {!selectedNode.approval && !selectedNode.matrix && !selectedNode.scatter && !selectedNode.mapId && (
               <div style={{ fontSize: 10, color: T.faint, fontFamily: T.mono, lineHeight: 1.45 }}>
                 Runs once. Fan it out with ⊞ matrix (one run per value) or ⊟ scatter (one leg per
-                workspace path). To run steps <b>in parallel</b>, route into them from the same step.
+                workspace path), or put it in a ⟳ map to repeat it — <b>together with the other steps
+                in that map</b> — once per value. To run steps <b>in parallel</b>, route into them
+                from the same step.
               </div>
             )}
           </div>

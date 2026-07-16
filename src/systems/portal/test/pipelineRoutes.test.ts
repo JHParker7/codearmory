@@ -1,8 +1,9 @@
 import { expect } from 'chai';
 import {
   routesFromBlocks, layoutGraph, findCycle, nodeName, pruneRoutes, stepsFromNodes,
+  blocksFromSteps, regionMembers, pruneMaps, mapIssues,
 } from '../src/pages/app/pipelineGraph';
-import type { Block, Route } from '../src/pages/app/pipelineGraph';
+import type { Block, Route, MapDef } from '../src/pages/app/pipelineGraph';
 
 /** Inline blocks, so the node name is the block's own name and no catalog is needed. */
 const mk = (name: string, parallelWithPrev = false): Block => ({
@@ -143,6 +144,83 @@ describe('stepsFromNodes: fan-out and gates survive the graph editor', () => {
   it('drops an incomplete matrix rather than sending a var-less fan-out', () => {
     const b: Block = { ...mk('build'), matrix: { var: '  ', values: [] } };
     expect(stepsFromNodes([b])[0]).to.not.have.property('matrix');
+  });
+});
+
+describe('map regions', () => {
+  const mapped = (name: string, mapId: string): Block => ({ ...mk(name), mapId });
+  const m1: MapDef = { id: 'm1', var: 'dir', values_from: '${steps.discover.output.DIRS}' };
+
+  it('round-trips map_id through the step payload', () => {
+    const refs = stepsFromNodes([mk('discover'), mapped('build', 'm1'), mapped('test', 'm1')]);
+    expect(refs[0].map_id).to.equal(undefined);
+    expect(refs[1].map_id).to.equal('m1');
+    expect(refs[2].map_id).to.equal('m1');
+  });
+
+  it('reads map_id back off the wire', () => {
+    const blocks = blocksFromSteps([
+      { action: 'forge/run', name: 'build', map_id: 'm1' },
+      { action: 'forge/run', name: 'deploy' },
+    ]);
+    expect(blocks[0].mapId).to.equal('m1');
+    expect(blocks[1].mapId).to.equal(undefined);
+  });
+
+  it('groups members in step order', () => {
+    const members = regionMembers([mk('discover'), mapped('build', 'm1'), mapped('test', 'm1')], noCatalog);
+    expect(members.m1).to.deep.equal(['build', 'test']);
+  });
+
+  it('drops a map whose last member left — the backend rejects an empty region', () => {
+    expect(pruneMaps([m1], [mapped('build', 'm1')])).to.have.length(1);
+    expect(pruneMaps([m1], [mk('build')])).to.deep.equal([]);
+  });
+});
+
+describe('mapIssues (client mirror of the backend rules)', () => {
+  const mapped = (name: string, mapId: string): Block => ({ ...mk(name), mapId });
+  const good: MapDef = { id: 'm1', var: 'dir', values: ['a'] };
+
+  it('accepts a well-formed map', () => {
+    expect(mapIssues([mapped('build', 'm1')], [good], [], noCatalog)).to.deep.equal([]);
+  });
+
+  it('needs exactly one value source', () => {
+    expect(mapIssues([mapped('b', 'm1')], [{ id: 'm1', var: 'd' }], [], noCatalog)[0]).to.match(/exactly one/);
+    expect(mapIssues([mapped('b', 'm1')], [{ id: 'm1', var: 'd', values: ['a'], values_from: '${x}' }], [], noCatalog)[0]).to.match(/exactly one/);
+  });
+
+  it('needs a var', () => {
+    expect(mapIssues([mapped('b', 'm1')], [{ id: 'm1', var: '  ', values: ['a'] }], [], noCatalog)[0]).to.match(/variable name/);
+  });
+
+  it("rejects a step's own fan-out inside a map — it would nest", () => {
+    const b: Block = { ...mapped('build', 'm1'), matrix: { var: 'os', values: ['a'] } };
+    expect(mapIssues([b], [good], [], noCatalog)[0]).to.match(/cannot also have a matrix/);
+  });
+
+  it('rejects a gate inside a map — resume cannot tell iterations apart', () => {
+    const b: Block = { uid: 'g', stepId: '', parallelWithPrev: false, name: 'gate', approval: {}, mapId: 'm1' };
+    expect(mapIssues([b], [good], [], noCatalog)[0]).to.match(/approval gate cannot be inside a map/);
+  });
+
+  it('rejects a route crossing between two maps', () => {
+    const blocks = [mapped('a', 'm1'), mapped('b', 'm2')];
+    const maps: MapDef[] = [good, { id: 'm2', var: 'e', values: ['y'] }];
+    const issues = mapIssues(blocks, maps, [{ from: 'a', to: 'b' }], noCatalog);
+    expect(issues[0]).to.match(/cannot cross between maps/);
+  });
+
+  it('allows a route INSIDE a map — that is the region body', () => {
+    const blocks = [mapped('build', 'm1'), mapped('test', 'm1')];
+    expect(mapIssues(blocks, [good], [{ from: 'build', to: 'test' }], noCatalog)).to.deep.equal([]);
+  });
+
+  it('allows routes in and out of a map — those are its boundary', () => {
+    const blocks = [mk('discover'), mapped('build', 'm1'), mk('deploy')];
+    const routes: Route[] = [{ from: 'discover', to: 'build' }, { from: 'build', to: 'deploy' }];
+    expect(mapIssues(blocks, [good], routes, noCatalog)).to.deep.equal([]);
   });
 });
 

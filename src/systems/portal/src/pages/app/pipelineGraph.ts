@@ -102,6 +102,9 @@ export interface StepRef {
   matrix?: MatrixConfig | null;
   scatter?: ScatterConfig | null;
   approval?: ApprovalGate | null;
+  /** The map region this step belongs to — see MapDef. Mutually exclusive with
+   * matrix/scatter/parallel_group, which are the step's OWN fan-out. */
+  map_id?: string;
 }
 
 /** A directed edge between two steps, identified by STEP NAME — the same identity
@@ -114,6 +117,33 @@ export interface Route {
   from: string;
   to: string;
   when?: string;
+}
+
+/** A map region: a SUBGRAPH repeated once per value. Steps join it by naming its id
+ * in `mapId`, and the region's own routes are its body — so unlike a matrix (which
+ * repeats ONE step) an iteration can build, then test, then conditionally push.
+ *
+ * `volume`, when set, gives each iteration its own CLONE of that workspace. That is
+ * the reason the region exists rather than being composed from a matrix over
+ * sub-pipelines: volumes are ReadWriteOnce, so parallel iterations cannot share a
+ * checkout. Mirrors the workflows API MapDef. */
+export interface MapDef {
+  id: string;
+  /** Each iteration sees its value as ${map.<var>}. */
+  var: string;
+  /** Exactly one of values / values_from — the latter is a ${...} reference resolved
+   * when the region starts, which is what makes the fan-out dynamic. */
+  values?: string[];
+  values_from?: string;
+  max_concurrent?: number;
+  sequential?: boolean;
+  /** Base workspace cloned per iteration; empty = no clone. */
+  volume?: string;
+  mount_path?: string;
+  size_mb?: number;
+  medium?: string;
+  /** Paths each iteration owns, gathered back into the base afterward. */
+  outputs?: string[];
 }
 
 /** One step occurrence in the builder. `parallelWithPrev` links it into the same
@@ -144,6 +174,8 @@ export interface Block {
   matrix?: MatrixConfig | null;
   scatter?: ScatterConfig | null;
   approval?: ApprovalGate | null;
+  /** The map region this node belongs to (undefined = none). */
+  mapId?: string;
 }
 
 /**
@@ -200,6 +232,7 @@ export function blocksFromSteps(steps: StepRef[]): Block[] {
         with: blockWith,
         inline,
         matrix: s?.matrix ?? null, scatter: s?.scatter ?? null, approval: s?.approval ?? null,
+        mapId: s?.map_id || undefined,
       });
       i++;
     });
@@ -398,10 +431,63 @@ export function findCycle(blocks: Block[], routes: Route[], defName: (id: string
  * the two together). Order is preserved because it is still the step index the run
  * records join on. */
 export function stepsFromNodes(blocks: Block[]): StepRef[] {
-  return stepsFromBlocks(blocks.map((b) => ({ ...b, parallelWithPrev: false }))).map((ref) => {
+  return stepsFromBlocks(blocks.map((b) => ({ ...b, parallelWithPrev: false }))).map((ref, i) => {
     const { parallel_group: _drop, ...rest } = ref;
-    return rest as StepRef;
+    const out = rest as StepRef;
+    if (blocks[i]?.mapId) out.map_id = blocks[i].mapId;
+    return out;
   });
+}
+
+/** The step names belonging to each map region, in step order. */
+export function regionMembers(blocks: Block[], defName: (id: string) => string | undefined): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const b of blocks) {
+    if (!b.mapId) continue;
+    (out[b.mapId] ??= []).push(nodeName(b, defName));
+  }
+  return out;
+}
+
+/** Drops regions no step belongs to, so removing the last member of a map removes
+ * the map — the backend rejects a declared region with no members. */
+export function pruneMaps(maps: MapDef[], blocks: Block[]): MapDef[] {
+  const used = new Set(blocks.map((b) => b.mapId).filter(Boolean));
+  return maps.filter((m) => used.has(m.id));
+}
+
+/** Client-side mirror of the backend's validateMaps, so the editor can show what a
+ * save would reject rather than surfacing a 400 after the fact. Returns [] when valid. */
+export function mapIssues(blocks: Block[], maps: MapDef[], routes: Route[], defName: (id: string) => string | undefined): string[] {
+  const issues: string[] = [];
+  const byID = new Map(maps.map((m) => [m.id, m]));
+  for (const m of maps) {
+    if (!m.var.trim()) issues.push(`map ${m.id}: needs a variable name`);
+    const hasValues = (m.values ?? []).length > 0;
+    const hasFrom = !!m.values_from?.trim();
+    if (hasValues === hasFrom) issues.push(`map ${m.id}: set exactly one of values or values from`);
+  }
+  const regionOf: Record<string, string> = {};
+  for (const b of blocks) {
+    if (!b.mapId) continue;
+    const name = nodeName(b, defName);
+    regionOf[name] = b.mapId;
+    if (!byID.has(b.mapId)) {
+      issues.push(`${name}: belongs to unknown map ${b.mapId}`);
+      continue;
+    }
+    // These would nest a fan-out inside the region's, or (for a gate) require
+    // pausing each iteration independently — both rejected by the backend.
+    if (b.matrix) issues.push(`${name}: a step in a map cannot also have a matrix`);
+    if (b.scatter) issues.push(`${name}: a step in a map cannot also have a scatter`);
+    if (b.approval) issues.push(`${name}: an approval gate cannot be inside a map`);
+  }
+  for (const r of routes) {
+    const a = regionOf[r.from];
+    const b = regionOf[r.to];
+    if (a && b && a !== b) issues.push(`route ${r.from} → ${r.to}: cannot cross between maps ${a} and ${b}`);
+  }
+  return issues;
 }
 
 /** Drops routes whose endpoints no longer exist — e.g. after a step is deleted or

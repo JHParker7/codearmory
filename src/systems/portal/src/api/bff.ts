@@ -326,6 +326,9 @@ export interface WorkflowStepRef {
   matrix?: MatrixConfig | null;
   scatter?: ScatterConfig | null;
   approval?: ApprovalGate | null;
+  /** The map region this step belongs to. Mutually exclusive with
+   * matrix/scatter/parallel_group, which are the step's own fan-out. */
+  map_id?: string;
 }
 
 /** A directed edge between two steps, identified by step name — the workflows API's
@@ -340,6 +343,26 @@ export interface WorkflowRoute {
   from: string;
   to: string;
   when?: string;
+}
+
+/** A map region: a subgraph repeated once per value. Steps join it via
+ * WorkflowStepRef.map_id, and the routes between them are its body — so unlike a
+ * matrix (one step) an iteration can build, then test, then conditionally push.
+ * `volume` gives each iteration its own clone of that workspace, which is why a map
+ * exists at all: volumes are ReadWriteOnce, so iterations cannot share a checkout.
+ * The workflows API's MapDef. */
+export interface WorkflowMapDef {
+  id: string;
+  var: string;
+  values?: string[];
+  values_from?: string;
+  max_concurrent?: number;
+  sequential?: boolean;
+  volume?: string;
+  mount_path?: string;
+  size_mb?: number;
+  medium?: string;
+  outputs?: string[];
 }
 
 /** A run parameter a pipeline declares. `default` is applied when the trigger omits
@@ -373,6 +396,8 @@ export interface Workflow {
    * ordered steps[]/parallel_group encoding, whose edges the backend derives at run
    * time — the graph editor shows those derived edges and writes routes on save. */
   routes?: WorkflowRoute[];
+  /** The map regions steps join via map_id. */
+  maps?: WorkflowMapDef[];
   /** Declared run parameters (defaults/required applied at trigger time). */
   inputs?: WorkflowInputDef[];
   /** Declared outputs published on completion (resolved into WorkflowRun.outputs). */
@@ -949,7 +974,7 @@ export function listActions(token: string) {
 
 export function createWorkflow(
   token: string,
-  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; routes?: WorkflowRoute[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[] },
+  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; routes?: WorkflowRoute[]; maps?: WorkflowMapDef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[] },
 ) {
   return req<Workflow>('POST', '/workflows/pipelines', token, payload);
 }
@@ -957,7 +982,7 @@ export function createWorkflow(
 export function updateWorkflow(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; routes: WorkflowRoute[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[] }>,
+  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; routes: WorkflowRoute[]; maps: WorkflowMapDef[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[] }>,
 ) {
   return req<Workflow>('PUT', `/workflows/pipelines/${id}`, token, payload);
 }
