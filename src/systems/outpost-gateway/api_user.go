@@ -16,7 +16,7 @@ import (
 // knownModules are the integration modules an outpost can enable. Adding a new
 // integration (e.g. argo) adds an entry here; the gateway core is otherwise
 // integration-agnostic.
-var knownModules = map[string]bool{"chaos": true, "argo": true}
+var knownModules = map[string]bool{"chaos": true, "argo": true, "deploy": true}
 
 type createOutpostRequest struct {
 	Name    string   `json:"name"`
