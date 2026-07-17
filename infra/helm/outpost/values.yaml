@@ -79,6 +79,14 @@ argo:
   rbac: true
   # Argo CD installation namespace (where Application CRs live).
   namespace: argocd
+deploy:
+  # RBAC (a namespaced Role granting get/patch on Deployments) for the deploy module.
+  rbac: true
+  # Namespace a redeploy command targets when it names none. Empty = release namespace.
+  defaultNamespace: ""
+  # Namespaces the outpost may redeploy into (one Role each). Least privilege.
+  targetNamespaces:
+    - default
 
 serviceAccount:
   # The outpost's own ServiceAccount.

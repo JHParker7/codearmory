@@ -50,7 +50,7 @@ gatekeeper:
     # Comma-separated list of service names permitted to register. Core services
     # deployed by this chart (incl. the forge + workflows CI/CD pair) are listed
     # here; non-core services are auto-permitted at runtime when builder registers them.
-    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git_connector,containers,hooks"
+    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git_connector,containers,hooks,outpost-gateway"
     # Comma-separated services allowed to resolve org secrets via the internal
     # lookup endpoint (deny-all when empty). Defaults to "forge" so forge can resolve
     # "secret:<name>" job secret_refs; add "containers" to let the container registry
@@ -731,6 +731,43 @@ hooks:
     clientCertSecret: ""
     caBundle: ""
 
+# ── Outpost gateway ───────────────────────────────────────────────────────────
+# Connection point + event backbone for user-deployed outposts (in-cluster agents that
+# actuate a target cluster — e.g. the deploy module that redeploys a workload). Off by
+# default; enable to run outposts. The user-facing /outposts API is gatekeeper-authed
+# via conductor; outposts dial the /outpost/* endpoints with per-outpost keys, and
+# consumers use the internal HMAC key.
+outpostGateway:
+  enabled: false
+  image:
+    repository: outpost-gateway
+    tag: ""
+  replicaCount: 1
+  port: 8092
+  service:
+    # ClusterIP for same-cluster outposts; NodePort/Ingress to reach it from a remote
+    # cluster's outpost.
+    type: ClusterIP
+    nodePort: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+    # integration=url,... — where the gateway delivers each integration's events.
+    # Empty is fine: events are still recorded, just not fanned out to a consumer.
+    eventConsumers: ""
+  secret:
+    databaseUrl: ""
+    gatekeeperServiceKey: ""
+    # Shared HMAC for the internal command/event plane. Auto-derived; leave empty.
+    internalKey: ""
+
 # ── Git ───────────────────────────────────────────────────────────────────────
 # Backend-agnostic git credential broker — mints short-lived clone credentials for
 # linked backends (GitHub, GitLab, Forgejo, generic). In-repo GORM CORE service.
@@ -984,3 +1021,4 @@ postgresql:
           CREATE DATABASE git;
           CREATE DATABASE artifacts;
           CREATE DATABASE hooks;
+          CREATE DATABASE outpost_gateway;
