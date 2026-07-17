@@ -36,7 +36,7 @@ func driveGraph(t *testing.T, g *workflowGraph, outcomes map[string]nodeState, o
 // all-inbound-RESOLVED rather than all-inbound-completed — under the latter, D
 // would wait on the skipped branch forever.
 func TestScheduler_ConditionalDiamondJoinRuns(t *testing.T) {
-	steps := stepsWithGroups("a", "b", "c", "d")
+	steps := stepsNamed("a", "b", "c", "d")
 	routes := []WorkflowRoute{
 		{From: "a", To: "b", When: `steps.a.output == "yes"`},
 		{From: "a", To: "c", When: `steps.a.output != "yes"`},
@@ -66,7 +66,7 @@ func TestScheduler_ConditionalDiamondJoinRuns(t *testing.T) {
 
 // The other branch of the same diamond, to prove the condition actually decides.
 func TestScheduler_ConditionalDiamondOtherBranch(t *testing.T) {
-	steps := stepsWithGroups("a", "b", "c", "d")
+	steps := stepsNamed("a", "b", "c", "d")
 	g := newGraph(steps, []WorkflowRoute{
 		{From: "a", To: "b", When: `steps.a.output == "yes"`},
 		{From: "a", To: "c", When: `steps.a.output != "yes"`},
@@ -89,7 +89,7 @@ func TestScheduler_ConditionalDiamondOtherBranch(t *testing.T) {
 // which is how the pre-graph engine's unconditional `break` falls out of the model
 // with no special case.
 func TestScheduler_FailureSkipsDownstreamTransitively(t *testing.T) {
-	steps := stepsWithGroups("a", "b", "c")
+	steps := stepsNamed("a", "b", "c")
 	g := newGraph(steps, deriveRoutes(steps))
 	launched, st := driveGraph(t, g, map[string]nodeState{"a": nodeFailed}, nil)
 
@@ -104,7 +104,7 @@ func TestScheduler_FailureSkipsDownstreamTransitively(t *testing.T) {
 // A route conditioned on failure is how a cleanup/handler branch runs. Continuing
 // past a failure is strictly opt-in: the default (empty when) is success-only.
 func TestScheduler_FailureRouteRunsHandler(t *testing.T) {
-	steps := stepsWithGroups("build", "publish", "cleanup")
+	steps := stepsNamed("build", "publish", "cleanup")
 	g := newGraph(steps, []WorkflowRoute{
 		{From: "build", To: "publish", When: `steps.build.status == "completed"`},
 		{From: "build", To: "cleanup", When: `steps.build.status == "failed"`},
@@ -122,7 +122,7 @@ func TestScheduler_FailureRouteRunsHandler(t *testing.T) {
 // case a status-only enum cannot express, and the reason for a real expression
 // language: "only publish if a release was actually cut".
 func TestScheduler_RouteGatesOnOutputJSON(t *testing.T) {
-	steps := stepsWithGroups("release", "build")
+	steps := stepsNamed("release", "build")
 	g := newGraph(steps, []WorkflowRoute{
 		{From: "release", To: "build", When: `steps.release.json.published == true`},
 	})
@@ -170,7 +170,7 @@ func TestScheduler_GateParksWithoutBlockingSiblings(t *testing.T) {
 // Resume seeds already-completed nodes so the frontier reopens past them rather
 // than re-running them.
 func TestScheduler_ResumeSkipsCompletedNodes(t *testing.T) {
-	steps := stepsWithGroups("a", "b", "c")
+	steps := stepsNamed("a", "b", "c")
 	g := newGraph(steps, deriveRoutes(steps))
 	st := newRunState(g, map[string]string{"a": "done"}, map[string]bool{"a": true})
 

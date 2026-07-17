@@ -47,11 +47,11 @@ func TestParseMatrixList(t *testing.T) {
 		{`[]`, []string{}},
 		{"solo", []string{"solo"}},
 		// Linux-style list output: whitespace separates values just like commas.
-		{"a b c", []string{"a", "b", "c"}},               // space-separated (echo a b c)
+		{"a b c", []string{"a", "b", "c"}},                           // space-separated (echo a b c)
 		{"a.txt\nb.txt\nc.txt", []string{"a.txt", "b.txt", "c.txt"}}, // newline-separated (ls)
-		{"a.txt\nb.txt\n", []string{"a.txt", "b.txt"}},   // trailing newline dropped
-		{"a\tb  c", []string{"a", "b", "c"}},             // tabs and runs of spaces collapse
-		{"a, b\nc d", []string{"a", "b", "c", "d"}},      // mixed comma + whitespace
+		{"a.txt\nb.txt\n", []string{"a.txt", "b.txt"}},               // trailing newline dropped
+		{"a\tb  c", []string{"a", "b", "c"}},                         // tabs and runs of spaces collapse
+		{"a, b\nc d", []string{"a", "b", "c", "d"}},                  // mixed comma + whitespace
 	}
 	for _, c := range cases {
 		got := parseMatrixList(c.in)
@@ -243,26 +243,16 @@ func TestValidateMatrix(t *testing.T) {
 	}
 }
 
-func TestValidateStepRefShape_MatrixParallelExclusive(t *testing.T) {
-	grp := 0
-	ref := WorkflowStepRef{StepID: uuid.New().String(), ParallelGroup: &grp, Matrix: &MatrixConfig{Var: "v", Values: []string{"a"}}}
-	if msg := validateStepRefShape(0, ref); msg == "" {
-		t.Fatal("expected matrix+parallel_group to be rejected")
-	}
-}
-
 // An inline step carries its whole definition on the ref (no step_id). It is
 // validated like a stored step, must have a name, cannot double as a reference or a
 // gate, and cannot use the approval action.
 func TestValidateStepRefShape_Inline(t *testing.T) {
-	grp := 0
 	cases := []struct {
 		name string
 		ref  WorkflowStepRef
 		ok   bool
 	}{
 		{"valid inline", WorkflowStepRef{Action: "forge/run", Name: "build", With: map[string]any{"image": "alpine"}}, true},
-		{"inline with parallel group", WorkflowStepRef{Action: "forge/run", Name: "build", ParallelGroup: &grp}, true},
 		{"inline with matrix", WorkflowStepRef{Action: "forge/run", Name: "build", Matrix: &MatrixConfig{Var: "v", Values: []string{"a"}}}, true},
 		{"step_id and action", WorkflowStepRef{StepID: uuid.New().String(), Action: "forge/run", Name: "x"}, false},
 		{"neither step_id nor action", WorkflowStepRef{}, false},
@@ -581,7 +571,6 @@ func TestInlineApprovalGate_ValidationRejectsBadShapes(t *testing.T) {
 	s0 := seedHTTPStep(t, "tu", "to", "vsvc", "/a")
 	cases := []map[string]any{
 		{"approval": map[string]any{"message": "x"}, "step_id": s0.StepID},                                          // both gate and step ref
-		{"approval": map[string]any{"message": "x"}, "parallel_group": 0},                                           // gate in a parallel group
 		{"approval": map[string]any{"message": "x"}, "matrix": map[string]any{"var": "v", "values": []string{"a"}}}, // gate with a matrix
 	}
 	for i, step := range cases {
@@ -733,7 +722,7 @@ func TestExecuteRun_InlineStepRuns(t *testing.T) {
 }
 
 // A matrix over an inline step fans it out, exercising the inline enrich path's
-// ParallelGroup/Matrix pass-through.
+// Matrix pass-through.
 func TestExecuteRun_InlineStepMatrixFansOut(t *testing.T) {
 	requireDB(t)
 	stubGatekeeperRouting(t, "tu", "to")

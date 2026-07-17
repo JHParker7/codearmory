@@ -10,14 +10,13 @@ import (
 // The frontier scheduler: executes a run by walking the workflow graph, rather
 // than by iterating precomputed batches.
 //
-// The pre-graph engine grouped steps with groupSteps and ran a plain `for range`
-// over the result — a static plan computed before the first step ran, with no
-// readiness check and no way to hang a predicate on a transition. This replaces
-// that loop with a readiness-based frontier so that edges can carry conditions.
+// The pre-graph engine ran a plain `for range` over precomputed batches — a static
+// plan fixed before the first step ran, with no readiness check and no way to hang a
+// predicate on a transition. This replaces that loop with a readiness-based frontier
+// so that edges can carry conditions.
 //
-// For a workflow with no explicit routes the edges are derived from
-// parallel_group (deriveRoutes), and the observable behaviour is identical to the
-// batch engine — that equivalence is what the existing test suite pins down.
+// A workflow with no explicit routes has its edges derived as a chain in array order
+// (deriveRoutes), so a plain sequence still behaves exactly as it always did.
 
 // nodeState is a node's lifecycle state within one run.
 type nodeState string

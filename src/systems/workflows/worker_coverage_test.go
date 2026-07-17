@@ -14,7 +14,7 @@ import (
 // TestExecuteRun_HTTPStepCompletes drives the worker end-to-end: a workflow with a
 // single HTTP step against a stub service, executed via executeRun, must finish
 // 'completed' and record a step run. Exercises executeRun/executeStep/startStepRun/
-// finishStepRun/snapshotOutputs/groupSteps/Complete/SetCurrentStep/rotateToken.
+// finishStepRun/snapshotOutputs/Complete/SetCurrentStep/rotateToken.
 func TestExecuteRun_HTTPStepCompletes(t *testing.T) {
 	requireDB(t)
 	stubGatekeeperRouting(t, "wk", "wko") // token minting for rotateToken
@@ -47,8 +47,8 @@ func TestExecuteRun_HTTPStepCompletes(t *testing.T) {
 		t.Fatalf("decode wf: %v", err)
 	}
 	t.Cleanup(func() {
-		connect().Exec(`DELETE FROM workflows WHERE workflow_id = ?`, wf.WorkflowID)        //nolint:errcheck
-		connect().Exec(`DELETE FROM workflow_runs WHERE workflow_id = ?`, wf.WorkflowID)    //nolint:errcheck
+		connect().Exec(`DELETE FROM workflows WHERE workflow_id = ?`, wf.WorkflowID)                                                             //nolint:errcheck
+		connect().Exec(`DELETE FROM workflow_runs WHERE workflow_id = ?`, wf.WorkflowID)                                                         //nolint:errcheck
 		connect().Exec(`DELETE FROM workflow_step_runs WHERE run_id IN (SELECT run_id FROM workflow_runs WHERE workflow_id = ?)`, wf.WorkflowID) //nolint:errcheck
 	})
 

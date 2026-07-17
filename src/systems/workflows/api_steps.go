@@ -363,8 +363,8 @@ func validateStepRefShape(i int, ref WorkflowStepRef) string {
 		if ref.StepID != "" || ref.Action != "" {
 			return fmt.Sprintf("step %d: cannot be both a step and an approval gate", i)
 		}
-		if ref.ParallelGroup != nil || ref.Matrix != nil {
-			return fmt.Sprintf("step %d: an approval gate cannot have a parallel_group or matrix", i)
+		if ref.Matrix != nil {
+			return fmt.Sprintf("step %d: an approval gate cannot have a matrix", i)
 		}
 		return ""
 	}
@@ -395,20 +395,14 @@ func validateStepRefShape(i int, ref WorkflowStepRef) string {
 	} else if ref.StepID == "" {
 		return fmt.Sprintf("step %d: step_id or action is required", i)
 	}
-	if ref.ParallelGroup != nil && *ref.ParallelGroup < 0 {
-		return fmt.Sprintf("step %d: parallel_group must be non-negative", i)
-	}
 	if ref.Matrix != nil {
-		if ref.ParallelGroup != nil {
-			return fmt.Sprintf("step %d: matrix and parallel_group are mutually exclusive", i)
-		}
 		if msg := validateMatrix(ref.Matrix); msg != "" {
 			return fmt.Sprintf("step %d: %s", i, msg)
 		}
 	}
 	if ref.Scatter != nil {
-		if ref.ParallelGroup != nil || ref.Matrix != nil {
-			return fmt.Sprintf("step %d: scatter is mutually exclusive with matrix and parallel_group", i)
+		if ref.Matrix != nil {
+			return fmt.Sprintf("step %d: scatter and matrix are mutually exclusive", i)
 		}
 		if ref.Action == "" {
 			return fmt.Sprintf("step %d: scatter requires an inline step action to run per leg", i)

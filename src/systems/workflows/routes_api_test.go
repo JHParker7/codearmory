@@ -51,15 +51,15 @@ func TestCreateWorkflow_AcceptsRoutes(t *testing.T) {
 	}
 }
 
-// Omitting routes keeps the ordered-steps encoding — the shape every existing
-// client sends — and stores no routes, so the edges are derived at run time.
+// Omitting routes stores none: a bare step array is a sequence, and its edges are
+// derived as a chain at run time.
 func TestCreateWorkflow_WithoutRoutesStoresNone(t *testing.T) {
 	body := `{
 		"name":"linear-wf-ok",
 		"steps":[
 			{"action":"http","name":"a","with":{"service":"forge","path":"/x"}},
-			{"action":"http","name":"b","with":{"service":"forge","path":"/x"},"parallel_group":0},
-			{"action":"http","name":"c","with":{"service":"forge","path":"/x"},"parallel_group":0}
+			{"action":"http","name":"b","with":{"service":"forge","path":"/x"}},
+			{"action":"http","name":"c","with":{"service":"forge","path":"/x"}}
 		]
 	}`
 	w := postPipeline(t, body)
@@ -73,9 +73,9 @@ func TestCreateWorkflow_WithoutRoutesStoresNone(t *testing.T) {
 	if len(wf.Routes) != 0 {
 		t.Fatalf("routes = %v, want none stored", wf.Routes)
 	}
-	// The graph is still derivable, and reproduces the parallel_group semantics.
-	if got := routeSet(wf.buildGraph().routes); len(got) != 2 || got[0] != "a->b" || got[1] != "a->c" {
-		t.Fatalf("derived routes = %v, want [a->b a->c]", got)
+	// The graph is still derivable: a chain in array order.
+	if got := routeSet(wf.buildGraph().routes); len(got) != 2 || got[0] != "a->b" || got[1] != "b->c" {
+		t.Fatalf("derived routes = %v, want [a->b b->c]", got)
 	}
 }
 
@@ -99,14 +99,6 @@ func TestCreateWorkflow_RejectsBadRoutes(t *testing.T) {
 				{"action":"http","name":"a","with":{"service":"f","path":"/x"}}],
 				"routes":[{"from":"a","to":"ghost"}]}`,
 			want: "unknown step",
-		},
-		{
-			name: "routes combined with parallel_group",
-			body: `{"name":"wf-mix","steps":[
-				{"action":"http","name":"a","with":{"service":"f","path":"/x"}},
-				{"action":"http","name":"b","with":{"service":"f","path":"/x"},"parallel_group":0}],
-				"routes":[{"from":"a","to":"b"}]}`,
-			want: "cannot be combined with routes",
 		},
 		{
 			// A typo'd field is caught by compiling the condition against the

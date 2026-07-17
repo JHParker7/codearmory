@@ -379,11 +379,10 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 		// would otherwise miss on the empty StepID and silently drop the step.
 		if ref.StepID == "" && ref.Action != "" {
 			result = append(result, WorkflowStep{
-				Step:          Step{Name: ref.Name, Action: ref.Action, With: ref.With, Timeout: ref.Timeout},
-				ParallelGroup: ref.ParallelGroup,
-				Matrix:        ref.Matrix,
-				Scatter:       ref.Scatter,
-				MapID:         ref.MapID,
+				Step:    Step{Name: ref.Name, Action: ref.Action, With: ref.With, Timeout: ref.Timeout},
+				Matrix:  ref.Matrix,
+				Scatter: ref.Scatter,
+				MapID:   ref.MapID,
 			})
 			continue
 		}
@@ -406,7 +405,7 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 			maps.Copy(merged, ref.With)
 			s.With = merged
 		}
-		result = append(result, WorkflowStep{Step: s, ParallelGroup: ref.ParallelGroup, Matrix: ref.Matrix, Scatter: ref.Scatter, MapID: ref.MapID})
+		result = append(result, WorkflowStep{Step: s, Matrix: ref.Matrix, Scatter: ref.Scatter, MapID: ref.MapID})
 	}
 	return result, nil
 }

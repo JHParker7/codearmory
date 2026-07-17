@@ -212,12 +212,6 @@ func TestValidateMaps(t *testing.T) {
 			nil, "approval gate cannot be inside a map region",
 		},
 		{
-			"parallel_group inside a map",
-			[]WorkflowStep{{Step: Step{Name: "build"}, MapID: "m1", ParallelGroup: intPtr(0)}},
-			[]MapDef{{ID: "m1", Var: "d", Values: []string{"x"}}},
-			nil, "parallel_group cannot be combined with map_id",
-		},
-		{
 			"route crossing between two regions",
 			[]WorkflowStep{mapped("a", "m1"), mapped("b", "m2")},
 			[]MapDef{

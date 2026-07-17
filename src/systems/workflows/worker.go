@@ -77,32 +77,13 @@ var rotationIntervalFn = func() time.Duration {
 // rotationInterval returns a random duration in [30 min, 60 min).
 func rotationInterval() time.Duration { return rotationIntervalFn() }
 
-// stepGroup is a set of steps that execute together (sequential = 1 step, parallel = N steps).
+// stepGroup is ONE node's unit of work, plus the index it occupies in the workflow's
+// step array. It holds a slice rather than a single step only because a matrix/scatter
+// node expands into legs (buildGroupTasks); it never holds two different steps —
+// running distinct steps together is a property of the graph's edges, not of a batch.
 type stepGroup struct {
 	steps   []WorkflowStep
 	indices []int
-}
-
-func groupSteps(steps []WorkflowStep) []stepGroup {
-	var groups []stepGroup
-	i := 0
-	for i < len(steps) {
-		ws := steps[i]
-		if ws.ParallelGroup == nil {
-			groups = append(groups, stepGroup{steps: []WorkflowStep{ws}, indices: []int{i}})
-			i++
-			continue
-		}
-		g := *ws.ParallelGroup
-		var grp stepGroup
-		for i < len(steps) && steps[i].ParallelGroup != nil && *steps[i].ParallelGroup == g {
-			grp.steps = append(grp.steps, steps[i])
-			grp.indices = append(grp.indices, i)
-			i++
-		}
-		groups = append(groups, grp)
-	}
-	return groups
 }
 
 // WorkerPool runs workflow runs from the pending queue in PostgreSQL.
@@ -204,8 +185,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	stepOutputs, completed := rebuildResumeState(runCtx, runID, workflow.Steps)
 
 	// The graph is the execution plan: a workflow's stored routes, or — for one
-	// authored as an ordered array — the edges derived from parallel_group, which
-	// reproduce the old batching exactly.
+	// authored as a plain array — a chain derived from that array's order.
 	g := workflow.buildGraph()
 	st := newRunState(g, stepOutputs, completed)
 

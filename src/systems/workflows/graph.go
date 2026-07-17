@@ -13,17 +13,21 @@ import (
 // names are unique (enforced by validateUniqueStepNames) and are already the
 // identity used by ${steps.<name>.output}, by the run-time output map, and by
 // WorkflowStepRun.StepName. What did NOT exist is E: ordering was *implied* by
-// array position plus the consecutive-run parallel_group encoding that
-// groupSteps decodes.
+// array position.
 //
 // So the node identity is the step NAME, and a route is a directed edge between
 // two names. Keeping the array as the node set is what lets StepIndex stay
 // meaningful (it is still the position in StepRefs), which in turn is why the
 // portal, the CLI, and the run records need no change.
 //
-// A workflow with no explicit routes has them DERIVED from parallel_group at
-// load time (deriveRoutes), so existing pipelines keep their exact semantics
-// with no stored representation and therefore nothing that can drift.
+// A workflow with no explicit routes has them DERIVED at load time (deriveRoutes)
+// as a plain chain in array order, so a route-less array is simply a sequence and
+// needs no stored representation that could drift.
+//
+// Routes are the only encoding for parallelism. The positional parallel_group this
+// replaced could group only ADJACENT array entries, so it could not express a step
+// depending on two non-adjacent steps, a diamond join, or any cross-stage edge —
+// two edges out of one node say all of that directly.
 
 // maxRoutes caps the edge count. A complete DAG over maxSteps nodes would be
 // maxSteps*(maxSteps-1)/2 = 1225 edges; this bounds validation and scheduling
@@ -126,26 +130,14 @@ func groupNames(steps []WorkflowStep) []string {
 	return out
 }
 
-// deriveRoutes reproduces the ordering semantics of groupSteps as explicit edges.
+// deriveRoutes gives a route-less workflow its edges: a plain chain in array order.
 //
-// It deliberately CALLS groupSteps rather than reimplementing the consecutive-run
-// parallel_group decoding, so the derivation is equivalent to the batching it
-// replaces by construction rather than by inspection.
-//
-// The cross product between adjacent groups IS the barrier: every node of group
-// k+1 depends on every node of group k, which under the all-inbound-resolved join
-// gives exactly the old "each group sees only prior groups' outputs" rule.
+// An array with no routes is a sequence — nothing more. Parallelism is expressed by
+// routes and only by routes, so there is no positional encoding left to decode here.
 func deriveRoutes(steps []WorkflowStep) []WorkflowRoute {
 	var routes []WorkflowRoute
-	var prev []string
-	for _, g := range groupSteps(steps) {
-		cur := groupNames(g.steps)
-		for _, p := range prev {
-			for _, c := range cur {
-				routes = append(routes, WorkflowRoute{From: p, To: c})
-			}
-		}
-		prev = cur
+	for i := 1; i < len(steps); i++ {
+		routes = append(routes, WorkflowRoute{From: steps[i-1].Name, To: steps[i].Name})
 	}
 	return routes
 }
@@ -297,7 +289,7 @@ func (g *workflowGraph) topoOrder() (order []string, residual []string, ok bool)
 }
 
 // buildGraph returns the runtime graph for a workflow: its stored routes when it
-// has any, otherwise routes derived from parallel_group.
+// has any, otherwise a chain derived from the step array.
 //
 // The two are mutually exclusive by validation, so there is never a stored graph
 // and an array encoding that can disagree — and a workflow authored before routes
@@ -325,14 +317,6 @@ func validateGraph(steps []WorkflowStep, routes []WorkflowRoute, maps []MapDef) 
 	}
 	if len(routes) > maxRoutes {
 		return fmt.Sprintf("too many routes: %d (max %d)", len(routes), maxRoutes)
-	}
-	// With explicit routes, parallel_group has no meaning. Silently ignoring it
-	// would leave a pipeline that does not do what its JSON says, so reject —
-	// mirroring the mutual-exclusion rules in validateStepRefShape.
-	for i, ws := range steps {
-		if ws.ParallelGroup != nil {
-			return fmt.Sprintf("step %d (%s): parallel_group cannot be combined with routes", i, ws.Name)
-		}
 	}
 	known := make(map[string]bool, len(steps))
 	for _, ws := range steps {

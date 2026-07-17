@@ -260,9 +260,9 @@ type createWorkflowRequest struct {
 	Steps       []WorkflowStepRef   `json:"steps,omitempty"`
 	Inputs      []WorkflowInputDef  `json:"inputs,omitempty"`
 	Outputs     []WorkflowOutputDef `json:"outputs,omitempty"`
-	// Routes are the explicit edges between steps. Omit them to keep the ordered
-	// steps[]/parallel_group encoding, whose edges are derived at run time — which
-	// is what lets a client that predates routes carry on unchanged.
+	// Routes are the explicit edges between steps, and the only way to express a
+	// fork or a join. Omit them for a plain sequence: the edges are then derived as
+	// a chain in array order at run time.
 	Routes []WorkflowRoute `json:"routes,omitempty"`
 	// Maps declare the map regions steps join via map_id — see MapDef.
 	Maps []MapDef `json:"maps,omitempty"`

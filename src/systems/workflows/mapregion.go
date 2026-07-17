@@ -81,9 +81,6 @@ func validateMaps(steps []WorkflowStep, defs []MapDef, routes []WorkflowRoute) s
 		if ws.Scatter != nil {
 			return fmt.Sprintf("step %d (%s): scatter cannot be combined with map_id", i, ws.Name)
 		}
-		if ws.ParallelGroup != nil {
-			return fmt.Sprintf("step %d (%s): parallel_group cannot be combined with map_id", i, ws.Name)
-		}
 		if ws.Approval != nil || ws.Action == ActionApproval {
 			return fmt.Sprintf("step %d (%s): an approval gate cannot be inside a map region", i, ws.Name)
 		}

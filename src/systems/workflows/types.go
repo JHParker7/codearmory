@@ -232,19 +232,18 @@ type WorkflowStepRef struct {
 	// step's inputs to earlier steps' outputs — e.g. With:{"env":{"TARGET":
 	// "${steps.build.output}"}} — without editing the shared step. The values support
 	// the same ${...} substitution as any With value.
-	With          map[string]any `json:"with,omitempty"`
-	ParallelGroup *int           `json:"parallel_group,omitempty"`
-	Matrix        *MatrixConfig  `json:"matrix,omitempty"`
+	With   map[string]any `json:"with,omitempty"`
+	Matrix *MatrixConfig  `json:"matrix,omitempty"`
 	// Scatter fans this step out over the regex-matched paths of a shared workspace,
 	// each leg on its own clone, gathering owned outputs back afterward. Mutually
-	// exclusive with Matrix/ParallelGroup — see ScatterConfig.
+	// exclusive with Matrix — see ScatterConfig.
 	Scatter  *ScatterConfig `json:"scatter,omitempty"`
 	Approval *ApprovalGate  `json:"approval,omitempty"`
 	// MapID puts this step inside the named map region (see MapDef): the region's
 	// whole subgraph is repeated once per value, so unlike Matrix — which repeats a
 	// single step — a map body can be several routed steps. Mutually exclusive with
-	// Matrix/Scatter/ParallelGroup on the same step, since those are the step's own
-	// fan-out and would nest inside the region's.
+	// Matrix/Scatter on the same step, since those are the step's own fan-out and
+	// would nest inside the region's.
 	MapID string `json:"map_id,omitempty"`
 }
 
@@ -296,10 +295,9 @@ const maxMapValues = 50
 // carries the gate config back out so the editor can round-trip it.
 type WorkflowStep struct {
 	Step
-	ParallelGroup *int           `json:"parallel_group,omitempty"`
-	Matrix        *MatrixConfig  `json:"matrix,omitempty"`
-	Scatter       *ScatterConfig `json:"scatter,omitempty"`
-	Approval      *ApprovalGate  `json:"approval,omitempty"`
+	Matrix   *MatrixConfig  `json:"matrix,omitempty"`
+	Scatter  *ScatterConfig `json:"scatter,omitempty"`
+	Approval *ApprovalGate  `json:"approval,omitempty"`
 	// MapID is the map region this step belongs to — see MapDef.
 	MapID string `json:"map_id,omitempty"`
 }
@@ -342,10 +340,10 @@ type Workflow struct {
 	// derivation logic changes (constant bumped) a workflow with an older version
 	// re-provisions on its next trigger — see handleTriggerRun. Default 0 means
 	// "pre-versioning"; AutoMigrate backfills existing rows to 0.
-	RolePermsVersion int               `json:"-"            gorm:"column:role_perms_version;default:0"`
-	Active           bool              `json:"active"       gorm:"column:active;default:true"`
-	CreatedAt        time.Time         `json:"created_at"   gorm:"column:created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"   gorm:"column:updated_at"`
+	RolePermsVersion int       `json:"-"            gorm:"column:role_perms_version;default:0"`
+	Active           bool      `json:"active"       gorm:"column:active;default:true"`
+	CreatedAt        time.Time `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt        time.Time `json:"updated_at"   gorm:"column:updated_at"`
 	// Inputs/Outputs declare the pipeline's interface — JSON columns, so AutoMigrate
 	// adds them with no manual migration and existing rows read back as empty.
 	Inputs  []WorkflowInputDef  `json:"inputs,omitempty"  gorm:"column:inputs;serializer:json"`
@@ -354,10 +352,15 @@ type Workflow struct {
 	// a region by naming it in WorkflowStepRef.MapID.
 	Maps []MapDef `json:"maps,omitempty" gorm:"column:maps;serializer:json"`
 	// Routes are the explicit edges between steps — see WorkflowRoute. Empty means
-	// the edges are DERIVED from parallel_group at load time (deriveRoutes), which
-	// is why a pipeline authored before routes existed needs no migration. The two
-	// encodings are mutually exclusive: validateGraph rejects routes combined with
-	// parallel_group, so a stored graph can never disagree with the array.
+	// the edges are DERIVED at load time (deriveRoutes) as a plain chain in array
+	// order, which is why a pipeline authored before routes existed needs no
+	// migration: an array with no routes IS a sequence.
+	//
+	// Routes are the ONLY way to express parallelism. There is no parallel_group:
+	// two edges out of one node is a fork, and it composes with joins and conditions
+	// in a way a positional run-length field never could. Fan-out WITHIN a node
+	// (matrix/scatter/map) is that node's own concern and carries its own
+	// max_concurrent.
 	// A JSON column, so AutoMigrate adds it and existing rows read back empty.
 	Routes   []WorkflowRoute   `json:"routes,omitempty" gorm:"column:routes;serializer:json"`
 	StepRefs []WorkflowStepRef `json:"-"            gorm:"column:steps;serializer:json"`
@@ -371,24 +374,24 @@ func (Workflow) TableName() string { return "workflows" }
 // it is never the triggering user's own session token. RunSessionID tracks the
 // underlying gatekeeper session so it can be revoked on terminal state.
 type WorkflowRun struct {
-	RunID        string            `json:"run_id"       gorm:"column:run_id;primaryKey"`
-	WorkflowID   string            `json:"workflow_id"  gorm:"column:workflow_id"`
-	TriggeredBy  string            `json:"triggered_by" gorm:"column:triggered_by"`
-	OrgID        string            `json:"org_id"       gorm:"column:org_id;default:''"`
-	Project      string            `json:"project,omitempty" gorm:"column:project;default:''"`
-	Status       string            `json:"status"       gorm:"column:status;default:'pending'"`
-	CurrentStep  int               `json:"current_step" gorm:"column:current_step;default:0"`
-	Inputs       map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
+	RunID       string            `json:"run_id"       gorm:"column:run_id;primaryKey"`
+	WorkflowID  string            `json:"workflow_id"  gorm:"column:workflow_id"`
+	TriggeredBy string            `json:"triggered_by" gorm:"column:triggered_by"`
+	OrgID       string            `json:"org_id"       gorm:"column:org_id;default:''"`
+	Project     string            `json:"project,omitempty" gorm:"column:project;default:''"`
+	Status      string            `json:"status"       gorm:"column:status;default:'pending'"`
+	CurrentStep int               `json:"current_step" gorm:"column:current_step;default:0"`
+	Inputs      map[string]string `json:"inputs"       gorm:"column:inputs;serializer:json"`
 	// Outputs is the resolved pipeline-output map, computed from the declared
 	// WorkflowOutputDefs when the run completes; empty until then. Surfaced to a
 	// parent run as the workflows/trigger step's output.
 	Outputs map[string]string `json:"outputs,omitempty" gorm:"column:outputs;serializer:json"`
 	// Depth is the sub-pipeline nesting depth (0 for a top-level run); ParentRunID
 	// links a sub-run to the run whose workflows/trigger step started it.
-	Depth        int    `json:"depth,omitempty"         gorm:"column:depth;default:0"`
-	ParentRunID  string `json:"parent_run_id,omitempty" gorm:"column:parent_run_id;default:''"`
-	Token        string `json:"-"            gorm:"column:token"`
-	RunSessionID string `json:"-"            gorm:"column:run_session_id"`
+	Depth        int               `json:"depth,omitempty"         gorm:"column:depth;default:0"`
+	ParentRunID  string            `json:"parent_run_id,omitempty" gorm:"column:parent_run_id;default:''"`
+	Token        string            `json:"-"            gorm:"column:token"`
+	RunSessionID string            `json:"-"            gorm:"column:run_session_id"`
 	StepRuns     []WorkflowStepRun `json:"step_runs"    gorm:"-"`
 	CreatedAt    time.Time         `json:"created_at"   gorm:"column:created_at"`
 	StartedAt    *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`
