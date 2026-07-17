@@ -90,10 +90,12 @@ func safeSegment(s string) string {
 // stage here first — fsStore then renames it into place; s3Store uploads it — so
 // neither can replace a good artifact with a partial one on failure or over-quota.
 //
-// The temp file lives in the OS temp dir (per-pod scratch), NOT the artifact store, so
-// staging does not reintroduce the shared-storage bottleneck for the s3 backend.
-func stageBlob(r io.Reader, limit int64) (path string, size int64, digest string, err error) {
-	tmp, err := os.CreateTemp("", "artifact-upload-*")
+// The caller chooses `dir`: fsStore stages in the SAME directory as the final file so
+// the rename that follows is atomic (rename cannot cross filesystems); s3Store stages
+// in a scratch dir. Neither uses the OS default temp dir blindly — the pod runs with a
+// read-only root filesystem, so the only writable places are the volumes we mount.
+func stageBlob(dir string, r io.Reader, limit int64) (path string, size int64, digest string, err error) {
+	tmp, err := os.CreateTemp(dir, "artifact-upload-*")
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -132,10 +134,11 @@ func (s *fsStore) path(userID, name string) string {
 
 func (s *fsStore) Write(_ context.Context, userID, name string, r io.Reader, limit int64) (int64, string, error) {
 	final := s.path(userID, name)
-	if err := os.MkdirAll(filepath.Dir(final), 0o750); err != nil {
+	dir := filepath.Dir(final)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return 0, "", err
 	}
-	tmp, size, digest, err := stageBlob(r, limit)
+	tmp, size, digest, err := stageBlob(dir, r, limit)
 	if err != nil {
 		return size, "", err
 	}

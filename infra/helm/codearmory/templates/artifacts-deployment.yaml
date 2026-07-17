@@ -86,6 +86,11 @@ spec:
                   name: {{ .Values.artifacts.s3.secretKeySecret }}
                   key: {{ .Values.artifacts.s3.secretKeySecretKey }}
             {{- end }}
+            # Staging scratch for uploads before they go to object storage. The root
+            # filesystem is read-only, so this points at a writable emptyDir (below),
+            # NOT /tmp.
+            - name: ARTIFACTS_TMP_DIR
+              value: /scratch
             {{- else }}
             - name: ARTIFACTS_DATA_DIR
               value: {{ .Values.artifacts.storage.mountPath | quote }}
@@ -97,7 +102,10 @@ spec:
               value: {{ .Values.artifacts.defaultQuotaMB | quote }}
             {{- include "codearmory.tls.envs" .Values.artifacts.tls | nindent 12 }}
           volumeMounts:
-            {{- if not .Values.artifacts.s3.enabled }}
+            {{- if .Values.artifacts.s3.enabled }}
+            - name: scratch
+              mountPath: /scratch
+            {{- else }}
             - name: data
               mountPath: {{ .Values.artifacts.storage.mountPath }}
             {{- end }}
@@ -117,7 +125,12 @@ spec:
           resources:
             {{- toYaml .Values.artifacts.resources | nindent 12 }}
       volumes:
-        {{- if not .Values.artifacts.s3.enabled }}
+        {{- if .Values.artifacts.s3.enabled }}
+        # Ephemeral per-pod scratch for staging uploads (see ARTIFACTS_TMP_DIR). Not
+        # shared and not persistent — the object store holds the durable copy.
+        - name: scratch
+          emptyDir: {}
+        {{- else }}
         - name: data
           {{- if .Values.artifacts.storage.enabled }}
           persistentVolumeClaim:

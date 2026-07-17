@@ -70,7 +70,7 @@ func (s *s3Store) Write(ctx context.Context, userID, name string, r io.Reader, l
 	// known ContentLength + a seekable body, which keeps the PutObject a single simple
 	// request rather than multipart with an unknown size. The temp file is per-pod
 	// scratch, so it does not reintroduce shared storage.
-	tmp, size, digest, err := stageBlob(r, limit)
+	tmp, size, digest, err := stageBlob(scratchDir(), r, limit)
 	if err != nil {
 		return size, "", err
 	}

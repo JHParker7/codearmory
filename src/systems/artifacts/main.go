@@ -67,6 +67,11 @@ func envOrDefault(key, def string) string {
 // dataDir is where blobs live — a persistent volume in a real deployment.
 func dataDir() string { return envOrDefault("ARTIFACTS_DATA_DIR", "/data") }
 
+// scratchDir is a writable directory the s3 backend stages uploads in before pushing
+// them to object storage. The pod runs with a read-only root filesystem, so this must
+// be an explicitly-mounted writable volume (an emptyDir), NOT /tmp — see the chart.
+func scratchDir() string { return envOrDefault("ARTIFACTS_TMP_DIR", os.TempDir()) }
+
 // defaultQuotaMB is the service-wide default allowance, in megabytes. It is the
 // admin's one global knob; per-user overrides live in the database.
 const defaultQuotaMB = 5120 // 5 GB — enough for a Go module + build cache
