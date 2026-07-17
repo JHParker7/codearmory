@@ -1,0 +1,26 @@
+{{- if .Values.hooks.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "codearmory.fullname" . }}-hooks
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hooks
+spec:
+  # NodePort when a git host must reach the webhook endpoint from outside the cluster
+  # (webhooks bypass conductor — they authenticate by HMAC, not a codearmory bearer).
+  # ClusterIP otherwise; front it with an Ingress in a real deployment.
+  type: {{ .Values.hooks.service.type | default "ClusterIP" }}
+  ports:
+    - port: {{ .Values.hooks.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+      {{- if and (eq (.Values.hooks.service.type | default "ClusterIP") "NodePort") .Values.hooks.service.nodePort }}
+      nodePort: {{ .Values.hooks.service.nodePort }}
+      {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ include "codearmory.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: hooks
+{{- end }}

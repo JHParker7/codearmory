@@ -1210,6 +1210,12 @@
       },
       {
         "method": "POST",
+        "path": "/hooks/gitea",
+        "action": "receiveGiteaHook",
+        "resource": "hooks/hooks"
+      },
+      {
+        "method": "POST",
         "path": "/rules",
         "action": "createRule",
         "resource": "hooks/rules"

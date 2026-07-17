@@ -1671,5 +1671,96 @@
         ]
       }
     ]
+  },
+  {
+    "name": "hooks",
+    "url": "http://hooks:8087",
+    "description": "Webhook ingestion and pipeline rule management",
+    "forward_auth": true,
+    "service_key": "hooks-registry-local-secret",
+    "endpoints": [
+      {
+        "method": "POST",
+        "path": "/hooks",
+        "action": "receiveHook",
+        "resource": "hooks/hooks",
+        "public": true
+      },
+      {
+        "method": "POST",
+        "path": "/hooks/github",
+        "action": "receiveGithubHook",
+        "resource": "hooks/hooks",
+        "public": true
+      },
+      {
+        "method": "POST",
+        "path": "/hooks/gitea",
+        "action": "receiveGiteaHook",
+        "resource": "hooks/hooks"
+      },
+      {
+        "method": "POST",
+        "path": "/rules",
+        "action": "createRule",
+        "resource": "hooks/rules"
+      },
+      {
+        "method": "GET",
+        "path": "/rules",
+        "action": "listRule",
+        "resource": "hooks/rules"
+      },
+      {
+        "method": "GET",
+        "path": "/rules/{id}",
+        "action": "getRule",
+        "resource": "hooks/rules/{id}"
+      },
+      {
+        "method": "PUT",
+        "path": "/rules/{id}",
+        "action": "updateRule",
+        "resource": "hooks/rules/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/rules/{id}",
+        "action": "deleteRule",
+        "resource": "hooks/rules/{id}"
+      },
+      {
+        "method": "GET",
+        "path": "/events",
+        "action": "listEvent",
+        "resource": "hooks/events"
+      },
+      {
+        "method": "GET",
+        "path": "/events/{id}",
+        "action": "getEvent",
+        "resource": "hooks/events/{id}"
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": [
+          "createRule",
+          "listRule",
+          "getRule",
+          "updateRule",
+          "deleteRule",
+          "listEvent",
+          "getEvent"
+        ],
+        "resources": [
+          "{username}/hooks/rules",
+          "{username}/hooks/rules/*",
+          "{username}/hooks/events",
+          "{username}/hooks/events/*"
+        ]
+      }
+    ]
   }
 ]

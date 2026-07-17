@@ -1,6 +1,20 @@
 {
   "name": "codearmory-ci",
   "description": "dogfood CI: checkout -> [build+test per module] -> image builds, with a gocache that persists across runs",
+  "inputs": [
+    {
+      "name": "HOOK_REF",
+      "default": "main"
+    },
+    {
+      "name": "HOOK_COMMIT",
+      "default": ""
+    },
+    {
+      "name": "HOOK_REPO",
+      "default": ""
+    }
+  ],
   "steps": [
     {
       "action": "forge/create-volume",
@@ -31,7 +45,7 @@
         "timeout": 600,
         "checkout": {
           "depth": 1,
-          "ref": "dev-2"
+          "ref": "${inputs.HOOK_REF}"
         },
         "secret_refs": {
           "GIT_CLONE_URL": "git:http://192.168.53.171:3000/jp01/codearmory.git"
