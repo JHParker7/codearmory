@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,6 +25,8 @@ const (
 	defaultRegistryAuthEnv = "REGISTRY_AUTH"
 	// builds are minutes-long, not seconds; default well above a command step.
 	defaultBuildTimeoutSecs = int64(1800)
+	// defaultBuildRetries is how many times kaniko retries a registry operation.
+	defaultBuildRetries = 3
 
 	kanikoShell = "/busybox/sh" // kaniko :debug ships busybox at this path
 )
@@ -88,12 +91,68 @@ func validateBuild(b *BuildSpec, refs, env map[string]string) error {
 	return nil
 }
 
+// buildRetries is how many times kaniko retries a registry operation.
+//
+// Kaniko's own default is 0: a SINGLE transient registry error is fatal, reported as
+// "unable to complete operation after 0 attempts". That is a bad default for CI. A
+// matrix of image builds pulls the same base image from the same public registry in a
+// burst, and a public registry answers a burst with TOOMANYREQUESTS — a throttle that
+// is transient by definition and would succeed on a retry. Without one, an unrelated
+// registry hiccup reds a pipeline whose code is fine.
+//
+// Retrying (kaniko backs off between attempts) makes that a slower build instead of a
+// failed one. Operator-overridable; 0 restores kaniko's no-retry behaviour.
+func buildRetries() int {
+	if n := envIntOrDefault("FORGE_BUILD_RETRIES", defaultBuildRetries); n > 0 {
+		return n
+	}
+	return 0
+}
+
+// registryMirrors returns the operator-configured pull-through mirrors in kaniko's
+// --registry-map format ("original.registry=mirror;other.registry=mirror2").
+//
+// Why remap rather than edit Dockerfiles: a fan-out of builds that all derive from the
+// same base pulls that identical base once per leg, from one egress IP, in a burst —
+// which is what earns a TOOMANYREQUESTS from a public registry. A mirror collapses that
+// to a single upstream pull, and remapping applies it to every build without rewriting
+// a FROM line in each repo (which would also break builds run outside the platform).
+//
+// This is operator config, never a request field: a build must not be able to point its
+// own base-image pull at a host of the caller's choosing.
+//
+// Note kaniko falls back to the ORIGINAL registry when a mirror does not have the image
+// (absent --skip-default-registry-fallback), so a broken or empty mirror degrades to
+// today's behaviour rather than breaking every build. That is why this is safe to
+// default on for an operator who sets it.
+func registryMirrors() string {
+	return strings.TrimSpace(os.Getenv("FORGE_REGISTRY_MAP"))
+}
+
+// insecureRegistries lists registries kaniko may reach over plain HTTP. An in-cluster
+// mirror typically has no TLS, and without this kaniko fails the pull rather than
+// falling back. Comma-separated; operator config.
+func insecureRegistries() []string {
+	raw := strings.TrimSpace(os.Getenv("FORGE_INSECURE_REGISTRIES"))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, r := range strings.Split(raw, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // kanikoCommand assembles the Kaniko invocation. It writes the registry Docker config
 // from the auth env before executing (when pushing), then builds from the dir://
 // context and pushes each destination (or --no-push).
 func kanikoCommand(b *BuildSpec) []string {
 	ctx := orDefault(b.Context, defaultBuildContext)
 	df := orDefault(b.Dockerfile, defaultDockerfile)
+	retries := buildRetries()
 
 	var sb strings.Builder
 	sb.WriteString("set -e\n")
@@ -104,7 +163,23 @@ func kanikoCommand(b *BuildSpec) []string {
 	sb.WriteString("exec /kaniko/executor")
 	sb.WriteString(" --context=dir://" + shellSingleQuote(ctx))
 	sb.WriteString(" --dockerfile=" + shellSingleQuote(df))
+	// Pulling the base image is the step most exposed to someone else's rate limit,
+	// and it happens on every build whether or not we push.
+	if retries > 0 {
+		sb.WriteString(fmt.Sprintf(" --image-download-retry=%d", retries))
+	}
+	// Mirror first (fewer upstream pulls), retries second (survive the ones that remain).
+	// The two are complementary, not alternatives: a mirror still misses on a cold cache.
+	if m := registryMirrors(); m != "" {
+		sb.WriteString(" --registry-map=" + shellSingleQuote(m))
+	}
+	for _, r := range insecureRegistries() {
+		sb.WriteString(" --insecure-registry=" + shellSingleQuote(r))
+	}
 	if pushing(b) {
+		if retries > 0 {
+			sb.WriteString(fmt.Sprintf(" --push-retry=%d", retries))
+		}
 		for _, d := range b.Destinations {
 			sb.WriteString(" --destination=" + shellSingleQuote(d))
 		}

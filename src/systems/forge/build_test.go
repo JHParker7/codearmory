@@ -94,3 +94,88 @@ func TestKanikoCommand_NoPush(t *testing.T) {
 		t.Errorf("no-push should not write registry auth:\n%s", s)
 	}
 }
+
+// Kaniko's own --image-download-retry default is 0, so one transient TOOMANYREQUESTS
+// from a public registry kills a build whose code is fine. Forge must not inherit that.
+func TestKanikoCommand_RetriesRegistryOperations(t *testing.T) {
+	initBuildConfig()
+
+	// A no-push build still PULLS its base image, which is the throttle-exposed step.
+	s := kanikoCommand(&BuildSpec{NoPush: true})[2]
+	if !strings.Contains(s, "--image-download-retry=3") {
+		t.Errorf("a no-push build must still retry its base-image pull:\n%s", s)
+	}
+	if strings.Contains(s, "--push-retry") {
+		t.Errorf("a no-push build has nothing to push:\n%s", s)
+	}
+
+	// A pushing build is exposed at both ends.
+	s = kanikoCommand(&BuildSpec{Destinations: []string{"reg.io/a/b:1"}})[2]
+	for _, want := range []string{"--image-download-retry=3", "--push-retry=3"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("pushing build missing %q:\n%s", want, s)
+		}
+	}
+}
+
+func TestBuildRetries_OperatorOverride(t *testing.T) {
+	t.Setenv("FORGE_BUILD_RETRIES", "7")
+	if got := buildRetries(); got != 7 {
+		t.Errorf("buildRetries = %d, want the env override 7", got)
+	}
+	if s := kanikoCommand(&BuildSpec{NoPush: true})[2]; !strings.Contains(s, "--image-download-retry=7") {
+		t.Errorf("override not threaded into the command:\n%s", s)
+	}
+
+	// 0 means "restore kaniko's default": emit no flag rather than an explicit =0.
+	t.Setenv("FORGE_BUILD_RETRIES", "0")
+	if s := kanikoCommand(&BuildSpec{NoPush: true})[2]; strings.Contains(s, "--image-download-retry") {
+		t.Errorf("0 must omit the flag entirely, not pass =0:\n%s", s)
+	}
+
+	// A garbage value must not silently disable retries.
+	t.Setenv("FORGE_BUILD_RETRIES", "not-a-number")
+	if got := buildRetries(); got != defaultBuildRetries {
+		t.Errorf("buildRetries = %d, want fallback to %d on an unparseable value", got, defaultBuildRetries)
+	}
+}
+
+// A mirror is operator config: it must reach the kaniko command, and it must never be
+// something a caller can set (a build pointing its own base pull at an arbitrary host).
+func TestKanikoCommand_RegistryMirror(t *testing.T) {
+	initBuildConfig()
+
+	// Unset: no flag at all, so an operator who configures nothing gets today's behaviour.
+	if s := kanikoCommand(&BuildSpec{NoPush: true})[2]; strings.Contains(s, "--registry-map") {
+		t.Errorf("no mirror configured must emit no --registry-map:\n%s", s)
+	}
+
+	t.Setenv("FORGE_REGISTRY_MAP", "public.ecr.aws=mirror.svc:5000")
+	t.Setenv("FORGE_INSECURE_REGISTRIES", "mirror.svc:5000")
+	s := kanikoCommand(&BuildSpec{NoPush: true})[2]
+	for _, want := range []string{
+		"--registry-map='public.ecr.aws=mirror.svc:5000'",
+		"--insecure-registry='mirror.svc:5000'", // an in-cluster mirror has no TLS
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("kaniko script missing %q:\n%s", want, s)
+		}
+	}
+	// Fallback to the original registry must stay ON: a cold or broken mirror should
+	// degrade to a direct pull, not fail every build in the platform.
+	if strings.Contains(s, "--skip-default-registry-fallback") {
+		t.Error("must not disable registry fallback: a mirror miss has to fall back to the origin")
+	}
+}
+
+func TestInsecureRegistries_Parsing(t *testing.T) {
+	t.Setenv("FORGE_INSECURE_REGISTRIES", " a.io:5000 , , b.io ")
+	got := insecureRegistries()
+	if len(got) != 2 || got[0] != "a.io:5000" || got[1] != "b.io" {
+		t.Errorf("insecureRegistries = %#v, want trimmed entries with blanks dropped", got)
+	}
+	t.Setenv("FORGE_INSECURE_REGISTRIES", "")
+	if got := insecureRegistries(); got != nil {
+		t.Errorf("unset must yield nil, got %#v", got)
+	}
+}
