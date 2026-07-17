@@ -258,6 +258,11 @@ func main() {
 	// tearing them down. Normal runs delete their own volumes; this is the backstop.
 	go startVolumeReaper(ctx, reg)
 
+	// Reap executions stuck non-terminal past their deadline — work orphaned by a
+	// forge restart or a vanished pod. Critical because a stranded running row keeps
+	// holding cluster budget in the scheduler and wedges the queue for everyone.
+	go startExecutionReaper(ctx, reg)
+
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)

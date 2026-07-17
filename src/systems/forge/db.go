@@ -199,6 +199,68 @@ func (e Execution) Complete(_ context.Context, status string, result RunResult) 
 	return nil
 }
 
+// stuckExecution is the minimal projection the execution reaper needs.
+type stuckExecution struct {
+	ExecutionID string    `gorm:"column:execution_id"`
+	Backend     string    `gorm:"column:backend"`
+	Status      string    `gorm:"column:status"`
+	CreatedAt   time.Time `gorm:"column:created_at"`
+}
+
+// findStuckExecutions returns non-terminal executions that have outlived their
+// deadline: a running row past COALESCE(started_at, created_at) + timeout_secs +
+// graceSecs, or a pending row that has waited longer than the larger of that same
+// deadline and pendingMaxAgeSecs. The pending floor is deliberately generous so a
+// job merely starved by a busy budget is left to run, and only long-abandoned queue
+// entries (e.g. from a workflow run that died) are cleared. Running orphans are the
+// urgent case — each holds resource budget in claimPendingExecution and wedges the
+// queue — so they are reaped as soon as their own deadline passes.
+func findStuckExecutions(ctx context.Context, graceSecs, pendingMaxAgeSecs int64) ([]stuckExecution, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.find_stuck_executions")
+	defer span.End()
+	var rows []stuckExecution
+	err := connect().WithContext(ctx).Raw(`
+		SELECT execution_id, backend, status, created_at
+		FROM executions
+		WHERE (status = 'running'
+		         AND COALESCE(started_at, created_at) + make_interval(secs => timeout_secs + @grace) < now())
+		   OR (status = 'pending'
+		         AND created_at + make_interval(secs => GREATEST(timeout_secs + @grace, @pendingAge)) < now())
+		ORDER BY created_at
+		LIMIT 200
+	`, sql.Named("grace", graceSecs), sql.Named("pendingAge", pendingMaxAgeSecs)).Scan(&rows).Error
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return rows, nil
+}
+
+// failStuckExecution marks an orphaned execution failed, guarded on it still being
+// non-terminal so a row that finished between the reaper's scan and this update is
+// never clobbered. Returns whether a row was actually changed.
+func failStuckExecution(ctx context.Context, id string) (bool, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.fail_stuck_execution")
+	defer span.End()
+	span.SetAttributes(attribute.String("execution.id", id))
+	res := connect().WithContext(ctx).Exec(`
+		UPDATE executions
+		SET status = 'failed', ended_at = now(),
+		    stderr = COALESCE(stderr, '') || E'\n[forge: execution exceeded its deadline and was reaped]'
+		WHERE execution_id = ? AND status IN ('running', 'pending')`,
+		id,
+	)
+	if res.Error != nil {
+		span.RecordError(res.Error)
+		span.SetStatus(codes.Error, res.Error.Error())
+		return false, res.Error
+	}
+	span.SetStatus(codes.Ok, "")
+	return res.RowsAffected > 0, nil
+}
+
 // claimSchedulerLockKey serialises the pending-execution scheduling decision
 // across all worker goroutines and forge replicas via a transaction-scoped
 // Postgres advisory lock. Only one claim transaction runs its count-and-pick step
