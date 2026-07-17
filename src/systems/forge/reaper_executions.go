@@ -35,8 +35,13 @@ var (
 // without waiting a full interval.
 func startExecutionReaper(ctx context.Context, reg *runtimeRegistry) {
 	if execReaperInterval <= 0 {
+		slog.InfoContext(ctx, "execution reaper disabled (interval <= 0)")
 		return
 	}
+	slog.InfoContext(ctx, "execution reaper started",
+		"interval_secs", int(execReaperInterval.Seconds()),
+		"grace_secs", execReaperGrace,
+		"pending_max_age_secs", execPendingMaxAge)
 	reapStuckExecutions(ctx, reg)
 	ticker := time.NewTicker(execReaperInterval)
 	defer ticker.Stop()
