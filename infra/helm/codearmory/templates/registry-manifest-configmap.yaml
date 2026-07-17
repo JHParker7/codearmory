@@ -15,6 +15,9 @@
 {{- if .Values.tickets.enabled -}}
 {{- $manifest = replace "http://tickets:"           (printf "http://%s-tickets:" $fullname)           $manifest -}}
 {{- end -}}
+{{- if .Values.hooks.enabled -}}
+{{- $manifest = replace "http://hooks:"             (printf "http://%s-hooks:" $fullname)             $manifest -}}
+{{- end -}}
 {{- if .Values.git.enabled -}}
 {{- $manifest = replace "http://git:"               (printf "http://%s-git:" $fullname)               $manifest -}}
 {{- end -}}
