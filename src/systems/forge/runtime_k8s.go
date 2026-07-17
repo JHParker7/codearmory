@@ -56,6 +56,14 @@ type KubernetesRuntime struct {
 	// short jobs). Injected in newKubernetesRuntime; left nil by tests that build
 	// the runtime directly, so the sampling loop must nil-check it.
 	podMemoryMB func(ctx context.Context, podName string) (int64, bool)
+	// execNodeSelector / execTolerations place exec pods on the nodes that can
+	// actually run them. On a multi-node cluster the kata/gvisor runtime is usually
+	// installed on a subset of (often tainted) nodes; without this a sandbox pod can
+	// be scheduled onto a node with no RuntimeClass handler and fail to start. The
+	// idiomatic alternative is a RuntimeClass `scheduling` block, which the scheduler
+	// applies automatically — these are the explicit override for when that is not set.
+	execNodeSelector map[string]string
+	execTolerations  []corev1.Toleration
 }
 
 // k8sKeyRuntimeClass is the backend config key naming the Kubernetes RuntimeClass
@@ -127,14 +135,55 @@ func newKubernetesRuntime(configRuntimeClass string, kernelIsolated bool) (*Kube
 	}
 
 	rt := &KubernetesRuntime{
-		client:         client,
-		namespace:      envOrDefault("K8S_NAMESPACE", "forge"),
-		runtimeClass:   resolveRuntimeClass(configRuntimeClass),
-		kernelIsolated: kernelIsolated,
-		egressProxy:    envOrDefault("FORGE_EGRESS_PROXY", ""),
+		client:           client,
+		namespace:        envOrDefault("K8S_NAMESPACE", "forge"),
+		runtimeClass:     resolveRuntimeClass(configRuntimeClass),
+		kernelIsolated:   kernelIsolated,
+		egressProxy:      envOrDefault("FORGE_EGRESS_PROXY", ""),
+		execNodeSelector: parseNodeSelector(os.Getenv("FORGE_EXEC_NODE_SELECTOR")),
+		execTolerations:  parseTolerations(os.Getenv("FORGE_EXEC_TOLERATE_KEYS")),
 	}
 	rt.podMemoryMB = rt.fetchPodMemoryMB
 	return rt, nil
+}
+
+// parseNodeSelector reads a "key=value,key2=value2" string into a label selector.
+// Blank or malformed entries are skipped rather than failing startup — a runner
+// scheduling constraint is not worth crashing the service over.
+func parseNodeSelector(s string) map[string]string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		if ok && strings.TrimSpace(k) != "" {
+			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseTolerations reads a comma-separated list of taint KEYS into tolerations, each
+// an Exists toleration for that key. This covers the common case — "the RuntimeClass
+// nodes are tainted with X, tolerate it" — without asking an operator to hand-write a
+// toleration struct; the value/effect are left unset so it tolerates any value/effect.
+func parseTolerations(s string) []corev1.Toleration {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []corev1.Toleration
+	for _, k := range strings.Split(s, ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			out = append(out, corev1.Toleration{Key: k, Operator: corev1.TolerationOpExists})
+		}
+	}
+	return out
 }
 
 // ClusterAllocatable sums the allocatable CPU and memory across all schedulable,
@@ -400,6 +449,8 @@ func (r *KubernetesRuntime) buildJob(exec Execution, spec RunnerClass) *batchv1.
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					RuntimeClassName: r.runtimeClass,
+					NodeSelector:     r.execNodeSelector,
+					Tolerations:      r.execTolerations,
 					// Prevent the pod from inheriting cluster credentials via
 					// the default service account token.
 					AutomountServiceAccountToken: ptr(false),

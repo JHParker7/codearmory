@@ -102,6 +102,21 @@ spec:
               value: {{ .memoryPercent | quote }}
             {{- end }}
             {{- end }}
+            {{- with .Values.forge.execScheduling }}
+            # Place exec (sandbox) pods on nodes that can run the kata/gvisor
+            # RuntimeClass. Prefer configuring the RuntimeClass's own `scheduling` block
+            # — the scheduler applies it automatically — and use these only as an
+            # explicit override. nodeSelector is "key=value,key2=value2"; tolerateKeys
+            # is a comma-separated list of taint keys to tolerate (Exists).
+            {{- with .nodeSelector }}
+            - name: FORGE_EXEC_NODE_SELECTOR
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .tolerateKeys }}
+            - name: FORGE_EXEC_TOLERATE_KEYS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.forge.volumes }}
             # Shared workspace volumes: per-workflow total-size cap (0 disables the
             # feature), optional per-volume cap, PVC StorageClass/access mode, and the

@@ -1,0 +1,102 @@
+# Production profile — a real multi-node cluster.
+#
+# Overlay on the base values:  helm upgrade ca ./codearmory -f values-prod.yaml
+#
+# This turns on the multi-node-ready settings that default OFF (so a single-node dev
+# box stays simple): percent-based admission, S3-backed storage, multiple replicas +
+# autoscaling, and realistic resource requests. Fill in the site-specific bits marked
+# TODO (image tags, the S3 endpoint/bucket, secret names) before applying.
+#
+# See values-staging.yaml for a lighter version of the same shape.
+
+# ── forge: percent-of-capacity admission + exec-pod placement ─────────────────
+forge:
+  admission:
+    # Fraction of TOTAL allocatable cluster CPU/memory forge admits runners against.
+    # Correct on any cluster and tracks autoscaling — no absolute millicore number to
+    # re-pick per environment. Leave ~30-40% headroom for the control plane + system
+    # daemons; a budget at/near 100% can starve the API server.
+    cpuPercent: 60
+    memoryPercent: 60
+    maxTotalCpuMillicores: 0   # unused when cpuPercent is set
+    maxTotalMemoryMB: 0
+  execScheduling:
+    # Pin sandbox pods to the nodes that carry the kata/gvisor RuntimeClass. Match your
+    # node labels/taints (or configure the RuntimeClass scheduling block instead).
+    nodeSelector: ""           # TODO e.g. "forge-runtime=kata"
+    tolerateKeys: ""           # TODO e.g. "sandbox"
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits:   {cpu: "2",  memory: 1Gi}
+
+# ── artifacts: S3 object storage (shared, scales past one node) ────────────────
+artifacts:
+  replicaCount: 2
+  autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 6, targetCPUUtilizationPercentage: 70}
+  s3:
+    enabled: true
+    bucket: ""                 # TODO
+    endpoint: ""               # TODO e.g. http://minio.storage.svc:9000 (empty = AWS)
+    forcePathStyle: "true"     # MinIO / Ceph RGW
+    accessKeySecret: ""        # TODO Secret name holding the credentials
+    secretKeySecret: ""        # TODO
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits:   {cpu: "1",  memory: 512Mi}
+
+# ── base-image mirror: S3-backed, multi-replica ───────────────────────────────
+registryMirror:
+  replicaCount: 2
+  s3:
+    enabled: true
+    bucket: ""                 # TODO
+    endpoint: ""               # TODO
+    forcePathStyle: "true"
+    secure: "false"            # http in-cluster endpoint
+    accessKeySecret: ""        # TODO
+    secretKeySecret: ""        # TODO
+  buildCache:
+    enabled: true
+
+# ── stateless services: HA replicas + autoscaling + real requests ─────────────
+# The two workers (forge above, workflows below) are safe to scale — both claim work
+# with FOR UPDATE ... SKIP LOCKED, so replicas never double-process.
+gatekeeper:
+  replicaCount: 2
+  autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 6, targetCPUUtilizationPercentage: 70}
+  resources:
+    requests: {cpu: 200m, memory: 128Mi}
+    limits:   {cpu: "1",  memory: 512Mi}
+
+registry:
+  replicaCount: 2
+  autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 4, targetCPUUtilizationPercentage: 70}
+  resources:
+    requests: {cpu: 100m, memory: 64Mi}
+    limits:   {cpu: 500m, memory: 256Mi}
+
+conductor:
+  replicaCount: 2
+  autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 8, targetCPUUtilizationPercentage: 70}
+  resources:
+    requests: {cpu: 200m, memory: 64Mi}
+    limits:   {cpu: "1",  memory: 256Mi}
+
+workflows:
+  replicaCount: 2
+  autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 6, targetCPUUtilizationPercentage: 70}
+  resources:
+    requests: {cpu: 200m, memory: 128Mi}
+    limits:   {cpu: "1",  memory: 512Mi}
+
+tickets:
+  replicaCount: 2
+  autoscaling: {enabled: true, minReplicas: 2, maxReplicas: 4, targetCPUUtilizationPercentage: 70}
+  resources:
+    requests: {cpu: 100m, memory: 64Mi}
+    limits:   {cpu: 500m, memory: 256Mi}

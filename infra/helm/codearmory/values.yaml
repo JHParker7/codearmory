@@ -296,6 +296,14 @@ forge:
   # pool size. The resource budgets are the pacing knob: forge admits a queued runner
   # only when the summed CPU/memory of already-running runners plus its own fits the
   # budget, holding the rest in the queue until running ones finish and free space.
+  # Where exec (sandbox) pods are scheduled. On a multi-node cluster the kata/gvisor
+  # RuntimeClass is usually installed on a subset of (often tainted) nodes; without
+  # placement a sandbox pod can land on a node with no runtime handler and fail. Prefer
+  # setting the RuntimeClass's own `scheduling` block (applied automatically); these are
+  # the explicit override. Empty = no constraint (fine for a single-node cluster).
+  execScheduling: {}
+    # nodeSelector: "forge-runtime=kata"          # "k=v,k2=v2"
+    # tolerateKeys: "sandbox"                      # comma-separated taint keys (Exists)
   admission:
     # Max simultaneously-running executions per org / per user (0 = unlimited).
     maxConcurrentPerOrg: 0
