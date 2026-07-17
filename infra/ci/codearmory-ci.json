@@ -141,7 +141,8 @@
         "runner_class": "standard",
         "timeout": 120,
         "output_env": [
-          "MODULES"
+          "MODULES",
+          "IMAGES"
         ],
         "volumes": [
           {
@@ -150,31 +151,7 @@
             "mount_path": "/workspace"
           }
         ],
-        "run": "set -eu\ncd /workspace/src\nMODULES=\"\"\nfor f in systems/*/go.mod cli/go.mod; do [ -f \"$f\" ] || continue; MODULES=\"$MODULES ${f%/go.mod}\"; done\nMODULES=\"${MODULES# }\"\necho \"modules: $MODULES\"\n"
-      }
-    },
-    {
-      "action": "forge/run",
-      "name": "build",
-      "map_id": "per-module",
-      "timeout": 2400,
-      "with": {
-        "image": "golang:1.25",
-        "runner_class": "ci",
-        "timeout": 2400,
-        "env": {
-          "GOCACHE": "/gocache/build",
-          "GOFLAGS": "-p=2",
-          "GOMODCACHE": "/gocache/mod"
-        },
-        "volumes": [
-          {
-            "workflow_id": "${run_id}",
-            "name": "gocache",
-            "mount_path": "/gocache"
-          }
-        ],
-        "run": "set -eu\ncd \"/workspace/src/${map.module}\"\necho \"=== build ${map.module} ===\"\ngo build ./...\n"
+        "run": "set -eu\ncd /workspace/src\nMODULES=\"\"\nfor f in systems/*/go.mod cli/go.mod; do [ -f \"$f\" ] || continue; MODULES=\"$MODULES ${f%/go.mod}\"; done\nMODULES=\"${MODULES# }\"\n# IMAGES: every service whose Dockerfile builds from its OWN directory. portal-bff is\n# deliberately excluded \u2014 its Dockerfile COPYs portal/ as well, so it needs the parent\n# context and gets its own step. Anything else with a Dockerfile is picked up here.\nIMAGES=\"\"\nfor f in systems/*/Dockerfile; do\n  [ -f \"$f\" ] || continue\n  d=${f%/Dockerfile}; svc=${d#systems/}\n  [ \"$svc\" = \"portal-bff\" ] && continue\n  IMAGES=\"$IMAGES $svc\"\ndone\nIMAGES=\"${IMAGES# }\"\necho \"modules: $MODULES\"\necho \"images:  $IMAGES\"\n"
       }
     },
     {
@@ -248,21 +225,32 @@
       },
       "matrix": {
         "var": "svc",
-        "values": [
-          "gatekeeper",
-          "registry",
-          "conductor",
-          "workflows",
-          "forge",
-          "builder",
-          "tickets",
-          "containers",
-          "git",
-          "hooks",
-          "egress-proxy",
-          "outpost-gateway"
+        "values_from": "${steps.discover.output.IMAGES}",
+        "max_concurrent": 4
+      }
+    },
+    {
+      "action": "forge/build-image",
+      "name": "image-portal",
+      "timeout": 2400,
+      "with": {
+        "runner_class": "ci",
+        "timeout": 2400,
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "workspace",
+            "mount_path": "/workspace"
+          }
         ],
-        "max_concurrent": 2
+        "build": {
+          "context": "/workspace/src/systems",
+          "dockerfile": "portal-bff/Dockerfile",
+          "destinations": [
+            "ghcr.io/code-armory-app/portal:ci"
+          ],
+          "no_push": true
+        }
       }
     },
     {
@@ -349,10 +337,6 @@
     },
     {
       "from": "discover",
-      "to": "build"
-    },
-    {
-      "from": "build",
       "to": "test"
     },
     {
@@ -362,6 +346,10 @@
     {
       "from": "test",
       "to": "image"
+    },
+    {
+      "from": "test",
+      "to": "image-portal"
     },
     {
       "from": "test",
@@ -381,11 +369,6 @@
       "when": "steps.discover.status == 'failed'"
     },
     {
-      "from": "build",
-      "to": "fail-ticket",
-      "when": "steps.build.status == 'failed'"
-    },
-    {
       "from": "test",
       "to": "fail-ticket",
       "when": "steps.test.status == 'failed'"
@@ -394,6 +377,11 @@
       "from": "image",
       "to": "fail-ticket",
       "when": "steps.image.status == 'failed'"
+    },
+    {
+      "from": "image-portal",
+      "to": "fail-ticket",
+      "when": "steps[\"image-portal\"].status == 'failed'"
     }
   ]
 }

@@ -179,3 +179,22 @@ func TestInsecureRegistries_Parsing(t *testing.T) {
 		t.Errorf("unset must yield nil, got %#v", got)
 	}
 }
+
+// Layer caching is operator config and must work for a no-push CI build — that is the
+// case it exists for (warm the module-download layer across runs).
+func TestKanikoCommand_LayerCache(t *testing.T) {
+	initBuildConfig()
+
+	// Unset: no cache flags at all, so an operator who configures nothing is unaffected.
+	if s := kanikoCommand(&BuildSpec{NoPush: true})[2]; strings.Contains(s, "--cache") {
+		t.Errorf("no cache repo configured must emit no --cache:\n%s", s)
+	}
+
+	t.Setenv("FORGE_BUILD_CACHE_REPO", "mirror.svc:5000/cache")
+	s := kanikoCommand(&BuildSpec{NoPush: true})[2]
+	for _, want := range []string{"--cache=true", "--cache-repo='mirror.svc:5000/cache'"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("a no-push build must still cache layers, missing %q:\n%s", want, s)
+		}
+	}
+}

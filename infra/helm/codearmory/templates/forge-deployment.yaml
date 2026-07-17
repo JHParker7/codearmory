@@ -148,6 +148,13 @@ spec:
             # kaniko must be told not to require TLS for it.
             - name: FORGE_INSECURE_REGISTRIES
               value: {{ $mirror | quote }}
+            {{- if .Values.registryMirror.buildCache.enabled }}
+            # Kaniko caches intermediate layers (the go-mod-download layer, mostly) to a
+            # repo on the same mirror, so cache traffic stays in-cluster. Warms across
+            # runs; kaniko does not evict, so the mirror PVC is the bound.
+            - name: FORGE_BUILD_CACHE_REPO
+              value: {{ printf "%s/%s" $mirror .Values.registryMirror.buildCache.repo | quote }}
+            {{- end }}
             {{- end }}
             - name: FORGE_GIT_IMAGE
             {{- if .Values.forge.gitImage }}

@@ -146,6 +146,24 @@ func insecureRegistries() []string {
 	return out
 }
 
+// buildCacheRepo returns the registry repository kaniko caches intermediate layers
+// to, or "" to disable caching (kaniko's default).
+//
+// Why it helps: every service's Dockerfile does `COPY go.mod go.sum && RUN go mod
+// download` before copying source, so that layer's cache key is just the module set —
+// unchanged across most commits. Caching it turns a per-image module download into a
+// cache hit, which across a dozen images per run is the bulk of the redundant work.
+// The `go build` layer still invalidates on any source change; this does not cache
+// that, and does not pretend to.
+//
+// It is operator config (a build must not choose where its cache lives), and points at
+// a repository ON the in-cluster registry mirror — so cache traffic never leaves the
+// cluster. NOTE: kaniko does not evict; the cache grows until the mirror's PVC is
+// pruned, which is the operator's to manage.
+func buildCacheRepo() string {
+	return strings.TrimSpace(os.Getenv("FORGE_BUILD_CACHE_REPO"))
+}
+
 // kanikoCommand assembles the Kaniko invocation. It writes the registry Docker config
 // from the auth env before executing (when pushing), then builds from the dir://
 // context and pushes each destination (or --no-push).
@@ -175,6 +193,12 @@ func kanikoCommand(b *BuildSpec) []string {
 	}
 	for _, r := range insecureRegistries() {
 		sb.WriteString(" --insecure-registry=" + shellSingleQuote(r))
+	}
+	// Layer cache. Independent of --no-push: kaniko caches intermediate layers to the
+	// cache repo whether or not the final image is pushed, which is exactly the CI
+	// case — a no-push build still warms and reuses the module-download layer.
+	if repo := buildCacheRepo(); repo != "" {
+		sb.WriteString(" --cache=true --cache-repo=" + shellSingleQuote(repo))
 	}
 	if pushing(b) {
 		if retries > 0 {

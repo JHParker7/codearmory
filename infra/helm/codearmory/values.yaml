@@ -504,6 +504,14 @@ registryMirror:
     repository: public.ecr.aws/docker/library/registry
     tag: "2"
   port: 5000
+  # Kaniko layer cache: a repo ON this mirror where image builds cache intermediate
+  # layers (chiefly the `go mod download` layer, whose key is just the module set, so
+  # it survives most commits). In-cluster, so no external traffic. Kaniko does not
+  # evict — the cache grows until the mirror PVC is pruned — so it is opt-in.
+  buildCache:
+    enabled: true
+    # Repository path on the mirror. registry:2 creates it on first push.
+    repo: kaniko-cache
   # Registries remapped to this mirror, as kaniko's --registry-map:
   # "original.registry=mirror;other=mirror". {{ mirror }} is substituted with this
   # mirror's in-cluster host:port. Empty disables remapping (builds pull from origin).
