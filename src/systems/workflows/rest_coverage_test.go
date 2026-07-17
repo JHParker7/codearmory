@@ -134,6 +134,6 @@ func TestProvisionAndDeleteWorkflowRole(t *testing.T) {
 	stubGatekeeperRouting(t, "u1", "o1")
 	// Exercises the role-create request path (returns "" if the stub doesn't echo a
 	// role id — the point is to cover the request/response handling, not assert an id).
-	_ = provisionWorkflowRole(context.Background(), uuid.New().String(), "u1", "o1", []WorkflowStep{}, nil)
+	_ = provisionWorkflowRole(context.Background(), uuid.New().String(), "u1", "o1", []WorkflowStep{}, nil, nil)
 	deleteWorkflowRole(context.Background(), "some-role-id")
 }

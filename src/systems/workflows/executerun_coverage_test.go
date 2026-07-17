@@ -61,7 +61,7 @@ func runOnce(t *testing.T, wf Workflow) WorkflowRun {
 	run := WorkflowRun{RunID: uuid.New().String(), WorkflowID: wf.WorkflowID, TriggeredBy: "tu", OrgID: "to", Status: "pending", CreatedAt: time.Now().UTC()}
 	run.Add(context.Background())                                                         //nolint:errcheck
 	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID) //nolint:errcheck
-	newWorkerPool().executeRun(context.Background(), run.RunID, wf.WorkflowID, "", "", "tu", map[string]string{}, 0)
+	newWorkerPool().executeRun(context.Background(), run.RunID, wf.WorkflowID, "", "", "tu", map[string]string{}, 0, "")
 	got, _ := (WorkflowRun{RunID: run.RunID}).Get(context.Background())
 	return got.(WorkflowRun)
 }

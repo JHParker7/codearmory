@@ -346,7 +346,7 @@ func TestExecuteRun_MatrixValuesFromInput(t *testing.T) {
 	run.Add(context.Background())                                                               //nolint:errcheck
 	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)       //nolint:errcheck
 	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id=?`, run.RunID) }) //nolint:errcheck
-	newWorkerPool().executeRun(context.Background(), run.RunID, wf.WorkflowID, "", "", "tu", run.Inputs, 0)
+	newWorkerPool().executeRun(context.Background(), run.RunID, wf.WorkflowID, "", "", "tu", run.Inputs, 0, "")
 
 	got, _ := getRun(context.Background(), run.RunID)
 	if got.Status != StatusCompleted {
@@ -364,7 +364,7 @@ func TestExecuteRun_MatrixValuesFromInput(t *testing.T) {
 func resumeRun(t *testing.T, runID, workflowID string) WorkflowRun {
 	t.Helper()
 	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, runID) //nolint:errcheck
-	newWorkerPool().executeRun(context.Background(), runID, workflowID, "", "", "tu", map[string]string{}, 0)
+	newWorkerPool().executeRun(context.Background(), runID, workflowID, "", "", "tu", map[string]string{}, 0, "")
 	got, _ := getRun(context.Background(), runID)
 	return got
 }

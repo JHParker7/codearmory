@@ -372,7 +372,7 @@ func TestCollectWorkflowPermissions_MapVolumeGrants(t *testing.T) {
 	})
 	steps := []WorkflowStep{mapped("build", "m1")}
 	defs := []MapDef{{ID: "m1", Var: "d", Values: []string{"x"}, Volume: "workspace"}}
-	perms := collectWorkflowPermissions(steps, defs)
+	perms := collectWorkflowPermissions(steps, defs, nil)
 	var actions []string
 	for _, p := range perms {
 		actions = append(actions, p.Action)

@@ -362,7 +362,11 @@ type Workflow struct {
 	// (matrix/scatter/map) is that node's own concern and carries its own
 	// max_concurrent.
 	// A JSON column, so AutoMigrate adds it and existing rows read back empty.
-	Routes   []WorkflowRoute   `json:"routes,omitempty" gorm:"column:routes;serializer:json"`
+	Routes []WorkflowRoute `json:"routes,omitempty" gorm:"column:routes;serializer:json"`
+	// Ticket opts every run of this workflow into being mirrored to a ticket — see
+	// TicketConfig. Nil/disabled means no ticket, which is why existing workflows are
+	// untouched. A JSON column, so AutoMigrate adds it and existing rows read back nil.
+	Ticket   *TicketConfig     `json:"ticket,omitempty" gorm:"column:ticket;serializer:json"`
 	StepRefs []WorkflowStepRef `json:"-"            gorm:"column:steps;serializer:json"`
 	Steps    []WorkflowStep    `json:"steps"        gorm:"-"`
 }
@@ -388,8 +392,15 @@ type WorkflowRun struct {
 	Outputs map[string]string `json:"outputs,omitempty" gorm:"column:outputs;serializer:json"`
 	// Depth is the sub-pipeline nesting depth (0 for a top-level run); ParentRunID
 	// links a sub-run to the run whose workflows/trigger step started it.
-	Depth        int               `json:"depth,omitempty"         gorm:"column:depth;default:0"`
-	ParentRunID  string            `json:"parent_run_id,omitempty" gorm:"column:parent_run_id;default:''"`
+	Depth       int    `json:"depth,omitempty"         gorm:"column:depth;default:0"`
+	ParentRunID string `json:"parent_run_id,omitempty" gorm:"column:parent_run_id;default:''"`
+	// TicketID is the ticket mirroring this run (see TicketConfig), empty when the
+	// workflow did not opt in. Recorded on the RUN, not just on the ticket, for two
+	// reasons: a run that pauses on an approval gate is re-executed from the top when
+	// it resumes, and without this it would open a second ticket for the same run; and
+	// it is the link a client follows from a run to its ticket, which the tickets API
+	// cannot serve in reverse (it has no run_id filter).
+	TicketID     string            `json:"ticket_id,omitempty" gorm:"column:ticket_id;default:''"`
 	Token        string            `json:"-"            gorm:"column:token"`
 	RunSessionID string            `json:"-"            gorm:"column:run_session_id"`
 	StepRuns     []WorkflowStepRun `json:"step_runs"    gorm:"-"`

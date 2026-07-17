@@ -253,17 +253,17 @@ func (g *workflowGraph) subGraph(region *mapRegion) *workflowGraph {
 func (p *WorkerPool) runMapRegion(
 	ctx context.Context, store *tokenStore, runID, workflowID string, g *workflowGraph, region *mapRegion,
 	inputs, visible map[string]string, depth int, legSem chan struct{},
-) (map[string]string, string) {
+) (map[string]string, string, int) {
 	sc := substContext{inputs: inputs, outputs: visible, runID: runID}
 	values, err := resolveMapValues(region.def, sc)
 	if err != nil {
-		return nil, p.mapFail(runID, g, region, err.Error())
+		return nil, p.mapFail(runID, g, region, err.Error()), 0
 	}
 	if len(values) == 0 {
 		// Mirrors the matrix rule: a fan-out that resolved to nothing did no work, so
 		// passing would leave the region absent from the run view while the run showed
 		// green. Fail loudly instead.
-		return nil, p.mapFail(runID, g, region, fmt.Sprintf("map %q produced no values to run", region.def.ID))
+		return nil, p.mapFail(runID, g, region, fmt.Sprintf("map %q produced no values to run", region.def.ID)), 0
 	}
 
 	sub := g.subGraph(region)
@@ -308,7 +308,7 @@ func (p *WorkerPool) runMapRegion(
 		b, _ := json.Marshal(outs)
 		agg[n] = string(b)
 	}
-	return agg, status
+	return agg, status, len(values)
 }
 
 // runIteration runs the region's subgraph once, for one value.

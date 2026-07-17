@@ -29,7 +29,7 @@ func TestExecuteRun_EmptyMatrixFailsRun(t *testing.T) {
 	run.Add(context.Background())                                                               //nolint:errcheck
 	connect().Exec(`UPDATE workflow_runs SET status='running' WHERE run_id=?`, run.RunID)       //nolint:errcheck
 	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id=?`, run.RunID) }) //nolint:errcheck
-	newWorkerPool().executeRun(context.Background(), run.RunID, wf.WorkflowID, "", "", "tu", run.Inputs, 0)
+	newWorkerPool().executeRun(context.Background(), run.RunID, wf.WorkflowID, "", "", "tu", run.Inputs, 0, "")
 
 	got, _ := getRun(context.Background(), run.RunID)
 	if got.Status != StatusFailed {

@@ -151,11 +151,13 @@ func (p *WorkerPool) tryOne(ctx context.Context) bool {
 		run.Token = plainToken
 	}
 
-	p.executeRun(ctx, run.RunID, run.WorkflowID, run.Token, run.RunSessionID, run.TriggeredBy, run.Inputs, run.Depth)
+	p.executeRun(ctx, run.RunID, run.WorkflowID, run.Token, run.RunSessionID, run.TriggeredBy, run.Inputs, run.Depth, run.TicketID)
 	return true
 }
 
-func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, sessionID, triggeredBy string, inputs map[string]string, depth int) {
+// ticketID is the run's already-open ticket, if it has one — a resumed run adopts it
+// rather than opening a second (see ticketReporter.open).
+func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, sessionID, triggeredBy string, inputs map[string]string, depth int, ticketID string) {
 	runCtx, cancel := context.WithCancel(ctx)
 	p.cancels.Store(runID, cancel)
 	defer func() {
@@ -189,6 +191,14 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	g := workflow.buildGraph()
 	st := newRunState(g, stepOutputs, completed)
 
+	// Mirror this run into a ticket, when the workflow opted in. Attached to the
+	// TOP-LEVEL state only, which is what stops a map region's iterations commenting
+	// once per node per value. A resumed run passes the ticket it already has, so a
+	// gate does not open a second one. Nothing here can fail the run — see ticket.go.
+	st.ticket = newTicketReporter(&workflow, store, runID)
+	st.ticket.open(runCtx, workflow.Name, inputs, ticketID)
+	runStart := time.Now()
+
 	// One run-wide leg budget, shared by every node in the frontier, every matrix or
 	// scatter fan-out, and every map iteration. maxParallelSteps was a true ceiling
 	// in the batch engine only because a fan-out step was always alone in its group;
@@ -209,6 +219,9 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 			slog.ErrorContext(ctx, "worker: pause for approval", "run_id", runID, "error", err)
 			finalStatus = StatusFailed
 		} else {
+			// The run is parked, not finished: the ticket says blocked rather than
+			// closing on a run that has not reached its end.
+			st.ticket.pause(runCtx)
 			slog.InfoContext(ctx, "worker: run paused awaiting approval", "run_id", runID)
 			return
 		}
@@ -232,6 +245,9 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	if finalStatus == StatusCompleted {
 		runOutputs = resolveWorkflowOutputs(workflow.Outputs, substContext{inputs: inputs, outputs: stepOutputs, runID: runID})
 	}
+	// Close the ticket with the run's outcome. A background context: a cancelled run
+	// still deserves a ticket that says so, and runCtx is already dead by here.
+	st.ticket.closeWith(context.Background(), finalStatus, time.Since(runStart))
 	(WorkflowRun{RunID: runID}).Complete(context.Background(), finalStatus, runOutputs)
 	revokeRunToken(context.Background(), store.getSessionID())
 	slog.InfoContext(ctx, "worker: run finished", "run_id", runID, "status", finalStatus)

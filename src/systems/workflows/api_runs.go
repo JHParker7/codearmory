@@ -165,8 +165,8 @@ func startWorkflowRun(ctx context.Context, wf *Workflow, userID, orgID string, i
 	// committing the bump when we have a usable role or the workflow needs none.
 	if wf.RolePermsVersion < workflowRolePermsVersion {
 		oldRole := wf.RoleID
-		newRole := provisionWorkflowRole(ctx, wf.WorkflowID, wf.CreatedBy, wf.OrgID, wf.Steps, wf.Maps)
-		if newRole != "" || len(collectWorkflowPermissions(wf.Steps, wf.Maps)) == 0 {
+		newRole := provisionWorkflowRole(ctx, wf.WorkflowID, wf.CreatedBy, wf.OrgID, wf.Steps, wf.Maps, wf.Ticket)
+		if newRole != "" || len(collectWorkflowPermissions(wf.Steps, wf.Maps, wf.Ticket)) == 0 {
 			wf.RoleID = newRole
 			wf.RolePermsVersion = workflowRolePermsVersion
 			if err := wf.Update(ctx); err != nil {

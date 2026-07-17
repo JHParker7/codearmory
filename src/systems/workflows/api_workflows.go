@@ -41,7 +41,7 @@ const workflowRolePermsVersion = 6
 
 // collectWorkflowPermissions returns the deduplicated set of gatekeeper
 // permissions declared by the workflow's step actions in the current catalog.
-func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef) []PermissionSpec {
+func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef, ticket *TicketConfig) []PermissionSpec {
 	seen := map[string]struct{}{}
 	var out []PermissionSpec
 	actionCatalogMu.RLock()
@@ -139,14 +139,26 @@ func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef) []Permissio
 			addAction(actionForgeVolumeCopy)
 		}
 	}
+	// Mirroring a run into a ticket is done with the RUN TOKEN, so the workflow's role
+	// must carry the ticket permissions — but only when the workflow opted in. A
+	// workflow with no ticket config grants nothing extra, which is why enabling this
+	// cannot widen what any existing run can do.
+	if ticket != nil && ticket.Enabled {
+		for _, p := range ticketPermissions() {
+			key := p.Service + ":" + p.Action + ":" + p.Resource
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, p)
+		}
+	}
 	return out
-}
-
-// provisionWorkflowRole asks gatekeeper to create a minimal-permission role for
+} // provisionWorkflowRole asks gatekeeper to create a minimal-permission role for
 // workflowID. Returns the new role_id, or "" when the key is unconfigured or the
 // permission list is empty (runs will use the user's full session permissions).
-func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string, steps []WorkflowStep, maps []MapDef) string {
-	perms := collectWorkflowPermissions(steps, maps)
+func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string, steps []WorkflowStep, maps []MapDef, ticket *TicketConfig) string {
+	perms := collectWorkflowPermissions(steps, maps, ticket)
 	if len(perms) == 0 {
 		return ""
 	}
@@ -266,6 +278,9 @@ type createWorkflowRequest struct {
 	Routes []WorkflowRoute `json:"routes,omitempty"`
 	// Maps declare the map regions steps join via map_id — see MapDef.
 	Maps []MapDef `json:"maps,omitempty"`
+	// Ticket opts every run of this workflow into being mirrored to a ticket — see
+	// TicketConfig. Omit it and nothing changes.
+	Ticket *TicketConfig `json:"ticket,omitempty"`
 }
 
 // validateWorkflowIO checks the declared inputs/outputs: unique, named, and every
@@ -378,6 +393,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		Outputs:     req.Outputs,
 		Routes:      req.Routes,
 		Maps:        req.Maps,
+		Ticket:      req.Ticket,
 		StepRefs:    refs,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -395,6 +411,11 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	// Routes are validated against the ENRICHED steps, since a route names a step
 	// by the name it actually runs under (a stored-step reference may override it).
+	if msg := validateTicket(wf.Ticket); msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
 	if msg := validateGraph(wf.Steps, wf.Routes, wf.Maps); msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
@@ -402,7 +423,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Provision a scoped service role before persisting so the role_id is stored atomically.
-	wf.RoleID = provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps, wf.Maps)
+	wf.RoleID = provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps, wf.Maps, wf.Ticket)
 	wf.RolePermsVersion = workflowRolePermsVersion
 
 	if err := wf.Add(ctx); err != nil {
@@ -605,6 +626,11 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if msg := validateTicket(req.Ticket); msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
 	if msg := validateGraph(newSteps, req.Routes, req.Maps); msg != "" {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, msg, http.StatusBadRequest)
@@ -616,6 +642,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing.Description = req.Description
 	existing.Routes = req.Routes
 	existing.Maps = req.Maps
+	existing.Ticket = req.Ticket
 	// Guard like tickets: a partial PUT that omits project must not silently
 	// wipe the stored label (the CLI/TUI update payloads don't send project).
 	if req.Project != "" {
@@ -628,7 +655,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing.UpdatedAt = time.Now().UTC()
 
 	// Re-provision the role with the updated step set.
-	existing.RoleID = provisionWorkflowRole(ctx, existing.WorkflowID, userID, orgID, newSteps, req.Maps)
+	existing.RoleID = provisionWorkflowRole(ctx, existing.WorkflowID, userID, orgID, newSteps, req.Maps, req.Ticket)
 	existing.RolePermsVersion = workflowRolePermsVersion
 
 	if err := existing.Update(ctx); err != nil {

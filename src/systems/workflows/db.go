@@ -606,6 +606,15 @@ func (run WorkflowRun) SetCurrentStep(ctx context.Context, step int) {
 		"UPDATE workflow_runs SET current_step=? WHERE run_id=?", step, run.RunID)
 }
 
+// SetTicket records the ticket mirroring this run, so a resume after an approval gate
+// adopts it instead of opening a second one. Best-effort: mirroring must never fail a
+// run, and the worst case of a lost write is a duplicate ticket on resume — not a
+// broken pipeline.
+func (run WorkflowRun) SetTicket(ctx context.Context, ticketID string) {
+	connect().WithContext(ctx).Exec( //nolint:errcheck — best-effort; see doc comment
+		"UPDATE workflow_runs SET ticket_id=? WHERE run_id=?", ticketID, run.RunID)
+}
+
 // errRunNotAwaiting is returned by the approval transitions when the run is no
 // longer paused (already approved/rejected/cancelled), so the API answers 409.
 var errRunNotAwaiting = errors.New("run is not awaiting approval")

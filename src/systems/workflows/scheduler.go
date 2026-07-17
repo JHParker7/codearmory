@@ -66,6 +66,11 @@ type runState struct {
 	nodes   map[string]nodeState
 	edges   []edgeState
 	outputs map[string]string
+	// ticket mirrors the run's progress into a ticket, and is non-nil ONLY on the
+	// top-level state. A map region's iterations build their own runState
+	// (runIteration), so an iteration structurally cannot comment: a 15-value map
+	// posts the 2 comments its body is worth, not 30.
+	ticket *ticketReporter
 }
 
 func newRunState(g *workflowGraph, outputs map[string]string, completed map[string]bool) *runState {
@@ -95,6 +100,10 @@ type nodeResult struct {
 	// output across iterations.
 	region        *mapRegion
 	regionOutputs map[string]string
+	// legs is how many parallel executions the node expanded into (matrix/scatter
+	// legs, or a map region's iterations). 0/1 means it ran once. Reported to the
+	// run's ticket so "build (15 legs) completed" reads as what actually happened.
+	legs int
 }
 
 // resolveOutbound decides every outbound route of a node that has just reached a
@@ -366,8 +375,8 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 				visible := g.visibleForRegion(region, st.outputs)
 				inFlight++
 				go func(region *mapRegion, visible map[string]string) {
-					agg, status := p.runMapRegion(ctx, store, runID, workflowID, g, region, inputs, visible, depth, legSem)
-					resCh <- nodeResult{region: region, state: statusToNodeState(status), regionOutputs: agg}
+					agg, status, iters := p.runMapRegion(ctx, store, runID, workflowID, g, region, inputs, visible, depth, legSem)
+					resCh <- nodeResult{region: region, state: statusToNodeState(status), regionOutputs: agg, legs: iters}
 				}(region, visible)
 			}
 			for _, n := range g.readyNodes(st) {
@@ -419,6 +428,7 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 			if r.region == nil && r.state == nodeCompleted {
 				st.outputs[n] = r.output
 			}
+			st.ticket.stepDone(ctx, n, r.state, r.legs)
 		}
 		switch r.state {
 		case nodeFailed:
@@ -552,9 +562,9 @@ func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, work
 	// A matrix step's per-value executions combine into one JSON-array output under
 	// the base step name; a plain step publishes its single output.
 	if aggregateName != "" {
-		return nodeResult{name: ws.Name, state: nodeCompleted, output: aggregateTaskOutputs(results)}
+		return nodeResult{name: ws.Name, state: nodeCompleted, output: aggregateTaskOutputs(results), legs: len(results)}
 	}
-	return nodeResult{name: ws.Name, state: nodeCompleted, output: results[0].output}
+	return nodeResult{name: ws.Name, state: nodeCompleted, output: results[0].output, legs: len(results)}
 }
 
 // pauseAtGates records a step run for every parked gate and pauses the run.
