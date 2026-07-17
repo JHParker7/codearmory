@@ -1,0 +1,116 @@
+{{- if .Values.registryMirror.enabled }}
+{{- $fullname := include "codearmory.fullname" . }}
+{{- $name := printf "%s-registry-mirror" $fullname }}
+# In-cluster mirror of the base images builds pull FROM, so a fan-out of image builds
+# does not pull the same base once per leg from a public registry and earn a
+# TOOMANYREQUESTS. See values.yaml (registryMirror) for why this is seeded rather than
+# a pull-through proxy.
+#
+# Plain HTTP: this serves public base images inside the cluster only — there is nothing
+# secret here and no credential is accepted, so TLS would buy nothing but a certificate
+# to rotate. Forge marks it insecure for kaniko accordingly. It is NOT exposed outside
+# the cluster (ClusterIP) and is not a codearmory service: no registry manifest entry,
+# no routes, no RBAC — conductor never fronts it.
+{{- if .Values.registryMirror.storage.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry-mirror
+  {{- if .Values.registryMirror.storage.retain }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.registryMirror.storage.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.registryMirror.storage.size | quote }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry-mirror
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.registryMirror.port }}
+      targetPort: registry
+      protocol: TCP
+      name: registry
+  selector:
+    app.kubernetes.io/name: {{ include "codearmory.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: registry-mirror
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry-mirror
+spec:
+  replicas: 1
+  # The PVC is ReadWriteOnce, so two replicas could not mount it on different nodes.
+  # Recreate avoids a rolling update deadlocking on the old pod holding the volume.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "codearmory.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: registry-mirror
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "codearmory.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: registry-mirror
+    spec:
+      containers:
+        - name: registry
+          image: "{{ .Values.registryMirror.image.repository }}:{{ .Values.registryMirror.image.tag }}"
+          ports:
+            - name: registry
+              containerPort: 5000
+              protocol: TCP
+          env:
+            - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+              value: /var/lib/registry
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.registryMirror.resources | nindent 12 }}
+      volumes:
+        - name: data
+        {{- if .Values.registryMirror.storage.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $name }}
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+{{- end }}

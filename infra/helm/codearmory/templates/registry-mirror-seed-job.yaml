@@ -1,0 +1,88 @@
+{{- if and .Values.registryMirror.enabled .Values.registryMirror.seed.enabled }}
+{{- $fullname := include "codearmory.fullname" . }}
+{{- $name := printf "%s-registry-mirror" $fullname }}
+{{- $mirror := printf "%s:%v" $name (.Values.registryMirror.port | toString) }}
+# Copies the base images builds pull FROM into the mirror, once per install/upgrade.
+#
+# This is what makes the mirror useful: an empty mirror is not an error (kaniko falls
+# back to the origin registry) but it is also not a cache, so the burst of upstream
+# pulls — and the TOOMANYREQUESTS it earns — comes straight back.
+#
+# It NEVER fails the release. The mirror is an optimisation, not a dependency: if the
+# seed cannot reach the upstream, builds still work by pulling from the origin exactly
+# as they did before. Failing a whole deploy because an image cache could not be warmed
+# would trade a slow build for an outage, so every failure here is logged and skipped.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-seed
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry-mirror-seed
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    # After the mirror Deployment/Service exist, so the wait loop below can find them.
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "codearmory.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: registry-mirror-seed
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: "{{ .Values.registryMirror.seed.image.repository }}:{{ .Values.registryMirror.seed.image.tag }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -u
+              MIRROR={{ $mirror | quote }}
+              SOURCE={{ .Values.registryMirror.seed.source | quote }}
+
+              # The Deployment may still be rolling when this hook fires.
+              echo "waiting for mirror at $MIRROR ..."
+              i=0
+              until curl -sf -o /dev/null "http://$MIRROR/v2/"; do
+                i=$((i+1))
+                if [ "$i" -ge 60 ]; then
+                  echo "mirror never became ready; skipping seed (builds fall back to $SOURCE)"
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "mirror is up"
+
+              failed=0
+              for img in {{ range .Values.registryMirror.seed.images }}{{ . | quote }} {{ end }}; do
+                echo "==> seeding $img"
+                # Idempotent: skopeo skips blobs the mirror already has, so re-running
+                # on every upgrade costs a manifest check rather than a full copy.
+                if skopeo copy --dest-tls-verify=false \
+                     "docker://$SOURCE/$img" "docker://$MIRROR/$img"; then
+                  echo "==> seeded $img"
+                else
+                  echo "==> FAILED to seed $img — builds will pull it from $SOURCE instead"
+                  failed=$((failed+1))
+                fi
+              done
+
+              if [ "$failed" -gt 0 ]; then
+                echo "seed finished with $failed image(s) unmirrored; not failing the release"
+              else
+                echo "seed complete: every base image mirrored"
+              fi
+              exit 0
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+{{- end }}

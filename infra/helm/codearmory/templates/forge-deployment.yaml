@@ -135,6 +135,20 @@ spec:
             - name: FORGE_ARTIFACTS_URL
               value: "http://{{ include "codearmory.fullname" . }}-artifacts:{{ .Values.artifacts.port }}"
             {{- end }}
+            # Remap base-image pulls to the in-cluster mirror so a build matrix does not
+            # pull the same base once per leg from a public registry. Operator config,
+            # never a request field: a build must not choose where its base comes from.
+            # Kaniko falls back to the origin registry on a miss, so this is safe even
+            # when the mirror is empty or down.
+            {{- if and .Values.registryMirror.enabled .Values.registryMirror.registryMap }}
+            {{- $mirror := printf "%s-registry-mirror:%v" (include "codearmory.fullname" .) (.Values.registryMirror.port | toString) }}
+            - name: FORGE_REGISTRY_MAP
+              value: {{ .Values.registryMirror.registryMap | replace "{{ mirror }}" $mirror | quote }}
+            # The mirror is plain HTTP (in-cluster, public images, no credentials), so
+            # kaniko must be told not to require TLS for it.
+            - name: FORGE_INSECURE_REGISTRIES
+              value: {{ $mirror | quote }}
+            {{- end }}
             - name: FORGE_GIT_IMAGE
             {{- if .Values.forge.gitImage }}
               value: {{ .Values.forge.gitImage | quote }}

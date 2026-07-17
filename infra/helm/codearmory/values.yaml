@@ -412,6 +412,12 @@ forge:
       # artifact caching. Access is still authenticated per user — a step can only
       # touch artifacts the token you wire into it allows.
       allowArtifacts: true
+      # Allow sandboxes to reach the base-image mirror (that pod, on its port only) so
+      # image builds pull their base locally instead of from the public internet. Same
+      # narrow shape as allowArtifacts. Set false to deny it: builds then fall back to
+      # pulling from the origin registry, which still works but re-exposes them to that
+      # registry's rate limits.
+      allowRegistryMirror: true
   # Run sandbox jobs under gVisor (handler "runsc"): a userspace kernel (the Sentry)
   # intercepts each job's syscalls, giving strong isolation WITHOUT any hardware
   # virtualization — choose it over kata when nodes lack nested virt / /dev/kvm. When true:
@@ -472,6 +478,66 @@ workflows:
 # ── Tickets ─────────────────────────────────────────────────────────────────
 # Issue/task tracking. Source lives in the codearmory-tickets repo; the chart deploys
 # its published image as a CORE service (registered via the registry manifest).
+# ── Base-image mirror ───────────────────────────────────────────────────────
+# An in-cluster registry holding the base images that builds pull FROM.
+#
+# The problem it solves: a matrix of image builds derives from the same handful of
+# bases, so every leg pulls an identical base from the same public registry, from one
+# egress IP, at the same moment. A public registry answers that burst with
+# TOOMANYREQUESTS and the build dies — a red pipeline caused by nothing in the code.
+#
+# Why seeded rather than a pull-through proxy: registry:2's proxy mode cannot serve
+# BLOBS from public.ecr.aws (it negotiates an "aws"-scoped token, and blob fetches come
+# back "unauthorized: authentication required" while manifests succeed) — verified
+# against 2.8.3. Seeding sidesteps the upstream's auth model entirely and is strictly
+# better anyway: after the seed job, builds cause ZERO upstream pulls rather than one.
+#
+# Forge points builds here with kaniko's --registry-map, so no Dockerfile changes: a
+# FROM stays public.ecr.aws/... and is remapped at build time (which also keeps the
+# Dockerfiles buildable outside the platform). Kaniko falls back to the origin registry
+# on a mirror miss, so an un-seeded or disabled mirror degrades to a direct pull rather
+# than breaking builds.
+registryMirror:
+  enabled: true
+  # A stock upstream registry; nothing codearmory-specific runs here.
+  image:
+    repository: public.ecr.aws/docker/library/registry
+    tag: "2"
+  port: 5000
+  # Registries remapped to this mirror, as kaniko's --registry-map:
+  # "original.registry=mirror;other=mirror". {{ mirror }} is substituted with this
+  # mirror's in-cluster host:port. Empty disables remapping (builds pull from origin).
+  registryMap: "public.ecr.aws={{ mirror }}"
+  # Base images seeded into the mirror on install/upgrade, as repository paths under
+  # the mirrored registry. These are exactly the FROM lines used across the services;
+  # a base that is NOT listed still builds, by falling back to the origin registry.
+  seed:
+    enabled: true
+    # The registry the seed job copies FROM.
+    source: public.ecr.aws
+    images:
+      - docker/library/golang:1.26.0-alpine3.23
+      - docker/library/alpine:3.23.3
+      - docker/library/node:22-alpine
+    image:
+      repository: quay.io/skopeo/stable
+      tag: latest
+  storage:
+    # A PVC so the seed survives a restart. With this off the mirror is an emptyDir and
+    # empties on every reschedule — builds still work (origin fallback), just unmirrored.
+    enabled: true
+    size: 10Gi
+    # Empty uses the cluster default StorageClass.
+    storageClass: ""
+    retain: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
 # Artifact store — named, user-owned blobs that OUTLIVE a run: a Go build cache to
 # restore next time, a CLI binary to publish after the run that made it. Forge volumes
 # are run-scoped and reaped, so without this there is nowhere for either to live.

@@ -48,6 +48,26 @@ spec:
         - protocol: TCP
           port: {{ .Values.artifacts.port }}
     {{- end }}
+    # The base-image mirror — the same narrow hole, for the same reason. A build pulls
+    # its base image before it can do anything else, so without this an image build
+    # under kata cannot use the mirror at all: it would fall back to the public origin
+    # on every leg (working, but re-exposing the rate-limit burst the mirror exists to
+    # prevent). Scoped to that one pod on its one port; every other internal address
+    # stays denied. The mirror serves only public base images and accepts no
+    # credentials, so reaching it grants a sandbox nothing it could not get from the
+    # public internet it is already allowed to reach.
+    {{- if and .Values.registryMirror.enabled .Values.forge.kata.egress.allowRegistryMirror }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: registry-mirror
+      ports:
+        - protocol: TCP
+          port: {{ .Values.registryMirror.port }}
+    {{- end }}
     # All public IPv4; every private/internal range — and any admin-supplied blocklist
     # CIDR — is excepted (denied). 169.254.0.0/16 covers the cloud-metadata endpoint;
     # 100.64.0.0/10 (CGNAT) is included because clusters commonly place the pod/node
