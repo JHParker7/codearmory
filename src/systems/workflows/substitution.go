@@ -34,6 +34,10 @@ type substContext struct {
 	// ${scatter.path} so the leg's command targets its own partition.
 	scatterPath string
 	runID       string // this run's id, exposed as ${run_id} / ${run.id}
+	// workflowID is the PIPELINE's id, exposed as ${workflow_id}. Distinct from runID:
+	// it identifies the definition across every run of it, which is what links a
+	// created ticket back to the pipeline rather than to one execution of it.
+	workflowID string
 	// depth is the run's sub-pipeline nesting depth, propagated to a workflows/trigger
 	// step so the created sub-run is one level deeper (not itself a substitution
 	// value, so it is excluded from empty()).
@@ -125,6 +129,9 @@ func (sc substContext) resolve(expr string) (string, bool) {
 	// volume to the run (workflow_id) and to name it deterministically across steps.
 	if expr == "run_id" || expr == "run.id" {
 		return sc.runID, sc.runID != ""
+	}
+	if expr == "workflow_id" || expr == "workflow.id" {
+		return sc.workflowID, sc.workflowID != ""
 	}
 	// Bare ${NAME} resolves to a run input (backward compatible).
 	v, ok := sc.inputs[expr]

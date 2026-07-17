@@ -254,7 +254,7 @@ func (p *WorkerPool) runMapRegion(
 	ctx context.Context, store *tokenStore, runID, workflowID string, g *workflowGraph, region *mapRegion,
 	inputs, visible map[string]string, depth int, legSem chan struct{},
 ) (map[string]string, string, int) {
-	sc := substContext{inputs: inputs, outputs: visible, runID: runID}
+	sc := substContext{inputs: inputs, outputs: visible, runID: runID, workflowID: workflowID}
 	values, err := resolveMapValues(region.def, sc)
 	if err != nil {
 		return nil, p.mapFail(runID, g, region, err.Error()), 0

@@ -156,9 +156,11 @@ type pipelineFile struct {
 	Inputs      []pipelineInputDef  `json:"inputs,omitempty"`
 	Outputs     []pipelineOutputDef `json:"outputs,omitempty"`
 	// Routes are the edges between steps — omit for a plain sequence. Maps declare
-	// the map regions steps join via map_id.
+	// the map regions steps join via map_id. Ticket mirrors every run of the pipeline
+	// into a ticket (there are no ticket steps — it is a property of the pipeline).
 	Routes []workflowRoute  `json:"routes,omitempty"`
 	Maps   []map[string]any `json:"maps,omitempty"`
+	Ticket map[string]any   `json:"ticket,omitempty"`
 }
 
 // ── DSL parser ────────────────────────────────────────────────────────────────
@@ -420,11 +422,13 @@ type rawPipeline struct {
 	Inputs      []pipelineInputDef  `json:"inputs,omitempty"`
 	Outputs     []pipelineOutputDef `json:"outputs,omitempty"`
 	StepRefs    []workflowStepRef   `json:"step_refs"`
-	// Routes and Maps must round-trip: a pipeline's edges live here, not in the step
-	// array, so a re-PUT that dropped them would silently flatten a graph into a
-	// sequence — changing what the pipeline DOES while only meaning to edit a step.
+	// Routes, Maps and Ticket must round-trip: none of them live in the step array, so
+	// a re-PUT that dropped them would change what the pipeline DOES while only meaning
+	// to edit a step — flattening a graph into a sequence, or silently turning off the
+	// ticket mirroring every run of it depends on.
 	Routes []workflowRoute  `json:"routes,omitempty"`
 	Maps   []map[string]any `json:"maps,omitempty"`
+	Ticket map[string]any   `json:"ticket,omitempty"`
 }
 
 func fetchRawPipeline(id string) (rawPipeline, error) {
@@ -455,6 +459,9 @@ func putRawPipeline(id string, pl rawPipeline) error {
 	}
 	if len(pl.Maps) > 0 {
 		payload["maps"] = pl.Maps
+	}
+	if len(pl.Ticket) > 0 {
+		payload["ticket"] = pl.Ticket
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -771,6 +778,7 @@ reusable step, or "localize-step" to copy a shared step's definition inline.`,
 				Outputs     []pipelineOutputDef `json:"outputs,omitempty"`
 				Routes      []workflowRoute     `json:"routes,omitempty"`
 				Maps        []map[string]any    `json:"maps,omitempty"`
+				Ticket      map[string]any      `json:"ticket,omitempty"`
 			}
 
 			if pipelineFileFlag != "" {
@@ -789,6 +797,7 @@ reusable step, or "localize-step" to copy a shared step's definition inline.`,
 				payload.Outputs = pf.Outputs
 				payload.Routes = pf.Routes
 				payload.Maps = pf.Maps
+				payload.Ticket = pf.Ticket
 			} else {
 				nodes, err := parseDSL(args[2])
 				if err != nil {

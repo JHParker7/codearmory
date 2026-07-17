@@ -411,6 +411,10 @@ function PipelineBuilderOverlay({
         maps: maps.length > 0 ? maps : undefined,
         inputs: cleanInputs.length > 0 ? cleanInputs : undefined,
         outputs: cleanOutputs.length > 0 ? cleanOutputs : undefined,
+        // Carried through unchanged: this editor cannot set a ticket config, and a PUT
+        // that omitted it would turn run mirroring OFF for a pipeline the user only
+        // meant to rename. Editing a field you do not render must not delete it.
+        ticket: initial?.ticket,
       };
       const wf = initial
         ? await updateWorkflow(token, initial.workflow_id, payload)

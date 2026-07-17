@@ -243,7 +243,7 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	// for a sub-run, the parent's workflows/trigger step output.
 	var runOutputs map[string]string
 	if finalStatus == StatusCompleted {
-		runOutputs = resolveWorkflowOutputs(workflow.Outputs, substContext{inputs: inputs, outputs: stepOutputs, runID: runID})
+		runOutputs = resolveWorkflowOutputs(workflow.Outputs, substContext{inputs: inputs, outputs: stepOutputs, runID: runID, workflowID: workflowID})
 	}
 	// Close the ticket with the run's outcome. A background context: a cancelled run
 	// still deserves a ticket that says so, and runCtx is already dead by here.

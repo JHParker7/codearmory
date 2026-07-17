@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -39,6 +40,19 @@ import (
 // workflow created earlier would 403 its first clone and hang.
 const workflowRolePermsVersion = 6
 
+// resourcePathParamRe matches a "{param}" segment of an endpoint's resource template.
+var resourcePathParamRe = regexp.MustCompile(`\{[^}]+\}`)
+
+// wildcardPathParams turns an endpoint's resource TEMPLATE into a pattern a role can
+// match: "tickets/tickets/{id}" -> "tickets/tickets/*".
+//
+// A run cannot know the id it will act on when its role is provisioned — the ticket it
+// updates is created by an earlier step of the same run — so the grant has to span the
+// id space. It is still scoped to that one service and action.
+func wildcardPathParams(resource string) string {
+	return resourcePathParamRe.ReplaceAllString(resource, "*")
+}
+
 // collectWorkflowPermissions returns the deduplicated set of gatekeeper
 // permissions declared by the workflow's step actions in the current catalog.
 func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef, ticket *TicketConfig) []PermissionSpec {
@@ -57,7 +71,14 @@ func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef, ticket *Tic
 			return
 		}
 		p := def.RequiredPermission
-		key := p.Service + ":" + p.Action + ":" + p.Resource
+		// The registry DERIVES an action's permission from its endpoint, whose resource
+		// is a TEMPLATE ("tickets/tickets/{id}", "forge/executions/{id}"). A role carries
+		// this string verbatim and gatekeeper knows nothing about "{id}" — it matches
+		// exact strings, "*", "foo/*" and "foo/*/bar" — so granting the literal would
+		// 403 every call on a real id. Rewrite each path param to the wildcard the role
+		// can actually match.
+		resource := wildcardPathParams(p.Resource)
+		key := p.Service + ":" + p.Action + ":" + resource
 		if _, dup := seen[key]; dup {
 			return
 		}
@@ -65,7 +86,7 @@ func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef, ticket *Tic
 		out = append(out, PermissionSpec{
 			Service:  p.Service,
 			Action:   p.Action,
-			Resource: p.Resource,
+			Resource: resource,
 		})
 
 		// Async actions submit a job and then POLL it to a terminal state (forge:
@@ -80,7 +101,7 @@ func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef, ticket *Tic
 			pollSpec := PermissionSpec{
 				Service:  p.Service,
 				Action:   "get" + strings.TrimPrefix(p.Action, "create"),
-				Resource: strings.TrimRight(p.Resource, "/") + "/*",
+				Resource: strings.TrimRight(resource, "/") + "/*",
 			}
 			pollKey := pollSpec.Service + ":" + pollSpec.Action + ":" + pollSpec.Resource
 			if _, dup := seen[pollKey]; !dup {
@@ -93,7 +114,7 @@ func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef, ticket *Tic
 		// /volumes?workflow_id=...). Grant the matching deleteVolume on the same
 		// resource so teardown isn't 403'd and volumes linger until the age reaper.
 		if p.Action == "createVolume" {
-			delSpec := PermissionSpec{Service: p.Service, Action: "deleteVolume", Resource: p.Resource}
+			delSpec := PermissionSpec{Service: p.Service, Action: "deleteVolume", Resource: resource}
 			delKey := delSpec.Service + ":" + delSpec.Action + ":" + delSpec.Resource
 			if _, dup := seen[delKey]; !dup {
 				seen[delKey] = struct{}{}

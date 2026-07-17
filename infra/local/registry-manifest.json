@@ -1471,6 +1471,13 @@
         "path": "/tickets/{id}"
       },
       {
+        "name": "tickets/comment",
+        "summary": "Add a comment to a ticket",
+        "description": "Appends a comment to a ticket. Use it to record a pipeline's progress on the ticket a `tickets/create` step opened for the run \u2014 the ticket carries `run_id`/`workflow_id`, so the comments read as that run's timeline.",
+        "method": "POST",
+        "path": "/tickets/{id}/comments"
+      },
+      {
         "name": "tickets/delete",
         "method": "DELETE",
         "path": "/tickets/{id}"

@@ -379,6 +379,25 @@ export interface WorkflowOutputDef {
   value: string;
 }
 
+/** Opts a pipeline into mirroring each of its runs to a ticket. The run's ticket is
+ * opened when the run starts, commented as each step finishes, and closed with the
+ * run's outcome — there are no ticket STEPS; it is a property of the pipeline. */
+export interface WorkflowTicketConfig {
+  enabled: boolean;
+  /** Supports ${run_id}, ${inputs.X} and ${steps.NAME.output.FIELD} — a title naming a
+   * step's output is filled in once that step runs. */
+  title?: string;
+  board_id?: string;
+  priority?: string;
+  project?: string;
+  /** Overrides for the statuses a run maps onto; needed when the ticket is filed on a
+   * board whose columns are not the default open/in_progress/resolved/closed. */
+  status_running?: string;
+  status_success?: string;
+  status_failure?: string;
+  status_cancelled?: string;
+}
+
 export interface Workflow {
   workflow_id: string;
   name: string;
@@ -395,6 +414,10 @@ export interface Workflow {
   routes?: WorkflowRoute[];
   /** The map regions steps join via map_id. */
   maps?: WorkflowMapDef[];
+  /** Mirrors every run of this pipeline into a ticket (opt-in). The editor has no UI
+   * for it, so it is carried through a save unchanged — dropping it would silently
+   * turn mirroring off for a pipeline nobody meant to change. */
+  ticket?: WorkflowTicketConfig;
   /** Declared run parameters (defaults/required applied at trigger time). */
   inputs?: WorkflowInputDef[];
   /** Declared outputs published on completion (resolved into WorkflowRun.outputs). */

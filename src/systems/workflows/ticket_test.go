@@ -353,3 +353,68 @@ func TestTicketReporter_StaticTitleIsNotPending(t *testing.T) {
 		t.Error("a static title must never trigger a retitle PUT")
 	}
 }
+
+// An endpoint's resource is a TEMPLATE ("tickets/tickets/{id}"), and the registry
+// derives an action's permission from it. A role carries that string verbatim, and
+// gatekeeper has no notion of "{id}" — it matches exact, "*", "foo/*", "foo/*/bar".
+// Granting the literal would 403 every call on a real id.
+func TestWildcardPathParams(t *testing.T) {
+	cases := map[string]string{
+		"tickets/tickets/{id}":              "tickets/tickets/*",
+		"tickets/tickets/{id}/comments/{c}": "tickets/tickets/*/comments/*",
+		"forge/executions/{id}":             "forge/executions/*",
+		// Nothing to rewrite: a collection resource must be left exactly as it is.
+		"tickets/tickets": "tickets/tickets",
+		"forge/volumes":   "forge/volumes",
+		// An already-wildcarded resource must not be double-processed.
+		"tickets/tickets/*": "tickets/tickets/*",
+	}
+	for in, want := range cases {
+		if got := wildcardPathParams(in); got != want {
+			t.Errorf("wildcardPathParams(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A pipeline that opens a ticket and then updates it gets a role that can actually do
+// both — the update's resource is item-scoped, so the literal template would 403.
+func TestCollectWorkflowPermissions_TicketStepsGetUsableResources(t *testing.T) {
+	actionCatalogMu.Lock()
+	old := actionCatalog
+	actionCatalog = map[string]ActionDef{
+		"tickets/create": {Name: "tickets/create", RequiredPermission: &PermissionSpec{
+			Service: "tickets", Action: "createTicket", Resource: "tickets/tickets"}},
+		"tickets/update": {Name: "tickets/update", RequiredPermission: &PermissionSpec{
+			Service: "tickets", Action: "updateTicket", Resource: "tickets/tickets/{id}"}},
+		"tickets/comment": {Name: "tickets/comment", RequiredPermission: &PermissionSpec{
+			Service: "tickets", Action: "createComment", Resource: "tickets/tickets/{id}"}},
+	}
+	actionCatalogMu.Unlock()
+	t.Cleanup(func() {
+		actionCatalogMu.Lock()
+		actionCatalog = old
+		actionCatalogMu.Unlock()
+	})
+
+	perms := collectWorkflowPermissions([]WorkflowStep{
+		{Step: Step{Name: "open", Action: "tickets/create"}},
+		{Step: Step{Name: "note", Action: "tickets/comment"}},
+		{Step: Step{Name: "close", Action: "tickets/update"}},
+	}, nil, nil)
+
+	got := map[string]string{}
+	for _, p := range perms {
+		got[p.Action] = p.Resource
+	}
+	if got["createTicket"] != "tickets/tickets" {
+		t.Errorf("createTicket resource = %q, want the collection unchanged", got["createTicket"])
+	}
+	for _, act := range []string{"updateTicket", "createComment"} {
+		if got[act] != "tickets/tickets/*" {
+			t.Errorf("%s resource = %q, want tickets/tickets/* — a literal {id} 403s", act, got[act])
+		}
+		if strings.Contains(got[act], "{") {
+			t.Errorf("%s resource %q still carries a path param template", act, got[act])
+		}
+	}
+}

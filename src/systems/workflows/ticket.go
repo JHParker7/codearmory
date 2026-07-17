@@ -235,7 +235,7 @@ func (t *ticketReporter) open(ctx context.Context, wfName string, inputs map[str
 	// — the commit a checkout resolved, say — cannot be rendered yet. substitute leaves
 	// an unresolved ${...} literal, so the ticket opens with a provisional title and
 	// retitle() fills it in the moment the step it names completes.
-	title = substitute(title, substContext{inputs: inputs, runID: t.runID})
+	title = substitute(title, substContext{inputs: inputs, runID: t.runID, workflowID: t.workflowID})
 	t.title = title
 	t.pendingTitle = referencesSteps(title)
 
@@ -290,7 +290,7 @@ func (t *ticketReporter) retitle(ctx context.Context, inputs, outputs map[string
 	if t == nil || t.off || t.ticketID == "" || !t.pendingTitle {
 		return
 	}
-	rendered := substitute(t.cfg.Title, substContext{inputs: inputs, outputs: outputs, runID: t.runID})
+	rendered := substitute(t.cfg.Title, substContext{inputs: inputs, outputs: outputs, runID: t.runID, workflowID: t.workflowID})
 	if referencesSteps(rendered) {
 		return // the step it names still has not produced its output
 	}

@@ -533,7 +533,7 @@ func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, work
 	}
 
 	group := stepGroup{steps: []WorkflowStep{ws}, indices: []int{idx}}
-	tasks, aggregateName, terr := buildGroupTasks(group, substContext{inputs: inputs, outputs: visible, mapVars: ic.mapVars, runID: runID})
+	tasks, aggregateName, terr := buildGroupTasks(group, substContext{inputs: inputs, outputs: visible, mapVars: ic.mapVars, runID: runID, workflowID: workflowID})
 	if terr != nil {
 		if sid := uuid.New().String(); p.startStepRun(runID, sid, idx, ws.Name) == nil {
 			p.finishStepRun(sid, StatusFailed, strPtr(terr.Error()), nil, nil, nil)
