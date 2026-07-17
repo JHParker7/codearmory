@@ -22,10 +22,11 @@ def make_step(bearer, action, with_, name=None):
     return res.json()["step_id"]
 
 
-def make_pipeline(bearer, steps):
-    res = requests.post(f"{WORKFLOWS_URL}/pipelines", headers=bearer, json={
-        "name": f"wf-{uuid.uuid4().hex[:8]}", "steps": steps,
-    })
+def make_pipeline(bearer, steps, routes=None):
+    body = {"name": f"wf-{uuid.uuid4().hex[:8]}", "steps": steps}
+    if routes:
+        body["routes"] = routes
+    res = requests.post(f"{WORKFLOWS_URL}/pipelines", headers=bearer, json=body)
     assert res.status_code == 201, f"create pipeline: {res.status_code} {res.text}"
     wf_id = res.json()["workflow_id"]
     return wf_id
@@ -159,19 +160,33 @@ def test_step_timeout_is_enforced_by_forge(bearer):
     requests.delete(f"{WORKFLOWS_URL}/steps/{sid}", headers=bearer)
 
 
-def test_parallel_group_runs_all_steps(bearer):
+def test_forked_routes_run_all_steps(bearer):
+    # Parallelism is expressed by routes: two edges out of one step fork the run.
+    # There is no parallel_group — a bare step array is a plain sequence.
+    fan = make_step(bearer, "http", {"service": "gatekeeper", "method": "GET", "path": "/healthz", "expected_status": 200})
     s1 = make_step(bearer, "http", {"service": "gatekeeper", "method": "GET", "path": "/healthz", "expected_status": 200})
     s2 = make_step(bearer, "http", {"service": "gatekeeper", "method": "GET", "path": "/healthz", "expected_status": 200})
-    # Both steps in the same parallel group execute concurrently.
-    wf = make_pipeline(bearer, [
-        {"step_id": s1, "parallel_group": 0},
-        {"step_id": s2, "parallel_group": 0},
-    ])
+    wf = make_pipeline(
+        bearer,
+        [
+            {"step_id": fan, "name": "fan"},
+            {"step_id": s1, "name": "a"},
+            {"step_id": s2, "name": "b"},
+        ],
+        routes=[
+            {"from": "fan", "to": "a"},
+            {"from": "fan", "to": "b"},
+        ],
+    )
     run_id = trigger(bearer, wf)
     result = poll_run(bearer, run_id)
     assert result["status"] == "completed", f"expected completed, got {result['status']}: {result}"
     step_runs = result.get("step_runs") or []
-    assert len(step_runs) == 2, f"expected 2 step runs for the parallel group, got {len(step_runs)}"
+    assert len(step_runs) == 3, f"expected 3 step runs across the fork, got {len(step_runs)}"
+    # Both branches must actually have run — a fork that dropped one would still
+    # report completed.
+    names = {sr["step_name"] for sr in step_runs}
+    assert names == {"fan", "a", "b"}, f"expected both branches to run, got {names}"
     requests.delete(f"{WORKFLOWS_URL}/pipelines/{wf}", headers=bearer)
 
 

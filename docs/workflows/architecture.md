@@ -4,7 +4,9 @@
 
 Workflows orchestrates graphs of HTTP steps against registered backend services. A workflow is a named set of steps plus the routes between them; each step makes one HTTP request. A run walks that graph: a step becomes ready once every inbound route is resolved and at least one was taken, and routes may carry conditions, so a pipeline can branch, join, and handle failure. Runs are queued in PostgreSQL and executed asynchronously by a background worker pool.
 
-A workflow with no explicit `routes` has them derived from the ordered steps and their `parallel_group` values, which reproduces the original sequential/parallel batching exactly — so the ordered list remains a valid way to author a pipeline, and is what the portal still sends.
+A workflow with no explicit `routes` has them derived as a plain chain in array order — a bare step array is a sequence, so an ordered list remains a valid way to author a simple pipeline.
+
+Routes are the only encoding for parallelism: two edges out of one step fork the run, two edges into one step join it. Fan-out *within* a step (`matrix`, `scatter`, or a map region) is that step's own concern and carries its own `max_concurrent`.
 
 ```
 API caller (Bearer JWT)

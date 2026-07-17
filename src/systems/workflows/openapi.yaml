@@ -14,20 +14,20 @@ info:
     references it.
 
     A **Workflow** is a set of step references (`step_id` + optional
-    `parallel_group` or `matrix`) plus the `routes` between them — a graph. A
+    `matrix`) plus the `routes` between them — a graph. A
     step runs once every inbound route is resolved and at least one was taken,
     and a route may carry a `when` condition, so a pipeline can branch, join,
     and handle failure. A step reference with a `matrix` fans the step out over
     a list of values (see below); that fan-out is internal to the step, so a
     matrix step is one node, not many.
 
-    Omit `routes` and the edges are derived from the ordered steps and their
-    `parallel_group` values: steps sharing the same non-nil `parallel_group`
-    execute concurrently and the run waits for all before advancing. That
-    encoding is a run-length delimiter (only equality with the immediately
-    preceding step matters), so it cannot express a non-adjacent dependency, a
-    diamond join, or a conditional branch — supply `routes` for those. The two
-    are mutually exclusive.
+    Omit `routes` and the edges are derived as a plain chain in array order: a
+    bare step array is a sequence, nothing more.
+
+    Routes are the ONLY way to express parallelism — two edges out of one step
+    fork the run, and a step with two inbound routes joins it. Fan-out WITHIN a
+    step (`matrix`, `scatter`, or a map region) is that step's own concern and
+    carries its own `max_concurrent`.
 
     ## Action types
 
@@ -55,7 +55,7 @@ info:
     e.g. `${inputs.regions}`). The executions run concurrently and the step's
     output is the JSON array of their outputs. Set `max_concurrent` to throttle
     how many run at once — useful when each value spins up a resource-heavy
-    runner. `matrix` and `parallel_group` are mutually exclusive.
+    runner.
 
     ## Authentication
 
@@ -826,8 +826,7 @@ components:
         targets a different input each time. Executions run concurrently (capped
         at 10, or fewer via `max_concurrent`) and the step's output is the JSON
         array of each execution's output, addressable as `${steps.<name>.output}`.
-        Mutually exclusive with `parallel_group`; not allowed on an `approval`
-        step. Capped at 50 values.
+        Not allowed on an `approval` step. Capped at 50 values.
       required:
         - var
       properties:
@@ -881,22 +880,14 @@ components:
       description: |
         A position in a workflow, which is EITHER a reference to a stored step
         (`step_id`) OR an inline `approval` gate. A step ref may additionally
-        carry a `parallel_group` (steps sharing a non-null value run concurrently)
-        or a `matrix` (fans the step out over a list); the two are mutually
-        exclusive, and an approval gate is always solo.
+        carry a `matrix` (fans the step out over a list) or a `map_id` (joins a
+        map region). Steps do NOT carry parallelism: that is the shape of the
+        `routes` between them.
       properties:
         step_id:
           type: string
           format: uuid
           description: ID of the step to execute (omit for an approval gate)
-        parallel_group:
-          type: integer
-          nullable: true
-          description: |
-            When non-null, steps with the same value run concurrently. The run
-            waits for all steps in a group before advancing. Must be
-            non-negative.
-          example: 1
         matrix:
           allOf:
             - $ref: '#/components/schemas/MatrixConfig'
@@ -911,10 +902,6 @@ components:
         - $ref: '#/components/schemas/Step'
         - type: object
           properties:
-            parallel_group:
-              type: integer
-              nullable: true
-              description: Parallel group assigned in the workflow, if any
             matrix:
               allOf:
                 - $ref: '#/components/schemas/MatrixConfig'
@@ -953,7 +940,7 @@ components:
           type: array
           description: |
             Explicit edges between steps. Absent/empty means the edges are derived
-            from the ordered steps and their parallel_group values.
+            as a chain in array order.
           items:
             $ref: '#/components/schemas/WorkflowRoute'
         steps:
@@ -996,10 +983,9 @@ components:
         routes:
           type: array
           description: |
-            Explicit edges between steps, forming a graph. Omit to keep the
-            ordered steps[]/parallel_group encoding, whose edges are derived at
-            run time — the two are mutually exclusive, and combining routes with
-            any parallel_group is rejected. Maximum 200.
+            Explicit edges between steps, forming a graph, and the only way to
+            express a fork or a join. Omit for a plain sequence: the edges are
+            then derived as a chain in array order at run time. Maximum 200.
           items:
             $ref: '#/components/schemas/WorkflowRoute'
           maxItems: 200

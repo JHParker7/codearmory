@@ -26,7 +26,7 @@ Each entry in a workflow's `steps` array is exactly **one** of three kinds:
 - **Inline step** — `{"action": "...", "name": "...", "with": {...}, "timeout": N}` with **no `step_id`**. The step's whole definition lives on the pipeline; it is **private to that pipeline** and not in the `steps` table. This is the default in the portal builder — a step is only promoted to a shared Step on demand.
 - **Approval gate** — `{"approval": {"message": "...", "approvers": [...]}}`. An inline manual-approval pause; the run holds at `awaiting_approval` until approved/rejected.
 
-A reference or inline step may also carry a `parallel_group` or a `matrix` (mutually exclusive); a gate is always solo. `GET /pipelines/{ref}?raw=true` returns the stored, unenriched refs (in `step_refs`) so a client can mutate a pipeline without baking a referenced step's merged config into its override.
+A reference or inline step may also carry a `matrix` (fan-out over a list) or a `map_id` (join a map region); a gate is always solo. Parallelism between steps is not a field on a step — it is the shape of the `routes`. `GET /pipelines/{ref}?raw=true` returns the stored, unenriched refs (in `step_refs`) so a client can mutate a pipeline without baking a referenced step's merged config into its override.
 
 **Convert / make-local.** An inline step can be promoted to a shared Step (portal: “⇪ convert to general”; CLI: `armory pipelines convert-step <pipeline> <step-name>`) — it is persisted to the `steps` table and the ref repointed at its `step_id`. The reverse copies a shared step's definition inline (portal: “⇩ make local”; CLI: `armory pipelines localize-step`), so later edits stay local to the pipeline.
 
@@ -45,9 +45,10 @@ Caller → POST /pipelines/{ref}/runs
          │     (short-lived JWT scoped to a minimal workflow role — the user's
          │      own session token is never stored in the workflows database)
          │  3. Fetch workflow definition; enrich step refs from steps table
-         │  4. Group steps by parallel_group; execute each group:
-         │     - Steps with same non-nil parallel_group run concurrently
-         │     - Steps with nil parallel_group run sequentially
+         │  4. Build the graph (stored routes, else a chain in array order) and
+         │     walk it: a step runs once every inbound route is resolved and at
+         │     least one was taken, so steps with no path between them run
+         │     concurrently
          │     - For each step:
          │       a. Resolve action: "http" → raw HTTP; other → action catalog
          │       b. Substitute ${KEY} from run inputs into all With string values
@@ -351,10 +352,16 @@ curl -X POST http://localhost:8085/pipelines \
     "name": "deploy-staging",
     "description": "Build and deploy to staging",
     "steps": [
-      {"step_id": "uuid-of-build-step"},
-      {"step_id": "uuid-of-test-a", "parallel_group": 1},
-      {"step_id": "uuid-of-test-b", "parallel_group": 1},
-      {"step_id": "uuid-of-deploy-step"}
+      {"step_id": "uuid-of-build-step",  "name": "build"},
+      {"step_id": "uuid-of-test-a",      "name": "test-a"},
+      {"step_id": "uuid-of-test-b",      "name": "test-b"},
+      {"step_id": "uuid-of-deploy-step", "name": "deploy"}
+    ],
+    "routes": [
+      {"from": "build",  "to": "test-a"},
+      {"from": "build",  "to": "test-b"},
+      {"from": "test-a", "to": "deploy"},
+      {"from": "test-b", "to": "deploy"}
     ]
   }'
 ```
@@ -363,23 +370,23 @@ A maximum of 50 step references per workflow is enforced. All referenced steps m
 
 ### Parallel execution
 
-Steps sharing the same non-nil `parallel_group` integer execute concurrently. The run waits for every step in a group to reach a terminal state before advancing to the next sequential step or group.
-
-Steps without a `parallel_group` (or with a `null` value) execute sequentially in the order they appear.
+Parallelism is the shape of the graph, not a field on a step: **two edges out of one step fork the run, two edges into one step join it.** In the example above, `test-a` and `test-b` both route off `build`, so they run concurrently, and `deploy` waits for both.
 
 ```
-Step 0 (no group)          → runs first
-Steps 1 and 2 (group=1)    → run concurrently after step 0 finishes
-Step 3 (no group)          → runs after both group-1 steps finish
+build                      → runs first
+test-a, test-b             → both routed off build, so they run concurrently
+deploy                     → has both as inbound routes, so it waits for both
 ```
 
-The group integer is a **run-length delimiter, not a set label**: only equality with the immediately preceding step matters, so `[a(group=0), b(group=1), c(group=0)]` is three groups (a plain chain), not two. This encoding cannot express a step depending on two non-adjacent steps, a diamond join, or any conditional branch — for those, use **routes**.
+A step becomes ready once every inbound route is resolved and at least one was taken — which is what makes a join wait, and what lets a skipped branch not deadlock the step it joins into.
+
+Fan-out **within** a step is a different thing and stays on the step: `matrix` (one execution per value), `scatter` (one leg per workspace path), and a map region (a whole body per value) each carry their own `max_concurrent`.
 
 ### Routes (the graph model)
 
 A pipeline is a graph. The steps are its nodes — identified by **step name**, the same identity `${steps.<name>.output}` already uses — and `routes` are the directed edges between them. A step with no inbound route is an entry step; there is no entry sentinel.
 
-Omit `routes` and the edges are **derived** from `parallel_group` at run time, reproducing the ordering above exactly — so a pipeline authored before routes existed keeps working with nothing stored and nothing to migrate. Supply `routes` and they are used as given. The two are mutually exclusive: combining `routes` with any `parallel_group` is a 400, because silently ignoring the group would leave a pipeline that doesn't do what its JSON says.
+Omit `routes` and the edges are **derived** as a plain chain in array order: a bare step array is a sequence, nothing more, so a simple linear pipeline needs no routes and nothing to migrate. Supply `routes` and they are used as given.
 
 ```json
 {
@@ -435,7 +442,7 @@ A `scatter` block fans a step out over the paths of a shared workspace that matc
 }
 ```
 
-Under the hood the worker drives forge: `forge/resolve-paths` lists the matching paths (each becomes one leg, bound to `${scatter.path}`), `forge/create-volume` + `forge/volume-copy` clone the workspace per leg, the step's own action runs per leg on its clone, and `forge/volume-copy` gathers the owned `outputs` back into the base. Every leg is recorded as its own step run (`<name> [path=…]`), and the step's aggregated output is the JSON array of each leg's output. The per-leg clone volumes are scoped to the run and torn down with it. `scatter` is mutually exclusive with `matrix`/`parallel_group`, and requires an inline step action to run per leg.
+Under the hood the worker drives forge: `forge/resolve-paths` lists the matching paths (each becomes one leg, bound to `${scatter.path}`), `forge/create-volume` + `forge/volume-copy` clone the workspace per leg, the step's own action runs per leg on its clone, and `forge/volume-copy` gathers the owned `outputs` back into the base. Every leg is recorded as its own step run (`<name> [path=…]`), and the step's aggregated output is the JSON array of each leg's output. The per-leg clone volumes are scoped to the run and torn down with it. `scatter` is mutually exclusive with `matrix`, and requires an inline step action to run per leg.
 
 Fields: `volume` (base workspace, default `workspace`), `mount_path` (default `/workspace`), the path source — **exactly one of** `regex` (POSIX ERE scan of the workspace, with `mode` (`dir`/`file`) and `max_depth`) **or** `paths_from` (a `${...}` reference resolved at run time to the list directly — e.g. `${inputs.services}` or `${steps.discover.output}` — parsed like a matrix `values_from`: JSON array, or comma/whitespace-separated), `outputs` (owned paths unioned back — may reference `${scatter.path}`; empty = gather nothing), `size_mb`/`medium` (per-leg clone size), and `max_concurrent` (fan-out cap, like a matrix). Both path sources are substituted for `${inputs.*}`/`${steps.*}` before use; each resulting value is bound to `${scatter.path}` in one leg, which still runs on its own workspace clone.
 
@@ -457,8 +464,7 @@ When reading a single workflow (`GET /pipelines/{ref}`), the response enriches e
       "name": "run-forge",
       "action": "forge/run",
       "with": {"image": "alpine:3.19"},
-      "timeout": 300,
-      "parallel_group": null
+      "timeout": 300
     }
   ],
   "created_at": "...",

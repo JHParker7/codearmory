@@ -21,7 +21,7 @@ type stepDef struct {
 }
 
 // matrixConfig fans a step out into one execution per value in a list, binding
-// ${matrix.<var>} per execution. Mutually exclusive with parallel_group.
+// ${matrix.<var>} per execution.
 type matrixConfig struct {
 	Var        string   `json:"var"`
 	Values     []string `json:"values,omitempty"`
@@ -38,8 +38,8 @@ type matrixConfig struct {
 // its OWN clone of the workspace, and after all legs finish their declared owned
 // outputs are gathered back into the base as a disjoint union. The path set comes from
 // exactly one of regex (a workspace scan) or paths_from (a ${...} list from an input or
-// earlier step). Mirrors the workflows ScatterConfig; mutually exclusive with
-// matrix/parallel_group, and requires an inline step action.
+// earlier step). Mirrors the workflows ScatterConfig; mutually exclusive with matrix,
+// and requires an inline step action.
 type scatterConfig struct {
 	Volume        string   `json:"volume,omitempty"`     // base workspace volume; default "workspace"
 	MountPath     string   `json:"mount_path,omitempty"` // where the workspace mounts; default "/workspace"
@@ -713,17 +713,34 @@ Use "armory pipelines list actions" to see all registered catalog actions.
 
 DSL syntax — step names must match previously-created steps:
   armory pipelines create pipeline myrepo main push->unit_tests->deploy
+
+  # [a,b] runs a and b concurrently, then re-joins:
   armory pipelines create pipeline myrepo main "push->[unit_tests,security_scan]->deploy"
 
-JSON file (-f) — a step is a stored-step reference, an inline step, or a gate:
+  # [body]*<map-id> runs the body once per value of a map region:
+  armory pipelines create pipeline myrepo main "checkout->[build->test]*per-module" \
+    --map '{"id":"per-module","var":"module","values_from":"${steps.discover.output.MODULES}"}'
+
+Parallelism is the shape of the graph, not a field on a step: a bracket compiles to
+routes that fork and re-join. Author routes directly with -f for anything the one-line
+DSL cannot say (a join across non-adjacent steps, or a conditional edge).
+
+JSON file (-f) — a step is a stored-step reference, an inline step, or a gate;
+"routes" are the edges between them (omit for a plain sequence):
   {
     "name": "optional name",
     "steps": [
-      {"step_id": "<id>"},
+      {"step_id": "<id>", "name": "push"},
       {"action": "forge/run", "name": "build", "with": {"image": "alpine", "run": "make"}},
-      {"step_id": "<id>", "parallel_group": 0},
-      {"action": "forge/run", "name": "test", "with": {"run": "make test"}, "parallel_group": 0},
-      {"approval": {"message": "deploy to prod?"}}
+      {"action": "forge/run", "name": "test", "with": {"run": "make test"}},
+      {"approval": {"message": "deploy to prod?", "name": "gate"}}
+    ],
+    "routes": [
+      {"from": "push", "to": "build"},
+      {"from": "push", "to": "test"},
+      {"from": "build", "to": "gate"},
+      {"from": "test", "to": "gate"},
+      {"from": "gate", "to": "deploy", "when": "steps.build.status == 'completed'"}
     ]
   }
 
