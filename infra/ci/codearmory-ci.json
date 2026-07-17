@@ -13,6 +13,14 @@
     {
       "name": "HOOK_REPO",
       "default": ""
+    },
+    {
+      "name": "OUTPOST_ID",
+      "default": ""
+    },
+    {
+      "name": "DEPLOY_TARGET",
+      "default": ""
     }
   ],
   "steps": [
@@ -286,6 +294,19 @@
       }
     },
     {
+      "action": "outpost-gateway/deploy",
+      "name": "redeploy",
+      "timeout": 60,
+      "with": {
+        "id": "${inputs.OUTPOST_ID}",
+        "integration": "deploy",
+        "type": "rollout",
+        "payload": {
+          "deployment": "${inputs.DEPLOY_TARGET}"
+        }
+      }
+    },
+    {
       "action": "tickets/update",
       "name": "close-ticket",
       "timeout": 60,
@@ -396,6 +417,11 @@
       "from": "image-portal",
       "to": "fail-ticket",
       "when": "steps[\"image-portal\"].status == 'failed'"
+    },
+    {
+      "from": "image",
+      "to": "redeploy",
+      "when": "inputs.OUTPOST_ID != \"\" && inputs.DEPLOY_TARGET != \"\""
     }
   ]
 }

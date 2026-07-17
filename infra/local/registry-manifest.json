@@ -1279,54 +1279,6 @@
     ]
   },
   {
-    "name": "outpost-gateway",
-    "url": "http://outpost-gateway:8092",
-    "description": "Outpost-facing connection point for cluster integrations",
-    "forward_auth": true,
-    "service_key": "outpost-gateway-registry-local-secret",
-    "endpoints": [
-      {
-        "method": "POST",
-        "path": "/outposts",
-        "action": "createOutpost",
-        "resource": "outpost-gateway/outposts"
-      },
-      {
-        "method": "GET",
-        "path": "/outposts",
-        "action": "listOutpost",
-        "resource": "outpost-gateway/outposts"
-      },
-      {
-        "method": "GET",
-        "path": "/outposts/{id}",
-        "action": "getOutpost",
-        "resource": "outpost-gateway/outposts/{id}"
-      },
-      {
-        "method": "DELETE",
-        "path": "/outposts/{id}",
-        "action": "deleteOutpost",
-        "resource": "outpost-gateway/outposts/{id}"
-      }
-    ],
-    "default_grants": [
-      {
-        "grant_on": "user",
-        "actions": [
-          "createOutpost",
-          "listOutpost",
-          "getOutpost",
-          "deleteOutpost"
-        ],
-        "resources": [
-          "{username}/outpost-gateway/outposts",
-          "{username}/outpost-gateway/outposts/*"
-        ]
-      }
-    ]
-  },
-  {
     "name": "builder",
     "url": "http://builder:8095",
     "description": "Global service control plane (system admin only; manages the single global service baseline for the whole instance)",
@@ -1957,6 +1909,70 @@
         "resources": [
           "{username}/artifacts/artifacts",
           "{username}/artifacts/artifacts/*"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "outpost-gateway",
+    "url": "http://outpost-gateway:8092",
+    "description": "Outpost connection point + command/event backbone",
+    "forward_auth": true,
+    "service_key": "outpost-gateway-registry-local-secret",
+    "endpoints": [
+      {
+        "method": "POST",
+        "path": "/outposts",
+        "action": "createOutpost",
+        "resource": "outpost-gateway/outposts"
+      },
+      {
+        "method": "GET",
+        "path": "/outposts",
+        "action": "listOutpost",
+        "resource": "outpost-gateway/outposts"
+      },
+      {
+        "method": "GET",
+        "path": "/outposts/{id}",
+        "action": "getOutpost",
+        "resource": "outpost-gateway/outposts/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/outposts/{id}",
+        "action": "deleteOutpost",
+        "resource": "outpost-gateway/outposts/{id}"
+      },
+      {
+        "method": "POST",
+        "path": "/outposts/{id}/commands",
+        "action": "enqueueCommand",
+        "resource": "outpost-gateway/outposts/{id}"
+      }
+    ],
+    "actions": [
+      {
+        "name": "outpost-gateway/deploy",
+        "summary": "Enqueue a command to an outpost (e.g. redeploy a workload)",
+        "description": "Enqueues a command for an outpost the caller owns. With integration=deploy and type=rollout|set-image, redeploys a workload in the outpost's target cluster \u2014 the actuator that lets a pipeline redeploy without the control plane holding cluster credentials. Path {id} is the outpost id; body: {integration,type,payload}.",
+        "method": "POST",
+        "path": "/outposts/{id}/commands"
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": [
+          "createOutpost",
+          "listOutpost",
+          "getOutpost",
+          "deleteOutpost",
+          "enqueueCommand"
+        ],
+        "resources": [
+          "{username}/outpost-gateway/outposts",
+          "{username}/outpost-gateway/outposts/*"
         ]
       }
     ]

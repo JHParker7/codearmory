@@ -170,6 +170,7 @@ func buildMux() http.Handler {
 	mux.HandleFunc("GET /outposts", handleListOutposts)
 	mux.HandleFunc("GET /outposts/{id}", handleGetOutpost)
 	mux.HandleFunc("DELETE /outposts/{id}", handleDeleteOutpost)
+	mux.HandleFunc("POST /outposts/{id}/commands", handleEnqueueOutpostCommand)
 
 	// Outpost-facing (direct, outpost-key auth). Not routed through conductor.
 	mux.HandleFunc("POST /outpost/register", handleRegister)

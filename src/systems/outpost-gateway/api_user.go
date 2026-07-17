@@ -202,3 +202,80 @@ func markStale(out []Outpost) {
 		}
 	}
 }
+
+// userEnqueueRequest is the body of POST /outposts/{id}/commands — the user-facing,
+// gatekeeper-authed way to enqueue a command. Unlike the internal endpoint, the tenant
+// is NOT in the body: it is taken from the authenticated caller, so a workflow step can
+// trigger a redeploy with its run token and never assert someone else's identity.
+type userEnqueueRequest struct {
+	Integration string         `json:"integration"`
+	Type        string         `json:"type"`
+	Payload     map[string]any `json:"payload"`
+}
+
+// handleEnqueueOutpostCommand lets an authenticated caller (e.g. a workflow step)
+// enqueue a command for an outpost it owns. This is what lets CI trigger a redeploy
+// via outpost: the pipeline calls it as a catalog action with its run token, and the
+// gateway relays the command to the in-cluster outpost — the control plane still holds
+// no cluster credentials.
+func handleEnqueueOutpostCommand(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("outpost-gateway").Start(r.Context(), "handleEnqueueOutpostCommand")
+	defer span.End()
+
+	id := r.PathValue("id")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "enqueueCommand", "outpost-gateway/outposts/"+id)
+	if !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+
+	var req userEnqueueRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Integration == "" || req.Type == "" {
+		http.Error(w, "integration and type are required", http.StatusBadRequest)
+		return
+	}
+
+	o, err := getOutpost(ctx, id)
+	if err != nil {
+		if isNotFound(err) {
+			http.Error(w, "unknown outpost", http.StatusNotFound)
+			return
+		}
+		span.RecordError(err)
+		http.Error(w, "failed to look up outpost", http.StatusInternalServerError)
+		return
+	}
+	// The tenant is the authenticated caller — never a body field — so one tenant
+	// cannot drive another's outpost.
+	if !canAccessOutpost(o, userID, orgID) {
+		http.Error(w, "outpost does not belong to you", http.StatusForbidden)
+		return
+	}
+	if !outpostHasModule(o, req.Integration) {
+		http.Error(w, "outpost does not have the "+req.Integration+" module enabled", http.StatusConflict)
+		return
+	}
+
+	cmd := OutpostCommand{
+		ID:          uuid.New().String(),
+		OutpostID:   id,
+		Integration: req.Integration,
+		Type:        req.Type,
+		Payload:     req.Payload,
+		Status:      CmdPending,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := enqueueCommandDB(ctx, cmd); err != nil {
+		span.RecordError(err)
+		http.Error(w, "failed to enqueue command", http.StatusInternalServerError)
+		return
+	}
+	span.SetStatus(codes.Ok, "")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(cmd) //nolint:errcheck
+}
