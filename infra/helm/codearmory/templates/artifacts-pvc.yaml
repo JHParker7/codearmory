@@ -1,4 +1,4 @@
-{{- if and .Values.artifacts.enabled .Values.artifacts.storage.enabled }}
+{{- if and .Values.artifacts.enabled .Values.artifacts.storage.enabled (not .Values.artifacts.s3.enabled) }}
 {{- $fullname := include "codearmory.fullname" . }}
 # Blob storage for the artifact store. Artifacts exist precisely to OUTLIVE a run, so
 # unlike forge's run-scoped volumes this claim is never reaped — the whole point is

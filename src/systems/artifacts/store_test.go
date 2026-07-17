@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,12 +20,12 @@ func TestValidateName(t *testing.T) {
 	// A name becomes a path segment, so traversal and separators are a security
 	// boundary rather than a style preference.
 	bad := map[string]string{
-		"":              "required",
-		"../etc/passwd": "letters, digits",
-		"a/b":           "letters, digits",
-		"..":            "letters, digits",
-		".hidden":       "start alphanumeric",
-		"has space":     "letters, digits",
+		"":                                "required",
+		"../etc/passwd":                   "letters, digits",
+		"a/b":                             "letters, digits",
+		"..":                              "letters, digits",
+		".hidden":                         "start alphanumeric",
+		"has space":                       "letters, digits",
 		strings.Repeat("x", maxNameLen+1): "exceeds",
 	}
 	for n, want := range bad {
@@ -52,21 +54,22 @@ func TestSafeSegment_ContainsNoPathParts(t *testing.T) {
 	}
 }
 
-func TestBlobPath_StaysUnderDataDir(t *testing.T) {
-	t.Setenv("ARTIFACTS_DATA_DIR", "/data")
-	p := blobPath("../../root", "cache.tar")
+func TestFSStore_PathStaysUnderDataDir(t *testing.T) {
+	fs := newFSStore("/data")
+	// A crafted user id is hashed to a plain segment, so it cannot escape the dir even
+	// before name validation runs.
+	p := fs.path("../../root", "cache.tar")
 	if !strings.HasPrefix(filepath.Clean(p), "/data/") {
-		t.Fatalf("blobPath escaped the data dir: %s", p)
+		t.Fatalf("fsStore path escaped the data dir: %s", p)
 	}
 }
 
-func TestWriteBlob_RoundTrips(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("ARTIFACTS_DATA_DIR", dir)
-	body := strings.NewReader("hello cache")
-	size, digest, err := writeBlob("u1", "gocache", body, 1024)
+func TestFSStore_RoundTrips(t *testing.T) {
+	fs := newFSStore(t.TempDir())
+	ctx := context.Background()
+	size, digest, err := fs.Write(ctx, "u1", "gocache", strings.NewReader("hello cache"), 1024)
 	if err != nil {
-		t.Fatalf("writeBlob: %v", err)
+		t.Fatalf("Write: %v", err)
 	}
 	if size != 11 {
 		t.Errorf("size = %d, want 11", size)
@@ -74,13 +77,12 @@ func TestWriteBlob_RoundTrips(t *testing.T) {
 	if digest == "" {
 		t.Error("want a digest so a caller can skip a download it already has")
 	}
-	f, err := openBlob("u1", "gocache")
+	f, err := fs.Open(ctx, "u1", "gocache")
 	if err != nil {
-		t.Fatalf("openBlob: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	defer f.Close()
-	got := make([]byte, 11)
-	f.Read(got) //nolint:errcheck
+	got, _ := io.ReadAll(f)
 	if string(got) != "hello cache" {
 		t.Errorf("read back %q", got)
 	}
@@ -88,15 +90,16 @@ func TestWriteBlob_RoundTrips(t *testing.T) {
 
 // The limit is enforced as the body streams, because Content-Length is a claim: a
 // client that under-declares must still be stopped.
-func TestWriteBlob_StopsAtTheLimit(t *testing.T) {
+func TestFSStore_StopsAtTheLimit(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("ARTIFACTS_DATA_DIR", dir)
-	_, _, err := writeBlob("u1", "big", strings.NewReader(strings.Repeat("x", 100)), 10)
+	fs := newFSStore(dir)
+	ctx := context.Background()
+	_, _, err := fs.Write(ctx, "u1", "big", strings.NewReader(strings.Repeat("x", 100)), 10)
 	if !errors.Is(err, errOverQuota) {
 		t.Fatalf("err = %v, want errOverQuota", err)
 	}
 	// An over-quota upload must not leave the artifact — nor a temp file behind.
-	if _, err := openBlob("u1", "big"); !os.IsNotExist(err) {
+	if _, err := fs.Open(ctx, "u1", "big"); !os.IsNotExist(err) {
 		t.Error("a rejected upload left an artifact behind")
 	}
 	entries, _ := os.ReadDir(filepath.Join(dir, safeSegment("u1")))
@@ -105,11 +108,11 @@ func TestWriteBlob_StopsAtTheLimit(t *testing.T) {
 	}
 }
 
-// A body exactly at the limit is allowed: the boundary is inclusive, so a cache
-// sized to the quota still saves.
-func TestWriteBlob_ExactlyAtLimitSucceeds(t *testing.T) {
-	t.Setenv("ARTIFACTS_DATA_DIR", t.TempDir())
-	size, _, err := writeBlob("u1", "exact", strings.NewReader(strings.Repeat("x", 10)), 10)
+// A body exactly at the limit is allowed: the boundary is inclusive, so a cache sized
+// to the quota still saves.
+func TestFSStore_ExactlyAtLimitSucceeds(t *testing.T) {
+	fs := newFSStore(t.TempDir())
+	size, _, err := fs.Write(context.Background(), "u1", "exact", strings.NewReader(strings.Repeat("x", 10)), 10)
 	if err != nil {
 		t.Fatalf("a body exactly at the limit must succeed, got %v", err)
 	}
@@ -118,41 +121,62 @@ func TestWriteBlob_ExactlyAtLimitSucceeds(t *testing.T) {
 	}
 }
 
-// Replacing an artifact must not leave the old bytes: the file is renamed over.
-func TestWriteBlob_ReplaceIsAtomic(t *testing.T) {
-	t.Setenv("ARTIFACTS_DATA_DIR", t.TempDir())
-	if _, _, err := writeBlob("u1", "c", strings.NewReader("first-version"), 1024); err != nil {
+// Replacing an artifact must not leave the old bytes; a rejected replace must not
+// destroy the good one.
+func TestFSStore_ReplaceIsAtomic(t *testing.T) {
+	fs := newFSStore(t.TempDir())
+	ctx := context.Background()
+	if _, _, err := fs.Write(ctx, "u1", "c", strings.NewReader("first-version"), 1024); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := writeBlob("u1", "c", strings.NewReader("second"), 1024); err != nil {
+	if _, _, err := fs.Write(ctx, "u1", "c", strings.NewReader("second"), 1024); err != nil {
 		t.Fatal(err)
 	}
-	f, _ := openBlob("u1", "c")
-	defer f.Close()
-	buf := make([]byte, 32)
-	n, _ := f.Read(buf)
-	if string(buf[:n]) != "second" {
-		t.Errorf("read %q, want the replacement only", buf[:n])
+	f, _ := fs.Open(ctx, "u1", "c")
+	got, _ := io.ReadAll(f)
+	f.Close()
+	if string(got) != "second" {
+		t.Errorf("read %q, want the replacement only", got)
 	}
-
 	// A failed replace must leave the GOOD artifact in place, not a partial one.
-	if _, _, err := writeBlob("u1", "c", strings.NewReader(strings.Repeat("x", 99)), 5); !errors.Is(err, errOverQuota) {
+	if _, _, err := fs.Write(ctx, "u1", "c", strings.NewReader(strings.Repeat("x", 99)), 5); !errors.Is(err, errOverQuota) {
 		t.Fatalf("want errOverQuota, got %v", err)
 	}
-	f2, err := openBlob("u1", "c")
+	f2, err := fs.Open(ctx, "u1", "c")
 	if err != nil {
 		t.Fatal("a rejected replace destroyed the existing artifact")
 	}
-	defer f2.Close()
-	n, _ = f2.Read(buf)
-	if string(buf[:n]) != "second" {
-		t.Errorf("after a rejected replace the artifact is %q, want it untouched", buf[:n])
+	got2, _ := io.ReadAll(f2)
+	f2.Close()
+	if string(got2) != "second" {
+		t.Errorf("after a rejected replace the artifact is %q, want it untouched", got2)
 	}
 }
 
-func TestRemoveBlob_MissingIsNotAnError(t *testing.T) {
-	t.Setenv("ARTIFACTS_DATA_DIR", t.TempDir())
-	if err := removeBlob("u1", "never-existed"); err != nil {
+func TestFSStore_RemoveMissingIsNotAnError(t *testing.T) {
+	fs := newFSStore(t.TempDir())
+	if err := fs.Remove(context.Background(), "u1", "never-existed"); err != nil {
 		t.Errorf("removing a missing blob must be a no-op, got %v", err)
+	}
+}
+
+// The object key is the same layout for both backends: a hashed user segment and the
+// raw (validated) name, '/'-joined. This is what an S3 key and a filesystem path share.
+func TestObjectKey(t *testing.T) {
+	k := objectKey("user-a", "gocache")
+	if !strings.HasSuffix(k, "/gocache") || strings.Contains(k, "user-a") {
+		t.Errorf("objectKey = %q, want <hashed-user>/gocache", k)
+	}
+	if strings.Count(k, "/") != 1 {
+		t.Errorf("objectKey = %q, want exactly one separator", k)
+	}
+}
+
+// The S3 backend is selected by the presence of a bucket; without one, newS3Store
+// refuses rather than silently misbehaving.
+func TestNewS3Store_RequiresBucket(t *testing.T) {
+	t.Setenv("ARTIFACTS_S3_BUCKET", "")
+	if _, err := newS3Store(context.Background()); err == nil {
+		t.Error("newS3Store must require a bucket")
 	}
 }

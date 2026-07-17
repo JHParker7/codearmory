@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -11,12 +12,34 @@ import (
 	"strings"
 )
 
-// Blob storage: one file per artifact under DATA_DIR/<user_id>/<name>.
+// Blob storage. Two backends behind one interface:
 //
-// A plain filesystem rather than an object store because the deployment already
-// has a PVC to hand and the alternative is a new external dependency. The layout is
-// user-first so a user's tree can be sized, listed, or removed without touching the
-// database.
+//   - fsStore: one file per artifact under DATA_DIR/<user_id>/<name>. Simple, but a
+//     ReadWriteOnce PVC pins the whole store to ONE node/replica — fine for a single
+//     dev box, a bottleneck and a SPOF on a real multi-node cluster.
+//   - s3Store: an S3-compatible object store (MinIO, Ceph RGW, AWS). Shared across
+//     nodes, so the artifacts service scales to N replicas — this is the multi-node
+//     answer. See store_s3.go.
+//
+// The backend is chosen at startup from config (newBlobStore); everything above the
+// interface — quota accounting, the API, the name rules — is identical for both.
+
+// blobStore is the storage backend for artifact bytes. The database is the source of
+// truth for existence and size; this only moves the bytes.
+type blobStore interface {
+	// Write streams r to the user's artifact, enforcing `limit` bytes as it goes,
+	// returning the stored size and its sha256. A write that exceeds the limit, or
+	// otherwise fails, must not replace an existing good artifact.
+	Write(ctx context.Context, userID, name string, r io.Reader, limit int64) (size int64, digest string, err error)
+	// Open returns the artifact's bytes for reading. The caller closes it.
+	Open(ctx context.Context, userID, name string) (io.ReadCloser, error)
+	// Remove deletes the artifact. A missing blob is NOT an error — the row is the
+	// source of truth, and a half-deleted artifact must still delete cleanly.
+	Remove(ctx context.Context, userID, name string) error
+}
+
+// store is the process-wide backend, set once by newBlobStore in main.
+var store blobStore
 
 // nameRe constrains an artifact name. Names come from users and become PATH
 // SEGMENTS, so this is a security boundary, not a style rule: anything outside this
@@ -43,34 +66,36 @@ func validateName(name string) string {
 	return ""
 }
 
-// blobPath is where a user's artifact lives. Callers MUST have validated the name.
-func blobPath(userID, name string) string {
-	return filepath.Join(dataDir(), safeSegment(userID), name)
+// objectKey is a user's artifact key: "<hashed-user>/<name>". The same layout serves
+// as a filesystem path (fsStore) and an S3 object key (s3Store) — both use '/' as the
+// separator, and the name is already validated to contain none.
+func objectKey(userID, name string) string {
+	return safeSegment(userID) + "/" + name
 }
 
-// safeSegment makes a user id safe as a directory name. Ids are gatekeeper UUIDs,
+// safeSegment makes a user id safe as a path/key segment. Ids are gatekeeper UUIDs,
 // but this never trusts that: a crafted id must not be able to walk the tree.
 func safeSegment(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:8])
 }
 
-// writeBlob streams r to the user's artifact, enforcing `limit` as it goes and
-// returning the size and digest.
+// stageBlob streams r to a temporary file, enforcing `limit` as it copies and
+// computing the sha256. It returns the temp file path (caller must remove it), the
+// size, and the digest.
 //
-// The limit is checked DURING the copy, not after: trusting Content-Length would let
-// a client under-declare and write past the quota, and buffering the whole body to
-// measure it first would trade a disk overrun for a memory one. The write goes to a
-// temp file and is renamed on success, so a failed or over-quota upload cannot
-// replace a good artifact with a partial one.
-func writeBlob(userID, name string, r io.Reader, limit int64) (size int64, digest string, err error) {
-	dir := filepath.Dir(blobPath(userID, name))
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return 0, "", err
-	}
-	tmp, err := os.CreateTemp(dir, ".upload-*")
+// The limit is checked DURING the copy, not after: trusting Content-Length would let a
+// client under-declare and write past the quota, and buffering the whole body in
+// memory to measure it would trade a disk overrun for a memory one. Both backends
+// stage here first — fsStore then renames it into place; s3Store uploads it — so
+// neither can replace a good artifact with a partial one on failure or over-quota.
+//
+// The temp file lives in the OS temp dir (per-pod scratch), NOT the artifact store, so
+// staging does not reintroduce the shared-storage bottleneck for the s3 backend.
+func stageBlob(r io.Reader, limit int64) (path string, size int64, digest string, err error) {
+	tmp, err := os.CreateTemp("", "artifact-upload-*")
 	if err != nil {
-		return 0, "", err
+		return "", 0, "", err
 	}
 	tmpName := tmp.Name()
 	defer func() {
@@ -79,36 +104,56 @@ func writeBlob(userID, name string, r io.Reader, limit int64) (size int64, diges
 			os.Remove(tmpName)
 		}
 	}()
-
 	h := sha256.New()
 	// limit+1 so a body exactly at the limit succeeds and the first byte past it is
 	// still read — which is what makes "over quota" detectable rather than silently
 	// truncating at the boundary.
 	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(r, limit+1))
 	if err != nil {
-		return 0, "", err
+		return "", 0, "", err
 	}
 	if n > limit {
-		return n, "", errOverQuota
+		return "", n, "", errOverQuota
 	}
 	if err = tmp.Close(); err != nil {
-		return 0, "", err
+		return "", 0, "", err
 	}
-	if err = os.Rename(tmpName, blobPath(userID, name)); err != nil {
-		return 0, "", err
-	}
-	return n, hex.EncodeToString(h.Sum(nil)), nil
+	return tmpName, n, hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// openBlob opens an artifact for reading.
-func openBlob(userID, name string) (*os.File, error) {
-	return os.Open(blobPath(userID, name))
+// fsStore keeps blobs as files under a data directory.
+type fsStore struct{ dir string }
+
+func newFSStore(dir string) *fsStore { return &fsStore{dir: dir} }
+
+func (s *fsStore) path(userID, name string) string {
+	return filepath.Join(s.dir, safeSegment(userID), name)
 }
 
-// removeBlob deletes an artifact's file. A missing file is not an error: the row is
-// the source of truth, and a half-deleted artifact should still delete cleanly.
-func removeBlob(userID, name string) error {
-	err := os.Remove(blobPath(userID, name))
+func (s *fsStore) Write(_ context.Context, userID, name string, r io.Reader, limit int64) (int64, string, error) {
+	final := s.path(userID, name)
+	if err := os.MkdirAll(filepath.Dir(final), 0o750); err != nil {
+		return 0, "", err
+	}
+	tmp, size, digest, err := stageBlob(r, limit)
+	if err != nil {
+		return size, "", err
+	}
+	// Rename into place — atomic on the same filesystem, so a reader never sees a
+	// half-written blob and a good artifact is only replaced once the new one is whole.
+	if err := os.Rename(tmp, final); err != nil {
+		os.Remove(tmp) //nolint:errcheck
+		return 0, "", err
+	}
+	return size, digest, nil
+}
+
+func (s *fsStore) Open(_ context.Context, userID, name string) (io.ReadCloser, error) {
+	return os.Open(s.path(userID, name))
+}
+
+func (s *fsStore) Remove(_ context.Context, userID, name string) error {
+	err := os.Remove(s.path(userID, name))
 	if os.IsNotExist(err) {
 		return nil
 	}

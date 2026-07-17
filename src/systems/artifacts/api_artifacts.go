@@ -72,7 +72,7 @@ func handleDownloadArtifact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get artifact", http.StatusInternalServerError)
 		return
 	}
-	f, err := openBlob(userID, name)
+	f, err := store.Open(ctx, userID, name)
 	if err != nil {
 		// The row exists but the blob does not — the store and the DB have diverged.
 		// Report it rather than serving an empty body that looks like a valid cache.
@@ -136,7 +136,7 @@ func handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	size, digest, err := writeBlob(userID, name, r.Body, headroom)
+	size, digest, err := store.Write(ctx, userID, name, r.Body, headroom)
 	if errors.Is(err, errOverQuota) {
 		http.Error(w, quotaMsg(size, maxBytes, used-prevSize), http.StatusRequestEntityTooLarge)
 		return
@@ -158,7 +158,7 @@ func handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
 	if err := upsertArtifact(ctx, a); err != nil {
 		// The blob landed but the row did not: remove it rather than leaking bytes
 		// that count against nothing and can never be listed or deleted.
-		removeBlob(userID, name) //nolint:errcheck
+		store.Remove(ctx, userID, name) //nolint:errcheck
 		slog.ErrorContext(ctx, "record artifact", "user_id", userID, "name", name, "error", err)
 		http.Error(w, "failed to store artifact", http.StatusInternalServerError)
 		return
@@ -191,7 +191,7 @@ func handleDeleteArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	// Drop the row first: an orphaned blob wastes disk, but an orphaned ROW would
 	// keep charging the user's quota for bytes they can no longer reach.
-	if err := removeBlob(userID, name); err != nil {
+	if err := store.Remove(ctx, userID, name); err != nil {
 		slog.WarnContext(ctx, "artifact blob remove failed", "user_id", userID, "name", name, "error", err)
 	}
 	w.WriteHeader(http.StatusNoContent)

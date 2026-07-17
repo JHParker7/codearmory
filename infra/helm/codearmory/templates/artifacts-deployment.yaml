@@ -59,8 +59,37 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-artifacts
                   key: gatekeeper-service-key
+            {{- if .Values.artifacts.s3.enabled }}
+            # S3 object storage: shared across nodes, so artifacts can run >1 replica.
+            # This is what removes the single-node ReadWriteOnce pin — see values.yaml.
+            - name: ARTIFACTS_S3_BUCKET
+              value: {{ .Values.artifacts.s3.bucket | quote }}
+            {{- with .Values.artifacts.s3.endpoint }}
+            - name: ARTIFACTS_S3_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            - name: ARTIFACTS_S3_REGION
+              value: {{ .Values.artifacts.s3.region | quote }}
+            - name: ARTIFACTS_S3_FORCE_PATH_STYLE
+              value: {{ .Values.artifacts.s3.forcePathStyle | quote }}
+            {{- if .Values.artifacts.s3.accessKeySecret }}
+            # Static credentials from a Secret. Omit the secret to fall back to the
+            # default AWS credential chain (IRSA / instance profile) on real AWS.
+            - name: ARTIFACTS_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.artifacts.s3.accessKeySecret }}
+                  key: {{ .Values.artifacts.s3.accessKeySecretKey }}
+            - name: ARTIFACTS_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.artifacts.s3.secretKeySecret }}
+                  key: {{ .Values.artifacts.s3.secretKeySecretKey }}
+            {{- end }}
+            {{- else }}
             - name: ARTIFACTS_DATA_DIR
               value: {{ .Values.artifacts.storage.mountPath | quote }}
+            {{- end }}
             # The default per-user allowance. An admin overrides individual users at
             # runtime via PUT /artifacts/quotas/user/{id}; this is the fallback for
             # everyone who has no override.
@@ -68,8 +97,10 @@ spec:
               value: {{ .Values.artifacts.defaultQuotaMB | quote }}
             {{- include "codearmory.tls.envs" .Values.artifacts.tls | nindent 12 }}
           volumeMounts:
+            {{- if not .Values.artifacts.s3.enabled }}
             - name: data
               mountPath: {{ .Values.artifacts.storage.mountPath }}
+            {{- end }}
             {{- with (include "codearmory.tls.volumeMounts" .Values.artifacts.tls) }}
             {{- . | nindent 12 }}
             {{- end }}
@@ -86,6 +117,7 @@ spec:
           resources:
             {{- toYaml .Values.artifacts.resources | nindent 12 }}
       volumes:
+        {{- if not .Values.artifacts.s3.enabled }}
         - name: data
           {{- if .Values.artifacts.storage.enabled }}
           persistentVolumeClaim:
@@ -95,6 +127,7 @@ spec:
           # environment, useless as a cache — which is the point of the store.
           emptyDir: {}
           {{- end }}
+        {{- end }}
         {{- with (include "codearmory.tls.volumes" .Values.artifacts.tls) }}
         {{- . | nindent 8 }}
         {{- end }}

@@ -573,8 +573,28 @@ artifacts:
   # user at runtime (PUT /artifacts/quotas/user/{id}); this is the fallback for
   # everyone without an override. 0 blocks storage by default.
   defaultQuotaMB: 5120
+  # Object-storage backend. When enabled, blobs live in an S3-compatible store shared
+  # across nodes, so artifacts can run more than one replica — this removes the
+  # single-node ReadWriteOnce pin of the PVC below. Point it at MinIO or Ceph RGW
+  # (self-hosted S3) in a real environment; the PVC path is the single-node default.
+  s3:
+    enabled: false
+    bucket: ""
+    # Endpoint of a self-hosted S3 (empty = real AWS S3). e.g. http://minio:9000
+    endpoint: ""
+    region: us-east-1
+    # MinIO and Ceph RGW need path-style addressing (bucket in the path). Real AWS
+    # works either way; leave true unless you know you need virtual-host style.
+    forcePathStyle: "true"
+    # Static credentials, read from a Secret. Leave the secret name empty to use the
+    # default AWS credential chain (IRSA / instance profile) on real AWS.
+    accessKeySecret: ""
+    accessKeySecretKey: access-key
+    secretKeySecret: ""
+    secretKeySecretKey: secret-key
   storage:
-    # A PVC for the blobs. Disable ONLY for a throwaway environment: without it the
+    # A PVC for the blobs (ignored when s3.enabled). Disable ONLY for a throwaway
+    # environment: without it the
     # store is an emptyDir and every restart loses the cache, which defeats the point.
     enabled: true
     size: 20Gi

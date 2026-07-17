@@ -107,9 +107,24 @@ func main() {
 		defer shutdown(context.Background())
 	}
 
-	if err := os.MkdirAll(dataDir(), 0o750); err != nil {
-		slog.Error("cannot create artifact data dir", "dir", dataDir(), "error", err)
-		os.Exit(1)
+	// Choose the blob backend. An S3 bucket (ARTIFACTS_S3_BUCKET) selects object
+	// storage, which is shared across nodes and lets the service scale past one
+	// replica; otherwise the filesystem PVC, which is simplest but single-node.
+	if os.Getenv("ARTIFACTS_S3_BUCKET") != "" {
+		s3s, err := newS3Store(ctx)
+		if err != nil {
+			slog.Error("cannot initialise s3 artifact store", "error", err)
+			os.Exit(1)
+		}
+		store = s3s
+		slog.Info("artifact store: s3", "bucket", os.Getenv("ARTIFACTS_S3_BUCKET"), "endpoint", os.Getenv("ARTIFACTS_S3_ENDPOINT"))
+	} else {
+		if err := os.MkdirAll(dataDir(), 0o750); err != nil {
+			slog.Error("cannot create artifact data dir", "dir", dataDir(), "error", err)
+			os.Exit(1)
+		}
+		store = newFSStore(dataDir())
+		slog.Info("artifact store: filesystem", "dir", dataDir())
 	}
 	if err := migrate(); err != nil {
 		slog.Error("failed to migrate database", "error", err)
