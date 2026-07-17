@@ -11,7 +11,7 @@
 # to rotate. Forge marks it insecure for kaniko accordingly. It is NOT exposed outside
 # the cluster (ClusterIP) and is not a codearmory service: no registry manifest entry,
 # no routes, no RBAC — conductor never fronts it.
-{{- if .Values.registryMirror.storage.enabled }}
+{{- if and .Values.registryMirror.storage.enabled (not .Values.registryMirror.s3.enabled) }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -61,11 +61,15 @@ metadata:
     {{- include "codearmory.labels" . | nindent 4 }}
     app.kubernetes.io/component: registry-mirror
 spec:
-  replicas: 1
+  replicas: {{ .Values.registryMirror.replicaCount }}
+  {{- if not .Values.registryMirror.s3.enabled }}
   # The PVC is ReadWriteOnce, so two replicas could not mount it on different nodes.
   # Recreate avoids a rolling update deadlocking on the old pod holding the volume.
+  # With the S3 backend storage is shared, so neither restriction applies — the default
+  # RollingUpdate and replicaCount > 1 are fine.
   strategy:
     type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "codearmory.name" . }}
@@ -86,11 +90,47 @@ spec:
               containerPort: 5000
               protocol: TCP
           env:
+            {{- if .Values.registryMirror.s3.enabled }}
+            # S3 storage driver (registry:2 native). Shared object storage means the
+            # mirror is no longer pinned to one node by a ReadWriteOnce PVC, so it can
+            # scale to several replicas behind the Service. Point it at the same MinIO /
+            # Ceph RGW the artifacts store uses.
+            - name: REGISTRY_STORAGE
+              value: s3
+            - name: REGISTRY_STORAGE_S3_BUCKET
+              value: {{ .Values.registryMirror.s3.bucket | quote }}
+            - name: REGISTRY_STORAGE_S3_REGION
+              value: {{ .Values.registryMirror.s3.region | quote }}
+            {{- with .Values.registryMirror.s3.endpoint }}
+            - name: REGISTRY_STORAGE_S3_REGIONENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            - name: REGISTRY_STORAGE_S3_FORCEPATHSTYLE
+              value: {{ .Values.registryMirror.s3.forcePathStyle | quote }}
+            # http endpoints (in-cluster MinIO/Ceph) need secure=false.
+            - name: REGISTRY_STORAGE_S3_SECURE
+              value: {{ .Values.registryMirror.s3.secure | quote }}
+            {{- if .Values.registryMirror.s3.accessKeySecret }}
+            - name: REGISTRY_STORAGE_S3_ACCESSKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.registryMirror.s3.accessKeySecret }}
+                  key: {{ .Values.registryMirror.s3.accessKeySecretKey }}
+            - name: REGISTRY_STORAGE_S3_SECRETKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.registryMirror.s3.secretKeySecret }}
+                  key: {{ .Values.registryMirror.s3.secretKeySecretKey }}
+            {{- end }}
+            {{- else }}
             - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
               value: /var/lib/registry
+            {{- end }}
           volumeMounts:
+            {{- if not .Values.registryMirror.s3.enabled }}
             - name: data
               mountPath: /var/lib/registry
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /v2/
@@ -105,6 +145,7 @@ spec:
             periodSeconds: 20
           resources:
             {{- toYaml .Values.registryMirror.resources | nindent 12 }}
+      {{- if not .Values.registryMirror.s3.enabled }}
       volumes:
         - name: data
         {{- if .Values.registryMirror.storage.enabled }}
@@ -113,4 +154,5 @@ spec:
         {{- else }}
           emptyDir: {}
         {{- end }}
+      {{- end }}
 {{- end }}

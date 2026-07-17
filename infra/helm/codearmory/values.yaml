@@ -512,6 +512,25 @@ workflows:
 # than breaking builds.
 registryMirror:
   enabled: true
+  # 1 with the filesystem (RWO PVC) backend; raise it with the s3 backend, where storage
+  # is shared and the mirror can scale horizontally behind its Service.
+  replicaCount: 1
+  # S3 storage driver (registry:2 native). Shared object storage removes the single-node
+  # RWO pin, so the mirror can run multiple replicas. Point at the same MinIO / Ceph RGW
+  # the artifacts store uses. When enabled, the PVC below is not created.
+  s3:
+    enabled: false
+    bucket: ""
+    region: us-east-1
+    # Endpoint of a self-hosted S3 (empty = real AWS). e.g. http://minio:9000
+    endpoint: ""
+    forcePathStyle: "true"
+    # false for an http (in-cluster) endpoint; true for https.
+    secure: "false"
+    accessKeySecret: ""
+    accessKeySecretKey: access-key
+    secretKeySecret: ""
+    secretKeySecretKey: secret-key
   # A stock upstream registry; nothing codearmory-specific runs here.
   image:
     repository: public.ecr.aws/docker/library/registry
