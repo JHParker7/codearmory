@@ -139,7 +139,7 @@
             "mount_path": "/workspace"
           }
         ],
-        "run": "set -eu\ngit config --global --add safe.directory /workspace\ncd /workspace\nSHA=$(git rev-parse --short HEAD)\nSUBJECT=$(git log -1 --pretty=%s)\necho \"commit: $SHA \u2014 $SUBJECT\"\n"
+        "run": "set -eu\ngit config --global --add safe.directory /workspace\ncd /workspace\nSHA=$(git rev-parse --short HEAD)\nSUBJECT=$(git log -1 --pretty=%s)\necho \"commit: $SHA — $SUBJECT\"\n"
       }
     },
     {
@@ -147,7 +147,7 @@
       "name": "open-ticket",
       "timeout": 60,
       "with": {
-        "title": "codearmory-ci \u2014 ${steps.commit.output.SHA} ${steps.commit.output.SUBJECT}",
+        "title": "codearmory-ci — ${steps.commit.output.SHA} ${steps.commit.output.SUBJECT}",
         "description": "Automated CI for commit `${steps.commit.output.SHA}` on dev-2.\n\nRun: `${run_id}`",
         "status": "in_progress",
         "run_id": "${run_id}",
@@ -174,7 +174,7 @@
             "mount_path": "/workspace"
           }
         ],
-        "run": "set -eu\ngit config --global --add safe.directory /workspace\ncd /workspace\n# Files changed by this push (HEAD~1..HEAD). If there is no parent (first commit or\n# a shallow clone without one) CHANGED is empty, which the loops below read as\n# \"rebuild everything\" \u2014 a safe superset for the preview pipeline.\nif git rev-parse HEAD~1 >/dev/null 2>&1; then\n  CHANGED=$(git diff --name-only HEAD~1 HEAD)\nelse\n  CHANGED=\"\"\nfi\ncd /workspace/src\nMODULES=\"\"\nfor f in systems/*/go.mod cli/go.mod; do [ -f \"$f\" ] || continue; MODULES=\"$MODULES ${f%/go.mod}\"; done\nMODULES=\"${MODULES# }\"\n# IMAGES: services whose Dockerfile builds from their OWN dir AND whose sources this\n# push touched. portal-bff is excluded \u2014 its Dockerfile also COPYs portal/, so it needs\n# the parent context and gets its own step (gated by PORTAL below).\nchanged_dir() { [ -z \"$CHANGED\" ] && return 0; printf '%s\\n' \"$CHANGED\" | grep -q \"^src/$1/\"; }\nIMAGES=\"\"\nfor f in systems/*/Dockerfile; do\n  [ -f \"$f\" ] || continue\n  d=${f%/Dockerfile}; svc=${d#systems/}\n  [ \"$svc\" = \"portal-bff\" ] && continue\n  if changed_dir \"systems/$svc\"; then IMAGES=\"$IMAGES $svc\"; fi\ndone\nIMAGES=\"${IMAGES# }\"\n# PORTAL rebuilds when either the SPA (portal/) or its BFF (portal-bff/) changed.\nPORTAL=\"\"\nif changed_dir systems/portal || changed_dir systems/portal-bff; then PORTAL=\"1\"; fi\necho \"modules: $MODULES\"\necho \"changed: $(printf '%s' \"$CHANGED\" | tr '\\n' ' ')\"\necho \"images:  $IMAGES\"\necho \"portal:  $PORTAL\"\n"
+        "run": "set -eu\ngit config --global --add safe.directory /workspace\ncd /workspace\n# Files changed by this push (HEAD~1..HEAD). If there is no parent (first commit or\n# a shallow clone without one) CHANGED is empty, which the loops below read as\n# \"rebuild everything\" — a safe superset for the preview pipeline.\nif git rev-parse HEAD~1 >/dev/null 2>&1; then\n  CHANGED=$(git diff --name-only HEAD~1 HEAD)\nelse\n  CHANGED=\"\"\nfi\ncd /workspace/src\nMODULES=\"\"\nfor f in systems/*/go.mod cli/go.mod; do [ -f \"$f\" ] || continue; MODULES=\"$MODULES ${f%/go.mod}\"; done\nMODULES=\"${MODULES# }\"\n# IMAGES: services whose Dockerfile builds from their OWN dir AND whose sources this\n# push touched. portal-bff is excluded — its Dockerfile also COPYs portal/, so it needs\n# the parent context and gets its own step (gated by PORTAL below).\nchanged_dir() { [ -z \"$CHANGED\" ] && return 0; printf '%s\\n' \"$CHANGED\" | grep -q \"^src/$1/\"; }\nIMAGES=\"\"\nfor f in systems/*/Dockerfile; do\n  [ -f \"$f\" ] || continue\n  d=${f%/Dockerfile}; svc=${d#systems/}\n  [ \"$svc\" = \"portal-bff\" ] && continue\n  if changed_dir \"systems/$svc\"; then IMAGES=\"$IMAGES $svc\"; fi\ndone\nIMAGES=\"${IMAGES# }\"\n# PORTAL rebuilds when either the SPA (portal/) or its BFF (portal-bff/) changed.\nPORTAL=\"\"\nif changed_dir systems/portal || changed_dir systems/portal-bff; then PORTAL=\"1\"; fi\necho \"modules: $MODULES\"\necho \"changed: $(printf '%s' \"$CHANGED\" | tr '\\n' ' ')\"\necho \"images:  $IMAGES\"\necho \"portal:  $PORTAL\"\n"
       }
     },
     {
@@ -228,7 +228,7 @@
       "name": "image",
       "timeout": 2400,
       "with": {
-        "runner_class": "ci",
+        "runner_class": "xlarge",
         "timeout": 2400,
         "secret_refs": {
           "REGISTRY_AUTH": "secret:forgejo-registry-auth"
@@ -260,7 +260,7 @@
       "name": "image-portal",
       "timeout": 2400,
       "with": {
-        "runner_class": "ci",
+        "runner_class": "xlarge",
         "timeout": 2400,
         "secret_refs": {
           "REGISTRY_AUTH": "secret:forgejo-registry-auth"
@@ -288,7 +288,7 @@
       "timeout": 60,
       "with": {
         "id": "${steps.open-ticket.output.ticket_id}",
-        "body": "\u2705 **build + unit tests** passed for all modules."
+        "body": "✅ **build + unit tests** passed for all modules."
       }
     },
     {
@@ -297,7 +297,7 @@
       "timeout": 60,
       "with": {
         "id": "${steps.open-ticket.output.ticket_id}",
-        "body": "\u2705 **images** built and pushed to Forgejo: `192.168.53.171:3000/jp01/<svc>:${steps.commit.output.SHA}` (changed services only)."
+        "body": "✅ **images** built and pushed to Forgejo: `192.168.53.171:3000/jp01/<svc>:${steps.commit.output.SHA}` (changed services only)."
       }
     },
     {
