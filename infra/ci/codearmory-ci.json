@@ -202,6 +202,24 @@
       }
     },
     {
+      "action": "forge/run",
+      "name": "test-portal",
+      "timeout": 1200,
+      "with": {
+        "image": "node:22-alpine",
+        "runner_class": "large",
+        "timeout": 1200,
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "workspace",
+            "mount_path": "/workspace"
+          }
+        ],
+        "run": "set -eu\ncd /workspace/src/systems/portal\nnpm ci\nnpm test\n"
+      }
+    },
+    {
       "action": "forge/save-artifact",
       "name": "save-gocache",
       "timeout": 900,
@@ -391,11 +409,6 @@
     },
     {
       "from": "test",
-      "to": "image-portal",
-      "when": "steps.discover.json.PORTAL == \"1\""
-    },
-    {
-      "from": "test",
       "to": "track-tested"
     },
     {
@@ -430,6 +443,20 @@
       "from": "image",
       "to": "redeploy",
       "when": "inputs.OUTPOST_ID != \"\" && inputs.DEPLOY_TARGET != \"\""
+    },
+    {
+      "from": "discover",
+      "to": "test-portal",
+      "when": "steps.discover.json.PORTAL == \"1\""
+    },
+    {
+      "from": "test-portal",
+      "to": "image-portal"
+    },
+    {
+      "from": "test-portal",
+      "to": "fail-ticket",
+      "when": "steps[\"test-portal\"].status == 'failed'"
     }
   ]
 }
