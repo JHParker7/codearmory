@@ -91,9 +91,9 @@ type Execution struct {
 	// this back, so it is deliberately absent from claimPendingExecution's SELECT.
 	Resolve  *ResolveSpec `gorm:"column:resolve;type:jsonb;serializer:json" json:"resolve,omitempty"`
 	Status   string       `gorm:"column:status;not null;default:pending"                  json:"status"`
-	ExitCode *int       `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
-	Stdout   *string    `gorm:"column:stdout"                                           json:"stdout,omitempty"`
-	Stderr   *string    `gorm:"column:stderr"                                           json:"stderr,omitempty"`
+	ExitCode *int         `gorm:"column:exit_code"                                        json:"exit_code,omitempty"`
+	Stdout   *string      `gorm:"column:stdout"                                           json:"stdout,omitempty"`
+	Stderr   *string      `gorm:"column:stderr"                                           json:"stderr,omitempty"`
 	// MemoryUsedMB is the peak memory the run's container consumed, captured
 	// best-effort from the runtime (k8s metrics-server / docker stats). It is NULL
 	// when metrics are unavailable — most often a very short job a metrics-server

@@ -69,10 +69,10 @@ func TestArtifactCommand_Save(t *testing.T) {
 	}
 	s := cmd[2]
 	for _, want := range []string{
-		"cd /workspace",              // runs in the attached volume
-		"tar czf - cache",            // archives the requested path
-		"-X PUT",                     // uploads
-		"--data-binary @-",           // STREAMS: a multi-GB cache never lands on disk
+		"cd /workspace",    // runs in the attached volume
+		"tar czf - cache",  // archives the requested path
+		"-X PUT",           // uploads
+		"--data-binary @-", // STREAMS: a multi-GB cache never lands on disk
 		"Authorization: Bearer $ARTIFACTS_TOKEN",
 		"http://artifacts:8097/artifacts/gocache",
 		"--fail", // curl is silent on 4xx by default: without this a quota rejection would look like success
