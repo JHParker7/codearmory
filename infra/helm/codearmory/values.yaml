@@ -338,6 +338,11 @@ forge:
   # (gcr.io/kaniko-project/executor:debug).
   build:
     builderImage: ""
+    # Registries kaniko may talk to over plain HTTP (no TLS), in addition to the
+    # in-cluster mirror. List a private registry the CI pushes to when it has no
+    # trusted cert — e.g. a self-hosted Forgejo package registry: ["192.168.53.171:3000"].
+    # Empty in production, where registries should present TLS.
+    insecureRegistries: []
   # The forge/git-clone step (and any checkout-only execution that supplies no image)
   # runs on a forge-controlled minimal git image — users never pick or maintain one.
   # Empty = the runner-git image at this chart's imageRegistry and forge image tag

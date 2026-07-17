@@ -171,10 +171,6 @@ spec:
             {{- $mirror := printf "%s-registry-mirror:%v" (include "codearmory.fullname" .) (.Values.registryMirror.port | toString) }}
             - name: FORGE_REGISTRY_MAP
               value: {{ .Values.registryMirror.registryMap | replace "{{ mirror }}" $mirror | quote }}
-            # The mirror is plain HTTP (in-cluster, public images, no credentials), so
-            # kaniko must be told not to require TLS for it.
-            - name: FORGE_INSECURE_REGISTRIES
-              value: {{ $mirror | quote }}
             {{- if .Values.registryMirror.buildCache.enabled }}
             # Kaniko caches intermediate layers (the go-mod-download layer, mostly) to a
             # repo on the same mirror, so cache traffic stays in-cluster. Warms across
@@ -182,6 +178,21 @@ spec:
             - name: FORGE_BUILD_CACHE_REPO
               value: {{ printf "%s/%s" $mirror .Values.registryMirror.buildCache.repo | quote }}
             {{- end }}
+            {{- end }}
+            {{- /* Registries kaniko may reach over plain HTTP: the in-cluster mirror
+                   (public images, no creds) plus any operator-listed private registry —
+                   e.g. a self-hosted Forgejo the CI pushes preview images to. Combined
+                   into one env so an extra registry does not require the mirror. */ -}}
+            {{- $insecure := list -}}
+            {{- if and .Values.registryMirror.enabled .Values.registryMirror.registryMap }}
+            {{- $insecure = append $insecure (printf "%s-registry-mirror:%v" (include "codearmory.fullname" .) (.Values.registryMirror.port | toString)) -}}
+            {{- end -}}
+            {{- range .Values.forge.build.insecureRegistries }}
+            {{- $insecure = append $insecure . -}}
+            {{- end -}}
+            {{- if $insecure }}
+            - name: FORGE_INSECURE_REGISTRIES
+              value: {{ join "," $insecure | quote }}
             {{- end }}
             - name: FORGE_GIT_IMAGE
             {{- if .Values.forge.gitImage }}
