@@ -136,7 +136,7 @@ func main() {
 func buildModules(enabled []string) ([]Module, error) {
 	var needsK8s bool
 	for _, name := range enabled {
-		if name == "chaos" || name == "argo" {
+		if name == "chaos" || name == "argo" || name == "deploy" {
 			needsK8s = true
 		}
 	}
@@ -148,6 +148,8 @@ func buildModules(enabled []string) ([]Module, error) {
 			modules = append(modules, newChaosModule(dynClient))
 		case "argo":
 			modules = append(modules, newArgoModule(dynClient))
+		case "deploy":
+			modules = append(modules, newDeployModule(dynClient))
 		default:
 			slog.Warn("outpost: ignoring unknown module", "module", name)
 		}
