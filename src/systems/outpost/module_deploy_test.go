@@ -3,7 +3,40 @@ package main
 import (
 	"context"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
+
+// TestDeployModule_SetImageIgnoreMissing: against a cluster with no such deployment,
+// set-image errors by default but returns a skip event when ignore_missing is set —
+// the behaviour a CI redeploy relies on when fanning out over services that may have
+// no control-plane Deployment.
+func TestDeployModule_SetImageIgnoreMissing(t *testing.T) {
+	ctx := context.Background()
+	newMod := func() *deployModule {
+		return &deployModule{client: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), defaultNS: "codearmory"}
+	}
+
+	// Default: a missing deployment is a hard error.
+	_, err := newMod().HandleCommand(ctx, Command{Type: "set-image", Payload: map[string]any{
+		"deployment": "ca-codearmory-ghost", "image": "reg/ghost:v1",
+	}})
+	if err == nil {
+		t.Fatal("set-image on a missing deployment must error without ignore_missing")
+	}
+
+	// ignore_missing: skip with an event, no error.
+	events, err := newMod().HandleCommand(ctx, Command{Type: "set-image", Payload: map[string]any{
+		"deployment": "ca-codearmory-ghost", "image": "reg/ghost:v1", "ignore_missing": true,
+	}})
+	if err != nil {
+		t.Fatalf("ignore_missing set-image on a missing deployment must not error: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != "image-skipped" {
+		t.Fatalf("want a single image-skipped event, got %+v", events)
+	}
+}
 
 func TestDeployModule_Name(t *testing.T) {
 	if newDeployModule(nil).Name() != "deploy" {

@@ -51,6 +51,16 @@ func payloadString(p map[string]any, key string) string {
 	return ""
 }
 
+// payloadBool reads a bool field defensively, treating a missing or non-bool value
+// as false.
+func payloadBool(p map[string]any, key string) bool {
+	if p == nil {
+		return false
+	}
+	v, _ := p[key].(bool)
+	return v
+}
+
 // payloadStringMap reads a map[string]string field (JSON-decoded as
 // map[string]any) defensively.
 func payloadStringMap(p map[string]any, key string) map[string]string {

@@ -16,11 +16,7 @@
     },
     {
       "name": "OUTPOST_ID",
-      "default": ""
-    },
-    {
-      "name": "DEPLOY_TARGET",
-      "default": ""
+      "default": "b38de6c5-6393-4dd2-aa93-b1ec5cf1bb86"
     }
   ],
   "steps": [
@@ -301,6 +297,21 @@
       }
     },
     {
+      "action": "outpost-gateway/enqueueCommand",
+      "name": "redeploy-portal",
+      "timeout": 120,
+      "with": {
+        "id": "${inputs.OUTPOST_ID}",
+        "integration": "deploy",
+        "type": "set-image",
+        "payload": {
+          "deployment": "ca-codearmory-portal",
+          "image": "192.168.53.171:3000/jp01/portal:${steps.commit.output.SHA}",
+          "ignore_missing": true
+        }
+      }
+    },
+    {
       "action": "tickets/comment",
       "name": "track-tested",
       "timeout": 60,
@@ -319,16 +330,23 @@
       }
     },
     {
-      "action": "outpost-gateway/deploy",
+      "action": "outpost-gateway/enqueueCommand",
       "name": "redeploy",
-      "timeout": 60,
+      "timeout": 120,
       "with": {
         "id": "${inputs.OUTPOST_ID}",
         "integration": "deploy",
-        "type": "rollout",
+        "type": "set-image",
         "payload": {
-          "deployment": "${inputs.DEPLOY_TARGET}"
+          "deployment": "ca-codearmory-${matrix.svc}",
+          "image": "192.168.53.171:3000/jp01/${matrix.svc}:${steps.commit.output.SHA}",
+          "ignore_missing": true
         }
+      },
+      "matrix": {
+        "var": "svc",
+        "values_from": "${steps.discover.output.IMAGES}",
+        "max_concurrent": 2
       }
     },
     {
@@ -440,11 +458,6 @@
       "when": "steps[\"image-portal\"].status == 'failed'"
     },
     {
-      "from": "image",
-      "to": "redeploy",
-      "when": "inputs.OUTPOST_ID != \"\" && inputs.DEPLOY_TARGET != \"\""
-    },
-    {
       "from": "discover",
       "to": "test-portal",
       "when": "steps.discover.json.PORTAL == \"1\""
@@ -457,6 +470,16 @@
       "from": "test-portal",
       "to": "fail-ticket",
       "when": "steps[\"test-portal\"].status == 'failed'"
+    },
+    {
+      "from": "image",
+      "to": "redeploy",
+      "when": "inputs.OUTPOST_ID != \"\""
+    },
+    {
+      "from": "image-portal",
+      "to": "redeploy-portal",
+      "when": "inputs.OUTPOST_ID != \"\""
     }
   ]
 }

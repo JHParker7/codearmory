@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -111,14 +112,34 @@ func (m *deployModule) setImage(ctx context.Context, c Command) ([]Event, error)
 		return nil, fmt.Errorf("deploy: set-image requires deployment and image")
 	}
 	ns := m.namespace(c)
+	// ignore_missing lets a caller (e.g. a CI redeploy fanning out over every changed
+	// service) target a deployment that may not exist in this cluster — a changed
+	// service with no control-plane Deployment (an agent, a sidecar) — and get a
+	// "skipped" event instead of a hard failure that would fail the whole run.
+	ignoreMissing := payloadBool(c.Payload, "ignore_missing")
+
+	// Fetch the deployment up front: it resolves the sole container when the caller
+	// gave none, and lets a NotFound be handled as skip-or-error in one place.
+	dep, err := m.client.Resource(deploymentGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) && ignoreMissing {
+			slog.Info("deploy: set-image skipped (deployment absent)", "namespace", ns, "deployment", name, "image", image)
+			return []Event{{
+				Integration: "deploy",
+				Type:        "image-skipped",
+				Payload:     map[string]any{"deployment": name, "namespace": ns, "image": image, "reason": "deployment not found"},
+			}}, nil
+		}
+		return nil, fmt.Errorf("deploy: get %s/%s: %w", ns, name, err)
+	}
 
 	container := payloadString(c.Payload, "container")
 	if container == "" {
 		// Default to the sole container when unambiguous; otherwise the caller must
 		// say which one, since a strategic merge is keyed on the container name.
-		resolved, err := m.soleContainer(ctx, ns, name)
-		if err != nil {
-			return nil, err
+		resolved, rerr := soleContainerOf(dep.Object, ns, name)
+		if rerr != nil {
+			return nil, rerr
 		}
 		container = resolved
 	}
@@ -147,15 +168,12 @@ func (m *deployModule) setImage(ctx context.Context, c Command) ([]Event, error)
 	}}, nil
 }
 
-// soleContainer returns the deployment's container name when it has exactly one, so
+// soleContainerOf returns the deployment's container name when it has exactly one, so
 // set-image can omit `container` for the common single-container case. It errors on
-// zero or many, because a strategic merge without a name is ambiguous.
-func (m *deployModule) soleContainer(ctx context.Context, ns, name string) (string, error) {
-	dep, err := m.client.Resource(deploymentGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("deploy: get %s/%s: %w", ns, name, err)
-	}
-	containers, found, err := unstructuredContainers(dep.Object)
+// zero or many, because a strategic merge without a name is ambiguous. It operates on
+// an already-fetched Deployment object so set-image does a single Get.
+func soleContainerOf(obj map[string]any, ns, name string) (string, error) {
+	containers, found, err := unstructuredContainers(obj)
 	if err != nil || !found {
 		return "", fmt.Errorf("deploy: %s/%s has no readable containers", ns, name)
 	}
