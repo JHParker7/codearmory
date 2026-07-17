@@ -119,13 +119,16 @@ func (r tuiRun) triggeredByLabel() string {
 }
 
 type tuiStepRun struct {
-	StepRunID     string  `json:"step_run_id"`
-	RunID         string  `json:"run_id"`
-	StepIndex     int     `json:"step_index"`
-	StepName      string  `json:"step_name"`
-	ParallelGroup *int    `json:"parallel_group"`
-	Status        string  `json:"status"`
-	Output        *string `json:"output"`
+	StepRunID string `json:"step_run_id"`
+	RunID     string `json:"run_id"`
+	StepIndex int    `json:"step_index"`
+	StepName  string `json:"step_name"`
+	// stage is COMPUTED, not sent: the run record carries no grouping, and neither
+	// does the definition any more. It is each step's rank in the pipeline's route
+	// graph (see tuiRanks), filled in by tuiAnnotateStages.
+	stage  *int
+	Status string  `json:"status"`
+	Output *string `json:"output"`
 	// Logs is the step's stdout, captured on success for display (distinct from
 	// Output, the consumable captured outputs). See workflows' WorkflowStepRun.Logs.
 	Logs          *string    `json:"logs"`
@@ -140,18 +143,25 @@ type tuiRunFull struct {
 	StepRuns []tuiStepRun `json:"step_runs"`
 }
 
-// tuiWorkflowStep is one step of a pipeline definition. ParallelGroup is the only
-// place parallelism is recorded: steps sharing the same non-nil group run
-// concurrently. The run record carries no grouping, so the run-detail view
-// derives it from the definition (see tuiAnnotateParallelGroups).
+// tuiWorkflowStep is one step of a pipeline definition.
+//
+// Parallelism is NOT a field on a step — it is the shape of the pipeline's routes.
+// Two steps run concurrently when neither can reach the other, which the diagram
+// reads off as a shared rank (tuiRanks). The run record carries no grouping either,
+// so the run-detail view derives stages from the definition's routes
+// (tuiAnnotateStages).
 type tuiWorkflowStep struct {
-	StepID        string         `json:"step_id"`
-	Name          string         `json:"name"`
-	Action        string         `json:"action"`
-	With          map[string]any `json:"with,omitempty"`
-	ParallelGroup *int           `json:"parallel_group"`
-	Matrix        *matrixConfig  `json:"matrix,omitempty"`
-	Approval      *approvalGate  `json:"approval,omitempty"`
+	StepID string         `json:"step_id"`
+	Name   string         `json:"name"`
+	Action string         `json:"action"`
+	With   map[string]any `json:"with,omitempty"`
+	Matrix *matrixConfig  `json:"matrix,omitempty"`
+	// MapID names the map region this step belongs to, if any: the region's body
+	// runs once per value. The DSL writes it as "[body]*<map-id>".
+	MapID    string        `json:"map_id,omitempty"`
+	Approval *approvalGate `json:"approval,omitempty"`
+	// stage is the computed rank (see tuiRanks); nil when it could not be derived.
+	stage *int
 }
 
 // tuiPipelineDef is the subset of a pipeline (GET /pipelines/{id}) the run-detail
@@ -159,6 +169,72 @@ type tuiWorkflowStep struct {
 type tuiPipelineDef struct {
 	WorkflowID string            `json:"workflow_id"`
 	Steps      []tuiWorkflowStep `json:"steps"`
+	// Routes are the edges. Empty means a plain sequence (the backend derives a
+	// chain in array order), which is exactly what tuiRanks assumes for an empty
+	// route list — so an old linear pipeline still draws as a linear pipeline.
+	Routes []workflowRoute `json:"routes,omitempty"`
+}
+
+// tuiRanks assigns each step its stage: the longest distance from an entry node over
+// the pipeline's routes. Two steps share a rank precisely when neither can reach the
+// other, i.e. when they can run concurrently — which is what the diagram draws as one
+// bracketed stage.
+//
+// This replaces the old "consecutive steps sharing a parallel_group" rule, and is
+// strictly more general: it groups a fork correctly no matter where its branches sit
+// in the array, which a positional run-length field could never do.
+//
+// An empty route list means the pipeline is a plain sequence, so each step is its own
+// stage. Returns nil if the graph has a cycle (the API rejects those, so this only
+// guards against a definition we cannot make sense of — better ungrouped than wrong).
+func tuiRanks(steps []tuiWorkflowStep, routes []workflowRoute) []int {
+	rank := make([]int, len(steps))
+	if len(routes) == 0 {
+		for i := range rank {
+			rank[i] = i
+		}
+		return rank
+	}
+	idx := make(map[string]int, len(steps))
+	for i, st := range steps {
+		idx[st.Name] = i
+	}
+	indeg := make([]int, len(steps))
+	adj := make([][]int, len(steps))
+	for _, r := range routes {
+		f, okF := idx[r.From]
+		t, okT := idx[r.To]
+		if !okF || !okT {
+			continue
+		}
+		adj[f] = append(adj[f], t)
+		indeg[t]++
+	}
+	var q []int
+	for i := range steps {
+		if indeg[i] == 0 {
+			q = append(q, i)
+		}
+	}
+	seen := 0
+	for len(q) > 0 {
+		n := q[0]
+		q = q[1:]
+		seen++
+		for _, m := range adj[n] {
+			if rank[n]+1 > rank[m] {
+				rank[m] = rank[n] + 1
+			}
+			indeg[m]--
+			if indeg[m] == 0 {
+				q = append(q, m)
+			}
+		}
+	}
+	if seen != len(steps) {
+		return nil
+	}
+	return rank
 }
 
 // ── View states ───────────────────────────────────────────────────────────────
@@ -432,7 +508,7 @@ func tuiFetchAnnotatedRun(runID string, cachedSteps []tuiWorkflowStep) (*tuiRunF
 	}
 	// triggered_by is a user_id; resolve it to a username for the detail view.
 	r.triggeredByName = tuiResolveName("triggered_by", r.TriggeredBy)
-	steps := tuiAnnotateParallelGroups(&r, cachedSteps)
+	steps := tuiAnnotateStages(&r, cachedSteps)
 	return &r, steps, nil
 }
 
@@ -517,20 +593,20 @@ func (m tuiModel) tuiEnsureRunDiagram(refreshActive bool) tea.Cmd {
 	return tuiFetchRunPreview(r.RunID, m.pipeDefs[r.WorkflowID])
 }
 
-// tuiAnnotateParallelGroups best-effort enriches a run from its pipeline
-// definition: it fills each step run's ParallelGroup (the run record stores no
-// grouping — only the definition does, via steps[].parallel_group, in step_index
-// order) and synthesises pending entries for steps the run has not reached yet
+// tuiAnnotateStages best-effort enriches a run from its pipeline
+// definition: it fills each step run's stage (neither the run record nor the
+// definition stores grouping — it is derived from the definition's routes, in
+// step_index order) and synthesises pending entries for steps the run has not reached yet
 // (see tuiFillPendingSteps) so the live diagram shows the whole plan. Any failure
 // (no workflow id, def fetch/parse error, or the pipeline was edited since the
-// run so step names no longer line up) leaves groups nil and falls back to
+// run so step names no longer line up) leaves stages nil and falls back to
 // whatever step runs the API returned, ungrouped.
 // cachedSteps, when non-nil, supplies the pipeline definition so the function
 // skips the GET /pipelines/{id} round-trip — the definition is immutable, so on
 // auto-refresh ticks it should be reused from m.pipeDefs rather than refetched.
 // Returns the step definition it used (cached or freshly fetched), or nil on
 // failure, so the caller can cache it for subsequent ticks.
-func tuiAnnotateParallelGroups(r *tuiRunFull, cachedSteps []tuiWorkflowStep) []tuiWorkflowStep {
+func tuiAnnotateStages(r *tuiRunFull, cachedSteps []tuiWorkflowStep) []tuiWorkflowStep {
 	if r.WorkflowID == "" {
 		return nil
 	}
@@ -545,6 +621,14 @@ func tuiAnnotateParallelGroups(r *tuiRunFull, cachedSteps []tuiWorkflowStep) []t
 			return nil
 		}
 		steps = def.Steps
+		// Rank once, here, and hang the result on the steps: the returned slice is
+		// what the caller caches, so auto-refresh ticks reuse the ranks rather than
+		// recomputing them (and never need the routes again).
+		if ranks := tuiRanks(steps, def.Routes); ranks != nil {
+			for i := range steps {
+				steps[i].stage = &ranks[i]
+			}
+		}
 	}
 	for i := range r.StepRuns {
 		idx := r.StepRuns[i].StepIndex
@@ -557,7 +641,7 @@ func tuiAnnotateParallelGroups(r *tuiRunFull, cachedSteps []tuiWorkflowStep) []t
 		if ds.Name != "" && ds.Name != r.StepRuns[i].StepName {
 			continue
 		}
-		r.StepRuns[i].ParallelGroup = ds.ParallelGroup
+		r.StepRuns[i].stage = ds.stage
 	}
 	tuiFillPendingSteps(r, steps)
 	return steps
@@ -591,11 +675,11 @@ func tuiFillPendingSteps(r *tuiRunFull, def []tuiWorkflowStep) {
 			continue
 		}
 		r.StepRuns = append(r.StepRuns, tuiStepRun{
-			RunID:         r.RunID,
-			StepIndex:     i,
-			StepName:      ds.Name,
-			ParallelGroup: ds.ParallelGroup,
-			Status:        "pending",
+			RunID:     r.RunID,
+			StepIndex: i,
+			StepName:  ds.Name,
+			stage:     ds.stage,
+			Status:    "pending",
 		})
 	}
 	sort.SliceStable(r.StepRuns, func(a, b int) bool {
@@ -959,11 +1043,14 @@ func ciSubmitSavePipeline(editID, name, desc, dsl string) tea.Cmd {
 		if err != nil {
 			return tuiFormErrMsg{err}
 		}
-		refs, err := dslToRefs(nodes)
+		refs, rts, err := dslToRefs(nodes)
 		if err != nil {
 			return tuiFormErrMsg{err}
 		}
 		payload := map[string]any{"name": name, "steps": refs}
+		if len(rts) > 0 {
+			payload["routes"] = rts
+		}
 		if desc != "" {
 			payload["description"] = desc
 		}
@@ -1055,19 +1142,22 @@ func dslStepToken(s tuiWorkflowStep) string {
 }
 
 // stepsToDSL renders an ordered step list back into the pipeline DSL, collapsing
-// consecutive steps that share a parallel group into "[a,b]" segments and appending
-// each step's per-occurrence git repo as "name@repo" — the inverse of parseDSL.
+// consecutive steps that share a stage into "[a,b]" segments and appending each
+// step's per-occurrence git repo as "name@repo" — the inverse of parseDSL.
+//
+// Steps must carry their stage (tuiAnnotateStages); without it every step renders as
+// its own segment, which is a plain sequence — the safe reading when we cannot tell.
 func stepsToDSL(steps []tuiWorkflowStep) string {
 	var segs []string
 	for i := 0; i < len(steps); {
-		g := steps[i].ParallelGroup
+		g := steps[i].stage
 		if g == nil {
 			segs = append(segs, dslStepToken(steps[i]))
 			i++
 			continue
 		}
 		var names []string
-		for i < len(steps) && steps[i].ParallelGroup != nil && *steps[i].ParallelGroup == *g {
+		for i < len(steps) && steps[i].stage != nil && *steps[i].stage == *g {
 			names = append(names, dslStepToken(steps[i]))
 			i++
 		}
@@ -1566,11 +1656,11 @@ func tuiStepRunContent(sr tuiStepRun) string {
 // group (a parallel batch — its members each carry a distinct step index) or
 // share a step index (a matrix fan-out — every combination of one matrix step is
 // recorded under that step's single index, with a "[var=val]" name suffix).
-// Sequential steps have distinct indices and no shared group, so they never
-// group. Comparing against the batch's first run (not its previous one) matches
-// how a parallel group is defined by a single shared value.
+// Sequential steps have distinct indices and distinct stages, so they never group.
+// Comparing against the batch's first run (not its previous one) matches how a stage
+// is defined by a single shared rank.
 func tuiSameStage(a, b tuiStepRun) bool {
-	if a.ParallelGroup != nil && b.ParallelGroup != nil && *a.ParallelGroup == *b.ParallelGroup {
+	if a.stage != nil && b.stage != nil && *a.stage == *b.stage {
 		return true
 	}
 	return a.StepIndex == b.StepIndex
@@ -1672,8 +1762,8 @@ func tuiPipelineStages(steps []tuiWorkflowStep) [][]string {
 	var stages [][]string
 	for i := 0; i < len(steps); {
 		j := i + 1
-		if g := steps[i].ParallelGroup; g != nil {
-			for j < len(steps) && steps[j].ParallelGroup != nil && *steps[j].ParallelGroup == *g {
+		if g := steps[i].stage; g != nil {
+			for j < len(steps) && steps[j].stage != nil && *steps[j].stage == *g {
 				j++
 			}
 		}
@@ -1912,11 +2002,11 @@ func tuiRunCompactFlow(batches [][]tuiStepRun, width int) string {
 	return joined
 }
 
-// tuiRunHasParallel reports whether any two consecutive step runs share a non-nil
-// parallel group, i.e. the run contains a parallel batch worth a legend.
+// tuiRunHasParallel reports whether any two consecutive step runs share a stage,
+// i.e. the run contains a concurrent batch worth a legend.
 func tuiRunHasParallel(stepRuns []tuiStepRun) bool {
 	for i := 0; i+1 < len(stepRuns); i++ {
-		a, b := stepRuns[i].ParallelGroup, stepRuns[i+1].ParallelGroup
+		a, b := stepRuns[i].stage, stepRuns[i+1].stage
 		if a != nil && b != nil && *a == *b {
 			return true
 		}

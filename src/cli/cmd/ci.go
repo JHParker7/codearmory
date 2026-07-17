@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -40,12 +41,12 @@ type matrixConfig struct {
 // earlier step). Mirrors the workflows ScatterConfig; mutually exclusive with
 // matrix/parallel_group, and requires an inline step action.
 type scatterConfig struct {
-	Volume        string   `json:"volume,omitempty"`      // base workspace volume; default "workspace"
-	MountPath     string   `json:"mount_path,omitempty"`  // where the workspace mounts; default "/workspace"
-	Regex         string   `json:"regex,omitempty"`       // regex source: POSIX ERE scan of the workspace
-	Mode          string   `json:"mode,omitempty"`        // "dir" (default) | "file"
-	MaxDepth      int      `json:"max_depth,omitempty"`   // find -maxdepth; 0/unset = unlimited
-	PathsFrom     string   `json:"paths_from,omitempty"`  // list source: ${...} ref (input/step output), mutually exclusive with regex
+	Volume        string   `json:"volume,omitempty"`     // base workspace volume; default "workspace"
+	MountPath     string   `json:"mount_path,omitempty"` // where the workspace mounts; default "/workspace"
+	Regex         string   `json:"regex,omitempty"`      // regex source: POSIX ERE scan of the workspace
+	Mode          string   `json:"mode,omitempty"`       // "dir" (default) | "file"
+	MaxDepth      int      `json:"max_depth,omitempty"`  // find -maxdepth; 0/unset = unlimited
+	PathsFrom     string   `json:"paths_from,omitempty"` // list source: ${...} ref (input/step output), mutually exclusive with regex
 	Outputs       []string `json:"outputs,omitempty"`    // owned paths gathered back; may ref ${scatter.path}
 	SizeMB        int64    `json:"size_mb,omitempty"`    // per-leg clone volume size
 	Medium        string   `json:"medium,omitempty"`     // "memory" (default) | "disk"
@@ -70,15 +71,26 @@ type approvalGate struct {
 // the DSL's `name@repo` syntax). For an inline step, Name is the step name, With is
 // its full config, and Timeout is the per-step timeout.
 type workflowStepRef struct {
-	StepID        string         `json:"step_id,omitempty"`
-	Action        string         `json:"action,omitempty"`
-	Timeout       int64          `json:"timeout,omitempty"`
-	Name          string         `json:"name,omitempty"`
-	With          map[string]any `json:"with,omitempty"`
-	ParallelGroup *int           `json:"parallel_group,omitempty"`
-	Matrix        *matrixConfig  `json:"matrix,omitempty"`
-	Scatter       *scatterConfig `json:"scatter,omitempty"`
-	Approval      *approvalGate  `json:"approval,omitempty"`
+	StepID  string         `json:"step_id,omitempty"`
+	Action  string         `json:"action,omitempty"`
+	Timeout int64          `json:"timeout,omitempty"`
+	Name    string         `json:"name,omitempty"`
+	With    map[string]any `json:"with,omitempty"`
+	Matrix  *matrixConfig  `json:"matrix,omitempty"`
+	Scatter *scatterConfig `json:"scatter,omitempty"`
+	// MapID puts this step inside the named map region: the region's body runs once
+	// per value. The region's own definition (var, values, volume) comes from --map.
+	MapID    string        `json:"map_id,omitempty"`
+	Approval *approvalGate `json:"approval,omitempty"`
+}
+
+// workflowRoute is a directed edge between two steps, by name. Routes are how a
+// pipeline expresses a fork or a join — two edges out of one step run it two ways.
+// A pipeline with no routes is a plain sequence.
+type workflowRoute struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	When string `json:"when,omitempty"`
 }
 
 // gitCloneEnv is the env var a per-step git repo is injected as. forge resolves the
@@ -143,14 +155,61 @@ type pipelineFile struct {
 	Steps       []workflowStepRef   `json:"steps,omitempty"`
 	Inputs      []pipelineInputDef  `json:"inputs,omitempty"`
 	Outputs     []pipelineOutputDef `json:"outputs,omitempty"`
+	// Routes are the edges between steps — omit for a plain sequence. Maps declare
+	// the map regions steps join via map_id.
+	Routes []workflowRoute  `json:"routes,omitempty"`
+	Maps   []map[string]any `json:"maps,omitempty"`
 }
 
 // ── DSL parser ────────────────────────────────────────────────────────────────
 
+// dslStage is one rank inside a segment: names that run concurrently.
+type dslStage struct {
+	names []string
+	repos []string // parallel to names; repos[i] is the git repo for names[i] ("" = none)
+}
+
+// dslNode is one "->"-separated segment: a body of one or more stages, optionally
+// marked as a map region.
 type dslNode struct {
-	names      []string
-	repos      []string // parallel to names; repos[i] is the git repo for names[i] ("" = none)
-	groupIndex int      // unique across parallel groups in this DSL
+	stages []dslStage
+	// mapID, when set, puts every step of this segment in that map region — the body
+	// runs once per value. The region's definition comes from --map.
+	mapID string
+}
+
+func (n dslNode) entries() []string { return n.stages[0].names }
+func (n dslNode) exits() []string   { return n.stages[len(n.stages)-1].names }
+
+// mapIDRe restricts a map region name to the charset the API accepts.
+var mapIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// splitTopLevel splits on "->" only OUTSIDE brackets, so a map body can itself use
+// "->" ("[build->test]*per-module"). A naive strings.Split would tear that body apart.
+func splitTopLevel(dsl string) ([]string, error) {
+	var out []string
+	depth, start := 0, 0
+	for i := 0; i < len(dsl); i++ {
+		switch dsl[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth < 0 {
+				return nil, fmt.Errorf("unexpected ']' in pipeline DSL: %q", dsl)
+			}
+		case '-':
+			if depth == 0 && i+1 < len(dsl) && dsl[i+1] == '>' {
+				out = append(out, dsl[start:i])
+				i++
+				start = i + 1
+			}
+		}
+	}
+	if depth != 0 {
+		return nil, fmt.Errorf("unclosed '[' in pipeline DSL: %q", dsl)
+	}
+	return append(out, dsl[start:]), nil
 }
 
 // splitStepRepo splits a DSL step token "name@repo" into its bare step name and the
@@ -162,52 +221,104 @@ func splitStepRepo(tok string) (name, repo string) {
 	return strings.TrimSpace(name), strings.TrimSpace(repo)
 }
 
+// parseStage parses one comma-separated rank of "name@repo" tokens.
+func parseStage(seg, ctx string) (dslStage, error) {
+	var st dslStage
+	for _, p := range strings.Split(seg, ",") {
+		name, repo := splitStepRepo(p)
+		if name == "" {
+			return st, fmt.Errorf("empty step name in %s", ctx)
+		}
+		st.names = append(st.names, name)
+		st.repos = append(st.repos, repo)
+	}
+	return st, nil
+}
+
 // parseDSL tokenises a pipeline DSL string into ordered nodes.
-// Grammar: steps are separated by "->"; a parallel group is written as
-// "[step1,step2,...]" and results in a single node with multiple names. A step may
-// carry a per-step git repo as "name@<clone-url-or-${inputs.X}>", cloned as
-// $GIT_CLONE_URL for that step only.
+//
+// Grammar: steps are separated by "->". A bracket holds a body, whose stages are
+// themselves separated by "->" and whose concurrent steps are separated by ",".
+// A bracket suffixed with "*<map-id>" is a MAP REGION: its body runs once per value
+// of that region (defined with --map). A step may carry a per-step git repo as
+// "name@<clone-url-or-${inputs.X}>", cloned as $GIT_CLONE_URL for that step only.
+//
+// Parallelism is not a field on a step — it is the shape of the graph, so a bracket
+// simply compiles to routes that fork and re-join.
+//
 // Examples:
 //
 //	"build->test->deploy"                      — three sequential steps
 //	"build->[lint,test]->deploy"               — lint and test run in parallel
+//	"checkout->[build->test]*per-module"       — build then test, once per module
+//	"checkout->[lint,test]*per-module"         — lint and test in parallel, per module
 //	"test@https://github.com/acme/app.git"     — test clones that repo
 //	"test@${inputs.REPO}"                      — test clones a run-input repo
 func parseDSL(dsl string) ([]dslNode, error) {
-	segments := strings.Split(dsl, "->")
+	segments, err := splitTopLevel(dsl)
+	if err != nil {
+		return nil, err
+	}
 	var nodes []dslNode
-	groupIdx := 0
 	for _, seg := range segments {
 		seg = strings.TrimSpace(seg)
 		if seg == "" {
 			return nil, fmt.Errorf("empty segment in pipeline DSL")
 		}
-		if strings.HasPrefix(seg, "[") {
-			if !strings.HasSuffix(seg, "]") {
-				return nil, fmt.Errorf("unclosed '[' in pipeline DSL: %q", seg)
+		if !strings.HasPrefix(seg, "[") {
+			st, err := parseStage(seg, "pipeline DSL")
+			if err != nil {
+				return nil, err
 			}
-			parts := strings.Split(seg[1:len(seg)-1], ",")
-			if len(parts) < 2 {
+			if len(st.names) > 1 {
+				return nil, fmt.Errorf("parallel steps must be bracketed: %q — write [%s]", seg, seg)
+			}
+			nodes = append(nodes, dslNode{stages: []dslStage{st}})
+			continue
+		}
+		close := strings.LastIndex(seg, "]")
+		if close < 0 {
+			return nil, fmt.Errorf("unclosed '[' in pipeline DSL: %q", seg)
+		}
+		inner := seg[1:close]
+		if strings.Contains(inner, "[") {
+			return nil, fmt.Errorf("nested '[' is not supported: %q", seg)
+		}
+		node := dslNode{}
+		// A "*<map-id>" suffix turns the bracket into a map region.
+		if suffix := strings.TrimSpace(seg[close+1:]); suffix != "" {
+			id, ok := strings.CutPrefix(suffix, "*")
+			if !ok {
+				return nil, fmt.Errorf("unexpected %q after ']' in %q — did you mean *<map-id>?", suffix, seg)
+			}
+			if !mapIDRe.MatchString(id) {
+				return nil, fmt.Errorf("invalid map id %q in %q", id, seg)
+			}
+			node.mapID = id
+		}
+		for _, stageSeg := range strings.Split(inner, "->") {
+			stageSeg = strings.TrimSpace(stageSeg)
+			if stageSeg == "" {
+				return nil, fmt.Errorf("empty stage in %q", seg)
+			}
+			st, err := parseStage(stageSeg, fmt.Sprintf("%q", seg))
+			if err != nil {
+				return nil, err
+			}
+			node.stages = append(node.stages, st)
+		}
+		// A plain bracket exists only to fork; one step in it is just that step. A map
+		// bracket is meaningful with a single-step body (run it once per value).
+		if node.mapID == "" {
+			var total int
+			for _, st := range node.stages {
+				total += len(st.names)
+			}
+			if total < 2 {
 				return nil, fmt.Errorf("parallel group must contain at least two steps: %q", seg)
 			}
-			var names, repos []string
-			for _, p := range parts {
-				name, repo := splitStepRepo(p)
-				if name == "" {
-					return nil, fmt.Errorf("empty step name in parallel group %q", seg)
-				}
-				names = append(names, name)
-				repos = append(repos, repo)
-			}
-			nodes = append(nodes, dslNode{names: names, repos: repos, groupIndex: groupIdx})
-			groupIdx++
-		} else {
-			name, repo := splitStepRepo(seg)
-			if name == "" {
-				return nil, fmt.Errorf("empty step name in pipeline DSL")
-			}
-			nodes = append(nodes, dslNode{names: []string{name}, repos: []string{repo}})
 		}
+		nodes = append(nodes, node)
 	}
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("pipeline DSL produced no steps")
@@ -231,28 +342,71 @@ func resolveStepName(name string) (string, error) {
 	return steps[0].StepID, nil
 }
 
-// dslToRefs resolves DSL nodes to workflow step refs (step IDs + parallel groups +
-// any per-step git repo override).
-func dslToRefs(nodes []dslNode) ([]workflowStepRef, error) {
+// dslToRefs resolves DSL nodes to workflow step refs and the routes between them.
+//
+// The refs are the node set; the routes are the edges. Within a segment consecutive
+// stages are joined by a cross product (every step of stage k+1 waits for every step
+// of stage k), and between segments the previous segment's exits fan into the next
+// segment's entries — which is exactly what "->" means.
+func dslToRefs(nodes []dslNode) ([]workflowStepRef, []workflowRoute, error) {
 	var refs []workflowStepRef
 	for _, node := range nodes {
-		for i, name := range node.names {
-			id, err := resolveStepName(name)
-			if err != nil {
-				return nil, err
+		for _, st := range node.stages {
+			for i, name := range st.names {
+				id, err := resolveStepName(name)
+				if err != nil {
+					return nil, nil, err
+				}
+				// Name is set explicitly: it is what routes address, and what
+				// ${steps.<name>.output} resolves against.
+				ref := workflowStepRef{StepID: id, Name: name, MapID: node.mapID}
+				if i < len(st.repos) {
+					ref.With = gitRepoStepWith(st.repos[i])
+				}
+				refs = append(refs, ref)
 			}
-			ref := workflowStepRef{StepID: id}
-			if len(node.names) > 1 {
-				g := node.groupIndex
-				ref.ParallelGroup = &g
-			}
-			if i < len(node.repos) {
-				ref.With = gitRepoStepWith(node.repos[i])
-			}
-			refs = append(refs, ref)
 		}
 	}
-	return refs, nil
+
+	var routes []workflowRoute
+	link := func(from, to []string) {
+		for _, p := range from {
+			for _, c := range to {
+				routes = append(routes, workflowRoute{From: p, To: c})
+			}
+		}
+	}
+	for _, node := range nodes {
+		for k := 1; k < len(node.stages); k++ {
+			link(node.stages[k-1].names, node.stages[k].names)
+		}
+	}
+	for k := 1; k < len(nodes); k++ {
+		link(nodes[k-1].exits(), nodes[k].entries())
+	}
+	return refs, routes, nil
+}
+
+// pipelineMapFlags collects --map values: each is a MapDef as JSON. The DSL names a
+// region ("[build->test]*per-module"); this is where that region is actually defined
+// (its var, its values, its per-iteration volume).
+var pipelineMapFlags []string
+
+// parseMapFlags turns each --map value into a map region definition.
+func parseMapFlags(flags []string) ([]map[string]any, error) {
+	var out []map[string]any
+	for _, f := range flags {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(f), &m); err != nil {
+			return nil, fmt.Errorf("parsing --map %q: %w (expected JSON, e.g. %s)", f, err,
+				`{"id":"per-module","var":"module","values_from":"${steps.discover.output.MODULES}"}`)
+		}
+		if id, _ := m["id"].(string); id == "" {
+			return nil, fmt.Errorf("--map %q: an \"id\" is required — it is what the DSL's [body]*<id> refers to", f)
+		}
+		out = append(out, m)
+	}
+	return out, nil
 }
 
 // ── Raw pipeline helpers (convert-step / localize-step) ─────────────────────────
@@ -266,6 +420,11 @@ type rawPipeline struct {
 	Inputs      []pipelineInputDef  `json:"inputs,omitempty"`
 	Outputs     []pipelineOutputDef `json:"outputs,omitempty"`
 	StepRefs    []workflowStepRef   `json:"step_refs"`
+	// Routes and Maps must round-trip: a pipeline's edges live here, not in the step
+	// array, so a re-PUT that dropped them would silently flatten a graph into a
+	// sequence — changing what the pipeline DOES while only meaning to edit a step.
+	Routes []workflowRoute  `json:"routes,omitempty"`
+	Maps   []map[string]any `json:"maps,omitempty"`
 }
 
 func fetchRawPipeline(id string) (rawPipeline, error) {
@@ -290,6 +449,12 @@ func putRawPipeline(id string, pl rawPipeline) error {
 	}
 	if len(pl.Outputs) > 0 {
 		payload["outputs"] = pl.Outputs
+	}
+	if len(pl.Routes) > 0 {
+		payload["routes"] = pl.Routes
+	}
+	if len(pl.Maps) > 0 {
+		payload["maps"] = pl.Maps
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -587,6 +752,8 @@ reusable step, or "localize-step" to copy a shared step's definition inline.`,
 				Steps       []workflowStepRef   `json:"steps,omitempty"`
 				Inputs      []pipelineInputDef  `json:"inputs,omitempty"`
 				Outputs     []pipelineOutputDef `json:"outputs,omitempty"`
+				Routes      []workflowRoute     `json:"routes,omitempty"`
+				Maps        []map[string]any    `json:"maps,omitempty"`
 			}
 
 			if pipelineFileFlag != "" {
@@ -603,16 +770,24 @@ reusable step, or "localize-step" to copy a shared step's definition inline.`,
 				payload.Steps = pf.Steps
 				payload.Inputs = pf.Inputs
 				payload.Outputs = pf.Outputs
+				payload.Routes = pf.Routes
+				payload.Maps = pf.Maps
 			} else {
 				nodes, err := parseDSL(args[2])
 				if err != nil {
 					return err
 				}
-				refs, err := dslToRefs(nodes)
+				refs, rts, err := dslToRefs(nodes)
 				if err != nil {
 					return err
 				}
 				payload.Steps = refs
+				payload.Routes = rts
+				mp, err := parseMapFlags(pipelineMapFlags)
+				if err != nil {
+					return err
+				}
+				payload.Maps = mp
 			}
 
 			if payload.Name == "" {
@@ -633,6 +808,7 @@ reusable step, or "localize-step" to copy a shared step's definition inline.`,
 		},
 	}
 	createPipelineCmd.Flags().StringVarP(&pipelineFileFlag, "file", "f", "", "JSON pipeline definition file")
+	createPipelineCmd.Flags().StringArrayVar(&pipelineMapFlags, "map", nil, `define a map region the DSL refers to as [body]*<id>, as JSON (repeatable): {"id":"per-module","var":"module","values_from":"${steps.discover.output.MODULES}"}`)
 	ciCreateCmd.AddCommand(createPipelineCmd)
 
 	// ── armory pipelines list pipelines ──────────────────────────────────────────────
@@ -761,6 +937,7 @@ gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`
 			id := args[0]
 
 			var steps []workflowStepRef
+			var dslRoutes []workflowRoute
 			var inputs []pipelineInputDef
 			var outputs []pipelineOutputDef
 			if updatePipelineFile != "" {
@@ -781,12 +958,13 @@ gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`
 				if updatePipelineDesc == "" {
 					updatePipelineDesc = pf.Description
 				}
+				dslRoutes = pf.Routes
 			} else {
 				nodes, err := parseDSL(args[1])
 				if err != nil {
 					return err
 				}
-				steps, err = dslToRefs(nodes)
+				steps, dslRoutes, err = dslToRefs(nodes)
 				if err != nil {
 					return err
 				}
@@ -811,6 +989,14 @@ gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`
 				"name":  updatePipelineName,
 				"steps": steps,
 			}
+			if len(dslRoutes) > 0 {
+				payload["routes"] = dslRoutes
+			}
+			if mp, err := parseMapFlags(pipelineMapFlags); err != nil {
+				return err
+			} else if len(mp) > 0 {
+				payload["maps"] = mp
+			}
 			if updatePipelineDesc != "" {
 				payload["description"] = updatePipelineDesc
 			}
@@ -829,6 +1015,7 @@ gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`
 		},
 	}
 	updatePipelineCmd.Flags().StringVarP(&updatePipelineFile, "file", "f", "", "JSON pipeline definition file")
+	updatePipelineCmd.Flags().StringArrayVar(&pipelineMapFlags, "map", nil, `define a map region the DSL refers to as [body]*<id>, as JSON (repeatable)`)
 	updatePipelineCmd.Flags().StringVar(&updatePipelineName, "name", "", "Pipeline name (fetched automatically if omitted)")
 	updatePipelineCmd.Flags().StringVar(&updatePipelineDesc, "description", "", "Pipeline description")
 	ciUpdateCmd.AddCommand(updatePipelineCmd)
@@ -873,9 +1060,11 @@ becomes the new step's definition.`,
 			if err := json.Unmarshal(data, &created); err != nil || created.StepID == "" {
 				return fmt.Errorf("could not read created step id")
 			}
-			// Repoint the ref at the new step; keep grouping/matrix, drop the now-redundant
-			// per-occurrence name (it equals the new step's own name).
-			pl.StepRefs[idx] = workflowStepRef{StepID: created.StepID, ParallelGroup: ref.ParallelGroup, Matrix: ref.Matrix}
+			// Repoint the ref at the new step; keep its map region and matrix, drop the
+			// now-redundant per-occurrence name (it equals the new step's own name).
+			// MapID must survive: a converted step that fell out of its region would
+			// stop running per value, silently changing what the pipeline does.
+			pl.StepRefs[idx] = workflowStepRef{StepID: created.StepID, MapID: ref.MapID, Matrix: ref.Matrix}
 			return putRawPipeline(id, pl)
 		},
 	})
@@ -926,7 +1115,7 @@ edits to the shared step no longer affect this pipeline (and vice versa).`,
 			}
 			pl.StepRefs[idx] = workflowStepRef{
 				Action: def.Action, Name: name, Timeout: def.Timeout, With: merged,
-				ParallelGroup: ref.ParallelGroup, Matrix: ref.Matrix,
+				MapID: ref.MapID, Matrix: ref.Matrix,
 			}
 			return putRawPipeline(id, pl)
 		},

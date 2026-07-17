@@ -996,8 +996,8 @@ func TestStepsToDSL_RoundTrip(t *testing.T) {
 	g0 := 0
 	steps := []tuiWorkflowStep{
 		{Name: "build"},
-		{Name: "lint", ParallelGroup: &g0},
-		{Name: "test", ParallelGroup: &g0},
+		{Name: "lint", stage: &g0},
+		{Name: "test", stage: &g0},
 		{Name: "deploy"},
 	}
 	if got := stepsToDSL(steps); got != "build->[lint,test]->deploy" {
@@ -1279,9 +1279,9 @@ func TestTuiStepRunRows_GroupsParallelBatch(t *testing.T) {
 	g := 0
 	steps := []tuiStepRun{
 		{StepIndex: 0, StepName: "build", Status: "completed"},
-		{StepIndex: 1, StepName: "test", Status: "completed", ParallelGroup: &g},
-		{StepIndex: 2, StepName: "lint", Status: "running", ParallelGroup: &g},
-		{StepIndex: 3, StepName: "scan", Status: "pending", ParallelGroup: &g},
+		{StepIndex: 1, StepName: "test", Status: "completed", stage: &g},
+		{StepIndex: 2, StepName: "lint", Status: "running", stage: &g},
+		{StepIndex: 3, StepName: "scan", Status: "pending", stage: &g},
 		{StepIndex: 4, StepName: "deploy", Status: "pending"},
 	}
 	rows := tuiStepRunRows(steps)
@@ -1364,8 +1364,8 @@ func TestTuiStepRunRows_ParallelCarriesMarker(t *testing.T) {
 	g := 0
 	rows := tuiStepRunRows([]tuiStepRun{
 		{StepIndex: 0, StepName: "build", Status: "completed"},
-		{StepIndex: 1, StepName: "test", Status: "completed", ParallelGroup: &g},
-		{StepIndex: 2, StepName: "lint", Status: "completed", ParallelGroup: &g},
+		{StepIndex: 1, StepName: "test", Status: "completed", stage: &g},
+		{StepIndex: 2, StepName: "lint", Status: "completed", stage: &g},
 	})
 	if !strings.HasPrefix(rows[1][1], "┌ ∥ ") {
 		t.Errorf("parallel first row = %q, want ┌ ∥ marker", rows[1][1])
@@ -1375,11 +1375,11 @@ func TestTuiStepRunRows_ParallelCarriesMarker(t *testing.T) {
 func TestTuiRunStageLegend(t *testing.T) {
 	g := 0
 	seq := []tuiStepRun{{StepIndex: 0, StepName: "a"}, {StepIndex: 1, StepName: "b"}}
-	par := []tuiStepRun{{StepIndex: 0, StepName: "a", ParallelGroup: &g}, {StepIndex: 1, StepName: "b", ParallelGroup: &g}}
+	par := []tuiStepRun{{StepIndex: 0, StepName: "a", stage: &g}, {StepIndex: 1, StepName: "b", stage: &g}}
 	mat := []tuiStepRun{{StepIndex: 0, StepName: "m [v=1]"}, {StepIndex: 0, StepName: "m [v=2]"}}
 	both := []tuiStepRun{
-		{StepIndex: 0, StepName: "a", ParallelGroup: &g},
-		{StepIndex: 1, StepName: "b", ParallelGroup: &g},
+		{StepIndex: 0, StepName: "a", stage: &g},
+		{StepIndex: 1, StepName: "b", stage: &g},
 		{StepIndex: 2, StepName: "m [v=1]"},
 		{StepIndex: 2, StepName: "m [v=2]"},
 	}
@@ -1420,8 +1420,8 @@ func TestTuiRunHasParallel(t *testing.T) {
 		want  bool
 	}{
 		{"no groups", []tuiStepRun{{StepName: "a"}, {StepName: "b"}}, false},
-		{"shared consecutive group", []tuiStepRun{{ParallelGroup: &g}, {ParallelGroup: &g}}, true},
-		{"same value but separated", []tuiStepRun{{ParallelGroup: &g}, {StepName: "x"}, {ParallelGroup: &other}}, false},
+		{"shared consecutive group", []tuiStepRun{{stage: &g}, {stage: &g}}, true},
+		{"same value but separated", []tuiStepRun{{stage: &g}, {StepName: "x"}, {stage: &other}}, false},
 	}
 	for _, c := range cases {
 		if got := tuiRunHasParallel(c.steps); got != c.want {
@@ -1430,8 +1430,10 @@ func TestTuiRunHasParallel(t *testing.T) {
 	}
 }
 
-func TestTuiFetchRunDetail_AnnotatesParallelGroups(t *testing.T) {
-	g := 0
+// The run record carries no grouping, so the detail view derives each step's stage
+// from the DEFINITION'S ROUTES: build forks to test and lint, so those two share a
+// rank and draw as one concurrent stage.
+func TestTuiFetchRunDetail_AnnotatesStagesFromRoutes(t *testing.T) {
 	run := tuiRunFull{
 		tuiRun: tuiRun{RunID: "run-1", WorkflowID: "wf-1", Status: "completed"},
 		StepRuns: []tuiStepRun{
@@ -1444,8 +1446,12 @@ func TestTuiFetchRunDetail_AnnotatesParallelGroups(t *testing.T) {
 		WorkflowID: "wf-1",
 		Steps: []tuiWorkflowStep{
 			{StepID: "s0", Name: "build"},
-			{StepID: "s1", Name: "test", ParallelGroup: &g},
-			{StepID: "s2", Name: "lint", ParallelGroup: &g},
+			{StepID: "s1", Name: "test"},
+			{StepID: "s2", Name: "lint"},
+		},
+		Routes: []workflowRoute{
+			{From: "build", To: "test"},
+			{From: "build", To: "lint"},
 		},
 	}
 	mux := http.NewServeMux()
@@ -1462,14 +1468,16 @@ func TestTuiFetchRunDetail_AnnotatesParallelGroups(t *testing.T) {
 	if !ok {
 		t.Fatalf("msg type = %T, want tuiRunDetailMsg", msg)
 	}
-	if result.StepRuns[0].ParallelGroup != nil {
-		t.Errorf("build group = %d, want nil (sequential)", *result.StepRuns[0].ParallelGroup)
+	for i, sr := range result.StepRuns {
+		if sr.stage == nil {
+			t.Fatalf("step %d (%s) has no stage; routes should have ranked every step", i, sr.StepName)
+		}
 	}
-	if result.StepRuns[1].ParallelGroup == nil || result.StepRuns[2].ParallelGroup == nil {
-		t.Fatal("test/lint should be annotated with their parallel group from the definition")
+	if *result.StepRuns[1].stage != *result.StepRuns[2].stage {
+		t.Error("test and lint are both routed off build, so they share a stage")
 	}
-	if *result.StepRuns[1].ParallelGroup != *result.StepRuns[2].ParallelGroup {
-		t.Error("test and lint should share the same parallel group")
+	if *result.StepRuns[0].stage == *result.StepRuns[1].stage {
+		t.Error("build precedes test, so it must not share its stage")
 	}
 }
 
@@ -1494,7 +1502,7 @@ func TestTuiFetchRunDetail_NoDefStillSucceeds(t *testing.T) {
 	if !ok {
 		t.Fatalf("msg type = %T, want tuiRunDetailMsg", msg)
 	}
-	if len(result.StepRuns) != 1 || result.StepRuns[0].ParallelGroup != nil {
+	if len(result.StepRuns) != 1 || result.StepRuns[0].stage != nil {
 		t.Error("run should load with no grouping when the definition is unavailable")
 	}
 }
@@ -1592,8 +1600,8 @@ func TestTUIView_RunDetail_ShowsParallelLegend(t *testing.T) {
 	m = applyMsg(m, tuiRunDetailMsg(tuiRunFull{
 		tuiRun: tuiRun{RunID: "r", Status: "completed"},
 		StepRuns: []tuiStepRun{
-			{StepIndex: 0, StepName: "test", Status: "completed", ParallelGroup: &g},
-			{StepIndex: 1, StepName: "lint", Status: "completed", ParallelGroup: &g},
+			{StepIndex: 0, StepName: "test", Status: "completed", stage: &g},
+			{StepIndex: 1, StepName: "lint", Status: "completed", stage: &g},
 		},
 	}))
 	if !strings.Contains(m.View(), "parallel") {

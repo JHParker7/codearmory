@@ -13,8 +13,8 @@ func TestTuiPipelineStages_GroupsConsecutiveParallel(t *testing.T) {
 	g := 0
 	steps := []tuiWorkflowStep{
 		{Name: "build"},
-		{Name: "lint", ParallelGroup: &g},
-		{Name: "test", ParallelGroup: &g},
+		{Name: "lint", stage: &g},
+		{Name: "test", stage: &g},
 		{Name: "deploy"},
 	}
 	stages := tuiPipelineStages(steps)
@@ -37,9 +37,9 @@ func TestTuiPipelineStages_SameGroupValueButSeparated(t *testing.T) {
 	// distinct stages — only *consecutive* same-group steps collapse.
 	g, other := 0, 0
 	steps := []tuiWorkflowStep{
-		{Name: "a", ParallelGroup: &g},
+		{Name: "a", stage: &g},
 		{Name: "b"},
-		{Name: "c", ParallelGroup: &other},
+		{Name: "c", stage: &other},
 	}
 	stages := tuiPipelineStages(steps)
 	if len(stages) != 3 {
@@ -86,8 +86,8 @@ func TestTuiPipelineDiagram_RendersNamesAndArrows(t *testing.T) {
 	g := 0
 	steps := []tuiWorkflowStep{
 		{Name: "build"},
-		{Name: "lint", ParallelGroup: &g},
-		{Name: "test", ParallelGroup: &g},
+		{Name: "lint", stage: &g},
+		{Name: "test", stage: &g},
 		{Name: "deploy"},
 	}
 	d := tuiPipelineDiagram(steps, 100)
@@ -143,7 +143,7 @@ func TestTuiFetchPipelineDef_Success(t *testing.T) {
 		WorkflowID: "wf-1",
 		Steps: []tuiWorkflowStep{
 			{StepID: "s0", Name: "build"},
-			{StepID: "s1", Name: "lint", ParallelGroup: &g},
+			{StepID: "s1", Name: "lint", stage: &g},
 		},
 	}
 	mux := http.NewServeMux()
@@ -254,7 +254,7 @@ func TestTuiPipelineDiagramPanel_FixedHeight(t *testing.T) {
 	m := applyMsg(newTUIModel(), tuiPipelinesMsg([]tuiPipeline{{WorkflowID: "wf-1", Name: "p"}}))
 	g := 0
 	m.pipeDefs["wf-1"] = []tuiWorkflowStep{
-		{Name: "a"}, {Name: "b", ParallelGroup: &g}, {Name: "c", ParallelGroup: &g}, {Name: "d"},
+		{Name: "a"}, {Name: "b", stage: &g}, {Name: "c", stage: &g}, {Name: "d"},
 	}
 	panel := m.tuiPipelineDiagramPanel()
 	if got := strings.Count(panel, "\n") + 1; got != tuiDiagReserve {
@@ -313,8 +313,8 @@ func TestTuiRunBatches_GroupsParallel(t *testing.T) {
 	// them); sequential steps get their own indices too.
 	batches := tuiRunBatches([]tuiStepRun{
 		{StepIndex: 0, StepName: "build"},
-		{StepIndex: 1, StepName: "lint", ParallelGroup: &g},
-		{StepIndex: 2, StepName: "test", ParallelGroup: &g},
+		{StepIndex: 1, StepName: "lint", stage: &g},
+		{StepIndex: 2, StepName: "test", stage: &g},
 		{StepIndex: 3, StepName: "deploy"},
 	})
 	if len(batches) != 3 {
@@ -547,8 +547,8 @@ func TestTuiRunDiagramPanel_FixedHeight(t *testing.T) {
 	m.runDetails["run-1"] = &tuiRunFull{
 		StepRuns: []tuiStepRun{
 			{StepName: "a", Status: "completed"},
-			{StepName: "b", Status: "running", ParallelGroup: &g},
-			{StepName: "c", Status: "pending", ParallelGroup: &g},
+			{StepName: "b", Status: "running", stage: &g},
+			{StepName: "c", Status: "pending", stage: &g},
 			{StepName: "d", Status: "pending"},
 		},
 	}
@@ -575,7 +575,7 @@ func TestStepDSLExpressible(t *testing.T) {
 		{"approval gate", tuiWorkflowStep{Approval: &approvalGate{Message: "ok?"}}, false},
 		{"matrix", tuiWorkflowStep{StepID: "s1", Name: "build", Matrix: &matrixConfig{Var: "v", Values: []string{"a"}}}, false},
 		{"wired with override", tuiWorkflowStep{StepID: "s1", Name: "build", With: map[string]any{"env": map[string]any{"X": "${steps.a.output}"}}}, false},
-		{"parallel reference", tuiWorkflowStep{StepID: "s1", Name: "build", ParallelGroup: &g}, true},
+		{"parallel reference", tuiWorkflowStep{StepID: "s1", Name: "build", stage: &g}, true},
 	}
 	for _, c := range cases {
 		if stepDSLExpressible(c.s) != c.ok {

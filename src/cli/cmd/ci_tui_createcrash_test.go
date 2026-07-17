@@ -58,8 +58,8 @@ func TestTuiCreatePipeline_NoPanic(t *testing.T) {
 			grp := 1
 			m = drive(t, m, "diagram-defs", tuiPipelineDefMsg{workflowID: "w1", steps: []tuiWorkflowStep{
 				{Name: "build", Action: "forge/run"},
-				{Name: "a", Action: "forge/run", ParallelGroup: &grp},
-				{Name: "b", Action: "forge/run", ParallelGroup: &grp},
+				{Name: "a", Action: "forge/run", stage: &grp},
+				{Name: "b", Action: "forge/run", stage: &grp},
 				{Name: "fan", Action: "forge/run", Matrix: &matrixConfig{Var: "r", Values: []string{"x", "y"}}},
 				{Name: "gate", Action: "approval", Approval: &approvalGate{Message: "ok?"}},
 			}})
