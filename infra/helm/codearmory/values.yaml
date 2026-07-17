@@ -423,6 +423,11 @@ forge:
     egress:
       networkPolicy:
         enabled: true
+      # Private ENDPOINTS a build may egress to despite the private-range denial —
+      # e.g. a self-hosted image registry the CI pushes to. Each entry is
+      # "<ip>[/cidr]:<port>" and opens ONLY that port (not the whole host, so SSH and
+      # other services on the box stay blocked). e.g. ["192.168.53.171:3000"].
+      allowHosts: []
       # Extra CIDRs to DENY on top of the built-in private ranges — e.g. specific public
       # IPs/subnets you don't want sandboxes reaching. Each must be an IPv4 CIDR within
       # 0.0.0.0/0, e.g. "203.0.113.7/32" or "198.51.100.0/24".
