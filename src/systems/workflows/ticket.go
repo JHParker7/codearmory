@@ -138,6 +138,10 @@ type ticketReporter struct {
 	runID      string
 	workflowID string
 	ticketID   string
+	// title is the rendered title, and pendingTitle is true while it still contains
+	// an unresolved ${steps...} reference — see retitle.
+	title        string
+	pendingTitle bool
 	// off disables the reporter after a failure, so a tickets outage costs one log
 	// line per run rather than one per step.
 	off bool
@@ -227,7 +231,13 @@ func (t *ticketReporter) open(ctx context.Context, wfName string, inputs map[str
 	if strings.TrimSpace(title) == "" {
 		title = fmt.Sprintf("%s — run %s", wfName, shortID(t.runID))
 	}
+	// The ticket opens BEFORE any step has run, so a title referencing a step's output
+	// — the commit a checkout resolved, say — cannot be rendered yet. substitute leaves
+	// an unresolved ${...} literal, so the ticket opens with a provisional title and
+	// retitle() fills it in the moment the step it names completes.
 	title = substitute(title, substContext{inputs: inputs, runID: t.runID})
+	t.title = title
+	t.pendingTitle = referencesSteps(title)
 
 	body := map[string]any{
 		"title": title,
@@ -265,6 +275,36 @@ func (t *ticketReporter) open(ctx context.Context, wfName string, inputs map[str
 	// an approval gate adopts, and what links a run to its ticket.
 	(WorkflowRun{RunID: t.runID}).SetTicket(ctx, t.ticketID)
 	slog.InfoContext(ctx, "worker: opened run ticket", "run_id", t.runID, "ticket_id", t.ticketID)
+}
+
+// referencesSteps reports whether a rendered string still names a step output — i.e.
+// substitute could not resolve it, because that step had not run yet.
+func referencesSteps(s string) bool { return strings.Contains(s, "${steps.") }
+
+// retitle re-renders a title that referenced a step output, once that output exists.
+//
+// Without this a title like "CI — ${steps.commit.output.SHA}" would be stuck on the
+// literal text forever: the ticket is opened before any step runs, which is exactly
+// when the interesting facts about a run (its commit) are not yet known.
+func (t *ticketReporter) retitle(ctx context.Context, inputs, outputs map[string]string) {
+	if t == nil || t.off || t.ticketID == "" || !t.pendingTitle {
+		return
+	}
+	rendered := substitute(t.cfg.Title, substContext{inputs: inputs, outputs: outputs, runID: t.runID})
+	if referencesSteps(rendered) {
+		return // the step it names still has not produced its output
+	}
+	if rendered == t.title {
+		t.pendingTitle = false
+		return
+	}
+	if _, err := t.call(ctx, http.MethodPut, "/tickets/"+t.ticketID,
+		map[string]any{"title": rendered}); err != nil {
+		t.disable(ctx, "retitle", err)
+		return
+	}
+	t.title = rendered
+	t.pendingTitle = false
 }
 
 // stepDone comments the outcome of one node. Called only from the top-level graph, so

@@ -430,6 +430,10 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 			}
 			st.ticket.stepDone(ctx, n, r.state, r.legs)
 		}
+		// A title naming a step's output (the commit a checkout resolved) can only be
+		// rendered once that step has produced it. Cheap: a no-op unless the title is
+		// still pending.
+		st.ticket.retitle(ctx, inputs, st.outputs)
 		switch r.state {
 		case nodeFailed:
 			// A routed failure handler does not turn a red run green.

@@ -297,3 +297,59 @@ func TestValidateTicket(t *testing.T) {
 		t.Errorf("a disabled config should not be validated: %q", msg)
 	}
 }
+
+// A ticket opens before any step has run, so a title naming a step's output — the
+// commit a checkout resolved — cannot be rendered yet. It must be filled in the moment
+// that step completes, rather than left showing the literal template forever.
+func TestTicketReporter_RetitlesOnceTheStepOutputExists(t *testing.T) {
+	stub := &ticketStub{}
+	stub.start(t)
+	r := testReporter(TicketConfig{Enabled: true, Title: "CI — ${steps.commit.output.SHA}"})
+	r.open(context.Background(), "wf", nil, "")
+
+	// Opened with the unresolved template: the commit is not knowable yet.
+	if !r.pendingTitle {
+		t.Fatal("a title naming a step output must be pending after open")
+	}
+	if got := stub.created[0]["title"].(string); !strings.Contains(got, "${steps.commit") {
+		t.Errorf("provisional title = %q, want the unresolved template", got)
+	}
+
+	// A step completes, but not the one the title names: still pending, no PUT.
+	r.retitle(context.Background(), nil, map[string]string{"checkout": "{}"})
+	if !r.pendingTitle || len(stub.updates) != 0 {
+		t.Errorf("an unrelated step must not resolve the title; updates=%v", stub.updates)
+	}
+
+	// The named step lands.
+	r.retitle(context.Background(), nil, map[string]string{"commit": `{"SHA":"abc1234"}`})
+	if r.pendingTitle {
+		t.Error("title should be resolved once its step produced the output")
+	}
+	if len(stub.updates) != 1 || stub.updates[0]["title"] != "CI — abc1234" {
+		t.Fatalf("updates = %+v, want the title set to the commit", stub.updates)
+	}
+	// Once resolved it must not keep re-PUTting on every subsequent step.
+	r.retitle(context.Background(), nil, map[string]string{"commit": `{"SHA":"abc1234"}`})
+	if len(stub.updates) != 1 {
+		t.Errorf("retitle must be a no-op once resolved, got %d updates", len(stub.updates))
+	}
+}
+
+// A title with no step reference is final at open: it must never cost an extra call.
+func TestTicketReporter_StaticTitleIsNotPending(t *testing.T) {
+	stub := &ticketStub{}
+	stub.start(t)
+	r := testReporter(TicketConfig{Enabled: true, Title: "CI — ${run_id}"})
+	r.open(context.Background(), "wf", nil, "")
+	if r.pendingTitle {
+		t.Error("a title with no step reference must not be pending")
+	}
+	if got := stub.created[0]["title"].(string); got != "CI — run-1" {
+		t.Errorf("title = %q, want ${run_id} substituted at open", got)
+	}
+	r.retitle(context.Background(), nil, map[string]string{"any": "x"})
+	if len(stub.updates) != 0 {
+		t.Error("a static title must never trigger a retitle PUT")
+	}
+}
