@@ -136,12 +136,58 @@ func handleAckCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if err := ackCommand(ctx, o.OutpostID, id); err != nil {
+	// Body is optional for backward compatibility: an outpost that acks with no body
+	// records CmdDone. A body reports the terminal outcome the outpost observed.
+	var ack struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&ack) //nolint:errcheck
+	}
+	if err := ackCommand(ctx, o.OutpostID, id, ack.Status, ack.Error); err != nil {
 		span.RecordError(err)
 		http.Error(w, "failed to ack command", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetCommand returns a command's terminal state for polling. It is the
+// async-poll endpoint an enqueue-and-wait caller (a workflow step) hits until the
+// command reaches CmdDone/CmdFailed, so the step gates on the outpost's outcome.
+func handleGetCommand(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("outpost-gateway").Start(r.Context(), "handleGetCommand")
+	defer span.End()
+
+	id := r.PathValue("id")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getCommand", "outpost-gateway/outpost-commands/"+id)
+	if !ok {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	cmd, err := getCommandByID(ctx, id)
+	if err != nil {
+		if isNotFound(err) {
+			http.Error(w, "command not found", http.StatusNotFound)
+			return
+		}
+		span.RecordError(err)
+		http.Error(w, "failed to look up command", http.StatusInternalServerError)
+		return
+	}
+	// Authorize via the owning outpost — the caller must own it, exactly as for
+	// enqueue, so one tenant cannot read another's command results.
+	o, err := getOutpost(ctx, cmd.OutpostID)
+	if err != nil || !canAccessOutpost(o, userID, orgID) {
+		http.Error(w, "command not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"id": cmd.ID, "status": cmd.Status, "error": cmd.Error,
+		"integration": cmd.Integration, "type": cmd.Type,
+	})
 }
 
 type ingestEvent struct {

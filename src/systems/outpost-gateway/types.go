@@ -14,6 +14,10 @@ const (
 	CmdPending = "pending"
 	CmdClaimed = "claimed"
 	CmdDone    = "done"
+	// CmdFailed is a terminal ack state: the outpost ran the command and it failed
+	// (e.g. an integration-test Job that exited non-zero). Distinct from CmdDone so a
+	// caller polling the command can gate on the actual outcome, not merely delivery.
+	CmdFailed = "failed"
 )
 
 // Event delivery status values (the outpost_events outbox).
@@ -63,9 +67,12 @@ type OutpostCommand struct {
 	Integration string         `json:"integration" gorm:"column:integration"`
 	Type        string         `json:"type"        gorm:"column:type"`
 	Payload     map[string]any `json:"payload"     gorm:"column:payload;serializer:json"`
-	Status      string         `json:"-"           gorm:"column:status;default:'pending';index"`
-	CreatedAt   time.Time      `json:"created_at"  gorm:"column:created_at"`
-	ClaimedAt   *time.Time     `json:"-"           gorm:"column:claimed_at"`
+	Status      string         `json:"status"      gorm:"column:status;default:'pending';index"`
+	// Error carries the outpost's failure detail (e.g. the test Job's summary) when
+	// Status is CmdFailed, so a poller sees why it failed, not just that it did.
+	Error     string     `json:"error"      gorm:"column:error;default:''"`
+	CreatedAt time.Time  `json:"created_at" gorm:"column:created_at"`
+	ClaimedAt *time.Time `json:"-"          gorm:"column:claimed_at"`
 }
 
 func (OutpostCommand) TableName() string { return "outpost_commands" }

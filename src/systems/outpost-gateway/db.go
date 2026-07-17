@@ -206,10 +206,25 @@ func claimCommands(ctx context.Context, outpostID string, n int) ([]OutpostComma
 }
 
 // ackCommand marks a claimed command done.
-func ackCommand(ctx context.Context, outpostID, id string) error {
+// ackCommand marks a command terminal with the status the outpost reported —
+// CmdDone on success, CmdFailed with a detail on failure — so a poller can gate on
+// the real outcome. An empty/unknown status defaults to CmdDone (backward compatible
+// with an outpost that acks without a body).
+func ackCommand(ctx context.Context, outpostID, id, status, errDetail string) error {
+	if status != CmdDone && status != CmdFailed {
+		status = CmdDone
+	}
 	return connect().WithContext(ctx).Model(&OutpostCommand{}).
 		Where("id=? AND outpost_id=?", id, outpostID).
-		Update("status", CmdDone).Error
+		Updates(map[string]any{"status": status, "error": errDetail}).Error
+}
+
+// getCommandByID returns a command by id (across outposts); the caller authorizes
+// access via the owning outpost.
+func getCommandByID(ctx context.Context, id string) (OutpostCommand, error) {
+	var c OutpostCommand
+	err := connect().WithContext(ctx).Where("id=?", id).First(&c).Error
+	return c, err
 }
 
 // addEvent inserts a pending event into the outbox, due immediately.

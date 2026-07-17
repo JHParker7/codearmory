@@ -61,6 +61,42 @@ func payloadBool(p map[string]any, key string) bool {
 	return v
 }
 
+// payloadInt reads an int field defensively (JSON decodes numbers as float64),
+// falling back to def when absent or malformed.
+func payloadInt(p map[string]any, key string, def int) int {
+	if p == nil {
+		return def
+	}
+	switch v := p[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	}
+	return def
+}
+
+// payloadStringSlice reads a []string field defensively (JSON decodes arrays as
+// []any), skipping non-string elements.
+func payloadStringSlice(p map[string]any, key string) []string {
+	if p == nil {
+		return nil
+	}
+	raw, ok := p[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, e := range raw {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // payloadStringMap reads a map[string]string field (JSON-decoded as
 // map[string]any) defensively.
 func payloadStringMap(p map[string]any, key string) map[string]string {
