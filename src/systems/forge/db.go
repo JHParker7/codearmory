@@ -318,7 +318,7 @@ func claimPendingExecution(ctx context.Context) (Execution, bool) {
 		LIMIT 1
 		FOR UPDATE OF e SKIP LOCKED
 	`, sql.Named("defOrg", defaultMaxConcurrentPerOrg), sql.Named("defUser", defaultMaxConcurrentPerUser),
-		sql.Named("cpuBudget", maxTotalCPUMillicores), sql.Named("memBudget", maxTotalMemoryMB)).Scan(&raw)
+		sql.Named("cpuBudget", maxTotalCPUMillicores.Load()), sql.Named("memBudget", maxTotalMemoryMB.Load())).Scan(&raw)
 	if result.Error != nil {
 		tx.Rollback() //nolint:errcheck
 		span.RecordError(result.Error)

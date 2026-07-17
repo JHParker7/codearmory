@@ -230,6 +230,19 @@ func main() {
 	initCheckoutConfig()
 	initConcurrencyConfig()
 
+	// Percent-based admission budget: if configured, derive the CPU/memory budget from
+	// live cluster capacity and keep it current as the cluster autoscales. The default
+	// runtime is resolved above (reg.Get(ctx, "default")); when it can report cluster
+	// capacity (the kubernetes backend), use it. A docker backend does not implement
+	// clusterCapacity, so startResourceBudget falls back to the absolute values.
+	if def, err := reg.Get(ctx, "default"); err == nil {
+		if cap, ok := def.(clusterCapacity); ok {
+			startResourceBudget(ctx, cap)
+		} else {
+			startResourceBudget(ctx, nil)
+		}
+	}
+
 	// Rotate the gatekeeper service key every 25 minutes. GATEKEEPER_SERVICE_KEY
 	// must match the key in GATEKEEPER_SERVICES on gatekeeper. No-op if unset.
 	// The returned accessor yields the live key so credential lookups (see

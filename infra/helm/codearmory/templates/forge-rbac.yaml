@@ -51,4 +51,40 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "codearmory.forge.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if or .Values.forge.admission.cpuPercent .Values.forge.admission.memoryPercent }}
+---
+# Cluster-scoped read of node allocatable capacity, needed ONLY when the admission
+# budget is expressed as a percentage of cluster capacity (forge.admission.*Percent):
+# forge sums allocatable CPU/memory across Ready nodes to derive the budget, and
+# re-reads it so the budget tracks autoscaling. Nodes are a cluster-scoped resource,
+# so this is a ClusterRole — the one cluster-scoped grant forge needs, and only when
+# percent-based admission is on. With an absolute budget this is not created at all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "codearmory.fullname" . }}-forge-nodes
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: forge
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "codearmory.fullname" . }}-forge-nodes
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: forge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "codearmory.fullname" . }}-forge-nodes
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "codearmory.forge.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}

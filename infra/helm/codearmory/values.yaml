@@ -300,8 +300,21 @@ forge:
     # Max simultaneously-running executions per org / per user (0 = unlimited).
     maxConcurrentPerOrg: 0
     maxConcurrentPerUser: 0
-    # Cluster-wide CPU/memory budgets the scheduler admits runners against. Set them to
-    # a fraction of cluster capacity to reserve headroom for other workloads. 0 = off.
+    # Cluster-wide CPU/memory budgets the scheduler admits runners against — forge only
+    # starts a runner when the summed usage of running runners plus its class fits.
+    #
+    # Prefer the PERCENT knobs on a real cluster: an absolute millicore budget has to be
+    # re-picked for every environment (dev/staging/prod differ) and is actively wrong on
+    # an autoscaling cluster, where schedulable capacity moves under you. A percentage of
+    # live allocatable capacity is correct everywhere and tracks the node count. Leave
+    # ~30-40% headroom for the control plane and system daemons — a budget set at/near
+    # 100% can starve the API server (learned the hard way on a single node).
+    #
+    # Percent takes precedence over the absolute value for the dimension it is set on.
+    # Percent requires cluster-node read access (a ClusterRole, auto-created when set).
+    # 0 = off for each. In docker mode percent is ignored (no cluster); use absolute.
+    cpuPercent: 0
+    memoryPercent: 0
     maxTotalCpuMillicores: 0
     maxTotalMemoryMB: 0
   # Image building (the forge/build-image workflow action). Builds run with Kaniko

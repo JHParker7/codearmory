@@ -89,6 +89,18 @@ spec:
             - name: FORGE_MAX_TOTAL_MEMORY_MB
               value: {{ .maxTotalMemoryMB | quote }}
             {{- end }}
+            # Percent-based budget: a fraction of live cluster capacity, so the same
+            # value is correct on any cluster and follows autoscaling. Takes precedence
+            # over the absolute values above for whichever dimension it is set on;
+            # requires the node-list ClusterRole (forge-rbac.yaml).
+            {{- if .cpuPercent }}
+            - name: FORGE_MAX_TOTAL_CPU_PERCENT
+              value: {{ .cpuPercent | quote }}
+            {{- end }}
+            {{- if .memoryPercent }}
+            - name: FORGE_MAX_TOTAL_MEMORY_PERCENT
+              value: {{ .memoryPercent | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.forge.volumes }}
             # Shared workspace volumes: per-workflow total-size cap (0 disables the

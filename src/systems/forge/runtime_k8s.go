@@ -137,6 +137,45 @@ func newKubernetesRuntime(configRuntimeClass string, kernelIsolated bool) (*Kube
 	return rt, nil
 }
 
+// ClusterAllocatable sums the allocatable CPU and memory across all schedulable,
+// Ready nodes — the capacity a percent-based admission budget is taken from.
+//
+// Allocatable, not Capacity: capacity minus kubelet/system-reserved is what pods can
+// actually be scheduled into. Cordoned (unschedulable) and NotReady nodes are skipped
+// because they cannot run a runner, so counting them would let forge admit work that
+// then sits Pending. Requires list access to nodes (a cluster-scoped read) in forge's
+// RBAC; on failure the caller keeps the prior budget rather than dropping to zero.
+func (r *KubernetesRuntime) ClusterAllocatable(ctx context.Context) (cpuMillicores, memMB int64, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	nodes, err := r.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return 0, 0, err
+	}
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		if n.Spec.Unschedulable || !nodeIsReady(n) {
+			continue
+		}
+		cpuMillicores += n.Status.Allocatable.Cpu().MilliValue()
+		memMB += n.Status.Allocatable.Memory().Value() / (1024 * 1024)
+	}
+	if cpuMillicores == 0 && memMB == 0 {
+		return 0, 0, fmt.Errorf("no schedulable Ready nodes reported allocatable capacity")
+	}
+	return cpuMillicores, memMB, nil
+}
+
+// nodeIsReady reports whether a node's Ready condition is True.
+func nodeIsReady(n *corev1.Node) bool {
+	for _, c := range n.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
 // fetchPodMemoryMB reads the pod's summed container memory usage from the
 // metrics.k8s.io API. It goes through the existing client's REST client via
 // AbsPath so it needs no extra dependency or config — the request hits the same
