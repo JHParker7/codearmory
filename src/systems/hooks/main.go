@@ -281,6 +281,7 @@ func main() {
 
 	mux.HandleFunc("POST /hooks", handleWebhook)
 	mux.HandleFunc("POST /hooks/git", handleGitWebhook)
+	mux.HandleFunc("POST /hooks/gitea", handleGiteaWebhook)
 	// Internal: trusted services (e.g. tickets) emit lifecycle events here,
 	// authenticated by the shared HOOKS_TRIGGER_KEY HMAC rather than conductor.
 	mux.HandleFunc("POST /internal/events", handleInternalEvent)
