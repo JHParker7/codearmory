@@ -6,34 +6,30 @@ import {
 import type { Block, Route, MapDef } from '../src/pages/app/pipelineGraph';
 
 /** Inline blocks, so the node name is the block's own name and no catalog is needed. */
-const mk = (name: string, parallelWithPrev = false): Block => ({
-  uid: `u-${name}`, stepId: '', parallelWithPrev, name, inline: { action: 'forge/run' },
+const mk = (name: string): Block => ({
+  uid: `u-${name}`, stepId: '', name, inline: { action: 'forge/run' },
 });
 const noCatalog = () => undefined;
 const key = (rs: Route[]) => rs.map((r) => `${r.from}->${r.to}`).sort();
 
-describe('routesFromBlocks (legacy ordered pipeline -> graph)', () => {
-  it('turns a linear stack into a chain', () => {
+describe('routesFromBlocks (route-less pipeline -> the sequence it implies)', () => {
+  it('turns an ordered stack into a chain', () => {
+    // Mirrors the backend: a pipeline with no routes runs its steps in array order.
     const rs = routesFromBlocks([mk('a'), mk('b'), mk('c')], noCatalog);
     expect(key(rs)).to.deep.equal(['a->b', 'b->c']);
-  });
-
-  it('fans out and joins a parallel band', () => {
-    // build | lint+test | deploy — the cross product between adjacent stages IS
-    // the barrier, mirroring the backend's derivation.
-    const rs = routesFromBlocks([mk('build'), mk('lint'), mk('test', true), mk('deploy')], noCatalog);
-    expect(key(rs)).to.deep.equal(['build->lint', 'build->test', 'lint->deploy', 'test->deploy']);
   });
 
   it('gives a single step no routes', () => {
     expect(routesFromBlocks([mk('only')], noCatalog)).to.deep.equal([]);
   });
 
-  it('treats a leading parallel band as multiple entry steps', () => {
-    const rs = routesFromBlocks([mk('a'), mk('b', true), mk('c')], noCatalog);
-    expect(key(rs)).to.deep.equal(['a->c', 'b->c']);
-    // Neither a nor b has an inbound route, so both start the run.
-    expect(rs.some((r) => r.to === 'a' || r.to === 'b')).to.equal(false);
+  it('gives an empty pipeline no routes', () => {
+    expect(routesFromBlocks([], noCatalog)).to.deep.equal([]);
+  });
+
+  it('leaves only the first step without an inbound route', () => {
+    const rs = routesFromBlocks([mk('a'), mk('b'), mk('c')], noCatalog);
+    expect(rs.some((r) => r.to === 'a')).to.equal(false);
   });
 });
 
@@ -44,9 +40,14 @@ describe('layoutGraph', () => {
     expect(placed.map((p) => p.layer)).to.deep.equal([0, 1, 2]);
   });
 
-  it('puts a parallel band in one column and the join past it', () => {
-    const blocks = [mk('build'), mk('lint'), mk('test', true), mk('deploy')];
-    const placed = layoutGraph(blocks, routesFromBlocks(blocks, noCatalog), noCatalog);
+  it('puts a fork in one column and the join past it', () => {
+    // Two edges out of build IS the fork; lint and test share a column, deploy joins.
+    const blocks = [mk('build'), mk('lint'), mk('test'), mk('deploy')];
+    const routes: Route[] = [
+      { from: 'build', to: 'lint' }, { from: 'build', to: 'test' },
+      { from: 'lint', to: 'deploy' }, { from: 'test', to: 'deploy' },
+    ];
+    const placed = layoutGraph(blocks, routes, noCatalog);
     const layer = Object.fromEntries(placed.map((p) => [p.name, p.layer]));
     expect(layer.build).to.equal(0);
     expect(layer.lint).to.equal(1);
@@ -104,9 +105,10 @@ describe('pruneRoutes', () => {
 });
 
 describe('stepsFromNodes', () => {
-  it('never emits parallel_group — routes replace it, and the backend rejects both', () => {
-    // Even from blocks carrying the legacy flag, the graph editor writes routes only.
-    const refs = stepsFromNodes([mk('a'), mk('b', true), mk('c', true)]);
+  it('never emits parallel_group — the field no longer exists in the API', () => {
+    // Regression guard: parallelism is `routes` only, so a step ref must carry no
+    // trace of the removed encoding.
+    const refs = stepsFromNodes([mk('a'), mk('b'), mk('c')]);
     expect(refs).to.have.length(3);
     refs.forEach((r) => expect(r).to.not.have.property('parallel_group'));
   });
@@ -120,20 +122,17 @@ describe('stepsFromNodes: fan-out and gates survive the graph editor', () => {
   it('emits a gate as an approval ref, never as an inline action', () => {
     // The backend rejects an inline step whose action is "approval" ("use a gate"),
     // so building one that way would 400 on save.
-    const gate: Block = { uid: 'g', stepId: '', parallelWithPrev: false, name: 'approve', approval: { message: 'ship it?' } };
+    const gate: Block = { uid: 'g', stepId: '', name: 'approve', approval: { message: 'ship it?' } };
     const refs = stepsFromNodes([gate]);
     expect(refs[0]).to.have.property('approval');
     expect(refs[0].approval).to.deep.equal({ message: 'ship it?' });
     expect(refs[0]).to.not.have.property('action');
   });
 
-  it('keeps a matrix on a node — and, unlike the old model, its siblings can be parallel', () => {
+  it('keeps a matrix on a node — a fan-out WITHIN the node, independent of its edges', () => {
     const b: Block = { ...mk('build'), matrix: { var: 'os', values: ['linux', 'mac'] } };
     const refs = stepsFromNodes([b]);
     expect(refs[0].matrix).to.deep.equal({ var: 'os', values: ['linux', 'mac'] });
-    // parallel_group was mutually exclusive with matrix; routes are not, so the
-    // node keeps its fan-out with no group to conflict with.
-    expect(refs[0]).to.not.have.property('parallel_group');
   });
 
   it('keeps a scatter on an inline node', () => {
@@ -217,7 +216,7 @@ describe('mapIssues (client mirror of the backend rules)', () => {
   });
 
   it('rejects a gate inside a map — resume cannot tell iterations apart', () => {
-    const b: Block = { uid: 'g', stepId: '', parallelWithPrev: false, name: 'gate', approval: {}, mapId: 'm1' };
+    const b: Block = { uid: 'g', stepId: '', name: 'gate', approval: {}, mapId: 'm1' };
     expect(mapIssues([b], [good], [], noCatalog)[0]).to.match(/approval gate cannot be inside a map/);
   });
 
@@ -243,7 +242,7 @@ describe('mapIssues (client mirror of the backend rules)', () => {
 describe('nodeName', () => {
   it('prefers the block name, falling back to the referenced step definition', () => {
     expect(nodeName(mk('build'), noCatalog)).to.equal('build');
-    const ref: Block = { uid: 'u', stepId: 's1', parallelWithPrev: false };
+    const ref: Block = { uid: 'u', stepId: 's1' };
     expect(nodeName(ref, (id) => (id === 's1' ? 'shared-step' : undefined))).to.equal('shared-step');
   });
 });

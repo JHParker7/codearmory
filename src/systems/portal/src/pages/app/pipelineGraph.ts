@@ -2,17 +2,18 @@
  * Pure mapping between the Scratch-style block builder and the workflows backend
  * model — the portal twin of the CLI's tuiPipelineStages.
  *
- * The backend stores a pipeline as an *ordered* list of steps, each with an
- * optional parallel_group: consecutive steps sharing a non-nil parallel_group run
- * concurrently (one "stage"); every other step is its own sequential stage. The
- * builder is a vertical stack of blocks (one per step occurrence) where a block
- * can be "linked" to the block above it to run in the same stage. This module is
- * the (pure, unit-tested) bridge between the two:
+ * The backend stores a pipeline as an ordered list of steps plus `routes` — the
+ * edges between them, which are the ONLY encoding of parallelism between steps
+ * (two edges out of one node is a fork). A pipeline with no routes is a plain
+ * sequence: the backend derives a linear chain in steps[] order. Step order still
+ * matters because it is the step index a run's records join on.
  *
- *   blocksFromSteps  ordered steps  -> blocks (first block of each stage starts a
- *                                       stage; the rest are parallelWithPrev)
- *   stepsFromBlocks  blocks         -> ordered steps with parallel_group
- *   stagesOf         blocks         -> blocks grouped into stage bands (rendering)
+ * The builder is a set of blocks (one per step occurrence) wired by routes. This
+ * module is the (pure, unit-tested) bridge between the two:
+ *
+ *   blocksFromSteps  ordered steps  -> blocks (1:1, in order)
+ *   stepsFromBlocks  blocks         -> ordered steps
+ *   routesFromBlocks blocks         -> the linear chain a route-less pipeline implies
  *
  * Node/library types are kept out of here so the mapping can be tested under
  * mocha without the UI; the block component adapts these shapes. (stepSchema is
@@ -22,8 +23,9 @@
 import { splitPipelineWith } from './stepSchema';
 
 /** Fans a step out into one execution per value in a list, binding
- * ${matrix.<var>} per execution. Mutually exclusive with parallel_group. Mirrors
- * the workflows API MatrixConfig; kept local so this module stays UI/library-free. */
+ * ${matrix.<var>} per execution — a fan-out WITHIN one step, as distinct from
+ * `routes`, which is parallelism BETWEEN steps. Mirrors the workflows API
+ * MatrixConfig; kept local so this module stays UI/library-free. */
 export interface MatrixConfig {
   var: string;
   values?: string[];
@@ -59,7 +61,7 @@ export interface ScatterConfig {
 }
 
 /** An inline manual-approval gate: a pipeline pause point that needs no Step row.
- * A ref with an approval has no step_id and is always solo (no group/matrix). */
+ * A ref with an approval has no step_id and never fans out (no matrix/scatter). */
 export interface ApprovalGate {
   message?: string;
   approvers?: string[];
@@ -100,12 +102,11 @@ export interface StepRef {
   // Nullable because the API returns an enriched step with `with: null` when it has
   // no config; the editor treats null and absent alike.
   with?: Record<string, unknown> | null;
-  parallel_group?: number | null;
   matrix?: MatrixConfig | null;
   scatter?: ScatterConfig | null;
   approval?: ApprovalGate | null;
   /** The map region this step belongs to — see MapDef. Mutually exclusive with
-   * matrix/scatter/parallel_group, which are the step's OWN fan-out. */
+   * matrix/scatter, which are the step's OWN fan-out. */
   map_id?: string;
 }
 
@@ -148,15 +149,11 @@ export interface MapDef {
   outputs?: string[];
 }
 
-/** One step occurrence in the builder. `parallelWithPrev` links it into the same
- * stage as the block above (they run concurrently). The first block is always a
- * stage start, so its flag is forced false. `uid` is unique per occurrence so the
- * same step can appear more than once. `matrix` fans a solo block out over a list;
- * `approval` makes the block an inline manual-approval gate (no stepId).
- *
- * `parallelWithPrev` is the LEGACY ordered-list encoding: it is still read when
- * loading a pipeline authored before routes existed (so its edges can be derived
- * for display), but the graph editor writes routes instead and never sets it. */
+/** One step occurrence in the builder. `uid` is unique per occurrence so the same
+ * step can appear more than once. Concurrency with other blocks is not a property
+ * of the block at all — it is the shape of the `routes` graph. `matrix`/`scatter`
+ * fan the block out over a list (a fan-out within the one node); `approval` makes
+ * the block an inline manual-approval gate (no stepId). */
 export interface Block {
   uid: string;
   /** '' for an inline step and for a gate; the stored step id otherwise. */
@@ -167,7 +164,6 @@ export interface Block {
    * mirroring a stored step's def/override split, so the same editors work. The two
    * layers are merged into one `with` when serialised (inline refs are single-layer). */
   inline?: { action: string; timeout?: number; with?: Record<string, unknown> };
-  parallelWithPrev: boolean;
   /** Inline step: the step name. Stored reference: per-occurrence name override
    * (undefined = use the step definition's name). */
   name?: string;
@@ -180,90 +176,47 @@ export interface Block {
   mapId?: string;
 }
 
-/**
- * Collapse an ordered step list into sequential stages of step_ids. Mirrors the
- * CLI's tuiPipelineStages: only *consecutive* steps with the same non-nil
- * parallel_group merge into one stage.
- */
-export function stagesFromSteps(steps: StepRef[]): string[][] {
-  const stages: string[][] = [];
-  let prevGroup: number | null | undefined = undefined;
-  for (const s of steps) {
-    const g = s.parallel_group ?? null;
-    const id = s.step_id ?? ''; // inline gates have no step_id
-    if (g !== null && g === prevGroup) {
-      stages[stages.length - 1].push(id);
-    } else {
-      stages.push([id]);
-    }
-    prevGroup = g;
-  }
-  return stages;
-}
-
-/** Stored steps -> builder blocks. The first block of each stage starts the stage
- * (parallelWithPrev=false); any further blocks in a parallel stage link upward.
- * Block order matches the input order 1:1, so each block carries its step's matrix
- * by position (matrix only ever appears on solo, non-parallel steps). */
+/** Stored steps -> builder blocks, 1:1 and in order. Each block carries its step's
+ * matrix/scatter by position; the graph's shape lives in `routes`, not here. */
 export function blocksFromSteps(steps: StepRef[]): Block[] {
-  const blocks: Block[] = [];
-  let i = 0;
-  for (const stage of stagesFromSteps(steps)) {
-    stage.forEach((stepId, idx) => {
-      const s = steps[i];
-      // An inline ref (action, no step_id, no gate) becomes an inline block. Its `with`
-      // is split so the definition (config + input defaults) goes into the definition
-      // layer (inline.with) while any per-occurrence PIPELINE fields (e.g. an attached
-      // volume) go into the block override — mirroring a stored-step reference, which
-      // keeps such fields in its override. Left in inline.with they would be dropped
-      // the next time the inline step's definition is edited (the def form rebuilds
-      // inline.with without pipeline fields).
-      const isInline = !!s?.action && !s?.step_id && !s?.approval;
-      let inline: Block['inline'];
-      let blockWith: Record<string, unknown> | undefined;
-      if (isInline) {
-        const { def, pipeline } = splitPipelineWith(s!.action!, (s!.with ?? {}) as Record<string, unknown>);
-        inline = { action: s!.action!, timeout: s!.timeout, with: Object.keys(def).length ? def : undefined };
-        blockWith = Object.keys(pipeline).length ? pipeline : {};
-      } else {
-        // The API returns `with: null` for a step with no config; the block model
-        // uses undefined for "none", so normalise here.
-        blockWith = s?.with ?? undefined;
-      }
-      blocks.push({
-        uid: `b${i}`, stepId, parallelWithPrev: idx > 0,
-        name: s?.name || undefined,
-        with: blockWith,
-        inline,
-        matrix: s?.matrix ?? null, scatter: s?.scatter ?? null, approval: s?.approval ?? null,
-        mapId: s?.map_id || undefined,
-      });
-      i++;
-    });
-  }
-  return blocks;
-}
-
-/** Group blocks into stage bands: a run of [start, linked, linked…] is one stage.
- * The first block always starts a stage regardless of its flag. */
-export function stagesOf(blocks: Block[]): Block[][] {
-  const stages: Block[][] = [];
-  blocks.forEach((b, idx) => {
-    if (idx === 0 || !b.parallelWithPrev) stages.push([b]);
-    else stages[stages.length - 1].push(b);
+  return steps.map((s, i) => {
+    // An inline ref (action, no step_id, no gate) becomes an inline block. Its `with`
+    // is split so the definition (config + input defaults) goes into the definition
+    // layer (inline.with) while any per-occurrence PIPELINE fields (e.g. an attached
+    // volume) go into the block override — mirroring a stored-step reference, which
+    // keeps such fields in its override. Left in inline.with they would be dropped
+    // the next time the inline step's definition is edited (the def form rebuilds
+    // inline.with without pipeline fields).
+    const isInline = !!s.action && !s.step_id && !s.approval;
+    let inline: Block['inline'];
+    let blockWith: Record<string, unknown> | undefined;
+    if (isInline) {
+      const { def, pipeline } = splitPipelineWith(s.action!, (s.with ?? {}) as Record<string, unknown>);
+      inline = { action: s.action!, timeout: s.timeout, with: Object.keys(def).length ? def : undefined };
+      blockWith = Object.keys(pipeline).length ? pipeline : {};
+    } else {
+      // The API returns `with: null` for a step with no config; the block model
+      // uses undefined for "none", so normalise here.
+      blockWith = s.with ?? undefined;
+    }
+    return {
+      uid: `b${i}`,
+      stepId: s.step_id ?? '', // inline steps and gates have no step_id
+      name: s.name || undefined,
+      with: blockWith,
+      inline,
+      matrix: s.matrix ?? null, scatter: s.scatter ?? null, approval: s.approval ?? null,
+      mapId: s.map_id || undefined,
+    };
   });
-  return stages;
 }
 
-/** Builder blocks -> ordered steps with parallel_group. Each stage band of >1
- * block gets a shared group; a solo block gets null. Order follows the blocks. A
- * solo block's matrix (mutually exclusive with parallel_group) is carried through
- * when it names a var, so an incomplete in-progress matrix is dropped silently. */
+/** Builder blocks -> ordered steps, 1:1 and in order. A block's matrix/scatter is
+ * carried through only when it is complete (a matrix names a var, a scatter has a
+ * regex), so an incomplete in-progress fan-out is dropped silently. */
 export function stepsFromBlocks(blocks: Block[]): StepRef[] {
-  const out: StepRef[] = [];
-  let group = 0;
-  // The base ref for a block, before parallel_group/matrix. An inline block collapses
-  // its two edit layers (inline.with def + block.with override) into one `with`.
+  // The base ref for a block, before matrix/scatter. An inline block collapses its
+  // two edit layers (inline.with def + block.with override) into one `with`.
   const baseRef = (b: Block): StepRef => {
     if (b.approval) return { approval: b.approval };
     if (b.inline) {
@@ -278,27 +231,15 @@ export function stepsFromBlocks(blocks: Block[]): StepRef[] {
     if (b.with && Object.keys(b.with).length > 0) ref.with = b.with;
     return ref;
   };
-  for (const stage of stagesOf(blocks)) {
-    if (stage.length > 1) {
-      const g = group++;
-      for (const b of stage) {
-        const ref = baseRef(b);
-        // A gate can never be parallel, so it stays a solo gate even if grouped.
-        if (!b.approval) ref.parallel_group = g;
-        out.push(ref);
-      }
-    } else {
-      const b = stage[0];
-      const ref = baseRef(b);
-      if (!b.approval) {
-        if (!b.inline) ref.parallel_group = null;
-        if (b.scatter && b.scatter.regex.trim()) ref.scatter = b.scatter;
-        else if (b.matrix && b.matrix.var.trim()) ref.matrix = b.matrix;
-      }
-      out.push(ref);
+  return blocks.map((b) => {
+    const ref = baseRef(b);
+    // A gate is a pause point, not an execution, so it never fans out.
+    if (!b.approval) {
+      if (b.scatter && b.scatter.regex.trim()) ref.scatter = b.scatter;
+      else if (b.matrix && b.matrix.var.trim()) ref.matrix = b.matrix;
     }
-  }
-  return out;
+    return ref;
+  });
 }
 
 /** The resolved definition of a step node — from its own inline def (inline step)
@@ -323,8 +264,8 @@ export interface BlockSelection { uid: string; kind: 'gate' | 'ref' | 'inline'; 
 
 // ── The graph model ─────────────────────────────────────────────────────────────
 // A pipeline is a graph: the steps are its nodes (identified by name) and `routes`
-// are the edges. The ordered steps[]/parallel_group encoding is the legacy shape —
-// still accepted by the backend, which derives the same edges from it at run time.
+// are the edges. A pipeline that declares no routes is a plain sequence, whose
+// linear chain the backend derives from steps[] order at run time.
 // These helpers mirror the Go engine (graph.go) so the editor draws exactly what
 // the worker will execute.
 
@@ -337,20 +278,14 @@ export function nodeName(b: Block, defName: (id: string) => string | undefined):
   return defName(b.stepId) ?? '';
 }
 
-/** Legacy ordered blocks -> the routes they imply, so a pipeline authored before
- * routes existed opens in the graph editor as the graph it already was.
- *
- * Mirrors deriveRoutes in the Go engine: the cross product between adjacent stages
- * IS the barrier — every node of a stage depends on every node of the one before.
- * Reuses stagesOf, so it decodes parallel_group exactly as the backend does. */
+/** The routes an ordered, route-less pipeline implies: the linear chain through its
+ * blocks. Mirrors deriveRoutes in the Go engine, so a pipeline that declares no
+ * routes opens in the graph editor as exactly the sequence the worker will run —
+ * and saving it writes those edges out explicitly. */
 export function routesFromBlocks(blocks: Block[], defName: (id: string) => string | undefined): Route[] {
+  const names = blocks.map((b) => nodeName(b, defName)).filter(Boolean);
   const routes: Route[] = [];
-  let prev: string[] = [];
-  for (const stage of stagesOf(blocks)) {
-    const cur = stage.map((b) => nodeName(b, defName)).filter(Boolean);
-    for (const from of prev) for (const to of cur) routes.push({ from, to });
-    if (cur.length > 0) prev = cur;
-  }
+  for (let i = 1; i < names.length; i++) routes.push({ from: names[i - 1], to: names[i] });
   return routes;
 }
 
@@ -430,16 +365,13 @@ export function findCycle(blocks: Block[], routes: Route[], defName: (id: string
   return names.filter((n) => (indeg.get(n) ?? 0) > 0);
 }
 
-/** Builder blocks -> step refs for a GRAPH pipeline: the same shape as
- * stepsFromBlocks minus parallel_group, which routes replace (the backend rejects
- * the two together). Order is preserved because it is still the step index the run
- * records join on. */
+/** Builder blocks -> step refs for a GRAPH pipeline: stepsFromBlocks plus each
+ * node's map region, which is carried on the block rather than the step ref. Order
+ * is preserved because it is still the step index the run records join on. */
 export function stepsFromNodes(blocks: Block[]): StepRef[] {
-  return stepsFromBlocks(blocks.map((b) => ({ ...b, parallelWithPrev: false }))).map((ref, i) => {
-    const { parallel_group: _drop, ...rest } = ref;
-    const out = rest as StepRef;
-    if (blocks[i]?.mapId) out.map_id = blocks[i].mapId;
-    return out;
+  return stepsFromBlocks(blocks).map((ref, i) => {
+    if (blocks[i]?.mapId) ref.map_id = blocks[i].mapId;
+    return ref;
   });
 }
 
@@ -506,22 +438,20 @@ export function pruneRoutes(routes: Route[], names: string[]): Route[] {
 // payload and lets it be edited back. These pure helpers are the bridge, shared by
 // the panel and the save path so what you see is what is saved.
 
-/** Maps builder StepRefs to the API's step payload shape: a parallel step keeps its
- * group; a solo step keeps a matrix only when it names a var; everything else is a
- * bare {step_id}. */
+/** Maps builder StepRefs to the API's step payload shape: a step keeps a matrix or
+ * scatter only when it is complete (a var / a regex); everything else is a bare
+ * {step_id}. */
 export function stepsToPayload(steps: StepRef[]): StepRef[] {
   return steps.map((s) => {
     let ref: StepRef;
     if (s.approval) ref = { approval: s.approval };
     else if (s.action) {
-      // Inline step: action + full config (+ optional timeout), plus group/matrix.
+      // Inline step: action + full config (+ optional timeout), plus any fan-out.
       ref = { action: s.action };
       if (s.timeout && s.timeout > 0) ref.timeout = s.timeout;
-      if (s.parallel_group != null) ref.parallel_group = s.parallel_group;
-      else if (s.scatter && s.scatter.regex.trim()) ref.scatter = s.scatter;
+      if (s.scatter && s.scatter.regex.trim()) ref.scatter = s.scatter;
       else if (s.matrix && s.matrix.var.trim()) ref.matrix = s.matrix;
     }
-    else if (s.parallel_group != null) ref = { step_id: s.step_id, parallel_group: s.parallel_group };
     else if (s.matrix && s.matrix.var.trim()) ref = { step_id: s.step_id, matrix: s.matrix };
     else ref = { step_id: s.step_id };
     if (s.name) ref.name = s.name;
@@ -683,11 +613,11 @@ export function parseConfig(raw: string): { name: string; description: string; s
       const gate: ApprovalGate = {};
       if (typeof a.message === 'string') gate.message = a.message;
       if (Array.isArray(a.approvers)) gate.approvers = a.approvers.filter((x): x is string => typeof x === 'string');
-      return { parallel_group: null, approval: gate, ...(name ? { name } : {}) };
+      return { approval: gate, ...(name ? { name } : {}) };
     }
     // An inline step carries its definition (action) instead of a step_id.
     if (typeof so.action === 'string' && so.action) {
-      const ref: StepRef = { action: so.action, parallel_group: typeof so.parallel_group === 'number' ? so.parallel_group : null };
+      const ref: StepRef = { action: so.action };
       if (name) ref.name = name;
       if (withOverride && Object.keys(withOverride).length > 0) ref.with = withOverride;
       if (typeof so.timeout === 'number' && so.timeout > 0) ref.timeout = so.timeout;
@@ -696,7 +626,7 @@ export function parseConfig(raw: string): { name: string; description: string; s
       return ref;
     }
     if (typeof so.step_id !== 'string' || !so.step_id) throw new Error(`steps[${i}]: a "step_id" string, an inline "action", or an "approval" gate is required`);
-    const ref: StepRef = { step_id: so.step_id, parallel_group: typeof so.parallel_group === 'number' ? so.parallel_group : null };
+    const ref: StepRef = { step_id: so.step_id };
     if (name) ref.name = name;
     if (withOverride && Object.keys(withOverride).length > 0) ref.with = withOverride;
     if (so.matrix && typeof so.matrix === 'object' && !Array.isArray(so.matrix)) ref.matrix = so.matrix as MatrixConfig;

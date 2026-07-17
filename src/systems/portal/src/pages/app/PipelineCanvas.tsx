@@ -294,7 +294,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
 
   const addStep = (stepId: string, name: string) => {
     const uid = `n${seq.current++}-${Date.now()}`;
-    setBlocks((bs) => [...bs, { uid, stepId, parallelWithPrev: false, name: undefined }]);
+    setBlocks((bs) => [...bs, { uid, stepId, name: undefined }]);
     consumeFanout(uid);
     void name;
   };
@@ -305,7 +305,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     const taken = new Set(blocks.map((b) => nodeName(b, defName)));
     let unique = name; let n = 2;
     while (taken.has(unique)) unique = `${name}-${n++}`;
-    setBlocks((bs) => [...bs, { uid, stepId: '', parallelWithPrev: false, name: unique, inline: { action, with: w, timeout } }]);
+    setBlocks((bs) => [...bs, { uid, stepId: '', name: unique, inline: { action, with: w, timeout } }]);
     consumeFanout(uid);
   };
 
@@ -324,7 +324,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     const taken = new Set(blocks.map((b) => nodeName(b, defName)));
     let unique = 'approval'; let n = 2;
     while (taken.has(unique)) unique = `approval-${n++}`;
-    setBlocks((bs) => [...bs, { uid, stepId: '', parallelWithPrev: false, name: unique, approval: {} }]);
+    setBlocks((bs) => [...bs, { uid, stepId: '', name: unique, approval: {} }]);
   };
 
   // Matrix and scatter are both a fan-out OF ONE NODE, so they are mutually

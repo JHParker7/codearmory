@@ -274,7 +274,8 @@ export function deleteSecretProvider(token: string, orgId: string) {
 // ── Workflows ─────────────────────────────────────────────────────────────────
 
 /** Fans a step out into one execution per value in a list, binding
- * ${matrix.<var>} per execution. Mutually exclusive with parallel_group. */
+ * ${matrix.<var>} per execution — a fan-out WITHIN one step, as distinct from
+ * `routes`, which is parallelism BETWEEN steps. */
 export interface MatrixConfig {
   var: string;
   values?: string[];
@@ -319,15 +320,11 @@ export interface WorkflowStepRef {
   // (merged) with; on save send only the keys that differ from the step definition.
   // For an inline step it is the full config.
   with?: Record<string, unknown> | null;
-  // The legacy ordered-list encoding: consecutive steps sharing a non-nil group run
-  // concurrently. Superseded by `routes` on the Workflow, and rejected alongside
-  // them — the graph editor never sends it.
-  parallel_group?: number | null;
   matrix?: MatrixConfig | null;
   scatter?: ScatterConfig | null;
   approval?: ApprovalGate | null;
   /** The map region this step belongs to. Mutually exclusive with
-   * matrix/scatter/parallel_group, which are the step's own fan-out. */
+   * matrix/scatter, which are the step's own fan-out. */
   map_id?: string;
 }
 
@@ -392,9 +389,9 @@ export interface Workflow {
   org_id?: string | null;
   active: boolean;
   steps: WorkflowStepRef[];
-  /** The edges between steps. Absent/empty means this pipeline still uses the
-   * ordered steps[]/parallel_group encoding, whose edges the backend derives at run
-   * time — the graph editor shows those derived edges and writes routes on save. */
+  /** The edges between steps — the only encoding of parallelism between steps.
+   * Absent/empty means the pipeline is a plain sequence: the backend derives a
+   * linear chain in steps[] order, which is what the graph editor draws. */
   routes?: WorkflowRoute[];
   /** The map regions steps join via map_id. */
   maps?: WorkflowMapDef[];

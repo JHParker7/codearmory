@@ -75,16 +75,14 @@ interface RunStep {
   sr?: WorkflowStepRun;
 }
 
-/** A sequential stage of the run. `parallel` marks a real parallel_group of more
- * than one workflow step — not a single step's matrix fan-out, which also yields
- * several blocks (`steps`) but occupies one stage. */
+/** One stage of the run: the blocks belonging to a single workflow step. A matrix
+ * fan-out yields several blocks (`steps`) but still occupies one stage. */
 interface RunStage {
-  parallel: boolean;
   steps: RunStep[];
 }
 
-/** Group the run's steps into sequential stages. Uses the workflow's
- * parallel_group structure when available, else the flat step-run order (a deleted
+/** Group the run's step runs by the workflow step they belong to, in step order —
+ * falling back to the flat step-run order when the workflow is gone (a deleted
  * workflow still shows its run as a sequence). A matrix step fans out into several
  * step runs that all share one step_index; each becomes its own block so every
  * combination's status and output is shown — not just one. */
@@ -98,9 +96,7 @@ function buildStages(workflow: Workflow | null, stepRuns: WorkflowStepRun[], cat
 
   if (workflow && workflow.steps.length > 0) {
     const stages: RunStage[] = [];
-    let prev: number | null | undefined = undefined;
     workflow.steps.forEach((s, i) => {
-      const g = s.parallel_group ?? null;
       const runs = byIndex.get(i) ?? [];
       const base = s.approval
         ? (s.name || 'approval gate')
@@ -114,14 +110,7 @@ function buildStages(workflow: Workflow | null, stepRuns: WorkflowStepRun[], cat
             .sort((a, b) => a.step_name.localeCompare(b.step_name))
             .map((sr) => ({ key: sr.step_run_id, index: i, gate: s.approval, sr, label: sr.step_name || base }))
         : [{ key: runs[0]?.step_run_id ?? `idx:${i}`, index: i, gate: s.approval, sr: runs[0], label: base }];
-      if (g !== null && g === prev) {
-        const stage = stages[stages.length - 1];
-        stage.steps.push(...blocks);
-        stage.parallel = true; // more than one workflow step shares this parallel_group
-      } else {
-        stages.push({ parallel: false, steps: blocks });
-      }
-      prev = g;
+      stages.push({ steps: blocks });
     });
     return stages;
   }
@@ -130,7 +119,7 @@ function buildStages(workflow: Workflow | null, stepRuns: WorkflowStepRun[], cat
   return stepRuns
     .slice()
     .sort((a, b) => a.step_index - b.step_index)
-    .map((sr) => ({ parallel: false, steps: [{ key: sr.step_run_id, index: sr.step_index, label: sr.step_name, sr }] }));
+    .map((sr) => ({ steps: [{ key: sr.step_run_id, index: sr.step_index, label: sr.step_name, sr }] }));
 }
 
 /** A matrix step's fan-out collapsed into a single block: one status card plus a

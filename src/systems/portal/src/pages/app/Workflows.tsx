@@ -108,7 +108,6 @@ function PipelineBuilderOverlay({
           timeout: s.timeout ?? undefined,
           name: s.name || undefined,
           with: (s.with ?? undefined) as Record<string, unknown> | undefined,
-          parallel_group: s.parallel_group ?? null,
           matrix: s.matrix ?? null,
           scatter: s.scatter ?? null,
           map_id: s.map_id || undefined,
@@ -130,7 +129,6 @@ function PipelineBuilderOverlay({
         // per-occurrence `with`; without this the synthesised gate's message/approvers
         // (returned in `with` by the GET) would leak in as a spurious override.
         with: (!s.approval && Object.keys(wo).length) ? wo : undefined,
-        parallel_group: s.parallel_group ?? null,
         matrix: s.matrix ?? null,
         scatter: s.scatter ?? null,
         approval: s.approval ?? null,
@@ -406,9 +404,9 @@ function PipelineBuilderOverlay({
         name: name.trim(),
         description: desc.trim() || undefined,
         steps: stepsToPayload(cleanedSteps),
-        // Routes and parallel_group are mutually exclusive server-side, and
-        // stepsFromNodes never emits a group — so sending the graph's edges is what
-        // converts a legacy ordered pipeline into an explicit one on its next save.
+        // Routes are the only encoding of parallelism between steps. Omitting them
+        // leaves the pipeline a plain sequence (the backend derives a linear chain
+        // in steps[] order), so a route-less graph saves as the sequence it is.
         routes: routes.length > 0 ? routes : undefined,
         maps: maps.length > 0 ? maps : undefined,
         inputs: cleanInputs.length > 0 ? cleanInputs : undefined,
@@ -690,7 +688,6 @@ function PipelinesTab() {
         name: isInline ? (s.name || undefined) : undefined,
         timeout: isInline ? (s.timeout ?? undefined) : undefined,
         with: isInline ? ((s.with ?? undefined) as Record<string, unknown> | undefined) : undefined,
-        parallel_group: s.parallel_group ?? null,
         matrix: s.matrix ?? null,
         scatter: s.scatter ?? null,
         approval: s.approval ?? null,
