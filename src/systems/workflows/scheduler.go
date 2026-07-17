@@ -528,7 +528,7 @@ func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, work
 
 	// Scatter owns its whole resolve/clone/run/gather orchestration.
 	if ws.Scatter != nil {
-		output, status := p.runScatterGroup(ctx, store, runID, ws, idx, inputs, visible, depth, legSem)
+		output, status := p.runScatterGroup(ctx, store, runID, workflowID, ws, idx, inputs, visible, depth, legSem)
 		return nodeResult{name: ws.Name, state: statusToNodeState(status), output: output}
 	}
 

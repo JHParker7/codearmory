@@ -570,7 +570,7 @@ func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID,
 				return
 			}
 			defer func() { <-sem }() // release
-			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, mapVars: t.mapVars, runID: runID, depth: depth})
+			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, mapVars: t.mapVars, runID: runID, workflowID: workflowID, depth: depth})
 			resCh <- taskResult{name: t.name, output: res.Output, logs: res.Logs, usedMB: res.MemoryUsedMB, limitMB: res.MemoryLimitMB, err: err, idx: k}
 		}(k, t)
 	}

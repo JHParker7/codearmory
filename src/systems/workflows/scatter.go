@@ -198,9 +198,9 @@ func parseScatterPaths(resolveOutput string) []string {
 // cause is visible rather than a silently failed run.
 // legSem is the run-wide leg budget shared with every other node in the frontier;
 // cfg.MaxConcurrent still caps this scatter's own fan-out within it.
-func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, runID string, ws WorkflowStep, stepIndex int, inputs, visible map[string]string, depth int, legSem chan struct{}) (string, string) {
+func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, runID, workflowID string, ws WorkflowStep, stepIndex int, inputs, visible map[string]string, depth int, legSem chan struct{}) (string, string) {
 	c := ws.Scatter
-	base := substContext{inputs: inputs, outputs: visible, runID: runID, depth: depth}
+	base := substContext{inputs: inputs, outputs: visible, runID: runID, workflowID: workflowID, depth: depth}
 
 	// Produce the fan-out path set. Both sources are substituted for run-level
 	// references (${inputs.*}/${steps.*}) first: paths_from takes the list straight from
@@ -267,7 +267,7 @@ func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, run
 				results[i] = taskResult{idx: i, err: context.Canceled}
 				return
 			}
-			results[i] = p.runScatterLeg(ctx, store, runID, ws, &cfg, shards[i], paths[i], inputs, visible, depth)
+			results[i] = p.runScatterLeg(ctx, store, runID, workflowID, ws, &cfg, shards[i], paths[i], inputs, visible, depth)
 		}(i)
 	}
 	wg.Wait()
@@ -298,15 +298,15 @@ func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, run
 
 // runScatterLeg provisions one leg's clone volume, seeds it from the base workspace,
 // and runs the user's step on it bound to its matched path.
-func (p *WorkerPool) runScatterLeg(ctx context.Context, store *tokenStore, runID string, ws WorkflowStep, cfg *ScatterConfig, shard, path string, inputs, visible map[string]string, depth int) taskResult {
-	base := substContext{inputs: inputs, outputs: visible, runID: runID, depth: depth}
+func (p *WorkerPool) runScatterLeg(ctx context.Context, store *tokenStore, runID, workflowID string, ws WorkflowStep, cfg *ScatterConfig, shard, path string, inputs, visible map[string]string, depth int) taskResult {
+	base := substContext{inputs: inputs, outputs: visible, runID: runID, workflowID: workflowID, depth: depth}
 	if _, err := p.executeStep(ctx, store, scatterCreateShardStep(cfg, runID, shard), base); err != nil {
 		return taskResult{err: fmt.Errorf("create clone volume: %w", err)}
 	}
 	if _, err := p.executeStep(ctx, store, scatterCloneStep(cfg, runID, shard), base); err != nil {
 		return taskResult{err: fmt.Errorf("clone workspace: %w", err)}
 	}
-	legCtx := substContext{inputs: inputs, outputs: visible, scatterPath: path, runID: runID, depth: depth}
+	legCtx := substContext{inputs: inputs, outputs: visible, scatterPath: path, runID: runID, workflowID: workflowID, depth: depth}
 	res, err := p.executeStep(ctx, store, scatterLegStep(ws, cfg, runID, shard), legCtx)
 	return taskResult{output: res.Output, logs: res.Logs, usedMB: res.MemoryUsedMB, limitMB: res.MemoryLimitMB, err: err}
 }

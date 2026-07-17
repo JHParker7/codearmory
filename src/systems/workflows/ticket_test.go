@@ -418,3 +418,24 @@ func TestCollectWorkflowPermissions_TicketStepsGetUsableResources(t *testing.T) 
 		}
 	}
 }
+
+// ${workflow_id} identifies the PIPELINE across every run of it — it is what links a
+// step-created ticket back to the definition rather than to one execution.
+func TestSubstitute_WorkflowID(t *testing.T) {
+	sc := substContext{runID: "run-1", workflowID: "wf-9"}
+	for in, want := range map[string]string{
+		"${workflow_id}":                  "wf-9",
+		"${workflow.id}":                  "wf-9",
+		"${run_id}":                       "run-1",
+		"run ${run_id} of ${workflow_id}": "run run-1 of wf-9",
+	} {
+		if got := substitute(in, sc); got != want {
+			t.Errorf("substitute(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// Unset must leave the reference literal rather than substituting an empty string:
+	// a ticket carrying "" would look linked to nothing, which is worse than obvious.
+	if got := substitute("${workflow_id}", substContext{runID: "r"}); got != "${workflow_id}" {
+		t.Errorf("unset workflow_id = %q, want the reference left literal", got)
+	}
+}
