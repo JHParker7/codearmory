@@ -93,6 +93,11 @@ gatekeeper:
     # Password for the optional bootstrap admin (see gatekeeper.env.adminEmail).
     # Leave empty to disable env-var admin seeding.
     adminPassword: ""
+    # AES-256-GCM key (64 hex chars = 32 bytes) encrypting stored user/org secrets.
+    # Auto-generated on first install and preserved across upgrades (reading the
+    # existing in-cluster key) — rotating it orphans every stored ciphertext. Leave
+    # empty for auto-generation. Enables the secrets feature and secret: job refs.
+    secretsKey: ""
   redis:
     enabled: true
     image:

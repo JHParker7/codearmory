@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -59,7 +60,7 @@ func fakeGitBrokerServer(t *testing.T, h http.HandlerFunc) {
 	})
 }
 
-// ── lookupOrgSecret ─────────────────────────────────────────────────────────────
+// ── lookupScopedSecret ──────────────────────────────────────────────────────────
 
 func TestLookupOrgSecret_Success(t *testing.T) {
 	fakeSecretsServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -72,19 +73,45 @@ func TestLookupOrgSecret_Success(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"value":"s3cr3t"}`)) //nolint:errcheck
 	})
-	got, err := lookupOrgSecret(context.Background(), "org1", "deploy-key")
+	got, err := lookupScopedSecret(context.Background(), "org1", "", "deploy-key")
 	if err != nil {
-		t.Fatalf("lookupOrgSecret: %v", err)
+		t.Fatalf("lookupScopedSecret: %v", err)
 	}
 	if got != "s3cr3t" {
 		t.Errorf("value = %q, want s3cr3t", got)
 	}
 }
 
-func TestLookupOrgSecret_NoOrg(t *testing.T) {
-	// No org bound: must fail before any network call (gatekeeper secrets are org-scoped).
-	if _, err := lookupOrgSecret(context.Background(), "", "name"); err == nil {
-		t.Fatal("expected an error when no org is bound to the execution")
+func TestLookupScopedSecret_NoScope(t *testing.T) {
+	// Neither org nor user bound: must fail before any network call — there is no
+	// ownership scope to resolve the secret under.
+	if _, err := lookupScopedSecret(context.Background(), "", "", "name"); err == nil {
+		t.Fatal("expected an error when neither org nor user is bound to the execution")
+	}
+}
+
+func TestLookupScopedSecret_PersonalUser(t *testing.T) {
+	// No org, but a user is bound: forge must send user_id so gatekeeper resolves
+	// the caller's personal secret. This is the org-less CI path.
+	fakeSecretsServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			OrgID  string `json:"org_id"`
+			UserID string `json:"user_id"`
+			Name   string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.OrgID != "" || body.UserID != "u-solo" {
+			t.Errorf("lookup body = %+v, want org_id='' user_id='u-solo'", body)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"value":"personal"}`)) //nolint:errcheck
+	})
+	got, err := lookupScopedSecret(context.Background(), "", "u-solo", "registry-auth")
+	if err != nil {
+		t.Fatalf("lookupScopedSecret personal: %v", err)
+	}
+	if got != "personal" {
+		t.Errorf("value = %q, want personal", got)
 	}
 }
 
@@ -92,7 +119,7 @@ func TestLookupOrgSecret_KeyNotInitialised(t *testing.T) {
 	orig := forgeServiceKey
 	forgeServiceKey = nil
 	t.Cleanup(func() { forgeServiceKey = orig })
-	if _, err := lookupOrgSecret(context.Background(), "org1", "name"); err == nil {
+	if _, err := lookupScopedSecret(context.Background(), "org1", "", "name"); err == nil {
 		t.Fatal("expected an error when the service key accessor is nil")
 	}
 }
@@ -101,7 +128,7 @@ func TestLookupOrgSecret_NotFound(t *testing.T) {
 	fakeSecretsServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	_, err := lookupOrgSecret(context.Background(), "org1", "missing")
+	_, err := lookupScopedSecret(context.Background(), "org1", "", "missing")
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("err = %v, want a not-found error", err)
 	}
@@ -111,7 +138,7 @@ func TestLookupOrgSecret_ServerError(t *testing.T) {
 	fakeSecretsServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	if _, err := lookupOrgSecret(context.Background(), "org1", "name"); err == nil {
+	if _, err := lookupScopedSecret(context.Background(), "org1", "", "name"); err == nil {
 		t.Fatal("expected an error for a non-200 lookup response")
 	}
 }
@@ -121,7 +148,7 @@ func TestLookupOrgSecret_BadJSON(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`not json`)) //nolint:errcheck
 	})
-	if _, err := lookupOrgSecret(context.Background(), "org1", "name"); err == nil {
+	if _, err := lookupScopedSecret(context.Background(), "org1", "", "name"); err == nil {
 		t.Fatal("expected a decode error for a malformed lookup response")
 	}
 }

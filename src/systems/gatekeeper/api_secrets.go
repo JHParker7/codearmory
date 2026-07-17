@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"gorm.io/gorm"
 )
 
 var adapterClient = &http.Client{
@@ -95,6 +96,29 @@ func validateSecretName(name string) error {
 	return nil
 }
 
+// scopeSecretQuery narrows a secrets query to the caller's ownership scope: an
+// org caller sees only their org's secrets; an org-less caller sees only their
+// own personal secrets (org_id = '' AND created_by = caller). This is the single
+// place the org-vs-personal ownership rule is expressed, so create/list/update/
+// delete/resolve all agree on it.
+func scopeSecretQuery(q *gorm.DB, orgID, userID string) *gorm.DB {
+	if orgID != "" {
+		return q.Where("org_id = ?", orgID)
+	}
+	return q.Where("org_id = '' AND created_by = ?", userID)
+}
+
+// callerOwnsSecret reports whether the caller may read/modify s under the same
+// org-vs-personal rule scopeSecretQuery enforces for queries. An org-less caller
+// owns a secret only if it is personal (org_id = '') AND they created it — so one
+// org-less user cannot touch another's personal secrets.
+func callerOwnsSecret(s Secret, orgID, userID string) bool {
+	if orgID != "" {
+		return s.OrgID == orgID
+	}
+	return s.OrgID == "" && s.CreatedBy == userID
+}
+
 type secretRequest struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
@@ -144,13 +168,12 @@ func handleCreateSecret(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "caller not found", http.StatusUnauthorized)
 		return
 	}
+	// A caller with an org owns org-scoped secrets; a caller with no org owns
+	// personal secrets, keyed by created_by. Both are supported so a solo user
+	// (no org) can still hold credentials — e.g. a CI run that pushes images.
 	orgID := ""
 	if oid := callerRow.(User).OrgID; oid != nil {
 		orgID = *oid
-	}
-	if orgID == "" {
-		http.Error(w, "caller must belong to an org to create secrets", http.StatusBadRequest)
-		return
 	}
 
 	var req secretRequest
@@ -168,8 +191,8 @@ func handleCreateSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var existing Secret
-	if connectRead().WithContext(r.Context()).
-		Where("org_id = ? AND name = ? AND active = true", orgID, req.Name).
+	if scopeSecretQuery(connectRead().WithContext(r.Context()), orgID, callerID).
+		Where("name = ? AND active = true", req.Name).
 		First(&existing).Error == nil {
 		http.Error(w, "secret with that name already exists", http.StatusConflict)
 		return
@@ -223,8 +246,8 @@ func handleListSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var secrets []Secret
-	if err := connectRead().WithContext(r.Context()).
-		Where("org_id = ? AND active = true", callerOrgID).
+	if err := scopeSecretQuery(connectRead().WithContext(r.Context()), callerOrgID, callerID).
+		Where("active = true").
 		Find(&secrets).Error; err != nil {
 		slog.ErrorContext(r.Context(), "list secrets: db", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -261,7 +284,7 @@ func handleUpdateSecret(w http.ResponseWriter, r *http.Request) {
 			callerOrgID = *oid
 		}
 	}
-	if s.OrgID != callerOrgID {
+	if !callerOwnsSecret(s, callerOrgID, callerID) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -326,7 +349,7 @@ func handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 			callerOrgID = *oid
 		}
 	}
-	if s.OrgID != callerOrgID {
+	if !callerOwnsSecret(s, callerOrgID, callerID) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -598,20 +621,24 @@ func handleLookupSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		OrgID string `json:"org_id"`
-		Name  string `json:"name"`
+		OrgID  string `json:"org_id"`
+		UserID string `json:"user_id"`
+		Name   string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.OrgID == "" || req.Name == "" {
-		http.Error(w, "org_id and name are required", http.StatusBadRequest)
+	// Either an org scope or a personal (user) scope must be supplied — the caller
+	// established the binding when it authorized the request. org_id wins when both
+	// are present, matching an org member's ownership.
+	if req.Name == "" || (req.OrgID == "" && req.UserID == "") {
+		http.Error(w, "name and one of org_id/user_id are required", http.StatusBadRequest)
 		return
 	}
 
 	ctx := r.Context()
-	values, err := resolveSecrets(ctx, req.OrgID, []string{req.Name})
+	values, err := resolveSecretsScoped(ctx, req.OrgID, req.UserID, []string{req.Name})
 	if err != nil {
 		var nfe *errSecretNotFound
 		if errors.As(err, &nfe) {
@@ -630,6 +657,20 @@ func handleLookupSecret(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"value": value}) //nolint:errcheck
+}
+
+// resolveSecretsScoped resolves names under either an org scope or a personal
+// (org-less) scope. Personal secrets are always builtin — a per-user external
+// provider makes no sense — so an org-less scope goes straight to the builtin
+// store keyed by created_by. An org scope keeps the full provider dispatch.
+func resolveSecretsScoped(ctx context.Context, orgID, userID string, names []string) (map[string]string, error) {
+	if orgID == "" {
+		if userID == "" {
+			return nil, fmt.Errorf("no owner scope for secret lookup")
+		}
+		return resolveBuiltinScoped(ctx, "", userID, names)
+	}
+	return resolveSecrets(ctx, orgID, names)
 }
 
 // resolveSecrets dispatches to the org's configured provider (or builtin if none set).
@@ -656,9 +697,16 @@ func resolveSecrets(ctx context.Context, orgID string, names []string) (map[stri
 // ── Built-in adapter ──────────────────────────────────────────────────────────
 
 func resolveBuiltin(ctx context.Context, orgID string, names []string) (map[string]string, error) {
+	return resolveBuiltinScoped(ctx, orgID, "", names)
+}
+
+// resolveBuiltinScoped reads secrets from the builtin store under the caller's
+// ownership scope (org or personal), using the same predicate as the CRUD path
+// so a lookup can only ever see secrets the owner could list.
+func resolveBuiltinScoped(ctx context.Context, orgID, userID string, names []string) (map[string]string, error) {
 	var secrets []Secret
-	if err := connectRead().WithContext(ctx).
-		Where("org_id = ? AND active = true AND name IN ?", orgID, names).
+	if err := scopeSecretQuery(connectRead().WithContext(ctx), orgID, userID).
+		Where("active = true AND name IN ?", names).
 		Find(&secrets).Error; err != nil {
 		return nil, fmt.Errorf("db query: %w", err)
 	}

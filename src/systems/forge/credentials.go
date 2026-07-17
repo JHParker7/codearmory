@@ -83,9 +83,11 @@ func parseCredentialRef(ref string) (scheme, arg string, err error) {
 
 // validateSecretRefs checks each secret_ref's target env var name and reference
 // at submit time. env holds the plaintext env keys the same request sets, so a
-// secret_ref cannot silently collide with a plaintext value. An org is required
-// for secret: references because gatekeeper secrets are org-scoped.
-func validateSecretRefs(refs, env map[string]string, orgID string) error {
+// secret_ref cannot silently collide with a plaintext value. A secret: reference
+// resolves under the submitter's ownership scope — their org if they have one,
+// otherwise their personal secrets — so it needs either an org or a user; a
+// submitter always has a user, so secret: refs are permitted for org-less users.
+func validateSecretRefs(refs, env map[string]string, orgID, userID string) error {
 	for target, ref := range refs {
 		if !envKeyRe.MatchString(target) {
 			return fmt.Errorf("invalid secret_ref target %q: must match [A-Za-z_][A-Za-z0-9_]*", target)
@@ -100,8 +102,8 @@ func validateSecretRefs(refs, env map[string]string, orgID string) error {
 		if err != nil {
 			return fmt.Errorf("secret_ref %q: %w", target, err)
 		}
-		if scheme == refSchemeSecret && orgID == "" {
-			return fmt.Errorf("secret_ref %q uses a secret: reference, which requires org membership", target)
+		if scheme == refSchemeSecret && orgID == "" && userID == "" {
+			return fmt.Errorf("secret_ref %q uses a secret: reference, which requires an org or an authenticated user", target)
 		}
 	}
 	return nil
@@ -124,7 +126,7 @@ func resolveCredentials(ctx context.Context, exec Execution) (map[string]string,
 		var value string
 		switch scheme {
 		case refSchemeSecret:
-			value, err = lookupOrgSecret(ctx, exec.OrgID, arg)
+			value, err = lookupScopedSecret(ctx, exec.OrgID, exec.UserID, arg)
 		case refSchemeGitea:
 			value, err = mintGiteaCloneURL(ctx, exec.UserID, arg)
 		case refSchemeGit:
@@ -140,18 +142,20 @@ func resolveCredentials(ctx context.Context, exec Execution) (map[string]string,
 	return out, nil
 }
 
-// lookupOrgSecret resolves a single org-scoped secret value from gatekeeper.
-// forge must be listed in gatekeeper's SECRETS_LOOKUP_ALLOWED_CALLERS. The org
-// binding was established by the gatekeeper permission check at submit time and
-// snapshotted onto the execution, so gatekeeper trusts the org_id forge sends.
-func lookupOrgSecret(ctx context.Context, orgID, name string) (string, error) {
-	if orgID == "" {
-		return "", fmt.Errorf("no org bound to execution for secret lookup")
+// lookupScopedSecret resolves a single secret value from gatekeeper under the
+// execution's ownership scope: its org if one is bound, otherwise the submitting
+// user's personal secrets. forge must be listed in gatekeeper's
+// SECRETS_LOOKUP_ALLOWED_CALLERS. Both bindings were established by the gatekeeper
+// permission check at submit time and snapshotted onto the execution, so
+// gatekeeper trusts the org_id/user_id forge sends.
+func lookupScopedSecret(ctx context.Context, orgID, userID, name string) (string, error) {
+	if orgID == "" && userID == "" {
+		return "", fmt.Errorf("no org or user bound to execution for secret lookup")
 	}
 	if forgeServiceKey == nil {
 		return "", fmt.Errorf("gatekeeper service key not initialised")
 	}
-	body, _ := json.Marshal(map[string]string{"org_id": orgID, "name": name})
+	body, _ := json.Marshal(map[string]string{"org_id": orgID, "user_id": userID, "name": name})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/internal/secrets/lookup", bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -166,7 +170,7 @@ func lookupOrgSecret(ctx context.Context, orgID, name string) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("org secret %q not found", name)
+		return "", fmt.Errorf("secret %q not found", name)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("secret lookup returned %d", resp.StatusCode)

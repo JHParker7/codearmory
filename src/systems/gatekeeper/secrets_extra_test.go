@@ -65,14 +65,26 @@ func TestHandleCreateSecret(t *testing.T) {
 	t.Cleanup(func() { gormDB.Unscoped().Where("name = ?", "MY_SECRET").Delete(&Secret{}) }) //nolint:errcheck
 }
 
+// TestHandleCreateSecret_NoOrg verifies an org-less caller creates a *personal*
+// secret (org_id = '', created_by = caller) rather than being rejected — so a solo
+// user can hold credentials without an org.
 func TestHandleCreateSecret_NoOrg(t *testing.T) {
 	u := createAuthorizedUser(t, "createSecret", "gatekeeper/secrets") // user has no org
-	b, _ := json.Marshal(map[string]any{"name": "X", "value": "y"})
+	name := "PERSONAL_" + uuid.NewString()[:8]
+	t.Cleanup(func() { gormDB.Unscoped().Where("name = ?", name).Delete(&Secret{}) }) //nolint:errcheck
+	b, _ := json.Marshal(map[string]any{"name": name, "value": "y"})
 	r := withUserID(httptest.NewRequest(http.MethodPost, "/secrets", bytes.NewReader(b)), u.UserID)
 	w := httptest.NewRecorder()
 	handleCreateSecret(w, r)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("no-org caller got %d, want 400", w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("no-org caller got %d, want 201: %s", w.Code, w.Body.String())
+	}
+	var got Secret
+	if err := gormDB.Where("name = ? AND active = true", name).First(&got).Error; err != nil {
+		t.Fatalf("personal secret not stored: %v", err)
+	}
+	if got.OrgID != "" || got.CreatedBy != u.UserID {
+		t.Fatalf("personal secret scope wrong: org_id=%q created_by=%q (want org_id='' created_by=%q)", got.OrgID, got.CreatedBy, u.UserID)
 	}
 }
 

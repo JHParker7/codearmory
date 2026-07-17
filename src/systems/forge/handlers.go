@@ -322,7 +322,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateSecretRefs(req.SecretRefs, req.Env, orgID); err != nil {
+	if err := validateSecretRefs(req.SecretRefs, req.Env, orgID, userID); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
