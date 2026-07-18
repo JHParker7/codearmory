@@ -350,6 +350,20 @@
       }
     },
     {
+      "action": "outpost-gateway/enqueueCommand",
+      "name": "integration-tests",
+      "timeout": 900,
+      "with": {
+        "id": "${inputs.OUTPOST_ID}",
+        "integration": "test",
+        "type": "run",
+        "payload": {
+          "image": "192.168.53.171:3000/jp01/ci-e2e:latest",
+          "timeout_secs": 600
+        }
+      }
+    },
+    {
       "action": "tickets/update",
       "name": "close-ticket",
       "timeout": 60,
@@ -434,10 +448,6 @@
       "to": "track-images"
     },
     {
-      "from": "track-images",
-      "to": "close-ticket"
-    },
-    {
       "from": "discover",
       "to": "fail-ticket",
       "when": "steps.discover.status == 'failed'"
@@ -480,6 +490,20 @@
       "from": "image-portal",
       "to": "redeploy-portal",
       "when": "inputs.OUTPOST_ID != \"\""
+    },
+    {
+      "from": "redeploy",
+      "to": "integration-tests",
+      "when": "inputs.OUTPOST_ID != \"\""
+    },
+    {
+      "from": "integration-tests",
+      "to": "close-ticket"
+    },
+    {
+      "from": "integration-tests",
+      "to": "fail-ticket",
+      "when": "steps[\"integration-tests\"].status == 'failed'"
     }
   ]
 }

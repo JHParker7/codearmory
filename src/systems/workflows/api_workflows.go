@@ -137,6 +137,21 @@ func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef, ticket *Tic
 				}
 			}
 		}
+
+		// An outpost-gateway/enqueueCommand step enqueues a command (POST
+		// /outposts/<id>/commands) and then polls it to a terminal state (GET
+		// /outpost-commands/<cmdId>). The poll reads a DIFFERENT resource space than the
+		// submit (a globally-unique command id, not scoped under the outpost), so the
+		// generic create→get companion above cannot cover it. Grant getCommand on the
+		// command space explicitly, mirroring the triggerRun case.
+		if p.Action == "enqueueCommand" {
+			spec := PermissionSpec{Service: p.Service, Action: "getCommand", Resource: "outpost-gateway/outpost-commands/*"}
+			k := spec.Service + ":" + spec.Action + ":" + spec.Resource
+			if _, dup := seen[k]; !dup {
+				seen[k] = struct{}{}
+				out = append(out, spec)
+			}
+		}
 	}
 
 	for _, ws := range steps {

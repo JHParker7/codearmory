@@ -88,6 +88,16 @@ deploy:
   targetNamespaces:
     - default
 
+test:
+  # RBAC (a namespaced Role granting create/watch/delete on Jobs + read on pods/logs)
+  # for the test module, which runs integration suites as Jobs.
+  rbac: true
+  # Namespace a test Job runs in when the command names none. Empty = release namespace.
+  defaultNamespace: ""
+  # Namespaces the outpost may run test Jobs in (one Role each). Least privilege.
+  targetNamespaces:
+    - default
+
 serviceAccount:
   # The outpost's own ServiceAccount.
   name: ""
