@@ -175,8 +175,16 @@ func TestClaimCommands_ReturnsAndAck(t *testing.T) {
 	if err != nil || len(cmds) != 1 || cmds[0].ID != cmdID {
 		t.Fatalf("claim = %+v err=%v", cmds, err)
 	}
-	if err := ackCommand(context.Background(), o.OutpostID, cmdID); err != nil {
+	if err := ackCommand(context.Background(), o.OutpostID, cmdID, "done", ""); err != nil {
 		t.Fatalf("ack: %v", err)
+	}
+	// The ack records the terminal status a poller (a CI step) gates on.
+	got, err := getCommandByID(context.Background(), cmdID)
+	if err != nil {
+		t.Fatalf("getCommandByID: %v", err)
+	}
+	if got.Status != CmdDone {
+		t.Fatalf("status = %q, want %q", got.Status, CmdDone)
 	}
 }
 
