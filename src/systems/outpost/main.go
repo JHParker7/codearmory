@@ -136,7 +136,7 @@ func main() {
 func buildModules(enabled []string) ([]Module, error) {
 	var needsK8s bool
 	for _, name := range enabled {
-		if name == "chaos" || name == "argo" {
+		if name == "chaos" || name == "argo" || name == "deploy" || name == "test" {
 			needsK8s = true
 		}
 	}
@@ -148,6 +148,10 @@ func buildModules(enabled []string) ([]Module, error) {
 			modules = append(modules, newChaosModule(dynClient))
 		case "argo":
 			modules = append(modules, newArgoModule(dynClient))
+		case "deploy":
+			modules = append(modules, newDeployModule(dynClient))
+		case "test":
+			modules = append(modules, newTestModule(dynClient))
 		default:
 			slog.Warn("outpost: ignoring unknown module", "module", name)
 		}
@@ -217,7 +221,7 @@ func handleCommand(ctx context.Context, client *gatewayClient, byName map[string
 	m, ok := byName[c.Integration]
 	if !ok {
 		slog.Warn("outpost: no module for command", "integration", c.Integration, "command_id", c.ID)
-		_ = client.ackCommand(ctx, c.ID) // ack so it isn't re-served forever
+		_ = client.ackCommand(ctx, c.ID, "failed", "no module for integration "+c.Integration) // ack so it isn't re-served forever
 		return
 	}
 	events, err := m.HandleCommand(ctx, c)
@@ -235,7 +239,7 @@ func handleCommand(ctx context.Context, client *gatewayClient, byName map[string
 			slog.Error("outpost: reporting command failure failed; leaving command for redelivery", "command_id", c.ID, "error", emitErr)
 			return
 		}
-		if ackErr := client.ackCommand(ctx, c.ID); ackErr != nil {
+		if ackErr := client.ackCommand(ctx, c.ID, "failed", err.Error()); ackErr != nil {
 			slog.Warn("outpost: ack failed", "command_id", c.ID, "error", ackErr)
 		}
 		return
@@ -249,7 +253,7 @@ func handleCommand(ctx context.Context, client *gatewayClient, byName map[string
 			return
 		}
 	}
-	if err := client.ackCommand(ctx, c.ID); err != nil {
+	if err := client.ackCommand(ctx, c.ID, "done", ""); err != nil {
 		slog.Warn("outpost: ack failed", "command_id", c.ID, "error", err)
 		return
 	}

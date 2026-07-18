@@ -1,4 +1,4 @@
-{{- if and .Values.outpostGateway.enabled .Values.outpostGateway.deploy }}
+{{- if .Values.outpostGateway.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -7,12 +7,18 @@ metadata:
     {{- include "codearmory.labels" . | nindent 4 }}
     app.kubernetes.io/component: outpost-gateway
 spec:
+  # ClusterIP: an in-cluster outpost reaches it by DNS. A REMOTE-cluster outpost dials
+  # out over HTTPS, so expose it (Ingress/LoadBalancer) only when running outposts in
+  # other clusters.
   type: {{ .Values.outpostGateway.service.type | default "ClusterIP" }}
   ports:
     - port: {{ .Values.outpostGateway.port }}
       targetPort: http
       protocol: TCP
       name: http
+      {{- if and (eq (.Values.outpostGateway.service.type | default "ClusterIP") "NodePort") .Values.outpostGateway.service.nodePort }}
+      nodePort: {{ .Values.outpostGateway.service.nodePort }}
+      {{- end }}
   selector:
     app.kubernetes.io/name: {{ include "codearmory.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}

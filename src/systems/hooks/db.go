@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -179,18 +180,23 @@ func listRules(ctx context.Context, userID, orgID string) ([]PipelineRule, error
 // Only rules with a non-empty secret are returned; rows with NULL or empty
 // secrets are excluded so they can never fire without HMAC verification.
 func getMatchedRules(ctx context.Context, source, event string) ([]PipelineRule, error) {
-	var rules []PipelineRule
-	if err := connectRead().WithContext(ctx).Raw(
-		`SELECT rule_id, name, repo, events, ref_filter, workflow_id, secret, input_mapping, created_by, org_id
-		 FROM pipeline_rules
-		 WHERE repo = ? AND active = true
-		   AND events::jsonb @> jsonb_build_array(?::text)
-		   AND secret IS NOT NULL AND secret != ''`,
-		source, event,
-	).Scan(&rules).Error; err != nil {
+	// Fetch the active, secret-protected rules for this source, then filter by
+	// event membership in Go. This avoids a Postgres-only jsonb containment
+	// operator so the identical query runs on Postgres and sqlite; the per-source
+	// candidate set is small (rules are keyed by repo), so the cost is negligible.
+	var candidates []PipelineRule
+	if err := connectRead().WithContext(ctx).
+		Where("repo = ? AND active = ? AND secret IS NOT NULL AND secret != ?", source, true, "").
+		Find(&candidates).Error; err != nil {
 		return nil, err
 	}
-	return rules, nil
+	var matched []PipelineRule
+	for _, r := range candidates {
+		if slices.Contains(r.Events, event) {
+			matched = append(matched, r)
+		}
+	}
+	return matched, nil
 }
 
 // ── HookEvent ─────────────────────────────────────────────────────────────────
@@ -446,7 +452,7 @@ func addRetry(ctx context.Context, triggerID, workflowID, triggeredBy, orgID str
 func claimDueRetries(ctx context.Context, n int) ([]HookTriggerRetry, error) {
 	var retries []HookTriggerRetry
 	err := connect().WithContext(ctx).
-		Where("next_retry_at <= now()").
+		Where("next_retry_at <= ?", time.Now().UTC()). // app clock, not SQL now() — portable across Postgres/sqlite
 		Order("next_retry_at").
 		Limit(n).
 		Find(&retries).Error

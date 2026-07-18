@@ -1,5 +1,18 @@
+/**
+ * Typed client for the portal BFF. Every function is a thin wrapper over {@link req}
+ * that issues an HTTP call against `/api/*` (proxied to conductor) and returns the
+ * decoded JSON. Grouped by backing service (gatekeeper, workflows, forge, …); the
+ * interfaces mirror each service's response shape. The functions are intentionally
+ * terse — the section banner and the verb+path in each call are the documentation.
+ */
+
 const BASE = '/api';
 
+/**
+ * Core fetch helper: issues `method BASE+path` with optional bearer auth and JSON
+ * body, returns decoded JSON (or undefined for 204), and throws an Error with a
+ * `.status` property on any non-2xx so callers can branch on the HTTP code.
+ */
 async function req<T>(method: string, path: string, token?: string, body?: unknown): Promise<T> {
   const res = await fetch(BASE + path, {
     method,
@@ -15,6 +28,16 @@ async function req<T>(method: string, path: string, token?: string, body?: unkno
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
+}
+
+/**
+ * Append a `project=<label>` view filter to a path's query string (choosing `?`
+ * or `&` by what the path already carries), or return it unchanged when no
+ * project is active. Mirrors the CLI's appendProjectParam.
+ */
+function withProject(path: string, project?: string): string {
+  if (!project) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}project=${encodeURIComponent(project)}`;
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -45,6 +68,39 @@ export function signup(payload: SignupPayload) {
 
 export function login(email: string, password: string) {
   return req<LoginResult>('POST', '/gatekeeper/login', undefined, { email, password });
+}
+
+// ── First-run setup ─────────────────────────────────────────────────────────
+// Public, unauthenticated. Reports whether the instance has been bootstrapped
+// (has at least one user). The portal routes to the first-run setup page when
+// initialized is false.
+
+export interface SetupStatus {
+  initialized: boolean;
+  /** When true, registration is invite-only: only allowlisted emails may sign up. */
+  invite_only: boolean;
+}
+
+/**
+ * Fetch first-run setup status, time-bounded so a hung upstream can't trap the
+ * SetupGate on the loading screen forever (the app's entire render is gated on
+ * this resolving). On timeout the fetch aborts and rejects, which checkSetup
+ * treats as a failed attempt.
+ */
+export async function getSetupStatus(timeoutMs = 4000): Promise<SetupStatus> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(BASE + '/gatekeeper/setup/status', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw Object.assign(new Error(res.statusText), { status: res.status });
+    return (await res.json()) as SetupStatus;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────
@@ -123,6 +179,7 @@ export function getTeam(token: string, id: string) {
 
 export interface Role {
   role_id: string;
+  name?: string;
   permissions_ids: string[];
   org_id?: string | null;
   owner_id: string;
@@ -191,7 +248,7 @@ export interface SecretProvider {
   updated_at: string;
 }
 
-// Returns null when no provider row exists (org implicitly uses builtin).
+/** Fetch an org's secret-provider config, returning null when no provider row exists (org implicitly uses builtin). */
 export async function getSecretProvider(token: string, orgId: string): Promise<SecretProvider | null> {
   try {
     return await req<SecretProvider>('GET', `/gatekeeper/orgs/${orgId}/secret-provider`, token);
@@ -216,14 +273,155 @@ export function deleteSecretProvider(token: string, orgId: string) {
 
 // ── Workflows ─────────────────────────────────────────────────────────────────
 
+/** Fans a step out into one execution per value in a list, binding
+ * ${matrix.<var>} per execution — a fan-out WITHIN one step, as distinct from
+ * `routes`, which is parallelism BETWEEN steps. */
+export interface MatrixConfig {
+  var: string;
+  values?: string[];
+  values_from?: string;
+}
+
+/** Fans an inline step out over the regex-matched paths of a shared workspace: each
+ * match is one parallel leg on its own clone (bound to ${scatter.path}), with owned
+ * outputs gathered back into the base afterward. */
+export interface ScatterConfig {
+  volume?: string;
+  mount_path?: string;
+  regex: string;
+  mode?: string;
+  max_depth?: number;
+  outputs?: string[];
+  size_mb?: number;
+  medium?: string;
+  max_concurrent?: number;
+}
+
+/** An inline manual-approval gate on a pipeline step ref — pauses the run with no
+ * separate Step row. A ref carries either a step_id or an approval gate. */
+export interface ApprovalGate {
+  message?: string;
+  approvers?: string[];
+}
+
+export interface WorkflowStepRef {
+  step_id?: string;
+  // Inline step only (no step_id): the action it runs. On a GET the enriched inline
+  // step carries this; on save it declares a pipeline-local step (definition on the
+  // ref) rather than referencing a shared step.
+  action?: string;
+  // Inline step only: per-step timeout in seconds.
+  timeout?: number;
+  // Per-occurrence name override (so a reused step can have distinct names). On a
+  // GET it is the effective name; on save send it only when it differs from the
+  // step definition's name. For an inline step it is the step name.
+  name?: string;
+  // Per-occurrence `with` overrides (input wiring). On a GET this is the effective
+  // (merged) with; on save send only the keys that differ from the step definition.
+  // For an inline step it is the full config.
+  with?: Record<string, unknown> | null;
+  matrix?: MatrixConfig | null;
+  scatter?: ScatterConfig | null;
+  approval?: ApprovalGate | null;
+  /** The map region this step belongs to. Mutually exclusive with
+   * matrix/scatter, which are the step's own fan-out. */
+  map_id?: string;
+}
+
+/** A directed edge between two steps, identified by step name — the workflows API's
+ * WorkflowRoute. A step with no inbound route is an entry step.
+ *
+ * `when` is a boolean expression (NOT `${...}` templating) deciding whether the
+ * edge is taken, evaluated once `from` reaches a terminal state; empty means "taken
+ * iff `from` completed". Reads steps.NAME.status/.output/.json.FIELD, inputs.NAME,
+ * run.id. It is compiled when the pipeline is saved, so a typo is a 400 rather than
+ * a silently dead branch at run time. */
+export interface WorkflowRoute {
+  from: string;
+  to: string;
+  when?: string;
+}
+
+/** A map region: a subgraph repeated once per value. Steps join it via
+ * WorkflowStepRef.map_id, and the routes between them are its body — so unlike a
+ * matrix (one step) an iteration can build, then test, then conditionally push.
+ * `volume` gives each iteration its own clone of that workspace, which is why a map
+ * exists at all: volumes are ReadWriteOnce, so iterations cannot share a checkout.
+ * The workflows API's MapDef. */
+export interface WorkflowMapDef {
+  id: string;
+  var: string;
+  values?: string[];
+  values_from?: string;
+  max_concurrent?: number;
+  sequential?: boolean;
+  volume?: string;
+  mount_path?: string;
+  size_mb?: number;
+  medium?: string;
+  outputs?: string[];
+}
+
+/** A run parameter a pipeline declares. `default` is applied when the trigger omits
+ * the input; `required` makes the backend reject a trigger that leaves it unset. */
+export interface WorkflowInputDef {
+  name: string;
+  default?: string;
+  required?: boolean;
+  description?: string;
+}
+
+/** A value a pipeline publishes on completion. `value` is a `${...}` template —
+ * typically `${steps.STEP.output.KEY}` — resolved from step outputs at run end and
+ * surfaced in WorkflowRun.outputs (and consumable by a parent workflows/trigger step). */
+export interface WorkflowOutputDef {
+  name: string;
+  value: string;
+}
+
+/** Opts a pipeline into mirroring each of its runs to a ticket. The run's ticket is
+ * opened when the run starts, commented as each step finishes, and closed with the
+ * run's outcome — there are no ticket STEPS; it is a property of the pipeline. */
+export interface WorkflowTicketConfig {
+  enabled: boolean;
+  /** Supports ${run_id}, ${inputs.X} and ${steps.NAME.output.FIELD} — a title naming a
+   * step's output is filled in once that step runs. */
+  title?: string;
+  board_id?: string;
+  priority?: string;
+  project?: string;
+  /** Overrides for the statuses a run maps onto; needed when the ticket is filed on a
+   * board whose columns are not the default open/in_progress/resolved/closed. */
+  status_running?: string;
+  status_success?: string;
+  status_failure?: string;
+  status_cancelled?: string;
+}
+
 export interface Workflow {
   workflow_id: string;
   name: string;
   description?: string | null;
+  /** Free-text project (workspace) label this pipeline is tagged with — a view filter, not a permission. */
+  project?: string;
   created_by: string;
   org_id?: string | null;
   active: boolean;
-  steps: Array<{ step_id: string; parallel_group?: string | null }>;
+  steps: WorkflowStepRef[];
+  /** The edges between steps — the only encoding of parallelism between steps.
+   * Absent/empty means the pipeline is a plain sequence: the backend derives a
+   * linear chain in steps[] order, which is what the graph editor draws. */
+  routes?: WorkflowRoute[];
+  /** The map regions steps join via map_id. */
+  maps?: WorkflowMapDef[];
+  /** Mirrors every run of this pipeline into a ticket (opt-in). The editor has no UI
+   * for it, so it is carried through a save unchanged — dropping it would silently
+   * turn mirroring off for a pipeline nobody meant to change. */
+  ticket?: WorkflowTicketConfig;
+  /** Declared run parameters (defaults/required applied at trigger time). */
+  inputs?: WorkflowInputDef[];
+  /** Declared outputs published on completion (resolved into WorkflowRun.outputs). */
+  outputs?: WorkflowOutputDef[];
   created_at: string;
   updated_at: string;
 }
@@ -235,6 +433,11 @@ export interface WorkflowStepRun {
   step_name: string;
   status: string;
   output?: string | null;
+  /** The step's execution log — the backing action's stdout (forge: the command's
+   * stdout), captured on success for display. Distinct from `output`, which holds
+   * the consumable captured outputs (output_env map). Absent on the failure path,
+   * where stdout is folded into `output`. */
+  logs?: string | null;
   started_at?: string | null;
   ended_at?: string | null;
 }
@@ -247,14 +450,16 @@ export interface WorkflowRun {
   status: string;
   current_step?: number | null;
   inputs?: Record<string, unknown> | null;
+  /** Declared pipeline outputs resolved from step outputs at completion. */
+  outputs?: Record<string, string> | null;
   step_runs?: WorkflowStepRun[];
   created_at: string;
   started_at?: string | null;
   ended_at?: string | null;
 }
 
-export function listWorkflows(token: string) {
-  return req<Workflow[]>('GET', '/workflows/pipelines', token);
+export function listWorkflows(token: string, project?: string) {
+  return req<Workflow[]>('GET', withProject('/workflows/pipelines', project), token);
 }
 
 export function getWorkflow(token: string, id: string) {
@@ -285,7 +490,33 @@ export function cancelRun(token: string, id: string) {
   return req<void>('DELETE', `/workflows/runs/${id}`, token);
 }
 
+/** Approve a run paused on a manual-approval gate, resuming it. */
+export function approveRun(token: string, id: string, comment?: string) {
+  return req<WorkflowRun>('POST', `/workflows/runs/${id}/approve`, token, comment ? { comment } : {});
+}
+
+/** Reject a run paused on a manual-approval gate, failing it. */
+export function rejectRun(token: string, id: string, comment?: string) {
+  return req<WorkflowRun>('POST', `/workflows/runs/${id}/reject`, token, comment ? { comment } : {});
+}
+
 // ── Forge ─────────────────────────────────────────────────────────────────────
+
+/**
+ * actions/checkout-style clone config. When set on an execution, forge `git clone`s
+ * the repo whose authenticated URL lives in `env` (default GIT_CLONE_URL, usually a
+ * git:/gitea: secret_ref) into `path` and cd's into it before running the command.
+ */
+export interface CheckoutSpec {
+  /** Env var holding the clone URL. Default GIT_CLONE_URL. */
+  env?: string;
+  /** Directory to clone into and cd into. Default: repo name derived from the ref, else "repo". */
+  path?: string;
+  /** Branch or tag to check out. Empty = the remote's default branch. */
+  ref?: string;
+  /** git clone --depth. Omit for a shallow depth-1 clone; 0 = full clone. */
+  depth?: number;
+}
 
 export interface Execution {
   execution_id: string;
@@ -295,6 +526,12 @@ export interface Execution {
   env?: Record<string, string> | null;
   timeout?: number | null;
   runner_class?: string | null;
+  /** Credential references (target env var → "scheme:arg") resolved at dispatch, never the resolved values. */
+  secret_refs?: Record<string, string> | null;
+  /** actions/checkout-style clone config, if requested at submit. */
+  checkout?: CheckoutSpec | null;
+  /** Free-text project (workspace) label this execution is tagged with. */
+  project?: string;
   status: string;
   exit_code?: number | null;
   stdout?: string | null;
@@ -310,11 +547,28 @@ export interface RunnerClass {
   cpu_millicores: number;
   pids_limit?: number | null;
   tmpfs_mb?: number | null;
+  disk_gb?: number | null;
+  /** Name of the RuntimeBackend this class runs on (resolve to its type for kata vs not). */
+  backend?: string;
   enabled: boolean;
+  /** Root + writable rootfs + privilege escalation; only meaningful on VM-isolated backends. */
+  privileged?: boolean;
 }
 
-export function listExecutions(token: string) {
-  return req<Execution[]>('GET', '/forge/executions', token);
+/** Admin runtime target. `type` is the runtime implementation: docker | kubernetes | kata | gvisor. */
+export interface RuntimeBackend {
+  name: string;
+  type: string;
+  enabled: boolean;
+  /** Non-secret settings (e.g. `runtime_class` for kata/gvisor). Always an object from the API. */
+  config?: Record<string, string>;
+  /** Logical key → the NAME of an env var read via secret(); never the secret value. */
+  secret_refs?: Record<string, string>;
+  created_at?: string;
+}
+
+export function listExecutions(token: string, project?: string) {
+  return req<Execution[]>('GET', withProject('/forge/executions', project), token);
 }
 
 export function getExecution(token: string, id: string) {
@@ -327,6 +581,15 @@ export function cancelExecution(token: string, id: string) {
 
 export function listRunnerClasses(token: string) {
   return req<RunnerClass[]>('GET', '/forge/runner-classes', token);
+}
+
+export function listRuntimeBackends(token: string) {
+  return req<RuntimeBackend[]>('GET', '/forge/runtime-backends', token);
+}
+
+/** The forge image allowlist (deduped, sorted). Executions may only use these. */
+export function listForgeImages(token: string) {
+  return req<string[]>('GET', '/forge/images', token);
 }
 
 // ── Tickets ───────────────────────────────────────────────────────────────────
@@ -346,6 +609,14 @@ export interface Ticket {
   description?: string | null;
   status: string;
   priority?: string | null;
+  /** A scheduling bucket (e.g. "Q1 2026") — a custom `timescale` field-def value or free text. */
+  timescale?: string | null;
+  /** Due date as an ISO timestamp (only the date part is meaningful); null/absent when none is set. */
+  due_date?: string | null;
+  /** Free-text project (workspace) label this ticket is tagged with. */
+  project?: string;
+  /** The board this ticket belongs to. New tickets always have a board; null/absent only for legacy rows. */
+  board_id?: string | null;
   created_by: string;
   org_id?: string | null;
   assignee_id?: string | null;
@@ -357,19 +628,21 @@ export interface Ticket {
   updated_at: string;
 }
 
-export function listTickets(token: string) {
-  return req<Ticket[]>('GET', '/tickets/tickets', token);
+export function listTickets(token: string, project?: string) {
+  return req<Ticket[]>('GET', withProject('/tickets/tickets', project), token);
 }
 
 export function getTicket(token: string, id: string) {
   return req<Ticket>('GET', `/tickets/tickets/${id}`, token);
 }
 
-export function createTicket(token: string, payload: { title: string; description?: string; priority?: string }) {
+export function createTicket(token: string, payload: { title: string; description?: string; status?: string; priority?: string; project?: string; board_id?: string; timescale?: string; due_date?: string; assignee_id?: string }) {
   return req<Ticket>('POST', '/tickets/tickets', token, payload);
 }
 
-export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string }>) {
+// board_id: a string assigns the ticket to that board; "" re-homes it to the default board; omit to leave unchanged.
+// due_date accepts YYYY-MM-DD; "" clears it. assignee_id "" unassigns. timescale "" is ignored server-side (kept).
+export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string; board_id: string; timescale: string; due_date: string }>) {
   return req<Ticket>('PUT', `/tickets/tickets/${id}`, token, payload);
 }
 
@@ -381,12 +654,77 @@ export function addComment(token: string, ticketId: string, body: string) {
   return req<TicketComment>('POST', `/tickets/tickets/${ticketId}/comments`, token, { body });
 }
 
+/** A configurable status/priority/timescale value — the kanban board's columns come from the `status` defs. */
+export interface TicketFieldDef {
+  field_def_id: string;
+  kind: string;
+  value: string;
+  label: string;
+  color?: string;
+  position: number;
+  /** Set on status defs that are owned by a specific board ("" = org/global). */
+  board_id?: string;
+}
+
+// boardId scopes status columns to a single board; omit (or "") for the org/global set.
+export function listTicketFieldDefs(token: string, kind: string, boardId?: string) {
+  const q = boardId ? `&board_id=${encodeURIComponent(boardId)}` : '';
+  return req<TicketFieldDef[]>('GET', `/tickets/field-defs?kind=${encodeURIComponent(kind)}${q}`, token);
+}
+
+export function createTicketFieldDef(token: string, payload: { kind: string; value: string; label: string; color?: string; position?: number; board_id?: string }) {
+  return req<TicketFieldDef>('POST', '/tickets/field-defs', token, payload);
+}
+
+export function updateTicketFieldDef(token: string, id: string, payload: Partial<{ label: string; color: string; position: number }>) {
+  return req<TicketFieldDef>('PUT', `/tickets/field-defs/${id}`, token, payload);
+}
+
+export function deleteTicketFieldDef(token: string, id: string) {
+  return req<void>('DELETE', `/tickets/field-defs/${id}`, token);
+}
+
+/** A named kanban board — a first-class grouping of tickets owned by a user/org. */
+export interface Board {
+  board_id: string;
+  name: string;
+  description?: string;
+  color?: string;
+  position: number;
+  created_by: string;
+  org_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Server-computed ticket tallies for this board: open = not resolved/closed, total = all active. */
+  open_count?: number;
+  total_count?: number;
+}
+
+export function listBoards(token: string) {
+  return req<Board[]>('GET', '/tickets/boards', token);
+}
+
+export function createBoard(token: string, payload: { name: string; description?: string; color?: string }) {
+  return req<Board>('POST', '/tickets/boards', token, payload);
+}
+
+export function updateBoard(token: string, id: string, payload: Partial<{ name: string; description: string; color: string; position: number }>) {
+  return req<Board>('PUT', `/tickets/boards/${id}`, token, payload);
+}
+
+// Deleting a board cascade-deletes its tickets, so the server requires the
+// board's exact name echoed back as confirmation (?confirm=<name>).
+export function deleteBoard(token: string, id: string, confirmName: string) {
+  return req<void>('DELETE', `/tickets/boards/${id}?confirm=${encodeURIComponent(confirmName)}`, token);
+}
+
 // ── Hooks ─────────────────────────────────────────────────────────────────────
 
 export interface PipelineRule {
   rule_id: string;
   name: string;
-  repo: string;
+  /** Webhook source repo this rule matches (e.g. "owner/repo"). The hooks service serialises this as `source`. */
+  source: string;
   events: string[];
   ref_filter?: string | null;
   workflow_id: string;
@@ -410,7 +748,8 @@ export interface HookTrigger {
 
 export interface HookEvent {
   event_id: string;
-  repo: string;
+  /** Source repo the delivery came from (e.g. "owner/repo"). Serialised as `source` by the hooks service. */
+  source: string;
   event_type: string;
   ref?: string | null;
   payload?: unknown;
@@ -428,11 +767,17 @@ export function getRule(token: string, id: string) {
   return req<PipelineRule>('GET', `/hooks/rules/${id}`, token);
 }
 
-export function createRule(token: string, payload: { name: string; repo: string; events: string[]; ref_filter?: string; workflow_id: string; input_mapping?: Record<string, string> }) {
+// Create a rule. The hooks service requires a non-empty `secret` (the HMAC secret
+// that authenticates deliveries) and a `workflow_id` that resolves to a workflow
+// in the caller's org.
+export function createRule(token: string, payload: { name: string; source: string; events: string[]; ref_filter?: string; workflow_id: string; secret: string; input_mapping?: Record<string, string> }) {
   return req<PipelineRule>('POST', '/hooks/rules', token, payload);
 }
 
-export function updateRule(token: string, id: string, payload: Partial<{ name: string; repo: string; events: string[]; ref_filter: string; workflow_id: string; input_mapping: Record<string, string> }>) {
+// Update a rule. Send the full rule (name/source/events/workflow_id are all
+// required by the service). Omit `secret` to keep the existing one; a non-empty
+// value replaces it. An empty-string secret is rejected server-side.
+export function updateRule(token: string, id: string, payload: Partial<{ name: string; source: string; events: string[]; ref_filter: string; workflow_id: string; secret: string; input_mapping: Record<string, string> }>) {
   return req<PipelineRule>('PUT', `/hooks/rules/${id}`, token, payload);
 }
 
@@ -490,13 +835,13 @@ export function deleteWorkspaceState(token: string, path: string) {
 // ── Audit ─────────────────────────────────────────────────────────────────────
 
 export interface AuditLog {
-  audit_id: string;
+  audit_log_id: string;
   actor_id: string;
+  actor_type?: string | null; // "user" | "service"
   action: string;
   resource_id: string;
-  resource_type?: string | null;
-  org_id?: string | null;
-  meta?: Record<string, unknown> | null;
+  org_id?: string | null; // actor's org at the time of the action
+  detail?: string | null;
   created_at: string;
 }
 
@@ -514,6 +859,41 @@ export function listAuditLogs(
   return req<AuditLog[]>('GET', `/gatekeeper/audit-logs${qs ? '?' + qs : ''}`, token);
 }
 
+// ── Permission checks (access-decision audit log) ─────────────────────────────
+// One row per permission evaluation (granted or denied), across every service.
+// Admin-only — used to review access patterns and hunt suspicious usage. Unlike
+// the mutation audit log, `resource` is the full scoped resource path used in the
+// RBAC check, and `granted` records the decision.
+
+export interface PermissionCheck {
+  permissions_check_id: string;
+  service: string;
+  action: string;
+  resource: string;
+  user_id: string;
+  org_id?: string | null;
+  team_id?: string | null;
+  granted: boolean;
+  created_at: string;
+}
+
+export function listPermissionChecks(
+  token: string,
+  filters?: { user_id?: string; service?: string; action?: string; resource?: string; org_id?: string; granted?: boolean; limit?: number; offset?: number },
+) {
+  const q = new URLSearchParams();
+  if (filters?.user_id) q.set('user_id', filters.user_id);
+  if (filters?.service) q.set('service', filters.service);
+  if (filters?.action) q.set('action', filters.action);
+  if (filters?.resource) q.set('resource', filters.resource);
+  if (filters?.org_id) q.set('org_id', filters.org_id);
+  if (filters?.granted !== undefined) q.set('granted', String(filters.granted));
+  if (filters?.limit !== undefined) q.set('limit', String(filters.limit));
+  if (filters?.offset !== undefined) q.set('offset', String(filters.offset));
+  const qs = q.toString();
+  return req<PermissionCheck[]>('GET', `/gatekeeper/permission-checks${qs ? '?' + qs : ''}`, token);
+}
+
 // ── CI Steps ──────────────────────────────────────────────────────────────────
 
 export interface Step {
@@ -521,7 +901,7 @@ export interface Step {
   name: string;
   description?: string | null;
   action: string;
-  with?: Record<string, string> | null;
+  with?: Record<string, unknown> | null;
   timeout?: number | null;
   created_by: string;
   org_id?: string | null;
@@ -530,10 +910,53 @@ export interface Step {
   updated_at: string;
 }
 
+/** The gatekeeper permission triple an action requires to run. */
+export interface ActionPermission {
+  service: string;
+  action: string;
+  resource: string;
+}
+
+/** Rewrites a `with` key before the step payload is sent to the backend service. */
+export interface ActionBodyTransform {
+  from_key: string;
+  to_key: string;
+  wrap?: string[];
+}
+
+/** How a long-running action is polled to a terminal state. */
+export interface ActionAsyncConfig {
+  id_field: string;
+  poll_path: string;
+  poll_interval_secs: number;
+  status_field: string;
+  success_states?: string[];
+  failure_states?: string[];
+  cancel_states?: string[];
+  output_field?: string;
+  /** A response field holding an object that becomes the step's success output
+   * (e.g. forge's captured output_env map). When set, stdout is never the output. */
+  output_map_field?: string;
+  error_fields?: string[];
+}
+
+/**
+ * A callable action from the workflows catalog (mirrors the backend ActionDef).
+ * summary/description are human-facing metadata; the remaining fields are the
+ * action config — which backend service/route it hits, how the body is shaped,
+ * the required permission, and any async polling spec.
+ */
 export interface WorkflowAction {
   name: string;
+  summary?: string | null;
   description?: string | null;
-  inputs?: Record<string, unknown> | null;
+  service_name?: string;
+  service_url?: string;
+  method?: string;
+  path?: string;
+  body_transforms?: ActionBodyTransform[] | null;
+  async?: ActionAsyncConfig | null;
+  required_permission?: ActionPermission | null;
 }
 
 export function listSteps(token: string) {
@@ -546,7 +969,7 @@ export function getStep(token: string, id: string) {
 
 export function createStep(
   token: string,
-  payload: { name: string; description?: string; action: string; with?: Record<string, string>; timeout?: number },
+  payload: { name: string; description?: string; action: string; with?: Record<string, unknown>; timeout?: number },
 ) {
   return req<Step>('POST', '/workflows/steps', token, payload);
 }
@@ -554,7 +977,7 @@ export function createStep(
 export function updateStep(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; action: string; with: Record<string, string>; timeout: number }>,
+  payload: Partial<{ name: string; description: string; action: string; with: Record<string, unknown>; timeout: number }>,
 ) {
   return req<Step>('PUT', `/workflows/steps/${id}`, token, payload);
 }
@@ -571,7 +994,7 @@ export function listActions(token: string) {
 
 export function createWorkflow(
   token: string,
-  payload: { name: string; description?: string; steps: Array<{ step_id: string; parallel_group?: string }> },
+  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; routes?: WorkflowRoute[]; maps?: WorkflowMapDef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[] },
 ) {
   return req<Workflow>('POST', '/workflows/pipelines', token, payload);
 }
@@ -579,18 +1002,22 @@ export function createWorkflow(
 export function updateWorkflow(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; steps: Array<{ step_id: string; parallel_group?: string }> }>,
+  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; routes: WorkflowRoute[]; maps: WorkflowMapDef[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[] }>,
 ) {
   return req<Workflow>('PUT', `/workflows/pipelines/${id}`, token, payload);
 }
 
 // ── Forge — create execution, manage runner classes ───────────────────────────
 
+// Forge's POST /executions responds with only the new id — not a full Execution.
+// secret_refs maps a target env var NAME to a "<scheme>:<arg>" credential reference
+// (e.g. "git:https://github.com/acme/widgets.git") resolved at dispatch and injected
+// into the runner env only — never persisted. The repo selector sets a git: ref.
 export function createExecution(
   token: string,
-  payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string },
+  payload: { image: string; command: string[]; env?: Record<string, string>; timeout?: number; runner_class?: string; project?: string; secret_refs?: Record<string, string>; checkout?: CheckoutSpec },
 ) {
-  return req<Execution>('POST', '/forge/executions', token, payload);
+  return req<{ execution_id: string }>('POST', '/forge/executions', token, payload);
 }
 
 export function createRunnerClass(
@@ -614,6 +1041,27 @@ export function updateRunnerClass(
 
 export function deleteRunnerClass(token: string, name: string) {
   return req<void>('DELETE', `/forge/runner-classes/${name}`, token);
+}
+
+// RuntimeBackend admin (docker/kubernetes/kata/gvisor). Create/update send the full
+// object — forge re-validates type + the kata/gvisor runtime_class on every write,
+// so partial updates would be rejected. secret_refs holds env-var NAMES, not values.
+export type RuntimeBackendInput = { name: string; type: string; enabled: boolean; config?: Record<string, string>; secret_refs?: Record<string, string> };
+
+export function createRuntimeBackend(token: string, payload: RuntimeBackendInput) {
+  return req<RuntimeBackend>('POST', '/forge/runtime-backends', token, payload);
+}
+
+export function getRuntimeBackend(token: string, name: string) {
+  return req<RuntimeBackend>('GET', `/forge/runtime-backends/${name}`, token);
+}
+
+export function updateRuntimeBackend(token: string, name: string, payload: Omit<RuntimeBackendInput, 'name'>) {
+  return req<RuntimeBackend>('PUT', `/forge/runtime-backends/${name}`, token, payload);
+}
+
+export function deleteRuntimeBackend(token: string, name: string) {
+  return req<void>('DELETE', `/forge/runtime-backends/${name}`, token);
 }
 
 // ── Containers ────────────────────────────────────────────────────────────────
@@ -673,6 +1121,8 @@ export interface GiteaRepo {
   description?: string | null;
   private: boolean;
   default_branch?: string | null;
+  /** Free-text project (workspace) label this repo is tagged with. */
+  project?: string;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -718,8 +1168,13 @@ export function unlinkGiteaAccount(token: string) {
   return req<void>('DELETE', '/gitea_integration/account', token);
 }
 
-export function listGiteaRepos(token: string) {
-  return req<GiteaRepo[]>('GET', '/gitea_integration/repos', token);
+export function listGiteaRepos(token: string, project?: string) {
+  return req<GiteaRepo[]>('GET', withProject('/gitea_integration/repos', project), token);
+}
+
+/** Assign a repo to a project (pass an empty string to clear it). Mirrors the CLI's `armory repos project`. */
+export function setGiteaRepoProject(token: string, owner: string, name: string, project: string) {
+  return req<GiteaRepo>('PUT', `/gitea_integration/repos/${owner}/${name}/project`, token, { project });
 }
 
 export function createGiteaRepo(token: string, payload: { name: string; description?: string; private?: boolean }) {
@@ -767,6 +1222,156 @@ export function mergePull(token: string, owner: string, repo: string, index: num
   return req<void>('POST', `/gitea_integration/repos/${owner}/${repo}/pulls/${index}/merge`, token);
 }
 
+// ── Git (credential broker) ─────────────────────────────────────────────────
+// The `git` core service is a backend-agnostic git credential broker. It stores
+// provider backends (github/gitlab/forgejo/generic) and mints short-lived clone
+// credentials for a repo URL. Secrets are write-only: they are sent on
+// create/update but NEVER returned by any read — the backend types below omit
+// every secret field.
+
+export type GitBackendType = 'github' | 'gitlab' | 'forgejo' | 'generic';
+
+/**
+ * A registered git backend as returned by reads. Secret material (tokens, keys,
+ * passwords) is never present — only the non-sensitive descriptor, including the
+ * resolved `host` and the `auth_mode` in effect.
+ */
+export interface GitBackend {
+  id: string;
+  name: string;
+  type: GitBackendType | string;
+  base_url: string;
+  host: string;
+  auth_mode: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * The write-only auth payload sent when creating/updating a backend. `mode`
+ * selects the credential scheme for the chosen backend type; the remaining
+ * fields are mode-specific and never read back. Numbers (app_id/installation_id)
+ * are sent as ints.
+ */
+export interface GitBackendAuth {
+  mode: string;
+  // github "app"
+  app_id?: number;
+  installation_id?: number;
+  private_key?: string;
+  // github "pat" / gitlab "token" / forgejo "token"
+  token?: string;
+  username?: string;
+  // gitlab "oauth"
+  refresh_token?: string;
+  client_id?: string;
+  client_secret?: string;
+  // forgejo "admin"
+  admin_token?: string;
+  // generic "basic"
+  password?: string;
+}
+
+export interface GitBackendCreate {
+  name: string;
+  type: GitBackendType | string;
+  base_url: string;
+  auth: GitBackendAuth;
+}
+
+/** Result of probing a backend's stored credentials. */
+export interface GitBackendTest {
+  ok: boolean;
+  backend_type: string;
+  auth_mode: string;
+  expires_at?: string | null;
+}
+
+/** A short-lived clone credential minted for a repo URL. `secret` is sensitive. */
+export interface GitCredential {
+  type: string;
+  username: string;
+  secret: string;
+  clone_url: string;
+  backend: string;
+  backend_type: string;
+  expires_at?: string | null;
+}
+
+export function listGitBackends(token: string) {
+  return req<GitBackend[]>('GET', '/git_connector/backends', token);
+}
+
+export function getGitBackend(token: string, id: string) {
+  return req<GitBackend>('GET', `/git_connector/backends/${id}`, token);
+}
+
+export function createGitBackend(token: string, payload: GitBackendCreate) {
+  return req<GitBackend>('POST', '/git_connector/backends', token, payload);
+}
+
+export function updateGitBackend(token: string, id: string, payload: Partial<GitBackendCreate>) {
+  return req<GitBackend>('PUT', `/git_connector/backends/${id}`, token, payload);
+}
+
+export function deleteGitBackend(token: string, id: string) {
+  return req<void>('DELETE', `/git_connector/backends/${id}`, token);
+}
+
+/** Probe a backend's stored credentials against its host, returning the broker's verdict. */
+export function testGitBackend(token: string, id: string) {
+  return req<GitBackendTest>('POST', `/git_connector/backends/${id}/test`, token);
+}
+
+/** Mint a short-lived clone credential for a repo URL (the broker picks the matching backend by host). */
+export function mintGitCredential(token: string, repoUrl: string) {
+  return req<GitCredential>('POST', '/git_connector/credentials', token, { repo_url: repoUrl });
+}
+
+/**
+ * One entry in the repo selector. `url` is the HTTPS clone URL a forge `git:` ref
+ * consumes. `source` is "enumerated" (discovered live from a linked backend's API)
+ * or "manual" (pinned by the user); `id` is present only for manual repos (deletable).
+ */
+export interface GitRepo {
+  id?: string;
+  name: string;
+  url: string;
+  backend?: string;
+  backend_type?: string;
+  source: 'enumerated' | 'manual' | string;
+}
+
+/** List clone targets: repos enumerated across the caller's linked backends plus any pinned manually. */
+export function listGitRepos(token: string) {
+  return req<GitRepo[]>('GET', '/git_connector/repos', token);
+}
+
+/** Pin a repo to the selector (for generic backends that can't be enumerated, or to surface extras). */
+export function createGitRepo(token: string, payload: { url: string; name?: string }) {
+  return req<GitRepo>('POST', '/git_connector/repos', token, payload);
+}
+
+/** Remove a pinned (manual) repo. */
+export function deleteGitRepo(token: string, id: string) {
+  return req<void>('DELETE', `/git_connector/repos/${id}`, token);
+}
+
+/** One branch of a repo; `default` flags the remote's default branch. */
+export interface GitBranch {
+  name: string;
+  default?: boolean;
+}
+
+/**
+ * List a repo's branches (for the checkout branch selector), enumerated via the
+ * owning backend's API. Returns [] for generic/un-enumerable backends so the caller
+ * falls back to a free-text ref. `cloneURL` is the repo's HTTPS clone URL.
+ */
+export function listGitBranches(token: string, cloneURL: string) {
+  return req<GitBranch[]>('GET', `/git_connector/repos/branches?url=${encodeURIComponent(cloneURL)}`, token);
+}
+
 // ── Invites ───────────────────────────────────────────────────────────────────
 
 export interface Invite {
@@ -798,6 +1403,42 @@ export function declineInvite(token: string, id: string) {
 
 export function deleteInvite(token: string, id: string) {
   return req<void>('DELETE', `/gatekeeper/invites/${id}`, token);
+}
+
+// ── Signup allowlist / invite-only policy (admin) ─────────────────────────────
+
+export interface SignupAllowlistEntry {
+  entry_id: string;
+  email: string;
+  note: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface SignupPolicy {
+  invite_only: boolean;
+  updated_at: string;
+  updated_by: string;
+}
+
+export function listSignupAllowlist(token: string) {
+  return req<SignupAllowlistEntry[]>('GET', '/gatekeeper/signup-allowlist', token);
+}
+
+export function addSignupAllowlist(token: string, email: string, note?: string) {
+  return req<SignupAllowlistEntry>('POST', '/gatekeeper/signup-allowlist', token, { email, note: note ?? '' });
+}
+
+export function deleteSignupAllowlist(token: string, id: string) {
+  return req<void>('DELETE', `/gatekeeper/signup-allowlist/${id}`, token);
+}
+
+export function getSignupPolicy(token: string) {
+  return req<SignupPolicy>('GET', '/gatekeeper/signup-policy', token);
+}
+
+export function setSignupPolicy(token: string, invite_only: boolean) {
+  return req<SignupPolicy>('PUT', '/gatekeeper/signup-policy', token, { invite_only });
 }
 
 // ── Orgs extended ─────────────────────────────────────────────────────────────
@@ -841,11 +1482,11 @@ export function deletePermission(token: string, id: string) {
 
 // ── Roles extended ────────────────────────────────────────────────────────────
 
-export function createRole(token: string, payload: { permissions_ids: string[] }) {
+export function createRole(token: string, payload: { name?: string; permissions_ids: string[] }) {
   return req<Role>('POST', '/gatekeeper/roles', token, payload);
 }
 
-export function updateRole(token: string, id: string, payload: { permissions_ids: string[] }) {
+export function updateRole(token: string, id: string, payload: { name?: string; permissions_ids: string[] }) {
   return req<Role>('PUT', `/gatekeeper/roles/${id}`, token, payload);
 }
 
@@ -937,6 +1578,81 @@ export function deleteComment(token: string, ticketId: string, commentId: string
 
 export function checkPermission(token: string, service: string, action: string, resource: string) {
   return req<{ authorized: boolean }>('POST', '/gatekeeper/check_permissions', token, { service, action, resource });
+}
+
+// ── Builder — global service control plane (system admin) ─────────────────────
+// Builder is a SYSTEM-ADMIN-only control plane over the single global service
+// baseline (addressed by the literal id "default"). The admin page lets the admin
+// toggle, configure, and register platform services for the whole instance; there
+// are no per-org overrides. `core` services (gatekeeper, conductor, registry,
+// builder) are always enabled and cannot be configured. Reads are granted to all
+// users (read-only); only the system admin may write.
+
+export interface OrgService {
+  service: string;
+  enabled: boolean;
+  kind: string;   // "platform" | "custom"
+  source: string; // "catalog" | "default" | "override" | "custom" | "core"
+  config?: Record<string, unknown>;
+  image?: string;
+  port?: number;
+  description?: string;
+  core?: boolean;
+  // coming_soon flags a spun-off service whose source is not in this repo: it can't be
+  // deployed yet, so builder forces it disabled and the UI shows a "coming soon" badge
+  // in place of the enable/configure controls.
+  coming_soon?: boolean;
+  db_configured?: boolean;
+  db_host?: string;
+}
+
+// SetOrgServiceBody is the PUT payload. `db_url` and `secrets` are write-only — they
+// are encrypted on receipt and never read back (only the redacted db_host is returned).
+// `secrets` carries sensitive config keyed by env var (e.g. REDIS_URL, GITEA_ADMIN_TOKEN)
+// that a service declares in its secretConfig; non-sensitive config goes in `config`.
+export interface SetOrgServiceBody {
+  enabled?: boolean;
+  kind?: string;
+  config?: Record<string, unknown>;
+  image?: string;
+  port?: number;
+  description?: string;
+  db_url?: string;
+  secrets?: Record<string, string>;
+}
+
+export function listServices(token: string) {
+  return req<OrgService[]>('GET', '/builder/services', token);
+}
+
+export function setService(token: string, service: string, body: SetOrgServiceBody) {
+  return req<OrgService>('PUT', `/builder/services/${encodeURIComponent(service)}`, token, body);
+}
+
+export function deleteService(token: string, service: string) {
+  return req<void>('DELETE', `/builder/services/${encodeURIComponent(service)}`, token);
+}
+
+// ── Registered services (routing availability) ────────────────────────────────
+// Conductor's live routing table: every service currently registered/routable,
+// whether it registered from the manifest at startup (core / compose / Helm) or
+// was deployed-and-registered by builder at runtime when the system admin enabled
+// it. The sidebar uses this to show only services that are actually up — a service
+// builder later disables is unregistered and drops out. Public read on conductor;
+// no permissions required.
+export interface RegisteredService {
+  name: string;
+  description?: string;
+  // Path under the service's route prefix that serves its embedded mini-portal
+  // (e.g. "/ui"). Present only for services that ship a UI; the shell renders an
+  // iframe page for any registered, non-bundled service that advertises one.
+  ui_path?: string;
+}
+
+/** Fetch conductor's live routing table (the services currently registered/routable), flattened to the bare array. */
+export async function listRegisteredServices(token: string): Promise<RegisteredService[]> {
+  const res = await req<{ services: RegisteredService[] }>('GET', '/services', token);
+  return res.services ?? [];
 }
 
 // ── Outposts ──────────────────────────────────────────────────────────────────
@@ -1069,4 +1785,32 @@ export function syncArgoApp(token: string, name: string, payload?: { outpost_id?
 
 export function getArgoSync(token: string, id: string) {
   return req<ArgoSync>('GET', `/argo/syncs/${id}`, token);
+}
+
+// ── Projects (workspaces) ─────────────────────────────────────────────────────
+// A project is a free-text label attached to pipelines, executions, tickets and
+// repos — a view filter, not a permission boundary. There is no project registry
+// endpoint: the in-use labels are derived by scanning those resources' lists.
+
+/**
+ * Aggregate the distinct, sorted project labels currently in use across the
+ * caller's pipelines, executions, tickets and repos — the source list for the
+ * project switcher. Best-effort: an endpoint the user can't reach (or that
+ * errors) is skipped, never fatal, mirroring the CLI's fetchKnownProjects.
+ */
+export async function fetchProjectLabels(token: string): Promise<string[]> {
+  const settled = await Promise.allSettled<{ project?: string }[]>([
+    listWorkflows(token),
+    listExecutions(token),
+    listTickets(token),
+    listGiteaRepos(token),
+  ]);
+  const labels = new Set<string>();
+  for (const r of settled) {
+    if (r.status !== 'fulfilled') continue;
+    for (const item of r.value) {
+      if (item.project) labels.add(item.project);
+    }
+  }
+  return [...labels].sort();
 }

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -16,13 +15,19 @@ import (
 var ociProxy *httputil.ReverseProxy
 
 func initOCIProxy() {
-	target, err := url.Parse(registry.baseURL)
-	if err != nil {
-		slog.Error("invalid REGISTRY_URL", "error", err)
-		os.Exit(1)
-	}
 	ociProxy = &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
+			// The upstream registry is resolved per request (the default
+			// registry) and passed via context by handleV2 — there is no longer
+			// a single boot-time target.
+			reg, _ := req.Context().Value(ctxRegistryKey{}).(*registryClient)
+			if reg == nil {
+				return
+			}
+			target, err := url.Parse(reg.baseURL)
+			if err != nil {
+				return
+			}
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
@@ -31,8 +36,8 @@ func initOCIProxy() {
 			req.Header.Del("Authorization")
 			if creds, ok := req.Context().Value(ctxCredsKey{}).(registryCreds); ok && creds.username != "" {
 				req.SetBasicAuth(creds.username, creds.password)
-			} else if registry.username != "" {
-				req.SetBasicAuth(registry.username, registry.password)
+			} else if reg.username != "" {
+				req.SetBasicAuth(reg.username, reg.password)
 			}
 		},
 		// Flush immediately — blob layers can be gigabytes and must stream
@@ -137,6 +142,21 @@ func handleV2(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
+
+	// Resolve the upstream (default) registry. The service may boot with none
+	// configured, so respond with a clear OCI error rather than proxying to
+	// nowhere.
+	reg, err := resolveDefaultRegistry(ctx)
+	if err != nil {
+		span.SetStatus(codes.Ok, "")
+		slog.WarnContext(ctx, "v2 request with no registry configured", "path", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"errors":[{"code":"UNAVAILABLE","message":"no container registry configured"}]}`)) //nolint:errcheck
+		return
+	}
+	r = r.WithContext(context.WithValue(ctx, ctxRegistryKey{}, reg))
+	ctx = r.Context()
 
 	// Credential resolution priority (highest to lowest):
 	//   1. Per-user Gitea token (when GITEA_INTEGRATION_URL is set)

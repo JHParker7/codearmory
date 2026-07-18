@@ -1,10 +1,10 @@
-{{- if and .Values.forge.enabled .Values.forge.serviceAccount.create }}
+{{- if and .Values.forge.enabled .Values.forge.serviceAccount.create (eq .Values.forge.env.runtime "kubernetes") }}
 # Role in the sandbox namespace allows forge to create and manage execution Jobs.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "codearmory.fullname" . }}-forge
-  namespace: {{ .Values.forge.env.k8sNamespace }}
+  namespace: {{ .Values.forge.env.k8sNamespace | default .Release.Namespace }}
   labels:
     {{- include "codearmory.labels" . | nindent 4 }}
     app.kubernetes.io/component: forge
@@ -15,7 +15,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
-  # Warning events on a Job/Pod carry the real reason a kata run failed
+  # Shared workspace volumes are backed by PersistentVolumeClaims that forge
+  # provisions (POST /volumes), mounts into execution pods, and deletes at run end
+  # (plus an age-based reaper for orphans). Without these verbs the create-volume
+  # step fails with a "forbidden" from the API server.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Warning events on a Job/Pod carry the real reason a kata or gvisor run failed
   # (FailedCreatePodSandBox, Evicted, a missing RuntimeClass); forge reads them to
   # surface a useful diagnostic instead of an opaque "no pod found".
   - apiGroups: [""]
@@ -32,7 +39,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "codearmory.fullname" . }}-forge
-  namespace: {{ .Values.forge.env.k8sNamespace }}
+  namespace: {{ .Values.forge.env.k8sNamespace | default .Release.Namespace }}
   labels:
     {{- include "codearmory.labels" . | nindent 4 }}
     app.kubernetes.io/component: forge
@@ -44,4 +51,40 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "codearmory.forge.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if or .Values.forge.admission.cpuPercent .Values.forge.admission.memoryPercent }}
+---
+# Cluster-scoped read of node allocatable capacity, needed ONLY when the admission
+# budget is expressed as a percentage of cluster capacity (forge.admission.*Percent):
+# forge sums allocatable CPU/memory across Ready nodes to derive the budget, and
+# re-reads it so the budget tracks autoscaling. Nodes are a cluster-scoped resource,
+# so this is a ClusterRole — the one cluster-scoped grant forge needs, and only when
+# percent-based admission is on. With an absolute budget this is not created at all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "codearmory.fullname" . }}-forge-nodes
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: forge
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "codearmory.fullname" . }}-forge-nodes
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: forge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "codearmory.fullname" . }}-forge-nodes
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "codearmory.forge.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}

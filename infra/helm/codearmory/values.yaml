@@ -13,7 +13,7 @@ fullnameOverride: ""
 imageRegistry: "ghcr.io/code-armory-app"
 
 # Default image tag applied to all services when the per-service tag is empty.
-imageTag: alpha-1.2.0
+imageTag: alpha-0.1.0
 imagePullPolicy: IfNotPresent
 imagePullSecrets: []
 
@@ -47,13 +47,15 @@ gatekeeper:
       memory: 256Mi
   env:
     logLevel: info
-    # Comma-separated list of service names permitted to register.
-    permittedServices: "gatekeeper,blueprints,forge,workflows,tickets,notifications,hooks,outpost-gateway,chaos,argo,builder"
+    # Comma-separated list of service names permitted to register. Core services
+    # deployed by this chart (incl. the forge + workflows CI/CD pair) are listed
+    # here; non-core services are auto-permitted at runtime when builder registers them.
+    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git_connector,containers,hooks,outpost-gateway"
     # Comma-separated services allowed to resolve org secrets via the internal
-    # lookup endpoint (deny-all when empty). Set to "containers,forge" to let the
-    # container registry resolve per-org creds and forge resolve "secret:<name>"
-    # job secret_refs. Requires the secrets feature (gatekeeperSecretsKey).
-    secretsLookupAllowedCallers: ""
+    # lookup endpoint (deny-all when empty). Defaults to "forge" so forge can resolve
+    # "secret:<name>" job secret_refs; add "containers" to let the container registry
+    # resolve per-org creds. Requires the secrets feature (gatekeeperSecretsKey).
+    secretsLookupAllowedCallers: "forge,containers"
     # Comma-separated CIDRs of trusted reverse proxies (optional).
     trustedProxyCIDRs: ""
     # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
@@ -91,6 +93,11 @@ gatekeeper:
     # Password for the optional bootstrap admin (see gatekeeper.env.adminEmail).
     # Leave empty to disable env-var admin seeding.
     adminPassword: ""
+    # AES-256-GCM key (64 hex chars = 32 bytes) encrypting stored user/org secrets.
+    # Auto-generated on first install and preserved across upgrades (reading the
+    # existing in-cluster key) — rotating it orphans every stored ciphertext. Leave
+    # empty for auto-generation. Enables the secrets feature and secret: job refs.
+    secretsKey: ""
   redis:
     enabled: true
     image:
@@ -122,10 +129,9 @@ registry:
       memory: 128Mi
   env:
     logLevel: info
-    # Auto-populated as "blueprints=http://<fullname>-blueprints:8093,forge=http://<fullname>-forge:8083,
-    # workflows=http://<fullname>-workflows:8085,tickets=http://<fullname>-tickets:8086,
-    # notifications=http://<fullname>-notifications:8094,hooks=http://<fullname>-hooks:8087"
-    # when left empty. Override to use custom service URLs.
+    # Optional comma-separated "name=url" pre-seed of service URLs. Non-core services
+    # register their own URLs with the registry at runtime (via builder), so this is
+    # normally left empty and used only to pre-seed extra/custom service URLs.
     services: ""
     otelEndpoint: ""
   secret:
@@ -139,6 +145,10 @@ registry:
     # Set explicitly only if you need additional service accounts beyond conductor and gatekeeper.
     serviceAccounts: ""
     # Comma-separated "name=key" pairs for admin service accounts (e.g. CI pipelines).
+    # The builder service is auto-added here as an admin account when builder.enabled
+    # is true, so its reconciler can register/update/remove non-core services in the
+    # registry at runtime (POST/PUT/DELETE /services). Admin accounts also satisfy read
+    # auth, so builder still fetches the live catalog.
     adminAccounts: ""
   tls:
     certSecret: ""     # Kubernetes TLS secret (tls.crt + tls.key) for server TLS
@@ -146,51 +156,6 @@ registry:
     caSecret: ""       # Secret containing ca.crt used to verify client certificates
     clientCertSecret: "" # TLS secret (tls.crt + tls.key) presented on outbound calls
     caBundle: ""       # Secret containing ca.crt used to verify outbound server certs
-
-# ── Blueprints ────────────────────────────────────────────────────────────────
-blueprints:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: blueprints
-    tag: ""
-  replicaCount: 1
-  port: 8093
-  resources:
-    requests:
-      cpu: 100m
-      memory: 64Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
-    databaseUrl: ""
-    # Redis URL. Auto-constructed from blueprints.redis when left empty.
-    # Override to use an external Redis instance.
-    redisUrl: ""
-    # 64-character hex string for AES-256-GCM encryption of Terraform state.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    encryptionKey: ""
-    # Must match the blueprints entry in gatekeeper.secret.gatekeeperServices.
-    gatekeeperServiceKey: ""
-  redis:
-    enabled: true
-    image:
-      repository: redis
-      tag: "7-alpine"
-    resources:
-      requests:
-        cpu: 50m
-        memory: 32Mi
-      limits:
-        cpu: 250m
-        memory: 128Mi
-    # Size of the in-memory tmpfs volume mounted at /data.
-    dataSizeLimit: 64Mi
 
 # ── Conductor ─────────────────────────────────────────────────────────────────
 conductor:
@@ -273,9 +238,11 @@ portal:
     tls: []
 
 # ── Forge ─────────────────────────────────────────────────────────────────────
+# Sandboxed command execution — one half of the core CI/CD pair (with workflows).
+# Shipped by this chart as a core service so pipelines can run out of the box; set
+# enabled=false only if you intend to run an external forge.
 forge:
   enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: forge
     tag: ""
@@ -295,26 +262,102 @@ forge:
     runtime: kubernetes
     # Comma-separated list of container images forge is permitted to run.
     allowedImages: "alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25"
-    # Kubernetes namespace in which forge creates sandbox Jobs.
-    k8sNamespace: forge
-    # Optional RuntimeClass for stronger isolation (e.g. "gvisor").
+    # Kubernetes namespace in which forge creates sandbox Jobs. Empty = the release
+    # namespace (so a default install works with no prerequisite). Set a dedicated
+    # namespace — which MUST already exist — for stronger isolation of sandbox Jobs.
+    k8sNamespace: ""
+    # Optional RuntimeClass for stronger isolation (e.g. "gvisor", "kata").
     k8sRuntimeClass: ""
     # Resource limits applied to each sandbox container.
     containerMemoryLimit: "256Mi"
     containerCpuLimit: "500m"
     otelEndpoint: ""
+  # Shared workspace volumes let a workflow run's steps share a filesystem: a
+  # create-volume step provisions one, a git step clones into it, and later steps
+  # attach the same volume (and never need git themselves). Volumes are torn down
+  # when the run ends, with an age-based reaper as the backstop.
+  volumes:
+    # Cap on the summed size (MB) of all of one workflow run's volumes. This is the
+    # admin ceiling forge enforces on create. Set to 0 to disable shared volumes.
+    maxWorkflowMB: 10240
+    # Optional cap on any single volume (MB). Empty = same as maxWorkflowMB.
+    maxVolumeMB: ""
+    # StorageClass backing workspace PVCs. Empty = the cluster default. Point it at a
+    # RAM/tmpfs-backed StorageClass to keep volumes in memory. NOTE: if the cluster has
+    # no default StorageClass this MUST be set to a provisionable class, else volume
+    # PVCs never bind and steps that mount them fail to schedule ("pod has unbound
+    # immediate PersistentVolumeClaims"); a WaitForFirstConsumer class is preferred.
+    storageClass: ""
+    # PVC access mode. ReadWriteOnce suits sequential single-node runs; use
+    # ReadWriteMany (on a class that supports it) when a run's steps span nodes.
+    accessMode: "ReadWriteOnce"
+    # Seconds before an orphaned volume is reaped. Empty = binary default
+    # (longest possible run + 1h), which is safely above any live run.
+    maxAgeSecs: ""
+  # Admission control paces how fast queued executions are sent to the backend, so a
+  # large fan-out (e.g. a matrix of `large` runners) does not dump every Job on the
+  # kube-scheduler at once and leave the excess Pending until it times out. All limits
+  # default to 0 (unlimited); with everything 0, forge dequeues FIFO up to the worker
+  # pool size. The resource budgets are the pacing knob: forge admits a queued runner
+  # only when the summed CPU/memory of already-running runners plus its own fits the
+  # budget, holding the rest in the queue until running ones finish and free space.
+  # Where exec (sandbox) pods are scheduled. On a multi-node cluster the kata/gvisor
+  # RuntimeClass is usually installed on a subset of (often tainted) nodes; without
+  # placement a sandbox pod can land on a node with no runtime handler and fail. Prefer
+  # setting the RuntimeClass's own `scheduling` block (applied automatically); these are
+  # the explicit override. Empty = no constraint (fine for a single-node cluster).
+  execScheduling: {}
+    # nodeSelector: "forge-runtime=kata"          # "k=v,k2=v2"
+    # tolerateKeys: "sandbox"                      # comma-separated taint keys (Exists)
+  admission:
+    # Max simultaneously-running executions per org / per user (0 = unlimited).
+    maxConcurrentPerOrg: 0
+    maxConcurrentPerUser: 0
+    # Cluster-wide CPU/memory budgets the scheduler admits runners against — forge only
+    # starts a runner when the summed usage of running runners plus its class fits.
+    #
+    # Prefer the PERCENT knobs on a real cluster: an absolute millicore budget has to be
+    # re-picked for every environment (dev/staging/prod differ) and is actively wrong on
+    # an autoscaling cluster, where schedulable capacity moves under you. A percentage of
+    # live allocatable capacity is correct everywhere and tracks the node count. Leave
+    # ~30-40% headroom for the control plane and system daemons — a budget set at/near
+    # 100% can starve the API server (learned the hard way on a single node).
+    #
+    # Percent takes precedence over the absolute value for the dimension it is set on.
+    # Percent requires cluster-node read access (a ClusterRole, auto-created when set).
+    # 0 = off for each. In docker mode percent is ignored (no cluster); use absolute.
+    cpuPercent: 0
+    memoryPercent: 0
+    maxTotalCpuMillicores: 0
+    maxTotalMemoryMB: 0
+  # Image building (the forge/build-image workflow action). Builds run with Kaniko
+  # (daemonless, no privileged container) and REQUIRE a privileged runner class on a
+  # kata or gvisor backend (create one via the forge runner-classes API, backed by a
+  # kata/gvisor runtime backend, privileged=true). Override the builder image only for
+  # a private mirror / air-gapped install; empty = the forge default
+  # (gcr.io/kaniko-project/executor:debug).
+  build:
+    builderImage: ""
+    # Registries kaniko may talk to over plain HTTP (no TLS), in addition to the
+    # in-cluster mirror. List a private registry the CI pushes to when it has no
+    # trusted cert — e.g. a self-hosted Forgejo package registry: ["192.168.53.171:3000"].
+    # Empty in production, where registries should present TLS.
+    insecureRegistries: []
+  # The forge/git-clone step (and any checkout-only execution that supplies no image)
+  # runs on a forge-controlled minimal git image — users never pick or maintain one.
+  # Empty = the runner-git image at this chart's imageRegistry and forge image tag
+  # (e.g. ghcr.io/code-armory-app/runner-git:alpha-0.1.0), which the release pipeline
+  # builds in lockstep with forge. Override to pin a digest or point at a private
+  # mirror in an air-gapped install.
+  gitImage: ""
   secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
-    # Must match conductor.secret.conductorForwardKey.
+    # Must match conductor.secret.conductorForwardKey. Auto-synced on upgrades.
     conductorForwardKey: ""
     # Must match the forge entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
-    # Proxmox VE API token for the proxmox runtime backend, in the form
-    # "USER@REALM!TOKENID=SECRET". Only used when forge.proxmox.enabled is true;
-    # referenced by a runtime backend via secret_refs {token: "PROXMOX_TOKEN"}.
-    proxmoxToken: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -329,18 +372,106 @@ forge:
   dockerSocket:
     enabled: false
     path: /var/run/docker.sock
-  # Proxmox VM-per-job runtime backend. When enabled, the PROXMOX_TOKEN secret is
-  # mounted into forge so an admin can create a runtime backend of type "proxmox"
-  # (via POST /runtime-backends) that clones a throwaway VM per job. The backend's
-  # url/node/template_vmid/storage/bridge live in its API config, not here — this
-  # flag only gates whether the token secret is wired into the pod.
-  proxmox:
+  # Domain-allowlisting egress proxy for forge's sandbox traffic. Deployed by this
+  # chart and ENABLED BY DEFAULT: sandbox executions reach the internet only through
+  # this proxy, confined to allowedDomains. Automatically skipped when forge.kata.enabled
+  # is true — kata's microVM is the isolation boundary, so runners aren't forced through
+  # the proxy; a public-only egress NetworkPolicy (forge.kata.egress) blocks private IPs
+  # instead. NOT skipped under forge.gvisor.enabled: gVisor is a kernel sandbox, not a
+  # network boundary, so it still needs the proxy + NetworkPolicy to confine egress.
+  egressProxy:
+    enabled: true
+    image:
+      repository: egress-proxy
+      tag: ""
+    replicaCount: 1
+    # Override the egress URL wired into forge. Empty = the in-cluster proxy this chart
+    # deploys (http://<release>-forge-egress-proxy:3128).
+    url: ""
+    # Egress policy for sandbox traffic through the proxy. Default is "*", the
+    # public-only sentinel: runners may reach ANY public host, while the proxy's IP
+    # guard still blocks loopback/private/link-local/cloud-metadata addresses — so they
+    # get the public internet but never cluster-internal services. To restrict instead,
+    # set a comma-separated allowlist of exact hosts ("github.com") and "*.example.com"
+    # subdomain wildcards (e.g.
+    # "registry.terraform.io,github.com,*.github.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org").
+    # Empty = block all egress.
+    allowedDomains: "*"
+    resources:
+      requests:
+        cpu: 50m
+        memory: 32Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+    # Enforce egress confinement with a NetworkPolicy on the sandbox Job pods so a
+    # malicious process cannot bypass the proxy and connect out directly. Only applies
+    # to the kubernetes runtime (where forge runs sandbox Jobs) and requires a
+    # NetworkPolicy-aware CNI; inert otherwise.
+    networkPolicy:
+      enabled: true
+  # Run sandbox jobs in hardware-isolated kata (Cloud Hypervisor) microVMs. When true:
+  #   - forge runs RUNTIME=kata (env.k8sRuntimeClass MUST be set to the VM-isolating
+  #     RuntimeClass, e.g. "kata", or the chart fails to render);
+  #   - the egress PROXY is skipped (the microVM's kernel is the isolation boundary, so
+  #     runners don't need to be forced through the proxy) — but a public-only egress
+  #     NetworkPolicy is still applied (see kata.egress) so the VM boundary doesn't leave
+  #     cluster-internal / metadata IPs reachable;
+  #   - forge seeds its default runner classes privileged (root + writable rootfs), since
+  #     the VM — not the container — is the isolation boundary.
+  # Mutually exclusive with forge.gvisor.enabled.
+  kata:
+    enabled: false
+    # Egress confinement for kata sandbox pods. A kata microVM is a KERNEL/VM boundary,
+    # not a network one: on its own a kata pod keeps the pod network's full reach, so
+    # untrusted code could still hit cluster services or the 169.254.169.254 cloud-metadata
+    # endpoint. This NetworkPolicy closes that: it allows egress to ALL public IPs and
+    # blocks every private/internal range (RFC1918 10/8·172.16/12·192.168/16, loopback
+    # 127/8, link-local/metadata 169.254/16, CGNAT 100.64/10) plus anything in `blocklist`,
+    # while still permitting DNS. IPv4 only — IPv6 egress is denied. Requires a
+    # NetworkPolicy-aware CNI; inert otherwise.
+    egress:
+      networkPolicy:
+        enabled: true
+      # Private ENDPOINTS a build may egress to despite the private-range denial —
+      # e.g. a self-hosted image registry the CI pushes to. Each entry is
+      # "<ip>[/cidr]:<port>" and opens ONLY that port (not the whole host, so SSH and
+      # other services on the box stay blocked). e.g. ["192.168.53.171:3000"].
+      allowHosts: []
+      # Extra CIDRs to DENY on top of the built-in private ranges — e.g. specific public
+      # IPs/subnets you don't want sandboxes reaching. Each must be an IPv4 CIDR within
+      # 0.0.0.0/0, e.g. "203.0.113.7/32" or "198.51.100.0/24".
+      blocklist: []
+      # Allow sandboxes to reach the artifact store (that service's pods, on its port
+      # only) so forge/save-artifact and forge/restore-artifact work. This is the one
+      # internal service a sandbox may talk to; set false to deny it and give up
+      # artifact caching. Access is still authenticated per user — a step can only
+      # touch artifacts the token you wire into it allows.
+      allowArtifacts: true
+      # Allow sandboxes to reach the base-image mirror (that pod, on its port only) so
+      # image builds pull their base locally instead of from the public internet. Same
+      # narrow shape as allowArtifacts. Set false to deny it: builds then fall back to
+      # pulling from the origin registry, which still works but re-exposes them to that
+      # registry's rate limits.
+      allowRegistryMirror: true
+  # Run sandbox jobs under gVisor (handler "runsc"): a userspace kernel (the Sentry)
+  # intercepts each job's syscalls, giving strong isolation WITHOUT any hardware
+  # virtualization — choose it over kata when nodes lack nested virt / /dev/kvm. When true:
+  #   - forge runs RUNTIME=gvisor (env.k8sRuntimeClass MUST be set to the gVisor
+  #     RuntimeClass, e.g. "gvisor", or the chart fails to render);
+  #   - the egress proxy + NetworkPolicy are KEPT (gVisor is a kernel boundary, not a
+  #     network one, so it does not confine egress on its own);
+  #   - forge seeds its default runner classes privileged (root + writable rootfs), since
+  #     the gVisor Sentry — not the host kernel — contains the job's root.
+  # Mutually exclusive with forge.kata.enabled.
+  gvisor:
     enabled: false
 
 # ── Workflows ─────────────────────────────────────────────────────────────────
+# CI/CD pipeline orchestration — the other half of the core CI/CD pair (with forge).
+# Sequences forge executions (and any other registered service) into runs.
 workflows:
   enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: workflows
     tag: ""
@@ -356,18 +487,19 @@ workflows:
   env:
     logLevel: info
     # Comma-separated "name=url" pairs of services that workflow steps may call.
-    # Auto-populated as "forge=http://<fullname>-forge:8083,blueprints=http://<fullname>-blueprints:8093"
-    # when left empty. Override to add custom services or change URLs.
+    # Defaults to "forge=http://<fullname>-forge:8083" (the core step target) when
+    # left empty. Override to add non-core targets (e.g. blueprints) that builder
+    # has deployed and registered, or to change URLs.
     services: ""
     otelEndpoint: ""
   secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
     # Must match the workflows entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
     # Shared HMAC secret with the hooks service for authenticating internal trigger requests.
-    # Auto-synced from hooks.secret.hooksTriggerKey on upgrades. Leave empty for auto-generation.
+    # Auto-synced from hooks.secret.hooksTriggerKey when hooks is deployed. Leave empty for auto-generation.
     hooksTriggerKey: ""
     # AES-256 key for encrypting run tokens at rest in the database.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
@@ -379,10 +511,166 @@ workflows:
     clientCertSecret: ""
     caBundle: ""
 
-# ── Tickets ───────────────────────────────────────────────────────────────────
+# ── Tickets ─────────────────────────────────────────────────────────────────
+# Issue/task tracking. Source lives in the codearmory-tickets repo; the chart deploys
+# its published image as a CORE service (registered via the registry manifest).
+# ── Base-image mirror ───────────────────────────────────────────────────────
+# An in-cluster registry holding the base images that builds pull FROM.
+#
+# The problem it solves: a matrix of image builds derives from the same handful of
+# bases, so every leg pulls an identical base from the same public registry, from one
+# egress IP, at the same moment. A public registry answers that burst with
+# TOOMANYREQUESTS and the build dies — a red pipeline caused by nothing in the code.
+#
+# Why seeded rather than a pull-through proxy: registry:2's proxy mode cannot serve
+# BLOBS from public.ecr.aws (it negotiates an "aws"-scoped token, and blob fetches come
+# back "unauthorized: authentication required" while manifests succeed) — verified
+# against 2.8.3. Seeding sidesteps the upstream's auth model entirely and is strictly
+# better anyway: after the seed job, builds cause ZERO upstream pulls rather than one.
+#
+# Forge points builds here with kaniko's --registry-map, so no Dockerfile changes: a
+# FROM stays public.ecr.aws/... and is remapped at build time (which also keeps the
+# Dockerfiles buildable outside the platform). Kaniko falls back to the origin registry
+# on a mirror miss, so an un-seeded or disabled mirror degrades to a direct pull rather
+# than breaking builds.
+registryMirror:
+  enabled: true
+  # 1 with the filesystem (RWO PVC) backend; raise it with the s3 backend, where storage
+  # is shared and the mirror can scale horizontally behind its Service.
+  replicaCount: 1
+  # S3 storage driver (registry:2 native). Shared object storage removes the single-node
+  # RWO pin, so the mirror can run multiple replicas. Point at the same MinIO / Ceph RGW
+  # the artifacts store uses. When enabled, the PVC below is not created.
+  s3:
+    enabled: false
+    bucket: ""
+    region: us-east-1
+    # Endpoint of a self-hosted S3 (empty = real AWS). e.g. http://minio:9000
+    endpoint: ""
+    forcePathStyle: "true"
+    # false for an http (in-cluster) endpoint; true for https.
+    secure: "false"
+    accessKeySecret: ""
+    accessKeySecretKey: access-key
+    secretKeySecret: ""
+    secretKeySecretKey: secret-key
+  # A stock upstream registry; nothing codearmory-specific runs here.
+  image:
+    repository: public.ecr.aws/docker/library/registry
+    tag: "2"
+  port: 5000
+  # Kaniko layer cache: a repo ON this mirror where image builds cache intermediate
+  # layers (chiefly the `go mod download` layer, whose key is just the module set, so
+  # it survives most commits). In-cluster, so no external traffic. Kaniko does not
+  # evict — the cache grows until the mirror PVC is pruned — so it is opt-in.
+  buildCache:
+    enabled: true
+    # Repository path on the mirror. registry:2 creates it on first push.
+    repo: kaniko-cache
+  # Registries remapped to this mirror, as kaniko's --registry-map:
+  # "original.registry=mirror;other=mirror". {{ mirror }} is substituted with this
+  # mirror's in-cluster host:port. Empty disables remapping (builds pull from origin).
+  registryMap: "public.ecr.aws={{ mirror }}"
+  # Base images seeded into the mirror on install/upgrade, as repository paths under
+  # the mirrored registry. These are exactly the FROM lines used across the services;
+  # a base that is NOT listed still builds, by falling back to the origin registry.
+  seed:
+    enabled: true
+    # The registry the seed job copies FROM.
+    source: public.ecr.aws
+    images:
+      - docker/library/golang:1.26.0-alpine3.23
+      - docker/library/alpine:3.23.3
+      - docker/library/node:22-alpine
+    image:
+      repository: quay.io/skopeo/stable
+      tag: latest
+  storage:
+    # A PVC so the seed survives a restart. With this off the mirror is an emptyDir and
+    # empties on every reschedule — builds still work (origin fallback), just unmirrored.
+    enabled: true
+    size: 10Gi
+    # Empty uses the cluster default StorageClass.
+    storageClass: ""
+    retain: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Artifact store — named, user-owned blobs that OUTLIVE a run: a Go build cache to
+# restore next time, a CLI binary to publish after the run that made it. Forge volumes
+# are run-scoped and reaped, so without this there is nowhere for either to live.
+artifacts:
+  enabled: true
+  image:
+    repository: artifacts
+    tag: ""
+  replicaCount: 1
+  port: 8097
+  # The default per-user allowance, in megabytes. An admin overrides an individual
+  # user at runtime (PUT /artifacts/quotas/user/{id}); this is the fallback for
+  # everyone without an override. 0 blocks storage by default.
+  defaultQuotaMB: 5120
+  # Object-storage backend. When enabled, blobs live in an S3-compatible store shared
+  # across nodes, so artifacts can run more than one replica — this removes the
+  # single-node ReadWriteOnce pin of the PVC below. Point it at MinIO or Ceph RGW
+  # (self-hosted S3) in a real environment; the PVC path is the single-node default.
+  s3:
+    enabled: false
+    bucket: ""
+    # Endpoint of a self-hosted S3 (empty = real AWS S3). e.g. http://minio:9000
+    endpoint: ""
+    region: us-east-1
+    # MinIO and Ceph RGW need path-style addressing (bucket in the path). Real AWS
+    # works either way; leave true unless you know you need virtual-host style.
+    forcePathStyle: "true"
+    # Static credentials, read from a Secret. Leave the secret name empty to use the
+    # default AWS credential chain (IRSA / instance profile) on real AWS.
+    accessKeySecret: ""
+    accessKeySecretKey: access-key
+    secretKeySecret: ""
+    secretKeySecretKey: secret-key
+  storage:
+    # A PVC for the blobs (ignored when s3.enabled). Disable ONLY for a throwaway
+    # environment: without it the
+    # store is an emptyDir and every restart loses the cache, which defeats the point.
+    enabled: true
+    size: 20Gi
+    # Empty uses the cluster default StorageClass.
+    storageClass: ""
+    mountPath: /data
+    # Keep the PVC when the release is uninstalled — a cache is cheap to lose, a
+    # published binary is not.
+    retain: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
+    databaseUrl: ""
+    # Must match the artifacts entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades.
+    gatekeeperServiceKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
 tickets:
   enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
     repository: tickets
     tag: ""
@@ -399,13 +687,13 @@ tickets:
     logLevel: info
     otelEndpoint: ""
   secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
     # Must match the tickets entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
-    # Shared HMAC secret for emitting ticket lifecycle events to the hooks service.
-    # Synced from hooks.secret.hooksTriggerKey when hooks is enabled. Leave empty for auto-sync.
+    # Shared HMAC secret with hooks for authenticating internal trigger requests.
+    # Auto-synced from the hooks secret when present. Leave empty for auto-generation.
     hooksTriggerKey: ""
   tls:
     certSecret: ""
@@ -414,16 +702,24 @@ tickets:
     clientCertSecret: ""
     caBundle: ""
 
-# ── Notifications ─────────────────────────────────────────────────────────────
-# Notification delivery via pluggable integrations (Slack, email, webhook).
-notifications:
+# ── Hooks ─────────────────────────────────────────────────────────────────────
+# Webhook receiver + rule engine: takes push/PR webhooks from a git host (Forgejo,
+# GitHub, ...), matches them against rules, and triggers workflow runs. Webhooks hit
+# the service DIRECTLY (they authenticate by HMAC, not a codearmory bearer), so to
+# receive them from an external git host expose the service — set service.type NodePort
+# (dev) or front it with an Ingress (prod).
+hooks:
   enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
-    repository: notifications
+    repository: hooks
     tag: ""
   replicaCount: 1
-  port: 8094
+  port: 8087
+  service:
+    # ClusterIP (default) keeps webhooks in-cluster; NodePort exposes the endpoint to
+    # an external git host on a fixed node port.
+    type: ClusterIP
+    nodePort: ""          # set with type NodePort to pin the port (else auto-assigned)
   resources:
     requests:
       cpu: 50m
@@ -435,11 +731,14 @@ notifications:
     logLevel: info
     otelEndpoint: ""
   secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
-    # Must match the notifications entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
+    # Must match the hooks entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades.
     gatekeeperServiceKey: ""
+    # Shared HMAC that signs hook→workflows trigger calls; workflows verifies with the
+    # same value. Auto-derived to match workflows. Leave empty for auto-generation.
+    hooksTriggerKey: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -447,17 +746,24 @@ notifications:
     clientCertSecret: ""
     caBundle: ""
 
-# ── Outpost Gateway ───────────────────────────────────────────────────────────
-# Outpost-facing connection point + Postgres event backbone for cluster
-# integrations (chaos, argo). Distinct from conductor.
+# ── Outpost gateway ───────────────────────────────────────────────────────────
+# Connection point + event backbone for user-deployed outposts (in-cluster agents that
+# actuate a target cluster — e.g. the deploy module that redeploys a workload). Off by
+# default; enable to run outposts. The user-facing /outposts API is gatekeeper-authed
+# via conductor; outposts dial the /outpost/* endpoints with per-outpost keys, and
+# consumers use the internal HMAC key.
 outpostGateway:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
+  enabled: false
   image:
     repository: outpost-gateway
     tag: ""
   replicaCount: 1
   port: 8092
+  service:
+    # ClusterIP for same-cluster outposts; NodePort/Ingress to reach it from a remote
+    # cluster's outpost.
+    type: ClusterIP
+    nodePort: ""
   resources:
     requests:
       cpu: 50m
@@ -468,18 +774,48 @@ outpostGateway:
   env:
     logLevel: info
     otelEndpoint: ""
-  service:
-    # Set to LoadBalancer/NodePort (or front with an Ingress) to expose the
-    # gateway to outposts running outside the control-plane cluster (SaaS).
-    type: ClusterIP
+    # integration=url,... — where the gateway delivers each integration's events.
+    # Empty is fine: events are still recorded, just not fanned out to a consumer.
+    eventConsumers: ""
   secret:
     databaseUrl: ""
-    # Must match the outpost-gateway entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades.
     gatekeeperServiceKey: ""
-    # Shared HMAC secret across the gateway and every integration consumer
-    # (chaos, argo). Auto-generated and synced on first install.
-    outpostInternalKey: ""
+    # Shared HMAC for the internal command/event plane. Auto-derived; leave empty.
+    internalKey: ""
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+# Backend-agnostic git credential broker — mints short-lived clone credentials for
+# linked backends (GitHub, GitLab, Forgejo, generic). In-repo GORM CORE service.
+git:
+  enabled: true
+  image:
+    repository: git
+    tag: ""
+  replicaCount: 1
+  port: 8096
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
+    databaseUrl: ""
+    # Must match the git entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
+    gatekeeperServiceKey: ""
+    # REQUIRED: encrypts linked-backend credentials at rest. The service refuses to
+    # start without it. Auto-generated on first install and preserved across upgrades
+    # (so early-encrypted rows stay decryptable). Set a managed key for production.
+    gitEncryptionKey: ""
+    # Shared HMAC secret authenticating forge → git /internal/clone-token calls.
+    # forge derives the same key; leave empty for auto-generation (both sides agree).
+    gitInternalKey: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -487,17 +823,16 @@ outpostGateway:
     clientCertSecret: ""
     caBundle: ""
 
-# ── Chaos ─────────────────────────────────────────────────────────────────────
-# Thin control plane for chaos experiments. Holds no cluster credentials; drives
-# an outpost via the outpost-gateway.
-chaos:
+# ── Containers ──────────────────────────────────────────────────────────────
+# Container image registry management. Stateless (no DB). Source lives in the
+# codearmory-containers repo; the chart deploys its published image as a CORE service.
+containers:
   enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
   image:
-    repository: chaos
+    repository: containers
     tag: ""
   replicaCount: 1
-  port: 8090
+  port: 8089
   resources:
     requests:
       cpu: 50m
@@ -507,14 +842,19 @@ chaos:
       memory: 128Mi
   env:
     logLevel: info
+    # Optional base URL of an upstream registry to seed as the default on first
+    # boot. Leave empty to start with no registry and configure one or more at
+    # runtime via the /registries API.
+    registryUrl: ""
+    # Optional registry basic-auth username (password goes in secret.registryPassword).
+    registryUsername: ""
     otelEndpoint: ""
   secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
     databaseUrl: ""
     gatekeeperServiceKey: ""
-    # Shared with the outpost-gateway. Leave empty for auto-sync.
-    outpostInternalKey: ""
-    # Shared HMAC secret for emitting experiment events to the hooks service.
-    hooksTriggerKey: ""
+    # Optional registry basic-auth password.
+    registryPassword: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -562,6 +902,68 @@ builder:
     # Name prefix for created workloads (Deployment/Service codearmory-<svc>). Empty
     # = the chart fullname, so they slot into the existing Service routing.
     releasePrefix: ""
+    # Replica floor for every builder-managed (non-core) workload. Builder always sets
+    # a surge-first rollout strategy (maxUnavailable:0, maxSurge:1); at ≥2 it also
+    # creates a PodDisruptionBudget (minAvailable = replicas-1) so node drains can't
+    # take it below the floor. 0/empty keeps the historical single replica. A
+    # per-service override is the "replicas" key in that service's builder config.
+    defaultReplicas: 2
+    # Periodic rolling restart of every managed workload, restoring pods to the image
+    # to shed drift or a compromised process. Go duration (e.g. "30m", "1h"); honoured
+    # via a bucketed pod-template annotation, so it rolls once per interval, not every
+    # reconcile. Empty disables it. Per-service override: the "rotateInterval" config key.
+    rotateInterval: "30m"
+  # How builder-deployed (non-core) services obtain their DATABASE_URL. Selected
+  # globally; a service may override it with its "dbBackend" config key. The default
+  # (manual) is unchanged — the admin PUTs a per-service db_url that builder encrypts
+  # and stores. The other backends either provision the database (sql) or remove
+  # builder from credential custody entirely (cnpg/external). Backend-specific blocks
+  # are consulted only for the backend(s) in use. See docs/builder/db-provisioning.md.
+  db:
+    # manual | sql | cnpg | external
+    backend: manual
+    # sql: builder runs CREATE DATABASE/ROLE once at enable via a maintenance
+    # connection, then stores the derived URL like a manual one.
+    sql:
+      # CREATEDB/CREATEROLE maintenance URL for unattended re-provisioning. Leave
+      # empty for ephemeral mode (supplied per enable request, never persisted —
+      # recommended). When set it is written to the builder Secret as a crown-jewel
+      # credential. Honoured via secret key db-sql-maintenance-url.
+      maintenanceUrl: ""
+      # false = CREATEDB-only profile: reuse ownerRole instead of minting a
+      # per-service svc_<service> role (avoids the sharp CREATEROLE privilege).
+      createRole: true
+      # Owner role for the CREATEDB-only profile (createRole=false). Its password is
+      # the secret key db-sql-owner-password.
+      ownerRole: ""
+      ownerPassword: ""
+      # sslmode forced onto derived URLs (e.g. "require"). Empty = leave unset.
+      sslMode: ""
+    # cnpg: provision via the CloudNativePG operator's Database CR; DATABASE_URL
+    # points at an operator-owned Secret. Builder holds only k8s RBAC on the CR.
+    cnpg:
+      cluster: ""
+      # Namespace of the CNPG Cluster/Database CRs. Empty = the workload namespace.
+      namespace: ""
+      # Secret-name template for the connection credential; {cluster}/{service} expand.
+      credSecretTemplate: ""
+      # Key in that Secret holding the connection string.
+      credKey: "uri"
+    # external: builder creates an ExternalSecret (External Secrets Operator) pointing
+    # at a store path the admin populated (e.g. a Vault DB engine). ESO materializes
+    # the Secret; builder holds only the reference.
+    external:
+      storeRef: ""
+      # SecretStore | ClusterSecretStore
+      storeKind: SecretStore
+      # Remote path template; {service} expands (e.g. "codearmory/{service}/db").
+      pathTemplate: ""
+      # Property within the remote secret holding the URL. Empty = whole value.
+      property: ""
+      # ExternalSecret refreshInterval (e.g. "1h"). Empty = operator default.
+      refresh: ""
+      # ExternalSecret API version.
+      apiVersion: v1beta1
   secret:
     databaseUrl: ""
     gatekeeperServiceKey: ""
@@ -572,178 +974,6 @@ builder:
     # Auto-generated on first install and preserved across upgrades; rotating it
     # orphans stored URLs. Leave empty for auto-generation.
     secretsKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Argo ──────────────────────────────────────────────────────────────────────
-# Second integration (Argo CD app sync) proving the framework generalises.
-argo:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: argo
-    tag: ""
-  replicaCount: 1
-  port: 8091
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    databaseUrl: ""
-    gatekeeperServiceKey: ""
-    # Shared with the outpost-gateway. Leave empty for auto-sync.
-    outpostInternalKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Hooks ─────────────────────────────────────────────────────────────────────
-hooks:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: hooks
-    tag: ""
-  replicaCount: 1
-  port: 8087
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
-    databaseUrl: ""
-    # Must match the hooks entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    gatekeeperServiceKey: ""
-    # Shared HMAC secret with the workflows service for signing internal trigger requests.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    hooksTriggerKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Containers ────────────────────────────────────────────────────────────────
-containers:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: containers
-    tag: ""
-  replicaCount: 1
-  port: 8089
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # Base URL of your OCI/Docker registry, e.g. https://registry.example.com
-    # Required — containers will refuse to start without this.
-    registryUrl: ""
-    # Registry credentials (optional — omit for anonymous/token-based access).
-    registryUsername: ""
-    registryPassword: ""
-    # Must match the containers entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    gatekeeperServiceKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Egress Proxy ──────────────────────────────────────────────────────────────
-egressProxy:
-  enabled: true
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: egress-proxy
-    tag: ""
-  replicaCount: 1
-  port: 3128
-  resources:
-    requests:
-      cpu: 25m
-      memory: 16Mi
-    limits:
-      cpu: 100m
-      memory: 64Mi
-  env:
-    # Comma-separated list of domains forge execution containers may reach.
-    # Exact hostnames or wildcard prefixes (*.github.com).
-    allowedDomains: "registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com"
-    # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
-    otelEndpoint: ""
-
-# ── Gitea integration ─────────────────────────────────────────────────────────
-giteaIntegration:
-  enabled: false
-  deploy: false  # deployed on demand by builder (Phase 2), not by Helm
-  image:
-    repository: gitea_integration
-    tag: ""
-  replicaCount: 1
-  port: 8088
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed when left empty.
-    databaseUrl: ""
-    # Base URL of your Forgejo/Gitea instance, e.g. https://git.example.com
-    # Required when giteaIntegration.enabled is true.
-    giteaUrl: ""
-    # Admin API token for the Forgejo/Gitea instance.
-    # Required when giteaIntegration.enabled is true.
-    giteaAdminToken: ""
-    # Must match the gitea_integration entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
-    gatekeeperServiceKey: ""
-    # Shared key authenticating forge → /internal/clone-token (resolves
-    # "gitea:<owner>/<repo>" job secret_refs). The forge deployment reads this same
-    # secret, so the two always match. Auto-generated and preserved; leave empty.
-    # NOTE: when global.externalSecrets is true the chart does not create this
-    # Secret — your externally-managed "<release>-gitea-integration" Secret MUST
-    # include a "gitea-internal-key" entry, or both the gitea-integration and forge
-    # pods will fail to start (CreateContainerConfigError).
-    internalKey: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -763,12 +993,6 @@ tests:
       tag: ""
     # DATABASE_URL for post-test cleanup. Auto-constructed from postgresql when empty.
     databaseUrl: ""
-  blueprints:
-    # Also requires blueprints.enabled to be true.
-    enabled: true
-    image:
-      repository: test-blueprints
-      tag: ""
   conductor:
     enabled: true
     image:
@@ -777,54 +1001,11 @@ tests:
     # DATABASE_URL for post-test cleanup (targets the gatekeeper db).
     # Auto-constructed from postgresql when empty.
     databaseUrl: ""
-  forge:
-    # Also requires forge.enabled to be true.
-    enabled: true
-    image:
-      repository: test-forge
-      tag: ""
   registry:
     enabled: true
     image:
       repository: test-registry
       tag: ""
-  workflows:
-    # Also requires workflows.enabled to be true.
-    enabled: true
-    image:
-      repository: test-workflows
-      tag: ""
-  tickets:
-    # Also requires tickets.enabled to be true.
-    enabled: true
-    image:
-      repository: test-tickets
-      tag: ""
-  hooks:
-    # Also requires hooks.enabled and workflows.enabled to be true.
-    enabled: true
-    image:
-      repository: test-hooks
-      tag: ""
-  outpostGateway:
-    # Also requires outpostGateway.enabled to be true.
-    enabled: true
-    image:
-      repository: test-outpost-gateway
-      tag: ""
-  chaos:
-    # Also requires chaos.enabled and outpostGateway.enabled to be true.
-    enabled: true
-    image:
-      repository: test-chaos
-      tag: ""
-  argo:
-    # Also requires argo.enabled and outpostGateway.enabled to be true.
-    enabled: true
-    image:
-      repository: test-argo
-      tag: ""
-
 # ── PostgreSQL (Bitnami subchart) ─────────────────────────────────────────────
 postgresql:
   enabled: true
@@ -840,16 +1021,19 @@ postgresql:
   primary:
     initdb:
       scripts:
+        # Only the CORE service databases (incl. the forge + workflows CI/CD pair and the
+        # DB-backed tickets + git core members; containers is stateless).
+        # Non-core services (incl. gitea_integration, now builder-deployed) are deployed
+        # by builder with an admin-supplied db_url (HA Postgres / Neon / managed), so the
+        # bundled subchart never provisions theirs.
         init.sql: |
           CREATE DATABASE gatekeeper;
-          CREATE DATABASE blueprints;
-          CREATE DATABASE forge;
           CREATE DATABASE registry;
+          CREATE DATABASE builder;
+          CREATE DATABASE forge;
           CREATE DATABASE workflows;
           CREATE DATABASE tickets;
-          CREATE DATABASE notifications;
+          CREATE DATABASE git;
+          CREATE DATABASE artifacts;
           CREATE DATABASE hooks;
-          CREATE DATABASE gitea_integration;
           CREATE DATABASE outpost_gateway;
-          CREATE DATABASE chaos;
-          CREATE DATABASE argo;

@@ -327,7 +327,96 @@ func TestHandleDeleteComment_Unauthorized(t *testing.T) {
 	}
 }
 
+// ── Board ─────────────────────────────────────────────────────────────────────
 
+func TestCanAccessBoard(t *testing.T) {
+	b := Board{CreatedBy: "user-1", OrgID: "org-1"}
+	if !canAccessBoard(b, "user-1", "") {
+		t.Error("owner should have access")
+	}
+	if !canAccessBoard(b, "user-2", "org-1") {
+		t.Error("same-org user should have access")
+	}
+	if canAccessBoard(b, "user-2", "org-2") {
+		t.Error("different-org user should not have access")
+	}
+	if canAccessBoard(Board{CreatedBy: "user-1", OrgID: ""}, "user-2", "org-1") {
+		t.Error("org membership should not grant access to a no-org board")
+	}
+}
+
+func TestHandleCreateBoard_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/boards", nil)
+	w := httptest.NewRecorder()
+	handleCreateBoard(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleCreateBoard_MissingName(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
+	r := httptest.NewRequest(http.MethodPost, "/boards", bytes.NewBufferString(`{"description":"no name"}`))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	handleCreateBoard(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+func TestHandleListBoards_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/boards", nil)
+	w := httptest.NewRecorder()
+	handleListBoards(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+func TestHandleDeleteBoard_Unauthorized(t *testing.T) {
+	r := httptest.NewRequest(http.MethodDelete, "/boards/some-id", nil)
+	r.SetPathValue("id", "some-id")
+	w := httptest.NewRecorder()
+	handleDeleteBoard(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
+// ── board-scoped status helpers ──────────────────────────────────────────────
+
+func TestBoardScope(t *testing.T) {
+	if got := boardScope(nil); got != "" {
+		t.Errorf("nil board pointer: got %q, want \"\"", got)
+	}
+	id := "board-1"
+	if got := boardScope(&id); got != "board-1" {
+		t.Errorf("got %q, want board-1", got)
+	}
+	empty := ""
+	if got := boardScope(&empty); got != "" {
+		t.Errorf("empty board pointer: got %q, want \"\"", got)
+	}
+}
+
+func TestBuiltinStatusDefs_OrderedOpenFirst(t *testing.T) {
+	defs := builtinStatusDefs()
+	if len(defs) == 0 {
+		t.Fatal("expected built-in status defs")
+	}
+	if defs[0].Value != StatusOpen {
+		t.Errorf("left-most built-in status = %q, want %q", defs[0].Value, StatusOpen)
+	}
+	for i, d := range defs {
+		if d.Position != i {
+			t.Errorf("def %d (%q) position = %d, want %d", i, d.Value, d.Position, i)
+		}
+		if d.Kind != FieldKindStatus {
+			t.Errorf("def %q kind = %q, want status", d.Value, d.Kind)
+		}
+	}
+}
 
 // ── statusResponseWriter ─────────────────────────────────────────────────────
 

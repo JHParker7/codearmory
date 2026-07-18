@@ -87,6 +87,18 @@ spec:
             - name: ARGO_NAMESPACE
               value: {{ .Values.argo.namespace | quote }}
             {{- end }}
+            {{- if eq (include "outpost.hasModule" (list . "deploy")) "true" }}
+            # The namespace a redeploy command targets when it names none. Matches the
+            # deploy RBAC scope (rbac-deploy.yaml).
+            - name: DEPLOY_NAMESPACE
+              value: {{ .Values.deploy.defaultNamespace | default .Release.Namespace | quote }}
+            {{- end }}
+            {{- if eq (include "outpost.hasModule" (list . "test")) "true" }}
+            # The namespace a test Job runs in when the command names none. Matches the
+            # test RBAC scope (rbac-test.yaml).
+            - name: TEST_NAMESPACE
+              value: {{ .Values.test.defaultNamespace | default .Release.Namespace | quote }}
+            {{- end }}
           {{- if .Values.persistence.enabled }}
           volumeMounts:
             - name: state

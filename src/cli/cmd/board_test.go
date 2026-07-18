@@ -63,16 +63,12 @@ func updateSpecialKey(m boardModel, kt tea.KeyType) boardModel {
 }
 
 // boardDataMsgDefaults returns a boardDataMsg with default statuses/priorities
-// and empty columns — suitable for tests that just want loading to complete.
+// and no tickets — suitable for tests that just want loading to complete.
 func boardDataMsgDefaults() boardDataMsg {
-	cols := make([][]boardTicket, len(defaultBoardStatuses))
-	for i := range cols {
-		cols[i] = []boardTicket{}
-	}
 	return boardDataMsg{
 		statuses:   defaultBoardStatuses,
 		priorities: defaultBoardPriorities,
-		cols:       cols,
+		tickets:    []boardTicket{},
 	}
 }
 
@@ -256,8 +252,12 @@ func TestUpdate_KeysIgnoredWhileLoading(t *testing.T) {
 func TestUpdate_BoardLoadedMsg_PopulatesColumns(t *testing.T) {
 	m := boardModel{loading: true}
 	msg := boardDataMsgDefaults()
-	msg.cols[0] = fakeTickets(2)
-	msg.cols[2] = fakeTickets(1)
+	// Two open tickets (col 0) and one resolved (col 2); the model regroups by status.
+	msg.tickets = []boardTicket{
+		{ID: testUUID, Title: "a", Status: "open"},
+		{ID: testUUID, Title: "b", Status: "open"},
+		{ID: testUUID, Title: "c", Status: "resolved"},
+	}
 
 	next, _ := m.Update(msg)
 	m2 := next.(boardModel)
@@ -493,23 +493,22 @@ func TestFetchBoardData_Success(t *testing.T) {
 	srv := boardFetchServer(t, http.StatusOK, string(body))
 	setupCLI(t, srv)
 
-	msg := fetchBoardData()
+	msg := fetchBoardData("")()
 
 	loaded, ok := msg.(boardDataMsg)
 	if !ok {
 		t.Fatalf("expected boardDataMsg, got %T", msg)
 	}
-	if len(loaded.cols[0]) != 1 || loaded.cols[0][0].ID != "t1" {
-		t.Errorf("col[0] (open) = %v", loaded.cols[0])
+	// fetchBoardData returns raw tickets; the model groups them into columns.
+	if len(loaded.tickets) != 4 {
+		t.Fatalf("tickets len = %d, want 4", len(loaded.tickets))
 	}
-	if len(loaded.cols[1]) != 1 || loaded.cols[1][0].ID != "t2" {
-		t.Errorf("col[1] (in_progress) = %v", loaded.cols[1])
+	status := map[string]string{}
+	for _, tk := range loaded.tickets {
+		status[tk.ID] = tk.Status
 	}
-	if len(loaded.cols[2]) != 1 || loaded.cols[2][0].ID != "t3" {
-		t.Errorf("col[2] (resolved) = %v", loaded.cols[2])
-	}
-	if len(loaded.cols[3]) != 1 || loaded.cols[3][0].ID != "t4" {
-		t.Errorf("col[3] (closed) = %v", loaded.cols[3])
+	if status["t1"] != "open" || status["t2"] != "in_progress" || status["t3"] != "resolved" || status["t4"] != "closed" {
+		t.Errorf("ticket statuses not preserved: %v", status)
 	}
 }
 
@@ -517,15 +516,13 @@ func TestFetchBoardData_EmptyList(t *testing.T) {
 	srv := boardFetchServer(t, http.StatusOK, `[]`)
 	setupCLI(t, srv)
 
-	msg := fetchBoardData()
+	msg := fetchBoardData("")()
 	loaded, ok := msg.(boardDataMsg)
 	if !ok {
 		t.Fatalf("expected boardDataMsg, got %T", msg)
 	}
-	for i, col := range loaded.cols {
-		if len(col) != 0 {
-			t.Errorf("col[%d] should be empty, has %d tickets", i, len(col))
-		}
+	if len(loaded.tickets) != 0 {
+		t.Errorf("tickets should be empty, got %d", len(loaded.tickets))
 	}
 }
 
@@ -533,7 +530,7 @@ func TestFetchBoardData_HTTPError(t *testing.T) {
 	srv := boardFetchServer(t, http.StatusInternalServerError, `internal error`)
 	setupCLI(t, srv)
 
-	msg := fetchBoardData()
+	msg := fetchBoardData("")()
 	if _, ok := msg.(boardErrMsg); !ok {
 		t.Fatalf("expected boardErrMsg on HTTP error, got %T", msg)
 	}
@@ -543,7 +540,7 @@ func TestFetchBoardData_InvalidJSON(t *testing.T) {
 	srv := boardFetchServer(t, http.StatusOK, `not json`)
 	setupCLI(t, srv)
 
-	msg := fetchBoardData()
+	msg := fetchBoardData("")()
 	if _, ok := msg.(boardErrMsg); !ok {
 		t.Fatalf("expected boardErrMsg on bad JSON, got %T", msg)
 	}
@@ -554,13 +551,16 @@ func TestFetchBoardData_UnknownStatusIgnored(t *testing.T) {
 	srv := boardFetchServer(t, http.StatusOK, payload)
 	setupCLI(t, srv)
 
-	msg := fetchBoardData()
+	msg := fetchBoardData("")()
 	loaded, ok := msg.(boardDataMsg)
 	if !ok {
 		t.Fatalf("expected boardDataMsg, got %T", msg)
 	}
+	// Grouping happens in the model: a ticket whose status has no column is dropped.
+	m := boardModel{statuses: defaultBoardStatuses, allTickets: loaded.tickets}
+	m = m.regroup()
 	total := 0
-	for _, col := range loaded.cols {
+	for _, col := range m.cols {
 		total += len(col)
 	}
 	if total != 0 {

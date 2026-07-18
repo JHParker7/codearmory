@@ -60,11 +60,12 @@ func buildCITUIStyles() {
 	tuiDiagArrowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.Muted))
 
 	tuiStatusColors = map[string]lipgloss.Color{
-		"completed": lipgloss.Color(activeTheme.Accent),
-		"running":   lipgloss.Color(activeTheme.Warning),
-		"pending":   lipgloss.Color(activeTheme.Muted),
-		"failed":    lipgloss.Color(activeTheme.Danger),
-		"cancelled": lipgloss.Color(activeTheme.Muted),
+		"completed":         lipgloss.Color(activeTheme.Accent),
+		"running":           lipgloss.Color(activeTheme.Warning),
+		"pending":           lipgloss.Color(activeTheme.Muted),
+		"awaiting_approval": lipgloss.Color(activeTheme.Warning),
+		"failed":            lipgloss.Color(activeTheme.Danger),
+		"cancelled":         lipgloss.Color(activeTheme.Muted),
 	}
 }
 
@@ -73,6 +74,13 @@ func tuiColorStatus(s string) string {
 		return lipgloss.NewStyle().Foreground(c).Render(s)
 	}
 	return s
+}
+
+// tuiRunStatusActive reports whether a run status is non-terminal, so the UI keeps
+// refreshing it and offers cancel. `awaiting_approval` is paused on a manual gate
+// but still in flight — its remaining steps run once it is approved.
+func tuiRunStatusActive(s string) bool {
+	return s == "running" || s == "pending" || s == "awaiting_approval"
 }
 
 // ── API types ─────────────────────────────────────────────────────────────────
@@ -94,16 +102,36 @@ type tuiRun struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	StartedAt   *time.Time `json:"started_at"`
 	EndedAt     *time.Time `json:"ended_at"`
+
+	// triggeredByName is the resolved username for TriggeredBy (a user_id),
+	// filled in during fetch so the UI shows who triggered the run instead of a
+	// raw UUID. Not part of the API response; empty when the lookup failed.
+	triggeredByName string
+}
+
+// triggeredByLabel returns the human-readable trigger actor, falling back to the
+// raw user id only when no username resolved.
+func (r tuiRun) triggeredByLabel() string {
+	if r.triggeredByName != "" {
+		return r.triggeredByName
+	}
+	return r.TriggeredBy
 }
 
 type tuiStepRun struct {
-	StepRunID     string     `json:"step_run_id"`
-	RunID         string     `json:"run_id"`
-	StepIndex     int        `json:"step_index"`
-	StepName      string     `json:"step_name"`
-	ParallelGroup *int       `json:"parallel_group"`
-	Status        string     `json:"status"`
-	Output        *string    `json:"output"`
+	StepRunID string `json:"step_run_id"`
+	RunID     string `json:"run_id"`
+	StepIndex int    `json:"step_index"`
+	StepName  string `json:"step_name"`
+	// stage is COMPUTED, not sent: the run record carries no grouping, and neither
+	// does the definition any more. It is each step's rank in the pipeline's route
+	// graph (see tuiRanks), filled in by tuiAnnotateStages.
+	stage  *int
+	Status string  `json:"status"`
+	Output *string `json:"output"`
+	// Logs is the step's stdout, captured on success for display (distinct from
+	// Output, the consumable captured outputs). See workflows' WorkflowStepRun.Logs.
+	Logs          *string    `json:"logs"`
 	MemoryUsedMB  *int64     `json:"memory_used_mb"`
 	MemoryLimitMB *int64     `json:"memory_limit_mb"`
 	StartedAt     *time.Time `json:"started_at"`
@@ -115,14 +143,25 @@ type tuiRunFull struct {
 	StepRuns []tuiStepRun `json:"step_runs"`
 }
 
-// tuiWorkflowStep is one step of a pipeline definition. ParallelGroup is the only
-// place parallelism is recorded: steps sharing the same non-nil group run
-// concurrently. The run record carries no grouping, so the run-detail view
-// derives it from the definition (see tuiAnnotateParallelGroups).
+// tuiWorkflowStep is one step of a pipeline definition.
+//
+// Parallelism is NOT a field on a step — it is the shape of the pipeline's routes.
+// Two steps run concurrently when neither can reach the other, which the diagram
+// reads off as a shared rank (tuiRanks). The run record carries no grouping either,
+// so the run-detail view derives stages from the definition's routes
+// (tuiAnnotateStages).
 type tuiWorkflowStep struct {
-	StepID        string `json:"step_id"`
-	Name          string `json:"name"`
-	ParallelGroup *int   `json:"parallel_group"`
+	StepID string         `json:"step_id"`
+	Name   string         `json:"name"`
+	Action string         `json:"action"`
+	With   map[string]any `json:"with,omitempty"`
+	Matrix *matrixConfig  `json:"matrix,omitempty"`
+	// MapID names the map region this step belongs to, if any: the region's body
+	// runs once per value. The DSL writes it as "[body]*<map-id>".
+	MapID    string        `json:"map_id,omitempty"`
+	Approval *approvalGate `json:"approval,omitempty"`
+	// stage is the computed rank (see tuiRanks); nil when it could not be derived.
+	stage *int
 }
 
 // tuiPipelineDef is the subset of a pipeline (GET /pipelines/{id}) the run-detail
@@ -130,6 +169,72 @@ type tuiWorkflowStep struct {
 type tuiPipelineDef struct {
 	WorkflowID string            `json:"workflow_id"`
 	Steps      []tuiWorkflowStep `json:"steps"`
+	// Routes are the edges. Empty means a plain sequence (the backend derives a
+	// chain in array order), which is exactly what tuiRanks assumes for an empty
+	// route list — so an old linear pipeline still draws as a linear pipeline.
+	Routes []workflowRoute `json:"routes,omitempty"`
+}
+
+// tuiRanks assigns each step its stage: the longest distance from an entry node over
+// the pipeline's routes. Two steps share a rank precisely when neither can reach the
+// other, i.e. when they can run concurrently — which is what the diagram draws as one
+// bracketed stage.
+//
+// This replaces the old "consecutive steps sharing a parallel_group" rule, and is
+// strictly more general: it groups a fork correctly no matter where its branches sit
+// in the array, which a positional run-length field could never do.
+//
+// An empty route list means the pipeline is a plain sequence, so each step is its own
+// stage. Returns nil if the graph has a cycle (the API rejects those, so this only
+// guards against a definition we cannot make sense of — better ungrouped than wrong).
+func tuiRanks(steps []tuiWorkflowStep, routes []workflowRoute) []int {
+	rank := make([]int, len(steps))
+	if len(routes) == 0 {
+		for i := range rank {
+			rank[i] = i
+		}
+		return rank
+	}
+	idx := make(map[string]int, len(steps))
+	for i, st := range steps {
+		idx[st.Name] = i
+	}
+	indeg := make([]int, len(steps))
+	adj := make([][]int, len(steps))
+	for _, r := range routes {
+		f, okF := idx[r.From]
+		t, okT := idx[r.To]
+		if !okF || !okT {
+			continue
+		}
+		adj[f] = append(adj[f], t)
+		indeg[t]++
+	}
+	var q []int
+	for i := range steps {
+		if indeg[i] == 0 {
+			q = append(q, i)
+		}
+	}
+	seen := 0
+	for len(q) > 0 {
+		n := q[0]
+		q = q[1:]
+		seen++
+		for _, m := range adj[n] {
+			if rank[n]+1 > rank[m] {
+				rank[m] = rank[n] + 1
+			}
+			indeg[m]--
+			if indeg[m] == 0 {
+				q = append(q, m)
+			}
+		}
+	}
+	if seen != len(steps) {
+		return nil
+	}
+	return rank
 }
 
 // ── View states ───────────────────────────────────────────────────────────────
@@ -217,6 +322,12 @@ type tuiModel struct {
 
 	form      tuiForm
 	runReturn tuiViewID // view to restore when the run form is cancelled
+
+	// runInputDefs are the declared inputs of the pipeline being run, fetched when
+	// the run form opens. When non-empty the run form renders one prompt per input
+	// (defaults pre-filled); when empty it falls back to the free-text KEY=VALUE
+	// field. It gates how tuiSubmitRun collects the inputs map.
+	runInputDefs []pipelineInputDef
 }
 
 func tuiTableStyles() table.Styles {
@@ -243,12 +354,16 @@ var (
 		{"ACTIVE", 6, 0},
 		{"CREATED", 14, 0},
 	}
+	// Runs have no human name; the runs list is already scoped to one pipeline
+	// (its name is in the view title), so the primary label is meaningful context
+	// — status + who triggered it + time — with the short run id as a trailing
+	// detail column.
 	ciRunCols = []tuiColSpec{
-		{"RUN ID", 10, 0},
 		{"STATUS", 11, 0},
 		{"TRIGGERED BY", 16, 1},
 		{"STARTED", 18, 0},
 		{"DURATION", 10, 0},
+		{"RUN ID", 10, 0},
 	}
 	ciStepCols = []tuiColSpec{
 		{"#", 3, 0},
@@ -329,16 +444,22 @@ func tuiFetchRuns(workflowID string) tea.Cmd {
 		if err := json.Unmarshal(data, &rs); err != nil {
 			return tuiErrMsg{err}
 		}
+		// triggered_by is a user_id; resolve it to a username so the UI shows who
+		// triggered the run rather than a raw UUID (cached process-wide).
+		for i := range rs {
+			rs[i].triggeredByName = tuiResolveName("triggered_by", rs[i].TriggeredBy)
+		}
 		return tuiRunsMsg(rs)
 	}
 }
 
-// tuiRunActionMsg is the outcome of a run action (cancel). cancelled identifies
-// the run so the runs list can report it; a non-nil err surfaces as a status
-// line instead of being silently swallowed.
+// tuiRunActionMsg is the outcome of a run action (cancel/approve/reject). runID
+// identifies the affected run; verb is the present-tense action for status lines;
+// a non-nil err surfaces as a status line instead of being silently swallowed.
 type tuiRunActionMsg struct {
-	cancelled string
-	err       error
+	runID string
+	verb  string
+	err   error
 }
 
 // tuiCancelRun cancels a run via the API. It runs as a cmd (not a blocking call
@@ -346,9 +467,29 @@ type tuiRunActionMsg struct {
 func tuiCancelRun(runID string) tea.Cmd {
 	return func() tea.Msg {
 		if _, err := doRequest("DELETE", "/workflows/runs/"+runID, nil); err != nil {
-			return tuiRunActionMsg{err: err}
+			return tuiRunActionMsg{runID: runID, verb: "cancel", err: err}
 		}
-		return tuiRunActionMsg{cancelled: runID}
+		return tuiRunActionMsg{runID: runID, verb: "cancel"}
+	}
+}
+
+// tuiApproveRun resumes a run paused on a manual-approval gate; tuiRejectRun fails
+// it. Both POST to the run's decision endpoint and report success/failure.
+func tuiApproveRun(runID string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := doRequest("POST", "/workflows/runs/"+runID+"/approve", nil); err != nil {
+			return tuiRunActionMsg{runID: runID, verb: "approve", err: err}
+		}
+		return tuiRunActionMsg{runID: runID, verb: "approve"}
+	}
+}
+
+func tuiRejectRun(runID string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := doRequest("POST", "/workflows/runs/"+runID+"/reject", nil); err != nil {
+			return tuiRunActionMsg{runID: runID, verb: "reject", err: err}
+		}
+		return tuiRunActionMsg{runID: runID, verb: "reject"}
 	}
 }
 
@@ -365,7 +506,9 @@ func tuiFetchAnnotatedRun(runID string, cachedSteps []tuiWorkflowStep) (*tuiRunF
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, nil, err
 	}
-	steps := tuiAnnotateParallelGroups(&r, cachedSteps)
+	// triggered_by is a user_id; resolve it to a username for the detail view.
+	r.triggeredByName = tuiResolveName("triggered_by", r.TriggeredBy)
+	steps := tuiAnnotateStages(&r, cachedSteps)
 	return &r, steps, nil
 }
 
@@ -441,7 +584,7 @@ func (m tuiModel) tuiEnsureRunDiagram(refreshActive bool) tea.Cmd {
 	}
 	r := m.runs[i]
 	_, ok := m.runDetails[r.RunID]
-	active := r.Status == "running" || r.Status == "pending"
+	active := tuiRunStatusActive(r.Status)
 	if ok && !(refreshActive && active) {
 		return nil
 	}
@@ -450,20 +593,20 @@ func (m tuiModel) tuiEnsureRunDiagram(refreshActive bool) tea.Cmd {
 	return tuiFetchRunPreview(r.RunID, m.pipeDefs[r.WorkflowID])
 }
 
-// tuiAnnotateParallelGroups best-effort enriches a run from its pipeline
-// definition: it fills each step run's ParallelGroup (the run record stores no
-// grouping — only the definition does, via steps[].parallel_group, in step_index
-// order) and synthesises pending entries for steps the run has not reached yet
+// tuiAnnotateStages best-effort enriches a run from its pipeline
+// definition: it fills each step run's stage (neither the run record nor the
+// definition stores grouping — it is derived from the definition's routes, in
+// step_index order) and synthesises pending entries for steps the run has not reached yet
 // (see tuiFillPendingSteps) so the live diagram shows the whole plan. Any failure
 // (no workflow id, def fetch/parse error, or the pipeline was edited since the
-// run so step names no longer line up) leaves groups nil and falls back to
+// run so step names no longer line up) leaves stages nil and falls back to
 // whatever step runs the API returned, ungrouped.
 // cachedSteps, when non-nil, supplies the pipeline definition so the function
 // skips the GET /pipelines/{id} round-trip — the definition is immutable, so on
 // auto-refresh ticks it should be reused from m.pipeDefs rather than refetched.
 // Returns the step definition it used (cached or freshly fetched), or nil on
 // failure, so the caller can cache it for subsequent ticks.
-func tuiAnnotateParallelGroups(r *tuiRunFull, cachedSteps []tuiWorkflowStep) []tuiWorkflowStep {
+func tuiAnnotateStages(r *tuiRunFull, cachedSteps []tuiWorkflowStep) []tuiWorkflowStep {
 	if r.WorkflowID == "" {
 		return nil
 	}
@@ -478,6 +621,14 @@ func tuiAnnotateParallelGroups(r *tuiRunFull, cachedSteps []tuiWorkflowStep) []t
 			return nil
 		}
 		steps = def.Steps
+		// Rank once, here, and hang the result on the steps: the returned slice is
+		// what the caller caches, so auto-refresh ticks reuse the ranks rather than
+		// recomputing them (and never need the routes again).
+		if ranks := tuiRanks(steps, def.Routes); ranks != nil {
+			for i := range steps {
+				steps[i].stage = &ranks[i]
+			}
+		}
 	}
 	for i := range r.StepRuns {
 		idx := r.StepRuns[i].StepIndex
@@ -490,7 +641,7 @@ func tuiAnnotateParallelGroups(r *tuiRunFull, cachedSteps []tuiWorkflowStep) []t
 		if ds.Name != "" && ds.Name != r.StepRuns[i].StepName {
 			continue
 		}
-		r.StepRuns[i].ParallelGroup = ds.ParallelGroup
+		r.StepRuns[i].stage = ds.stage
 	}
 	tuiFillPendingSteps(r, steps)
 	return steps
@@ -510,8 +661,9 @@ func tuiFillPendingSteps(r *tuiRunFull, def []tuiWorkflowStep) {
 	// Only an in-flight run has steps genuinely still ahead of it. For a run that
 	// has already finished (completed/failed/cancelled), steps it never reached will
 	// never run, so synthesising "pending" rows for them would misrepresent
-	// never-to-run steps as still queued.
-	if r.Status != "running" && r.Status != "pending" {
+	// never-to-run steps as still queued. A run paused awaiting approval still has
+	// its remaining steps ahead, so it counts as in-flight here.
+	if !tuiRunStatusActive(r.Status) {
 		return
 	}
 	seen := make(map[int]bool, len(r.StepRuns))
@@ -523,11 +675,11 @@ func tuiFillPendingSteps(r *tuiRunFull, def []tuiWorkflowStep) {
 			continue
 		}
 		r.StepRuns = append(r.StepRuns, tuiStepRun{
-			RunID:         r.RunID,
-			StepIndex:     i,
-			StepName:      ds.Name,
-			ParallelGroup: ds.ParallelGroup,
-			Status:        "pending",
+			RunID:     r.RunID,
+			StepIndex: i,
+			StepName:  ds.Name,
+			stage:     ds.stage,
+			Status:    "pending",
 		})
 	}
 	sort.SliceStable(r.StepRuns, func(a, b int) bool {
@@ -608,11 +760,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := make([]table.Row, len(m.runs))
 		for i, r := range m.runs {
 			rows[i] = table.Row{
-				tuiShortID(r.RunID),
 				r.Status,
-				r.TriggeredBy,
+				r.triggeredByLabel(),
 				tuiFormatTime(r.StartedAt),
 				tuiFormatDur(r.StartedAt, r.EndedAt),
+				tuiShortID(r.RunID),
 			}
 		}
 		m.rTable.SetRows(rows)
@@ -662,6 +814,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.view = tuiViewCreate
 		return m, cmd
 
+	case runInputsLoadedMsg:
+		// Only rebuild if we're still on the run form for this pipeline and it
+		// declares inputs; otherwise keep the free-text KEY=VALUE form.
+		if m.view == tuiViewRun && m.selPipeline != nil &&
+			m.selPipeline.WorkflowID == msg.workflowID && len(msg.inputs) > 0 {
+			m.runInputDefs = msg.inputs
+			var cmd tea.Cmd
+			m.form, cmd = newCIRunFormWithInputs(m.selPipeline.Name, msg.inputs)
+			return m, cmd
+		}
+		return m, nil
+
 	case tuiRunTriggeredMsg:
 		// Show the freshly-triggered run in the pipeline's run history.
 		m.submitting = false
@@ -675,11 +839,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiRunActionMsg:
 		if msg.err != nil {
-			m.runStatus = "✗ cancel failed: " + msg.err.Error()
+			m.runStatus = "✗ " + msg.verb + " failed: " + msg.err.Error()
 			m.runStatusErr = true
 			return m, nil
 		}
-		m.runStatus = "✓ cancelled " + tuiShortID(msg.cancelled)
+		past := map[string]string{"cancel": "cancelled", "approve": "approved", "reject": "rejected"}[msg.verb]
+		if past == "" {
+			past = msg.verb + "ed"
+		}
+		m.runStatus = "✓ " + past + " " + tuiShortID(msg.runID)
 		m.runStatusErr = false
 		// Return to the runs list and refresh so the new status shows.
 		m.view = tuiViewRuns
@@ -800,21 +968,29 @@ func (m tuiModel) tuiKeyPipelines(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 
 // ── Create form ───────────────────────────────────────────────────────────────
 
+// ciPipelineStepsHelp documents the pipeline DSL, including the per-step git repo
+// annotation (a clone URL or a ${inputs.X} run-input template) cloned as $GIT_CLONE_URL.
+const ciPipelineStepsHelp = "steps: a->b->c sequential, [a,b] parallel. add a per-step git repo with name@<url> or name@${inputs.REPO} — cloned as $GIT_CLONE_URL for that step."
+
 func newCIPipelineForm() (tuiForm, tea.Cmd) {
-	return newTUIForm("New Pipeline",
+	f, cmd := newTUIForm("New Pipeline",
 		formInput("name", "Name", "my-pipeline (required)"),
-		formInput("steps", "Steps", "build->test->deploy (required)"),
+		formInput("steps", "Steps", "build->test@${inputs.REPO}->deploy (required)"),
 		formInput("desc", "Desc", "description (optional)"),
 	)
+	f.help = ciPipelineStepsHelp
+	return f, cmd
 }
 
 // newCIPipelineEditForm is the create form pre-filled from an existing pipeline.
 func newCIPipelineEditForm(name, dsl, desc string) (tuiForm, tea.Cmd) {
-	return newTUIForm("Edit Pipeline",
+	f, cmd := newTUIForm("Edit Pipeline",
 		formInputDefault("name", "Name", "my-pipeline (required)", name),
-		formInputDefault("steps", "Steps", "build->test->deploy (required)", dsl),
+		formInputDefault("steps", "Steps", "build->test@${inputs.REPO}->deploy (required)", dsl),
 		formInputDefault("desc", "Desc", "description (optional)", desc),
 	)
+	f.help = ciPipelineStepsHelp
+	return f, cmd
 }
 
 func (m tuiModel) tuiKeyCreate(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
@@ -867,11 +1043,14 @@ func ciSubmitSavePipeline(editID, name, desc, dsl string) tea.Cmd {
 		if err != nil {
 			return tuiFormErrMsg{err}
 		}
-		refs, err := dslToRefs(nodes)
+		refs, rts, err := dslToRefs(nodes)
 		if err != nil {
 			return tuiFormErrMsg{err}
 		}
 		payload := map[string]any{"name": name, "steps": refs}
+		if len(rts) > 0 {
+			payload["routes"] = rts
+		}
 		if desc != "" {
 			payload["description"] = desc
 		}
@@ -920,25 +1099,66 @@ func tuiFetchPipelineForEdit(workflowID string) tea.Cmd {
 		if err := json.Unmarshal(data, &def); err != nil {
 			return pipelineEditLoadedMsg{err: err}
 		}
+		// The one-line DSL only expresses stored-step references (+ optional @repo). A
+		// pipeline with an inline step, a gate, a matrix, or wired inputs would be
+		// silently corrupted on a DSL round-trip (re-resolved by name / dropped), so
+		// refuse to open it in the DSL edit form and point at the faithful paths.
+		for _, s := range def.Steps {
+			if !stepDSLExpressible(s) {
+				return pipelineEditLoadedMsg{err: fmt.Errorf(
+					"this pipeline has steps the one-line DSL can't represent (inline steps, gates, a matrix, or wired inputs) — edit it with 'armory pipelines update %s -f <file>' or in the portal", def.WorkflowID)}
+			}
+		}
 		return pipelineEditLoadedMsg{workflowID: def.WorkflowID, name: def.Name, desc: def.Description, dsl: stepsToDSL(def.Steps)}
 	}
 }
 
+// stepDSLExpressible reports whether a step can be faithfully round-tripped through
+// the one-line pipeline DSL. The DSL only references stored steps by name (with an
+// optional @repo). Inline steps, gates, matrices, and any per-occurrence `with`
+// beyond a git repo have no DSL form, so editing such a pipeline via the DSL would
+// lose them — those must be edited via -f JSON or the portal.
+func stepDSLExpressible(s tuiWorkflowStep) bool {
+	if s.Approval != nil || s.Matrix != nil {
+		return false
+	}
+	if s.StepID == "" && s.Action != "" {
+		return false // inline step
+	}
+	if len(s.With) > 0 && gitRepoFromStepWith(s.With) == "" {
+		return false // a wired/override `with` the DSL can't encode
+	}
+	return true
+}
+
+// dslStepToken renders one step as its DSL token, appending "@<repo>" when the step
+// carries a per-occurrence git repo override (so an edit round-trips it back). The
+// inverse of splitStepRepo.
+func dslStepToken(s tuiWorkflowStep) string {
+	if repo := gitRepoFromStepWith(s.With); repo != "" {
+		return s.Name + "@" + repo
+	}
+	return s.Name
+}
+
 // stepsToDSL renders an ordered step list back into the pipeline DSL, collapsing
-// consecutive steps that share a parallel group into "[a,b]" segments — the
-// inverse of parseDSL.
+// consecutive steps that share a stage into "[a,b]" segments and appending each
+// step's per-occurrence git repo as "name@repo" — the inverse of parseDSL.
+//
+// Steps must carry their stage (tuiAnnotateStages); without it every step renders as
+// its own segment, which is a plain sequence — the safe reading when we cannot tell.
 func stepsToDSL(steps []tuiWorkflowStep) string {
 	var segs []string
 	for i := 0; i < len(steps); {
-		g := steps[i].ParallelGroup
+		g := steps[i].stage
 		if g == nil {
-			segs = append(segs, steps[i].Name)
+			segs = append(segs, dslStepToken(steps[i]))
 			i++
 			continue
 		}
 		var names []string
-		for i < len(steps) && steps[i].ParallelGroup != nil && *steps[i].ParallelGroup == *g {
-			names = append(names, steps[i].Name)
+		for i < len(steps) && steps[i].stage != nil && *steps[i].stage == *g {
+			names = append(names, dslStepToken(steps[i]))
 			i++
 		}
 		if len(names) == 1 {
@@ -953,20 +1173,75 @@ func stepsToDSL(steps []tuiWorkflowStep) string {
 // ── Run form ──────────────────────────────────────────────────────────────────
 
 // openRunForm opens the manual-run dialog for m.selPipeline, remembering the
-// current view so a cancel returns the user to where they triggered it from.
+// current view so a cancel returns the user to where they triggered it from. It
+// shows the free-text KEY=VALUE form immediately and fetches the pipeline's
+// declared inputs; if it declares any, runInputsLoadedMsg rebuilds the form with
+// one prompt per input.
 func (m tuiModel) openRunForm() (tuiModel, tea.Cmd) {
 	m.runReturn = m.view
 	m.submitting = false
+	m.runInputDefs = nil
 	var cmd tea.Cmd
 	m.form, cmd = newCIRunForm(m.selPipeline.Name)
 	m.view = tuiViewRun
-	return m, cmd
+	return m, tea.Batch(cmd, tuiFetchRunInputs(m.selPipeline.WorkflowID))
 }
 
 func newCIRunForm(name string) (tuiForm, tea.Cmd) {
 	return newTUIForm("Run Pipeline: "+name,
 		formInput("inputs", "Inputs", "KEY=VALUE KEY=VALUE (optional)"),
 	)
+}
+
+// runInputsLoadedMsg carries a pipeline's declared inputs, resolved after the run
+// form opens so it can be rebuilt with a prompt per declared input. workflowID lets
+// the handler ignore a stale response for a pipeline the user has since navigated away from.
+type runInputsLoadedMsg struct {
+	workflowID string
+	name       string
+	inputs     []pipelineInputDef
+}
+
+// tuiFetchRunInputs loads a pipeline's declared inputs for the run form. A
+// fetch/parse failure degrades to no declared inputs (the free-text field stands)
+// rather than a tuiErrMsg, so it never hijacks the run dialog.
+func tuiFetchRunInputs(workflowID string) tea.Cmd {
+	return func() tea.Msg {
+		data, err := doRequest("GET", "/workflows/pipelines/"+workflowID, nil)
+		if err != nil {
+			return runInputsLoadedMsg{workflowID: workflowID}
+		}
+		var def struct {
+			Name   string             `json:"name"`
+			Inputs []pipelineInputDef `json:"inputs"`
+		}
+		if err := json.Unmarshal(data, &def); err != nil {
+			return runInputsLoadedMsg{workflowID: workflowID}
+		}
+		return runInputsLoadedMsg{workflowID: workflowID, name: def.Name, inputs: def.Inputs}
+	}
+}
+
+// newCIRunFormWithInputs builds the run form with one field per declared input,
+// pre-filling each default and marking required ones. Submitted values are read
+// back by tuiSubmitRun keyed on the input name.
+func newCIRunFormWithInputs(name string, inputs []pipelineInputDef) (tuiForm, tea.Cmd) {
+	fields := make([]formField, len(inputs))
+	for i, in := range inputs {
+		ph := in.Description
+		switch {
+		case in.Required && ph != "":
+			ph += " (required)"
+		case in.Required:
+			ph = "(required)"
+		case ph == "":
+			ph = "(optional)"
+		}
+		fields[i] = formInputDefault(in.Name, in.Name, ph, in.Default)
+	}
+	f, cmd := newTUIForm("Run Pipeline: "+name, fields...)
+	f.help = "declared inputs — required fields must be set; leave blank to use the pipeline default"
+	return f, cmd
 }
 
 func (m tuiModel) tuiKeyRun(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
@@ -997,10 +1272,30 @@ func (m tuiModel) tuiSubmitRun() (tuiModel, tea.Cmd) {
 		m.form.errMsg = "no pipeline selected"
 		return m, nil
 	}
-	inputs, err := parseRunInputs(m.form.value("inputs"))
-	if err != nil {
-		m.form.errMsg = err.Error()
-		return m, nil
+	var inputs map[string]string
+	if len(m.runInputDefs) > 0 {
+		// Declared-input form: collect one value per input. A blank optional input
+		// is omitted so the backend applies its declared default; a blank required
+		// input is rejected inline before the trigger fires.
+		inputs = map[string]string{}
+		for _, in := range m.runInputDefs {
+			v := strings.TrimSpace(m.form.value(in.Name))
+			if v == "" {
+				if in.Required {
+					m.form.errMsg = in.Name + " is required"
+					return m, nil
+				}
+				continue
+			}
+			inputs[in.Name] = v
+		}
+	} else {
+		parsed, err := parseRunInputs(m.form.value("inputs"))
+		if err != nil {
+			m.form.errMsg = err.Error()
+			return m, nil
+		}
+		inputs = parsed
 	}
 	m.form.errMsg = ""
 	m.submitting = true
@@ -1052,7 +1347,7 @@ func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		i := m.rTable.Cursor()
 		if i < len(m.runs) {
 			r := m.runs[i]
-			if r.Status == "pending" || r.Status == "running" {
+			if tuiRunStatusActive(r.Status) {
 				m.runStatus = "cancelling " + tuiShortID(r.RunID) + "…"
 				m.runStatusErr = false
 				return m, tuiCancelRun(r.RunID)
@@ -1086,6 +1381,18 @@ func (m tuiModel) tuiKeyRuns(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	return m, cmd
 }
 
+// tuiRunDetailState returns the watched run's id and current status, preferring
+// the freshly-fetched detail over the (possibly stale) list selection.
+func (m tuiModel) tuiRunDetailState() (runID, status string) {
+	if m.runFull != nil {
+		return m.runFull.RunID, m.runFull.Status
+	}
+	if m.selRun != nil {
+		return m.selRun.RunID, m.selRun.Status
+	}
+	return "", ""
+}
+
 func (m tuiModel) tuiKeyRunDetail(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
@@ -1094,11 +1401,28 @@ func (m tuiModel) tuiKeyRunDetail(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		m.view = tuiViewRuns
 		return m, nil
 	case "c":
-		// Cancel the run being watched, if it is still in progress.
-		if m.selRun != nil && (m.selRun.Status == "pending" || m.selRun.Status == "running") {
-			m.runStatus = "cancelling " + tuiShortID(m.selRun.RunID) + "…"
+		// Cancel the run being watched, if it is still in a cancellable state
+		// (pending, running, or paused awaiting approval).
+		if rid, st := m.tuiRunDetailState(); rid != "" && (st == "pending" || st == "running" || st == "awaiting_approval") {
+			m.runStatus = "cancelling " + tuiShortID(rid) + "…"
 			m.runStatusErr = false
-			return m, tuiCancelRun(m.selRun.RunID)
+			return m, tuiCancelRun(rid)
+		}
+		return m, nil
+	case "a":
+		// Approve a run paused on a manual-approval gate, resuming it.
+		if rid, st := m.tuiRunDetailState(); rid != "" && st == "awaiting_approval" {
+			m.runStatus = "approving " + tuiShortID(rid) + "…"
+			m.runStatusErr = false
+			return m, tuiApproveRun(rid)
+		}
+		return m, nil
+	case "d":
+		// Reject (deny) a run paused on a manual-approval gate, failing it.
+		if rid, st := m.tuiRunDetailState(); rid != "" && st == "awaiting_approval" {
+			m.runStatus = "rejecting " + tuiShortID(rid) + "…"
+			m.runStatusErr = false
+			return m, tuiRejectRun(rid)
 		}
 		return m, nil
 	case "enter":
@@ -1108,10 +1432,7 @@ func (m tuiModel) tuiKeyRunDetail(msg tea.KeyMsg) (tuiModel, tea.Cmd) {
 		i := m.dTable.Cursor()
 		if i < len(m.runFull.StepRuns) {
 			sr := m.runFull.StepRuns[i]
-			output := "(no output)"
-			if sr.Output != nil && *sr.Output != "" {
-				output = *sr.Output
-			}
+			output := tuiStepRunContent(sr)
 			m.outputTitle = fmt.Sprintf("Step %d: %s  [%s]", sr.StepIndex+1, sr.StepName, sr.Status)
 			m.vp.SetContent(output)
 			m.vp.GotoTop()
@@ -1259,7 +1580,12 @@ func (m tuiModel) tuiRunDiagramPanel() string {
 
 func (m tuiModel) tuiViewRunDetail() string {
 	title := tuiTitleStyle.Render("Run Detail")
-	help := tuiHelp("[↑↓/jk] navigate  [enter] output  [r] refresh  [esc] back", m.width)
+	keys := "[↑↓/jk] navigate  [enter] output  [r] refresh  [esc] back"
+	if m.runFull != nil && m.runFull.Status == "awaiting_approval" {
+		// Surface the gate decision keys only when there is something to decide.
+		keys = "[a] approve  [d] reject  " + keys
+	}
+	help := tuiHelp(keys, m.width)
 	if m.loading {
 		return title + "\n\n" + tuiMetaStyle.Render("Loading…") + "\n\n" + help
 	}
@@ -1268,19 +1594,22 @@ func (m tuiModel) tuiViewRunDetail() string {
 	}
 	d := m.runFull
 	live := ""
-	if d.Status == "running" || d.Status == "pending" {
+	switch d.Status {
+	case "running", "pending":
 		live = "  " + tuiMetaStyle.Render("(auto-refreshing)")
+	case "awaiting_approval":
+		live = "  " + tuiMetaStyle.Render("(awaiting approval — [a] approve  [d] reject)")
 	}
 	meta := fmt.Sprintf("run %s  status: %s  triggered: %s",
 		tuiShortID(d.RunID),
 		tuiColorStatus(d.Status),
-		tuiTrunc(d.TriggeredBy, 20),
+		tuiTrunc(d.triggeredByLabel(), 20),
 	)
 	if d.StartedAt != nil {
 		meta += "  started: " + d.StartedAt.Local().Format("Jan 02 15:04:05")
 	}
-	if tuiRunHasParallel(d.StepRuns) {
-		meta += "\n┌├└ bracketed steps ran in parallel"
+	if legend := tuiRunStageLegend(d.StepRuns); legend != "" {
+		meta += "\n" + legend
 	}
 	diagram := tuiClampHeight(
 		tuiMetaStyle.Render("▾ live pipeline")+"\n"+tuiRunDiagram(d.StepRuns, m.width),
@@ -1295,26 +1624,87 @@ func (m tuiModel) tuiViewOutput() string {
 	return title + "\n" + tuiBoxStyle.Render(m.vp.View()) + "\n" + help
 }
 
+// tuiStepRunContent renders a step run's viewable text: the command's stdout
+// (Logs, captured on success) followed by its consumable captured outputs — or,
+// for a failed step, the failure detail (Output). Output is skipped when it just
+// repeats the logs, so a plain echo step shows its stdout once.
+func tuiStepRunContent(sr tuiStepRun) string {
+	var b strings.Builder
+	if sr.Logs != nil && *sr.Logs != "" {
+		b.WriteString(*sr.Logs)
+	}
+	if sr.Output != nil && *sr.Output != "" && (sr.Logs == nil || *sr.Output != *sr.Logs) {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		label := "captured outputs"
+		if sr.Status != "completed" {
+			label = "failure detail"
+		}
+		b.WriteString("── " + label + " ──\n" + *sr.Output)
+	}
+	if b.Len() == 0 {
+		return "(no output)"
+	}
+	return b.String()
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// tuiStepRunRows builds the run-detail table rows, collapsing each parallel
-// batch — consecutive step runs sharing the same non-nil ParallelGroup — into a
-// bracketed block that shares one stage number, so it is visually obvious those
-// steps ran concurrently. Sequential steps render as a normal single row. Rows
-// stay 1:1 with stepRuns in order, so the table cursor still indexes StepRuns.
+// tuiSameStage reports whether two consecutive step runs belong to the same
+// run-detail stage. Two runs group when they either share a non-nil parallel
+// group (a parallel batch — its members each carry a distinct step index) or
+// share a step index (a matrix fan-out — every combination of one matrix step is
+// recorded under that step's single index, with a "[var=val]" name suffix).
+// Sequential steps have distinct indices and distinct stages, so they never group.
+// Comparing against the batch's first run (not its previous one) matches how a stage
+// is defined by a single shared rank.
+func tuiSameStage(a, b tuiStepRun) bool {
+	if a.stage != nil && b.stage != nil && *a.stage == *b.stage {
+		return true
+	}
+	return a.StepIndex == b.StepIndex
+}
+
+// tuiStageExtent returns j, the end (exclusive) of the stage beginning at index
+// i: run i plus any following runs in the same stage (see tuiSameStage). j is
+// i+1 for a solo sequential step.
+func tuiStageExtent(stepRuns []tuiStepRun, i int) int {
+	j := i + 1
+	for j < len(stepRuns) && tuiSameStage(stepRuns[i], stepRuns[j]) {
+		j++
+	}
+	return j
+}
+
+// tuiBatchIsMatrix reports whether a multi-run stage is a matrix fan-out — every
+// run shares the one step index of the matrix step — as opposed to a parallel
+// group, whose members carry distinct indices. A solo run is neither.
+func tuiBatchIsMatrix(batch []tuiStepRun) bool {
+	if len(batch) < 2 {
+		return false
+	}
+	for _, sr := range batch[1:] {
+		if sr.StepIndex != batch[0].StepIndex {
+			return false
+		}
+	}
+	return true
+}
+
+// tuiStepRunRows builds the run-detail table rows, collapsing each stage —
+// consecutive step runs sharing one parallel group (a parallel batch) or one step
+// index (a matrix step's fan-out) — into a bracketed block that shares one stage
+// number, so it is visually obvious those runs belong together. The first row's
+// marker says which kind: ∥ parallel or ⊞ matrix. Sequential steps render as a
+// normal single row. Rows stay 1:1 with stepRuns in order, so the table cursor
+// still indexes StepRuns.
 func tuiStepRunRows(stepRuns []tuiStepRun) []table.Row {
 	rows := make([]table.Row, 0, len(stepRuns))
 	stage := 0
-	i := 0
-	for i < len(stepRuns) {
+	for i := 0; i < len(stepRuns); {
 		stage++
-		// Extent of this batch: consecutive runs sharing the same non-nil group.
-		j := i + 1
-		if g := stepRuns[i].ParallelGroup; g != nil {
-			for j < len(stepRuns) && stepRuns[j].ParallelGroup != nil && *stepRuns[j].ParallelGroup == *g {
-				j++
-			}
-		}
+		j := tuiStageExtent(stepRuns, i)
 		batch := stepRuns[i:j]
 		if len(batch) == 1 {
 			sr := batch[0]
@@ -1329,9 +1719,16 @@ func tuiStepRunRows(stepRuns []tuiStepRun) []table.Row {
 			i = j
 			continue
 		}
+		// A bracketed stage is either a matrix step's fan-out (⊞, all runs share one
+		// step index) or a parallel group (∥); mark the first row so the two don't
+		// read alike now that both bracket.
+		mark := "∥ "
+		if tuiBatchIsMatrix(batch) {
+			mark = "⊞ "
+		}
 		for k, sr := range batch {
 			// ┌/├/└ bracket the members into one group; the stage number sits on
-			// the first row only so the block reads as a single parallel stage.
+			// the first row only so the block reads as a single stage.
 			glyph, num := "├ ", ""
 			switch {
 			case k == 0:
@@ -1339,9 +1736,13 @@ func tuiStepRunRows(stepRuns []tuiStepRun) []table.Row {
 			case k == len(batch)-1:
 				glyph = "└ "
 			}
+			name := glyph + sr.StepName
+			if k == 0 {
+				name = glyph + mark + sr.StepName
+			}
 			rows = append(rows, table.Row{
 				num,
-				glyph + sr.StepName,
+				name,
 				sr.Status,
 				tuiFormatMemShort(sr.MemoryUsedMB, sr.MemoryLimitMB),
 				tuiFormatTime(sr.StartedAt),
@@ -1361,14 +1762,23 @@ func tuiPipelineStages(steps []tuiWorkflowStep) [][]string {
 	var stages [][]string
 	for i := 0; i < len(steps); {
 		j := i + 1
-		if g := steps[i].ParallelGroup; g != nil {
-			for j < len(steps) && steps[j].ParallelGroup != nil && *steps[j].ParallelGroup == *g {
+		if g := steps[i].stage; g != nil {
+			for j < len(steps) && steps[j].stage != nil && *steps[j].stage == *g {
 				j++
 			}
 		}
 		names := make([]string, 0, j-i)
 		for _, s := range steps[i:j] {
-			names = append(names, s.Name)
+			// Mark a matrix fan-out and a manual-approval gate so the flow reads at
+			// a glance which steps branch over a list or pause for a decision.
+			switch {
+			case s.Matrix != nil:
+				names = append(names, s.Name+" ⊞")
+			case s.Action == "approval":
+				names = append(names, s.Name+" ⏸")
+			default:
+				names = append(names, s.Name)
+			}
 		}
 		stages = append(stages, names)
 		i = j
@@ -1487,17 +1897,14 @@ func tuiStatusColor(status string) lipgloss.Color {
 	return lipgloss.Color(activeTheme.Muted)
 }
 
-// tuiRunBatches groups ordered step runs into stages for the diagram: runs of
-// consecutive steps sharing the same non-nil parallel group form one stage.
+// tuiRunBatches groups ordered step runs into stages for the diagram: consecutive
+// runs sharing one parallel group, or one step index (a matrix step's fan-out),
+// collapse into a single stage so its members stack in one diagram box (see
+// tuiStageExtent).
 func tuiRunBatches(stepRuns []tuiStepRun) [][]tuiStepRun {
 	var out [][]tuiStepRun
 	for i := 0; i < len(stepRuns); {
-		j := i + 1
-		if g := stepRuns[i].ParallelGroup; g != nil {
-			for j < len(stepRuns) && stepRuns[j].ParallelGroup != nil && *stepRuns[j].ParallelGroup == *g {
-				j++
-			}
-		}
+		j := tuiStageExtent(stepRuns, i)
 		out = append(out, stepRuns[i:j])
 		i = j
 	}
@@ -1595,16 +2002,43 @@ func tuiRunCompactFlow(batches [][]tuiStepRun, width int) string {
 	return joined
 }
 
-// tuiRunHasParallel reports whether any two consecutive step runs share a non-nil
-// parallel group, i.e. the run contains a parallel batch worth a legend.
+// tuiRunHasParallel reports whether any two consecutive step runs share a stage,
+// i.e. the run contains a concurrent batch worth a legend.
 func tuiRunHasParallel(stepRuns []tuiStepRun) bool {
 	for i := 0; i+1 < len(stepRuns); i++ {
-		a, b := stepRuns[i].ParallelGroup, stepRuns[i+1].ParallelGroup
+		a, b := stepRuns[i].stage, stepRuns[i+1].stage
 		if a != nil && b != nil && *a == *b {
 			return true
 		}
 	}
 	return false
+}
+
+// tuiRunStageLegend describes the bracketed stages a run contains — a parallel
+// group (∥), a matrix fan-out (⊞), or both — so the run-detail view can explain
+// its ┌├└ blocks. Returns "" when the run has no bracketed stage, so the legend
+// only appears when it explains something.
+func tuiRunStageLegend(stepRuns []tuiStepRun) string {
+	par, mat := false, false
+	for _, b := range tuiRunBatches(stepRuns) {
+		if len(b) < 2 {
+			continue
+		}
+		if tuiBatchIsMatrix(b) {
+			mat = true
+		} else {
+			par = true
+		}
+	}
+	switch {
+	case par && mat:
+		return "┌├└ one stage · ∥ parallel · ⊞ matrix fan-out"
+	case par:
+		return "┌├└ ∥ bracketed steps ran in parallel"
+	case mat:
+		return "┌├└ ⊞ bracketed runs are one matrix step's fan-out"
+	}
+	return ""
 }
 
 func tuiShortID(id string) string {
@@ -1688,13 +2122,13 @@ var ciTUICmd = &cobra.Command{
 
 func startCITUI() error {
 	p := tea.NewProgram(standaloneWrap{newTUIModel()}, tea.WithAltScreen())
-	_, err := p.Run()
-	return err
+	return runTUIProgram(p)
 }
 
 func init() {
 	RegisterModule(Module{
 		Name:    "workflows",
+		Service: "workflows",
 		Order:   10,
 		Command: ciCmd,
 		Screens: []HubScreen{

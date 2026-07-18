@@ -51,26 +51,38 @@ type appModel struct {
 	active   tea.Model   // currently-shown screen; nil means the home menu
 	screens  []HubScreen // home-menu screens, indexed by menu position
 	subtitle string      // home header subtitle ("platform" / "admin")
+	admin    bool        // which hub: the user hub gates on sign-in, the admin hub doesn't
 }
 
-// newAppModel builds the user hub from the non-admin module screens.
-func newAppModel() appModel { return newHubModel(hubScreens(), "platform", true) }
-
-// newAdminAppModel builds the admin hub from the admin module screens. It skips
-// the first-use welcome (an admin opening this is already set up) and labels the
-// header so it's unmistakable which surface you're on.
-func newAdminAppModel() appModel { return newHubModel(adminScreens(), "admin", false) }
-
-// newHubModel assembles a hub over the given screens. allowFirstUse gates the
-// fresh-install welcome prompt, which only makes sense on the user hub.
-func newHubModel(screens []HubScreen, subtitle string, allowFirstUse bool) appModel {
-	m := appModel{home: newHomeModel(screens, subtitle), screens: screens, subtitle: subtitle}
-	if allowFirstUse && isFirstUse() {
-		// Show the welcome prompt before the home menu so a fresh install lands
-		// in a discoverable spot rather than a list of services the user has no
-		// credentials for. Pressing 'n' falls through to the home menu.
-		m.active = newFirstUseModel()
+// newAppModel builds the user hub. When signed in it shows the service menu
+// filtered to the services actually registered for the caller (enabledScreensFor).
+// When signed out it shows the sign-in gate instead: without a token
+// registeredServices() can't filter, so the menu would fail open and list every
+// service. The filtered menu is built on the first return-home after sign-in (see
+// Update's goHomeMsg branch). Crucially, enabledScreensFor is NOT called while
+// signed out, so the routing-table probe isn't cached as a fail-open (nil) result
+// before the user has a token.
+func newAppModel() appModel {
+	if !isSignedIn() {
+		m := appModel{subtitle: "platform"}
+		m.active = newSignInGateModel()
+		m.home = newHomeModel(nil, m.subtitle) // placeholder; rebuilt after sign-in
+		return m
 	}
+	return newHubModel(false, "platform")
+}
+
+// newAdminAppModel builds the admin hub. Its screens are permission-gated
+// server-side, so it builds eagerly without the sign-in gate and labels the
+// header so it's unmistakable which surface you're on.
+func newAdminAppModel() appModel { return newHubModel(true, "admin") }
+
+// newHubModel assembles a hub over the screens of the matching modules, filtered
+// to the services registered for the caller.
+func newHubModel(admin bool, subtitle string) appModel {
+	m := appModel{subtitle: subtitle, admin: admin}
+	m.screens = enabledScreensFor(admin)
+	m.home = newHomeModel(m.screens, subtitle)
 	return m
 }
 
@@ -95,7 +107,17 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fall through so the active view also receives the resize.
 	}
 	if _, ok := msg.(goHomeMsg); ok {
+		// User hub while signed out: show the sign-in gate, never an unfiltered
+		// menu. (The admin hub is permission-gated server-side and isn't gated.)
+		if !m.admin && !isSignedIn() {
+			m.active = m.sized(newSignInGateModel())
+			return m, nil
+		}
+		// Rebuild the menu so it reflects the services registered for the caller —
+		// after a sign-in this is the first time registeredServices() resolves with
+		// a token. registeredServices() is cached, so the rebuild is cheap.
 		m.active = nil
+		m.screens = enabledScreensFor(m.admin)
 		m.home = m.sized(newHomeModel(m.screens, m.subtitle)).(homeModel)
 		return m, nil
 	}
@@ -277,8 +299,7 @@ func (w standaloneWrap) View() string { return w.inner.View() }
 
 func runHomeTUI() error {
 	p := tea.NewProgram(newAppModel(), tea.WithAltScreen())
-	_, err := p.Run()
-	return err
+	return runTUIProgram(p)
 }
 
 func init() {

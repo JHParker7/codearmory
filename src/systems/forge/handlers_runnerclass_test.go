@@ -20,7 +20,7 @@ func TestRunnerClass_BackendAndDisk_DB(t *testing.T) {
 
 	authAs(t, "admin")
 	createBody := `{"name":"` + name + `","memory_mb":4096,"cpu_millicores":2000,` +
-		`"pids_limit":128,"tmpfs_mb":64,"disk_gb":50,"backend":"proxmox-prod","enabled":true}`
+		`"pids_limit":128,"tmpfs_mb":64,"disk_gb":50,"backend":"kata-prod","enabled":true}`
 	r := httptest.NewRequest(http.MethodPost, "/runner-classes", bytes.NewBufferString(createBody))
 	r.Header.Set("Authorization", "Bearer t")
 	w := httptest.NewRecorder()
@@ -30,8 +30,8 @@ func TestRunnerClass_BackendAndDisk_DB(t *testing.T) {
 	}
 	var created RunnerClass
 	json.NewDecoder(w.Body).Decode(&created) //nolint:errcheck
-	if created.Backend != "proxmox-prod" {
-		t.Errorf("backend = %q, want proxmox-prod", created.Backend)
+	if created.Backend != "kata-prod" {
+		t.Errorf("backend = %q, want kata-prod", created.Backend)
 	}
 	if created.DiskGB != 50 {
 		t.Errorf("disk_gb = %d, want 50", created.DiskGB)
@@ -71,11 +71,13 @@ func TestRunnerClass_BackendAndDisk_DB(t *testing.T) {
 func TestRunnerClass_Privileged_DB(t *testing.T) {
 	requireForgeDB(t)
 	kataBackend := "be-" + uuid.New().String()
+	gvisorBackend := "be-" + uuid.New().String()
 	dockerBackend := "be-" + uuid.New().String()
 	className := "rc-" + uuid.New().String()
+	gvisorClassName := "rc-" + uuid.New().String()
 	t.Cleanup(func() {
-		connect().Exec(`DELETE FROM runner_classes WHERE name = ?`, className)                          //nolint:errcheck
-		connect().Exec(`DELETE FROM runtime_backends WHERE name IN (?, ?)`, kataBackend, dockerBackend) //nolint:errcheck
+		connect().Exec(`DELETE FROM runner_classes WHERE name IN (?, ?)`, className, gvisorClassName)                     //nolint:errcheck
+		connect().Exec(`DELETE FROM runtime_backends WHERE name IN (?, ?, ?)`, kataBackend, gvisorBackend, dockerBackend) //nolint:errcheck
 	})
 
 	mkBackend := func(body string) {
@@ -89,6 +91,7 @@ func TestRunnerClass_Privileged_DB(t *testing.T) {
 		}
 	}
 	mkBackend(`{"name":"` + kataBackend + `","type":"kata","enabled":true,"config":{"runtime_class":"kata"}}`)
+	mkBackend(`{"name":"` + gvisorBackend + `","type":"gvisor","enabled":true,"config":{"runtime_class":"gvisor"}}`)
 	mkBackend(`{"name":"` + dockerBackend + `","type":"docker","enabled":true,"config":{}}`)
 
 	// privileged on a kata backend is accepted and persisted.
@@ -108,7 +111,20 @@ func TestRunnerClass_Privileged_DB(t *testing.T) {
 		t.Error("privileged should be persisted as true on a kata backend")
 	}
 
-	// privileged on a non-kata (container) backend is rejected — never inserted.
+	// privileged on a gvisor backend is also accepted — gVisor is kernel-isolated
+	// (the Sentry contains root), so root + writable rootfs is safe just as on kata.
+	authAs(t, "admin")
+	gvBody := `{"name":"` + gvisorClassName + `","memory_mb":2048,"cpu_millicores":1000,"pids_limit":64,` +
+		`"tmpfs_mb":256,"disk_gb":10,"backend":"` + gvisorBackend + `","enabled":true,"privileged":true}`
+	r = httptest.NewRequest(http.MethodPost, "/runner-classes", bytes.NewBufferString(gvBody))
+	r.Header.Set("Authorization", "Bearer t")
+	w = httptest.NewRecorder()
+	handleCreateRunnerClass(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create privileged gvisor class: got %d, want 201: %s", w.Code, w.Body.String())
+	}
+
+	// privileged on a non-kernel-isolated (container) backend is rejected — never inserted.
 	authAs(t, "admin")
 	badBody := `{"name":"rc-` + uuid.New().String() + `","memory_mb":2048,"cpu_millicores":1000,"pids_limit":64,` +
 		`"tmpfs_mb":256,"disk_gb":10,"backend":"` + dockerBackend + `","enabled":true,"privileged":true}`

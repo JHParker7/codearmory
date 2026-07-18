@@ -97,7 +97,7 @@ func handleCreateRunToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if svc.ServiceName != "workflows" {
+	if !canMintScopedRoles(svc.ServiceName) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -195,7 +195,7 @@ func handleRevokeRunToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if svc.ServiceName != "workflows" {
+	if !canMintScopedRoles(svc.ServiceName) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -230,12 +230,24 @@ type permissionSpec struct {
 // actually holds that permission before including it — so the workflow role can
 // never exceed the owner's own access. The resulting role_id is stored in the
 // Workflow row and used to scope run tokens.
+// canMintScopedRoles reports whether a service may provision a minimal-permission
+// role and mint run tokens against it.
+//
+// workflows does this for a run; forge does it for an artifact step, where a sandbox
+// needs a bearer for the artifact store. Both are safe for the same reason: every
+// permission in the request is verified against the OWNER's own access before it is
+// included, so a minted role can never exceed what the user already has — the caller
+// is choosing a subset, not granting itself authority.
+func canMintScopedRoles(service string) bool {
+	return service == "workflows" || service == "forge"
+}
+
 func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 	svc, ok := requireServiceAuth(w, r)
 	if !ok {
 		return
 	}
-	if svc.ServiceName != "workflows" {
+	if !canMintScopedRoles(svc.ServiceName) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -258,9 +270,16 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 	// request resource to at run time. Storing the raw resource would never match
 	// the scoped resource conductor sends for a run step (e.g. "alice/forge/...").
 	var ownerUsername, ownerOrgName string
+	// ownerOrgID is the authoritative org for the scoped role/permissions. Trusting
+	// the caller-supplied req.OrgID verbatim violates fk_roles_org when it's empty
+	// (org-less users) or stale, which makes the whole creation 500 and silently
+	// drops the run back to the user's full permissions. Resolve it from the owner
+	// instead; a nil pointer stores NULL (valid) rather than a dangling "".
+	var ownerOrgID *string
 	if userRow, err := (User{UserID: req.UserID}).Get(ctx); err == nil {
 		owner := userRow.(User)
 		ownerUsername = owner.Username
+		ownerOrgID = owner.OrgID
 		if owner.OrgID != nil {
 			if orgRow, err2 := (Org{OrgID: *owner.OrgID}).Get(ctx); err2 == nil {
 				ownerOrgName = orgRow.(Org).OrgName
@@ -284,7 +303,6 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = p.Service + "." + p.Action
 		}
-		orgID := req.OrgID
 		perm := Permissions{
 			PermissionsID: uuid.New().String(),
 			Name:          "workflow:" + req.WorkflowID + ":" + name,
@@ -292,7 +310,7 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 			Actions:       []string{p.Action},
 			Resources:     []string{scopeResource(p.Resource, ownerUsername, ownerOrgName)},
 			OwnerID:       req.UserID,
-			OrgID:         &orgID,
+			OrgID:         ownerOrgID,
 			Active:        true,
 		}
 		if err := perm.Add(ctx); err != nil {
@@ -303,12 +321,11 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 		permIDs = append(permIDs, perm.PermissionsID)
 	}
 
-	orgID := req.OrgID
 	role := Role{
 		RoleID:         uuid.New().String(),
 		Name:           "workflow:" + req.WorkflowID,
 		OwnerID:        req.UserID,
-		OrgID:          &orgID,
+		OrgID:          ownerOrgID,
 		PermissionsIDs: permIDs,
 		Active:         true,
 	}
@@ -338,7 +355,7 @@ func handleDeleteWorkflowRole(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if svc.ServiceName != "workflows" {
+	if !canMintScopedRoles(svc.ServiceName) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

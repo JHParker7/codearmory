@@ -5,7 +5,24 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
+
+// instanceUserCount returns the total number of user accounts on the instance,
+// regardless of active status. It is the single source of truth for "has this
+// instance been bootstrapped": both the public setup-status endpoint and the
+// bootstrap-admin determination use it, so deactivating every user can never reset
+// the initialized state (which would otherwise hand bootstrap admin to the next
+// signup). It deliberately counts inactive accounts — only a full account wipe
+// resets it. The caller passes the db handle so the bootstrap path can count inside
+// its transaction (read-your-writes) while the public endpoint uses the primary.
+func instanceUserCount(db *gorm.DB) (int64, error) {
+	var count int64
+	if err := db.Model(&User{}).Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
 
 // ── Lookup helpers ────────────────────────────────────────────────────────────
 
@@ -35,11 +52,6 @@ func getUserIDsByOrg(ctx context.Context, orgID string) ([]string, error) {
 		return nil, err
 	}
 	return ids, nil
-}
-
-// clearOrgMembership clears the org_id field on all users that belong to orgID.
-func clearOrgMembership(ctx context.Context, orgID string) error {
-	return connect().WithContext(ctx).Model(&User{}).Where("org_id = ?", orgID).Update("org_id", nil).Error
 }
 
 // getUserIDsByTeam returns the user_id of all users in a team.

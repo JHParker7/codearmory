@@ -24,8 +24,13 @@ const (
 
 // validStatuses / validPriorities are the built-in fallbacks used when an org
 // has no custom field defs defined.
-var validStatuses   = []string{StatusOpen, StatusInProgress, StatusResolved, StatusClosed}
+var validStatuses = []string{StatusOpen, StatusInProgress, StatusResolved, StatusClosed}
 var validPriorities = []string{PriorityLow, PriorityMedium, PriorityHigh, PriorityCritical}
+
+// terminalStatuses are the statuses that mark a ticket as done (no longer
+// counted as "open") for the per-board open/total tallies. Mirrors the portal's
+// isTerminal().
+var terminalStatuses = []string{StatusResolved, StatusClosed}
 
 const maxBodyBytes = 64 * 1024
 
@@ -43,6 +48,7 @@ type Ticket struct {
 	CreatedBy        string          `json:"created_by"         gorm:"column:created_by"`
 	OrgID            string          `json:"org_id"             gorm:"column:org_id;default:''"`
 	Project          string          `json:"project,omitempty"  gorm:"column:project;default:''"`
+	BoardID          *string         `json:"board_id,omitempty" gorm:"column:board_id"`
 	AssigneeID       *string         `json:"assignee_id,omitempty"        gorm:"column:assignee_id"`
 	WorkflowID       *string         `json:"workflow_id,omitempty"        gorm:"column:workflow_id"`
 	RunID            *string         `json:"run_id,omitempty"             gorm:"column:run_id"`
@@ -70,19 +76,50 @@ type TicketComment struct {
 // TableName sets the GORM table name for TicketComment.
 func (TicketComment) TableName() string { return "ticket_comments" }
 
+// Board is a named grouping of tickets (a kanban board) owned by a user and
+// optionally shared within an org. Tickets reference a board via Ticket.BoardID;
+// the board's columns are the org's configured status field defs.
+type Board struct {
+	BoardID     string    `json:"board_id"     gorm:"column:board_id;primaryKey"`
+	Name        string    `json:"name"         gorm:"column:name"`
+	Description string    `json:"description"  gorm:"column:description;default:''"`
+	Color       string    `json:"color"        gorm:"column:color;default:''"`
+	Position    int       `json:"position"     gorm:"column:position;default:0"`
+	CreatedBy   string    `json:"created_by"   gorm:"column:created_by"`
+	OrgID       string    `json:"org_id"       gorm:"column:org_id;default:''"`
+	Active      bool      `json:"-"            gorm:"column:active;default:true"`
+	CreatedAt   time.Time `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt   time.Time `json:"updated_at"   gorm:"column:updated_at"`
+	// OpenCount/TotalCount are computed on read (not stored): TotalCount is every
+	// active ticket on the board and OpenCount those still open (not in a terminal
+	// status). They are populated by the list/get board handlers.
+	OpenCount  int64 `json:"open_count"  gorm:"-"`
+	TotalCount int64 `json:"total_count" gorm:"-"`
+}
+
+// TableName sets the GORM table name for Board.
+func (Board) TableName() string { return "ticket_boards" }
+
 // TicketFieldDef defines a custom status, priority, or timescale value.
 // OrgID="" means it is a system-wide default visible to all orgs.
+//
+// BoardID scopes a status def to a single board so each board owns its own
+// status columns ("linked to the board"). BoardID="" is the org/global level
+// used by no-board tickets and as the fallback for boards that have not
+// configured their own columns. Only status defs are ever board-scoped;
+// priority/timescale defs always keep BoardID="".
 type TicketFieldDef struct {
-	FieldDefID string    `json:"field_def_id" gorm:"column:field_def_id;primaryKey"`
-	OrgID      string    `json:"org_id"       gorm:"column:org_id;default:''"`
-	Kind       string    `json:"kind"         gorm:"column:kind"`
-	Value      string    `json:"value"        gorm:"column:value"`
-	Label      string    `json:"label"        gorm:"column:label"`
-	Color      string    `json:"color"        gorm:"column:color;default:''"`
-	Position   int       `json:"position"     gorm:"column:position;default:0"`
-	Active     bool      `json:"-"            gorm:"column:active;default:true"`
-	CreatedAt  time.Time `json:"created_at"   gorm:"column:created_at"`
-	UpdatedAt  time.Time `json:"updated_at"   gorm:"column:updated_at"`
+	FieldDefID string    `json:"field_def_id"        gorm:"column:field_def_id;primaryKey"`
+	OrgID      string    `json:"org_id"              gorm:"column:org_id;default:''"`
+	BoardID    string    `json:"board_id,omitempty"  gorm:"column:board_id;default:''"`
+	Kind       string    `json:"kind"                gorm:"column:kind"`
+	Value      string    `json:"value"               gorm:"column:value"`
+	Label      string    `json:"label"               gorm:"column:label"`
+	Color      string    `json:"color"               gorm:"column:color;default:''"`
+	Position   int       `json:"position"            gorm:"column:position;default:0"`
+	Active     bool      `json:"-"                   gorm:"column:active;default:true"`
+	CreatedAt  time.Time `json:"created_at"          gorm:"column:created_at"`
+	UpdatedAt  time.Time `json:"updated_at"          gorm:"column:updated_at"`
 }
 
 // TableName sets the GORM table name for TicketFieldDef.

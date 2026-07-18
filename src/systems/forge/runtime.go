@@ -33,7 +33,7 @@ func defaultRuntimeType() string {
 
 // proxyEnvPairs is the set of egress-proxy environment variables forge injects
 // into a sandboxed job (upper- and lower-case forms, plus NO_PROXY for loopback).
-// Shared by the docker and proxmox runtimes so the two sandboxes can't diverge.
+// Used by the docker runtime; the kubernetes runtime injects the same set separately.
 func proxyEnvPairs(proxy string) [][2]string {
 	return [][2]string{
 		{"HTTP_PROXY", proxy},

@@ -616,7 +616,7 @@ func TestForgeModel_List_N_OpensCreateForm(t *testing.T) {
 func TestForgeModel_Create_Esc_BacksToList(t *testing.T) {
 	m := newForgeModel()
 	m.view = forgeViewCreate
-	m.form, _ = newForgeCreateForm(nil, nil)
+	m.form, _ = newForgeCreateForm(nil, nil, kvCatalog{})
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if updated.(forgeModel).view != forgeViewList {
 		t.Error("esc in create view should return to list")
@@ -626,7 +626,7 @@ func TestForgeModel_Create_Esc_BacksToList(t *testing.T) {
 func TestForgeModel_Create_Submit_MissingImage_StaysWithError(t *testing.T) {
 	m := newForgeModel()
 	m.view = forgeViewCreate
-	m.form, _ = newForgeCreateForm(nil, nil)
+	m.form, _ = newForgeCreateForm(nil, nil, kvCatalog{})
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	m2 := updated.(forgeModel)
 	if m2.view != forgeViewCreate {
@@ -643,7 +643,7 @@ func TestForgeModel_Create_Submit_MissingImage_StaysWithError(t *testing.T) {
 func TestForgeModel_Create_CtrlC_Quits(t *testing.T) {
 	m := newForgeModel()
 	m.view = forgeViewCreate
-	m.form, _ = newForgeCreateForm(nil, nil)
+	m.form, _ = newForgeCreateForm(nil, nil, kvCatalog{})
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if cmd == nil {
 		t.Fatal("ctrl+c should return a cmd")
@@ -672,7 +672,7 @@ func TestForgeModel_CreatedMsg_ReturnsToListAndRefetches(t *testing.T) {
 func TestForgeModel_FormErrMsg_ShowsInlineError(t *testing.T) {
 	m := newForgeModel()
 	m.view = forgeViewCreate
-	m.form, _ = newForgeCreateForm(nil, nil)
+	m.form, _ = newForgeCreateForm(nil, nil, kvCatalog{})
 	updated, _ := m.Update(forgeFormErrMsg{err: fmt.Errorf("image not allowed")})
 	m2 := updated.(forgeModel)
 	if m2.view != forgeViewCreate {
@@ -688,7 +688,7 @@ func TestForgeSubmitExec_PostsCorrectPayload(t *testing.T) {
 	setupCLI(t, srv)
 
 	msg := forgeSubmitExec("ubuntu:22.04", []string{"sh", "-c", "echo hi"},
-		map[string]string{"FOO": "bar"}, 120, "large")()
+		map[string]string{"FOO": "bar"}, 120, "large", "", false, "", "")()
 
 	if _, ok := msg.(forgeCreatedMsg); !ok {
 		t.Fatalf("msg = %T, want forgeCreatedMsg", msg)
@@ -718,7 +718,7 @@ func TestForgeSubmitExec_PostsCorrectPayload(t *testing.T) {
 func TestForgeSubmitExec_HTTPError_ReturnsFormErr(t *testing.T) {
 	srv, _ := recordingServer(t, http.StatusBadRequest, `{"error":"image not allowed"}`)
 	setupCLI(t, srv)
-	if _, ok := forgeSubmitExec("x", []string{"sh"}, nil, 0, "")().(forgeFormErrMsg); !ok {
+	if _, ok := forgeSubmitExec("x", []string{"sh"}, nil, 0, "", "", false, "", "")().(forgeFormErrMsg); !ok {
 		t.Error("HTTP error should return forgeFormErrMsg")
 	}
 }
@@ -881,7 +881,7 @@ func TestBuildForgeCommand_MultiLineWrapsInShell(t *testing.T) {
 func TestForgeView_CreateView_RendersForm(t *testing.T) {
 	m := newForgeModel()
 	m.view = forgeViewCreate
-	m.form, _ = newForgeCreateForm(nil, nil)
+	m.form, _ = newForgeCreateForm(nil, nil, kvCatalog{})
 	v := m.View()
 	if !strings.Contains(v, "New Execution") {
 		t.Errorf("create view should show the form heading, got: %q", v)
@@ -992,13 +992,52 @@ func TestForgeSubmitExec_SelectedDefaultRunner_OmitsRunnerClass(t *testing.T) {
 	srv, rec := recordingServer(t, http.StatusOK, `{"execution_id":"e1"}`)
 	setupCLI(t, srv)
 	// Empty runner (the "(default)" option) must not send runner_class.
-	forgeSubmitExec("alpine:3.19", []string{"sh"}, nil, 0, "")()
+	forgeSubmitExec("alpine:3.19", []string{"sh"}, nil, 0, "", "", false, "", "")()
 	var got map[string]any
 	if err := json.Unmarshal(rec.Body, &got); err != nil {
 		t.Fatalf("body not JSON: %v", err)
 	}
 	if _, present := got["runner_class"]; present {
 		t.Errorf("runner_class should be omitted when empty, body = %s", rec.Body)
+	}
+}
+
+func TestForgeSubmitExec_Checkout_IncludesSpecWithRepo(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"execution_id":"e1"}`)
+	setupCLI(t, srv)
+	forgeSubmitExec("alpine:3.19", []string{"sh", "-c", "make"}, nil, 0, "", "https://github.com/acme/widgets.git", true, "src", "develop")()
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body, &got); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	refs, _ := got["secret_refs"].(map[string]any)
+	if refs["GIT_CLONE_URL"] != "git:https://github.com/acme/widgets.git" {
+		t.Errorf("secret_refs = %v, want git: ref on GIT_CLONE_URL", got["secret_refs"])
+	}
+	spec, ok := got["checkout"].(map[string]any)
+	if !ok {
+		t.Fatalf("checkout should be present, body = %s", rec.Body)
+	}
+	if spec["path"] != "src" {
+		t.Errorf("checkout.path = %v, want src", spec["path"])
+	}
+	if spec["ref"] != "develop" {
+		t.Errorf("checkout.ref = %v, want develop", spec["ref"])
+	}
+}
+
+func TestForgeSubmitExec_Checkout_OmittedWithoutRepo(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{"execution_id":"e1"}`)
+	setupCLI(t, srv)
+	// checkout=true but no repo: forgeSubmitExec only attaches checkout alongside a
+	// repo, so the payload carries neither. (The form rejects this combination.)
+	forgeSubmitExec("alpine:3.19", []string{"sh", "-c", "make"}, nil, 0, "", "", true, "src", "develop")()
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body, &got); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if _, present := got["checkout"]; present {
+		t.Errorf("checkout should be omitted without a repo, body = %s", rec.Body)
 	}
 }
 

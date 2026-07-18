@@ -26,11 +26,13 @@ Forge calls Gatekeeper directly to verify the Bearer token on every request. It 
 
 ## Runtime backends
 
-The runtime that runs a job is selected per-execution. Admins define **runtime backends** (`/runtime-backends`, admin-only CRUD; users get read-only list/get) of type `docker`, `kubernetes`, `proxmox`, or `kata`, and point a runner class at one via its `backend` field. The execution snapshots the class's backend at submit time. A `default` backend is seeded from the legacy `RUNTIME` env, so a single-runtime deployment needs no change.
+The runtime that runs a job is selected per-execution. Admins define **runtime backends** (`/runtime-backends`, admin-only CRUD; users get read-only list/get) of type `docker`, `kubernetes`, `kata`, or `gvisor`, and point a runner class at one via its `backend` field. The execution snapshots the class's backend at submit time. A `default` backend is seeded from the legacy `RUNTIME` env, so a single-runtime deployment needs no change.
 
 - **docker / kubernetes** — container-level sandbox (read-only rootfs, dropped caps, egress proxy). Best for untrusted code.
 - **kata** — the kubernetes runtime pinned to a Kata Containers `RuntimeClass`, so each job runs in a lightweight VM (a real kernel, hardware-virtualization boundary) while keeping the same Job lifecycle and container hardening. Stronger isolation than a plain container with no new runtime to operate. See [kata.md](kata.md).
-- **proxmox** — a throwaway VM per job with full root and a real Docker daemon, for CI work that needs `apt`/`docker build`. See [proxmox.md](proxmox.md).
+- **gvisor** — the kubernetes runtime pinned to a gVisor (`runsc`) `RuntimeClass`, so each job runs under a userspace kernel (the Sentry) that intercepts its syscalls. Kernel-level isolation comparable to kata but with **no hardware virtualization** — the choice when nodes lack nested virt / `/dev/kvm`. Keeps the egress proxy (gVisor is not a network boundary). See [gvisor.md](gvisor.md).
+
+To **build container images**, use forge's built-in daemonless image build (BuildKit on kata, Kaniko on gvisor) rather than a Docker daemon — it needs a privileged runner class on a kernel-isolated backend, never the host socket.
 
 ## Requirements
 
@@ -90,7 +92,9 @@ The recommended setup:
 
 Execution containers are then isolated to the `forge-exec` network (no direct internet) but can reach the allowlisted domains through the proxy. The compose file at `infra/local/compose.yml` ships a ready-to-use configuration.
 
-**Default allowed domains** (overridable via `FORGE_PROXY_ALLOWED_DOMAINS` in compose):
+**Public-only mode is the default (`PROXY_ALLOWED_DOMAINS=*`).** Out of the box the allowlist is the single value `*`, so a workload that needs broad outbound access (e.g. all of AWS) works without enumerating domains. `*` passes the **hostname** check for any host, but the proxy's dial-time **IP guard always still applies**: it refuses any host that resolves to a loopback, private (RFC1918), link-local (incl. the `169.254.169.254` cloud-metadata IP), multicast, or unspecified address. The result is "public internet only" — runners reach any public destination but never cluster-internal services or cloud metadata. The IP guard is enforced on every request regardless of the allowlist, so `*` is not "allow everything," only "allow everything *public*". The allowlist is process-wide (one proxy), so it applies to all runners — there is no per-runner-class egress policy.
+
+**Restricting to a domain allowlist (optional).** For a tighter posture, set `forge.egressProxy.allowedDomains` (Helm) / `FORGE_PROXY_ALLOWED_DOMAINS` (compose) / `PROXY_ALLOWED_DOMAINS` (forge config) to a comma-separated list of exact hosts and `*.example.com` subdomain wildcards. A reasonable build/CI starting point:
 
 | Domain | Purpose |
 |--------|---------|
@@ -102,6 +106,8 @@ Execution containers are then isolated to the `forge-exec` network (no direct in
 | `pypi.org`, `files.pythonhosted.org` | Python packages |
 | `proxy.golang.org`, `sum.golang.org`, `storage.googleapis.com` | Go modules |
 
+Setting it to empty blocks all egress.
+
 ### Kubernetes runtime variables
 
 | Variable | Default | Description |
@@ -111,6 +117,24 @@ Execution containers are then isolated to the `forge-exec` network (no direct in
 | `KUBECONFIG` | `~/.kube/config` | Kubeconfig path (falls back to in-cluster credentials) |
 
 Resource limits are controlled per execution by runner classes — see [Runner classes](#runner-classes).
+
+### Admission control (queue pacing)
+
+Submitted executions are queued as `pending` rows and claimed one at a time by a worker pool (10 workers). Before an execution is claimed and its Job sent to the backend, it must pass the admission gate. All limits default to `0` (unlimited); with everything unset, forge dequeues strictly FIFO up to the worker-pool size.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FORGE_MAX_CONCURRENT_PER_ORG` | `0` | Max simultaneously-running executions per org (`0` = unlimited). Per-org overrides can be set at runtime in the `concurrency_limits` table. |
+| `FORGE_MAX_CONCURRENT_PER_USER` | `0` | Max simultaneously-running executions per user (`0` = unlimited). |
+| `FORGE_MAX_TOTAL_CPU_MILLICORES` | `0` | Cluster-wide CPU budget in millicores. A pending execution is only admitted when the summed `cpu_millicores` of all running runner classes plus its own fits the budget. `0` = unlimited. |
+| `FORGE_MAX_TOTAL_MEMORY_MB` | `0` | Cluster-wide memory budget in MB, gated the same way against running runner classes' `memory_mb`. `0` = unlimited. |
+
+The resource budgets are the pacing mechanism for large fan-outs (e.g. a matrix of `large` runners). Without them, forge sends every Job to the backend at once and the excess pods sit `Pending` until they time out. With a budget set, forge counts the resources running runners are using and holds the next runner in the queue until enough finish to free the space it needs — so runners are sent to Kubernetes only when the cluster can actually run them. Set the budget to a fraction of cluster capacity to reserve headroom for other workloads.
+
+Two admission details worth knowing:
+
+- **Skip-ahead:** forge claims the *oldest pending execution that fits* the budget, so a too-large head-of-line job does not block smaller ones queued behind it.
+- **Idle escape:** when nothing is running, the oldest pending execution is admitted even if it alone exceeds the budget — that is its best chance to run, and it prevents a single oversized job (or one larger than the whole budget) from deadlocking the queue. The backend then reports a clear "insufficient CPU/memory" error if it genuinely cannot be scheduled.
 
 ## Runner classes
 
@@ -128,7 +152,7 @@ These three classes are seeded automatically on startup if absent. Operators can
 
 ### Privileged classes (root for package managers)
 
-A runner class may set `privileged: true` to run jobs as **root with a writable root filesystem** and privilege escalation allowed, so package managers (`apt`/`pacman`/`dnf`) and other root operations work. This is honoured **only on VM-isolated backends** (`kata`, `proxmox`), where the microVM — not the container — is the isolation boundary. The API rejects `privileged` on shared-kernel container backends (`docker`/`kubernetes`) with `400`, and forge drops the flag at runtime if it ever reaches one (root + writable rootfs in a shared-kernel container is a host-escape risk). See [kata.md](kata.md#privileged-jobs-root--package-managers).
+A runner class may set `privileged: true` to run jobs as **root with a writable root filesystem** and privilege escalation allowed, so package managers (`apt`/`pacman`/`dnf`) and other root operations work. This is honoured **only on kernel-isolated backends** (`kata`, `gvisor`), where a guest or userspace kernel — not the host kernel — contains the job's root. The API rejects `privileged` on shared-kernel container backends (`docker`/`kubernetes`) with `400`, and forge drops the flag at runtime if it ever reaches one (root + writable rootfs in a shared-kernel container is a host-escape risk). See [kata.md](kata.md#privileged-jobs-root--package-managers).
 
 ### Selecting a runner class
 

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"os"
 	"sync"
 	"time"
@@ -29,6 +31,16 @@ type db interface {
 var gormDB *gorm.DB
 var gormDBRead *gorm.DB
 var dbInitMu sync.Mutex
+
+// skipLocked applies FOR UPDATE SKIP LOCKED so concurrent workers never dequeue
+// the same run twice. It is a Postgres feature; on other dialects (sqlite in unit
+// tests, which is single-writer) it is a no-op so the dequeue path stays testable.
+func skipLocked(tx *gorm.DB) *gorm.DB {
+	if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		return tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
+	}
+	return tx
+}
 
 func connect() *gorm.DB {
 	dbInitMu.Lock()
@@ -204,11 +216,11 @@ func getStepsByIDs(ctx context.Context, ids []string) ([]Step, error) {
 	return steps, nil
 }
 
-// cancelRun transitions a pending or running run to cancelled status.
+// cancelRun transitions a pending, running, or awaiting-approval run to cancelled.
 // Returns the number of rows affected (0 if the run was not in a cancellable state).
 func cancelRun(ctx context.Context, id string) (int64, error) {
 	result := connect().WithContext(ctx).Exec(
-		"UPDATE workflow_runs SET status='cancelled', ended_at=now(), token=NULL WHERE run_id=? AND status IN ('pending','running')", id,
+		"UPDATE workflow_runs SET status='cancelled', ended_at=CURRENT_TIMESTAMP, token=NULL WHERE run_id=? AND status IN ('pending','running','awaiting_approval')", id,
 	)
 	return result.RowsAffected, result.Error
 }
@@ -329,33 +341,91 @@ func listWorkflows(ctx context.Context, userID, orgID, projectFilter string) ([]
 	return wfs, nil
 }
 
-// enrichStepRefs looks up the full Step definition for each ref and assembles
-// WorkflowStep objects. Deleted steps are omitted.
+// enrichStepRefs looks up the full Step definition for each step ref and assembles
+// WorkflowStep objects; inline approval gates are synthesised in place (no Step
+// lookup). Refs whose stored step was deleted are omitted.
 func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep, error) {
 	if len(refs) == 0 {
 		return []WorkflowStep{}, nil
 	}
-	ids := make([]string, len(refs))
-	for i, r := range refs {
-		ids[i] = r.StepID
+	ids := make([]string, 0, len(refs))
+	for _, r := range refs {
+		if r.Approval == nil && r.StepID != "" {
+			ids = append(ids, r.StepID)
+		}
 	}
-	var dbSteps []Step
-	if err := connectRead().WithContext(ctx).Where("step_id IN ? AND active=?", ids, true).Find(&dbSteps).Error; err != nil {
-		return nil, err
-	}
-	byID := make(map[string]Step, len(dbSteps))
-	for _, s := range dbSteps {
-		byID[s.StepID] = s
+	byID := make(map[string]Step, len(ids))
+	if len(ids) > 0 {
+		var dbSteps []Step
+		if err := connectRead().WithContext(ctx).Where("step_id IN ? AND active=?", ids, true).Find(&dbSteps).Error; err != nil {
+			return nil, err
+		}
+		for _, s := range dbSteps {
+			byID[s.StepID] = s
+		}
 	}
 	result := make([]WorkflowStep, 0, len(refs))
 	for _, ref := range refs {
+		if ref.Approval != nil {
+			ws := synthesiseApprovalStep(ref)
+			if ref.Name != "" {
+				ws.Name = ref.Name
+			}
+			result = append(result, ws)
+			continue
+		}
+		// An inline step carries its whole definition on the ref (no stored step to look
+		// up) — build the WorkflowStep directly. Must precede the byID lookup below, which
+		// would otherwise miss on the empty StepID and silently drop the step.
+		if ref.StepID == "" && ref.Action != "" {
+			result = append(result, WorkflowStep{
+				Step:    Step{Name: ref.Name, Action: ref.Action, With: ref.With, Timeout: ref.Timeout},
+				Matrix:  ref.Matrix,
+				Scatter: ref.Scatter,
+				MapID:   ref.MapID,
+			})
+			continue
+		}
 		s, ok := byID[ref.StepID]
 		if !ok {
 			continue
 		}
-		result = append(result, WorkflowStep{Step: s, ParallelGroup: ref.ParallelGroup})
+		// A per-occurrence name overrides the step definition's name for this use,
+		// so the worker records it as the step-run name and the ${steps.<name>.output}
+		// key — s is a local copy, so other occurrences are unaffected.
+		if ref.Name != "" {
+			s.Name = ref.Name
+		}
+		// Per-occurrence With overrides (e.g. an input wired to ${steps.X.output})
+		// are merged over the step's own With, ref keys winning. The merge is into a
+		// fresh map so the shared step definition is never mutated.
+		if len(ref.With) > 0 {
+			merged := make(map[string]any, len(s.With)+len(ref.With))
+			maps.Copy(merged, s.With)
+			maps.Copy(merged, ref.With)
+			s.With = merged
+		}
+		result = append(result, WorkflowStep{Step: s, Matrix: ref.Matrix, Scatter: ref.Scatter, MapID: ref.MapID})
 	}
 	return result, nil
+}
+
+// synthesiseApprovalStep builds the WorkflowStep for an inline approval gate: a
+// virtual step with Action=approval whose With carries the gate's message and
+// approver allow-list, so the worker and approval API treat it exactly like an
+// approval step without one existing in the steps table.
+func synthesiseApprovalStep(ref WorkflowStepRef) WorkflowStep {
+	with := map[string]any{}
+	if ref.Approval.Message != "" {
+		with["message"] = ref.Approval.Message
+	}
+	if len(ref.Approval.Approvers) > 0 {
+		with["approvers"] = ref.Approval.Approvers
+	}
+	return WorkflowStep{
+		Step:     Step{Name: "approval", Action: ActionApproval, With: with},
+		Approval: ref.Approval,
+	}
 }
 
 // ── WorkflowRun ───────────────────────────────────────────────────────────────
@@ -391,7 +461,7 @@ func (run WorkflowRun) Remove(ctx context.Context) error {
 	defer span.End()
 	span.SetAttributes(attribute.String("run.id", run.RunID))
 	if err := connect().WithContext(ctx).Exec(
-		"UPDATE workflow_runs SET status='cancelled', ended_at=now(), token=NULL WHERE run_id=? AND status IN ('pending','running')", run.RunID,
+		"UPDATE workflow_runs SET status='cancelled', ended_at=CURRENT_TIMESTAMP, token=NULL WHERE run_id=? AND status IN ('pending','running','awaiting_approval')", run.RunID,
 	).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -467,7 +537,7 @@ func getStepRuns(ctx context.Context, runID string) ([]WorkflowStepRun, error) {
 	var stepRuns []WorkflowStepRun
 	if err := connectRead().WithContext(ctx).Raw(
 		`SELECT step_run_id, run_id, step_index, step_name, status,
-		        response_body, memory_used_mb, memory_limit_mb, started_at, ended_at
+		        response_body, logs, memory_used_mb, memory_limit_mb, started_at, ended_at
 		 FROM workflow_step_runs WHERE run_id=? ORDER BY step_index`, runID,
 	).Scan(&stepRuns).Error; err != nil {
 		return nil, err
@@ -494,7 +564,7 @@ func (WorkflowRun) Dequeue(ctx context.Context) (*WorkflowRun, error) {
 	defer tx.Rollback() //nolint:errcheck
 
 	var run WorkflowRun
-	result := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+	result := skipLocked(tx).
 		Where("status = 'pending'").
 		Order("created_at").
 		Limit(1).
@@ -509,7 +579,7 @@ func (WorkflowRun) Dequeue(ctx context.Context) (*WorkflowRun, error) {
 		return nil, nil
 	}
 
-	r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=now() WHERE run_id=?", run.RunID)
+	r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=CURRENT_TIMESTAMP WHERE run_id=?", run.RunID)
 	if r.Error != nil {
 		span.RecordError(r.Error)
 		span.SetStatus(codes.Error, r.Error.Error())
@@ -536,19 +606,158 @@ func (run WorkflowRun) SetCurrentStep(ctx context.Context, step int) {
 		"UPDATE workflow_runs SET current_step=? WHERE run_id=?", step, run.RunID)
 }
 
-// Complete marks the run with its final status and clears credentials. Uses
-// context.Background() internally: the caller's context may be cancelled on
-// shutdown or user cancel, but the terminal state must always be persisted.
-func (run WorkflowRun) Complete(_ context.Context, status string) {
+// SetTicket records the ticket mirroring this run, so a resume after an approval gate
+// adopts it instead of opening a second one. Best-effort: mirroring must never fail a
+// run, and the worst case of a lost write is a duplicate ticket on resume — not a
+// broken pipeline.
+func (run WorkflowRun) SetTicket(ctx context.Context, ticketID string) {
+	connect().WithContext(ctx).Exec( //nolint:errcheck — best-effort; see doc comment
+		"UPDATE workflow_runs SET ticket_id=? WHERE run_id=?", ticketID, run.RunID)
+}
+
+// errRunNotAwaiting is returned by the approval transitions when the run is no
+// longer paused (already approved/rejected/cancelled), so the API answers 409.
+var errRunNotAwaiting = errors.New("run is not awaiting approval")
+
+// PauseForApproval transitions a running run to awaiting_approval, recording the
+// step it paused on. The token is intentionally left in place: a paused run keeps
+// no live worker, and the approval API re-mints a fresh run token before
+// re-queueing. Guarded on status='running' so it never revives a terminal run —
+// a no-op (0 rows) when the run was cancelled mid-step is not an error.
+func (run WorkflowRun) PauseForApproval(ctx context.Context, step int) error {
+	return connect().WithContext(ctx).Exec(
+		"UPDATE workflow_runs SET status='awaiting_approval', current_step=? WHERE run_id=? AND status='running'",
+		step, run.RunID).Error
+}
+
+// resumeAfterApproval marks one approval step run completed and re-queues the
+// paused run (awaiting_approval → pending) so a worker resumes it. decision is the
+// audit line stored as the step's output (e.g. "approved by alice"). The writes
+// share a transaction so a run is never left half-resumed.
+//
+// A graph run can park on several gates at once, so the run is only re-queued once
+// the LAST one is decided; deciding one of several leaves the run paused. The
+// step-run update is guarded on status so two simultaneous decisions on the same
+// gate cannot both win — the loser updates 0 rows and gets errRunNotAwaiting.
+func resumeAfterApproval(ctx context.Context, runID, stepRunID, decision string) error {
+	tx := connect().WithContext(ctx).Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	defer tx.Rollback() //nolint:errcheck
+	sr := tx.Exec(
+		`UPDATE workflow_step_runs SET status='completed', response_body=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=? AND status=?`,
+		decision, stepRunID, StatusAwaitingApproval)
+	if sr.Error != nil {
+		return sr.Error
+	}
+	if sr.RowsAffected == 0 {
+		return errRunNotAwaiting
+	}
+	var remaining int64
+	if err := tx.Raw(
+		`SELECT count(*) FROM workflow_step_runs WHERE run_id=? AND status=?`,
+		runID, StatusAwaitingApproval).Scan(&remaining).Error; err != nil {
+		return err
+	}
+	if remaining > 0 {
+		// Other branches are still parked; the run stays awaiting_approval.
+		return tx.Commit().Error
+	}
+	r := tx.Exec(`UPDATE workflow_runs SET status='pending' WHERE run_id=? AND status='awaiting_approval'`, runID)
+	if r.Error != nil {
+		return r.Error
+	}
+	if r.RowsAffected == 0 {
+		return errRunNotAwaiting
+	}
+	return tx.Commit().Error
+}
+
+// rejectAfterApproval marks the approval step run failed and fails the paused run,
+// clearing its credentials. decision is the audit line (e.g. "rejected by alice").
+func rejectAfterApproval(ctx context.Context, runID, stepRunID, decision string) error {
+	tx := connect().WithContext(ctx).Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	defer tx.Rollback() //nolint:errcheck
+	sr := tx.Exec(
+		`UPDATE workflow_step_runs SET status='failed', response_body=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=? AND status=?`,
+		decision, stepRunID, StatusAwaitingApproval)
+	if sr.Error != nil {
+		return sr.Error
+	}
+	if sr.RowsAffected == 0 {
+		return errRunNotAwaiting
+	}
+	// One rejection fails the whole run, so any sibling gate parked on another
+	// branch is cancelled rather than left stranded in awaiting_approval under a
+	// failed run.
+	if err := tx.Exec(
+		`UPDATE workflow_step_runs SET status='cancelled', ended_at=CURRENT_TIMESTAMP WHERE run_id=? AND status=?`,
+		runID, StatusAwaitingApproval).Error; err != nil {
+		return err
+	}
+	r := tx.Exec(
+		`UPDATE workflow_runs SET status='failed', ended_at=CURRENT_TIMESTAMP, token=NULL, run_session_id=NULL WHERE run_id=? AND status='awaiting_approval'`,
+		runID)
+	if r.Error != nil {
+		return r.Error
+	}
+	if r.RowsAffected == 0 {
+		return errRunNotAwaiting
+	}
+	return tx.Commit().Error
+}
+
+// approvalStepRun returns the step run a paused run is currently awaiting approval
+// on. gorm.ErrRecordNotFound means the run has no pending gate.
+//
+// A graph run can park on several gates at once, so prefer approvalStepRuns and
+// let the caller disambiguate; this returns the lowest-indexed gate and exists for
+// callers that only need "is there a gate, and which step is it".
+func approvalStepRun(ctx context.Context, runID string) (WorkflowStepRun, error) {
+	var sr WorkflowStepRun
+	err := connectRead().WithContext(ctx).
+		Where("run_id=? AND status=?", runID, StatusAwaitingApproval).
+		Order("step_index").First(&sr).Error
+	return sr, err
+}
+
+// approvalStepRuns returns every gate a paused run is currently awaiting, in step
+// order. A run parked on two concurrent branches has two; a linear pipeline can
+// only ever have one, since a gate cannot share a parallel group.
+func approvalStepRuns(ctx context.Context, runID string) ([]WorkflowStepRun, error) {
+	var srs []WorkflowStepRun
+	err := connectRead().WithContext(ctx).
+		Where("run_id=? AND status=?", runID, StatusAwaitingApproval).
+		Order("step_index").Find(&srs).Error
+	return srs, err
+}
+
+// Complete marks the run with its final status, records its resolved output map
+// (nil for a non-completed run), and clears credentials. Uses context.Background()
+// internally: the caller's context may be cancelled on shutdown or user cancel, but
+// the terminal state must always be persisted. outputs is stored as the JSON string
+// the serializer:json column round-trips (a text/bytea column across postgres and
+// the sqlite used in unit tests — no dialect-specific cast).
+func (run WorkflowRun) Complete(_ context.Context, status string, outputs map[string]string) {
 	_, span := otel.Tracer("workflows").Start(context.Background(), "db.workflow_run.complete")
 	defer span.End()
 	span.SetAttributes(
 		attribute.String("run.id", run.RunID),
 		attribute.String("status", status),
 	)
+	var outParam any // NULL unless the run completed with declared outputs
+	if len(outputs) > 0 {
+		if b, err := json.Marshal(outputs); err == nil {
+			outParam = string(b)
+		}
+	}
 	if err := connect().WithContext(context.Background()).Exec(
-		"UPDATE workflow_runs SET status=?, ended_at=now(), token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
-		status, run.RunID,
+		"UPDATE workflow_runs SET status=?, outputs=?, ended_at=CURRENT_TIMESTAMP, token=NULL, run_session_id=NULL WHERE run_id=? AND status='running'",
+		status, outParam, run.RunID,
 	).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -588,8 +797,35 @@ func (sr WorkflowStepRun) Add(_ context.Context) error {
 	)
 	if err := connect().Exec(
 		`INSERT INTO workflow_step_runs (step_run_id, run_id, step_index, step_name, status, started_at)
-		 VALUES (?, ?, ?, ?, 'running', now())`,
+		 VALUES (?, ?, ?, ?, 'running', CURRENT_TIMESTAMP)`,
 		sr.StepRunID, sr.RunID, sr.StepIndex, sr.StepName,
+	).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// AddAwaitingApproval inserts an approval step run paused for a human decision.
+// message (the substituted approval prompt, if any) is stored as the step's
+// response body so the run view can show what is being approved.
+func (sr WorkflowStepRun) AddAwaitingApproval(message string) error {
+	_, span := otel.Tracer("workflows").Start(context.Background(), "db.step_run.add_awaiting_approval")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("step_run.id", sr.StepRunID),
+		attribute.String("run.id", sr.RunID),
+	)
+	var body any // NULL when no message, so the column stays empty rather than ""
+	if message != "" {
+		body = message
+	}
+	if err := connect().Exec(
+		`INSERT INTO workflow_step_runs (step_run_id, run_id, step_index, step_name, status, response_body, started_at)
+		 VALUES (?, ?, ?, ?, 'awaiting_approval', ?, CURRENT_TIMESTAMP)`,
+		sr.StepRunID, sr.RunID, sr.StepIndex, sr.StepName, body,
 	).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -654,7 +890,7 @@ func (sr WorkflowStepRun) List(ctx context.Context, limit, offset int) ([]db, er
 
 // Complete records the step run's outcome. Best-effort; run status is authoritative.
 // Uses context.Background() internally as the run context may already be cancelled.
-func (sr WorkflowStepRun) Complete(_ context.Context, status string, output *string, usedMB, limitMB *int64) {
+func (sr WorkflowStepRun) Complete(_ context.Context, status string, output, logs *string, usedMB, limitMB *int64) {
 	_, span := otel.Tracer("workflows").Start(context.Background(), "db.step_run.complete")
 	defer span.End()
 	span.SetAttributes(
@@ -662,15 +898,15 @@ func (sr WorkflowStepRun) Complete(_ context.Context, status string, output *str
 		attribute.String("status", status),
 	)
 	connect().WithContext(context.Background()).Exec( //nolint:errcheck — step result is best-effort; run status is authoritative
-		`UPDATE workflow_step_runs SET status=?, response_body=?, memory_used_mb=?, memory_limit_mb=?, ended_at=now() WHERE step_run_id=?`,
-		status, output, usedMB, limitMB, sr.StepRunID)
+		`UPDATE workflow_step_runs SET status=?, response_body=?, logs=?, memory_used_mb=?, memory_limit_mb=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=?`,
+		status, output, logs, usedMB, limitMB, sr.StepRunID)
 	span.SetStatus(codes.Ok, "")
 }
 
 // recoverStuckRunsDB marks any runs left in 'running' state as 'failed' on startup.
 func recoverStuckRunsDB() int64 {
 	result := connect().Exec(
-		"UPDATE workflow_runs SET status='failed', ended_at=now(), token=NULL, run_session_id=NULL WHERE status='running'",
+		"UPDATE workflow_runs SET status='failed', ended_at=CURRENT_TIMESTAMP, token=NULL, run_session_id=NULL WHERE status='running'",
 	)
 	if result.Error != nil {
 		slog.Error("startup: failed to recover stuck runs", "error", result.Error)

@@ -70,8 +70,8 @@ services:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: blueprints=blueprints-local-secret,forge=forge-local-secret,workflows=workflows-local-secret,tickets=tickets-local-secret,notifications=notifications-local-secret,hooks=hooks-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,outpost-gateway=outpost-gateway-local-secret,chaos=chaos-local-secret,argo=argo-local-secret,builder=builder-local-secret,test-service=test-service-local-secret
-      SECRETS_LOOKUP_ALLOWED_CALLERS: "containers,forge"
+      GATEKEEPER_SERVICES: forge=forge-local-secret,workflows=workflows-local-secret,hooks=hooks-local-secret,outpost-gateway=outpost-gateway-local-secret,builder=builder-local-secret,tickets=tickets-local-secret,git_connector=git-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
+      SECRETS_LOOKUP_ALLOWED_CALLERS: "forge,containers"
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
       # Org-service disable-gate: when both are set, gatekeeper denies requests to
@@ -112,7 +112,7 @@ services:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/registry
       REGISTRY_SERVICE_ACCOUNTS: conductor=registry-read-local-secret,workflows=workflows-registry-local-secret,gatekeeper=gatekeeper-registry-read-local-secret,builder=builder-registry-read-local-secret,registry-test-reader=registry-test-reader-local-secret
       REGISTRY_ADMIN_ACCOUNTS: registry-admin=registry-admin-local-secret
-      SERVICES: blueprints=http://blueprints:8093,forge=http://forge:8083,gatekeeper=http://gatekeeper:8081
+      SERVICES: forge=http://forge:8083,gatekeeper=http://gatekeeper:8081
       CONDUCTOR_URL: http://conductor:8080
       CONDUCTOR_NOTIFY_KEY: conductor-notify-local-secret
       MANIFEST_FILE: /etc/registry/manifest.json
@@ -128,41 +128,21 @@ services:
       retries: 10
     restart: on-failure
 
-  blueprints:
-    build:
-      context: ../../src/systems/blueprints
-    environment:
-      <<: *otel-env
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/blueprints
-      GATEKEEPER_URL: http://gatekeeper:8081
-      REDIS_URL: redis://redis:6379/1
-      # Must match the blueprints entry in gatekeeper's GATEKEEPER_SERVICES.
-      GATEKEEPER_SERVICE_KEY: blueprints-local-secret
-    entrypoint: ["/bin/sh", "-c", "ENCRYPTION_KEY=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n') exec ./blueprints"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      gatekeeper:
-        condition: service_healthy
-      registry:
-        condition: service_started
-    restart: on-failure
-
   # ── Egress proxy ─────────────────────────────────────────────────────────────
   # Sits on both the default network (internet access) and the internal
   # forge-exec network. Execution containers on forge-exec can only reach the
   # internet through this proxy; direct outbound traffic is blocked by the
-  # internal network flag. Configure FORGE_PROXY_ALLOWED_DOMAINS to restrict
-  # which external hosts containers may contact.
+  # internal network flag. Default PROXY_ALLOWED_DOMAINS is "*" (public-only: any
+  # public host, but the proxy's IP guard still blocks private/internal/metadata
+  # addresses). Set FORGE_PROXY_ALLOWED_DOMAINS to a comma-separated domain allowlist
+  # to restrict which external hosts containers may contact.
 
   egress-proxy:
     build:
       context: ../../src/systems/egress-proxy
     environment:
       <<: *otel-env
-      PROXY_ALLOWED_DOMAINS: ${FORGE_PROXY_ALLOWED_DOMAINS:-registry.terraform.io,releases.hashicorp.com,github.com,*.github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,pypi.org,files.pythonhosted.org,proxy.golang.org,sum.golang.org,storage.googleapis.com}
+      PROXY_ALLOWED_DOMAINS: ${FORGE_PROXY_ALLOWED_DOMAINS:-*}
     networks:
       - default
       - forge-exec
@@ -182,12 +162,20 @@ services:
       RUNTIME: docker
       GATEKEEPER_URL: http://gatekeeper:8081
       ALLOWED_IMAGES: alpine:3.19,ubuntu:22.04,python:3.12-slim,golang:1.25
+      # The forge/git-clone step runs on a forge-controlled minimal git image (users
+      # never pick one; it bypasses ALLOWED_IMAGES). To exercise git-clone locally
+      # before CI publishes the image, build it from the repo root first:
+      #   docker build -t ghcr.io/code-armory-app/runner-git:latest infra/runner-images/git
+      FORGE_GIT_IMAGE: ghcr.io/code-armory-app/runner-git:latest
       # Must match the forge entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: forge-local-secret
       # Job secret_refs: forge resolves "secret:<name>" via gatekeeper (forge must
-      # be in SECRETS_LOOKUP_ALLOWED_CALLERS) and "gitea:<owner>/<repo>" by minting
-      # a Forgejo clone URL via gitea-integration. GITEA_INTERNAL_KEY must match the
-      # value on the gitea-integration service.
+      # be in SECRETS_LOOKUP_ALLOWED_CALLERS), "git:<repo-url>" by minting clone
+      # credentials via the core git broker, and "gitea:<owner>/<repo>" via the
+      # optional gitea-integration service. The *_INTERNAL_KEY values must match the
+      # corresponding service.
+      GIT_INTERNAL_URL: http://git:8096
+      GIT_INTERNAL_KEY: forge-git-internal-local-secret
       GITEA_INTERNAL_URL: http://gitea-integration:8088
       GITEA_INTERNAL_KEY: forge-gitea-internal-local-secret
       # Execution containers join the internal forge-exec network and route all
@@ -197,13 +185,6 @@ services:
       FORGE_EGRESS_PROXY: http://egress-proxy:3128
       # K8S_NAMESPACE: forge          # set when RUNTIME=kubernetes
       # K8S_RUNTIME_CLASS: gvisor     # optional: use gVisor for stronger isolation
-      #
-      # Proxmox VM-per-job runtime: the PVE host is external (not part of this
-      # compose stack), so there is nothing to start here. To try it, set the token
-      # below and create a runtime backend of type "proxmox" via the API whose
-      # config points at your PVE host and whose egress_proxy reuses the same
-      # FORGE_EGRESS_PROXY URL above. secret_refs {token: "PROXMOX_TOKEN"}.
-      # PROXMOX_TOKEN: "root@pam!forge=00000000-0000-0000-0000-000000000000"
     volumes:
       # Mount the Docker socket for the local docker runtime.
       # Remove this when deploying to Kubernetes (use RUNTIME=kubernetes instead).
@@ -244,13 +225,16 @@ services:
     restart: on-failure
 
   portal:
+    # The portal BFF is a static Go binary (portal-bff) that serves the built SPA and
+    # proxies /api to conductor — no Node runtime in the image. The build context is
+    # src/systems so the Dockerfile can reach both ./portal (SPA source) and ./portal-bff.
     build:
-      context: ../../src/systems/portal
+      context: ../../src/systems
+      dockerfile: portal-bff/Dockerfile
     environment:
       <<: *otel-env
       PORT: "3001"
       CONDUCTOR_URL: http://conductor:8080
-      METRICS_ENABLED: "true"
     ports:
       - "3001:3001"
     depends_on:
@@ -265,7 +249,7 @@ services:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/workflows
       GATEKEEPER_URL: http://gatekeeper:8081
-      SERVICES: blueprints=http://blueprints:8093,registry=http://registry:8084,conductor=http://conductor:8080,hooks=http://hooks:8087
+      SERVICES: registry=http://registry:8084,conductor=http://conductor:8080,hooks=http://hooks:8087
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: workflows-registry-local-secret
       GATEKEEPER_SERVICE_KEY: workflows-local-secret
@@ -282,44 +266,6 @@ services:
         condition: service_started
       forge:
         condition: service_started
-    restart: on-failure
-
-  tickets:
-    build:
-      context: ../../src/systems/tickets
-    environment:
-      <<: *otel-env
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/tickets
-      GATEKEEPER_URL: http://gatekeeper:8081
-      GATEKEEPER_SERVICE_KEY: tickets-local-secret
-      # Optional hooks integration: emit ticket lifecycle events to the hooks
-      # service. HOOKS_TRIGGER_KEY must match the hooks service's value.
-      HOOKS_URL: http://hooks:8087
-      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
-    ports:
-      - "8086:8086"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      gatekeeper:
-        condition: service_healthy
-    restart: on-failure
-
-  notifications:
-    build:
-      context: ../../src/systems/notifications
-    environment:
-      <<: *otel-env
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/notifications
-      GATEKEEPER_URL: http://gatekeeper:8081
-      GATEKEEPER_SERVICE_KEY: notifications-local-secret
-    ports:
-      - "8094:8094"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      gatekeeper:
-        condition: service_healthy
     restart: on-failure
 
   # ── Outpost integration framework ──────────────────────────────────────────
@@ -349,29 +295,6 @@ services:
         condition: service_healthy
     restart: on-failure
 
-  chaos:
-    build:
-      context: ../../src/systems/chaos
-    environment:
-      <<: *otel-env
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/chaos
-      GATEKEEPER_URL: http://gatekeeper:8081
-      GATEKEEPER_SERVICE_KEY: chaos-local-secret
-      OUTPOST_GATEWAY_URL: http://outpost-gateway:8092
-      OUTPOST_INTERNAL_KEY: outpost-internal-local-secret
-      HOOKS_URL: http://hooks:8087
-      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
-    ports:
-      - "8090:8090"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      gatekeeper:
-        condition: service_healthy
-      outpost-gateway:
-        condition: service_started
-    restart: on-failure
-
   builder:
     build:
       context: ../../src/systems/builder
@@ -397,25 +320,83 @@ services:
         condition: service_started
     restart: on-failure
 
-  argo:
+  # ── Tickets / Git / Container-registry (CORE, external images) ───────────────
+  # Source lives in their own codearmory-<svc> repos; locally we run the published
+  # images (override the tag with CODEARMORY_TAG). If the images are not pullable in
+  # your dev environment these stay down — the rest of the core stack is unaffected.
+  tickets:
     build:
-      context: ../../src/systems/argo
+      context: ../../src/systems/tickets
     environment:
       <<: *otel-env
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/argo
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/tickets
       GATEKEEPER_URL: http://gatekeeper:8081
-      GATEKEEPER_SERVICE_KEY: argo-local-secret
-      OUTPOST_GATEWAY_URL: http://outpost-gateway:8092
-      OUTPOST_INTERNAL_KEY: outpost-internal-local-secret
+      # Must match the tickets entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: tickets-local-secret
+      HOOKS_URL: http://hooks:8087
+      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
     ports:
-      - "8091:8091"
+      - "8086:8086"
     depends_on:
       postgres:
         condition: service_healthy
       gatekeeper:
         condition: service_healthy
-      outpost-gateway:
+      registry:
         condition: service_started
+    restart: on-failure
+
+  gitea-integration:
+    image: ghcr.io/code-armory-app/gitea_integration:${CODEARMORY_TAG:-alpha}
+    environment:
+      <<: *otel-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gitea_integration
+      GATEKEEPER_URL: http://gatekeeper:8081
+      # Must match the gitea_integration entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: gitea-integration-local-secret
+      GITEA_URL: http://forgejo:3000
+      # Admin token written to the shared volume by forgejo-setup; read via the *_FILE pattern.
+      GITEA_ADMIN_TOKEN_FILE: /token/token.txt
+      # Must match forge's GITEA_INTERNAL_KEY.
+      GITEA_INTERNAL_KEY: forge-gitea-internal-local-secret
+    volumes:
+      - forgejo_token:/token:ro
+    ports:
+      - "8088:8088"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gatekeeper:
+        condition: service_healthy
+      registry:
+        condition: service_started
+      forgejo-setup:
+        condition: service_completed_successfully
+    restart: on-failure
+
+  containers:
+    build:
+      context: ../../src/systems/containers
+    environment:
+      <<: *otel-env
+      GATEKEEPER_URL: http://gatekeeper:8081
+      # Must match the containers entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: containers-local-secret
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/containers
+      # Forgejo ships a built-in OCI container registry. REGISTRY_URL is optional —
+      # when set it seeds the default registry on first boot; additional registries
+      # are configurable at runtime via the /registries API.
+      REGISTRY_URL: http://forgejo:3000
+      GITEA_INTEGRATION_URL: http://gitea-integration:8088
+    ports:
+      - "8089:8089"
+    depends_on:
+      gatekeeper:
+        condition: service_healthy
+      registry:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: on-failure
 
   forgejo:
@@ -471,51 +452,6 @@ services:
         echo 'Forgejo token created'
     restart: "no"
 
-  gitea-integration:
-    build:
-      context: ../../src/systems/gitea_integration
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - "export GITEA_ADMIN_TOKEN=$(cat /token/token.txt) && exec ./gitea_integration"
-    environment:
-      <<: *otel-env
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gitea_integration
-      GATEKEEPER_URL: http://gatekeeper:8081
-      GATEKEEPER_SERVICE_KEY: gitea-integration-local-secret
-      GITEA_URL: http://forgejo:3000
-      # Shared key authenticating forge → /internal/clone-token. Must match the
-      # GITEA_INTERNAL_KEY on the forge service.
-      GITEA_INTERNAL_KEY: forge-gitea-internal-local-secret
-    ports:
-      - "8088:8088"
-    volumes:
-      - forgejo_token:/token
-    depends_on:
-      postgres:
-        condition: service_healthy
-      gatekeeper:
-        condition: service_healthy
-      forgejo-setup:
-        condition: service_completed_successfully
-    restart: on-failure
-
-  containers:
-    build:
-      context: ../../src/systems/containers
-    environment:
-      <<: *otel-env
-      GATEKEEPER_URL: http://gatekeeper:8081
-      GATEKEEPER_SERVICE_KEY: containers-local-secret
-      REGISTRY_URL: ${CONTAINER_REGISTRY_URL:?CONTAINER_REGISTRY_URL must be set to your OCI/Docker registry base URL}
-      REGISTRY_USERNAME: ${CONTAINER_REGISTRY_USERNAME:-}
-      REGISTRY_PASSWORD: ${CONTAINER_REGISTRY_PASSWORD:-}
-    ports:
-      - "8089:8089"
-    depends_on:
-      gatekeeper:
-        condition: service_healthy
-    restart: on-failure
-
   gatekeeper-integration-tests:
     build:
       context: ../../tests/gatekeeper
@@ -523,24 +459,13 @@ services:
       API_URL: http://gatekeeper:8081
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       GATEKEEPER_SERVICE_KEY: test-service:test-service-local-secret
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       gatekeeper:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    profiles: [test]
-    restart: no
-
-  blueprints-integration-tests:
-    build:
-      context: ../../tests/blueprints
-    environment:
-      BLUEPRINTS_URL: http://blueprints:8093
-      GATEKEEPER_URL: http://gatekeeper:8081
-    depends_on:
-      blueprints:
-        condition: service_started
-      gatekeeper:
+      redis:
         condition: service_healthy
     profiles: [test]
     restart: no
@@ -640,33 +565,28 @@ services:
         condition: service_started
     restart: on-failure
 
-  tickets-integration-tests:
+  git:
     build:
-      context: ../../tests/tickets
+      context: ../../src/systems/git
     environment:
-      TICKETS_URL: http://tickets:8086
+      <<: *otel-env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/git
       GATEKEEPER_URL: http://gatekeeper:8081
+      # Must match the git_connector entry in gatekeeper's GATEKEEPER_SERVICES.
+      GATEKEEPER_SERVICE_KEY: git-local-secret
+      # Encrypts linked-backend credential material at rest (AES-256-GCM).
+      GIT_ENCRYPTION_KEY: git-encryption-local-secret
+      # Authenticates forge/workflows → /internal/clone-token. Must match forge's
+      # GIT_INTERNAL_KEY.
+      GIT_INTERNAL_KEY: forge-git-internal-local-secret
+    ports:
+      - "8096:8096"
     depends_on:
-      tickets:
-        condition: service_started
+      postgres:
+        condition: service_healthy
       gatekeeper:
         condition: service_healthy
-    profiles: [test]
-    restart: no
-
-  notifications-integration-tests:
-    build:
-      context: ../../tests/notifications
-    environment:
-      NOTIFICATIONS_URL: http://notifications:8094
-      GATEKEEPER_URL: http://gatekeeper:8081
-    depends_on:
-      notifications:
-        condition: service_started
-      gatekeeper:
-        condition: service_healthy
-    profiles: [test]
-    restart: no
+    restart: on-failure
 
   hooks-integration-tests:
     build:
@@ -685,28 +605,6 @@ services:
     profiles: [test]
     restart: no
 
-  gitea-integration-integration-tests:
-    build:
-      context: ../../tests/gitea_integration
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - "export GITEA_ADMIN_TOKEN=$(cat /token/token.txt) && exec pytest -v --tb=short"
-    environment:
-      GITEA_INTEGRATION_URL: http://gitea-integration:8088
-      GATEKEEPER_URL: http://gatekeeper:8081
-      GITEA_URL: http://forgejo:3000
-    volumes:
-      - forgejo_token:/token
-    depends_on:
-      gitea-integration:
-        condition: service_started
-      gatekeeper:
-        condition: service_healthy
-      forgejo-setup:
-        condition: service_completed_successfully
-    profiles: [test]
-    restart: no
-
   outpost-gateway-integration-tests:
     build:
       context: ../../tests/outpost-gateway
@@ -715,40 +613,6 @@ services:
       GATEKEEPER_URL: http://gatekeeper:8081
       OUTPOST_INTERNAL_KEY: outpost-internal-local-secret
     depends_on:
-      outpost-gateway:
-        condition: service_started
-      gatekeeper:
-        condition: service_healthy
-    profiles: [test]
-    restart: no
-
-  chaos-integration-tests:
-    build:
-      context: ../../tests/chaos
-    environment:
-      CHAOS_URL: http://chaos:8090
-      OUTPOST_GATEWAY_URL: http://outpost-gateway:8092
-      GATEKEEPER_URL: http://gatekeeper:8081
-    depends_on:
-      chaos:
-        condition: service_started
-      outpost-gateway:
-        condition: service_started
-      gatekeeper:
-        condition: service_healthy
-    profiles: [test]
-    restart: no
-
-  argo-integration-tests:
-    build:
-      context: ../../tests/argo
-    environment:
-      ARGO_URL: http://argo:8091
-      OUTPOST_GATEWAY_URL: http://outpost-gateway:8092
-      GATEKEEPER_URL: http://gatekeeper:8081
-    depends_on:
-      argo:
-        condition: service_started
       outpost-gateway:
         condition: service_started
       gatekeeper:

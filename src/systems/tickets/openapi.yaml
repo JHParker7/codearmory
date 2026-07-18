@@ -285,6 +285,10 @@ components:
         project:
           type: string
           description: Free-text project (workspace) label; a view filter, not a permission boundary
+        board_id:
+          type: string
+          format: uuid
+          description: The board this ticket belongs to. Every ticket has a board.
         created_by:
           type: string
           format: uuid
@@ -359,6 +363,12 @@ components:
           example: Deploy v1.2 to production
         description:
           type: string
+        status:
+          type: string
+          description: >-
+            Status column for the new ticket. Omitting defaults to the board's
+            left-most column. Must be one of the board's configured status
+            columns.
         priority:
           type: string
           enum: [low, medium, high, critical]
@@ -366,6 +376,14 @@ components:
         project:
           type: string
           description: Project (workspace) label to tag the ticket with
+        board_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Board to place the ticket on. Every ticket has a board: omitting or
+            passing null/"" places it on the caller's default board (created on
+            first use).
         assignee_id:
           type: string
           format: uuid
@@ -385,11 +403,10 @@ components:
 
     UpdateTicketRequest:
       type: object
-      required:
-        - title
       properties:
         title:
           type: string
+          description: Omitting (or empty) preserves the current title
         description:
           type: string
         status:
@@ -403,6 +420,13 @@ components:
         project:
           type: string
           description: Project (workspace) label; omitting (or empty) preserves the current value
+        board_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Omitting preserves the current board; "" re-homes the ticket to the
+            caller's default board (tickets always have a board)
         assignee_id:
           type: string
           format: uuid

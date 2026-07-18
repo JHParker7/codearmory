@@ -1,5 +1,12 @@
+/**
+ * Outposts page — register and manage in-cluster outpost agents: lists outposts
+ * with connection status and enabled modules, registers a new one (which returns
+ * a one-time enrollment token shown in a helm-install panel), and deletes them.
+ * data via the bff.
+ */
 import { useState, useEffect, useCallback } from 'react';
 import { T } from '../../theme';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   listOutposts, createOutpost, deleteOutpost,
@@ -9,6 +16,7 @@ import { timeAgo } from '../../utils';
 
 const ALL_MODULES = ['chaos', 'argo'];
 
+/** Map an outpost status to a UI tone (connected→green, pending→amber, stale→red, else dim). */
 function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
   if (status === 'connected') return 'green';
   if (status === 'pending') return 'amber';
@@ -18,6 +26,7 @@ function statusTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
 
 const toneColor: Record<string, string> = { green: T.green, amber: T.amber, red: T.red, dim: T.faint };
 
+/** Small status dot colored by tone; pulses while pending (amber). */
 function Dot({ status }: { status: string }) {
   const tone = statusTone(status);
   return (
@@ -29,6 +38,7 @@ function Dot({ status }: { status: string }) {
   );
 }
 
+/** Outpost agent manager: lists registered outposts with status/modules and wires up the register/enrollment/delete flow. */
 export function Outposts() {
   const token = useAppSelector(s => s.auth.token)!;
   const [outposts, setOutposts] = useState<Outpost[]>([]);
@@ -36,6 +46,7 @@ export function Outposts() {
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [created, setCreated] = useState<CreateOutpostResponse | null>(null);
+  const [confirm, confirmEl] = useConfirm();
 
   const fetchOutposts = useCallback(async () => {
     setLoading(true); setError(null);
@@ -48,6 +59,7 @@ export function Outposts() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+      {confirmEl}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt }}>
         <div style={{ fontFamily: T.mono, color: T.textHi, fontSize: 13 }}>$ armory outposts</div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -75,7 +87,7 @@ export function Outposts() {
                 </div>
                 <div style={{ fontFamily: T.mono, color: T.faint, fontSize: 10.5, marginTop: 2 }}>{o.outpost_id}</div>
               </div>
-              <button onClick={async () => { if (confirm(`Delete outpost ${o.name}?`)) { await deleteOutpost(token, o.outpost_id); fetchOutposts(); } }}
+              <button onClick={async () => { if (await confirm({ message: `Delete outpost ${o.name}? The agent will lose its registration and stop receiving commands.` })) { await deleteOutpost(token, o.outpost_id); fetchOutposts(); } }}
                 style={{ ...btnStyle, color: T.dim }}>delete</button>
             </div>
           ))}
@@ -85,6 +97,7 @@ export function Outposts() {
   );
 }
 
+/** Inline register form; submits a name + selected modules via createOutpost and passes the response (with one-time token) up. */
 function CreateForm({ token, onClose, onCreated }: { token: string; onClose: () => void; onCreated: (o: CreateOutpostResponse) => void }) {
   const [name, setName] = useState('');
   const [modules, setModules] = useState<string[]>(['chaos']);
@@ -119,6 +132,7 @@ function CreateForm({ token, onClose, onCreated }: { token: string; onClose: () 
   );
 }
 
+/** Post-registration panel rendering the one-time enrollment token inside a copyable helm-install snippet (token shown only once). */
 function EnrollmentPanel({ outpost, onDismiss }: { outpost: CreateOutpostResponse; onDismiss: () => void }) {
   const snippet = `helm install ${outpost.name} infra/helm/outpost \\
   --namespace codearmory-outpost --create-namespace \\

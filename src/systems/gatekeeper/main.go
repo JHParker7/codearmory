@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -60,8 +61,9 @@ func rateLimitMiddleware(endpoint string, limiterMap *sync.Map, maxAttempts int,
 	}
 }
 
-var loginLimiter sync.Map  // per-IP login attempt buckets
-var signupLimiter sync.Map // per-IP signup attempt buckets
+var loginLimiter sync.Map       // per-IP login attempt buckets
+var signupLimiter sync.Map      // per-IP signup attempt buckets
+var setupStatusLimiter sync.Map // per-IP setup-status attempt buckets
 
 func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
@@ -70,6 +72,16 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// envBool reports whether key is set to a truthy value ("1", "true", "yes", "on",
+// case-insensitive). Any other value — including unset — is false.
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func envDuration(key string, def time.Duration) time.Duration {
@@ -193,10 +205,19 @@ func main() {
 	initSecretsEncryption()
 
 	conn := connect()
-	conn.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{})
+	conn.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{})
 	applyForeignKeys(conn)
+	applyUniqueIndexes(conn)
+	// Give existing single-org accounts a membership row so they participate in the
+	// user↔org join table. Idempotent; non-fatal so a transient DB hiccup here never
+	// blocks startup.
+	if err := backfillMemberships(ctx); err != nil {
+		slog.Warn("membership backfill failed; existing users may not appear in their org memberships until re-run", "error", err)
+	}
 	seedServiceAccounts(ctx)
 	seedAdminUser(ctx)
+	seedSignupPolicy(ctx)
+	seedSignupAllowlist(ctx)
 	initOIDC()
 
 	if registryURL := os.Getenv("REGISTRY_URL"); registryURL != "" {
@@ -206,10 +227,109 @@ func main() {
 		slog.Warn("REGISTRY_URL not set — default grants will not be loaded from registry; signup permissions will be minimal")
 	}
 
+	mux := buildMux()
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8081"
+	}
+
+	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "gatekeeper")
+	if err != nil {
+		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
+	} else {
+		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
+		defer shutdown(context.Background())
+	}
+	initMetrics()
+	initCache()
+	initPermittedServices()
+	initTrustedProxies()
+	initAuditPermissionChecks()
+
+	wrappedMux := otelhttp.NewHandler(NewLogger(limitBody(mux)), "gatekeeper",
+		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
+	)
+
+	certFile := os.Getenv("TLS_CERT_FILE")
+	keyFile := os.Getenv("TLS_KEY_FILE")
+
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      wrappedMux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	if certFile != "" && keyFile != "" {
+		tlsCfg, err := buildClientTLSConfig()
+		if err != nil {
+			slog.Error("TLS client-auth config", "error", err)
+			os.Exit(1)
+		}
+		srv.TLSConfig = tlsCfg
+	}
+
+	go func() {
+		var err error
+		if certFile != "" && keyFile != "" {
+			slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
+			err = srv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			slog.Info("listening", "port", port)
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "error", err)
+	}
+}
+
+// buildClientTLSConfig builds the optional mTLS client-auth config from env,
+// returning an error instead of exiting so its branches are unit-testable.
+func buildClientTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{}
+	switch os.Getenv("TLS_CLIENT_AUTH") {
+	case "require":
+		caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+		if caFile == "" {
+			return nil, errors.New("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+		}
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read TLS_CLIENT_CA_FILE %q: %w", caFile, err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("TLS_CLIENT_CA_FILE %q contains no valid PEM certificates", caFile)
+		}
+		tlsCfg.ClientCAs = caPool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	case "request":
+		tlsCfg.ClientAuth = tls.RequestClientCert
+	}
+	return tlsCfg, nil
+}
+
+// buildMux builds the full routing table. Extracted from main so the route set
+// is unit-testable without standing up the server.
+func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
+	mux.HandleFunc("GET /setup/status", rateLimitMiddleware("setup-status", &setupStatusLimiter, envInt("SETUP_STATUS_RATE_LIMIT", 60), envDuration("SETUP_STATUS_RATE_WINDOW", time.Minute), handleSetupStatus))
 	mux.HandleFunc("POST /signup", rateLimitMiddleware("signup", &signupLimiter, envInt("SIGNUP_RATE_LIMIT", 10), envDuration("SIGNUP_RATE_WINDOW", 10*time.Minute), handleSignup))
 	mux.HandleFunc("POST /login", rateLimitMiddleware("login", &loginLimiter, envInt("LOGIN_RATE_LIMIT", 5), envDuration("LOGIN_RATE_WINDOW", time.Minute), handleLogin))
 	mux.HandleFunc("POST /logout", handleLogout)
@@ -251,6 +371,11 @@ func main() {
 	mux.Handle("GET /orgs", mw(handleListOrgs))
 	mux.Handle("PUT /orgs/{id}", mw(handleUpdateOrg))
 	mux.Handle("DELETE /orgs/{id}", mw(handleDeleteOrg))
+	// Multi-org membership: switch the caller's active org, or leave an org. Both
+	// are gated (in the registry manifest) by getOrg on the target org, which every
+	// member already holds; the handlers additionally enforce membership.
+	mux.Handle("POST /orgs/{id}/switch", mw(handleSwitchOrg))
+	mux.Handle("POST /orgs/{id}/leave", mw(handleLeaveOrg))
 
 	mux.Handle("POST /teams", mw(handleCreateTeam))
 	mux.Handle("GET /teams", mw(handleListTeams))
@@ -265,6 +390,7 @@ func main() {
 	mux.Handle("DELETE /roles/{id}", mw(handleDeleteRole))
 
 	mux.Handle("POST /permissions", mw(handleCreatePermissions))
+	mux.Handle("GET /permissions", mw(handleListPermissions))
 	mux.Handle("GET /permissions/{id}", mw(handleGetPermissions))
 	mux.Handle("PUT /permissions/{id}", mw(handleUpdatePermissions))
 	mux.Handle("DELETE /permissions/{id}", mw(handleDeletePermissions))
@@ -281,6 +407,14 @@ func main() {
 	mux.Handle("DELETE /invites/{id}", mw(handleDeleteInvite))
 
 	mux.Handle("GET /audit-logs", mw(handleListAuditLogs))
+	mux.Handle("GET /permission-checks", mw(handleListPermissionChecks))
+
+	// Invite-only registration: admin-managed signup allowlist + policy toggle.
+	mux.Handle("POST /signup-allowlist", mw(handleCreateSignupAllowlist))
+	mux.Handle("GET /signup-allowlist", mw(handleListSignupAllowlist))
+	mux.Handle("DELETE /signup-allowlist/{id}", mw(handleDeleteSignupAllowlist))
+	mux.Handle("GET /signup-policy", mw(handleGetSignupPolicy))
+	mux.Handle("PUT /signup-policy", mw(handleUpdateSignupPolicy))
 
 	// Secrets: user-authenticated CRUD (values write-only) + internal resolve for the workflow worker.
 	mux.Handle("POST /secrets", mw(handleCreateSecret))
@@ -312,95 +446,7 @@ func main() {
 	mux.Handle("GET /service-permission-requests/{id}", mw(handleGetServicePermissionRequest))
 	mux.Handle("POST /service-permission-requests/{id}/approve", mw(handleApproveServicePermissionRequest))
 	mux.Handle("POST /service-permission-requests/{id}/decline", mw(handleDeclineServicePermissionRequest))
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
-	}
-
-	otelHandler, shutdown, err := telemetry.Setup(context.Background(), "gatekeeper")
-	if err != nil {
-		slog.Warn("OpenTelemetry setup failed, logging to stderr only", "error", err)
-	} else {
-		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
-		defer shutdown(context.Background())
-	}
-	initMetrics()
-	initCache()
-	initPermittedServices()
-	initTrustedProxies()
-	initAuditPermissionChecks()
-
-	wrappedMux := otelhttp.NewHandler(NewLogger(limitBody(mux)), "gatekeeper",
-		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
-	)
-
-	certFile := os.Getenv("TLS_CERT_FILE")
-	keyFile := os.Getenv("TLS_KEY_FILE")
-
-	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      wrappedMux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  120 * time.Second,
-	}
-
-	if certFile != "" && keyFile != "" {
-		tlsCfg := &tls.Config{}
-		// TLS_CLIENT_AUTH controls whether client certificates are requested.
-		// Set to "require" to enforce mTLS (needed for ClientCertFingerprints binding).
-		//   Requires TLS_CLIENT_CA_FILE to be set; clients must present a cert signed by that CA.
-		// Set to "request" to request but not require a client cert.
-		// Default (unset): no client certificate requested.
-		switch os.Getenv("TLS_CLIENT_AUTH") {
-		case "require":
-			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
-			if caFile == "" {
-				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
-				os.Exit(1)
-			}
-			caCert, err := os.ReadFile(caFile)
-			if err != nil {
-				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
-				os.Exit(1)
-			}
-			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(caCert) {
-				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
-				os.Exit(1)
-			}
-			tlsCfg.ClientCAs = caPool
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		case "request":
-			tlsCfg.ClientAuth = tls.RequestClientCert
-		}
-		srv.TLSConfig = tlsCfg
-	}
-
-	go func() {
-		var err error
-		if certFile != "" && keyFile != "" {
-			slog.Info("listening with TLS", "port", port, "client_auth", os.Getenv("TLS_CLIENT_AUTH"))
-			err = srv.ListenAndServeTLS(certFile, keyFile)
-		} else {
-			slog.Info("listening", "port", port)
-			err = srv.ListenAndServe()
-		}
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	<-ctx.Done()
-	stop()
-	slog.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown error", "error", err)
-	}
+	return mux
 }
 
 // applyForeignKeys adds FK constraints after all tables exist. Each statement
@@ -412,6 +458,8 @@ func applyForeignKeys(db *gorm.DB) {
 		`DO $$ BEGIN ALTER TABLE users ADD CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES orgs(org_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE users ADD CONSTRAINT fk_users_role FOREIGN KEY (role_id) REFERENCES roles(role_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE users ADD CONSTRAINT fk_users_team FOREIGN KEY (team_id) REFERENCES teams(team_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE user_org_memberships ADD CONSTRAINT fk_memberships_user FOREIGN KEY (user_id) REFERENCES users(user_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE user_org_memberships ADD CONSTRAINT fk_memberships_org FOREIGN KEY (org_id) REFERENCES orgs(org_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE sessions ADD CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users(user_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE teams ADD CONSTRAINT fk_teams_user FOREIGN KEY (owner_id) REFERENCES users(user_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE invites ADD CONSTRAINT fk_invites_inviter FOREIGN KEY (inviter_id) REFERENCES users(user_id); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
@@ -424,5 +472,40 @@ func applyForeignKeys(db *gorm.DB) {
 	}
 	for _, c := range constraints {
 		db.Exec(c)
+	}
+}
+
+// applyUniqueIndexes enforces that name-referenced resources have a unique
+// human-readable name within their owning scope, so they can be addressed by
+// name rather than by an opaque UUID. Partial indexes (WHERE active) are used so
+// soft-deleted rows don't block re-creating a name, and so a name freed by a
+// delete becomes available again — mirroring the workflows service pattern.
+//
+// Roles and Permissions are intentionally excluded: a role's name is empty for
+// user-facing roles (only set to "workflow:<id>" for service roles), so it is
+// not a human-facing identifier. Index creation is best-effort: a pre-existing
+// row collision logs a warning rather than aborting startup.
+func applyUniqueIndexes(db *gorm.DB) {
+	indexes := []string{
+		// Secrets are referenced by name (e.g. forge's git:/secret_ref schemes);
+		// unique per org. The create path already rejects duplicates.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_secrets_org_name ON secrets (org_id, name) WHERE active`,
+		// Teams are unique by name within their org; org-less teams are unique per owner.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_org_name ON teams (org_id, team_name) WHERE active AND org_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_owner_name ON teams (owner_id, team_name) WHERE active AND org_id IS NULL`,
+		// OAuth clients are unique by name within their org.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_oauth_clients_org_name ON oauth_clients (org_id, name) WHERE active`,
+		// A user holds at most one active membership per org; a soft-deleted (left)
+		// membership can be re-added by accepting a fresh invite.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_user_org_memberships ON user_org_memberships (user_id, org_id) WHERE active`,
+		// A signup allowlist value (email or @domain rule) is unique among active
+		// entries; a soft-deleted value can be re-added. Stored already-lowercased,
+		// so the index is on the raw column.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_signup_allowlist_email ON signup_allowlist (email) WHERE active`,
+	}
+	for _, idx := range indexes {
+		if err := db.Exec(idx).Error; err != nil {
+			slog.Warn("unique index not created (existing duplicate names?); name uniqueness not enforced for this resource", "stmt", idx, "error", err)
+		}
 	}
 }

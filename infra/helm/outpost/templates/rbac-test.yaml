@@ -1,0 +1,43 @@
+{{- if and (eq (include "outpost.hasModule" (list . "test")) "true") .Values.test.rbac }}
+{{- $full := include "outpost.fullname" . -}}
+{{- /* The test module runs integration suites as Jobs: create/watch/delete Jobs and
+       read their pods/logs. Scoped to a namespaced Role per target namespace — least
+       privilege, unlike a ClusterRole — so the outpost can only run test Jobs where it
+       is meant to. No other verbs: it launches and reaps test Jobs, nothing else. */ -}}
+{{- range .Values.test.targetNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $full }}-test
+  namespace: {{ . }}
+  labels:
+    {{- include "outpost.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $full }}-test
+  namespace: {{ . }}
+  labels:
+    {{- include "outpost.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $full }}-test
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "outpost.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

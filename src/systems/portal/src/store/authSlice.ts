@@ -1,5 +1,12 @@
+/**
+ * Auth slice — the session source of truth for the SPA. Holds the JWT, decoded
+ * user id, hydrated user object, and two derived gating layers the UI reads:
+ * `permissions` (per-action allow map for admin nav) and `registeredServices`
+ * (which modules are routable). The token is mirrored to localStorage so a reload
+ * rehydrates the session; logout and an expired-session rejection both clear it.
+ */
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { getUser, updateUser, login as apiLogin, signup as apiSignup, checkPermission } from '../api/bff';
+import { getUser, updateUser, login as apiLogin, signup as apiSignup, checkPermission, listRegisteredServices } from '../api/bff';
 import type { User, SignupPayload } from '../api/bff';
 import { decodeUserId } from '../utils';
 
@@ -12,8 +19,19 @@ export interface AuthState {
   status: 'idle' | 'loading' | 'succeeded' | 'failed';
   error: string | null;
   permissions: Record<string, boolean> | null;
+  // Names of platform services currently registered/routable in conductor (the
+  // live routing table — manifest- and builder-registered alike). The sidebar
+  // shows a module only when its backing service appears here. null = unresolved
+  // (error or in flight); combined with servicesResolved this fails OPEN — a
+  // module is hidden only once we hold a resolved, non-null list that omits it.
+  registeredServices: string[] | null;
+  // name → ui_path for registered services that advertise an embedded mini-portal.
+  // Drives the shell's iframe nav/routes; empty for services that ship no UI.
+  serviceUiPaths: Record<string, string>;
+  servicesResolved: boolean;
 }
 
+/** Seed the initial token/userId/status from a persisted JWT, discarding a token that can't be decoded into a user id. */
 function readStoredToken() {
   const token = localStorage.getItem(TOKEN_KEY);
   if (!token) return { token: null, userId: null, status: 'idle' as const };
@@ -32,24 +50,35 @@ const initialState: AuthState = {
   user: null,
   error: null,
   permissions: null,
+  registeredServices: null,
+  serviceUiPaths: {},
+  servicesResolved: false,
 };
 
 // ── Thunks ────────────────────────────────────────────────────────────────────
 
-// Called at startup when a stored token is found, to hydrate the user object.
+/** Hydrate the user object for a stored session at startup; rejects (clearing the token) if the session is gone. */
 export const hydrateUser = createAsyncThunk(
   'auth/hydrateUser',
   async (_, { getState, rejectWithValue }) => {
     const { token, userId } = (getState() as { auth: AuthState }).auth;
-    if (!token || !userId) return rejectWithValue('no stored session');
+    if (!token || !userId) return rejectWithValue({ transient: false });
     try {
       return await getUser(token, userId);
-    } catch {
-      return rejectWithValue('session expired');
+    } catch (err: unknown) {
+      // Only a genuine auth rejection (401/403 — the token is gone/expired) ends
+      // the session. Anything else — offline, request timeout, a 5xx from an
+      // upstream blip — is transient: we keep the session so a dropped connection
+      // doesn't dump the user (and their in-progress work) back to the sign-in
+      // screen. AppLayout re-hydrates once the connection returns.
+      const status = (err as { status?: number }).status;
+      const transient = status !== 401 && status !== 403;
+      return rejectWithValue({ transient });
     }
   },
 );
 
+/** Log in with email/password, persist the returned token, and fetch the user in one round trip. Rejects with {status, message}. */
 export const loginAndFetch = createAsyncThunk(
   'auth/loginAndFetch',
   async ({ email, password }: { email: string; password: string }, { rejectWithValue }) => {
@@ -67,6 +96,11 @@ export const loginAndFetch = createAsyncThunk(
   },
 );
 
+/**
+ * Sign up, then immediately log in. If the account is created but the follow-up
+ * login or user-fetch fails, the distinct rejection status lets the caller tell
+ * "signup failed" from "created but couldn't sign you in" apart.
+ */
 export const signupAndLogin = createAsyncThunk(
   'auth/signupAndLogin',
   async (payload: SignupPayload, { rejectWithValue }) => {
@@ -96,8 +130,14 @@ export const signupAndLogin = createAsyncThunk(
   },
 );
 
+/**
+ * The (service, action, resource) probes whose results drive which admin/privileged
+ * UI affordances render. Each is checked once at login via {@link hydratePermissions}
+ * and cached in `state.permissions` under a `service:action` key.
+ */
 const PERMISSION_GATES = [
   { service: 'gatekeeper', action: 'listAuditLog',       resource: 'gatekeeper/audit-logs' },
+  { service: 'gatekeeper', action: 'listPermissionCheck', resource: 'gatekeeper/permission-checks' },
   { service: 'gatekeeper', action: 'listUser',            resource: 'gatekeeper/users' },
   { service: 'gatekeeper', action: 'listRole',            resource: 'gatekeeper/roles' },
   { service: 'gatekeeper', action: 'createPermission',    resource: 'gatekeeper/permissions' },
@@ -105,18 +145,29 @@ const PERMISSION_GATES = [
   { service: 'gatekeeper', action: 'listTeam',            resource: 'gatekeeper/teams' },
   { service: 'gatekeeper', action: 'listOrg',             resource: 'gatekeeper/orgs' },
   { service: 'gatekeeper', action: 'listInvite',          resource: 'gatekeeper/invites' },
+  { service: 'gatekeeper', action: 'listSignupAllowlist', resource: 'gatekeeper/signup-allowlist' },
   { service: 'gatekeeper', action: 'listSPR',             resource: 'gatekeeper/service-permission-requests' },
   { service: 'forge',      action: 'createRunnerClass',   resource: 'forge/runner-classes' },
+  { service: 'forge',      action: 'createRuntimeBackend', resource: 'forge/runtime-backends' },
   { service: 'containers', action: 'deleteManifest',      resource: 'containers/repositories/*' },
 ] as const;
 
+/** Resolve every {@link PERMISSION_GATES} probe (plus the builder admin gate) into a `service:action → boolean` map; a failed check resolves to false. */
 export const hydratePermissions = createAsyncThunk(
   'auth/hydratePermissions',
   async (_, { getState }) => {
     const { token } = (getState() as { auth: AuthState }).auth;
     if (!token) return {};
+    // Builder is a system-admin-only global control plane: the configure grant is
+    // checked against the single "default" baseline, never the caller's org. Only
+    // the wildcard admin matches builder/orgs/default, so this gate alone surfaces
+    // builder/ for the system admin and hides it for everyone else.
+    const gates: { service: string; action: string; resource: string }[] = [
+      ...PERMISSION_GATES,
+      { service: 'builder', action: 'configureOrgService', resource: 'builder/orgs/default' },
+    ];
     const results = await Promise.all(
-      PERMISSION_GATES.map(async g => {
+      gates.map(async g => {
         const key = `${g.service}:${g.action}`;
         try {
           const { authorized } = await checkPermission(token, g.service, g.action, g.resource);
@@ -130,6 +181,30 @@ export const hydratePermissions = createAsyncThunk(
   },
 );
 
+/**
+ * Resolve the set of services currently registered/routable in conductor, so the
+ * sidebar can show only modules that are actually deployed. Returns null on any
+ * error so the UI fails OPEN (shows everything) rather than hiding a live module.
+ */
+export const hydrateRegisteredServices = createAsyncThunk(
+  'auth/hydrateRegisteredServices',
+  async (_, { getState }) => {
+    const { token } = (getState() as { auth: AuthState }).auth;
+    if (!token) return null;
+    try {
+      const services = await listRegisteredServices(token);
+      const uiPaths: Record<string, string> = {};
+      for (const s of services) {
+        if (s.ui_path) uiPaths[s.name] = s.ui_path;
+      }
+      return { names: services.map(s => s.name), uiPaths };
+    } catch {
+      return null;
+    }
+  },
+);
+
+/** Persist edits to the current user's profile and replace the cached user on success. Rejects with the error message. */
 export const saveUser = createAsyncThunk(
   'auth/saveUser',
   async (
@@ -155,6 +230,7 @@ const authSlice = createSlice({
   name: 'auth',
   initialState,
   reducers: {
+    /** Clear the session and all derived state (token, user, permissions, services) and drop the persisted token. */
     logout(state) {
       localStorage.removeItem(TOKEN_KEY);
       state.token = null;
@@ -163,6 +239,9 @@ const authSlice = createSlice({
       state.status = 'idle';
       state.error = null;
       state.permissions = null;
+      state.registeredServices = null;
+      state.serviceUiPaths = {};
+      state.servicesResolved = false;
     },
   },
   extraReducers(builder) {
@@ -171,7 +250,14 @@ const authSlice = createSlice({
         state.user = action.payload;
         state.status = 'succeeded';
       })
-      .addCase(hydrateUser.rejected, (state) => {
+      .addCase(hydrateUser.rejected, (state, action) => {
+        if ((action.payload as { transient?: boolean } | undefined)?.transient) {
+          // Transient failure (offline / timeout / 5xx): keep the token and let
+          // the app render. AppLayout re-dispatches hydrateUser on mount and when
+          // the browser comes back online, filling in the user once reachable.
+          state.status = 'succeeded';
+          return;
+        }
         localStorage.removeItem(TOKEN_KEY);
         state.token = null;
         state.userId = null;
@@ -215,6 +301,14 @@ const authSlice = createSlice({
       })
       .addCase(hydratePermissions.fulfilled, (state, action) => {
         state.permissions = action.payload;
+      })
+      .addCase(hydrateRegisteredServices.fulfilled, (state, action) => {
+        // Resolved (success or handled error). A null payload (error) leaves the
+        // sidebar failing open; a non-null list lets it hide unregistered modules
+        // and render an iframe nav entry for each service advertising a ui_path.
+        state.registeredServices = action.payload ? action.payload.names : null;
+        state.serviceUiPaths = action.payload ? action.payload.uiPaths : {};
+        state.servicesResolved = true;
       });
   },
 });

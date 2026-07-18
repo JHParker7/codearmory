@@ -1,0 +1,50 @@
+{{- /*
+HorizontalPodAutoscalers for the stateless services and the two SKIP-LOCKED workers.
+
+One template, driven by a per-service `autoscaling` block in values, so scaling is
+opt-in per service and off by default (every existing single-node deploy is unchanged).
+The workers (forge, workflows) are safe to scale: each claims work transactionally with
+FOR UPDATE ... SKIP LOCKED, so N replicas never double-process. The HTTP services
+(conductor, gatekeeper, registry, tickets, artifacts) are stateless request handlers.
+
+A service is scalable here only if its Deployment is named "<fullname>-<key>", which is
+the chart's convention for all of these.
+*/ -}}
+{{- $scalable := list "gatekeeper" "registry" "conductor" "workflows" "forge" "tickets" "artifacts" "hooks" }}
+{{- range $svc := $scalable }}
+{{- $cfg := index $.Values $svc }}
+{{- /* Core services (gatekeeper/registry/conductor) have no `enabled` key — always on.
+       Only an explicit `enabled: false` disables one. */ -}}
+{{- if and $cfg (not (eq $cfg.enabled false)) $cfg.autoscaling $cfg.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "codearmory.fullname" $ }}-{{ $svc }}
+  labels:
+    {{- include "codearmory.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "codearmory.fullname" $ }}-{{ $svc }}
+  minReplicas: {{ $cfg.autoscaling.minReplicas | default 2 }}
+  maxReplicas: {{ $cfg.autoscaling.maxReplicas | default 6 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $cfg.autoscaling.targetCPUUtilizationPercentage | default 70 }}
+    {{- if $cfg.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ $cfg.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end }}
+{{- end }}

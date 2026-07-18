@@ -5,46 +5,43 @@
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8)](https://go.dev)
 [![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange)](../../releases)
 
-**A self-hosted developer platform — remote Terraform state, extensible CI pipelines, Forgejo/Gitea integration, container registry management, and a CLI that keeps you in your terminal.**
+**A modular, self-hosted CI/CD platform — pipelines that run sandboxed jobs, triggered by git webhooks, behind one auth/RBAC layer, with a builder that brings new services online as modules and a CLI that keeps you in your terminal.**
 
 ---
 
 ## What's inside
 
-- **Remote Terraform/OpenTofu state** — drop-in HTTP backend with workspace locking, backed by your own Postgres. Point any existing `tofu` or `terraform` config at it with two lines of config.
-- **Extensible pipelines** — register any HTTP service and use it as a pipeline step. Your internal tools, build systems, and deployment scripts become first-class pipeline targets without any code changes.
-- **Sandboxed runners** — run commands in isolated containers with dropped capabilities, configurable resource tiers (runner classes), and optional egress control via an allowlist proxy (Forge + Egress Proxy).
-- **Git webhook triggers** — receive pushes and PRs from GitHub, GitLab, or Gitea and map them to pipeline runs with at-least-once delivery (Hooks).
-- **Auth + RBAC + SSO** — ES256 JWT sessions, orgs, teams, and roles covering every service. Gatekeeper also acts as an OIDC provider so Forgejo can use CodeArmory as its SSO identity source.
-- **Forgejo/Gitea integration** — link CodeArmory user accounts to Forgejo identities and manage repos, branches, commits, and pull requests through the platform API (Gitea Integration).
-- **Container registry management** — authenticated RBAC-enforced visibility and deletion on top of any OCI registry, plus transparent `docker push`/`pull` proxying (Containers).
-- **Task tracker** — tickets linked directly to pipeline runs and forge executions, so deployment tasks and their outcomes live together (Tickets).
-- **Cluster integrations via outposts** — run chaos-engineering experiments (Litmus) and drive Argo CD syncs in your own clusters through a single customer-deployed **outpost** that dials out to the control plane. No inbound cluster access and no control-plane cluster credentials; one mechanism for self-hosted and SaaS, with pipelines that gate on experiment verdicts and healthy syncs (Outpost Gateway + Chaos + Argo).
-- **CLI-first** — every platform operation is available from `armory`. Create workflows, trigger runs, manage tickets, inspect logs — without opening a browser.
-- **MCP server** — expose the full platform API as MCP tools so AI assistants can trigger pipelines, inspect runs, and manage tickets directly.
+- **CI/CD pipelines** — sequence steps into runs as sequential/parallel batches; run inputs and prior-step outputs are substituted at execution time, and stuck runs are recovered on restart (Workflows).
+- **Sandboxed runners** — run commands in isolated containers (Docker or Kubernetes Jobs) with dropped capabilities, configurable resource tiers (runner classes), and pluggable runtime backends — including kata/Cloud-Hypervisor VMs and gVisor userspace-kernel sandboxes (no `/dev/kvm` needed) — with optional egress allowlisting (Forge).
+- **Git webhook triggers** — receive pushes and PRs from GitHub, GitLab, or Forgejo/Gitea and map them to pipeline runs with at-least-once delivery (Hooks).
+- **Auth + RBAC + SSO** — ES256 JWT sessions, orgs, teams, and roles covering every service. Gatekeeper is also an OIDC provider, so it can be your SSO identity source.
+- **Unified API gateway** — every request enters through Conductor, which routes by service prefix and verifies permissions with Gatekeeper before forwarding. Services declare their routes, actions, and RBAC in the Registry.
+- **Modular by design** — Builder is the per-org control plane *and* the runtime deployer: enable a service for an org and Builder deploys + registers it at runtime, no chart edit. New capabilities ship as **modules** in their own repos, not as forks of the core.
+- **Cluster integrations + cross-cluster pipelines** — drive your own clusters from the control plane through **outposts** that dial out over HTTPS (no inbound access, no control-plane cluster credentials). One outpost per cluster means **pipelines unify across clusters** — a single run can act on your whole fleet, gating on the results. Run an outpost in the *same* cluster as CodeArmory for a single-cluster setup, or one per remote cluster to fan out (Outpost + Outpost Gateway).
+- **CLI-first** — every platform operation is available from `armory`. Create pipelines, trigger runs, manage runners, inspect logs — without opening a browser.
 
 ---
 
 ## Why CodeArmory?
 
-The DevOps toolchain is fragmented. GitHub Actions handles CI but has no state management. Terraform Cloud manages state but is separate from your pipelines. Atlantis brings state into CI but doesn't run arbitrary jobs. You end up stitching together multiple tools, multiple auth systems, and multiple places to look when something breaks.
+Most CI/CD stacks are monolithic: the runner, the trigger system, the auth model, and the API are all baked into one tool, and adding a capability means forking it or bolting on a second system with its own login.
 
-CodeArmory runs state, pipelines, sandboxed runners, webhook triggers, Forgejo integration, container registry management, and task tracking in one place, with one auth layer covering everything. Your Terraform runs, CI jobs, and deployment tickets all live under the same RBAC model, accessed through the same API and the same SSO session.
-
-It's also built to grow with you. Every service in the platform is registered through a common interface — so integrating a new tool means registering an HTTP endpoint, not forking the platform. Write a small service using the [CodeArmory SDK](https://github.com/code-armory-app/codearmory_sdk), register it, and it immediately becomes a first-class pipeline step with auth, routing, and RBAC handled for you.
+CodeArmory is a **platform, not a monolith**. Every capability — pipelines, sandboxed runners, webhook triggers, cluster integrations — is a service registered behind one gateway and one RBAC model. Adding a new capability means registering an HTTP service (and letting **Builder** deploy it), not patching the core. Write a small service with the [CodeArmory SDK](https://github.com/code-armory-app/codearmory_sdk), register it, and it immediately becomes a first-class pipeline target with auth, routing, and RBAC handled for you.
 
 ---
 
 ## Architecture
 
-Every request enters through Conductor. Backend services delegate auth to Gatekeeper — permission logic stays in one place across the whole platform.
+Every request enters through Conductor, which polls Registry for service manifests and verifies permissions with Gatekeeper before forwarding. Backend services delegate auth to Gatekeeper, so permission logic stays in one place. The core ships only the control plane — **Builder** deploys and registers everything else at runtime, so additional capabilities are modules it brings online rather than code baked into the core.
 
 ```
- Browser / CLI / Terraform / Git client
+ Browser / CLI / Git client
           │
           ▼
-    ┌─────────────┐
-    │  Conductor  │  :8080 — API gateway, auth, routing
+    ┌─────────────┐         ┌─────────────┐
+    │  Conductor  │ ──────► │  Gatekeeper │  :8081 — auth + RBAC, OIDC/SSO
+    │   :8080     │         └─────────────┘
+    │ API gateway │
     └──────┬──────┘
            │  polls for routes
            ▼
@@ -52,38 +49,30 @@ Every request enters through Conductor. Backend services delegate auth to Gateke
     │  Registry   │  :8082 — service manifests
     └─────────────┘
 
-    Routes traffic to:
+    Core services Conductor routes to:
 
-    ┌─────────────┐   ┌─────────────┐   ┌──────────────┐
-    │ Gatekeeper  │   │  Blueprints │   │    Forge     │
-    │   :8081     │   │   :8093     │   │    :8083     │
-    │ auth + RBAC │   │ Tofu state  │   │   runners    │
-    │ OIDC/SSO    │   └─────────────┘   └──────┬───────┘
-    └─────────────┘                            │ egress
-                                               ▼
-    ┌─────────────┐   ┌─────────────┐   ┌──────────────┐
-    │  Workflows  │   │    Hooks    │   │ Egress Proxy │
-    │   :8085     │   │   :8087     │   │    :3128     │
-    │  pipelines  │   │  webhooks   │   │  allowlist   │
-    └─────────────┘   └─────────────┘   └──────────────┘
+    ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+    │  Workflows  │   │    Forge    │   │    Hooks    │
+    │   :8085     │   │   :8083     │   │   :8087     │
+    │  pipelines  │   │   runners   │   │  webhooks   │
+    └─────────────┘   └─────────────┘   └─────────────┘
 
-    ┌─────────────┐   ┌─────────────────┐   ┌────────────┐
-    │   Tickets   │   │Gitea Integration│   │ Containers │
-    │   :8086     │   │     :8088       │   │   :8089    │
-    │   tasks     │   │ repos + PRs     │   │ OCI proxy  │
-    └─────────────┘   └─────────────────┘   └────────────┘
+    ┌─────────────┐   ┌───────────────────────────────┐
+    │   Builder   │   │  Portal — React SPA + BFF      │
+    │   :8095     │   │  web UI, proxies /api          │
+    │ org control │   └───────────────────────────────┘
+    │ + deployer  │  ← enables & deploys modules at runtime
+    └─────────────┘
 
-    Cluster integrations — the outpost dials out, no inbound access:
+    Cluster integrations — outposts dial out, no inbound access.
+    One per cluster, so pipelines unify across your whole fleet:
 
-    ┌──────────────────┐   ┌─────────────┐   ┌─────────────┐
-    │ Outpost Gateway  │   │    Chaos    │   │    Argo     │
-    │     :8092        │   │   :8090     │   │   :8091     │
-    │ enroll/commands/ │   │ experiments │   │  app sync   │
-    │ events backbone  │   └─────────────┘   └─────────────┘
-    └────────┬─────────┘   commands ▲ / events ▼ (HTTPS)
+    ┌──────────────────┐
+    │ Outpost Gateway  │  :8092 — enroll / commands / events backbone
+    └────────┬─────────┘  commands ▲ / events ▼ (HTTPS)
     ┌────────┴─────────┐
-    │     Outpost      │  ← in your cluster: Litmus CRDs / Argo CD
-    └──────────────────┘
+    │     Outpost      │  ← in each target cluster, or alongside
+    └──────────────────┘     CodeArmory itself for a single-cluster setup
 ```
 
 ---
@@ -94,11 +83,10 @@ Every request enters through Conductor. Backend services delegate auth to Gateke
 git clone https://github.com/code-armory-app/codearmory
 cd codearmory/infra/local
 export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
-export CONTAINER_REGISTRY_URL=https://ghcr.io   # required for Containers service
 docker compose up --build
 ```
 
-Starts PostgreSQL, Redis, and all services. API gateway at `http://localhost:8080`.
+Starts PostgreSQL, Redis, and the core services. API gateway at `http://localhost:8080`.
 
 ```bash
 # Sign up and get a token
@@ -120,35 +108,18 @@ helm install codearmory ./infra/helm/codearmory \
   --set global.postgresUrl=postgresql://...
 ```
 
----
-
-## Terraform / OpenTofu state
-
-Blueprints implements the standard [Terraform HTTP backend protocol](https://developer.hashicorp.com/terraform/language/settings/backends/http). Change two lines in your backend config and your state moves to your own Postgres — with workspace locking, soft deletes, and a full audit trail.
-
-```hcl
-terraform {
-  backend "http" {
-    address        = "http://conductor:8080/blueprints/state/alice/my-project"
-    lock_address   = "http://conductor:8080/blueprints/state/alice/my-project"
-    unlock_address = "http://conductor:8080/blueprints/state/alice/my-project"
-    username       = "alice"
-    password       = "<your-token>"
-  }
-}
-```
-
-State is scoped per user: `/blueprints/state/{username}/{workspace}`.
+The chart ships the core control plane; Builder deploys additional service modules at runtime when an org enables them.
 
 ---
 
-## Extending pipelines with custom services
+## Extending the platform with services
 
-Conductor routes to every service listed in the **Registry**. To add a new
-pipeline target — an internal deploy tool, a notification service, a custom API —
-register it in the Registry manifest (`infra/local/registry-manifest.json`, or the
-Helm equivalent) with its routes, any catalog **actions** pipelines can call, and
-the permissions granted by default:
+Conductor routes to every service listed in the **Registry**. To add a new pipeline
+target — an internal deploy tool, a custom API, anything that speaks HTTP — register
+it with its routes, any catalog **actions** pipelines can call, and the permissions
+granted by default. Core services are seeded from the registry manifest
+(`infra/local/registry-manifest.json`, or the Helm equivalent); additional services
+are registered at runtime by **Builder** when an org enables them.
 
 ```json
 {
@@ -168,9 +139,8 @@ the permissions granted by default:
 }
 ```
 
-Conductor picks the service up on its next Registry poll. Now reference the action
-from a reusable step and drop it into a pipeline — `${...}` resolves run inputs
-and prior step outputs at execution time:
+Once registered, reference the action from a reusable step and drop it into a
+pipeline — `${...}` resolves run inputs and prior step outputs at execution time:
 
 ```bash
 armory pipelines create step run-deployer \
@@ -184,8 +154,7 @@ armory pipelines run pipeline <pipeline-id> --input ENV=staging --input VERSION=
 No code changes to your existing service. With `forward_auth: false` (the default),
 Conductor strips the caller's bearer token and injects `X-User-ID` plus signed
 `X-Conductor-*` headers, so your service can trust requests arrived through the
-gateway. Run `armory pipelines list actions` to see every action the catalog
-exposes.
+gateway. Run `armory pipelines list actions` to see every action the catalog exposes.
 
 ---
 
@@ -199,10 +168,7 @@ armory pipelines list pipelines                      # see all pipelines
 armory pipelines run pipeline <id> --input KEY=VALUE # trigger a run
 armory pipelines get run <id>                        # inspect results
 armory forge exec run --image node:20 -- npm test    # sandboxed run
-armory tickets create --title "Deploy v2" --priority high
-armory tickets update <id> --status in_progress
 armory hooks rules create --name ci --repo myorg/myapp --events push --workflow <id> --secret <hmac>
-armory containers list repos
 armory admin orgs invite <org> colleague@example.com
 ```
 
@@ -218,20 +184,15 @@ Binaries for Linux, macOS, and Windows are attached to each [GitHub release](../
 | Gatekeeper | 8081 | [Auth + RBAC + OIDC](docs/gatekeeper/README.md) |
 | Registry | 8082 | [Service discovery](docs/registry/README.md) |
 | Forge | 8083 | [Sandboxed execution](docs/forge/README.md) |
-| Blueprints | 8093 | [Terraform state](docs/blueprints/README.md) |
 | Workflows | 8085 | [Pipeline orchestration](docs/workflows/README.md) |
-| Tickets | 8086 | [Task tracker](docs/tickets/README.md) |
 | Hooks | 8087 | [Webhook receiver](docs/hooks/README.md) |
-| Gitea Integration | 8088 | [Forgejo/Gitea repos + PRs](docs/gitea_integration/README.md) |
-| Containers | 8089 | [OCI registry management](docs/containers/README.md) |
-| Chaos | 8090 | [Chaos engineering](docs/chaos/README.md) |
-| Argo | 8091 | [Argo CD sync](docs/argo/README.md) |
+| Builder | 8095 | [Org control plane + runtime service deployer](docs/builder/README.md) |
 | Outpost Gateway | 8092 | [Cluster integration backbone](docs/outpost-gateway/README.md) |
-| Outpost | — | [Customer-deployed cluster agent](docs/outpost/README.md) |
-| Egress Proxy | 3128 | [Allowlist proxy for Forge](docs/egress-proxy/README.md) |
+| Outpost | — | [User-deployed cluster agent](docs/outpost/README.md) |
+| Portal | — | Web UI (React SPA + Express BFF) |
 | Armory CLI | — | [Command reference](docs/cli/README.md) |
 
-Full platform guide with worked examples: [docs/platform-guide.md](docs/platform-guide.md)
+Additional capabilities ship as **modules** in their own `codearmory-*` repos and are deployed at runtime by Builder. Full platform guide: [docs/platform-guide.md](docs/platform-guide.md).
 
 ---
 
@@ -242,20 +203,14 @@ Pre-built images are published to GHCR on every release (`alpha-latest` for pre-
 ```
 ghcr.io/code-armory-app/conductor:alpha-latest
 ghcr.io/code-armory-app/gatekeeper:alpha-latest
-ghcr.io/code-armory-app/blueprints:alpha-latest
 ghcr.io/code-armory-app/registry:alpha-latest
 ghcr.io/code-armory-app/forge:alpha-latest
 ghcr.io/code-armory-app/workflows:alpha-latest
 ghcr.io/code-armory-app/hooks:alpha-latest
-ghcr.io/code-armory-app/tickets:alpha-latest
-ghcr.io/code-armory-app/gitea_integration:alpha-latest
-ghcr.io/code-armory-app/containers:alpha-latest
-ghcr.io/code-armory-app/chaos:alpha-latest
-ghcr.io/code-armory-app/argo:alpha-latest
+ghcr.io/code-armory-app/builder:alpha-latest
 ghcr.io/code-armory-app/outpost-gateway:alpha-latest
 ghcr.io/code-armory-app/outpost:alpha-latest
-ghcr.io/code-armory-app/egress-proxy:alpha-latest
-ghcr.io/code-armory-app/mcp:alpha-latest
+ghcr.io/code-armory-app/portal:alpha-latest
 ```
 
 ---
@@ -289,23 +244,17 @@ pip install pre-commit && pre-commit install --hook-type commit-msg
 ```bash
 cd infra/local
 export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
-export CONTAINER_REGISTRY_URL=https://ghcr.io
 docker compose up --build -d
 
 docker compose --profile test run --rm gatekeeper-integration-tests
-docker compose --profile test run --rm blueprints-integration-tests
 docker compose --profile test run --rm registry-integration-tests
 docker compose --profile test run --rm conductor-integration-tests
 docker compose --profile test run --rm forge-integration-tests
 docker compose --profile test run --rm workflows-integration-tests
-docker compose --profile test run --rm tickets-integration-tests
 docker compose --profile test run --rm hooks-integration-tests
 docker compose --profile test run --rm outpost-gateway-integration-tests
-docker compose --profile test run --rm chaos-integration-tests
-docker compose --profile test run --rm argo-integration-tests
+docker compose --profile test run --rm portal-integration-tests
 ```
-
-Gitea integration tests require a live Forgejo instance and run directly with pytest — see [tests/gitea_integration/](tests/gitea_integration/).
 
 ---
 
@@ -318,4 +267,3 @@ CodeArmory is in **alpha**. APIs and data models may change between releases.
 ## Security
 
 To report a vulnerability, use [GitHub's private security advisory form](https://github.com/code-armory-app/codearmory/security/advisories/new) — do not open a public issue. We'll respond within 72 hours.
-

@@ -996,8 +996,8 @@ func TestStepsToDSL_RoundTrip(t *testing.T) {
 	g0 := 0
 	steps := []tuiWorkflowStep{
 		{Name: "build"},
-		{Name: "lint", ParallelGroup: &g0},
-		{Name: "test", ParallelGroup: &g0},
+		{Name: "lint", stage: &g0},
+		{Name: "test", stage: &g0},
 		{Name: "deploy"},
 	}
 	if got := stepsToDSL(steps); got != "build->[lint,test]->deploy" {
@@ -1279,9 +1279,9 @@ func TestTuiStepRunRows_GroupsParallelBatch(t *testing.T) {
 	g := 0
 	steps := []tuiStepRun{
 		{StepIndex: 0, StepName: "build", Status: "completed"},
-		{StepIndex: 1, StepName: "test", Status: "completed", ParallelGroup: &g},
-		{StepIndex: 2, StepName: "lint", Status: "running", ParallelGroup: &g},
-		{StepIndex: 3, StepName: "scan", Status: "pending", ParallelGroup: &g},
+		{StepIndex: 1, StepName: "test", Status: "completed", stage: &g},
+		{StepIndex: 2, StepName: "lint", Status: "running", stage: &g},
+		{StepIndex: 3, StepName: "scan", Status: "pending", stage: &g},
 		{StepIndex: 4, StepName: "deploy", Status: "pending"},
 	}
 	rows := tuiStepRunRows(steps)
@@ -1323,6 +1323,95 @@ func TestTuiStepRunRows_AllSequential_NoBrackets(t *testing.T) {
 	}
 }
 
+// A matrix step's runs all share one step index; the run-detail table must bracket
+// them into a single ⊞-marked stage — showing every combination, not collapsing
+// the fan-out to one — while keeping rows 1:1 with the step runs.
+func TestTuiStepRunRows_GroupsMatrixFanOut(t *testing.T) {
+	steps := []tuiStepRun{
+		{StepIndex: 0, StepName: "build", Status: "completed"},
+		{StepIndex: 1, StepName: "deploy [env=dev]", Status: "completed"},
+		{StepIndex: 1, StepName: "deploy [env=staging]", Status: "completed"},
+		{StepIndex: 1, StepName: "deploy [env=prod]", Status: "running"},
+		{StepIndex: 2, StepName: "notify", Status: "pending"},
+	}
+	rows := tuiStepRunRows(steps)
+	if len(rows) != len(steps) {
+		t.Fatalf("rows = %d, want %d (1:1 with step runs — every combination shown)", len(rows), len(steps))
+	}
+	// The three matrix runs share stage 2: number + ⊞ marker on the first row only.
+	if rows[1][0] != "2" || !strings.HasPrefix(rows[1][1], "┌ ⊞ ") {
+		t.Errorf("row1 = %q/%q, want stage 2 with ┌ ⊞ matrix marker", rows[1][0], rows[1][1])
+	}
+	if rows[2][0] != "" || !strings.HasPrefix(rows[2][1], "├ ") {
+		t.Errorf("row2 = %q/%q, want blank stage with ├ bracket", rows[2][0], rows[2][1])
+	}
+	if rows[3][0] != "" || !strings.HasPrefix(rows[3][1], "└ ") {
+		t.Errorf("row3 = %q/%q, want blank stage with └ bracket", rows[3][0], rows[3][1])
+	}
+	// Each combination keeps its own name so it stays individually identifiable.
+	if !strings.Contains(rows[1][1], "deploy [env=dev]") || !strings.Contains(rows[3][1], "deploy [env=prod]") {
+		t.Errorf("matrix rows lost their per-combination names: %q … %q", rows[1][1], rows[3][1])
+	}
+	// Sequential numbering resumes at stage 3 after the fan-out.
+	if rows[4][0] != "3" || rows[4][1] != "notify" {
+		t.Errorf("row4 = %q/%q, want 3/notify", rows[4][0], rows[4][1])
+	}
+}
+
+// The parallel batch must now carry a ∥ marker so it reads apart from a matrix
+// fan-out (both bracket into one stage).
+func TestTuiStepRunRows_ParallelCarriesMarker(t *testing.T) {
+	g := 0
+	rows := tuiStepRunRows([]tuiStepRun{
+		{StepIndex: 0, StepName: "build", Status: "completed"},
+		{StepIndex: 1, StepName: "test", Status: "completed", stage: &g},
+		{StepIndex: 2, StepName: "lint", Status: "completed", stage: &g},
+	})
+	if !strings.HasPrefix(rows[1][1], "┌ ∥ ") {
+		t.Errorf("parallel first row = %q, want ┌ ∥ marker", rows[1][1])
+	}
+}
+
+func TestTuiRunStageLegend(t *testing.T) {
+	g := 0
+	seq := []tuiStepRun{{StepIndex: 0, StepName: "a"}, {StepIndex: 1, StepName: "b"}}
+	par := []tuiStepRun{{StepIndex: 0, StepName: "a", stage: &g}, {StepIndex: 1, StepName: "b", stage: &g}}
+	mat := []tuiStepRun{{StepIndex: 0, StepName: "m [v=1]"}, {StepIndex: 0, StepName: "m [v=2]"}}
+	both := []tuiStepRun{
+		{StepIndex: 0, StepName: "a", stage: &g},
+		{StepIndex: 1, StepName: "b", stage: &g},
+		{StepIndex: 2, StepName: "m [v=1]"},
+		{StepIndex: 2, StepName: "m [v=2]"},
+	}
+	cases := []struct {
+		name       string
+		steps      []tuiStepRun
+		wantHasPar bool
+		wantHasMat bool
+		wantEmpty  bool
+	}{
+		{"sequential", seq, false, false, true},
+		{"parallel", par, true, false, false},
+		{"matrix", mat, false, true, false},
+		{"both", both, true, true, false},
+	}
+	for _, c := range cases {
+		got := tuiRunStageLegend(c.steps)
+		if c.wantEmpty {
+			if got != "" {
+				t.Errorf("%s: legend = %q, want empty", c.name, got)
+			}
+			continue
+		}
+		if c.wantHasPar && !strings.Contains(got, "∥") {
+			t.Errorf("%s: legend %q missing ∥", c.name, got)
+		}
+		if c.wantHasMat && !strings.Contains(got, "⊞") {
+			t.Errorf("%s: legend %q missing ⊞", c.name, got)
+		}
+	}
+}
+
 func TestTuiRunHasParallel(t *testing.T) {
 	g, other := 1, 1
 	cases := []struct {
@@ -1331,8 +1420,8 @@ func TestTuiRunHasParallel(t *testing.T) {
 		want  bool
 	}{
 		{"no groups", []tuiStepRun{{StepName: "a"}, {StepName: "b"}}, false},
-		{"shared consecutive group", []tuiStepRun{{ParallelGroup: &g}, {ParallelGroup: &g}}, true},
-		{"same value but separated", []tuiStepRun{{ParallelGroup: &g}, {StepName: "x"}, {ParallelGroup: &other}}, false},
+		{"shared consecutive group", []tuiStepRun{{stage: &g}, {stage: &g}}, true},
+		{"same value but separated", []tuiStepRun{{stage: &g}, {StepName: "x"}, {stage: &other}}, false},
 	}
 	for _, c := range cases {
 		if got := tuiRunHasParallel(c.steps); got != c.want {
@@ -1341,8 +1430,10 @@ func TestTuiRunHasParallel(t *testing.T) {
 	}
 }
 
-func TestTuiFetchRunDetail_AnnotatesParallelGroups(t *testing.T) {
-	g := 0
+// The run record carries no grouping, so the detail view derives each step's stage
+// from the DEFINITION'S ROUTES: build forks to test and lint, so those two share a
+// rank and draw as one concurrent stage.
+func TestTuiFetchRunDetail_AnnotatesStagesFromRoutes(t *testing.T) {
 	run := tuiRunFull{
 		tuiRun: tuiRun{RunID: "run-1", WorkflowID: "wf-1", Status: "completed"},
 		StepRuns: []tuiStepRun{
@@ -1355,8 +1446,12 @@ func TestTuiFetchRunDetail_AnnotatesParallelGroups(t *testing.T) {
 		WorkflowID: "wf-1",
 		Steps: []tuiWorkflowStep{
 			{StepID: "s0", Name: "build"},
-			{StepID: "s1", Name: "test", ParallelGroup: &g},
-			{StepID: "s2", Name: "lint", ParallelGroup: &g},
+			{StepID: "s1", Name: "test"},
+			{StepID: "s2", Name: "lint"},
+		},
+		Routes: []workflowRoute{
+			{From: "build", To: "test"},
+			{From: "build", To: "lint"},
 		},
 	}
 	mux := http.NewServeMux()
@@ -1373,14 +1468,16 @@ func TestTuiFetchRunDetail_AnnotatesParallelGroups(t *testing.T) {
 	if !ok {
 		t.Fatalf("msg type = %T, want tuiRunDetailMsg", msg)
 	}
-	if result.StepRuns[0].ParallelGroup != nil {
-		t.Errorf("build group = %d, want nil (sequential)", *result.StepRuns[0].ParallelGroup)
+	for i, sr := range result.StepRuns {
+		if sr.stage == nil {
+			t.Fatalf("step %d (%s) has no stage; routes should have ranked every step", i, sr.StepName)
+		}
 	}
-	if result.StepRuns[1].ParallelGroup == nil || result.StepRuns[2].ParallelGroup == nil {
-		t.Fatal("test/lint should be annotated with their parallel group from the definition")
+	if *result.StepRuns[1].stage != *result.StepRuns[2].stage {
+		t.Error("test and lint are both routed off build, so they share a stage")
 	}
-	if *result.StepRuns[1].ParallelGroup != *result.StepRuns[2].ParallelGroup {
-		t.Error("test and lint should share the same parallel group")
+	if *result.StepRuns[0].stage == *result.StepRuns[1].stage {
+		t.Error("build precedes test, so it must not share its stage")
 	}
 }
 
@@ -1405,7 +1502,7 @@ func TestTuiFetchRunDetail_NoDefStillSucceeds(t *testing.T) {
 	if !ok {
 		t.Fatalf("msg type = %T, want tuiRunDetailMsg", msg)
 	}
-	if len(result.StepRuns) != 1 || result.StepRuns[0].ParallelGroup != nil {
+	if len(result.StepRuns) != 1 || result.StepRuns[0].stage != nil {
 		t.Error("run should load with no grouping when the definition is unavailable")
 	}
 }
@@ -1503,8 +1600,8 @@ func TestTUIView_RunDetail_ShowsParallelLegend(t *testing.T) {
 	m = applyMsg(m, tuiRunDetailMsg(tuiRunFull{
 		tuiRun: tuiRun{RunID: "r", Status: "completed"},
 		StepRuns: []tuiStepRun{
-			{StepIndex: 0, StepName: "test", Status: "completed", ParallelGroup: &g},
-			{StepIndex: 1, StepName: "lint", Status: "completed", ParallelGroup: &g},
+			{StepIndex: 0, StepName: "test", Status: "completed", stage: &g},
+			{StepIndex: 1, StepName: "lint", Status: "completed", stage: &g},
 		},
 	}))
 	if !strings.Contains(m.View(), "parallel") {
@@ -1542,8 +1639,8 @@ func TestTUICancelRun_Success(t *testing.T) {
 	setupCLI(t, srv)
 	msg := tuiCancelRun("run-1")()
 	a, ok := msg.(tuiRunActionMsg)
-	if !ok || a.err != nil || a.cancelled != "run-1" {
-		t.Fatalf("msg = %#v, want cancelled run-1", msg)
+	if !ok || a.err != nil || a.runID != "run-1" || a.verb != "cancel" {
+		t.Fatalf("msg = %#v, want cancel run-1", msg)
 	}
 	if rec.Method != "DELETE" || rec.Path != "/workflows/runs/run-1" {
 		t.Errorf("request = %s %s, want DELETE /workflows/runs/run-1", rec.Method, rec.Path)
@@ -1555,6 +1652,63 @@ func TestTUICancelRun_Error(t *testing.T) {
 	setupCLI(t, srv)
 	if a, ok := tuiCancelRun("run-1")().(tuiRunActionMsg); !ok || a.err == nil {
 		t.Error("a failed cancel should return tuiRunActionMsg with an error")
+	}
+}
+
+func TestTUIApproveRun_Success(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{}`)
+	setupCLI(t, srv)
+	a, ok := tuiApproveRun("run-1")().(tuiRunActionMsg)
+	if !ok || a.err != nil || a.runID != "run-1" || a.verb != "approve" {
+		t.Fatalf("msg = %#v, want approve run-1", a)
+	}
+	if rec.Method != "POST" || rec.Path != "/workflows/runs/run-1/approve" {
+		t.Errorf("request = %s %s, want POST /workflows/runs/run-1/approve", rec.Method, rec.Path)
+	}
+}
+
+func TestTUIRejectRun_Success(t *testing.T) {
+	srv, rec := recordingServer(t, http.StatusOK, `{}`)
+	setupCLI(t, srv)
+	a, ok := tuiRejectRun("run-1")().(tuiRunActionMsg)
+	if !ok || a.err != nil || a.verb != "reject" {
+		t.Fatalf("msg = %#v, want reject", a)
+	}
+	if rec.Method != "POST" || rec.Path != "/workflows/runs/run-1/reject" {
+		t.Errorf("request = %s %s, want POST /workflows/runs/run-1/reject", rec.Method, rec.Path)
+	}
+}
+
+func TestTUIApproveRun_Error(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusConflict, `not awaiting approval`)
+	setupCLI(t, srv)
+	if a, ok := tuiApproveRun("run-1")().(tuiRunActionMsg); !ok || a.err == nil {
+		t.Error("a failed approve should return tuiRunActionMsg with an error")
+	}
+}
+
+// The approve/reject keys only act on a run that is paused awaiting approval.
+func TestTUIRunDetail_ApproveOnlyWhenAwaiting(t *testing.T) {
+	srv, _ := recordingServer(t, http.StatusOK, `{}`)
+	setupCLI(t, srv)
+
+	awaiting := newTUIModel()
+	awaiting.view = tuiViewRunDetail
+	awaiting.runFull = &tuiRunFull{tuiRun: tuiRun{RunID: "run-1", Status: "awaiting_approval"}}
+	_, cmd := awaiting.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if cmd == nil {
+		t.Fatal("a on an awaiting_approval run should emit an approve cmd")
+	}
+	if msg, ok := cmd().(tuiRunActionMsg); !ok || msg.verb != "approve" {
+		t.Errorf("a cmd returned %#v, want an approve action", cmd())
+	}
+
+	running := newTUIModel()
+	running.view = tuiViewRunDetail
+	running.runFull = &tuiRunFull{tuiRun: tuiRun{RunID: "run-2", Status: "running"}}
+	_, cmd2 := running.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if cmd2 != nil {
+		t.Error("a on a running run must not approve")
 	}
 }
 
@@ -1596,7 +1750,7 @@ func TestTUIRunActionMsg_ErrorSetsStatus(t *testing.T) {
 func TestTUIRunActionMsg_SuccessRefetches(t *testing.T) {
 	srv, _ := recordingServer(t, http.StatusOK, `[]`)
 	setupCLI(t, srv)
-	upd, cmd := newTUIModel().Update(tuiRunActionMsg{cancelled: "run-1"})
+	upd, cmd := newTUIModel().Update(tuiRunActionMsg{runID: "run-1", verb: "cancel"})
 	m := upd.(tuiModel)
 	if m.runStatusErr || !strings.Contains(m.runStatus, "cancelled") {
 		t.Errorf("success should set a non-error status (got %q)", m.runStatus)

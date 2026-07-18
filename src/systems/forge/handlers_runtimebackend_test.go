@@ -76,13 +76,19 @@ func TestValidateRuntimeBackendBody(t *testing.T) {
 		t.Errorf("kubernetes should be valid: %v", err)
 	}
 	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "proxmox"}); err == nil {
-		t.Error("proxmox should be rejected until the runtime is wired in")
+		t.Error("proxmox is retired and must be rejected as an unknown type")
 	}
 	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "kata"}); err == nil {
 		t.Error("kata without a runtime_class should be rejected (it would silently run as runc, no VM isolation)")
 	}
 	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "kata", Config: map[string]string{"runtime_class": "kata-qemu"}}); err != nil {
 		t.Errorf("kata with a runtime_class should be valid: %v", err)
+	}
+	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "gvisor"}); err == nil {
+		t.Error("gvisor without a runtime_class should be rejected (it would silently run as runc, no gVisor sandbox)")
+	}
+	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: "gvisor", Config: map[string]string{"runtime_class": "gvisor"}}); err != nil {
+		t.Errorf("gvisor with a runtime_class should be valid: %v", err)
 	}
 	if err := validateRuntimeBackendBody(runtimeBackendBody{Type: ""}); err == nil {
 		t.Error("empty type should be rejected")
@@ -101,7 +107,7 @@ func TestHandleRuntimeBackend_CRUD_DB(t *testing.T) {
 	// Create with a secret_ref: the ref is a NAME, never a secret value.
 	authAs(t, "admin")
 	createBody := `{"name":"` + name + `","type":"docker","enabled":true,` +
-		`"config":{"node":"pve1"},"secret_refs":{"token":"PROXMOX_TOKEN"}}`
+		`"config":{"network":"forge-exec"},"secret_refs":{"token":"REGISTRY_TOKEN"}}`
 	r := httptest.NewRequest(http.MethodPost, "/runtime-backends", bytes.NewBufferString(createBody))
 	r.Header.Set("Authorization", "Bearer t")
 	w := httptest.NewRecorder()
@@ -111,7 +117,7 @@ func TestHandleRuntimeBackend_CRUD_DB(t *testing.T) {
 	}
 	var created RuntimeBackend
 	json.NewDecoder(w.Body).Decode(&created) //nolint:errcheck
-	if created.SecretRefs["token"] != "PROXMOX_TOKEN" {
+	if created.SecretRefs["token"] != "REGISTRY_TOKEN" {
 		t.Errorf("secret_refs = %v, want the env var NAME echoed back", created.SecretRefs)
 	}
 	// No secret VALUE must ever appear in the response.

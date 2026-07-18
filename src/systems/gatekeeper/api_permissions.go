@@ -142,6 +142,67 @@ func handleCreatePermissions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(row.(Permissions))
 }
 
+func handleListPermissions(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleListPermissions")
+	defer span.End()
+	r = r.WithContext(ctx)
+
+	callerID, _ := ctx.Value(userIDKey).(string)
+	span.SetAttributes(attribute.String("user.id", callerID))
+	slog.InfoContext(ctx, "list permissions request", "caller_id", callerID)
+
+	if !requirePermission(w, r, "listPermission", "gatekeeper/permissions") {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+	span.AddEvent("permission.granted")
+
+	limit, offset, ok := parsePagination(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "invalid pagination")
+		return
+	}
+
+	// Scope to the caller's org (matching list roles/users).
+	var callerOrgID *string
+	if callerRow, err := (User{UserID: callerID}).Get(ctx); err == nil {
+		callerOrgID = callerRow.(User).OrgID
+	}
+
+	q := r.URL.Query()
+	var filter Permissions
+	filter.OrgID = callerOrgID
+	if v := q.Get("permissions_id"); v != "" {
+		filter.PermissionsID = v
+	}
+	if v := q.Get("name"); v != "" {
+		filter.Name = v
+	}
+	if v := q.Get("service"); v != "" {
+		filter.Service = v
+	}
+	if v := q.Get("owner_id"); v != "" {
+		filter.OwnerID = v
+	}
+
+	rows, err := filter.List(ctx, limit, offset)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "list permissions failed")
+		slog.WarnContext(ctx, "list permissions: db error", "caller_id", callerID, "error", err)
+		http.Error(w, "failed to list permissions", http.StatusInternalServerError)
+		return
+	}
+	perms := make([]Permissions, len(rows))
+	for i, row := range rows {
+		perms[i] = row.(Permissions)
+	}
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "list permissions: success", "caller_id", callerID, "count", len(perms))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(perms) //nolint:errcheck
+}
+
 func handleGetPermissions(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleGetPermissions")
 	defer span.End()

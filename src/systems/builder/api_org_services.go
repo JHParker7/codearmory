@@ -16,30 +16,24 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// scopeFromPath maps the {id} path value to a storage org id. The literal
-// "default" addresses the baseline scope; anything else is a real org id.
-func scopeFromPath(id string) string {
-	if id == "default" || id == defaultOrgID {
-		return defaultOrgID
-	}
-	return id
-}
+// builderResource is the fixed RBAC resource every builder endpoint checks. It is
+// org-independent — builder manages one global baseline, and only the system admin
+// (whose wildcard grant matches anything) holds access; no per-org grant exists.
+const builderResource = "builder/orgs/default"
 
 func handleListOrgServices(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleListOrgServices")
 	defer span.End()
 
-	id := r.PathValue("id")
-	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listOrgServices", "builder/orgs/"+id); !ok {
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listOrgServices", builderResource); !ok {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	orgID := scopeFromPath(id)
 
-	views, err := buildEffectiveView(ctx, orgID)
+	views, err := buildEffectiveView(ctx)
 	if err != nil {
 		span.RecordError(err)
-		slog.ErrorContext(ctx, "list org services: db error", "org_id", orgID, "error", err)
+		slog.ErrorContext(ctx, "list services: db error", "error", err)
 		http.Error(w, "failed to list services", http.StatusInternalServerError)
 		return
 	}
@@ -52,15 +46,13 @@ func handleGetOrgService(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleGetOrgService")
 	defer span.End()
 
-	id := r.PathValue("id")
 	service := r.PathValue("service")
-	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getOrgService", "builder/orgs/"+id); !ok {
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getOrgService", builderResource); !ok {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	orgID := scopeFromPath(id)
 
-	view, err := effectiveView(ctx, orgID, service)
+	view, err := effectiveView(ctx, service)
 	if err != nil {
 		span.RecordError(err)
 		http.Error(w, "failed to get service", http.StatusInternalServerError)
@@ -71,18 +63,59 @@ func handleGetOrgService(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(view) //nolint:errcheck
 }
 
+// missingRequiredConfig returns the def's requiredConfig keys not satisfied by this
+// request or already stored. A key is satisfied by: plain config in the request,
+// DATABASE_URL via a supplied or previously-stored db_url, or a sensitive key supplied
+// now (req.Secrets) or previously stored (existing.SecretsCiphertext). Config is
+// replaced on each PUT, so only the request's config counts; db_url and secrets are
+// kept when not re-supplied, so the stored ones count.
+// dbSatisfied marks DATABASE_URL satisfied regardless of a stored/supplied db_url: true
+// when a foreign-Secret backend (cnpg/external) provides it structurally, or the sql
+// backend just provisioned and stored a derived URL on the row being saved.
+func missingRequiredConfig(def serviceDef, req setServiceRequest, existing OrgService, service string, dbSatisfied bool) ([]string, error) {
+	satisfied := map[string]bool{}
+	for k := range req.Config {
+		satisfied[k] = true
+	}
+	if dbSatisfied || strings.TrimSpace(req.DBUrl) != "" || existing.DBURLCiphertext != nil {
+		satisfied["DATABASE_URL"] = true
+	}
+	if len(req.Secrets) > 0 {
+		for k := range req.Secrets {
+			satisfied[k] = true
+		}
+	} else if existing.SecretsCiphertext != nil && secretsEncryptionEnabled() {
+		// A decrypt failure is an internal error, NOT "the keys are missing" — surface
+		// it so the caller returns 500 rather than wrongly blocking a re-enable whose
+		// secrets are still stored (and live in the Secret) with a misleading 400.
+		m, err := decryptSecretsMap(existing.SecretsCiphertext, service)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt stored secrets for %s: %w", service, err)
+		}
+		for k := range m {
+			satisfied[k] = true
+		}
+	}
+	var missing []string
+	for _, k := range def.RequiredConfig {
+		if !satisfied[k] {
+			missing = append(missing, k)
+		}
+	}
+	return missing, nil
+}
+
 func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleSetOrgService")
 	defer span.End()
 
-	id := r.PathValue("id")
 	service := strings.TrimSpace(r.PathValue("service"))
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "configureOrgService", "builder/orgs/"+id)
+	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "configureOrgService", builderResource)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	orgID := scopeFromPath(id)
+	orgID := defaultOrgID
 
 	if service == "" {
 		http.Error(w, "service name is required", http.StatusBadRequest)
@@ -123,6 +156,14 @@ func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 		enabled = *req.Enabled
 	}
 
+	// Coming-soon services (source not in this repo) can't be deployed yet; refuse to
+	// enable them. A disable request still passes through so a previously-enabled row
+	// can be turned off.
+	if enabled && comingSoonServices[service] {
+		http.Error(w, "service is coming soon and cannot be enabled yet", http.StatusBadRequest)
+		return
+	}
+
 	row := OrgService{
 		OrgID:       orgID,
 		ServiceName: service,
@@ -155,6 +196,86 @@ func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 		row.DBHost = host
 	}
 
+	// Admin-supplied sensitive config (REDIS_URL, GITEA_ADMIN_TOKEN, …) is encrypted as
+	// a map, bound to the service. Builder writes each entry into the service Secret.
+	if len(req.Secrets) > 0 {
+		if !secretsEncryptionEnabled() {
+			http.Error(w, "secret storage is disabled (BUILDER_SECRETS_KEY not set)", http.StatusServiceUnavailable)
+			return
+		}
+		ct, err := encryptSecretsMap(req.Secrets, service)
+		if err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		row.SecretsCiphertext = ct
+	}
+
+	// Validation + provisioning gate: enabling a platform service in the default scope
+	// makes builder deploy it, so its database + required config must be in place. Org-
+	// scope toggles only flip the access gate (they inherit the default deployment), so
+	// they are not gated.
+	if enabled && kind == kindPlatform && orgID == defaultOrgID {
+		if def, ok := embeddedServiceDef(service); ok {
+			// Read from the primary so a db_url/secret stored in a prior request is
+			// seen (a lagging replica would falsely report it missing).
+			existing, _ := getOrgServicePrimary(ctx, orgID, service)
+			backend := globalDBConfig.backendFor(req.Config)
+
+			// sql backend: provision the per-service database now (one-shot) and store
+			// the derived URL like a manual one, so the reconciler treats it as manual
+			// thereafter. Skipped when the admin supplied an explicit db_url this request,
+			// or a URL is already stored and no new maintenance URL is given.
+			if backend == dbBackendSQL && len(row.DBURLCiphertext) == 0 {
+				maint := strings.TrimSpace(req.MaintenanceDBUrl)
+				if maint == "" {
+					maint = globalDBConfig.sqlMaintenanceURL
+				}
+				if maint != "" || len(existing.DBURLCiphertext) == 0 {
+					if maint == "" {
+						http.Error(w, "sql db backend requires a maintenance_db_url (or BUILDER_DB_SQL_MAINTENANCE_URL)", http.StatusBadRequest)
+						return
+					}
+					if !secretsEncryptionEnabled() {
+						http.Error(w, "DB URL storage is disabled (BUILDER_SECRETS_KEY not set)", http.StatusServiceUnavailable)
+						return
+					}
+					derived, err := provisionSQLDatabase(ctx, maint, service, globalDBConfig)
+					if err != nil {
+						span.RecordError(err)
+						slog.ErrorContext(ctx, "sql db provisioning failed", "service", service, "error", err)
+						http.Error(w, "database provisioning failed: "+err.Error(), http.StatusBadGateway)
+						return
+					}
+					host, _ := redactedDBHost(derived)
+					ct, encErr := encryptSecret(derived, service)
+					if encErr != nil {
+						http.Error(w, "internal server error", http.StatusInternalServerError)
+						return
+					}
+					row.DBURLCiphertext = ct
+					row.DBHost = host
+					slog.InfoContext(ctx, "provisioned database for service", "service", service, "db_host", host, "caller_id", userID)
+				}
+			}
+
+			// cnpg/external deliver DATABASE_URL via an operator/external-secrets Secret,
+			// so it is satisfied structurally; sql satisfies it via the row just stored.
+			dbSatisfied := backendUsesForeignSecret(backend) || len(row.DBURLCiphertext) > 0
+			missing, err := missingRequiredConfig(def, req, existing, service, dbSatisfied)
+			if err != nil {
+				span.RecordError(err)
+				slog.ErrorContext(ctx, "validate required config", "org_id", orgID, "service", service, "error", err)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			if len(missing) > 0 {
+				http.Error(w, "missing required config before enabling "+service+": "+strings.Join(missing, ", "), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
 	if _, err := upsertOrgService(ctx, row); err != nil {
 		span.RecordError(err)
 		slog.ErrorContext(ctx, "set org service: db error", "org_id", orgID, "service", service, "error", err)
@@ -172,7 +293,7 @@ func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 		reconcilerNudge()
 	}
 
-	view, err := effectiveView(ctx, orgID, service)
+	view, err := effectiveView(ctx, service)
 	if err != nil {
 		http.Error(w, "saved but failed to read back", http.StatusInternalServerError)
 		return
@@ -186,14 +307,13 @@ func handleDeleteOrgService(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleDeleteOrgService")
 	defer span.End()
 
-	id := r.PathValue("id")
 	service := r.PathValue("service")
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteOrgService", "builder/orgs/"+id)
+	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteOrgService", builderResource)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
 	}
-	orgID := scopeFromPath(id)
+	orgID := defaultOrgID
 
 	removed, err := deleteOrgService(ctx, orgID, service)
 	if err != nil {
@@ -202,54 +322,68 @@ func handleDeleteOrgService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !removed {
-		http.Error(w, "no override configured for that service", http.StatusNotFound)
+		http.Error(w, "no baseline row configured for that service", http.StatusNotFound)
 		return
 	}
-	slog.InfoContext(ctx, "org service override removed", "org_id", orgID, "service", service, "caller_id", userID)
-	if orgID == defaultOrgID {
-		reconcilerNudge()
-	}
+	slog.InfoContext(ctx, "service baseline removed", "service", service, "caller_id", userID)
+	reconcilerNudge()
 	span.SetStatus(codes.Ok, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // buildEffectiveView overlays the desired-state rows on the live service catalog
-// to produce the full effective list for a scope.
-func buildEffectiveView(ctx context.Context, orgID string) ([]serviceView, error) {
-	views := map[string]*serviceView{}
-
-	// 1. Seed from the registry catalog: every platform service, default-on.
-	for _, c := range serviceCatalog(ctx) {
-		views[c.Name] = &serviceView{
-			Service:     c.Name,
-			Enabled:     true,
-			Kind:        kindPlatform,
-			Source:      "catalog",
-			Description: c.Description,
-		}
-	}
-
-	// 2. Apply the default-scope baseline.
+// to produce the full effective list for the global baseline.
+func buildEffectiveView(ctx context.Context) ([]serviceView, error) {
 	defaults, err := listOrgServices(ctx, defaultOrgID)
 	if err != nil {
 		return nil, err
 	}
+	return mergeViews(serviceCatalog(ctx), liveServiceNames(ctx), defaults), nil
+}
+
+// mergeViews resolves the effective service list from its inputs. It is pure (no DB
+// or registry I/O) so the precedence — core → registry-live → catalog → baseline row
+// — is unit-tested directly. Precedence, low to high:
+//
+//	0. Core control-plane services: always present, always on, never configurable.
+//	   The catalog excludes them and their rows can't be written, so seeding them here
+//	   is what puts them in the list — flagged Core so every consumer (the admin UI,
+//	   the sidebar, the CLI hub) can trust that flag instead of re-hardcoding the set.
+//	1. Catalog services. Seeded ENABLED only when the registry — the source of truth
+//	   for what conductor routes — advertises them (live), otherwise OFF. This keeps
+//	   the view honest for services registered out-of-band with no builder baseline
+//	   row (e.g. forge/workflows, which the chart ships and registers directly)
+//	   instead of claiming they're disabled while they're live and routable.
+//	2. Baseline rows: the admin's explicit desired state, which overrides everything.
+func mergeViews(catalog []catalogEntry, live map[string]bool, defaults []OrgService) []serviceView {
+	views := map[string]*serviceView{}
+
+	for name := range coreServices {
+		views[name] = &serviceView{Service: name, Enabled: true, Kind: kindPlatform, Source: "core", Core: true}
+	}
+
+	for _, c := range catalog {
+		if coreServices[c.Name] {
+			continue
+		}
+		v := newCatalogView(c)
+		if live[c.Name] {
+			v.Enabled = true
+			v.Source = "registry"
+		}
+		views[c.Name] = v
+	}
+
 	for _, d := range defaults {
 		applyRow(views, d, "default")
 	}
 
-	// 3. Apply this org's overrides (only when not viewing the default scope).
-	if orgID != defaultOrgID {
-		overrides, err := listOrgServices(ctx, orgID)
-		if err != nil {
-			return nil, err
-		}
-		for _, o := range overrides {
-			src := "override"
-			if o.Kind == kindCustom {
-				src = "custom"
-			}
-			applyRow(views, o, src)
+	// Coming-soon services (source not in this repo) can't be deployed yet, so force
+	// them disabled and flag them regardless of any catalog/registry/baseline state.
+	for name, v := range views {
+		if comingSoonServices[name] {
+			v.Enabled = false
+			v.ComingSoon = true
 		}
 	}
 
@@ -258,7 +392,25 @@ func buildEffectiveView(ctx context.Context, orgID string) ([]serviceView, error
 		out = append(out, *v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Service < out[j].Service })
-	return out, nil
+	return out
+}
+
+// newCatalogView builds the default view for a catalog (platform) service that has
+// no baseline row. It is default-OFF on purpose: a catalog service builder could
+// deploy is only enabled once an admin enables it (a baseline row with Enabled=true,
+// applied by applyRow — that is also what the reconciler keys off in desiredWorkloads)
+// OR once it actually appears in the registry's live list (mergeViews flips it on).
+// Seeding default-on unconditionally would make the admin view claim every service is
+// enabled while nothing is actually deployed or routable, so the portal hides all
+// their tabs — the exact contradiction we avoid by defaulting to disabled.
+func newCatalogView(c catalogEntry) *serviceView {
+	return &serviceView{
+		Service:     c.Name,
+		Enabled:     false,
+		Kind:        kindPlatform,
+		Source:      "catalog",
+		Description: c.Description,
+	}
 }
 
 func applyRow(views map[string]*serviceView, row OrgService, source string) {
@@ -302,28 +454,32 @@ func redactedDBHost(raw string) (string, error) {
 	return u.Host + u.Path, nil
 }
 
-// effectiveView resolves the effective state of a single service for a scope.
-func effectiveView(ctx context.Context, orgID, service string) (serviceView, error) {
+// effectiveView resolves the effective state of a single service on the global
+// baseline.
+func effectiveView(ctx context.Context, service string) (serviceView, error) {
 	if coreServices[service] {
 		return serviceView{Service: service, Enabled: true, Kind: kindPlatform, Source: "core", Core: true}, nil
 	}
-	v := serviceView{Service: service, Enabled: true, Kind: kindPlatform, Source: "catalog"}
+	// Default-OFF, but the registry is the source of truth: if it advertises the
+	// service it is live/routable, so seed it enabled even without a baseline row
+	// (e.g. forge/workflows, registered directly by the chart). A baseline row, if
+	// present, overrides below. See mergeViews for the full precedence.
+	v := serviceView{Service: service, Enabled: false, Kind: kindPlatform, Source: "catalog"}
+	if liveServiceNames(ctx)[service] {
+		v.Enabled = true
+		v.Source = "registry"
+	}
 
 	if d, err := getOrgService(ctx, defaultOrgID, service); err == nil {
 		applyRow(map[string]*serviceView{service: &v}, d, "default")
 	} else if !isNotFound(err) {
 		return serviceView{}, err
 	}
-	if orgID != defaultOrgID {
-		if o, err := getOrgService(ctx, orgID, service); err == nil {
-			src := "override"
-			if o.Kind == kindCustom {
-				src = "custom"
-			}
-			applyRow(map[string]*serviceView{service: &v}, o, src)
-		} else if !isNotFound(err) {
-			return serviceView{}, err
-		}
+	// Coming-soon services (source not in this repo) can't be deployed yet — force
+	// disabled and flag, mirroring mergeViews.
+	if comingSoonServices[service] {
+		v.Enabled = false
+		v.ComingSoon = true
 	}
 	return v, nil
 }

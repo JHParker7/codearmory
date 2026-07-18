@@ -1,6 +1,14 @@
-import { useState, useEffect, useCallback } from 'react';
+/**
+ * gatekeeper admin page — the auth/RBAC control surface. tabbed view over the
+ * gatekeeper entities: users, roles, permissions, secrets (+ per-org secret
+ * backend), teams, orgs, invites, and service-permission-requests. all data
+ * goes through the typed bff client (src/api/bff.ts), which proxies /api/* to
+ * conductor; tabs are gated on the caller's redux permissions.
+ */
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
 import {
   listUsers, updateUser, deleteUser,
@@ -12,12 +20,15 @@ import {
   listInvites, acceptInvite, declineInvite, deleteInvite,
   listServiceRequests, approveServiceRequest, declineServiceRequest,
   listOrgs, createOrg, updateOrg, deleteOrg, inviteToOrg,
+  listSignupAllowlist, addSignupAllowlist, deleteSignupAllowlist, getSignupPolicy, setSignupPolicy,
   getOrg, getTeam,
 } from '../../api/bff';
-import type { User, Role, Permission, Secret, Org, Team, Invite, ServiceRequest, SecretProvider, SecretProviderName } from '../../api/bff';
-import { timeAgo } from '../../utils';
+import type { User, Role, Permission, Secret, Org, Team, Invite, ServiceRequest, SecretProvider, SecretProviderName, SignupAllowlistEntry } from '../../api/bff';
+import { timeAgo, shortId } from '../../utils';
+import { useUserNames } from '../../hooks/useNames';
+import { useResizableWidth } from '../../components/ResizeHandle';
 
-type Tab = 'users' | 'roles' | 'permissions' | 'secrets' | 'teams' | 'orgs' | 'invites' | 'service-requests';
+type Tab = 'users' | 'roles' | 'permissions' | 'secrets' | 'teams' | 'orgs' | 'invites' | 'allowlist' | 'service-requests';
 
 // ── Shared input style ─────────────────────────────────────────────────────────
 
@@ -33,8 +44,16 @@ const inputStyle = {
   boxSizing: 'border-box' as const,
 };
 
+// roleLabel is the human-facing name for a role — its name when set, otherwise a
+// short slice of the UUID. A raw role_id (a UUID) means nothing to an admin, so
+// every place a role is shown or chosen renders this instead.
+function roleLabel(role: Role): string {
+  return role.name?.trim() || `${shortId(role.role_id)} (unnamed)`;
+}
+
 // ── Users tab ─────────────────────────────────────────────────────────────────
 
+/** users tab: master/detail list of all users; the detail pane edits a user (email/username/name/password via updateUser) and deletes via deleteUser, and resolves the user's org/team names through getOrg/getTeam. */
 function UsersTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const currentUserId = useAppSelector(s => s.auth.user?.user_id);
@@ -44,6 +63,7 @@ function UsersTab() {
   const [selected, setSelected] = useState<string | null>(null);
   const [org, setOrg] = useState<Org | null>(null);
   const [team, setTeam] = useState<Team | null>(null);
+  const [roles, setRoles] = useState<Role[]>([]);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ email: '', username: '', firstname: '', lastname: '', password: '' });
   const [saving, setSaving] = useState(false);
@@ -56,8 +76,11 @@ function UsersTab() {
   }, [token]);
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
+  // Resolve a user's role_id to a name in the detail pane. Best effort.
+  useEffect(() => { listRoles(token).then(setRoles).catch(() => {}); }, [token]);
 
   const selectedUser = users.find(u => u.user_id === selected);
+  const roleById = useMemo(() => new Map(roles.map(r => [r.role_id, r])), [roles]);
 
   useEffect(() => {
     setEditing(false);
@@ -89,7 +112,12 @@ function UsersTab() {
     finally { setSaving(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.users', 260, { min: 200, max: 480 });
+
   const handleDelete = async (id: string) => {
+    const name = users.find(u => u.user_id === id)?.username;
+    if (!(await confirm({ message: `Delete user @${name ?? id}? This permanently removes the account and cannot be undone.` }))) return;
     try {
       await deleteUser(token, id);
       setUsers(prev => prev.filter(u => u.user_id !== id));
@@ -99,7 +127,8 @@ function UsersTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      {confirmEl}
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{users.length > 0 ? `${users.length} user${users.length !== 1 ? 's' : ''}` : ''}</span>
           <button onClick={fetchUsers} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '2px 6px', cursor: 'pointer' }}>↻</button>
@@ -121,6 +150,7 @@ function UsersTab() {
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedUser ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -188,7 +218,7 @@ function UsersTab() {
               <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '12px 16px', fontFamily: T.mono, fontSize: 12 }}>
                 {org && <div style={{ marginBottom: 4 }}><span style={{ color: T.faint }}>org   </span><span style={{ color: T.text }}>{org.org_name}</span></div>}
                 {team && <div style={{ marginBottom: 4 }}><span style={{ color: T.faint }}>team  </span><span style={{ color: T.text }}>{team.team_name}</span></div>}
-                {selectedUser.role_id && <div><span style={{ color: T.faint }}>role  </span><span style={{ color: T.dim }}>{selectedUser.role_id.slice(0, 8)}…</span></div>}
+                {selectedUser.role_id && <div><span style={{ color: T.faint }}>role  </span><span style={{ color: T.dim }}>{(() => { const r = roleById.get(selectedUser.role_id); return r ? roleLabel(r) : shortId(selectedUser.role_id); })()}</span></div>}
               </div>
             )}
           </div>
@@ -200,6 +230,7 @@ function UsersTab() {
 
 // ── Roles tab ─────────────────────────────────────────────────────────────────
 
+/** roles tab: master/detail list of roles; create + inline-edit a role by supplying a comma-separated permission-id set (createRole/updateRole), deletes via deleteRole, and resolves the attached permissions against listPermissions for the detail view. */
 function RolesTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [roles, setRoles] = useState<Role[]>([]);
@@ -208,9 +239,11 @@ function RolesTab() {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState('');
   const [newPermIds, setNewPermIds] = useState('');
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState('');
   const [editPermIds, setEditPermIds] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
 
@@ -228,13 +261,13 @@ function RolesTab() {
 
   const selectedRole = roles.find(r => r.role_id === selected);
 
-  const startEdit = (r: Role) => { setEditPermIds(r.permissions_ids.join(', ')); setError(null); setEditing(true); };
+  const startEdit = (r: Role) => { setEditName(r.name ?? ''); setEditPermIds(r.permissions_ids.join(', ')); setError(null); setEditing(true); };
 
   const handleUpdate = async (id: string) => {
     const ids = editPermIds.split(',').map(s => s.trim()).filter(Boolean);
     setSavingEdit(true); setError(null);
     try {
-      const updated = await updateRole(token, id, { permissions_ids: ids });
+      const updated = await updateRole(token, id, { name: editName.trim(), permissions_ids: ids });
       setRoles(prev => prev.map(r => r.role_id === id ? updated : r));
       setEditing(false);
     } catch (e: unknown) { setError((e as Error).message); }
@@ -248,14 +281,19 @@ function RolesTab() {
     const ids = newPermIds.split(',').map(s => s.trim()).filter(Boolean);
     setCreating(true); setError(null);
     try {
-      const role = await createRole(token, { permissions_ids: ids });
+      const role = await createRole(token, { name: newName.trim() || undefined, permissions_ids: ids });
       setRoles(prev => [role, ...prev]);
-      setNewPermIds(''); setShowCreate(false);
+      setNewName(''); setNewPermIds(''); setShowCreate(false);
     } catch (e: unknown) { setError((e as Error).message); }
     finally { setCreating(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.roles', 260, { min: 200, max: 480 });
+
   const handleDelete = async (id: string) => {
+    const r = roles.find(x => x.role_id === id);
+    if (!(await confirm({ message: `Delete role ${r ? roleLabel(r) : id}? Users assigned this role will lose its permissions.` }))) return;
     try {
       await deleteRole(token, id);
       setRoles(prev => prev.filter(r => r.role_id !== id));
@@ -265,7 +303,8 @@ function RolesTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      {confirmEl}
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{roles.length > 0 ? `${roles.length} role${roles.length !== 1 ? 's' : ''}` : ''}</span>
           <div style={{ display: 'flex', gap: 6 }}>
@@ -277,6 +316,8 @@ function RolesTab() {
         {showCreate && (
           <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card }}>
             {error && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{error}</div>}
+            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="role name (e.g. ci-deployer)" autoFocus
+              style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }} />
             <input value={newPermIds} onChange={e => setNewPermIds(e.target.value)} placeholder="permission IDs (comma-separated)"
               style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }} />
             <div style={{ display: 'flex', gap: 6 }}>
@@ -295,12 +336,13 @@ function RolesTab() {
             return (
               <button key={role.role_id} onClick={() => setSelected(role.role_id)}
                 style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{role.role_id.slice(0, 8)}…</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{roleLabel(role)}</div>
                 <div style={{ fontSize: 11, color: T.faint, marginTop: 2 }}>{role.permissions_ids.length} permission{role.permissions_ids.length !== 1 ? 's' : ''}</div>
               </button>
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedRole ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -310,7 +352,7 @@ function RolesTab() {
           <div style={{ padding: '20px 24px' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 }}>
               <div>
-                <div style={{ fontFamily: T.mono, fontSize: 16, fontWeight: 700, color: T.textHi }}>{selectedRole.role_id}</div>
+                <div style={{ fontFamily: T.mono, fontSize: 16, fontWeight: 700, color: T.textHi }}>{roleLabel(selectedRole)}</div>
                 <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginTop: 2 }}>
                   updated {timeAgo(selectedRole.updated_at)} ago ·{' '}
                   {selectedRole.active ? <span style={{ color: T.green }}>active</span> : <span style={{ color: T.red }}>inactive</span>}
@@ -331,6 +373,9 @@ function RolesTab() {
             </div>
             {editing && (
               <div style={{ background: T.card, border: `1px solid ${T.borderHi}`, padding: '14px 16px', marginBottom: 16 }}>
+                <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 8, letterSpacing: 0.5 }}>NAME</div>
+                <input value={editName} onChange={e => setEditName(e.target.value)} placeholder="role name (e.g. ci-deployer)"
+                  style={{ ...inputStyle, background: T.cardHi, marginBottom: 12 }} />
                 <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 8, letterSpacing: 0.5 }}>PERMISSION IDS · comma-separated</div>
                 <textarea value={editPermIds} onChange={e => setEditPermIds(e.target.value)} rows={3}
                   style={{ ...inputStyle, background: T.cardHi, resize: 'vertical', marginBottom: 10 }} />
@@ -369,6 +414,7 @@ function RolesTab() {
 
 // ── Permissions tab ───────────────────────────────────────────────────────────
 
+/** permissions tab: master/detail list of permissions; create + inline-edit a permission's name/service/actions/resources (createPermission/updatePermission) and delete via deletePermission. */
 function PermissionsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [perms, setPerms] = useState<Permission[]>([]);
@@ -432,7 +478,12 @@ function PermissionsTab() {
     finally { setCreating(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.permissions', 260, { min: 200, max: 480 });
+
   const handleDelete = async (id: string) => {
+    const name = perms.find(p => p.permissions_id === id)?.name;
+    if (!(await confirm({ message: `Delete permission ${name ?? id}? Roles referencing it will lose these grants.` }))) return;
     try {
       await deletePermission(token, id);
       setPerms(prev => prev.filter(p => p.permissions_id !== id));
@@ -442,7 +493,8 @@ function PermissionsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      {confirmEl}
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{perms.length > 0 ? `${perms.length} permission${perms.length !== 1 ? 's' : ''}` : ''}</span>
           <div style={{ display: 'flex', gap: 6 }}>
@@ -481,6 +533,7 @@ function PermissionsTab() {
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedPerm ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -549,6 +602,7 @@ const PROVIDERS: { id: SecretProviderName; label: string; help: string }[] = [
   { id: 'aws_sm', label: 'aws_sm', help: 'AWS Secrets Manager.' },
 ];
 
+/** secret backend panel: shows/sets the caller's org's secret provider — picks builtin/vault/doppler/aws_sm and posts optional JSON config via setSecretProvider, or resets to builtin via deleteSecretProvider. */
 function SecretProviderPanel() {
   const token = useAppSelector(s => s.auth.token)!;
   const orgId = useAppSelector(s => s.auth.user?.org_id);
@@ -559,6 +613,7 @@ function SecretProviderPanel() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [confirm, confirmEl] = useConfirm();
 
   const load = useCallback(async () => {
     if (!orgId) { setLoading(false); return; }
@@ -575,6 +630,8 @@ function SecretProviderPanel() {
 
   const apply = async () => {
     if (!orgId) return;
+    if (choice === 'builtin' && current !== 'builtin'
+      && !(await confirm({ message: `Reset the secret backend from ${current} to builtin? The ${current} configuration is removed and secrets are served from the platform database.`, confirmLabel: 'reset to builtin' }))) return;
     setSaving(true); setError(null); setNotice(null);
     try {
       let cfg: Record<string, unknown> | undefined;
@@ -594,6 +651,7 @@ function SecretProviderPanel() {
 
   return (
     <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '16px', marginBottom: 20 }}>
+      {confirmEl}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
         <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1 }}>SECRET BACKEND</div>
         {loading ? <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>· · ·</span>
@@ -625,6 +683,7 @@ function SecretProviderPanel() {
 
 // ── Secrets tab ───────────────────────────────────────────────────────────────
 
+/** secrets tab: renders the secret-backend panel plus a flat list of secrets; create (createSecret), rotate the value in place (updateSecret), and delete (deleteSecret) — values are write-only, never displayed. */
 function SecretsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [secrets, setSecrets] = useState<Secret[]>([]);
@@ -670,7 +729,11 @@ function SecretsTab() {
     finally { setCreating(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const name = secrets.find(s => s.secret_id === id)?.name;
+    if (!(await confirm({ message: `Delete secret ${name ?? id}? Services relying on it will lose access.` }))) return;
     setDeletingId(id);
     try {
       await deleteSecret(token, id);
@@ -681,6 +744,7 @@ function SecretsTab() {
 
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
+      {confirmEl}
       <SecretProviderPanel />
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1 }}>SECRETS · {secrets.length}</div>
@@ -759,9 +823,11 @@ function SecretsTab() {
 
 // ── Teams tab ─────────────────────────────────────────────────────────────────
 
+/** teams tab: master/detail list of teams; create (createTeam, optional role_id), rename (updateTeam), delete (deleteTeam), and invite a member by email (inviteToTeam) from the detail pane. */
 function TeamsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [teams, setTeams] = useState<Team[]>([]);
+  const [roles, setRoles] = useState<Role[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -784,9 +850,13 @@ function TeamsTab() {
   }, [token]);
 
   useEffect(() => { fetchTeams(); }, [fetchTeams]);
+  // Roles back the create form's role picker and resolve a team's role_id to a
+  // name in the detail pane. Best effort — the picker degrades to "no roles".
+  useEffect(() => { listRoles(token).then(setRoles).catch(() => {}); }, [token]);
   useEffect(() => { setEditing(false); }, [selected]);
 
   const selectedTeam = teams.find(t => t.team_id === selected);
+  const roleById = useMemo(() => new Map(roles.map(r => [r.role_id, r])), [roles]);
 
   const handleRename = async (id: string) => {
     if (!editName.trim()) return;
@@ -810,7 +880,12 @@ function TeamsTab() {
     finally { setCreating(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.teams', 260, { min: 200, max: 480 });
+
   const handleDelete = async (id: string) => {
+    const name = teams.find(t => t.team_id === id)?.team_name;
+    if (!(await confirm({ message: `Delete team ${name ?? id}? Its memberships will be removed.` }))) return;
     try {
       await deleteTeam(token, id);
       setTeams(prev => prev.filter(t => t.team_id !== id));
@@ -831,7 +906,8 @@ function TeamsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      {confirmEl}
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{teams.length > 0 ? `${teams.length} team${teams.length !== 1 ? 's' : ''}` : ''}</span>
           <div style={{ display: 'flex', gap: 6 }}>
@@ -844,7 +920,10 @@ function TeamsTab() {
           <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card }}>
             {error && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{error}</div>}
             <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="team name" autoFocus style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }} />
-            <input value={newRoleId} onChange={e => setNewRoleId(e.target.value)} placeholder="role ID (optional)" style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }} />
+            <select value={newRoleId} onChange={e => setNewRoleId(e.target.value)} style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }}>
+              <option value="">no role</option>
+              {roles.map(r => <option key={r.role_id} value={r.role_id}>{roleLabel(r)}</option>)}
+            </select>
             <div style={{ display: 'flex', gap: 6 }}>
               <button onClick={handleCreate} disabled={!newName.trim() || creating}
                 style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 10, fontWeight: 600, padding: '5px 0', cursor: 'pointer', opacity: (!newName.trim() || creating) ? 0.6 : 1 }}>
@@ -862,11 +941,11 @@ function TeamsTab() {
               <button key={t.team_id} onClick={() => setSelected(t.team_id)}
                 style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{t.team_name}</div>
-                <div style={{ fontSize: 10, color: T.faint, marginTop: 2 }}>{t.team_id.slice(0, 8)}…</div>
               </button>
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedTeam ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -878,7 +957,7 @@ function TeamsTab() {
               <div>
                 <div style={{ fontFamily: T.mono, fontSize: 20, fontWeight: 700, color: T.textHi, marginBottom: 4 }}>{selectedTeam.team_name}</div>
                 <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>updated {timeAgo(selectedTeam.updated_at)} ago</div>
-                {selectedTeam.role_id && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, marginTop: 2 }}>role: {selectedTeam.role_id.slice(0, 8)}…</div>}
+                {selectedTeam.role_id && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, marginTop: 2 }}>role: {(() => { const r = roleById.get(selectedTeam.role_id); return r ? roleLabel(r) : shortId(selectedTeam.role_id); })()}</div>}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button onClick={() => { if (editing) { setEditing(false); } else { setEditName(selectedTeam.team_name); setError(null); setEditing(true); } }}
@@ -924,6 +1003,7 @@ function TeamsTab() {
 
 // ── Orgs tab ──────────────────────────────────────────────────────────────────
 
+/** orgs tab: master/detail list of orgs; create (createOrg), rename (updateOrg), delete (deleteOrg), and invite a member by email (inviteToOrg) from the detail pane. */
 function OrgsTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [orgs, setOrgs] = useState<Org[]>([]);
@@ -974,7 +1054,12 @@ function OrgsTab() {
     finally { setSavingEdit(false); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.orgs', 260, { min: 200, max: 480 });
+
   const handleDelete = async (id: string) => {
+    const name = orgs.find(o => o.org_id === id)?.org_name;
+    if (!(await confirm({ message: `Delete org ${name ?? id}? This removes the organization and its scoped resources.` }))) return;
     try {
       await deleteOrg(token, id);
       setOrgs(prev => prev.filter(o => o.org_id !== id));
@@ -995,7 +1080,8 @@ function OrgsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      {confirmEl}
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{orgs.length > 0 ? `${orgs.length} org${orgs.length !== 1 ? 's' : ''}` : ''}</span>
           <div style={{ display: 'flex', gap: 6 }}>
@@ -1027,11 +1113,11 @@ function OrgsTab() {
               <button key={o.org_id} onClick={() => setSelected(o.org_id)}
                 style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: isActive ? T.textHi : T.text }}>{o.org_name}</div>
-                <div style={{ fontSize: 10, color: T.faint, marginTop: 2 }}>{o.org_id.slice(0, 8)}…</div>
               </button>
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedOrg ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -1091,6 +1177,7 @@ function OrgsTab() {
 
 // ── Invites tab ───────────────────────────────────────────────────────────────
 
+/** invites tab: flat list of invites with accept/decline (acceptInvite/declineInvite) on pending ones and delete (deleteInvite) on any. */
 function InvitesTab() {
   const token = useAppSelector(s => s.auth.token)!;
   const [invites, setInvites] = useState<Invite[]>([]);
@@ -1125,7 +1212,11 @@ function InvitesTab() {
     finally { setActing(null); }
   };
 
+  const [confirm, confirmEl] = useConfirm();
+
   const handleDelete = async (id: string) => {
+    const email = invites.find(i => i.invite_id === id)?.email;
+    if (!(await confirm({ message: `Delete invite for ${email ?? id}? The invitation link will stop working.` }))) return;
     setActing(id);
     try {
       await deleteInvite(token, id);
@@ -1134,6 +1225,7 @@ function InvitesTab() {
     finally { setActing(null); }
   };
 
+  /** maps an invite status to a pill tone (accepted=green, pending=amber, declined=red, else dim). */
   function inviteTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
     if (status === 'accepted') return 'green';
     if (status === 'pending') return 'amber';
@@ -1143,6 +1235,7 @@ function InvitesTab() {
 
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
+      {confirmEl}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1 }}>INVITES · {invites.length}</div>
         <button onClick={fetchInvites} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>↻</button>
@@ -1183,10 +1276,178 @@ function InvitesTab() {
   );
 }
 
+// ── Signup allowlist tab ──────────────────────────────────────────────────────
+
+/**
+ * signups tab: manage invite-only registration. A policy panel toggles invite-only
+ * mode on/off (setSignupPolicy); below it, an allowlist of permitted emails and
+ * @domain rules that may register while invite-only is on — add (addSignupAllowlist),
+ * list (listSignupAllowlist), and delete-with-confirm (deleteSignupAllowlist).
+ */
+function AllowlistTab() {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [entries, setEntries] = useState<SignupAllowlistEntry[]>([]);
+  const [inviteOnly, setInviteOnly] = useState<boolean | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newEmail, setNewEmail] = useState('');
+  const [newNote, setNewNote] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [togglingPolicy, setTogglingPolicy] = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const [list, policy] = await Promise.all([listSignupAllowlist(token), getSignupPolicy(token)]);
+      setEntries(list);
+      setInviteOnly(policy.invite_only);
+    } catch (e: unknown) { setError((e as Error).message); }
+    finally { setLoading(false); }
+  }, [token]);
+
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  const applyPolicy = async (next: boolean) => {
+    if (next === inviteOnly || togglingPolicy) return;
+    setTogglingPolicy(true); setError(null);
+    try {
+      const p = await setSignupPolicy(token, next);
+      setInviteOnly(p.invite_only);
+    } catch (e: unknown) { setError((e as Error).message); }
+    finally { setTogglingPolicy(false); }
+  };
+
+  const handleAdd = async () => {
+    const email = newEmail.trim();
+    if (!email || adding) return;
+    setAdding(true); setError(null);
+    try {
+      const entry = await addSignupAllowlist(token, email, newNote.trim() || undefined);
+      setEntries(prev => [entry, ...prev]);
+      setNewEmail(''); setNewNote(''); setShowCreate(false);
+    } catch (e: unknown) { setError((e as Error).message); }
+    finally { setAdding(false); }
+  };
+
+  const [confirm, confirmEl] = useConfirm();
+
+  const handleDelete = async (id: string) => {
+    const email = entries.find(e => e.entry_id === id)?.email;
+    if (!(await confirm({ message: `Remove ${email ?? id} from the sign-up allowlist? If invite-only is on, this email will no longer be able to register.` }))) return;
+    setDeletingId(id); setError(null);
+    try {
+      await deleteSignupAllowlist(token, id);
+      setEntries(prev => prev.filter(e => e.entry_id !== id));
+    } catch (e: unknown) { setError((e as Error).message); }
+    finally { setDeletingId(null); }
+  };
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
+      {confirmEl}
+
+      {/* Policy panel */}
+      <div style={{ background: T.card, border: `1px solid ${T.borderHi}`, padding: '14px 16px', marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+              <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1 }}>REGISTRATION POLICY</span>
+              {inviteOnly !== null && (
+                <Pill tone={inviteOnly ? 'green' : 'dim'}>{inviteOnly ? 'invite-only' : 'open'}</Pill>
+              )}
+            </div>
+            <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, lineHeight: 1.5 }}>
+              {inviteOnly
+                ? 'only emails matching the allowlist below can create an account.'
+                : 'anyone can create an account. enable invite-only to restrict sign-ups.'}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 0, border: `1px solid ${T.border}` }}>
+            <button onClick={() => applyPolicy(false)} disabled={togglingPolicy || inviteOnly === null}
+              style={{ background: inviteOnly === false ? T.greenSoft : 'transparent', border: 'none', borderRight: `1px solid ${T.border}`, color: inviteOnly === false ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '6px 14px', cursor: togglingPolicy ? 'default' : 'pointer' }}>
+              [ open ]
+            </button>
+            <button onClick={() => applyPolicy(true)} disabled={togglingPolicy || inviteOnly === null}
+              style={{ background: inviteOnly === true ? T.greenSoft : 'transparent', border: 'none', color: inviteOnly === true ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '6px 14px', cursor: togglingPolicy ? 'default' : 'pointer' }}>
+              [ invite-only ]
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Allowlist header + add */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+        <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1 }}>ALLOWLIST · {entries.length}</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => { setShowCreate(v => !v); setError(null); }}
+            style={{ background: showCreate ? T.greenSoft : 'transparent', border: `1px solid ${showCreate ? T.green : T.border}`, color: showCreate ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+            + add
+          </button>
+          <button onClick={fetchAll} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>↻</button>
+        </div>
+      </div>
+
+      {showCreate && (
+        <div style={{ background: T.card, border: `1px solid ${T.borderHi}`, padding: '16px', marginBottom: 20 }}>
+          {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>{error}</div>}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            <div>
+              <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>EMAIL OR @DOMAIN</div>
+              <input value={newEmail} onChange={e => setNewEmail(e.target.value)} autoFocus placeholder="you@company.dev or @company.dev"
+                onKeyDown={e => e.key === 'Enter' && handleAdd()} style={{ ...inputStyle, background: T.cardHi }} />
+            </div>
+            <div>
+              <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 6, letterSpacing: 0.5 }}>NOTE (OPTIONAL)</div>
+              <input value={newNote} onChange={e => setNewNote(e.target.value)} placeholder="e.g. new hire, contractor"
+                onKeyDown={e => e.key === 'Enter' && handleAdd()} style={{ ...inputStyle, background: T.cardHi }} />
+            </div>
+          </div>
+          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 12, lineHeight: 1.5 }}>
+            → a full address (alice@co.com) matches one person; a @domain rule (@co.com) matches everyone at that domain.
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={handleAdd} disabled={!newEmail.trim() || adding}
+              style={{ background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 12, fontWeight: 600, padding: '7px 16px', cursor: 'pointer', opacity: (!newEmail.trim() || adding) ? 0.6 : 1 }}>
+              {adding ? '[ · · · ]' : '[ add ]'}
+            </button>
+            <button onClick={() => { setShowCreate(false); setNewEmail(''); setNewNote(''); }} style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '7px 12px', cursor: 'pointer' }}>cancel</button>
+          </div>
+        </div>
+      )}
+      {error && !showCreate && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '10px 14px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 16 }}>{error}</div>}
+
+      {loading ? <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
+        : entries.length === 0 ? <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '20px', fontFamily: T.mono, fontSize: 12, color: T.faint, textAlign: 'center' }}>→ no allowlisted emails{inviteOnly ? ' — nobody can register until you add one' : ''}</div>
+        : (
+          <div style={{ background: T.card, border: `1px solid ${T.border}`, overflow: 'hidden' }}>
+            {entries.map((entry, i) => (
+              <div key={entry.entry_id} style={{ display: 'flex', alignItems: 'center', padding: '10px 14px', borderBottom: i < entries.length - 1 ? `1px solid ${T.border}` : 'none', gap: 12 }}>
+                {entry.email.startsWith('@') && <Pill tone="blue">domain</Pill>}
+                <span style={{ fontFamily: T.mono, fontSize: 13, color: T.textHi, fontWeight: 600 }}>{entry.email}</span>
+                {entry.note && <span style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, flex: 1 }}>{entry.note}</span>}
+                <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginLeft: entry.note ? 0 : 'auto' }}>{timeAgo(entry.created_at)} ago</span>
+                <button onClick={() => handleDelete(entry.entry_id)} disabled={deletingId === entry.entry_id}
+                  style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 8px', cursor: 'pointer', opacity: deletingId === entry.entry_id ? 0.5 : 1 }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
+                  [ delete ]
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+    </div>
+  );
+}
+
 // ── Service requests tab ──────────────────────────────────────────────────────
 
+/** service-requests tab: master/detail list of service-permission-requests (filterable by status); the detail pane shows the requested permissions and approves/declines pending ones via approveServiceRequest/declineServiceRequest. */
 function ServiceRequestsTab() {
   const token = useAppSelector(s => s.auth.token)!;
+  const userNames = useUserNames(token);
   const [requests, setRequests] = useState<ServiceRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1202,6 +1463,7 @@ function ServiceRequestsTab() {
   }, [token, statusFilter]);
 
   useEffect(() => { fetchRequests(); }, [fetchRequests]);
+  const [railW, railHandle] = useResizableWidth('rail.gatekeeper.service-requests', 260, { min: 200, max: 480 });
 
   const selectedReq = requests.find(r => r.request_id === selected);
 
@@ -1223,6 +1485,7 @@ function ServiceRequestsTab() {
     finally { setActing(null); }
   };
 
+  /** maps a service-request status to a pill tone (approved=green, pending=amber, declined=red, else dim). */
   function reqTone(status: string): 'green' | 'amber' | 'red' | 'dim' {
     if (status === 'approved') return 'green';
     if (status === 'pending') return 'amber';
@@ -1232,7 +1495,7 @@ function ServiceRequestsTab() {
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-      <div style={{ width: 260, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt, overflow: 'auto' }}>
         <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
             <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{requests.length} request{requests.length !== 1 ? 's' : ''}</span>
@@ -1260,6 +1523,7 @@ function ServiceRequestsTab() {
             );
           })}
       </div>
+      {railHandle}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {!selectedReq ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
@@ -1274,7 +1538,7 @@ function ServiceRequestsTab() {
                   <span style={{ fontFamily: T.mono, fontSize: 18, fontWeight: 700, color: T.textHi }}>{selectedReq.service_name}</span>
                 </div>
                 <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
-                  requested by {selectedReq.requested_by.slice(0, 8)}… · {timeAgo(selectedReq.created_at)} ago
+                  requested by {userNames[selectedReq.requested_by] ?? shortId(selectedReq.requested_by)} · {timeAgo(selectedReq.created_at)} ago
                 </div>
               </div>
               {selectedReq.status === 'pending' && (
@@ -1312,6 +1576,7 @@ function ServiceRequestsTab() {
 
 // ── Gatekeeper page ───────────────────────────────────────────────────────────
 
+/** tab descriptors paired with the gatekeeper permission key each one requires to be shown. */
 const ALL_TABS: { id: Tab; label: string; permission: string }[] = [
   { id: 'users',            label: 'users',        permission: 'gatekeeper:listUser' },
   { id: 'roles',            label: 'roles',        permission: 'gatekeeper:listRole' },
@@ -1320,9 +1585,11 @@ const ALL_TABS: { id: Tab; label: string; permission: string }[] = [
   { id: 'teams',            label: 'teams',        permission: 'gatekeeper:listTeam' },
   { id: 'orgs',             label: 'orgs',         permission: 'gatekeeper:listOrg' },
   { id: 'invites',          label: 'invites',      permission: 'gatekeeper:listInvite' },
+  { id: 'allowlist',        label: 'signups',      permission: 'gatekeeper:listSignupAllowlist' },
   { id: 'service-requests', label: 'svc requests', permission: 'gatekeeper:listSPR' },
 ];
 
+/** gatekeeper admin page: renders the tab bar (filtered to the tabs the caller's redux permissions allow) and switches between the entity tabs, defaulting to the first visible one. */
 export function Gatekeeper() {
   const permissions = useAppSelector(s => s.auth.permissions);
   const visibleTabs = permissions
@@ -1359,6 +1626,7 @@ export function Gatekeeper() {
         {tab === 'teams' && <TeamsTab />}
         {tab === 'orgs' && <OrgsTab />}
         {tab === 'invites' && <InvitesTab />}
+        {tab === 'allowlist' && <AllowlistTab />}
         {tab === 'service-requests' && <ServiceRequestsTab />}
       </div>
     </div>

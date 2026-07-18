@@ -13,11 +13,41 @@ const defaultOrgID = "default"
 
 // coreServices are control-plane services that are always available to every org
 // and can never be toggled off — disabling any of them would sever the platform.
+// They are shipped by the Helm chart (not deployed/registered by builder) and so are
+// excluded from the catalog, never reconciled, and rejected by the set-service API.
+// forge + workflows are the CI/CD pair: the chart deploys them and registers them via
+// the registry manifest, so builder treats them as core like the rest. tickets and
+// containers were likewise promoted to core: the chart deploys their published images
+// and registers them via the registry manifest. The core git service is the
+// backend-agnostic credential broker (src/systems/git); gitea_integration (Forgejo
+// repo management) is NOT core — most users do not run Forgejo, so builder deploys it
+// on demand from files/services/gitea_integration.json.
 var coreServices = map[string]bool{
-	"gatekeeper": true,
-	"conductor":  true,
-	"registry":   true,
-	"builder":    true,
+	"artifacts":     true,
+	"gatekeeper":    true,
+	"conductor":     true,
+	"registry":      true,
+	"builder":       true,
+	"forge":         true,
+	"workflows":     true,
+	"tickets":       true,
+	"git_connector": true,
+	"containers":    true,
+}
+
+// comingSoonServices are the platform services whose source was spun out into its
+// own codearmory-<svc> repo and so is NOT in this monorepo. This repo's CI does not
+// build their images yet, so on the core-only bundle they are surfaced as
+// "coming soon": they still appear in the builder catalog, but the effective view
+// forces them disabled and the set-service API refuses to enable them until their
+// images ship. Keep this in sync with the spun-off set in CLAUDE.md.
+var comingSoonServices = map[string]bool{
+	"argo":              true,
+	"blueprints":        true,
+	"chaos":             true,
+	"gitea_integration": true,
+	"mcp":               true,
+	"notifications":     true,
 }
 
 // kinds of org-service rows.
@@ -44,10 +74,15 @@ type OrgService struct {
 	// DBURLCiphertext is the admin-supplied per-service database URL, AES-256-GCM
 	// encrypted (AAD = service name) and never serialized. DBHost is a redacted
 	// host:port/db kept only for display.
-	DBURLCiphertext []byte    `json:"-"                 gorm:"column:db_url_ct"`
-	DBHost          string    `json:"-"                 gorm:"column:db_host;default:''"`
-	CreatedAt       time.Time `json:"created_at"        gorm:"column:created_at"`
-	UpdatedAt       time.Time `json:"updated_at"        gorm:"column:updated_at"`
+	DBURLCiphertext []byte `json:"-"                 gorm:"column:db_url_ct"`
+	DBHost          string `json:"-"                 gorm:"column:db_host;default:''"`
+	// SecretsCiphertext is the admin-supplied sensitive config (REDIS_URL,
+	// GITEA_ADMIN_TOKEN, REGISTRY_PASSWORD, …) as an AES-256-GCM-encrypted JSON map
+	// (AAD = service name), never serialized. Builder writes each entry into the
+	// service's Secret under its conventional key on provision.
+	SecretsCiphertext []byte    `json:"-"                 gorm:"column:secrets_ct"`
+	CreatedAt         time.Time `json:"created_at"        gorm:"column:created_at"`
+	UpdatedAt         time.Time `json:"updated_at"        gorm:"column:updated_at"`
 }
 
 func (OrgService) TableName() string { return "org_services" }
@@ -60,12 +95,16 @@ type serviceView struct {
 	Service     string         `json:"service"`
 	Enabled     bool           `json:"enabled"`
 	Kind        string         `json:"kind"`
-	Source      string         `json:"source"` // "default" | "override" | "custom" | "catalog"
+	Source      string         `json:"source"` // "core" | "default" | "override" | "custom" | "registry" | "catalog"
 	Config      map[string]any `json:"config,omitempty"`
 	Image       string         `json:"image,omitempty"`
 	Port        int            `json:"port,omitempty"`
 	Description string         `json:"description,omitempty"`
 	Core        bool           `json:"core,omitempty"`
+	// ComingSoon flags a spun-off service (source not in this repo, see
+	// comingSoonServices) that cannot be enabled yet. The view is forced disabled
+	// and every UI shows a "coming soon" badge instead of an enable control.
+	ComingSoon bool `json:"coming_soon,omitempty"`
 	// DBConfigured reports whether a per-service DB URL has been stored; DBHost is
 	// the redacted host for display. The URL itself is never returned.
 	DBConfigured bool   `json:"db_configured"`
@@ -82,6 +121,15 @@ type setServiceRequest struct {
 	Port        int            `json:"port"`
 	Description string         `json:"description"`
 	DBUrl       string         `json:"db_url"`
+	// MaintenanceDBUrl is used only by the sql db backend: a CREATEDB(/CREATEROLE)
+	// connection builder uses ONCE to provision the per-service database, then discards
+	// (it is never stored). Write-only; never read back. Empty falls back to the
+	// globally-configured BUILDER_DB_SQL_MAINTENANCE_URL.
+	MaintenanceDBUrl string `json:"maintenance_db_url"`
+	// Secrets is admin-supplied sensitive config keyed by env var name (e.g.
+	// REDIS_URL, GITEA_ADMIN_TOKEN, REGISTRY_PASSWORD). Write-only: encrypted on
+	// receipt and never read back. Non-sensitive config goes in Config.
+	Secrets map[string]string `json:"secrets"`
 }
 
 // effectiveResponse is the internal disabled-set returned to the gatekeeper gate.

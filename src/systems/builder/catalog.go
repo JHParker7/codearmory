@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -37,11 +38,34 @@ var (
 	catalogCacheTTL = 5 * time.Minute
 )
 
-// serviceCatalog returns the list of toggle-able platform services (core
-// services excluded). It is best-effort: on a registry error it returns the last
-// good cache (possibly empty) so the admin UI degrades to the configured rows
-// rather than failing outright.
+// serviceCatalog returns the list of toggle-able platform services (core services
+// excluded). The builder-embedded definitions are the authoritative set and are
+// always present (even when the registry is unreachable); registry-live non-core
+// services (custom/out-of-band registrations) are merged on top.
 func serviceCatalog(ctx context.Context) []catalogEntry {
+	byName := map[string]catalogEntry{}
+	if defs, err := loadEmbeddedDefs(); err == nil {
+		for _, d := range defs {
+			byName[d.RegistryName] = catalogEntry{Name: d.RegistryName, Description: d.Description}
+		}
+	}
+	for _, e := range liveCatalog(ctx) {
+		if _, ok := byName[e.Name]; !ok {
+			byName[e.Name] = e
+		}
+	}
+	out := make([]catalogEntry, 0, len(byName))
+	for _, e := range byName {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// liveCatalog returns the registry's live non-core services. It is best-effort: on a
+// registry error it returns the last good cache (possibly empty) so the admin UI
+// degrades to the embedded/configured rows rather than failing outright.
+func liveCatalog(ctx context.Context) []catalogEntry {
 	ctx, span := otel.Tracer("builder").Start(ctx, "catalog.list")
 	defer span.End()
 
@@ -69,6 +93,20 @@ func serviceCatalog(ctx context.Context) []catalogEntry {
 	catalogFetched = time.Now()
 	catalogMu.Unlock()
 	return fresh
+}
+
+// liveServiceNames returns the set of non-core service names the registry currently
+// advertises. The registry is the source of truth for what conductor will route, so
+// builder uses it to mark a service live in the effective view even when builder has
+// no baseline row for it — e.g. forge/workflows, which the chart ships and registers
+// directly. Best-effort: an empty set on a registry blip degrades a live service to
+// default-OFF rather than failing the list.
+func liveServiceNames(ctx context.Context) map[string]bool {
+	set := map[string]bool{}
+	for _, e := range liveCatalog(ctx) {
+		set[e.Name] = true
+	}
+	return set
 }
 
 func fetchCatalog(ctx context.Context) ([]catalogEntry, error) {

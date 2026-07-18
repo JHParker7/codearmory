@@ -71,11 +71,50 @@ func TestBuildJob_NonRootSecurityContext(t *testing.T) {
 	}
 }
 
+// TestBuildJob_EgressProxyEnv verifies the exec pod gets the egress-proxy env vars
+// when FORGE_EGRESS_PROXY is set: the NetworkPolicy confines exec pods to the proxy,
+// so without HTTP(S)_PROXY a clone dials the host directly and is blocked, failing
+// right after "Cloning into…". A user-set value in exec.Env must win.
+func TestBuildJob_EgressProxyEnv(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge", egressProxy: "http://egress-proxy:3128"}
+	exec := Execution{
+		ExecutionID: "exec-1",
+		Image:       "alpine:3.19",
+		Command:     []string{"sh", "-c", "git clone $GIT_CLONE_URL ."},
+		TimeoutSecs: 30,
+		Env:         map[string]string{"NO_PROXY": "example.internal"}, // user override
+	}
+
+	env := map[string]string{}
+	for _, e := range r.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+
+	if got := env["HTTPS_PROXY"]; got != "http://egress-proxy:3128" {
+		t.Errorf("HTTPS_PROXY = %q, want the egress proxy URL", got)
+	}
+	if got := env["HTTP_PROXY"]; got != "http://egress-proxy:3128" {
+		t.Errorf("HTTP_PROXY = %q, want the egress proxy URL", got)
+	}
+	// User-set NO_PROXY wins over the injected default.
+	if got := env["NO_PROXY"]; got != "example.internal" {
+		t.Errorf("NO_PROXY = %q, want the user override to win", got)
+	}
+
+	// With no proxy configured (e.g. kata), nothing is injected.
+	bare := &KubernetesRuntime{namespace: "forge"}
+	for _, e := range bare.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "HTTP_PROXY" || e.Name == "HTTPS_PROXY" {
+			t.Errorf("no proxy configured but %s was injected", e.Name)
+		}
+	}
+}
+
 // TestBuildJob_PrivilegedKata verifies the kata (VM-isolated) opt-in: a runner
 // class with Privileged runs the job as root with a writable rootfs and privilege
 // escalation allowed so package managers work — the microVM is the boundary.
 func TestBuildJob_PrivilegedKata(t *testing.T) {
-	r := &KubernetesRuntime{namespace: "forge", vmIsolated: true}
+	r := &KubernetesRuntime{namespace: "forge", kernelIsolated: true}
 	spec := stdRunnerSpec()
 	spec.Privileged = true
 	exec := Execution{ExecutionID: "exec-1", Image: "ubuntu:22.04", Command: []string{"apt-get", "update"}, TimeoutSecs: 30}
@@ -111,7 +150,7 @@ func TestBuildJob_PrivilegedKata(t *testing.T) {
 // MUST stay fully locked down — root in a shared-kernel container is an escape
 // risk, so the flag is dropped at runtime regardless of what the class requests.
 func TestBuildJob_PrivilegedIgnoredWithoutVMIsolation(t *testing.T) {
-	r := &KubernetesRuntime{namespace: "forge", vmIsolated: false}
+	r := &KubernetesRuntime{namespace: "forge", kernelIsolated: false}
 	spec := stdRunnerSpec()
 	spec.Privileged = true
 	exec := Execution{ExecutionID: "exec-1", Image: "ubuntu:22.04", Command: []string{"apt-get", "update"}, TimeoutSecs: 30}
@@ -166,8 +205,11 @@ func TestBuildJob_PlumbsExecutionFields(t *testing.T) {
 	if cmd := pod.Containers[0].Command; len(cmd) != 3 || cmd[0] != "python" {
 		t.Errorf("command = %v", cmd)
 	}
-	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 42 {
-		t.Errorf("ActiveDeadlineSeconds = %v, want 42", job.Spec.ActiveDeadlineSeconds)
+	// ActiveDeadlineSeconds is the command timeout plus the startup grace: it counts
+	// from pod creation, so it must leave room for ContainerCreating (volume bind +
+	// image pull) on top of the command's own budget.
+	if want := int64(42) + podStartupGraceSecs; job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != want {
+		t.Errorf("ActiveDeadlineSeconds = %v, want %d", job.Spec.ActiveDeadlineSeconds, want)
 	}
 	if amt := pod.AutomountServiceAccountToken; amt == nil || *amt {
 		t.Error("AutomountServiceAccountToken should be false (no cluster credentials in the sandbox)")
@@ -186,6 +228,63 @@ func TestNoPodError(t *testing.T) {
 	}
 	if got := noPodError("", "").Error(); !strings.Contains(got, "RuntimeClass") {
 		t.Errorf("generic hint should mention RuntimeClass, got %q", got)
+	}
+}
+
+// TestClarifyNoLogFailure verifies the opaque Kubernetes reasons behind a no-logs
+// failure are rewritten into plain-language, actionable messages, while an
+// unrecognised reason is passed through under the original prefix.
+func TestClarifyNoLogFailure(t *testing.T) {
+	const budget = int64(330)
+	cases := []struct {
+		name   string
+		detail string
+		want   []string // all substrings must be present
+	}{
+		{
+			name:   "still ContainerCreating reads as a startup timeout",
+			detail: "ContainerCreating",
+			want:   []string{"timed out after 330s", "still starting", "ContainerCreating"},
+		},
+		{
+			name:   "ContainerStatusUnknown reads as a startup timeout",
+			detail: "ContainerStatusUnknown: The container could not be located when the pod was terminated",
+			want:   []string{"timed out after 330s", "still starting", "FORGE_POD_STARTUP_GRACE_SECS"},
+		},
+		{
+			name:   "insufficient cpu names the runner class as the cause",
+			detail: "FailedScheduling: 0/3 nodes are available: 3 Insufficient cpu.",
+			want:   []string{"could not be scheduled", "runner class requests more", "Insufficient cpu"},
+		},
+		{
+			name:   "generic scheduling failure keeps the raw detail",
+			detail: "FailedScheduling: 0/3 nodes are available: no node has the kata-fc handler",
+			want:   []string{"could not be scheduled", "RuntimeClass", "kata-fc"},
+		},
+		{
+			name:   "unrecognised reason passes through under the original prefix",
+			detail: "OOMKilled",
+			want:   []string{"pod produced no logs: OOMKilled"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clarifyNoLogFailure(tc.detail, budget)
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("clarifyNoLogFailure(%q) = %q, want substring %q", tc.detail, got, w)
+				}
+			}
+		})
+	}
+}
+
+// TestNoPodError_InsufficientResources checks the pod-never-scheduled path also
+// names the runner class when the scheduler reported insufficient CPU/memory.
+func TestNoPodError_InsufficientResources(t *testing.T) {
+	got := noPodError("FailedScheduling: 0/3 nodes are available: 3 Insufficient cpu.", "").Error()
+	if !strings.Contains(got, "runner class") || !strings.Contains(got, "Insufficient cpu") {
+		t.Errorf("noPodError = %q, want the runner-class hint plus the raw reason", got)
 	}
 }
 
@@ -664,4 +763,277 @@ func TestBuildJob_RuntimeClassName(t *testing.T) {
 	if got := plain.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec.RuntimeClassName; got != nil {
 		t.Errorf("RuntimeClassName = %q, want nil for a plain k8s backend", *got)
 	}
+}
+
+// TestBuildJob_AttachesVolumes checks a shared workspace volume becomes a PVC-backed
+// pod volume mounted at its path, with the runner's working directory pinned to the
+// mount that sets workdir. This is what lets a git step's checkout be visible (and
+// the process start) inside the shared volume.
+func TestBuildJob_AttachesVolumes(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge"}
+	exec := Execution{
+		ExecutionID: "exec-1", Image: "alpine:3.19", Command: []string{"true"}, TimeoutSecs: 30,
+		Volumes: []VolumeMount{{WorkflowID: "run-1", Name: "workspace", MountPath: "/workspace", Workdir: true}},
+	}
+	pod := r.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec
+
+	want := volumeResourceName("run-1", "workspace")
+	var pvcVolName string
+	for _, v := range pod.Volumes {
+		if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == want {
+			pvcVolName = v.Name
+		}
+	}
+	if pvcVolName == "" {
+		t.Fatalf("no pod volume backed by PVC %q; volumes=%+v", want, pod.Volumes)
+	}
+
+	c := pod.Containers[0]
+	if c.WorkingDir != "/workspace" {
+		t.Errorf("WorkingDir = %q, want /workspace", c.WorkingDir)
+	}
+	mounted := false
+	for _, m := range c.VolumeMounts {
+		if m.Name == pvcVolName && m.MountPath == "/workspace" {
+			mounted = true
+		}
+	}
+	if !mounted {
+		t.Errorf("PVC volume not mounted at /workspace; mounts=%+v", c.VolumeMounts)
+	}
+	// The always-present tmpfs /tmp must survive alongside the new mount.
+	tmp := false
+	for _, m := range c.VolumeMounts {
+		if m.MountPath == "/tmp" {
+			tmp = true
+		}
+	}
+	if !tmp {
+		t.Error("/tmp mount was dropped when attaching a volume")
+	}
+}
+
+// TestBuildJob_NoVolumes keeps the default (no shared storage): just the /tmp mount,
+// and no working directory override.
+func TestBuildJob_NoVolumes(t *testing.T) {
+	r := &KubernetesRuntime{namespace: "forge"}
+	exec := Execution{ExecutionID: "exec-1", Image: "alpine:3.19", Command: []string{"true"}, TimeoutSecs: 30}
+	c := r.buildJob(exec, stdRunnerSpec()).Spec.Template.Spec.Containers[0]
+	if c.WorkingDir != "" {
+		t.Errorf("WorkingDir = %q, want empty when no workdir volume", c.WorkingDir)
+	}
+	if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].MountPath != "/tmp" {
+		t.Errorf("want only the /tmp mount, got %+v", c.VolumeMounts)
+	}
+}
+
+// TestKubernetesCreateDeleteVolume exercises the PVC lifecycle against the fake
+// clientset: create provisions a correctly-sized PVC, create is idempotent, and
+// delete removes it (and is idempotent on a missing PVC).
+func TestKubernetesCreateDeleteVolume(t *testing.T) {
+	initVolumeConfig()
+	// A resolvable StorageClass is required: with the fake clientset (no admission)
+	// an empty class leaves the PVC class-less, which CreateVolume now rejects. This
+	// mirrors production, where either an explicit class or the cluster default is
+	// stamped onto the PVC.
+	volumeStorageClass = "test-sc"
+	t.Cleanup(func() { volumeStorageClass = "" })
+	r := &KubernetesRuntime{client: fake.NewSimpleClientset(), namespace: "forge"}
+	ctx := context.Background()
+	name := volumeResourceName("run-1", "workspace")
+
+	if err := r.CreateVolume(ctx, VolumeSpec{ResourceName: name, SizeMB: 512, Medium: mediumMemory}); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	pvc, err := r.client.CoreV1().PersistentVolumeClaims("forge").Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("PVC not created: %v", err)
+	}
+	if got := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; got.String() != "512Mi" {
+		t.Errorf("PVC size = %s, want 512Mi", got.String())
+	}
+	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteOnce {
+		t.Errorf("PVC access modes = %v, want [ReadWriteOnce]", pvc.Spec.AccessModes)
+	}
+
+	// Idempotent create (already exists) must not error.
+	if err := r.CreateVolume(ctx, VolumeSpec{ResourceName: name, SizeMB: 512, Medium: mediumMemory}); err != nil {
+		t.Fatalf("idempotent CreateVolume: %v", err)
+	}
+
+	if err := r.DeleteVolume(ctx, name); err != nil {
+		t.Fatalf("DeleteVolume: %v", err)
+	}
+	if _, err := r.client.CoreV1().PersistentVolumeClaims("forge").Get(ctx, name, metav1.GetOptions{}); err == nil {
+		t.Error("PVC still present after delete")
+	}
+	// Idempotent delete (already gone) must not error.
+	if err := r.DeleteVolume(ctx, name); err != nil {
+		t.Fatalf("idempotent DeleteVolume: %v", err)
+	}
+}
+
+// TestKubernetesCreateVolume_NoStorageClass covers the misconfiguration that
+// surfaces as "pod has unbound immediate PersistentVolumeClaims" several steps
+// later: no configured class and no cluster default, so the PVC resolves to no
+// StorageClass. CreateVolume must reject it up front and leave no orphan PVC.
+func TestKubernetesCreateVolume_NoStorageClass(t *testing.T) {
+	initVolumeConfig() // resets volumeStorageClass to ""
+	r := &KubernetesRuntime{client: fake.NewSimpleClientset(), namespace: "forge"}
+	ctx := context.Background()
+	name := volumeResourceName("run-1", "workspace")
+
+	err := r.CreateVolume(ctx, VolumeSpec{ResourceName: name, SizeMB: 512, Medium: mediumMemory})
+	if err == nil {
+		t.Fatal("CreateVolume: want error for missing StorageClass, got nil")
+	}
+	if !strings.Contains(err.Error(), "StorageClass") {
+		t.Errorf("error %q does not mention StorageClass", err.Error())
+	}
+	if _, gerr := r.client.CoreV1().PersistentVolumeClaims("forge").Get(ctx, name, metav1.GetOptions{}); gerr == nil {
+		t.Error("unbindable PVC was left behind; want it deleted")
+	}
+}
+
+func pvcWithPhase(name string, phase corev1.PersistentVolumeClaimPhase) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "forge"},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: phase},
+	}
+}
+
+func pvcEvent(name, reason string, typ string) *corev1.Event {
+	return &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: name + "." + reason, Namespace: "forge"},
+		InvolvedObject: corev1.ObjectReference{Kind: "PersistentVolumeClaim", Name: name, Namespace: "forge"},
+		Reason:         reason,
+		Message:        reason + " detail",
+		Type:           typ,
+		LastTimestamp:  metav1.Now(),
+	}
+}
+
+func TestKubernetesVolumeStatus(t *testing.T) {
+	name := "fv-abc-workspace"
+	tests := []struct {
+		desc       string
+		objs       []runtime.Object
+		wantState  string
+		wantDetail string // substring; "" = don't care
+	}{
+		{
+			desc:      "bound is ready",
+			objs:      []runtime.Object{pvcWithPhase(name, corev1.ClaimBound)},
+			wantState: volumeReadyReady,
+		},
+		{
+			desc:      "lost is failed",
+			objs:      []runtime.Object{pvcWithPhase(name, corev1.ClaimLost)},
+			wantState: volumeReadyFailed,
+		},
+		{
+			// WaitForFirstConsumer binds only when a pod mounts it — nothing to wait for
+			// at create time, so report ready and let the mount trigger binding.
+			desc:      "pending + WaitForFirstConsumer event is ready",
+			objs:      []runtime.Object{pvcWithPhase(name, corev1.ClaimPending), pvcEvent(name, "WaitForFirstConsumer", corev1.EventTypeNormal)},
+			wantState: volumeReadyReady,
+		},
+		{
+			desc:       "pending while provisioning keeps waiting, surfaces warning",
+			objs:       []runtime.Object{pvcWithPhase(name, corev1.ClaimPending), pvcEvent(name, "ProvisioningFailed", corev1.EventTypeWarning)},
+			wantState:  volumeReadyProvisioning,
+			wantDetail: "ProvisioningFailed",
+		},
+		{
+			desc:      "missing claim is failed",
+			objs:      nil,
+			wantState: volumeReadyFailed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			r := &KubernetesRuntime{client: fake.NewSimpleClientset(tc.objs...), namespace: "forge"}
+			state, detail, err := r.VolumeStatus(context.Background(), name)
+			if err != nil {
+				t.Fatalf("VolumeStatus: unexpected error: %v", err)
+			}
+			if state != tc.wantState {
+				t.Errorf("state = %q, want %q", state, tc.wantState)
+			}
+			if tc.wantDetail != "" && !strings.Contains(detail, tc.wantDetail) {
+				t.Errorf("detail = %q, want substring %q", detail, tc.wantDetail)
+			}
+		})
+	}
+}
+
+// TestRunnerStarted checks the container-start gate that begins the command timeout:
+// a ContainerCreating (Waiting) runner has not started — so pod-startup latency
+// (volume bind + image pull) is not charged against the command — while a Running or
+// already-Terminated runner has. A nil pod and a pod without a runner container have
+// not started.
+func TestRunnerStarted(t *testing.T) {
+	runner := func(s corev1.ContainerState) *corev1.Pod {
+		return &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "runner", State: s}}}}
+	}
+	cases := []struct {
+		desc string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{"ContainerCreating has not started", runner(corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}), false},
+		{"Running has started", runner(corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}), true},
+		{"Terminated has started", runner(corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}), true},
+		{"nil pod has not started", nil, false},
+		{"no runner container has not started", &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "other", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}}, false},
+	}
+	for _, tc := range cases {
+		if got := runnerStarted(tc.pod); got != tc.want {
+			t.Errorf("%s: runnerStarted = %v, want %v", tc.desc, got, tc.want)
+		}
+	}
+}
+
+// TestWaitAndCollect_CommandTimeoutFromContainerStart verifies the command timeout is
+// enforced by the poll loop from container start — not left to the Job's larger
+// ActiveDeadlineSeconds — so a command that runs long past its budget while the pod
+// stays Running (the job never reaching a terminal status) is reported as a timeout.
+func TestWaitAndCollect_CommandTimeoutFromContainerStart(t *testing.T) {
+	// Poll fast so the ~1s command timeout is observed promptly; a small grace keeps
+	// the loop's safety deadline near the command timeout if this ever regresses.
+	defer swapDuration(&k8sPollInterval, 5*time.Millisecond)()
+	defer swapInt64(&podStartupGraceSecs, 1)()
+
+	const execID = "exec-slow"
+	const jobName = "forge-" + execID
+	// A running pod whose job never succeeds/fails — only the command timeout ends it.
+	runningJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: "forge"}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName + "-abcde", Namespace: "forge", Labels: map[string]string{"execution-id": execID}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: "runner", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}},
+	}
+	r := &KubernetesRuntime{client: fake.NewSimpleClientset(runningJob, pod), namespace: "forge"}
+
+	res, err := r.waitAndCollect(context.Background(), Execution{ExecutionID: execID, TimeoutSecs: 1}, jobName)
+	if err == nil || !strings.Contains(err.Error(), "timed out after 1s") {
+		t.Fatalf("waitAndCollect err = %v, want a \"timed out after 1s\" error", err)
+	}
+	if res.ExitCode == nil || *res.ExitCode == 0 {
+		t.Errorf("ExitCode = %v, want a non-zero timeout exit", res.ExitCode)
+	}
+}
+
+// swapDuration sets *p to v and returns a func that restores the old value, for
+// defer-scoped overrides of package-level tunables in a test.
+func swapDuration(p *time.Duration, v time.Duration) func() {
+	old := *p
+	*p = v
+	return func() { *p = old }
+}
+
+// swapInt64 is swapDuration for an int64 tunable.
+func swapInt64(p *int64, v int64) func() {
+	old := *p
+	*p = v
+	return func() { *p = old }
 }

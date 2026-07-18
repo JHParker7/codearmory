@@ -2,12 +2,11 @@
 
 All routes must include a service-name prefix as the first path segment:
   - POST /gatekeeper/signup, POST /gatekeeper/login  → Gatekeeper (no auth check)
-  - /blueprints/state/{username}/{...}               → Blueprints
   - /forge/executions/{...}                          → Forge
   - /gatekeeper/{...}                                → Gatekeeper
 
-The service name is stripped before forwarding, so /blueprints/state/alice/dev
-becomes /state/alice/dev when it reaches Blueprints. Conductor enforces RBAC
+The service name is stripped before forwarding, so /forge/executions becomes
+/executions when it reaches Forge. Conductor enforces RBAC
 by calling Gatekeeper's POST /check_permissions before forwarding each request.
 """
 
@@ -76,57 +75,40 @@ class TestGatekeeperRouting:
 
 
 # ---------------------------------------------------------------------------
-# Blueprints routes
+# Forge routes
 # ---------------------------------------------------------------------------
-# All blueprints routes require the /blueprints service prefix. Conductor strips
-# it before forwarding, so /blueprints/state/alice/dev becomes /state/alice/dev
-# at the Blueprints backend. Conductor enforces RBAC before forwarding.
+# All forge routes require the /forge service prefix. Conductor strips it before
+# forwarding, so /forge/executions becomes /executions at the Forge backend, and
+# enforces RBAC (via gatekeeper) before forwarding. A new user's default grants
+# include listExecution on their own {username}/forge/executions namespace.
 
 
-class TestBlueprintsRouting:
-    def test_user_scoped_state_reaches_blueprints(self, base_url, token, new_user):
-        """/blueprints/state/{username}/{workspace} is routed to Blueprints.
+class TestForgeRouting:
+    def test_user_executions_reach_forge(self, base_url, token):
+        """GET /forge/executions is routed to Forge; a new user can list their own
+        (empty) executions, so a 200 confirms the request reached Forge."""
+        resp = requests.get(f"{base_url}/forge/executions", headers=bearer(token))
+        assert resp.status_code == 200
 
-        Users have permission to access their own state namespace, so an empty
-        workspace returns 204. Gatekeeper has no /state/ route and would return
-        404, so a non-404 here confirms the request reached Blueprints.
-        """
-        resp = requests.get(
-            f"{base_url}/blueprints/state/{new_user['username']}/dev",
-            headers=bearer(token),
-        )
-        assert resp.status_code != 404
-
-    def test_deep_user_scoped_path_reaches_blueprints(self, base_url, token, new_user):
-        resp = requests.get(
-            f"{base_url}/blueprints/state/{new_user['username']}/team/workspace",
-            headers=bearer(token),
-        )
-        # Extra path segments beyond {workspace} are forwarded as-is;
-        # Blueprints returns 404 or 403 for unrecognised sub-paths.
+    def test_specific_execution_reaches_forge(self, base_url, token):
+        """A specific (nonexistent) execution id is forwarded; Forge returns 404."""
+        resp = requests.get(f"{base_url}/forge/executions/{uuid.uuid4()}", headers=bearer(token))
         assert resp.status_code in (403, 404)
 
-    def test_blueprints_lock_route_requires_auth(self, base_url):
-        """LOCK on a state path is blocked by conductor when no token is present."""
-        resp = requests.request(
-            "LOCK",
-            f"{base_url}/blueprints/state/alice/dev",
-        )
+    def test_forge_create_requires_auth(self, base_url):
+        resp = requests.post(f"{base_url}/forge/executions", json={})
         assert resp.status_code == 401
 
-    def test_blueprints_unlock_route_requires_auth(self, base_url):
-        resp = requests.request(
-            "UNLOCK",
-            f"{base_url}/blueprints/state/alice/dev",
-        )
+    def test_forge_delete_requires_auth(self, base_url):
+        resp = requests.delete(f"{base_url}/forge/executions/{uuid.uuid4()}")
         assert resp.status_code == 401
 
-    def test_state_delete_requires_auth(self, base_url):
-        resp = requests.delete(f"{base_url}/blueprints/state/alice/dev")
+    def test_forge_runner_classes_require_auth(self, base_url):
+        resp = requests.get(f"{base_url}/forge/runner-classes")
         assert resp.status_code == 401
 
-    def test_state_post_requires_auth(self, base_url):
-        resp = requests.post(f"{base_url}/blueprints/state/alice/dev", json={})
+    def test_forge_runtime_backends_require_auth(self, base_url):
+        resp = requests.get(f"{base_url}/forge/runtime-backends")
         assert resp.status_code == 401
 
 

@@ -9,10 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Provisioning lets builder bring a non-core service online with no Helm change.
@@ -20,7 +16,9 @@ import (
 // provide: a gatekeeper service identity (registered at runtime) and the service's
 // Secret (the admin-supplied DB URL + a generated gatekeeper key + the shared
 // conductor-forward key). It never creates the database — the admin supplies a URL
-// for a role already scoped to an existing database.
+// for a role already scoped to an existing database. All secret reads/writes go
+// through the secretStore seam (see secretstore.go) so a Vault backend can replace
+// the default k8s-Secret store without touching this orchestration.
 
 // provisioningConfig is the runtime config for builder's provisioner.
 type provisioningConfig struct {
@@ -34,14 +32,15 @@ func (b *k8sBackend) provisioningOn() bool {
 	return b.prov.enabled && b.prov.gatekeeperURL != "" && b.prov.internalKey != ""
 }
 
-// provision ensures the gatekeeper identity and Secret exist for a service. dbURL
-// is the decrypted admin-supplied database URL ("" when none is configured).
-func (b *k8sBackend) provision(ctx context.Context, service, dbURL string) error {
+// provision ensures the gatekeeper identity and Secret exist for a service. dbURL is
+// the decrypted admin-supplied database URL ("" when none); secrets is the decrypted
+// admin-supplied sensitive config (env-key → value), written under conventional keys.
+func (b *k8sBackend) provision(ctx context.Context, service, dbURL string, secrets map[string]string) error {
 	key, err := b.ensureGatekeeperIdentity(ctx, service)
 	if err != nil {
 		return fmt.Errorf("gatekeeper identity: %w", err)
 	}
-	if err := b.ensureServiceSecret(ctx, service, key, dbURL); err != nil {
+	if err := b.ensureServiceSecret(ctx, service, key, dbURL, secrets); err != nil {
 		return fmt.Errorf("service secret: %w", err)
 	}
 	return nil
@@ -51,12 +50,8 @@ func (b *k8sBackend) provision(ctx context.Context, service, dbURL string) error
 // builder owns it). The gatekeeper identity is left in place (harmless without a
 // running pod, and re-registered idempotently on the next enable).
 func (b *k8sBackend) deprovision(ctx context.Context, service string) {
-	name := b.name(service)
-	sec, err := b.client.CoreV1().Secrets(b.namespace).Get(ctx, name, metav1.GetOptions{})
-	if err == nil && sec.Labels[labelManagedBy] == managedByValue {
-		if err := b.client.CoreV1().Secrets(b.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			slog.WarnContext(ctx, "deprovision: delete secret failed", "service", service, "error", err)
-		}
+	if err := b.store().deleteIfManaged(ctx, b.name(service), labelManagedBy, managedByValue); err != nil {
+		slog.WarnContext(ctx, "deprovision: delete secret failed", "service", service, "error", err)
 	}
 }
 
@@ -103,68 +98,75 @@ func (b *k8sBackend) registerGatekeeperIdentity(ctx context.Context, service, ke
 	return nil
 }
 
-// ensureServiceSecret merges the keys builder manages into the service's Secret,
-// creating it (labelled managed-by builder) if absent. It only overwrites the
-// admin-supplied DB URL and fills the conductor-forward key when missing, so it
-// never clobbers a chart-provisioned Secret's other keys.
-func (b *k8sBackend) ensureServiceSecret(ctx context.Context, service, gkKey, dbURL string) error {
+// ensureServiceSecret merges the keys builder manages into the service's Secret via
+// the secretStore (creating it, labelled managed-by builder, when absent). The store's
+// merge preserves keys it does not set, so it never clobbers a chart-provisioned
+// Secret's other keys nor the rotating gatekeeper-service-key.
+func (b *k8sBackend) ensureServiceSecret(ctx context.Context, service, gkKey, dbURL string, secrets map[string]string) error {
 	name := b.name(service)
-	api := b.client.CoreV1().Secrets(b.namespace)
-
-	existing, err := api.Get(ctx, name, metav1.GetOptions{})
-	create := apierrors.IsNotFound(err)
-	if err != nil && !create {
-		return err
-	}
-
-	data := map[string][]byte{}
-	if !create && existing.Data != nil {
-		for k, v := range existing.Data {
-			data[k] = v
-		}
-	}
-	data["gatekeeper-service-key"] = []byte(gkKey)
+	data := map[string][]byte{"gatekeeper-service-key": []byte(gkKey)}
 	if dbURL != "" {
 		data["database-url"] = []byte(dbURL)
 	}
-	if _, ok := data["conductor-forward-key"]; !ok {
-		// Best-effort fill: a transient read error just skips it this round rather
-		// than failing the whole secret reconcile.
-		if cfk, err := b.existingSecretKeyIn(ctx, b.prov.conductorSecretName, "conductor-forward-key"); err == nil && cfk != "" {
+	// Admin-supplied sensitive config, stored under its conventional Secret key
+	// (REDIS_URL → redis-url, GITEA_ADMIN_TOKEN → gitea-admin-token). templatePod wires
+	// these as secret refs for the service's secretConfig env vars.
+	for envKey, val := range secrets {
+		data[secretKeyForEnv(envKey)] = []byte(val)
+	}
+	// Revoke any of the service's declared secretConfig keys the admin is no longer
+	// supplying, so clearing a secret actually removes it from the live Secret rather
+	// than leaving the stale value wired into the pod. DATABASE_URL has its own write
+	// path (database-url, set above when dbURL is present) and is not pruned here.
+	var remove []string
+	if def, ok := embeddedServiceDef(service); ok {
+		for _, envKey := range def.SecretConfig {
+			if envKey == "DATABASE_URL" {
+				continue
+			}
+			_, supplied := secrets[envKey]
+			// Managed Redis: with no external REDIS_URL supplied, builder points the
+			// service at the in-cluster store ensureManagedRedis deploys and keeps the
+			// key wired (rather than pruning it as a cleared admin secret).
+			if envKey == "REDIS_URL" && def.Infra.ManagedRedis && !supplied {
+				data["redis-url"] = []byte(b.managedRedisURL(service))
+				continue
+			}
+			if !supplied {
+				remove = append(remove, secretKeyForEnv(envKey))
+			}
+		}
+	}
+	// Write the service's derived secrets (cross-service shared keys + per-service
+	// crypto keys) and, when it pulls from the registry, its derived registry read-key.
+	// Deterministic, so every reconcile writes byte-identical values (no pod churn).
+	if def, ok := embeddedServiceDef(service); ok && secretDerivationEnabled() {
+		for _, ds := range def.DerivedSecrets {
+			if ds.Kind == "shared" {
+				data[ds.Name] = []byte(deriveSharedKey(ds.Name))
+			} else {
+				data[ds.Name] = []byte(derivePrivateKey(service, ds.Name))
+			}
+		}
+		if def.RegistryAccount {
+			data["registry-service-key"] = []byte(derivePrivateKey(service, "registry-service-key"))
+		}
+	}
+	// Fill the shared conductor-forward-key only when the service's bundle lacks it,
+	// reading it from conductor's own secret. Best-effort: a transient read just skips
+	// it this round rather than failing the whole secret reconcile (merge below still
+	// aborts on a hard error reading/writing the service bundle).
+	if cur, err := b.store().get(ctx, name, "conductor-forward-key"); err == nil && cur == "" {
+		if cfk, err := b.store().get(ctx, b.prov.conductorSecretName, "conductor-forward-key"); err == nil && cfk != "" {
 			data["conductor-forward-key"] = []byte(cfk)
 		}
 	}
-
-	if create {
-		_, err = api.Create(ctx, &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace, Labels: b.labels(service)},
-			Type:       corev1.SecretTypeOpaque,
-			Data:       data,
-		}, metav1.CreateOptions{})
-		return err
-	}
-	existing.Data = data
-	_, err = api.Update(ctx, existing, metav1.UpdateOptions{})
-	return err
+	return b.store().merge(ctx, name, b.labels(service), data, remove)
 }
 
 // existingSecretKey reads one key from the service's own Secret. A missing Secret
-// returns ("", nil); a transient API error is propagated so callers can retry
+// returns ("", nil); a transient backend error is propagated so callers can retry
 // rather than mistake it for "no value".
 func (b *k8sBackend) existingSecretKey(ctx context.Context, service, key string) (string, error) {
-	return b.existingSecretKeyIn(ctx, b.name(service), key)
-}
-
-func (b *k8sBackend) existingSecretKeyIn(ctx context.Context, secretName, key string) (string, error) {
-	if secretName == "" {
-		return "", nil
-	}
-	sec, err := b.client.CoreV1().Secrets(b.namespace).Get(ctx, secretName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return string(sec.Data[key]), nil
+	return b.store().get(ctx, b.name(service), key)
 }

@@ -1,0 +1,509 @@
+{
+  "name": "codearmory-ci",
+  "description": "dogfood CI: checkout -> [build+test per module] -> image builds, with a gocache that persists across runs",
+  "inputs": [
+    {
+      "name": "HOOK_REF",
+      "default": "main"
+    },
+    {
+      "name": "HOOK_COMMIT",
+      "default": ""
+    },
+    {
+      "name": "HOOK_REPO",
+      "default": ""
+    },
+    {
+      "name": "OUTPOST_ID",
+      "default": "b38de6c5-6393-4dd2-aa93-b1ec5cf1bb86"
+    }
+  ],
+  "steps": [
+    {
+      "action": "forge/create-volume",
+      "name": "workspace",
+      "with": {
+        "workflow_id": "${run_id}",
+        "name": "workspace",
+        "size_mb": 512,
+        "medium": "disk"
+      }
+    },
+    {
+      "action": "forge/create-volume",
+      "name": "gocache",
+      "with": {
+        "workflow_id": "${run_id}",
+        "name": "gocache",
+        "size_mb": 4096,
+        "medium": "disk"
+      }
+    },
+    {
+      "action": "forge/git-clone",
+      "name": "checkout",
+      "timeout": 600,
+      "with": {
+        "run": "true",
+        "timeout": 600,
+        "checkout": {
+          "depth": 2,
+          "ref": "${inputs.HOOK_REF}"
+        },
+        "secret_refs": {
+          "GIT_CLONE_URL": "git:http://192.168.53.171:3000/jp01/codearmory.git"
+        },
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "workspace",
+            "mount_path": "/workspace",
+            "workdir": true
+          }
+        ]
+      }
+    },
+    {
+      "action": "forge/restore-artifact",
+      "name": "restore-gocache",
+      "timeout": 900,
+      "with": {
+        "runner_class": "ci",
+        "timeout": 900,
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "gocache",
+            "mount_path": "/gocache",
+            "workdir": true
+          }
+        ],
+        "artifact": {
+          "mode": "restore",
+          "name": "codearmory-gocache",
+          "path": ".",
+          "optional": true
+        }
+      }
+    },
+    {
+      "action": "forge/run",
+      "name": "warm-cache",
+      "timeout": 1800,
+      "with": {
+        "image": "golang:1.25",
+        "runner_class": "ci",
+        "timeout": 1800,
+        "env": {
+          "GOCACHE": "/gocache/build",
+          "GOFLAGS": "-p=2",
+          "GOMODCACHE": "/gocache/mod"
+        },
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "workspace",
+            "mount_path": "/workspace",
+            "workdir": true
+          },
+          {
+            "workflow_id": "${run_id}",
+            "name": "gocache",
+            "mount_path": "/gocache"
+          }
+        ],
+        "run": "set -eu\nmkdir -p /gocache/mod /gocache/build\ncd /workspace/src/systems\nfor d in $(go list -m -f '{{.Dir}}'); do ( cd \"$d\" && go mod download ); done\n( cd /workspace/src/cli && go mod download )\necho '=== module cache primed ==='\ndu -sh /gocache/mod\n"
+      }
+    },
+    {
+      "action": "forge/run",
+      "name": "commit",
+      "timeout": 120,
+      "with": {
+        "image": "golang:1.25",
+        "runner_class": "standard",
+        "timeout": 120,
+        "output_env": [
+          "SHA",
+          "SUBJECT"
+        ],
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "workspace",
+            "mount_path": "/workspace"
+          }
+        ],
+        "run": "set -eu\ngit config --global --add safe.directory /workspace\ncd /workspace\nSHA=$(git rev-parse --short HEAD)\nSUBJECT=$(git log -1 --pretty=%s)\necho \"commit: $SHA — $SUBJECT\"\n"
+      }
+    },
+    {
+      "action": "tickets/create",
+      "name": "open-ticket",
+      "timeout": 60,
+      "with": {
+        "title": "codearmory-ci — ${steps.commit.output.SHA} ${steps.commit.output.SUBJECT}",
+        "description": "Automated CI for commit `${steps.commit.output.SHA}` on dev-2.\n\nRun: `${run_id}`",
+        "status": "in_progress",
+        "run_id": "${run_id}",
+        "workflow_id": "${workflow_id}"
+      }
+    },
+    {
+      "action": "forge/run",
+      "name": "discover",
+      "timeout": 120,
+      "with": {
+        "image": "golang:1.25",
+        "runner_class": "standard",
+        "timeout": 120,
+        "output_env": [
+          "MODULES",
+          "IMAGES",
+          "PORTAL"
+        ],
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "workspace",
+            "mount_path": "/workspace"
+          }
+        ],
+        "run": "set -eu\ngit config --global --add safe.directory /workspace\ncd /workspace\n# Files changed by this push (HEAD~1..HEAD). If there is no parent (first commit or\n# a shallow clone without one) CHANGED is empty, which the loops below read as\n# \"rebuild everything\" — a safe superset for the preview pipeline.\nif git rev-parse HEAD~1 >/dev/null 2>&1; then\n  CHANGED=$(git diff --name-only HEAD~1 HEAD)\nelse\n  CHANGED=\"\"\nfi\ncd /workspace/src\nMODULES=\"\"\nfor f in systems/*/go.mod cli/go.mod; do [ -f \"$f\" ] || continue; MODULES=\"$MODULES ${f%/go.mod}\"; done\nMODULES=\"${MODULES# }\"\n# IMAGES: services whose Dockerfile builds from their OWN dir AND whose sources this\n# push touched. portal-bff is excluded — its Dockerfile also COPYs portal/, so it needs\n# the parent context and gets its own step (gated by PORTAL below).\nchanged_dir() { [ -z \"$CHANGED\" ] && return 0; printf '%s\\n' \"$CHANGED\" | grep -q \"^src/$1/\"; }\nIMAGES=\"\"\nfor f in systems/*/Dockerfile; do\n  [ -f \"$f\" ] || continue\n  d=${f%/Dockerfile}; svc=${d#systems/}\n  [ \"$svc\" = \"portal-bff\" ] && continue\n  if changed_dir \"systems/$svc\"; then IMAGES=\"$IMAGES $svc\"; fi\ndone\nIMAGES=\"${IMAGES# }\"\n# PORTAL rebuilds when either the SPA (portal/) or its BFF (portal-bff/) changed.\nPORTAL=\"\"\nif changed_dir systems/portal || changed_dir systems/portal-bff; then PORTAL=\"1\"; fi\necho \"modules: $MODULES\"\necho \"changed: $(printf '%s' \"$CHANGED\" | tr '\\n' ' ')\"\necho \"images:  $IMAGES\"\necho \"portal:  $PORTAL\"\n"
+      }
+    },
+    {
+      "action": "forge/run",
+      "name": "test",
+      "map_id": "per-module",
+      "timeout": 2400,
+      "with": {
+        "image": "golang:1.25",
+        "runner_class": "ci",
+        "timeout": 2400,
+        "env": {
+          "GOCACHE": "/gocache/build",
+          "GOFLAGS": "-p=2",
+          "GOMODCACHE": "/gocache/mod"
+        },
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "gocache",
+            "mount_path": "/gocache"
+          }
+        ],
+        "run": "set -eu\ncd \"/workspace/src/${map.module}\"\necho \"=== test ${map.module} ===\"\ngo test ./...\n"
+      }
+    },
+    {
+      "action": "forge/run",
+      "name": "test-portal",
+      "timeout": 1200,
+      "with": {
+        "image": "node:22-alpine",
+        "runner_class": "large",
+        "timeout": 1200,
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "workspace",
+            "mount_path": "/workspace"
+          }
+        ],
+        "run": "set -eu\ncd /workspace/src/systems/portal\nnpm ci\nnpm test\n"
+      }
+    },
+    {
+      "action": "forge/save-artifact",
+      "name": "save-gocache",
+      "timeout": 900,
+      "with": {
+        "runner_class": "ci",
+        "timeout": 900,
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "gocache",
+            "mount_path": "/gocache",
+            "workdir": true
+          }
+        ],
+        "artifact": {
+          "mode": "save",
+          "name": "codearmory-gocache",
+          "path": "mod"
+        }
+      }
+    },
+    {
+      "action": "forge/build-image",
+      "name": "image",
+      "timeout": 2400,
+      "with": {
+        "runner_class": "xlarge",
+        "timeout": 2400,
+        "secret_refs": {
+          "REGISTRY_AUTH": "secret:forgejo-registry-auth"
+        },
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "workspace",
+            "mount_path": "/workspace"
+          }
+        ],
+        "build": {
+          "context": "/workspace/src/systems/${matrix.svc}",
+          "dockerfile": "Dockerfile",
+          "destinations": [
+            "192.168.53.171:3000/jp01/${matrix.svc}:${steps.commit.output.SHA}"
+          ],
+          "no_push": false
+        }
+      },
+      "matrix": {
+        "var": "svc",
+        "values_from": "${steps.discover.output.IMAGES}",
+        "max_concurrent": 4
+      }
+    },
+    {
+      "action": "forge/build-image",
+      "name": "image-portal",
+      "timeout": 2400,
+      "with": {
+        "runner_class": "xlarge",
+        "timeout": 2400,
+        "secret_refs": {
+          "REGISTRY_AUTH": "secret:forgejo-registry-auth"
+        },
+        "volumes": [
+          {
+            "workflow_id": "${run_id}",
+            "name": "workspace",
+            "mount_path": "/workspace"
+          }
+        ],
+        "build": {
+          "context": "/workspace/src/systems",
+          "dockerfile": "portal-bff/Dockerfile",
+          "destinations": [
+            "192.168.53.171:3000/jp01/portal:${steps.commit.output.SHA}"
+          ],
+          "no_push": false
+        }
+      }
+    },
+    {
+      "action": "outpost-gateway/enqueueCommand",
+      "name": "redeploy-portal",
+      "timeout": 120,
+      "with": {
+        "id": "${inputs.OUTPOST_ID}",
+        "integration": "deploy",
+        "type": "set-image",
+        "payload": {
+          "deployment": "ca-codearmory-portal",
+          "image": "192.168.53.171:3000/jp01/portal:${steps.commit.output.SHA}",
+          "ignore_missing": true
+        }
+      }
+    },
+    {
+      "action": "tickets/comment",
+      "name": "track-tested",
+      "timeout": 60,
+      "with": {
+        "id": "${steps.open-ticket.output.ticket_id}",
+        "body": "✅ **build + unit tests** passed for all modules."
+      }
+    },
+    {
+      "action": "tickets/comment",
+      "name": "track-images",
+      "timeout": 60,
+      "with": {
+        "id": "${steps.open-ticket.output.ticket_id}",
+        "body": "✅ **images** built and pushed to Forgejo: `192.168.53.171:3000/jp01/<svc>:${steps.commit.output.SHA}` (changed services only)."
+      }
+    },
+    {
+      "action": "outpost-gateway/enqueueCommand",
+      "name": "redeploy",
+      "timeout": 120,
+      "with": {
+        "id": "${inputs.OUTPOST_ID}",
+        "integration": "deploy",
+        "type": "set-image",
+        "payload": {
+          "deployment": "ca-codearmory-${matrix.svc}",
+          "image": "192.168.53.171:3000/jp01/${matrix.svc}:${steps.commit.output.SHA}",
+          "ignore_missing": true
+        }
+      },
+      "matrix": {
+        "var": "svc",
+        "values_from": "${steps.discover.output.IMAGES}",
+        "max_concurrent": 2
+      }
+    },
+    {
+      "action": "outpost-gateway/enqueueCommand",
+      "name": "integration-tests",
+      "timeout": 900,
+      "with": {
+        "id": "${inputs.OUTPOST_ID}",
+        "integration": "test",
+        "type": "run",
+        "payload": {
+          "image": "192.168.53.171:3000/jp01/ci-e2e:latest",
+          "timeout_secs": 600
+        }
+      }
+    },
+    {
+      "action": "tickets/update",
+      "name": "close-ticket",
+      "timeout": 60,
+      "with": {
+        "id": "${steps.open-ticket.output.ticket_id}",
+        "status": "resolved"
+      }
+    },
+    {
+      "action": "tickets/update",
+      "name": "fail-ticket",
+      "timeout": 60,
+      "with": {
+        "id": "${steps.open-ticket.output.ticket_id}",
+        "status": "open"
+      }
+    }
+  ],
+  "maps": [
+    {
+      "id": "per-module",
+      "var": "module",
+      "values_from": "${steps.discover.output.MODULES}",
+      "volume": "workspace",
+      "mount_path": "/workspace",
+      "size_mb": 512,
+      "medium": "disk",
+      "max_concurrent": 4
+    }
+  ],
+  "routes": [
+    {
+      "from": "workspace",
+      "to": "checkout"
+    },
+    {
+      "from": "gocache",
+      "to": "restore-gocache"
+    },
+    {
+      "from": "checkout",
+      "to": "commit"
+    },
+    {
+      "from": "commit",
+      "to": "open-ticket"
+    },
+    {
+      "from": "checkout",
+      "to": "warm-cache"
+    },
+    {
+      "from": "restore-gocache",
+      "to": "warm-cache"
+    },
+    {
+      "from": "warm-cache",
+      "to": "discover"
+    },
+    {
+      "from": "open-ticket",
+      "to": "discover"
+    },
+    {
+      "from": "discover",
+      "to": "test"
+    },
+    {
+      "from": "test",
+      "to": "save-gocache"
+    },
+    {
+      "from": "test",
+      "to": "image"
+    },
+    {
+      "from": "test",
+      "to": "track-tested"
+    },
+    {
+      "from": "image",
+      "to": "track-images"
+    },
+    {
+      "from": "discover",
+      "to": "fail-ticket",
+      "when": "steps.discover.status == 'failed'"
+    },
+    {
+      "from": "test",
+      "to": "fail-ticket",
+      "when": "steps.test.status == 'failed'"
+    },
+    {
+      "from": "image",
+      "to": "fail-ticket",
+      "when": "steps.image.status == 'failed'"
+    },
+    {
+      "from": "image-portal",
+      "to": "fail-ticket",
+      "when": "steps[\"image-portal\"].status == 'failed'"
+    },
+    {
+      "from": "discover",
+      "to": "test-portal",
+      "when": "steps.discover.json.PORTAL == \"1\""
+    },
+    {
+      "from": "test-portal",
+      "to": "image-portal"
+    },
+    {
+      "from": "test-portal",
+      "to": "fail-ticket",
+      "when": "steps[\"test-portal\"].status == 'failed'"
+    },
+    {
+      "from": "image",
+      "to": "redeploy",
+      "when": "inputs.OUTPOST_ID != \"\""
+    },
+    {
+      "from": "image-portal",
+      "to": "redeploy-portal",
+      "when": "inputs.OUTPOST_ID != \"\""
+    },
+    {
+      "from": "redeploy",
+      "to": "integration-tests",
+      "when": "inputs.OUTPOST_ID != \"\""
+    },
+    {
+      "from": "integration-tests",
+      "to": "close-ticket"
+    },
+    {
+      "from": "integration-tests",
+      "to": "fail-ticket",
+      "when": "steps[\"integration-tests\"].status == 'failed'"
+    }
+  ]
+}

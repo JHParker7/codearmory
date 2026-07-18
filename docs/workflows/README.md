@@ -8,7 +8,7 @@ The service has two distinct concepts:
 
 **Step** — a reusable, named action definition stored in the `steps` table. A step declares *what to do* (`action` + `with` config) and can be referenced by many workflows. Changing a step's definition affects every pipeline that references it.
 
-**Workflow** — an ordered list of step references (`step_id` + optional `parallel_group`). The workflow declares *when and in what order* to run steps; it stores no action logic itself.
+**Workflow** — an ordered list of step references. The workflow declares *when and in what order* to run steps; a reference itself stores no action logic.
 
 ```
 Steps table          Workflows table
@@ -18,10 +18,22 @@ step B  ──┐
 step C  ──┘──────►   [ref B, ref C]         ◄── workflow "smoke-test"
 ```
 
+### Step-ref kinds
+
+Each entry in a workflow's `steps` array is exactly **one** of three kinds:
+
+- **Stored-step reference** — `{"step_id": "<id>"}`. Points at a reusable Step in the `steps` table; many pipelines can share it, and editing the Step affects them all. A ref may add per-occurrence overrides: `name` (a distinct `${steps.<name>.output}` key so a step can appear more than once) and `with` (input wiring merged over the step's own config, ref keys winning).
+- **Inline step** — `{"action": "...", "name": "...", "with": {...}, "timeout": N}` with **no `step_id`**. The step's whole definition lives on the pipeline; it is **private to that pipeline** and not in the `steps` table. This is the default in the portal builder — a step is only promoted to a shared Step on demand.
+- **Approval gate** — `{"approval": {"message": "...", "approvers": [...]}}`. An inline manual-approval pause; the run holds at `awaiting_approval` until approved/rejected.
+
+A reference or inline step may also carry a `matrix` (fan-out over a list) or a `map_id` (join a map region); a gate is always solo. Parallelism between steps is not a field on a step — it is the shape of the `routes`. `GET /pipelines/{ref}?raw=true` returns the stored, unenriched refs (in `step_refs`) so a client can mutate a pipeline without baking a referenced step's merged config into its override.
+
+**Convert / make-local.** An inline step can be promoted to a shared Step (portal: “⇪ convert to general”; CLI: `armory pipelines convert-step <pipeline> <step-name>`) — it is persisted to the `steps` table and the ref repointed at its `step_id`. The reverse copies a shared step's definition inline (portal: “⇩ make local”; CLI: `armory pipelines localize-step`), so later edits stay local to the pipeline.
+
 ## How it works
 
 ```
-Caller → POST /workflows/{id}/runs
+Caller → POST /pipelines/{ref}/runs
          │
          ▼
    workflow_runs (status=pending) in PostgreSQL
@@ -33,9 +45,10 @@ Caller → POST /workflows/{id}/runs
          │     (short-lived JWT scoped to a minimal workflow role — the user's
          │      own session token is never stored in the workflows database)
          │  3. Fetch workflow definition; enrich step refs from steps table
-         │  4. Group steps by parallel_group; execute each group:
-         │     - Steps with same non-nil parallel_group run concurrently
-         │     - Steps with nil parallel_group run sequentially
+         │  4. Build the graph (stored routes, else a chain in array order) and
+         │     walk it: a step runs once every inbound route is resolved and at
+         │     least one was taken, so steps with no path between them run
+         │     concurrently
          │     - For each step:
          │       a. Resolve action: "http" → raw HTTP; other → action catalog
          │       b. Substitute ${KEY} from run inputs into all With string values
@@ -113,7 +126,7 @@ Actions with an `async` block submit work and poll a status endpoint until it re
 }
 ```
 
-See [chaos](../chaos/README.md) and [argo](../argo/README.md).
+See the chaos and argo consumer services (now in their own `codearmory-chaos` / `codearmory-argo` repos).
 
 ## Input & output substitution
 
@@ -182,15 +195,42 @@ docker run -p 8085:8085 \
 
 All endpoints require `Authorization: Bearer <token>` verified by Gatekeeper, except `/healthz` and the internal endpoints.
 
+### Resource identity: names, not UUIDs
+
+Pipelines and steps are addressed by their **name** as well as their id. A `{id}`
+path segment is resolved as the caller's unique **name** first, falling back to the
+UUID — so `GET /pipelines/deploy-prod` and `GET /pipelines/<uuid>` both work, and
+the conductor-enforced RBAC resource becomes the readable, exact
+`<owner>/workflows/pipelines/deploy-prod` (the owner — `<username>` or
+`org/<org_name>` — stays the isolation boundary). This lets an admin grant access
+to one named pipeline instead of a `…/pipelines/*` wildcard.
+
+Because the name is an identifier:
+
+- **Unique per owner.** Creating or renaming a pipeline/step to a name another of
+  the caller's pipelines/steps already uses returns **409 Conflict**.
+- **Restricted charset.** A name must match `^[A-Za-z0-9._-]{1,100}$` (no spaces
+  or `/`, so it is always a single URL/resource segment); otherwise **400**. On
+  update the charset is only re-checked when the name actually changes, so editing
+  a legacy-named row isn't blocked unless you rename it.
+- **Owner-scoped resolution.** A name only resolves to rows the caller owns or
+  shares via their org, so one user's `deploy-prod` never resolves another's.
+
+Runs are **namespaced under their workflow**: the run resource is
+`workflows/runs/<workflow_ref>/<run_id>`, reachable via the nested routes below
+(the flat `/runs/{id}` routes remain for back-compat).
+
 ### Steps
+
+`{ref}` is a step **name** (unique per owner) or its UUID.
 
 | Method | Path | Permission | Description |
 |--------|------|------------|-------------|
-| `POST` | `/steps` | `createStep` on `workflows/steps` | Create a step |
+| `POST` | `/steps` | `createStep` on `workflows/steps` | Create a step (409 on duplicate name) |
 | `GET` | `/steps` | `listStep` on `workflows/steps` | List accessible steps |
-| `GET` | `/steps/{id}` | `getStep` on `workflows/steps/{id}` | Get a step |
-| `PUT` | `/steps/{id}` | `updateStep` on `workflows/steps/{id}` | Update a step |
-| `DELETE` | `/steps/{id}` | `deleteStep` on `workflows/steps/{id}` | Soft-delete a step |
+| `GET` | `/steps/{ref}` | `getStep` on `workflows/steps/{ref}` | Get a step |
+| `PUT` | `/steps/{ref}` | `updateStep` on `workflows/steps/{ref}` | Update a step |
+| `DELETE` | `/steps/{ref}` | `deleteStep` on `workflows/steps/{ref}` | Soft-delete a step |
 
 ### Actions
 
@@ -198,31 +238,40 @@ All endpoints require `Authorization: Bearer <token>` verified by Gatekeeper, ex
 |--------|------|------------|-------------|
 | `GET` | `/actions` | `listAction` on `workflows/actions` | List the in-memory action catalog |
 
-### Workflows
+### Workflows (pipelines)
+
+`{ref}` is a pipeline **name** (unique per owner) or its UUID. Create/update return
+**409** on a duplicate name and **400** on an invalid name (see *Resource identity*).
 
 | Method | Path | Permission | Description |
 |--------|------|------------|-------------|
-| `POST` | `/workflows` | `createWorkflow` on `workflows/workflows` | Create a workflow |
-| `GET` | `/workflows` | `listWorkflow` on `workflows/workflows` | List accessible workflows |
-| `GET` | `/workflows/{id}` | `getWorkflow` on `workflows/workflows/{id}` | Get a workflow with enriched step definitions |
-| `PUT` | `/workflows/{id}` | `updateWorkflow` on `workflows/workflows/{id}` | Replace a workflow's name, description, and step list |
-| `DELETE` | `/workflows/{id}` | `deleteWorkflow` on `workflows/workflows/{id}` | Soft-delete a workflow |
+| `POST` | `/pipelines` | `createWorkflow` on `workflows/pipelines` | Create a workflow |
+| `GET` | `/pipelines` | `listWorkflow` on `workflows/pipelines` | List accessible workflows |
+| `GET` | `/pipelines/{ref}` | `getWorkflow` on `workflows/pipelines/{ref}` | Get a workflow with enriched step definitions |
+| `PUT` | `/pipelines/{ref}` | `updateWorkflow` on `workflows/pipelines/{ref}` | Replace a workflow's name, description, and step list |
+| `DELETE` | `/pipelines/{ref}` | `deleteWorkflow` on `workflows/pipelines/{ref}` | Soft-delete a workflow |
 
 ### Runs
 
+Runs are namespaced under their workflow: the resource is
+`workflows/runs/<workflow_ref>/<run_id>`. The flat `/runs/{id}` routes are kept for
+back-compat (un-namespaced resource).
+
 | Method | Path | Permission | Description |
 |--------|------|------------|-------------|
-| `POST` | `/workflows/{id}/runs` | `triggerRun` on `workflows/runs` | Trigger a run |
+| `POST` | `/pipelines/{ref}/runs` | `triggerRun` on `workflows/runs/{ref}` | Trigger a run of pipeline `{ref}` |
+| `GET` | `/pipelines/{ref}/runs/{run_id}` | `getRun` on `workflows/runs/{ref}/{run_id}` | Get a run (namespaced) with step results |
+| `DELETE` | `/pipelines/{ref}/runs/{run_id}` | `cancelRun` on `workflows/runs/{ref}/{run_id}` | Cancel a run (namespaced) |
 | `GET` | `/runs` | `listRun` on `workflows/runs` | List accessible runs |
-| `GET` | `/runs/{id}` | `getRun` on `workflows/runs/{id}` | Get a run with step results |
-| `DELETE` | `/runs/{id}` | `cancelRun` on `workflows/runs/{id}` | Cancel a pending or running run |
+| `GET` | `/runs/{id}` | `getRun` on `workflows/runs/{id}` | Get a run with step results (flat) |
+| `DELETE` | `/runs/{id}` | `cancelRun` on `workflows/runs/{id}` | Cancel a pending or running run (flat) |
 
 ### Internal endpoints (service-to-service)
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/internal/workflows/{id}/runs` | HMAC | Trigger a run (hooks service only) |
-| `GET` | `/internal/workflows/{id}` | HMAC | Get `org_id` for a workflow (hooks ownership check) |
+| `POST` | `/internal/pipelines/{id}/runs` | HMAC | Trigger a run (hooks service only) |
+| `GET` | `/internal/pipelines/{id}` | HMAC | Get `org_id` for a workflow (hooks ownership check) |
 | `GET` | `/internal/runs/{id}` | HMAC | Get current run status (GitHub App polling) |
 
 Internal endpoints use `X-Hooks-Token` (HMAC-SHA256 signed with `HOOKS_TRIGGER_KEY`) and `X-Hooks-Timestamp` headers instead of Bearer auth.
@@ -263,7 +312,7 @@ curl -X POST http://localhost:8085/steps \
   }'
 ```
 
-Step name must be unique per user/org. `timeout` defaults to 30, maximum 3600.
+Step name must be unique per user/org and match `^[A-Za-z0-9._-]{1,100}$` (it doubles as the step's resource identifier — see *Resource identity*). A duplicate name returns 409, an invalid name 400. `timeout` defaults to 30, maximum 3600.
 
 ### Step object
 
@@ -296,17 +345,23 @@ curl "http://localhost:8085/steps?name=forge" -H "Authorization: Bearer <token>"
 ### Create a workflow
 
 ```bash
-curl -X POST http://localhost:8085/workflows \
+curl -X POST http://localhost:8085/pipelines \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "deploy-staging",
     "description": "Build and deploy to staging",
     "steps": [
-      {"step_id": "uuid-of-build-step"},
-      {"step_id": "uuid-of-test-a", "parallel_group": 1},
-      {"step_id": "uuid-of-test-b", "parallel_group": 1},
-      {"step_id": "uuid-of-deploy-step"}
+      {"step_id": "uuid-of-build-step",  "name": "build"},
+      {"step_id": "uuid-of-test-a",      "name": "test-a"},
+      {"step_id": "uuid-of-test-b",      "name": "test-b"},
+      {"step_id": "uuid-of-deploy-step", "name": "deploy"}
+    ],
+    "routes": [
+      {"from": "build",  "to": "test-a"},
+      {"from": "build",  "to": "test-b"},
+      {"from": "test-a", "to": "deploy"},
+      {"from": "test-b", "to": "deploy"}
     ]
   }'
 ```
@@ -315,19 +370,85 @@ A maximum of 50 step references per workflow is enforced. All referenced steps m
 
 ### Parallel execution
 
-Steps sharing the same non-nil `parallel_group` integer execute concurrently. The run waits for every step in a group to reach a terminal state before advancing to the next sequential step or group.
-
-Steps without a `parallel_group` (or with a `null` value) execute sequentially in the order they appear.
+Parallelism is the shape of the graph, not a field on a step: **two edges out of one step fork the run, two edges into one step join it.** In the example above, `test-a` and `test-b` both route off `build`, so they run concurrently, and `deploy` waits for both.
 
 ```
-Step 0 (no group)          → runs first
-Steps 1 and 2 (group=1)    → run concurrently after step 0 finishes
-Step 3 (no group)          → runs after both group-1 steps finish
+build                      → runs first
+test-a, test-b             → both routed off build, so they run concurrently
+deploy                     → has both as inbound routes, so it waits for both
 ```
+
+A step becomes ready once every inbound route is resolved and at least one was taken — which is what makes a join wait, and what lets a skipped branch not deadlock the step it joins into.
+
+Fan-out **within** a step is a different thing and stays on the step: `matrix` (one execution per value), `scatter` (one leg per workspace path), and a map region (a whole body per value) each carry their own `max_concurrent`.
+
+### Routes (the graph model)
+
+A pipeline is a graph. The steps are its nodes — identified by **step name**, the same identity `${steps.<name>.output}` already uses — and `routes` are the directed edges between them. A step with no inbound route is an entry step; there is no entry sentinel.
+
+Omit `routes` and the edges are **derived** as a plain chain in array order: a bare step array is a sequence, nothing more, so a simple linear pipeline needs no routes and nothing to migrate. Supply `routes` and they are used as given.
+
+```json
+{
+  "name": "build-and-release",
+  "steps": [
+    { "action": "forge/run", "name": "build",   "with": { "run": "make build" } },
+    { "action": "forge/run", "name": "publish", "with": { "run": "make publish" } },
+    { "action": "forge/run", "name": "cleanup", "with": { "run": "make clean" } }
+  ],
+  "routes": [
+    { "from": "build", "to": "publish", "when": "steps.build.json.published == true" },
+    { "from": "build", "to": "cleanup", "when": "steps.build.status == \"failed\"" }
+  ]
+}
+```
+
+A step runs once **every** inbound route is resolved and **at least one** was taken. A step whose inbound routes all resolve to not-taken is **skipped** — which is what lets a conditional diamond join: if `a→b` is taken and `a→c` is not, `c` is skipped, `c→d` resolves not-taken, `b→d` is taken, and `d` still runs.
+
+Failure is opt-in to route past: a route with no `when` is taken only if its source **completed**, so an unhandled failure skips everything downstream transitively and the run fails — exactly as before. A route conditioned on `status == "failed"` runs a handler. A failed step always fails the run, even if a handler ran.
+
+#### Route conditions
+
+`when` is an expression (not `${...}` templating — see below). It must evaluate to a boolean, and it is compiled when the pipeline is saved, so a typo like `steps.build.stauts` is a 400 at authoring time rather than a silently dead branch at 3am.
+
+Available: `steps.<name>.status` (`completed`/`failed`/`skipped`/`cancelled`), `steps.<name>.output` (the raw string), `steps.<name>.json.<field>` (the output parsed as JSON, absent when it isn't), `inputs.<name>`, and `run.id`. Only steps in a terminal state are visible.
+
+```
+steps.test.status == "completed" && inputs.env == "prod"
+steps.scan.json.critical_count > 0
+steps.gate.output contains "approved"
+```
+
+> `when` and `${...}` are deliberately different languages. `${...}` is a string template over arbitrary step config and is **tolerant** — an unknown reference is left as a literal, since a `with` value may legitimately contain `${SOMETHING}` meant for a downstream shell. A route condition is **strict**: an unknown identifier is an error, because a typo that silently evaluates false would kill a branch with no signal. The identifier namespace is kept aligned (`${steps.x.output.a}` ↔ `steps.x.json.a`).
+
+A step sees only the outputs of its **transitive ancestors**. Referencing a step that isn't an ancestor can never resolve — including a sibling in the same parallel band, which under the old engine silently read as an empty string.
+
+### Scatter / gather
+
+A `scatter` block fans a step out over the paths of a shared workspace that match a regex — "partition the build, run the parts in parallel, recombine". Unlike a matrix (which just repeats a step over a value list), each scatter leg runs on its **own clone** of the workspace, so parallel legs never share a PVC (which on block storage would `Multi-Attach` across nodes) — and after all legs finish, each leg's declared owned outputs are **gathered** back into the base workspace as a disjoint union (two legs claiming the same path fails, rather than silently clobbering). It needs no ReadWriteMany volume and no CSI clone.
+
+```json
+{
+  "name": "build-services",
+  "action": "forge/run",
+  "with": { "run": "cd ${scatter.path} && make build && make test", "runner_class": "large" },
+  "scatter": {
+    "volume": "workspace",
+    "regex": "^services/[^/]+$",
+    "mode": "dir",
+    "outputs": ["${scatter.path}/dist"],
+    "max_concurrent": 4
+  }
+}
+```
+
+Under the hood the worker drives forge: `forge/resolve-paths` lists the matching paths (each becomes one leg, bound to `${scatter.path}`), `forge/create-volume` + `forge/volume-copy` clone the workspace per leg, the step's own action runs per leg on its clone, and `forge/volume-copy` gathers the owned `outputs` back into the base. Every leg is recorded as its own step run (`<name> [path=…]`), and the step's aggregated output is the JSON array of each leg's output. The per-leg clone volumes are scoped to the run and torn down with it. `scatter` is mutually exclusive with `matrix`, and requires an inline step action to run per leg.
+
+Fields: `volume` (base workspace, default `workspace`), `mount_path` (default `/workspace`), the path source — **exactly one of** `regex` (POSIX ERE scan of the workspace, with `mode` (`dir`/`file`) and `max_depth`) **or** `paths_from` (a `${...}` reference resolved at run time to the list directly — e.g. `${inputs.services}` or `${steps.discover.output}` — parsed like a matrix `values_from`: JSON array, or comma/whitespace-separated), `outputs` (owned paths unioned back — may reference `${scatter.path}`; empty = gather nothing), `size_mb`/`medium` (per-leg clone size), and `max_concurrent` (fan-out cap, like a matrix). Both path sources are substituted for `${inputs.*}`/`${steps.*}` before use; each resulting value is bound to `${scatter.path}` in one leg, which still runs on its own workspace clone.
 
 ### Workflow object
 
-When reading a single workflow (`GET /workflows/{id}`), the response enriches each step ref with the full step definition:
+When reading a single workflow (`GET /pipelines/{ref}`), the response enriches each step ref with the full step definition:
 
 ```json
 {
@@ -343,8 +464,7 @@ When reading a single workflow (`GET /workflows/{id}`), the response enriches ea
       "name": "run-forge",
       "action": "forge/run",
       "with": {"image": "alpine:3.19"},
-      "timeout": 300,
-      "parallel_group": null
+      "timeout": 300
     }
   ],
   "created_at": "...",
@@ -384,13 +504,14 @@ The catalog refreshes every 5 minutes. Requires `REGISTRY_URL` and `REGISTRY_SER
 ### Trigger a run
 
 ```bash
-curl -X POST http://localhost:8085/workflows/{id}/runs \
+# {ref} is the pipeline name or its UUID
+curl -X POST http://localhost:8085/pipelines/deploy-prod/runs \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"inputs": {"VERSION": "v1.2.3", "ENV": "staging"}}'
 ```
 
-Returns `202 Accepted` with the created run (status `pending`). Poll `GET /runs/{id}` for completion.
+Returns `202 Accepted` with the created run (status `pending`). Poll for completion via the namespaced `GET /pipelines/deploy-prod/runs/{run_id}` or the flat `GET /runs/{run_id}`.
 
 ### Run object
 

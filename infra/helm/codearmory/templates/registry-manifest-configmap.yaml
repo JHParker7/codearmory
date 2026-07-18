@@ -1,18 +1,35 @@
 {{- $fullname := include "codearmory.fullname" . -}}
 {{- $manifest := .Files.Get "files/registry-manifest.json" -}}
+{{- /* The chart ships the CORE service manifest entries (gatekeeper, builder, the
+       forge + workflows CI/CD pair, and the tickets + git + containers trio). Every
+       non-core service registers its own routes/RBAC with the registry at runtime via
+       builder, so their URLs are not substituted here. */ -}}
 {{- $manifest = replace "http://gatekeeper:"        (printf "http://%s-gatekeeper:" $fullname)        $manifest -}}
-{{- $manifest = replace "http://blueprints:"        (printf "http://%s-blueprints:" $fullname)        $manifest -}}
-{{- $manifest = replace "http://forge:"             (printf "http://%s-forge:" $fullname)             $manifest -}}
-{{- $manifest = replace "http://workflows:"         (printf "http://%s-workflows:" $fullname)         $manifest -}}
-{{- $manifest = replace "http://tickets:"           (printf "http://%s-tickets:" $fullname)           $manifest -}}
-{{- $manifest = replace "http://notifications:"     (printf "http://%s-notifications:" $fullname)     $manifest -}}
-{{- $manifest = replace "http://hooks:"             (printf "http://%s-hooks:" $fullname)             $manifest -}}
-{{- $manifest = replace "http://gitea-integration:" (printf "http://%s-gitea-integration:" $fullname) $manifest -}}
-{{- $manifest = replace "http://containers:"        (printf "http://%s-containers:" $fullname)        $manifest -}}
-{{- $manifest = replace "http://outpost-gateway:"   (printf "http://%s-outpost-gateway:" $fullname)   $manifest -}}
-{{- $manifest = replace "http://chaos:"             (printf "http://%s-chaos:" $fullname)             $manifest -}}
-{{- $manifest = replace "http://argo:"              (printf "http://%s-argo:" $fullname)              $manifest -}}
 {{- $manifest = replace "http://builder:"           (printf "http://%s-builder:" $fullname)           $manifest -}}
+{{- if .Values.forge.enabled -}}
+{{- $manifest = replace "http://forge:"             (printf "http://%s-forge:" $fullname)             $manifest -}}
+{{- end -}}
+{{- if .Values.workflows.enabled -}}
+{{- $manifest = replace "http://workflows:"         (printf "http://%s-workflows:" $fullname)         $manifest -}}
+{{- end -}}
+{{- if .Values.tickets.enabled -}}
+{{- $manifest = replace "http://tickets:"           (printf "http://%s-tickets:" $fullname)           $manifest -}}
+{{- end -}}
+{{- if .Values.hooks.enabled -}}
+{{- $manifest = replace "http://hooks:"             (printf "http://%s-hooks:" $fullname)             $manifest -}}
+{{- end -}}
+{{- if .Values.outpostGateway.enabled -}}
+{{- $manifest = replace "http://outpost-gateway:"    (printf "http://%s-outpost-gateway:" $fullname)    $manifest -}}
+{{- end -}}
+{{- if .Values.git.enabled -}}
+{{- $manifest = replace "http://git:"               (printf "http://%s-git:" $fullname)               $manifest -}}
+{{- end -}}
+{{- if .Values.artifacts.enabled -}}
+{{- $manifest = replace "http://artifacts:"         (printf "http://%s-artifacts:" $fullname)         $manifest -}}
+{{- end -}}
+{{- if .Values.containers.enabled -}}
+{{- $manifest = replace "http://containers:"        (printf "http://%s-containers:" $fullname)        $manifest -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

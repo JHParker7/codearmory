@@ -46,6 +46,7 @@ type forgeCreatedMsg struct{}
 type forgeFormErrMsg struct{ err error }
 type forgeImagesMsg []string
 type forgeRunnersMsg []string
+type forgeReposMsg kvCatalog
 
 // ── Views ─────────────────────────────────────────────────────────────────────
 
@@ -73,19 +74,25 @@ type forgeModel struct {
 	// option lists for the create form's ←/→ selectors, fetched on startup.
 	images  []string
 	runners []string
+	// repos backs the create form's optional Git repo name picker (shows the repo
+	// name, submits the clone URL); a selection wires forge's git: secret_ref so the
+	// runner can clone via $GIT_CLONE_URL. Degrades to a free-text URL when empty.
+	repos kvCatalog
 
 	eTable table.Model
 	vp     viewport.Model
 	form   tuiForm
 }
 
+// Executions have no human name, so the primary label is meaningful context —
+// status + image + runner class — and the short id is a secondary detail column.
 var forgeExecCols = []tuiColSpec{
-	{"ID", 10, 0},
 	{"STATUS", 12, 0},
 	{"IMAGE", 20, 2},
 	{"CLASS", 10, 0},
 	{"STARTED", 16, 0},
 	{"DURATION", 9, 0},
+	{"ID", 10, 0},
 }
 
 func newForgeModel() forgeModel {
@@ -180,10 +187,17 @@ func forgeFetchRunners() tea.Msg {
 	return forgeRunnersMsg(names)
 }
 
+// forgeFetchRepos loads the git-service repo list for the create form's optional
+// Git repo picker (name shown, clone URL submitted), degrading to an empty catalog
+// (free-text URL fallback) on failure.
+func forgeFetchRepos() tea.Msg {
+	return forgeReposMsg(fetchGitRepos())
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 func (m forgeModel) Init() tea.Cmd {
-	return tea.Batch(forgeFetchExecs, forgeFetchImages, forgeFetchRunners)
+	return tea.Batch(forgeFetchExecs, forgeFetchImages, forgeFetchRunners, forgeFetchRepos)
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
@@ -209,12 +223,12 @@ func (m forgeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := make([]table.Row, len(m.execs))
 		for i, e := range m.execs {
 			rows[i] = table.Row{
-				tuiShortID(e.ExecutionID),
 				e.Status,
 				e.Image,
 				e.RunnerClass,
 				tuiFormatTime(e.StartedAt),
 				tuiFormatDur(e.StartedAt, e.EndedAt),
+				tuiShortID(e.ExecutionID),
 			}
 		}
 		m.eTable.SetRows(rows)
@@ -257,6 +271,16 @@ func (m forgeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case forgeRunnersMsg:
 		m.runners = []string(msg)
+		return m, nil
+
+	case forgeReposMsg:
+		m.repos = kvCatalog(msg)
+		// If the form was opened before the catalog landed, its Git repo field fell
+		// back to free-text; rebuild so it upgrades to the name picker, carrying the
+		// entered URL (matched by key) across.
+		if m.view == forgeViewCreate {
+			m.form = forgeRebuildCreateForm(m.form, m.images, m.runners, m.repos)
+		}
 		return m, nil
 
 	case tuiAutoRefreshMsg:
@@ -328,9 +352,15 @@ func (m forgeModel) forgeKeyList(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
 		}
 	case "n":
 		var cmd tea.Cmd
-		m.form, cmd = newForgeCreateForm(m.images, m.runners)
+		m.form, cmd = newForgeCreateForm(m.images, m.runners, m.repos)
 		m.view = forgeViewCreate
-		return m, cmd
+		// If a prefetch hasn't landed (or failed), the repo field fell back to
+		// free-text; fetch now so it upgrades to a picker once the catalog arrives.
+		cmds := []tea.Cmd{cmd}
+		if len(m.repos.values) == 0 {
+			cmds = append(cmds, forgeFetchRepos)
+		}
+		return m, tea.Batch(cmds...)
 	case "x":
 		i := m.eTable.Cursor()
 		if i >= 0 && i < len(m.execs) {
@@ -388,9 +418,10 @@ func (m forgeModel) forgeKeyOutput(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
 // ── Create form ───────────────────────────────────────────────────────────────
 
 // newForgeCreateForm builds the execution form. When the server advertises an
-// image allowlist or runner classes, those fields become ←/→ selectors;
-// otherwise they fall back to free-text inputs.
-func newForgeCreateForm(images, runners []string) (tuiForm, tea.Cmd) {
+// image allowlist, runner classes, or git repos, those fields become selectors;
+// otherwise they fall back to free-text inputs. A chosen repo is injected as a
+// git: secret_ref on submit so the runner can clone via $GIT_CLONE_URL.
+func newForgeCreateForm(images, runners []string, repos kvCatalog) (tuiForm, tea.Cmd) {
 	var imageField formField
 	if len(images) > 0 {
 		imageField = formSelect("image", "Image", images)
@@ -410,7 +441,48 @@ func newForgeCreateForm(images, runners []string) (tuiForm, tea.Cmd) {
 		formInput("env", "Env", "KEY=VALUE KEY2=VALUE2 (optional)"),
 		formInput("timeout", "Timeout", "seconds (optional)"),
 		runnerField,
+		forgeRepoField(repos),
+		// Checkout: clone the chosen repo into the working dir and cd in before the
+		// command runs (actions/checkout-style). Only applied when a repo is set. The
+		// branch (git clone --branch) defaults to the remote's default when blank.
+		formSelectKV("checkout", "Checkout", []string{"no", "into working dir"}, []string{"", "yes"}),
+		formInput("checkout_branch", "Checkout branch", "branch or tag (optional, defaults to the remote's default)"),
+		formInput("checkout_dir", "Checkout dir", "clone dir (optional, defaults to repo name)"),
 	)
+}
+
+// forgeRepoField builds the optional Git repo control: a name→URL picker
+// (formSelectKV, leading "(none)" → no repo) when the catalog is loaded, else a
+// free-text URL input so the user can still clone an arbitrary repo.
+func forgeRepoField(repos kvCatalog) formField {
+	if len(repos.values) > 0 {
+		labels := append([]string{""}, repos.labels...)
+		values := append([]string{""}, repos.values...)
+		return formSelectKV("repo", "Git repo", labels, values)
+	}
+	return formInput("repo", "Git repo", "https://github.com/owner/repo.git (optional → $GIT_CLONE_URL)")
+}
+
+// forgeRebuildCreateForm rebuilds the create form against the latest catalogs,
+// carrying entered values (matched by key — for the repo picker that means the
+// clone URL), focus, and any inline error over. Used when a late repo prefetch
+// upgrades the free-text Git repo field to a picker.
+func forgeRebuildCreateForm(old tuiForm, images, runners []string, repos kvCatalog) tuiForm {
+	form, _ := newForgeCreateForm(images, runners, repos)
+	form.title = old.title
+	form.focus = old.focus
+	if form.focus >= len(form.fields) {
+		form.focus = len(form.fields) - 1
+	}
+	if form.focus < 0 {
+		form.focus = 0
+	}
+	form.errMsg = old.errMsg
+	for i := range form.fields {
+		form.fields[i].setValue(old.value(form.fields[i].key))
+	}
+	form.focusActive()
+	return form
 }
 
 func (m forgeModel) forgeKeyCreate(msg tea.KeyMsg) (forgeModel, tea.Cmd) {
@@ -440,14 +512,29 @@ func (m forgeModel) forgeSubmitCreate() (forgeModel, tea.Cmd) {
 		m.form.errMsg = "image is required"
 		return m, nil
 	}
-	command, err := buildForgeCommand(m.form.value("command"))
-	if err != nil {
-		m.form.errMsg = err.Error()
-		return m, nil
-	}
-	if len(command) == 0 {
-		m.form.errMsg = "command is required"
-		return m, nil
+	rawCmd := m.form.value("command")
+	checkout := m.form.value("checkout") == "yes"
+	// Checkout weaves a `git clone … && cd …` prologue into a shell script, which
+	// forge only accepts for a shell (`sh -c`) command. buildForgeCommand parses a
+	// single-line entry into raw argv, so force the shell form when checkout is on.
+	var command []string
+	if checkout {
+		if strings.TrimSpace(rawCmd) == "" {
+			m.form.errMsg = "command is required"
+			return m, nil
+		}
+		command = []string{"sh", "-c", rawCmd}
+	} else {
+		var err error
+		command, err = buildForgeCommand(rawCmd)
+		if err != nil {
+			m.form.errMsg = err.Error()
+			return m, nil
+		}
+		if len(command) == 0 {
+			m.form.errMsg = "command is required"
+			return m, nil
+		}
 	}
 	env, err := parseEnvAssignments(m.form.value("env"))
 	if err != nil {
@@ -463,11 +550,18 @@ func (m forgeModel) forgeSubmitCreate() (forgeModel, tea.Cmd) {
 		}
 		timeout = t
 	}
+	repo := m.form.value("repo")
+	// Checkout only makes sense with a repo to clone; reject the mismatch instead of
+	// silently dropping it so the user isn't surprised the working dir is empty.
+	if repo == "" && checkout {
+		m.form.errMsg = "checkout needs a Git repo selected"
+		return m, nil
+	}
 	m.form.errMsg = ""
-	return m, forgeSubmitExec(image, command, env, timeout, m.form.value("runner"))
+	return m, forgeSubmitExec(image, command, env, timeout, m.form.value("runner"), repo, checkout, m.form.value("checkout_dir"), m.form.value("checkout_branch"))
 }
 
-func forgeSubmitExec(image string, command []string, env map[string]string, timeout int64, runner string) tea.Cmd {
+func forgeSubmitExec(image string, command []string, env map[string]string, timeout int64, runner, repo string, checkout bool, checkoutDir, checkoutBranch string) tea.Cmd {
 	return func() tea.Msg {
 		payload := map[string]any{"image": image, "command": command}
 		if len(env) > 0 {
@@ -478,6 +572,27 @@ func forgeSubmitExec(image string, command []string, env map[string]string, time
 		}
 		if runner != "" {
 			payload["runner_class"] = runner
+		}
+		// A chosen repo wires forge's git: credential broker into the run: the
+		// runner clones via $GIT_CLONE_URL (fixed env var name). Omitted entirely
+		// when no repo is selected/typed.
+		if repo != "" {
+			payload["secret_refs"] = map[string]any{"GIT_CLONE_URL": "git:" + repo}
+			// Checkout asks forge to clone $GIT_CLONE_URL into the working dir and cd
+			// in before running the command. An empty dir lets forge derive it from
+			// the repo name. Only sent alongside a repo (validated in the form).
+			if checkout {
+				spec := map[string]any{}
+				if checkoutDir != "" {
+					spec["path"] = checkoutDir
+				}
+				// A branch/tag ref becomes `git clone --branch`; blank clones the
+				// remote's default branch.
+				if checkoutBranch != "" {
+					spec["ref"] = checkoutBranch
+				}
+				payload["checkout"] = spec
+			}
 		}
 		// Tag with the current project so the new run isn't hidden by the
 		// project-filtered list the user just created it from.
@@ -639,8 +754,10 @@ func (m forgeModel) forgeViewOutput() string {
 	if mem := tuiFormatMem(d.MemoryUsedMB, d.MemoryLimitMB); mem != "" {
 		memStr = "  mem: " + mem
 	}
-	meta := tuiMetaStyle.Render(tuiTrunc(d.Image, 36) + "  " + tuiColorStatus(d.Status) + exitStr + memStr)
-	return tuiTitleStyle.Render(tuiShortID(d.ExecutionID)) + "  " + meta + "\n" +
+	// No human name for an execution: lead with status + class (context) and
+	// keep the short id as a trailing detail.
+	meta := tuiMetaStyle.Render(tuiColorStatus(d.Status) + "  " + tuiTrunc(d.RunnerClass, 16) + exitStr + memStr + "  " + tuiShortID(d.ExecutionID))
+	return tuiTitleStyle.Render(tuiTrunc(d.Image, 40)) + "  " + meta + "\n" +
 		tuiBoxStyle.Render(m.vp.View()) + "\n" + help
 }
 
@@ -679,6 +796,7 @@ func init() {
 	})
 	RegisterModule(Module{
 		Name:    "forge",
+		Service: "forge",
 		Order:   30,
 		Command: forgeCmd,
 		Screens: []HubScreen{{

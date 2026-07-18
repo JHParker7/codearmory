@@ -1,11 +1,12 @@
 import type { ReactNode } from 'react';
 import { T } from '../theme';
 
-type Tone = 'green' | 'amber' | 'dim' | 'red';
+type Tone = 'green' | 'amber' | 'dim' | 'red' | 'blue';
 
+/** Small uppercase status badge tinted by `tone` (green/blue also show a status dot); used for states like enabled/pending/awaiting-approval/error/disabled. */
 export function Pill({ children, tone = 'green' }: { children: ReactNode; tone?: Tone }) {
-  const c = tone === 'green' ? T.green : tone === 'amber' ? T.amber : tone === 'red' ? T.red : T.dim;
-  const bg = tone === 'green' ? T.greenSoft : tone === 'amber' ? T.amberSoft : tone === 'red' ? T.redSoft : 'transparent';
+  const c = tone === 'green' ? T.green : tone === 'amber' ? T.amber : tone === 'red' ? T.red : tone === 'blue' ? T.blue : T.dim;
+  const bg = tone === 'green' ? T.greenSoft : tone === 'amber' ? T.amberSoft : tone === 'red' ? T.redSoft : tone === 'blue' ? T.blueSoft : 'transparent';
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -14,7 +15,7 @@ export function Pill({ children, tone = 'green' }: { children: ReactNode; tone?:
       fontSize: 10.5, fontFamily: T.mono, letterSpacing: 0.5,
       textTransform: 'uppercase',
     }}>
-      {tone === 'green' && <span style={{ width: 5, height: 5, borderRadius: 3, background: c }} />}
+      {(tone === 'green' || tone === 'blue') && <span style={{ width: 5, height: 5, borderRadius: 3, background: c }} />}
       {children}
     </span>
   );

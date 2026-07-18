@@ -326,8 +326,8 @@ paths:
       operationId: createRuntimeBackend
       description: |
         Creates a runtime backend (admin only). Returns `409` if one with the same
-        name already exists. A `proxmox` backend validates its required config keys
-        and the `token` secret_ref.
+        name already exists. A `kata` or `gvisor` backend validates that its
+        `runtime_class` config key is set.
 
         Permission: `createRuntimeBackend` on `forge/runtime-backends`.
       requestBody:
@@ -601,8 +601,8 @@ components:
         disk_gb:
           type: integer
           description: |
-            Disk size in gigabytes. Used only by the proxmox backend (VM disk
-            size); ignored by the docker and kubernetes backends.
+            Reserved for a future VM-style backend (per-class disk size);
+            currently ignored by all backends.
           example: 10
         backend:
           type: string
@@ -619,9 +619,9 @@ components:
           description: |
             Run the job as root with a writable root filesystem and privilege
             escalation allowed, so package managers (apt/pacman/dnf) work. Honoured
-            ONLY by VM-isolated backends (kata, proxmox); ignored on shared-kernel
-            container backends (docker/kubernetes), which always run the
-            locked-down non-root sandbox.
+            ONLY by kernel-isolated backends (kata, gvisor); ignored on
+            shared-kernel container backends (docker/kubernetes), which always run
+            the locked-down non-root sandbox.
           example: false
 
     RunnerClassBody:
@@ -661,8 +661,8 @@ components:
         disk_gb:
           type: integer
           description: |
-            VM disk size in gigabytes for the proxmox backend; ignored by docker
-            and kubernetes. Minimum 0 (0 = use the template disk unchanged).
+            Reserved for a future VM-style backend (per-class disk size);
+            currently ignored by all backends. Minimum 0.
           minimum: 0
           example: 20
         backend:
@@ -679,9 +679,9 @@ components:
           type: boolean
           description: |
             Run the job as root with a writable root filesystem (apt/pacman/dnf).
-            Only valid when `backend` is a VM-isolated backend (kata or proxmox) —
-            the API returns `400` if set on any shared-kernel (docker/kubernetes)
-            backend. Defaults to false.
+            Only valid when `backend` is a kernel-isolated backend (kata or
+            gvisor) — the API returns `400` if set on any shared-kernel
+            (docker/kubernetes) backend. Defaults to false.
           example: false
 
     RuntimeBackend:
@@ -690,14 +690,16 @@ components:
         name:
           type: string
           description: Unique backend name. Runner classes reference it by name.
-          example: proxmox-prod
+          example: kata-prod
         type:
           type: string
-          enum: [docker, kubernetes, proxmox, kata]
+          enum: [docker, kubernetes, kata, gvisor]
           description: |
             Runtime implementation this backend selects. `kata` is the Kubernetes
-            runtime pinned to a VM-isolating RuntimeClass.
-          example: proxmox
+            runtime pinned to a VM-isolating RuntimeClass; `gvisor` pins a gVisor
+            (runsc) RuntimeClass whose userspace kernel sandboxes the job without
+            any hardware virtualization.
+          example: kata
         enabled:
           type: boolean
           description: Whether the backend may be used by new jobs.
@@ -707,17 +709,13 @@ components:
           additionalProperties:
             type: string
           description: |
-            Non-secret backend settings. For proxmox:
-            `url`, `node`, `template_vmid`, `storage`, `bridge`, and optionally
-            `boot_disk` (disk id to resize, default `scsi0`), `vlan`,
-            `clone_mode` (`linked`|`full`), `egress_proxy`, `tls_insecure`,
-            `ca_file`. docker/kubernetes read their settings from env instead.
+            Non-secret backend settings. For kata: `runtime_class` (required, the
+            Kubernetes RuntimeClass, e.g. `kata-qemu`). For gvisor: `runtime_class`
+            (required, the gVisor RuntimeClass, e.g. `gvisor`). kubernetes accepts
+            an optional `runtime_class` (else K8S_RUNTIME_CLASS). docker reads env
+            instead.
           example:
-            url: https://pve:8006/api2/json
-            node: pve
-            template_vmid: "9000"
-            storage: local-lvm
-            bridge: vmbr1
+            runtime_class: kata-qemu
         secret_refs:
           type: object
           additionalProperties:
@@ -725,10 +723,9 @@ components:
           description: |
             Maps a logical key to the NAME of an environment variable read via the
             secret() convention — only env var names are stored and returned, never
-            secret values. Proxmox requires `token` → the var holding the PVE API
-            token.
-          example:
-            token: PROXMOX_TOKEN
+            secret values. The built-in backends (docker/kubernetes/kata/gvisor)
+            need none.
+          example: {}
         created_at:
           type: string
           format: date-time
@@ -743,11 +740,11 @@ components:
         name:
           type: string
           description: Unique backend name. Ignored on PUT (name comes from path).
-          example: proxmox-prod
+          example: kata-prod
         type:
           type: string
-          enum: [docker, kubernetes, proxmox]
-          example: proxmox
+          enum: [docker, kubernetes, kata, gvisor]
+          example: kata
         enabled:
           type: boolean
           example: true

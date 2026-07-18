@@ -1,0 +1,364 @@
+import { expect } from 'chai';
+import {
+  blocksFromSteps, stepsFromBlocks, StepRef, Block,
+  stepsToPayload, configToJson, parseConfig, collectRefs,
+  effectiveStepName, duplicateStepNames,
+} from '../src/pages/app/pipelineGraph.ts';
+
+describe('blocksFromSteps', () => {
+  it('maps steps to blocks 1:1, in order, with unique instance ids', () => {
+    const blocks = blocksFromSteps([
+      { step_id: 'build' },
+      { step_id: 'lint' },
+      { step_id: 'test' },
+      { step_id: 'deploy' },
+    ]);
+    expect(blocks.map((b) => b.stepId)).to.deep.equal(['build', 'lint', 'test', 'deploy']);
+    expect(new Set(blocks.map((b) => b.uid)).size).to.equal(4); // unique instance ids
+  });
+
+  it('gives a repeated step distinct blocks', () => {
+    const blocks = blocksFromSteps([{ step_id: 'build' }, { step_id: 'notify' }, { step_id: 'build' }]);
+    expect(blocks.filter((b) => b.stepId === 'build')).to.have.length(2);
+    expect(new Set(blocks.map((b) => b.uid)).size).to.equal(3);
+  });
+
+  it('returns no blocks for an empty pipeline', () => {
+    expect(blocksFromSteps([])).to.deep.equal([]);
+  });
+});
+
+describe('stepsFromBlocks', () => {
+  const blk = (uid: string, stepId: string): Block => ({ uid, stepId });
+
+  it('blocks become steps in order', () => {
+    const out = stepsFromBlocks([blk('b0', 'a'), blk('b1', 'b')]);
+    expect(out).to.deep.equal([{ step_id: 'a' }, { step_id: 'b' }]);
+  });
+
+  it('round-trips steps -> blocks -> steps (with a repeated step)', () => {
+    const steps: StepRef[] = [
+      { step_id: 'build' },
+      { step_id: 'lint' },
+      { step_id: 'test' },
+      { step_id: 'build' }, // build again, later
+    ];
+    expect(stepsFromBlocks(blocksFromSteps(steps))).to.deep.equal(steps);
+  });
+
+  it('emits step_id from the block, so one step can occupy two nodes', () => {
+    const out = stepsFromBlocks([blk('b0', 'build'), blk('b1', 'build')]);
+    expect(out).to.deep.equal([{ step_id: 'build' }, { step_id: 'build' }]);
+  });
+});
+
+describe('matrix round-trip', () => {
+  it('carries a step matrix through blocks and back', () => {
+    const steps: StepRef[] = [
+      { step_id: 'build' },
+      { step_id: 'deploy', matrix: { var: 'region', values: ['us', 'eu'] } },
+    ];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[1].matrix).to.deep.equal({ var: 'region', values: ['us', 'eu'] });
+    expect(stepsFromBlocks(blocks)).to.deep.equal(steps);
+  });
+
+  it('drops an incomplete matrix (no var) on serialize', () => {
+    const out = stepsFromBlocks([
+      { uid: 'b0', stepId: 'a', matrix: { var: '  ', values: ['x'] } },
+    ]);
+    expect(out).to.deep.equal([{ step_id: 'a' }]);
+  });
+
+  it('carries a values_from matrix', () => {
+    const steps: StepRef[] = [
+      { step_id: 'fan', matrix: { var: 'r', values_from: '${inputs.regions}' } },
+    ];
+    expect(stepsFromBlocks(blocksFromSteps(steps))).to.deep.equal(steps);
+  });
+});
+
+describe('config ⇄ JSON (live editable panel)', () => {
+  it('stepsToPayload emits matrix / bare shapes and drops an empty-var matrix', () => {
+    const steps: StepRef[] = [
+      { step_id: 'a' },
+      { step_id: 'b', matrix: { var: 'region', values: ['us'] } },
+      { step_id: 'c', matrix: { var: '  ', values: ['x'] } },
+      { step_id: 'd' },
+    ];
+    expect(stepsToPayload(steps)).to.deep.equal([
+      { step_id: 'a' },
+      { step_id: 'b', matrix: { var: 'region', values: ['us'] } },
+      { step_id: 'c' },
+      { step_id: 'd' },
+    ]);
+  });
+
+  it('configToJson omits an empty description and pretty-prints the payload', () => {
+    const json = configToJson('deploy', '', [{ step_id: 'a' }]);
+    expect(JSON.parse(json)).to.deep.equal({ name: 'deploy', steps: [{ step_id: 'a' }] });
+    expect(json).to.contain('\n'); // pretty-printed
+    const withDesc = JSON.parse(configToJson('deploy', 'ship it', []));
+    expect(withDesc).to.deep.equal({ name: 'deploy', description: 'ship it', steps: [] });
+  });
+
+  it('parseConfig round-trips configToJson (name, description, matrix steps)', () => {
+    const steps: StepRef[] = [
+      { step_id: 'build' },
+      { step_id: 'lint' },
+      { step_id: 'deploy', matrix: { var: 'r', values: ['us', 'eu'] } },
+    ];
+    const parsed = parseConfig(configToJson('pipe', 'desc', steps));
+    expect(parsed.name).to.equal('pipe');
+    expect(parsed.description).to.equal('desc');
+    expect(parsed.steps).to.deep.equal(steps);
+  });
+
+  it('parseConfig defaults missing name/description and a missing steps array', () => {
+    const parsed = parseConfig('{}');
+    expect(parsed).to.deep.equal({ name: '', description: '', steps: [] });
+  });
+
+  it('parseConfig rejects malformed input with a user-facing message', () => {
+    expect(() => parseConfig('{ not json')).to.throw();
+    expect(() => parseConfig('[]')).to.throw('JSON object');
+    expect(() => parseConfig('{"steps": "nope"}')).to.throw('array');
+    // A ref that is none of the three kinds (step_id / inline action / approval).
+    expect(() => parseConfig('{"steps": [{"name": "orphan"}]}')).to.throw('step_id');
+  });
+
+  it('parseConfig ignores a parallel_group left in a hand-edited config', () => {
+    // The field no longer exists in the API; it must never survive back into the
+    // builder, or the next save would send a field the backend rejects.
+    const parsed = parseConfig('{"name":"p","steps":[{"step_id":"a","parallel_group":0}]}');
+    expect(parsed.steps).to.deep.equal([{ step_id: 'a' }]);
+    expect(stepsToPayload(parsed.steps)).to.deep.equal([{ step_id: 'a' }]);
+  });
+});
+
+describe('per-occurrence step name', () => {
+  it('round-trips a named step through blocks and back', () => {
+    const steps: StepRef[] = [
+      { step_id: 'build', name: 'build-prod' },
+      { step_id: 'build' }, // same step, no override
+    ];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[0].name).to.equal('build-prod');
+    expect(blocks[1].name).to.equal(undefined);
+    expect(stepsFromBlocks(blocks)).to.deep.equal(steps);
+  });
+
+  it('stepsToPayload and configToJson include a name only when set', () => {
+    expect(stepsToPayload([{ step_id: 'a', name: 'deploy' }]))
+      .to.deep.equal([{ step_id: 'a', name: 'deploy' }]);
+    expect(JSON.parse(configToJson('p', '', [{ step_id: 'a', name: 'deploy' }])).steps)
+      .to.deep.equal([{ step_id: 'a', name: 'deploy' }]);
+  });
+
+  it('parseConfig reads a step name', () => {
+    const parsed = parseConfig('{"name":"p","steps":[{"step_id":"a","name":"deploy"}]}');
+    expect(parsed.steps).to.deep.equal([{ step_id: 'a', name: 'deploy' }]);
+  });
+});
+
+describe('per-occurrence with override (input wiring)', () => {
+  it('round-trips a with override through blocks and config JSON', () => {
+    const steps: StepRef[] = [
+      { step_id: 'deploy', with: { env: { TARGET: '${steps.build.output}' } } },
+    ];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[0].with).to.deep.equal({ env: { TARGET: '${steps.build.output}' } });
+    expect(stepsFromBlocks(blocks)).to.deep.equal(steps);
+    expect(JSON.parse(configToJson('p', '', steps)).steps).to.deep.equal([
+      { step_id: 'deploy', with: { env: { TARGET: '${steps.build.output}' } } },
+    ]);
+  });
+
+  it('drops an empty with override', () => {
+    expect(stepsToPayload([{ step_id: 'a', with: {} }]))
+      .to.deep.equal([{ step_id: 'a' }]);
+  });
+
+  it('parseConfig reads a with override', () => {
+    const parsed = parseConfig('{"name":"p","steps":[{"step_id":"a","with":{"image":"x"}}]}');
+    expect(parsed.steps).to.deep.equal([{ step_id: 'a', with: { image: 'x' } }]);
+  });
+});
+
+describe('inline approval gates', () => {
+  it('round-trips a gate through blocks (no step_id) and back', () => {
+    const steps: StepRef[] = [
+      { step_id: 'build' },
+      { approval: { message: 'deploy?', approvers: ['alice'] } },
+    ];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[1].approval).to.deep.equal({ message: 'deploy?', approvers: ['alice'] });
+    expect(stepsFromBlocks(blocks)).to.deep.equal(steps);
+  });
+
+  it('stepsToPayload emits a gate as just {approval}', () => {
+    expect(stepsToPayload([{ approval: { message: 'ok?' } }]))
+      .to.deep.equal([{ approval: { message: 'ok?' } }]);
+  });
+
+  it('configToJson/parseConfig round-trip a gate', () => {
+    const steps: StepRef[] = [{ approval: { message: 'go?', approvers: ['a', 'b'] } }];
+    const parsed = parseConfig(configToJson('p', '', steps));
+    expect(parsed.steps).to.deep.equal(steps);
+  });
+
+  it('parseConfig accepts a gate with no step_id', () => {
+    const parsed = parseConfig('{"name":"p","steps":[{"approval":{"message":"hold"}}]}');
+    expect(parsed.steps).to.deep.equal([{ approval: { message: 'hold' } }]);
+  });
+});
+
+describe('inline steps', () => {
+  it('round-trips an inline step through blocks (no step_id) and back', () => {
+    const steps: StepRef[] = [
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make' }, timeout: 60 },
+    ];
+    const blocks = blocksFromSteps(steps);
+    // The definition lives in inline.with; the per-occurrence override starts empty.
+    expect(blocks[0].stepId).to.equal('');
+    expect(blocks[0].name).to.equal('build');
+    expect(blocks[0].inline).to.deep.equal({ action: 'forge/run', timeout: 60, with: { image: 'alpine', run: 'make' } });
+    expect(blocks[0].with).to.deep.equal({});
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make' }, timeout: 60 },
+    ]);
+  });
+
+  it('collapses the inline def + per-occurrence override into one with on serialise', () => {
+    const blocks: Block[] = [{
+      uid: 'b0', stepId: '', name: 'build',
+      inline: { action: 'forge/run', with: { image: 'alpine', run: 'make' } },
+      with: { run: 'make test' }, // wiring override wins over the def
+    }];
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make test' } },
+    ]);
+  });
+
+  it('stepsToPayload emits an inline step as {action,name,with,timeout} — never a step_id', () => {
+    expect(stepsToPayload([{ action: 'forge/run', name: 'build', with: { image: 'alpine' }, timeout: 60 }]))
+      .to.deep.equal([{ action: 'forge/run', timeout: 60, name: 'build', with: { image: 'alpine' } }]);
+  });
+
+  it('carries a matrix on an inline step', () => {
+    const steps: StepRef[] = [{ action: 'forge/run', name: 'build', with: { image: 'alpine' }, matrix: { var: 'r', values: ['a', 'b'] } }];
+    const blocks = blocksFromSteps(steps);
+    expect(blocks[0].inline?.action).to.equal('forge/run');
+    expect(blocks[0].matrix).to.deep.equal({ var: 'r', values: ['a', 'b'] });
+    expect(stepsToPayload(stepsFromBlocks(blocks))).to.deep.equal([
+      { action: 'forge/run', matrix: { var: 'r', values: ['a', 'b'] }, name: 'build', with: { image: 'alpine' } },
+    ]);
+  });
+
+  it('configToJson/parseConfig round-trip an inline step', () => {
+    const steps: StepRef[] = [{ action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make' } }];
+    const parsed = parseConfig(configToJson('p', '', steps));
+    expect(parsed.steps).to.deep.equal([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make' } },
+    ]);
+  });
+
+  it('does not misclassify a stored-step reference as inline', () => {
+    const blocks = blocksFromSteps([{ step_id: 'build', name: 'b' }]);
+    expect(blocks[0].inline).to.equal(undefined);
+    expect(blocks[0].stepId).to.equal('build');
+  });
+
+  it('splits an inline step\'s attached volume into the block override, not the definition', () => {
+    // A volume attach is a per-occurrence PIPELINE field. On reload it must land in the
+    // block override (block.with), not the inline definition (inline.with) — the step
+    // definition form rebuilds inline.with and drops pipeline fields, so a volume left
+    // there would be silently removed the next time the step's definition is edited.
+    const volumes = [{ workflow_id: '${run_id}', name: 'workspace', mount_path: '/workspace', workdir: true }];
+    const blocks = blocksFromSteps([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make', volumes } },
+    ]);
+    expect(blocks[0].inline).to.deep.equal({ action: 'forge/run', timeout: undefined, with: { image: 'alpine', run: 'make' } });
+    expect(blocks[0].with).to.deep.equal({ volumes });
+    // The two layers still recombine into one `with` on serialise (volume preserved).
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make', volumes } },
+    ]);
+  });
+
+  it('preserves the volume when an inline step definition is edited (drops a def-only key)', () => {
+    const volumes = [{ workflow_id: '${run_id}', name: 'workspace', mount_path: '/workspace', workdir: true }];
+    const blocks = blocksFromSteps([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make', volumes } },
+    ]);
+    // Simulate a step-definition edit (StepDefForm → buildStepWith → applyInlineEdit):
+    // it rebuilds ONLY the inline.with definition layer (no pipeline fields), leaving
+    // the block override untouched.
+    blocks[0].inline = { action: 'forge/run', timeout: undefined, with: { image: 'alpine', run: 'make test' } };
+    expect(stepsFromBlocks(blocks)).to.deep.equal([
+      { action: 'forge/run', name: 'build', with: { image: 'alpine', run: 'make test', volumes } },
+    ]);
+  });
+});
+
+describe('collectRefs (step inspector)', () => {
+  it('extracts run inputs (named + bare) and upstream step outputs, ignoring matrix', () => {
+    const refs = collectRefs({
+      image: 'ubuntu',
+      run: 'deploy ${inputs.env} to ${matrix.region}',
+      url: '${steps.build.output.url}',
+      bare: '${TOKEN}',
+      nested: { a: ['${steps.lint.output}'] },
+    });
+    expect(refs.inputs).to.have.members(['env', 'TOKEN']);
+    expect(refs.steps).to.have.members(['build', 'lint']);
+  });
+
+  it('returns empty lists when there are no references', () => {
+    expect(collectRefs({ a: 'plain text', b: 3, c: true })).to.deep.equal({ inputs: [], steps: [] });
+  });
+
+  it('dedupes repeated references', () => {
+    const refs = collectRefs({ a: '${steps.x.output} ${steps.x.output}', b: '${inputs.y}', c: '${y}' });
+    expect(refs.steps).to.deep.equal(['x']);
+    expect(refs.inputs).to.have.members(['y']);
+  });
+});
+
+describe('duplicateStepNames', () => {
+  const defName = (id: string) => ({ s1: 'run', s2: 'run', s3: 'deploy' }[id]);
+
+  it('flags two blocks that fall back to the same definition name', () => {
+    // Both unnamed -> both resolve to "run" -> collide in the output map.
+    const steps: StepRef[] = [{ step_id: 's1' }, { step_id: 's2' }];
+    expect(duplicateStepNames(steps, defName)).to.deep.equal(['run']);
+  });
+
+  it('is clean once each block has a unique per-occurrence name', () => {
+    const steps: StepRef[] = [
+      { step_id: 's1', name: 'build' },
+      { step_id: 's2', name: 'test' },
+    ];
+    expect(duplicateStepNames(steps, defName)).to.deep.equal([]);
+  });
+
+  it('flags an override that collides with another block definition name', () => {
+    const steps: StepRef[] = [{ step_id: 's3' }, { step_id: 's1', name: 'deploy' }];
+    expect(duplicateStepNames(steps, defName)).to.deep.equal(['deploy']);
+  });
+
+  it('ignores unnamed approval gates (no output, empty name never collides)', () => {
+    const steps: StepRef[] = [
+      { approval: { message: 'ok?' } },
+      { approval: { message: 'again?' } },
+      { step_id: 's3' },
+    ];
+    expect(duplicateStepNames(steps, defName)).to.deep.equal([]);
+  });
+
+  it('effectiveStepName prefers the override, else the definition name', () => {
+    expect(effectiveStepName({ step_id: 's1' }, defName)).to.equal('run');
+    expect(effectiveStepName({ step_id: 's1', name: 'x' }, defName)).to.equal('x');
+    expect(effectiveStepName({ approval: {} }, defName)).to.equal('');
+  });
+});

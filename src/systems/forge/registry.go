@@ -65,31 +65,34 @@ func (r *runtimeRegistry) Evict(name string) {
 	delete(r.cache, name)
 }
 
-// isVMIsolatedBackendType reports whether a backend type runs each job inside its
-// own VM, making the VM — not a shared host kernel — the isolation boundary. Only
-// these backends may run a privileged runner class (root + writable rootfs): on a
-// shared-kernel container backend (docker/kubernetes) that would be a host escape.
-// This is the single source of truth consulted by both the API gate
-// (validatePrivilegedBackend) and the runtime build below, so the two never
-// disagree about which backends are VM-isolated. "kata" is the Kubernetes runtime
-// pinned to a VM-isolating RuntimeClass; "proxmox" boots a throwaway VM per job.
-func isVMIsolatedBackendType(t string) bool {
-	return t == "kata" || t == "proxmox"
+// isKernelIsolatedBackendType reports whether a backend type runs each job under
+// its OWN kernel rather than the shared host kernel, so the job's root can never
+// reach the host kernel. Only these backends may run a privileged runner class
+// (root + writable rootfs): on a shared-kernel container backend (docker/kubernetes)
+// that would be a host escape. This is the single source of truth consulted by both
+// the API gate (validatePrivilegedBackend) and the runtime build below, so the two
+// never disagree. "kata" pins a VM-isolating RuntimeClass (a hardware-virtualized
+// microVM guest kernel); "gvisor" pins a gVisor RuntimeClass whose userspace kernel
+// (the Sentry) services every syscall the job makes — a different mechanism but the
+// same guarantee that container-root is contained away from the host kernel. (gVisor
+// is a kernel boundary, not a network one — it does not confine egress, so unlike the
+// VM backends it keeps the egress proxy; that is decided in Helm/builder, not here.)
+func isKernelIsolatedBackendType(t string) bool {
+	return t == "kata" || t == "gvisor"
 }
 
 // buildRuntime constructs the concrete Runtime for a backend. docker and
 // kubernetes keep reading their existing env vars (FORGE_NETWORK_MODE,
-// K8S_NAMESPACE, …) so an existing single-runtime deployment is unchanged; the
-// proxmox case reads backend.Config / SecretRefs. kata is the kubernetes runtime
-// pinned to a VM-isolating RuntimeClass from config (validateKataBackend
-// guarantees it is set).
+// K8S_NAMESPACE, …) so an existing single-runtime deployment is unchanged. kata
+// is the kubernetes runtime pinned to a VM-isolating RuntimeClass from config
+// (validateKataBackend guarantees it is set).
 func buildRuntime(b RuntimeBackend) (Runtime, error) {
 	switch b.Type {
 	case "kubernetes":
 		// Optional per-backend RuntimeClass; empty falls back to K8S_RUNTIME_CLASS.
-		// Not VM-isolated: a shared host kernel, so privileged runner classes are
+		// Not kernel-isolated: a shared host kernel, so privileged runner classes are
 		// ignored and the locked-down sandbox is always applied.
-		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], isVMIsolatedBackendType(b.Type))
+		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], isKernelIsolatedBackendType(b.Type))
 	case "kata":
 		// Kata is the Kubernetes runtime pinned to a VM-isolating RuntimeClass. The
 		// RuntimeClass is mandatory: without one the pod silently falls back to the
@@ -101,14 +104,27 @@ func buildRuntime(b RuntimeBackend) (Runtime, error) {
 		if resolveRuntimeClass(b.Config[k8sKeyRuntimeClass]) == nil {
 			return nil, fmt.Errorf("kata runtime requires a RuntimeClass: set the backend %q config key or the K8S_RUNTIME_CLASS env var", k8sKeyRuntimeClass)
 		}
-		// VM-isolated: the job runs inside a microVM, so a runner class may opt into
-		// running as root (RunnerClass.Privileged) for package managers / apt.
-		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], isVMIsolatedBackendType(b.Type))
+		// Kernel-isolated: the job runs inside a microVM, so a runner class may opt
+		// into running as root (RunnerClass.Privileged) for package managers / apt.
+		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], isKernelIsolatedBackendType(b.Type))
+	case "gvisor":
+		// gVisor (handler runsc) is the Kubernetes runtime pinned to a gVisor
+		// RuntimeClass: a userspace kernel (the Sentry) intercepts the job's syscalls
+		// in software, so it needs NO hardware virtualization (/dev/kvm or nested
+		// virt) — the reason to choose it over kata. The RuntimeClass is mandatory,
+		// exactly as for kata: without it the pod falls back to runc with no gVisor
+		// sandbox at all, so enforce it here at the point of use. Kernel-isolated: the
+		// job's root is contained by the Sentry, so a runner class may run privileged
+		// (root + writable rootfs) just like kata. gVisor is a kernel boundary, not a
+		// network one, so it does NOT confine egress — Helm/builder keep the egress
+		// proxy for it (unlike the VM backends).
+		if resolveRuntimeClass(b.Config[k8sKeyRuntimeClass]) == nil {
+			return nil, fmt.Errorf("gvisor runtime requires a RuntimeClass: set the backend %q config key or the K8S_RUNTIME_CLASS env var", k8sKeyRuntimeClass)
+		}
+		return newKubernetesRuntime(b.Config[k8sKeyRuntimeClass], isKernelIsolatedBackendType(b.Type))
 	case "docker":
 		return newDockerRuntime()
-	case "proxmox":
-		return newProxmoxRuntime(b)
 	default:
-		return nil, fmt.Errorf("unknown runtime type %q: expected docker, kubernetes, proxmox or kata", b.Type)
+		return nil, fmt.Errorf("unknown runtime type %q: expected docker, kubernetes, gvisor or kata", b.Type)
 	}
 }

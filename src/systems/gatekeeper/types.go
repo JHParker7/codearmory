@@ -67,6 +67,27 @@ type User struct {
 	Active               bool      `gorm:"column:active;default:true"`
 }
 
+// UserOrgMembership records that a user belongs to an org. A user may hold many
+// memberships at once (they can be in multiple orgs); User.OrgID names the single
+// org they are currently *acting in* — the "active org" — which must always match
+// one of their active membership rows. Membership is what invite-accept grants and
+// what the org switch/leave endpoints add and remove; the active org is a pointer
+// into the membership set that drives every per-request org scoping decision (list
+// results, secrets, permission stamping, the service gate, and the org_id returned
+// by check_permissions that downstream services read). Keeping the active org on
+// User.OrgID means no downstream service needs to change: they still see one org
+// per request.
+type UserOrgMembership struct {
+	MembershipID string    `json:"membership_id" gorm:"column:membership_id;primaryKey"`
+	UserID       string    `json:"user_id"       gorm:"column:user_id"`
+	OrgID        string    `json:"org_id"        gorm:"column:org_id"`
+	CreatedAt    time.Time `json:"created_at"    gorm:"column:created_at"`
+	UpdatedAt    time.Time `json:"updated_at"    gorm:"column:updated_at"`
+	Active       bool      `json:"-"             gorm:"column:active;default:true"`
+}
+
+func (UserOrgMembership) TableName() string { return "user_org_memberships" }
+
 // Session holds the per-session ECDSA public key used to verify the JWT signature.
 // The JWT itself is never stored — authMiddleware re-validates the signature on
 // each request using the stored PubKey, so retaining the token would be redundant
@@ -102,6 +123,44 @@ type Invite struct {
 	ExpiresAt    time.Time `json:"expires_at"    gorm:"column:expires_at"`
 	Active       bool      `json:"-"             gorm:"column:active;default:true"`
 }
+
+// SignupAllowlistEntry is a single permitted-email rule for invite-only signup.
+// Email holds either a full address ("alice@example.com") or a domain rule
+// ("@example.com", matching any address at that domain), always normalised to
+// lower case. Entries are managed by platform admins at runtime; the signup gate
+// consults them only when the SignupPolicy has InviteOnly set.
+type SignupAllowlistEntry struct {
+	EntryID   string    `json:"entry_id"   gorm:"column:entry_id;primaryKey"`
+	CreatedAt time.Time `json:"created_at" gorm:"column:created_at"`
+	UpdatedAt time.Time `json:"updated_at" gorm:"column:updated_at"`
+	Email     string    `json:"email"      gorm:"column:email"`
+	Note      string    `json:"note"       gorm:"column:note;default:''"`
+	CreatedBy string    `json:"created_by" gorm:"column:created_by"`
+	Active    bool      `json:"-"          gorm:"column:active;default:true"`
+}
+
+func (SignupAllowlistEntry) TableName() string { return "signup_allowlist" }
+
+// signupPolicySingletonID is the fixed primary key of the single SignupPolicy row.
+const signupPolicySingletonID = "singleton"
+
+// SignupPolicy is a single-row table holding instance-wide registration policy.
+// When InviteOnly is true, handleSignup rejects any email that is not matched by
+// the signup allowlist (the bootstrap admin's very first signup is exempt so the
+// instance can always be initialised). Seeded from GATEKEEPER_INVITE_ONLY at
+// startup, then changed by admins at runtime via PUT /signup-policy.
+//
+// InviteOnly deliberately carries no `default:` gorm tag: a default tag makes
+// GORM omit the field on Create when it holds its zero value (false), so the
+// column could not be explicitly stored false. It is always set explicitly.
+type SignupPolicy struct {
+	ID         string    `json:"-"          gorm:"column:id;primaryKey"`
+	InviteOnly bool      `json:"invite_only" gorm:"column:invite_only"`
+	UpdatedAt  time.Time `json:"updated_at" gorm:"column:updated_at"`
+	UpdatedBy  string    `json:"updated_by" gorm:"column:updated_by;default:''"`
+}
+
+func (SignupPolicy) TableName() string { return "signup_policy" }
 
 // Permissions defines a set of allowed actions on resources for a given service.
 type Permissions struct {
@@ -176,6 +235,7 @@ type AuditLog struct {
 	ActorType  string    `json:"actor_type"   gorm:"column:actor_type"` // "user" | "service"
 	Action     string    `json:"action"       gorm:"column:action"`     // e.g. "role.update"
 	ResourceID string    `json:"resource_id"  gorm:"column:resource_id"`
+	OrgID      *string   `json:"org_id"       gorm:"column:org_id"` // actor's org at the time of the action
 	Detail     string    `json:"detail"       gorm:"column:detail"`
 }
 

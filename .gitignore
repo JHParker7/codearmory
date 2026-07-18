@@ -1,5 +1,8 @@
 # Go build output
+src/systems/artifacts/artifacts
+src/systems/git/git
 src/systems/gatekeeper/gatekeeper
+src/systems/egress-proxy/egress-proxy
 src/systems/blueprints/blueprints
 src/systems/conductor/conductor
 src/systems/workflows/workflows
@@ -16,6 +19,7 @@ src/systems/chaos/chaos
 src/systems/argo/argo
 src/systems/outpost/outpost
 src/systems/builder/builder
+src/systems/portal-bff/portal-bff
 src/cli/armory
 
 # SQLite databases

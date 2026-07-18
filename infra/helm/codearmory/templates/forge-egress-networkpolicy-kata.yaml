@@ -1,0 +1,106 @@
+{{- if and .Values.forge.enabled .Values.forge.kata.enabled .Values.forge.kata.egress.networkPolicy.enabled }}
+# Public-only egress for forge's kata sandbox Job pods (labelled app=forge). Kata's
+# microVM is a kernel/VM boundary, NOT a network one, so without this a kata pod keeps
+# the pod network's full reach — cluster services and the 169.254.169.254 cloud-metadata
+# endpoint included. This policy allows egress to every PUBLIC IPv4 address and denies
+# all private/internal ranges (RFC1918, loopback, link-local/metadata, CGNAT) plus any
+# configured blocklist, while still permitting DNS. IPv4 only: IPv6 egress is not listed
+# and so is denied. Requires a NetworkPolicy-aware CNI; inert otherwise. Created in the
+# exec namespace (forge.env.k8sNamespace, default the release namespace). This replaces
+# the proxy-confining policy (forge-egress-networkpolicy.yaml), which is skipped under
+# kata — the two are mutually exclusive and share one name.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "codearmory.fullname" . }}-forge-exec-egress
+  namespace: {{ .Values.forge.env.k8sNamespace | default .Release.Namespace }}
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: forge-egress-kata
+spec:
+  podSelector:
+    matchLabels:
+      app: forge
+  policyTypes:
+    - Egress
+  egress:
+    # DNS — an unrestricted port-53 rule so kube-dns (a private ClusterIP, otherwise
+    # denied by the block list below) stays reachable for name resolution.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The artifact store — a deliberate, NARROW hole in the private-range denial so a
+    # sandbox can save/restore a build cache. Scoped to that one service's pods on its
+    # one port, the same way the DNS rule above is scoped: every other internal address
+    # stays denied. Without this, artifact steps work only on a cluster whose CNI does
+    # not enforce NetworkPolicy — i.e. they would pass in dev and fail in production.
+    {{- if and .Values.artifacts.enabled .Values.forge.kata.egress.allowArtifacts }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: artifacts
+      ports:
+        - protocol: TCP
+          port: {{ .Values.artifacts.port }}
+    {{- end }}
+    # The base-image mirror — the same narrow hole, for the same reason. A build pulls
+    # its base image before it can do anything else, so without this an image build
+    # under kata cannot use the mirror at all: it would fall back to the public origin
+    # on every leg (working, but re-exposing the rate-limit burst the mirror exists to
+    # prevent). Scoped to that one pod on its one port; every other internal address
+    # stays denied. The mirror serves only public base images and accepts no
+    # credentials, so reaching it grants a sandbox nothing it could not get from the
+    # public internet it is already allowed to reach.
+    {{- if and .Values.registryMirror.enabled .Values.forge.kata.egress.allowRegistryMirror }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: registry-mirror
+      ports:
+        - protocol: TCP
+          port: {{ .Values.registryMirror.port }}
+    {{- end }}
+    # Explicit egress to specific private ENDPOINTS a build legitimately needs — chiefly
+    # an image registry on the private network (e.g. a self-hosted Forgejo the CI pushes
+    # built images to). Each entry is "<ip>[/cidr]:<port>", allowed back in despite the
+    # private-range denial below — but ONLY on that port. Scoping to the port matters:
+    # allowing a whole host would also expose SSH and anything else it runs; a registry
+    # build only needs the registry port. Every other address and port stays denied.
+    {{- range .Values.forge.kata.egress.allowHosts }}
+    {{- $parts := splitList ":" . }}
+    {{- $host := index $parts 0 }}
+    {{- $port := index $parts 1 }}
+    {{- if not (contains "/" $host) }}{{- $host = printf "%s/32" $host }}{{- end }}
+    - to:
+        - ipBlock:
+            cidr: {{ $host | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ $port | int }}
+    {{- end }}
+    # All public IPv4; every private/internal range — and any admin-supplied blocklist
+    # CIDR — is excepted (denied). 169.254.0.0/16 covers the cloud-metadata endpoint;
+    # 100.64.0.0/10 (CGNAT) is included because clusters commonly place the pod/node
+    # network there.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+              - 100.64.0.0/10
+              {{- range .Values.forge.kata.egress.blocklist }}
+              - {{ . | quote }}
+              {{- end }}
+{{- end }}

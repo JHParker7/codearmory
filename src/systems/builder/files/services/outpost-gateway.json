@@ -1,0 +1,69 @@
+{
+  "registryName": "outpost-gateway",
+  "k8sName": "outpost-gateway",
+  "imageRepo": "outpost-gateway",
+  "port": 8092,
+  "forward_auth": true,
+  "description": "Outpost-facing connection point for cluster integrations",
+  "registryAccount": false,
+  "infra": {},
+  "derivedSecrets": [
+    {
+      "envVar": "OUTPOST_INTERNAL_KEY",
+      "kind": "shared",
+      "name": "outpost-internal-key"
+    }
+  ],
+  "requiredConfig": [
+    "DATABASE_URL"
+  ],
+  "optionalConfig": [],
+  "secretConfig": [
+    "DATABASE_URL"
+  ],
+  "envExtras": {
+    "EVENT_CONSUMERS": "chaos=http://${PREFIX}-chaos:8090,argo=http://${PREFIX}-argo:8091"
+  },
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/outposts",
+      "action": "createOutpost",
+      "resource": "outpost-gateway/outposts"
+    },
+    {
+      "method": "GET",
+      "path": "/outposts",
+      "action": "listOutpost",
+      "resource": "outpost-gateway/outposts"
+    },
+    {
+      "method": "GET",
+      "path": "/outposts/{id}",
+      "action": "getOutpost",
+      "resource": "outpost-gateway/outposts/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/outposts/{id}",
+      "action": "deleteOutpost",
+      "resource": "outpost-gateway/outposts/{id}"
+    }
+  ],
+  "actions": [],
+  "default_grants": [
+    {
+      "grant_on": "user",
+      "actions": [
+        "createOutpost",
+        "listOutpost",
+        "getOutpost",
+        "deleteOutpost"
+      ],
+      "resources": [
+        "{username}/outpost-gateway/outposts",
+        "{username}/outpost-gateway/outposts/*"
+      ]
+    }
+  ]
+}

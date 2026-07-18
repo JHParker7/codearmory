@@ -1,81 +1,39 @@
+/**
+ * `/signup` page — terminal-styled registration form (email, username, password,
+ * terms) that submits via the `signupAndLogin` thunk through the BFF, then lands the
+ * new user in `/app`. If the account is created but auto-login fails it redirects to
+ * /login instead. Used for self-serve registration on an already-initialized instance.
+ */
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { T } from '../theme';
 import { Logo } from '../components/Logo';
-import { useAppDispatch } from '../store/hooks';
+import { PromptField, StrengthBar } from '../components/AuthFields';
+import { useAppDispatch, useAppSelector } from '../store/hooks';
 import { signupAndLogin } from '../store/authSlice';
 import { passwordScore } from '../utils';
 
-function StrengthBar({ score, checks }: { score: number; checks: Record<string, boolean> }) {
-  const total = 16;
-  const filled = Math.round((score / 5) * total);
-  const color = score >= 4 ? T.green : score >= 3 ? T.amber : score >= 1 ? T.red : T.faint;
-  const label = ['empty', 'weak', 'fair', 'good', 'strong', 'excellent'][score];
-  return (
-    <div style={{ fontFamily: T.mono, fontSize: 11.5, marginTop: -4, marginBottom: 16 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: T.dim }}>
-        <span style={{ color: T.faint }}>strength</span>
-        <span style={{ color, letterSpacing: 1 }}>
-          [{'█'.repeat(filled)}<span style={{ color: T.border }}>{'░'.repeat(total - filled)}</span>]
-        </span>
-        <span style={{ color, marginLeft: 'auto' }}>{label}</span>
-      </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 14px', marginTop: 6, color: T.faint, fontSize: 10.5, letterSpacing: 0.2 }}>
-        {([['len', 'len ≥ 8'], ['upper', '[A-Z]'], ['lower', '[a-z]'], ['num', '[0-9]'], ['sym', '[!@#$%]']] as [string, string][]).map(([k, l]) => (
-          <span key={k} style={{ color: checks[k] ? T.green : T.faint }}>{checks[k] ? '[x]' : '[ ]'} {l}</span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function PromptField({
-  prompt, value, onChange, type = 'text', placeholder, hint, rightSlot,
-}: {
-  prompt: string; value: string; onChange: (v: string) => void;
-  type?: string; placeholder?: string; hint?: string;
-  rightSlot?: React.ReactNode;
-}) {
-  const [focused, setFocused] = useState(false);
-  return (
-    <div style={{ marginBottom: 16 }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 5 }}>
-        <span style={{ fontSize: 12, color: focused ? T.green : T.dim, fontFamily: T.mono, letterSpacing: 0.3 }}>
-          <span style={{ color: T.green }}>$</span> {prompt}
-        </span>
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', background: T.cardHi, border: `1px solid ${focused ? T.green : T.border}`, boxShadow: focused ? `0 0 0 3px ${T.greenSoft}` : 'none', transition: 'border-color .15s, box-shadow .15s', padding: '8px 12px' }}>
-        <span style={{ color: T.green, fontFamily: T.mono, fontSize: 13.5, marginRight: 8, userSelect: 'none' }}>›</span>
-        <input
-          type={type} value={value}
-          onChange={(e) => onChange(e.target.value)}
-          onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
-          placeholder={placeholder}
-          style={{ flex: 1, background: 'transparent', border: 0, outline: 'none', color: T.text, fontFamily: T.mono, fontSize: 13.5, letterSpacing: 0.2, padding: 0 }}
-        />
-        {rightSlot}
-      </div>
-      {hint && <div style={{ fontSize: 11, color: T.faint, fontFamily: T.mono, marginTop: 5, letterSpacing: 0.2 }}>{hint}</div>}
-    </div>
-  );
-}
-
+/** Signup page component: validates email/username/password-strength/terms, then dispatches signupAndLogin and routes to /app (or /login when auto-login fails). */
 export function Signup() {
   const navigate = useNavigate();
   const dispatch = useAppDispatch();
+  const inviteOnly = useAppSelector((s) => s.setup.inviteOnly);
 
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
   const [showPw, setShowPw] = useState(false);
   const [terms, setTerms] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   const { score, checks } = passwordScore(password);
+  const passwordsMatch = password === confirm;
   const formValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
     && /^[a-zA-Z0-9_-]{1,64}$/.test(username)
     && score >= 3
+    && passwordsMatch
     && terms
     && !submitting;
 
@@ -88,7 +46,7 @@ export function Signup() {
     const result = await dispatch(signupAndLogin({ email, username, password }));
 
     if (signupAndLogin.fulfilled.match(result)) {
-      navigate('/app/blueprints');
+      navigate('/app');
       return;
     }
 
@@ -136,6 +94,13 @@ export function Signup() {
               <span style={{ color: T.green }}>#</span> free to self-host · up to 3 collaborators on day one.
             </div>
 
+            {inviteOnly && (
+              <div style={{ background: T.cardHi, border: `1px solid ${T.borderHi}`, padding: '10px 12px', marginBottom: 18, fontFamily: T.mono, fontSize: 11.5, color: T.dim, lineHeight: 1.6 }}>
+                <span style={{ color: T.green }}>invite-only</span> · this instance restricts sign-ups to invited email addresses.
+                Use the exact email you were invited with — others will be rejected. Ask an administrator to add you if needed.
+              </div>
+            )}
+
             {error && (
               <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', marginBottom: 16, fontFamily: T.mono, fontSize: 12, color: T.red }}>{error}</div>
             )}
@@ -152,6 +117,12 @@ export function Signup() {
                 }
               />
               <StrengthBar score={score} checks={checks} />
+
+              <PromptField prompt="password --confirm" value={confirm} onChange={setConfirm} type={showPw ? 'text' : 'password'} placeholder="••••••••••••"
+                hint={confirm && passwordsMatch ? '✓ passwords match' : 're-enter the password above to confirm.'} />
+              {confirm && !passwordsMatch && (
+                <div style={{ fontSize: 11, color: T.red, fontFamily: T.mono, marginTop: -12, marginBottom: 16, letterSpacing: 0.2 }}>✗ passwords do not match</div>
+              )}
 
               <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 18, cursor: 'pointer', fontSize: 12, color: T.dim, lineHeight: 1.5 }} onClick={() => setTerms((t) => !t)}>
                 <span style={{ color: T.green, fontFamily: T.mono, marginTop: 0 }}>{terms ? '[x]' : '[ ]'}</span>

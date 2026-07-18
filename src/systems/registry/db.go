@@ -28,6 +28,7 @@ type ServiceModel struct {
 	Description string    `gorm:"column:description;not null;default:''"`
 	ForwardAuth bool      `gorm:"column:forward_auth;not null;default:false"`
 	ServiceKey  string    `gorm:"column:service_key;not null;default:''"`
+	UIPath      string    `gorm:"column:ui_path;not null;default:''"`
 	Active      bool      `gorm:"column:active;not null;default:true"`
 	CreatedAt   time.Time `gorm:"column:created_at;not null;default:now()"`
 	UpdatedAt   time.Time `gorm:"column:updated_at;not null;default:now()"`
@@ -64,6 +65,8 @@ type ServiceActionModel struct {
 	ActionID       string    `gorm:"column:action_id;primaryKey"`
 	ServiceID      string    `gorm:"column:service_id;not null;uniqueIndex:service_actions_service_id_name_key"`
 	Name           string    `gorm:"column:name;not null;uniqueIndex:service_actions_service_id_name_key"`
+	Summary        string    `gorm:"column:summary;not null;default:''"`
+	Description    string    `gorm:"column:description;not null;default:''"`
 	Method         string    `gorm:"column:method;not null"`
 	Path           string    `gorm:"column:path;not null"`
 	BodyTransforms []byte    `gorm:"column:body_transforms;type:jsonb"`
@@ -402,6 +405,37 @@ func rotateServiceKeyDB(ctx context.Context, name, newHash string) error {
 		Error
 }
 
+// reactivateServiceByName flips a soft-deleted service row back to active and
+// refreshes its url/description/forward_auth (and service_key when setKey is true)
+// in place, preserving its service_id — and thus its child roles/endpoints/grants,
+// which the caller replaces next via replaceServiceManifest. Returns
+// gorm.ErrRecordNotFound when no row with that name exists. service_key is left
+// untouched when setKey is false so an empty request key never clobbers a stored one.
+func reactivateServiceByName(ctx context.Context, name, url, description, uiPath string, forwardAuth bool, hashedKey string, setKey bool) error {
+	ctx, span := otel.Tracer("registry").Start(ctx, "db.service.reactivate")
+	defer span.End()
+	span.SetAttributes(attribute.String("service.name", name))
+	q := `UPDATE services SET active = true, url = ?, description = ?, forward_auth = ?, ui_path = ?, updated_at = now()`
+	args := []any{url, description, forwardAuth, uiPath}
+	if setKey {
+		q += `, service_key = ?`
+		args = append(args, hashedKey)
+	}
+	q += ` WHERE name = ?`
+	args = append(args, name)
+	result := connect().WithContext(ctx).Exec(q, args...)
+	if result.Error != nil {
+		span.RecordError(result.Error)
+		span.SetStatus(codes.Error, result.Error.Error())
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
 // upsertServiceModelByName creates or updates a service by its unique name.
 // Used when seeding services from the SERVICES environment variable.
 func upsertServiceModelByName(ctx context.Context, svc ServiceModel) error {
@@ -420,7 +454,7 @@ func upsertServiceModelByName(ctx context.Context, svc ServiceModel) error {
 // and default grants in a batch (avoids N+1 round-trips).
 func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, error) {
 	svcRows, err := connect().WithContext(ctx).Raw(
-		`SELECT service_id, name, url, description, forward_auth, active, created_at, updated_at
+		`SELECT service_id, name, url, description, forward_auth, ui_path, active, created_at, updated_at
 		 FROM services WHERE active = true ORDER BY name`).Rows()
 	if err != nil {
 		return nil, err
@@ -430,7 +464,7 @@ func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, err
 	var svcs []Service
 	for svcRows.Next() {
 		var s Service
-		if err := svcRows.Scan(&s.ServiceID, &s.Name, &s.URL, &s.Description, &s.ForwardAuth, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := svcRows.Scan(&s.ServiceID, &s.Name, &s.URL, &s.Description, &s.ForwardAuth, &s.UIPath, &s.Active, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			slog.ErrorContext(ctx, "listServicesWithEndpoints: scan", "error", err)
 			continue
 		}
@@ -499,7 +533,7 @@ func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, err
 func listAllActions(ctx context.Context) ([]ServiceAction, error) {
 	sqlRows, err := connect().WithContext(ctx).Raw(`
 		SELECT sa.action_id, sa.service_id, s.name, s.url,
-		       sa.name, sa.method, sa.path,
+		       sa.name, sa.summary, sa.description, sa.method, sa.path,
 		       sa.body_transforms, sa.async_config,
 		       sa.active, sa.created_at, sa.updated_at,
 		       COALESCE(se.action, ''), COALESCE(se.resource, '')
@@ -524,7 +558,7 @@ func listAllActions(ctx context.Context) ([]ServiceAction, error) {
 		var bodyTransforms, asyncConfig []byte
 		if err := sqlRows.Scan(
 			&a.ActionID, &a.ServiceID, &a.ServiceName, &a.ServiceURL,
-			&a.Name, &a.Method, &a.Path,
+			&a.Name, &a.Summary, &a.Description, &a.Method, &a.Path,
 			&bodyTransforms, &asyncConfig,
 			&a.Active, &a.CreatedAt, &a.UpdatedAt,
 			&a.GkAction, &a.GkResource,
@@ -658,8 +692,8 @@ func replaceServiceManifest(ctx context.Context, id, url, description string,
 			continue
 		}
 		if err := tx.Exec(
-			`INSERT INTO service_actions (action_id, service_id, name, method, path, body_transforms, async_config) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			uuid.New().String(), id, a.Name, a.Method, a.Path,
+			`INSERT INTO service_actions (action_id, service_id, name, summary, description, method, path, body_transforms, async_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			uuid.New().String(), id, a.Name, a.Summary, a.Description, a.Method, a.Path,
 			jsonbBytes(a.BodyTransforms), jsonbBytes(a.Async)).Error; err != nil {
 			return err
 		}
@@ -706,6 +740,7 @@ func loadManifestEntry(ctx context.Context, e manifestEntry) {
 			Description: e.Description,
 			ForwardAuth: e.ForwardAuth,
 			ServiceKey:  hashedKey,
+			UIPath:      e.UIPath,
 		}
 		if err := conn.Create(&svcModel).Error; err != nil {
 			slog.ErrorContext(ctx, "manifest: failed to insert service", "service", e.Name, "error", err)
@@ -713,9 +748,14 @@ func loadManifestEntry(ctx context.Context, e manifestEntry) {
 		}
 		slog.InfoContext(ctx, "manifest: service created", "service", e.Name)
 	} else {
+		// url must be updated too: the manifest is the source of truth for where a
+		// core service lives, and omitting it here pinned an existing row to whatever
+		// URL it was first created with. A service that moved — a renamed Kubernetes
+		// Service, a changed port — would keep the stale address forever, and the only
+		// remedy would be deleting the row by hand.
 		if err := conn.Exec(
-			`UPDATE services SET description = ?, forward_auth = ?, service_key = ?, active = true, updated_at = now() WHERE service_id = ?`,
-			e.Description, e.ForwardAuth, hashedKey, svcModel.ServiceID,
+			`UPDATE services SET url = ?, description = ?, forward_auth = ?, service_key = ?, ui_path = ?, active = true, updated_at = now() WHERE service_id = ?`,
+			e.URL, e.Description, e.ForwardAuth, hashedKey, e.UIPath, svcModel.ServiceID,
 		).Error; err != nil {
 			slog.ErrorContext(ctx, "manifest: failed to update service", "service", e.Name, "error", err)
 			return

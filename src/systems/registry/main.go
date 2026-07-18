@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -205,6 +206,8 @@ func handleRotateServiceKey(w http.ResponseWriter, r *http.Request) {
 
 type manifestActionEntry struct {
 	Name           string          `json:"name"`
+	Summary        string          `json:"summary,omitempty"`
+	Description    string          `json:"description,omitempty"`
 	Method         string          `json:"method"`
 	Path           string          `json:"path"`
 	BodyTransforms json.RawMessage `json:"body_transforms,omitempty"`
@@ -223,6 +226,7 @@ type manifestEntry struct {
 	Description string `json:"description"`
 	ForwardAuth bool   `json:"forward_auth"`
 	ServiceKey  string `json:"service_key"`
+	UIPath      string `json:"ui_path"`
 	Endpoints   []struct {
 		Method   string `json:"method"`
 		Path     string `json:"path"`
@@ -248,6 +252,43 @@ func loadManifest(ctx context.Context, path string) {
 	for _, e := range entries {
 		loadManifestEntry(ctx, e)
 	}
+}
+
+// reconcileManifest re-ingests any manifest service that has gone missing from
+// the registry DB. loadManifest runs only at startup, so if the database is
+// cleared without the registry being restarted — a redeploy that doesn't roll
+// the registry, or a manual DB wipe — the catalog would stay empty (forge/run
+// vanishes from workflows) until a manual restart. Running this on the ticker
+// lets a wiped DB self-heal. Returns the names it re-ingested.
+func reconcileManifest(ctx context.Context, path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.WarnContext(ctx, "manifest reconcile: read file", "path", path, "error", err)
+		return nil
+	}
+	var entries []manifestEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		slog.WarnContext(ctx, "manifest reconcile: parse JSON", "error", err)
+		return nil
+	}
+	var healed []string
+	for _, e := range entries {
+		var n int64
+		if err := connect().WithContext(ctx).
+			Raw(`SELECT count(1) FROM services WHERE name = ? AND active = true`, e.Name).
+			Scan(&n).Error; err != nil {
+			slog.WarnContext(ctx, "manifest reconcile: db check failed", "service", e.Name, "error", err)
+			return healed // DB trouble — don't thrash; retry next tick
+		}
+		if n == 0 {
+			loadManifestEntry(ctx, e)
+			healed = append(healed, e.Name)
+		}
+	}
+	if len(healed) > 0 {
+		slog.WarnContext(ctx, "manifest reconcile: re-ingested services missing from registry DB", "services", healed)
+	}
+	return healed
 }
 
 func notifyService(ctx context.Context, name, target, key string) {
@@ -285,8 +326,34 @@ func notifyWorkflows(ctx context.Context) {
 		os.Getenv("WORKFLOWS_NOTIFY_KEY"))
 }
 
-func startNotificationTicker(ctx context.Context) {
+func startNotificationTicker(ctx context.Context, manifestPath string) {
 	go func() {
+		// Fast initial reconcile: on a fresh install the registry can ingest the
+		// manifest while the DB is still provisioning, leaving manifest services
+		// (e.g. forge → forge/run) missing with no retry until the 5-minute tick.
+		// Re-check with backoff until everything is present, healing within seconds
+		// instead of leaving the catalog empty. A healthy boot converges on the
+		// first pass (nothing missing) so there's no steady-state cost.
+		if manifestPath != "" {
+			backoff := 3 * time.Second
+			deadline := time.Now().Add(2 * time.Minute)
+			for time.Now().Before(deadline) {
+				if healed := reconcileManifest(ctx, manifestPath); len(healed) == 0 {
+					break // nothing missing — converged
+				}
+				notifyConductor(ctx)
+				notifyWorkflows(ctx)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < 30*time.Second {
+					backoff *= 2
+				}
+			}
+		}
+
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -294,6 +361,11 @@ func startNotificationTicker(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// Heal a wiped/drifted DB before re-notifying, so a cleared DB
+				// repopulates without needing a registry restart.
+				if manifestPath != "" {
+					reconcileManifest(ctx, manifestPath)
+				}
 				notifyConductor(ctx)
 				notifyWorkflows(ctx)
 			}
@@ -320,6 +392,60 @@ func main() {
 		defer shutdown(context.Background())
 	}
 
+	if err := run(ctx); err != nil {
+		slog.Error("fatal", "error", err)
+		stop()
+		os.Exit(1)
+	}
+}
+
+// buildClientTLSConfig builds the optional mTLS client-auth config from env,
+// returning an error instead of exiting so its branches are unit-testable.
+func buildClientTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{}
+	switch os.Getenv("TLS_CLIENT_AUTH") {
+	case "require":
+		caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+		if caFile == "" {
+			return nil, errors.New("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+		}
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read TLS_CLIENT_CA_FILE %q: %w", caFile, err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("TLS_CLIENT_CA_FILE %q contains no valid PEM certificates", caFile)
+		}
+		tlsCfg.ClientCAs = caPool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	case "request":
+		tlsCfg.ClientAuth = tls.RequestClientCert
+	}
+	return tlsCfg, nil
+}
+
+// buildMux registers all routes and returns the handler. Extracted from main so
+// the routing table is unit-testable without standing up a server.
+func buildMux() http.Handler {
+	mux := telemetry.NewMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
+	mux.HandleFunc("GET /system_health", handleSystemHealth)
+	mux.HandleFunc("GET /services", handleListServices)
+	mux.HandleFunc("POST /services", handleCreateService)
+	mux.HandleFunc("DELETE /services/{id}", handleDeleteService)
+	mux.HandleFunc("PUT /services/{id}/endpoints", handleUpdateServiceEndpoints)
+	mux.HandleFunc("GET /default-grants", handleListDefaultGrants)
+	mux.HandleFunc("GET /actions", handleListActions)
+	mux.HandleFunc("POST /service-accounts", handleUpsertServiceAccount)
+	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)
+	return mux
+}
+
+// run owns migrations, seeding, the manifest load, background tasks, and the
+// server lifecycle, returning an error instead of os.Exit-ing so it is testable.
+func run(ctx context.Context) error {
 	// Rename legacy PostgreSQL auto-named constraints to match GORM's naming
 	// convention. These are one-shot: silently ignored if already renamed or
 	// the table doesn't exist yet (fresh install).
@@ -340,8 +466,7 @@ func main() {
 		&ServiceAccountModel{},
 		&ServiceDefaultGrantModel{},
 	); err != nil {
-		slog.Error("failed to migrate database", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("migrate database: %w", err)
 	}
 	slog.Info("database initialized")
 
@@ -373,7 +498,7 @@ func main() {
 		notifyWorkflows(ctx)
 	}
 
-	startNotificationTicker(ctx)
+	startNotificationTicker(ctx, os.Getenv("MANIFEST_FILE"))
 
 	// Register Registry itself as a Gatekeeper service account so its identity rotates.
 	registry.StartKeyRotation(ctx, gatekeeperURL, "registry",
@@ -381,20 +506,8 @@ func main() {
 
 	startHealthCollector(ctx)
 
-	mux := telemetry.NewMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
-	mux.HandleFunc("GET /system_health", handleSystemHealth)
-	mux.HandleFunc("GET /services", handleListServices)
-	mux.HandleFunc("POST /services", handleCreateService)
-	mux.HandleFunc("DELETE /services/{id}", handleDeleteService)
-	mux.HandleFunc("PUT /services/{id}/endpoints", handleUpdateServiceEndpoints)
-	mux.HandleFunc("GET /default-grants", handleListDefaultGrants)
-	mux.HandleFunc("GET /actions", handleListActions)
-	mux.HandleFunc("POST /service-accounts/rotate-key", handleRotateServiceKey)
-
 	port := envOrDefault("PORT", "8084")
-	wrapped := otelhttp.NewHandler(&logger{mux}, "registry",
+	wrapped := otelhttp.NewHandler(&logger{buildMux()}, "registry",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
 
@@ -410,32 +523,14 @@ func main() {
 	}
 
 	if certFile != "" && keyFile != "" {
-		tlsCfg := &tls.Config{}
-		switch os.Getenv("TLS_CLIENT_AUTH") {
-		case "require":
-			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
-			if caFile == "" {
-				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
-				os.Exit(1)
-			}
-			caCert, err := os.ReadFile(caFile)
-			if err != nil {
-				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
-				os.Exit(1)
-			}
-			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(caCert) {
-				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
-				os.Exit(1)
-			}
-			tlsCfg.ClientCAs = caPool
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		case "request":
-			tlsCfg.ClientAuth = tls.RequestClientCert
+		tlsCfg, err := buildClientTLSConfig()
+		if err != nil {
+			return fmt.Errorf("TLS client-auth config: %w", err)
 		}
 		srv.TLSConfig = tlsCfg
 	}
 
+	serveErr := make(chan error, 1)
 	go func() {
 		var err error
 		if certFile != "" && keyFile != "" {
@@ -446,17 +541,20 @@ func main() {
 			err = srv.ListenAndServe()
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
+			serveErr <- err
 		}
 	}()
 
-	<-ctx.Done()
-	stop()
+	select {
+	case err := <-serveErr:
+		return fmt.Errorf("server error: %w", err)
+	case <-ctx.Done():
+	}
 	slog.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown error", "error", err)
+		return fmt.Errorf("shutdown: %w", err)
 	}
+	return nil
 }

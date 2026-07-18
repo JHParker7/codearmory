@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -74,6 +75,10 @@ func handleCreateStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if msg := validateStepRequest(req); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	if msg := validateResourceName(req.Name); msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
@@ -173,7 +178,7 @@ func handleGetStep(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	s, err := getStep(ctx, id)
+	s, err := resolveStepRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -212,7 +217,7 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	existing, err := getStep(ctx, id)
+	existing, err := resolveStepRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -240,6 +245,26 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
+	// Validate the name charset only on an actual rename, so editing a step whose
+	// name predates this rule (e.g. legacy spaces) isn't blocked unless it's changed.
+	if req.Name != existing.Name {
+		if msg := validateResourceName(req.Name); msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
+			return
+		}
+	}
+	// A rename must not collide with another of the caller's steps (the name is a
+	// resource identifier); keeping its own name is allowed (excludes existing.StepID).
+	if conflict, cerr := stepNameConflict(ctx, req.Name, existing.StepID, userID, orgID); cerr != nil {
+		span.RecordError(cerr)
+		span.SetStatus(codes.Error, "db error")
+		http.Error(w, "failed to update step", http.StatusInternalServerError)
+		return
+	} else if conflict {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "a step with that name already exists", http.StatusConflict)
+		return
+	}
 
 	timeout := req.Timeout
 	if timeout == 0 {
@@ -260,7 +285,7 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s, err := getStep(ctx, id)
+	s, err := getStep(ctx, existing.StepID)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db fetch after update failed")
@@ -269,7 +294,7 @@ func handleUpdateStep(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.SetStatus(codes.Ok, "")
-	slog.InfoContext(ctx, "step updated", "step_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "step updated", "step_id", existing.StepID, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s) //nolint:errcheck
 }
@@ -290,7 +315,7 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	s, err := getStep(ctx, id)
+	s, err := resolveStepRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -321,14 +346,110 @@ func handleDeleteStep(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// validateStepRefs confirms every referenced step exists and is accessible to the caller.
-func validateStepRefs(ctx context.Context, refs []WorkflowStepRef, userID, orgID string, w http.ResponseWriter) error {
-	if len(refs) == 0 {
-		return nil
+// validateStepRefShape checks a single step reference's structural invariants
+// without touching the database. A ref is exactly one of: an inline approval gate,
+// an inline step (Action set, definition on the ref), or a reference to a stored
+// step (StepID set) — each optionally with a parallel group or matrix. Returns a
+// user-facing message or "".
+func validateStepRefShape(i int, ref WorkflowStepRef) string {
+	// A per-occurrence name (if given) becomes a ${steps.<name>.output} key, so it
+	// must be a clean single-segment name like a step name.
+	if ref.Name != "" {
+		if msg := validateResourceName(ref.Name); msg != "" {
+			return fmt.Sprintf("step %d: name %s", i, msg)
+		}
 	}
-	ids := make([]string, len(refs))
-	for i, r := range refs {
-		ids[i] = r.StepID
+	if ref.Approval != nil {
+		if ref.StepID != "" || ref.Action != "" {
+			return fmt.Sprintf("step %d: cannot be both a step and an approval gate", i)
+		}
+		if ref.Matrix != nil {
+			return fmt.Sprintf("step %d: an approval gate cannot have a matrix", i)
+		}
+		return ""
+	}
+	// An inline step carries its whole definition on the ref (no StepID). Validate it
+	// the same way createStep validates a stored step, so both authoring paths accept
+	// the same actions; the parallel/matrix checks below then apply to it too.
+	if ref.Action != "" {
+		if ref.StepID != "" {
+			return fmt.Sprintf("step %d: cannot be both a stored-step reference and an inline step", i)
+		}
+		if ref.Name == "" {
+			return fmt.Sprintf("step %d: an inline step requires a name", i)
+		}
+		if ref.Action == ActionApproval {
+			return fmt.Sprintf("step %d: use an approval gate rather than an inline %q step", i, ActionApproval)
+		}
+		if ref.Action == ActionHTTP {
+			if withString(ref.With, "service") == "" {
+				return fmt.Sprintf("step %d: http requires with.service", i)
+			}
+			if withString(ref.With, "path") == "" {
+				return fmt.Sprintf("step %d: http requires with.path", i)
+			}
+		}
+		if ref.Timeout < 0 || ref.Timeout > maxTimeout {
+			return fmt.Sprintf("step %d: timeout must be between 0 and %d seconds", i, maxTimeout)
+		}
+	} else if ref.StepID == "" {
+		return fmt.Sprintf("step %d: step_id or action is required", i)
+	}
+	if ref.Matrix != nil {
+		if msg := validateMatrix(ref.Matrix); msg != "" {
+			return fmt.Sprintf("step %d: %s", i, msg)
+		}
+	}
+	if ref.Scatter != nil {
+		if ref.Matrix != nil {
+			return fmt.Sprintf("step %d: scatter and matrix are mutually exclusive", i)
+		}
+		if ref.Action == "" {
+			return fmt.Sprintf("step %d: scatter requires an inline step action to run per leg", i)
+		}
+		if msg := validateScatter(ref.Scatter); msg != "" {
+			return fmt.Sprintf("step %d: %s", i, msg)
+		}
+	}
+	return ""
+}
+
+// validateMatrix checks a matrix config: a var name usable as a ${matrix.<var>}
+// key, and exactly one source of values (a literal list or a values_from ref).
+func validateMatrix(m *MatrixConfig) string {
+	if m.Var == "" {
+		return "matrix.var is required"
+	}
+	if strings.ContainsAny(m.Var, " \t\n\r${}") {
+		return "matrix.var must not contain whitespace or ${} characters"
+	}
+	hasValues := len(m.Values) > 0
+	hasFrom := strings.TrimSpace(m.ValuesFrom) != ""
+	if hasValues == hasFrom {
+		return "matrix requires exactly one of values or values_from"
+	}
+	if hasValues && len(m.Values) > maxMatrixValues {
+		return fmt.Sprintf("matrix has %d values, exceeding the limit of %d", len(m.Values), maxMatrixValues)
+	}
+	if m.MaxConcurrent < 0 {
+		return "matrix.max_concurrent must not be negative"
+	}
+	return ""
+}
+
+// validateStepRefs confirms every stored-step reference exists and is accessible to
+// the caller. Inline steps and approval gates carry no step_id, so they are skipped
+// here (their shape is checked in validateStepRefShape); their names still take part
+// in the per-pipeline uniqueness check below.
+func validateStepRefs(ctx context.Context, refs []WorkflowStepRef, userID, orgID string, w http.ResponseWriter) error {
+	ids := make([]string, 0, len(refs))
+	for _, r := range refs {
+		if r.Approval == nil && r.StepID != "" {
+			ids = append(ids, r.StepID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
 	}
 	steps, err := getStepsByIDs(ctx, ids)
 	if err != nil {
@@ -339,17 +460,49 @@ func validateStepRefs(ctx context.Context, refs []WorkflowStepRef, userID, orgID
 	for _, s := range steps {
 		found[s.StepID] = s
 	}
+	// A step's effective name (per-occurrence override, else the step definition's
+	// name) is its ${steps.<name>.output} key and its step-run label, so two blocks
+	// sharing one name silently collide in the run's output map — the later one
+	// shadows the earlier, and any output reference resolves against the wrong entry
+	// (or not at all). Require names to be unique across the pipeline so wiring is
+	// unambiguous. Approval gates carry no override name here and produce no output,
+	// so an empty name never collides.
+	seenNames := make(map[string]int, len(refs))
 	for i, ref := range refs {
-		s, ok := found[ref.StepID]
-		if !ok {
-			err := fmt.Errorf("step %d: step %q not found", i, ref.StepID)
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return err
+		name := ref.Name
+		// Only a stored-step reference needs the existence/access lookup. An inline step
+		// (Approval nil, StepID empty) carries its own name via ref.Name — validated
+		// non-empty in validateStepRefShape — and a gate has no name here.
+		if ref.Approval == nil && ref.StepID != "" {
+			s, ok := found[ref.StepID]
+			if !ok {
+				err := fmt.Errorf("step %d: step %q not found", i, ref.StepID)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return err
+			}
+			if !canAccessStep(s, userID, orgID) {
+				err := fmt.Errorf("step %d: step %q not found", i, ref.StepID)
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return err
+			}
+			// A manual-approval gate is a single pause point, not a fan-out, so a matrix
+			// over it is meaningless — reject it rather than spawn N parallel gates.
+			if ref.Matrix != nil && s.Action == ActionApproval {
+				err := fmt.Errorf("step %d: an approval step cannot use a matrix", i)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return err
+			}
+			if name == "" {
+				name = s.Name
+			}
 		}
-		if !canAccessStep(s, userID, orgID) {
-			err := fmt.Errorf("step %d: step %q not found", i, ref.StepID)
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return err
+		if name != "" {
+			if first, dup := seenNames[name]; dup {
+				err := fmt.Errorf("step %d: duplicate step name %q (already used by step %d) — each step in a workflow must have a unique name; give this block a per-occurrence name", i, name, first)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return err
+			}
+			seenNames[name] = i
 		}
 	}
 	return nil

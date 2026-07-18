@@ -13,7 +13,24 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
+
+// testDBReady is set in TestMain when the in-memory test DB is migrated. The
+// dequeue's FOR UPDATE SKIP LOCKED and the run timestamps are dialect-portable
+// (skipLocked + CURRENT_TIMESTAMP), so the suite runs on hermetic sqlite.
+var testDBReady bool
+
+// requireDB skips a test when the test database failed to initialise.
+func requireDB(t *testing.T) {
+	t.Helper()
+	if !testDBReady {
+		t.Skip("workflows test database not available")
+	}
+}
 
 // fakeGatekeeper spins up a test server that always returns the given status
 // and body, overriding the package-level gatekeeperURL for the test duration.
@@ -50,6 +67,21 @@ func TestMain(m *testing.M) {
 	initMetrics()
 	httpClient = initHTTPClient()
 	gatekeeperClient = newGatekeeperClient()
+
+	// Hermetic in-memory sqlite (mirrors gatekeeper) — no external Postgres.
+	conn, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	if err == nil {
+		if migrateErr := conn.AutoMigrate(&Step{}, &Workflow{}, &WorkflowRun{}, &WorkflowStepRun{}); migrateErr == nil {
+			dbInitMu.Lock()
+			gormDB = conn
+			gormDBRead = conn
+			dbInitMu.Unlock()
+			testDBReady = true
+		}
+	}
+
 	os.Exit(m.Run())
 }
 
@@ -382,7 +414,7 @@ func TestExecuteAction_ThreadsForgeMemory(t *testing.T) {
 		},
 	}
 
-	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"image": "alpine"})
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{"image": "alpine"}, "", 0)
 	if err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
@@ -411,7 +443,7 @@ func TestExecuteAction_NonForgeNoMemory(t *testing.T) {
 		Name: "other/run", ServiceURL: srv.URL, Method: http.MethodPost, Path: "/jobs",
 		Async: &AsyncConfig{IDField: "id", PollPath: "/jobs/{id}", PollIntervalSecs: 1, StatusField: "state", SuccessStates: []string{"done"}, OutputField: "result"},
 	}
-	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{})
+	res, err := (&WorkerPool{}).executeAction(context.Background(), newTokenStore("", ""), def, map[string]any{}, "", 0)
 	if err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
@@ -538,6 +570,9 @@ func TestHandleCreateWorkflow_MissingName(t *testing.T) {
 	}
 }
 
+// An empty ref is neither a stored-step reference, an inline step (needs an action),
+// nor a gate, so it is still rejected — inline steps are the {action,...} case, not
+// a bare {}.
 func TestHandleCreateWorkflow_StepWithoutID(t *testing.T) {
 	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"u1"}`)
 	body := `{"name":"my-wf","steps":[{}]}`
@@ -668,73 +703,6 @@ func TestValidateStepRequest_ZeroTimeoutAllowed(t *testing.T) {
 	if msg != "" {
 		t.Fatalf("zero timeout should be allowed (means use default), got %q", msg)
 	}
-}
-
-// ── groupSteps ────────────────────────────────────────────────────────────────
-
-func TestGroupSteps_AllSequential(t *testing.T) {
-	steps := []WorkflowStep{
-		{Step: Step{StepID: "a"}},
-		{Step: Step{StepID: "b"}},
-	}
-	groups := groupSteps(steps)
-	if len(groups) != 2 {
-		t.Fatalf("want 2 groups, got %d", len(groups))
-	}
-	for _, g := range groups {
-		if len(g.steps) != 1 {
-			t.Fatalf("each group should have 1 step, got %d", len(g.steps))
-		}
-	}
-}
-
-func TestGroupSteps_AllParallel(t *testing.T) {
-	pg := 1
-	steps := []WorkflowStep{
-		{Step: Step{StepID: "a"}, ParallelGroup: &pg},
-		{Step: Step{StepID: "b"}, ParallelGroup: &pg},
-		{Step: Step{StepID: "c"}, ParallelGroup: &pg},
-	}
-	groups := groupSteps(steps)
-	if len(groups) != 1 {
-		t.Fatalf("want 1 group, got %d", len(groups))
-	}
-	if len(groups[0].steps) != 3 {
-		t.Fatalf("want 3 steps in group, got %d", len(groups[0].steps))
-	}
-}
-
-func TestGroupSteps_Mixed(t *testing.T) {
-	pg := 1
-	steps := []WorkflowStep{
-		{Step: Step{StepID: "seq1"}},
-		{Step: Step{StepID: "p1"}, ParallelGroup: &pg},
-		{Step: Step{StepID: "p2"}, ParallelGroup: &pg},
-		{Step: Step{StepID: "seq2"}},
-	}
-	groups := groupSteps(steps)
-	if len(groups) != 3 {
-		t.Fatalf("want 3 groups (seq, parallel, seq), got %d", len(groups))
-	}
-	// Assert membership, not just sizes: a bug that swapped which steps landed
-	// in which group while preserving group sizes must still fail.
-	if len(groups[0].steps) != 1 || groups[0].steps[0].StepID != "seq1" {
-		t.Errorf("group[0] should be [seq1], got %v", stepIDsOf(groups[0]))
-	}
-	if ids := stepIDsOf(groups[1]); len(ids) != 2 || ids[0] != "p1" || ids[1] != "p2" {
-		t.Errorf("group[1] should be [p1 p2], got %v", ids)
-	}
-	if len(groups[2].steps) != 1 || groups[2].steps[0].StepID != "seq2" {
-		t.Errorf("group[2] should be [seq2], got %v", stepIDsOf(groups[2]))
-	}
-}
-
-func stepIDsOf(g stepGroup) []string {
-	ids := make([]string, len(g.steps))
-	for i, s := range g.steps {
-		ids[i] = s.StepID
-	}
-	return ids
 }
 
 // ── substituteWith ────────────────────────────────────────────────────────────

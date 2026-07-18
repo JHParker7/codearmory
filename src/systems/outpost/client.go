@@ -148,11 +148,17 @@ func (g *gatewayClient) pollCommands(ctx context.Context) ([]Command, error) {
 	return cmds, nil
 }
 
-func (g *gatewayClient) ackCommand(ctx context.Context, id string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.baseURL+"/outpost/commands/"+id+"/ack", nil)
+// ackCommand marks a command terminal. status is CmdDone-equivalent ("done") on
+// success or "failed" with a detail, so an enqueue-and-wait caller can gate on the
+// real outcome rather than mere delivery. An empty status is treated as "done" by
+// the gateway.
+func (g *gatewayClient) ackCommand(ctx context.Context, id, status, errDetail string) error {
+	body, _ := json.Marshal(map[string]string{"status": status, "error": errDetail})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.baseURL+"/outpost/commands/"+id+"/ack", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	g.authHeaders(req)
 	resp, err := g.http.Do(req)
 	if err != nil {

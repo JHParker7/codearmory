@@ -1,4 +1,4 @@
-{{- if and .Values.containers.enabled .Values.containers.deploy }}
+{{- if .Values.containers.enabled }}
 {{- $fullname := include "codearmory.fullname" . }}
 apiVersion: apps/v1
 kind: Deployment
@@ -52,33 +52,35 @@ spec:
               value: {{ .Values.containers.env.logLevel | quote }}
             - name: GATEKEEPER_URL
               value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
-            {{- include "codearmory.otel.envs" (list . .Values.containers.env) | nindent 12 }}
+            {{- include "codearmory.postgresql.env" (list . "containers" "containers" $fullname) | nindent 12 }}
+            {{- if .Values.containers.env.registryUrl }}
+            # Optional — when set, seeds the default registry on first boot.
+            # Additional registries are configurable at runtime via /registries.
             - name: REGISTRY_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $fullname }}-containers
-                  key: registry-url
+              value: {{ .Values.containers.env.registryUrl | quote }}
+            {{- end }}
+            # gitea_integration is now a non-core service builder deploys on demand;
+            # builder deploys it under the fullname-prefixed name on its fixed port 8088.
+            # Kept (not removed) so containers always boots; resolves once an admin
+            # enables gitea via builder.
+            - name: GITEA_INTEGRATION_URL
+              value: "http://{{ $fullname }}-gitea-integration:8088"
+            {{- if .Values.containers.env.registryUsername }}
             - name: REGISTRY_USERNAME
+              value: {{ .Values.containers.env.registryUsername | quote }}
+            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.containers.env) | nindent 12 }}
+            - name: GATEKEEPER_SERVICE_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ $fullname }}-containers
-                  key: registry-username
-                  optional: true
+                  key: gatekeeper-service-key
             - name: REGISTRY_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ $fullname }}-containers
                   key: registry-password
                   optional: true
-            {{- if .Values.giteaIntegration.enabled }}
-            - name: GITEA_INTEGRATION_URL
-              value: "http://{{ $fullname }}-gitea-integration:{{ .Values.giteaIntegration.port }}"
-            {{- end }}
-            - name: GATEKEEPER_SERVICE_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $fullname }}-containers
-                  key: gatekeeper-service-key
             {{- include "codearmory.tls.envs" .Values.containers.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.containers.tls) }}
           volumeMounts:

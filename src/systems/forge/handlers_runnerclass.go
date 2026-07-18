@@ -62,10 +62,11 @@ func backendOrDefault(backend string) string {
 var errBackendLookup = errors.New("backend lookup failed")
 
 // validatePrivilegedBackend rejects a privileged runner class that does not target
-// a VM-isolated backend. Root + writable rootfs is only safe behind a VM boundary;
-// on shared-kernel container backends (docker/kubernetes/runc) it would be a
+// a kernel-isolated backend. Root + writable rootfs is only safe when the job has
+// its own kernel (a microVM for kata, the gVisor Sentry for gvisor); on
+// shared-kernel container backends (docker/kubernetes/runc) it would be a
 // host-kernel escape risk. This is the user-facing guard; buildJob enforces the
-// same rule at runtime as a second layer (it drops privileged off a non-VM
+// same rule at runtime as a second layer (it drops privileged off a shared-kernel
 // backend). A genuine lookup failure is returned wrapped in errBackendLookup so
 // the caller can distinguish it from a real validation rejection.
 func validatePrivilegedBackend(ctx context.Context, backend string, privileged bool) error {
@@ -74,13 +75,13 @@ func validatePrivilegedBackend(ctx context.Context, backend string, privileged b
 	}
 	row, err := (RuntimeBackend{Name: backend}).Get(ctx)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("privileged requires an existing VM-isolated backend; backend %q not found", backend)
+		return fmt.Errorf("privileged requires an existing kernel-isolated backend; backend %q not found", backend)
 	}
 	if err != nil {
 		return fmt.Errorf("%w: %v", errBackendLookup, err)
 	}
-	if b := row.(RuntimeBackend); !isVMIsolatedBackendType(b.Type) {
-		return fmt.Errorf("privileged is only allowed on VM-isolated backends (kata, proxmox); backend %q is type %q", backend, b.Type)
+	if b := row.(RuntimeBackend); !isKernelIsolatedBackendType(b.Type) {
+		return fmt.Errorf("privileged is only allowed on kernel-isolated backends (kata, gvisor); backend %q is type %q", backend, b.Type)
 	}
 	return nil
 }

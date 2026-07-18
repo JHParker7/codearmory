@@ -1,21 +1,18 @@
 go 1.25.6
 
 use (
-	./argo
-	./blueprints
+	./artifacts
 	./builder
-	./chaos
 	./conductor
 	./containers
 	./egress-proxy
 	./forge
 	./gatekeeper
-	./gitea_integration
+	./git
 	./hooks
-	./mcp
-	./notifications
 	./outpost
 	./outpost-gateway
+	./portal-bff
 	./registry
 	./tickets
 	./workflows

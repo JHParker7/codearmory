@@ -2,17 +2,94 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
+
+// testDBReady is set in TestMain when the in-memory test DB is migrated. The
+// SKIP LOCKED claim paths are dialect-guarded (skipLocked), so they run on
+// hermetic sqlite here and use FOR UPDATE SKIP LOCKED on Postgres in production.
+var testDBReady bool
 
 func TestMain(m *testing.M) {
 	initMetrics()
 	httpClient = initHTTPClient()
 	gatekeeperClient = newGatekeeperClient()
+
+	// Hermetic in-memory sqlite (mirrors gatekeeper) — no external Postgres.
+	conn, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	if err == nil {
+		if migrateErr := conn.AutoMigrate(&Outpost{}, &OutpostCommand{}, &OutpostEvent{}); migrateErr == nil {
+			dbInitMu.Lock()
+			gormDB = conn
+			gormDBRead = conn
+			dbInitMu.Unlock()
+			testDBReady = true
+		}
+	}
+
 	os.Exit(m.Run())
+}
+
+func requireDB(t *testing.T) {
+	t.Helper()
+	if !testDBReady {
+		t.Skip("outpost-gateway test database not available")
+	}
+}
+
+// stubGatekeeper points gatekeeperClient at an httptest server that authorizes
+// every request as the given user/org. It restores the previous URL on cleanup.
+// authorized=false makes /check_permissions return 200 with authorized:false so
+// the SDK writes 403.
+func stubGatekeeper(t *testing.T, userID, orgID string, authorized bool) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{"authorized": authorized, "user_id": userID}
+		if orgID != "" {
+			resp["org_id"] = orgID
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	prev := gatekeeperClient.URL
+	gatekeeperClient.URL = srv.URL
+	t.Cleanup(func() {
+		gatekeeperClient.URL = prev
+		srv.Close()
+	})
+}
+
+// bearerReq builds a request carrying a (dummy) bearer token so the gatekeeper
+// SDK accepts the Authorization header and calls the stub.
+func bearerReq(method, target string, body []byte) *http.Request {
+	var r *http.Request
+	if body != nil {
+		r = httptest.NewRequest(method, target, bytes.NewReader(body))
+	} else {
+		r = httptest.NewRequest(method, target, nil)
+	}
+	r.Header.Set("Authorization", "Bearer test-jwt")
+	return r
+}
+
+// jsonBody marshals v to JSON bytes for a request body.
+func jsonBody(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
 }
 
 // ── outpost-facing auth ───────────────────────────────────────────────────────

@@ -141,7 +141,7 @@ With `RUNTIME=docker`, Forge runs each execution as a short-lived container on t
 
 With `RUNTIME=kubernetes`, Forge creates a Kubernetes `Job` per execution in `K8S_NAMESPACE`. Configuration:
 - Resource limits (memory, CPU) and `/tmp` EmptyDir size from the runner class
-- Optional `RuntimeClass` (e.g. `gvisor`, or Kata Containers) for stronger isolation — set per-backend via the `runtime_class` config key (the `kata` backend type requires it) or process-wide via `K8S_RUNTIME_CLASS`; see [kata.md](kata.md)
+- Optional `RuntimeClass` (e.g. gVisor or Kata Containers) for stronger isolation — set per-backend via the `runtime_class` config key (the `kata` and `gvisor` backend types require it) or process-wide via `K8S_RUNTIME_CLASS`; see [kata.md](kata.md) (hardware-VM isolation) and [gvisor.md](gvisor.md) (userspace-kernel isolation, no `/dev/kvm`)
 - `AutomountServiceAccountToken: false`, `RunAsNonRoot: true`, all capabilities dropped, seccomp `RuntimeDefault`
 - `BackoffLimit: 0` — failures are not retried
 - Jobs are deleted immediately after logs are collected

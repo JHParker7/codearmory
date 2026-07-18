@@ -1,25 +1,26 @@
 # Outpost & the Integration Framework
 
-The **outpost** is a single, customer-deployed agent that is the *only* thing in the platform that ever touches an in-cluster system (Litmus chaos CRDs, Argo CD, …). CodeArmory's control-plane services never reach into a customer cluster — they **drive the outpost with commands** and **consume its data as events**, then weave both into the rest of the platform (workflows, hooks, portal).
+The **outpost** is a user-deployed agent (one per cluster) that is the *only* thing in the platform that ever touches an in-cluster system (Litmus chaos CRDs, Argo CD, …). CodeArmory's control-plane services never reach into a user's cluster — they **drive the outpost with commands** and **consume its data as events**, then weave both into the rest of the platform (workflows, hooks, portal). Because the control plane drives one outpost per cluster, **pipelines unify across clusters** — a single run can act on your whole fleet.
 
 This page describes the framework. The pieces that build on it have their own docs:
 
 - **[outpost-gateway](../outpost-gateway/README.md)** — the outpost-facing connection point + Postgres event backbone.
-- **[chaos](../chaos/README.md)** — chaos-engineering control plane (first integration).
-- **[argo](../argo/README.md)** — Argo CD sync control plane (second integration).
+- **chaos** — chaos-engineering control plane (first integration; now a separate `codearmory-chaos` repo).
+- **argo** — Argo CD sync control plane (second integration; now a separate `codearmory-argo` repo).
 
 ## Why an outpost
 
-Reaching into a customer's cluster from the control plane would mean the control plane holding cluster credentials and needing inbound network access to every customer. Instead, exactly one component — the outpost — runs *inside* (or against) the target cluster and **dials out** to the control plane over HTTPS. Benefits:
+Reaching into a user's cluster from the control plane would mean the control plane holding cluster credentials and needing inbound network access to every cluster. Instead, one component — the outpost — runs *inside* (or against) each target cluster and **dials out** to the control plane over HTTPS. Benefits:
 
-- **Zero inbound access.** The outpost long-polls for commands and POSTs events outbound only. Nothing connects *into* the customer cluster.
+- **Zero inbound access.** The outpost long-polls for commands and POSTs events outbound only. Nothing connects *into* your cluster.
 - **Zero control-plane cluster credentials.** All Kubernetes/CRD/Argo code lives in the outpost's modules; control-plane services hold none.
-- **Uniform self-hosted and SaaS.** One code path. Self-hosted simply runs the outpost in the same cluster as the control plane against the in-cluster gateway; SaaS runs it in the customer's cluster pointing at the gateway over a private link. The mechanism is identical.
+- **Unified pipelines across clusters.** Run one outpost per cluster and a single pipeline can drive actions across your whole fleet, gating on the results.
+- **Same mechanism single- or multi-cluster.** One code path. For a **single-cluster setup** the outpost runs in the same cluster as the control plane, against the in-cluster gateway; for **remote clusters** it runs in each cluster pointing at the gateway over a private link. The mechanism is identical.
 
 ## Architecture
 
 ```
- customer (or self-hosted) cluster            CodeArmory control plane
+ your cluster (co-located or remote)          CodeArmory control plane
  ┌─ outpost (one deploy) ──────────┐   HTTPS   ┌─ outpost-gateway ───────────────┐
  │ modules (user-enabled):         │  outbound │  enroll · long-poll commands ·  │
  │  • chaos  → litmus CRDs         │ ◄────────►│  ingest events (outpost key)    │
@@ -83,7 +84,7 @@ The shared internal key (`OUTPOST_INTERNAL_KEY`) is held by the gateway and ever
 
 ## Deploying an outpost
 
-Use the dedicated, customer-installable chart at `infra/helm/outpost/` (see its [README](../../infra/helm/outpost/README.md)):
+Use the dedicated, user-installable chart at `infra/helm/outpost/` (see its [README](../../infra/helm/outpost/README.md)):
 
 ```bash
 helm install my-outpost infra/helm/outpost \

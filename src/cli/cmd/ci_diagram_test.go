@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -12,8 +13,8 @@ func TestTuiPipelineStages_GroupsConsecutiveParallel(t *testing.T) {
 	g := 0
 	steps := []tuiWorkflowStep{
 		{Name: "build"},
-		{Name: "lint", ParallelGroup: &g},
-		{Name: "test", ParallelGroup: &g},
+		{Name: "lint", stage: &g},
+		{Name: "test", stage: &g},
 		{Name: "deploy"},
 	}
 	stages := tuiPipelineStages(steps)
@@ -36,9 +37,9 @@ func TestTuiPipelineStages_SameGroupValueButSeparated(t *testing.T) {
 	// distinct stages — only *consecutive* same-group steps collapse.
 	g, other := 0, 0
 	steps := []tuiWorkflowStep{
-		{Name: "a", ParallelGroup: &g},
+		{Name: "a", stage: &g},
 		{Name: "b"},
-		{Name: "c", ParallelGroup: &other},
+		{Name: "c", stage: &other},
 	}
 	stages := tuiPipelineStages(steps)
 	if len(stages) != 3 {
@@ -85,8 +86,8 @@ func TestTuiPipelineDiagram_RendersNamesAndArrows(t *testing.T) {
 	g := 0
 	steps := []tuiWorkflowStep{
 		{Name: "build"},
-		{Name: "lint", ParallelGroup: &g},
-		{Name: "test", ParallelGroup: &g},
+		{Name: "lint", stage: &g},
+		{Name: "test", stage: &g},
 		{Name: "deploy"},
 	}
 	d := tuiPipelineDiagram(steps, 100)
@@ -142,7 +143,7 @@ func TestTuiFetchPipelineDef_Success(t *testing.T) {
 		WorkflowID: "wf-1",
 		Steps: []tuiWorkflowStep{
 			{StepID: "s0", Name: "build"},
-			{StepID: "s1", Name: "lint", ParallelGroup: &g},
+			{StepID: "s1", Name: "lint", stage: &g},
 		},
 	}
 	mux := http.NewServeMux()
@@ -253,7 +254,7 @@ func TestTuiPipelineDiagramPanel_FixedHeight(t *testing.T) {
 	m := applyMsg(newTUIModel(), tuiPipelinesMsg([]tuiPipeline{{WorkflowID: "wf-1", Name: "p"}}))
 	g := 0
 	m.pipeDefs["wf-1"] = []tuiWorkflowStep{
-		{Name: "a"}, {Name: "b", ParallelGroup: &g}, {Name: "c", ParallelGroup: &g}, {Name: "d"},
+		{Name: "a"}, {Name: "b", stage: &g}, {Name: "c", stage: &g}, {Name: "d"},
 	}
 	panel := m.tuiPipelineDiagramPanel()
 	if got := strings.Count(panel, "\n") + 1; got != tuiDiagReserve {
@@ -308,17 +309,38 @@ func TestTuiStageStatus_Precedence(t *testing.T) {
 
 func TestTuiRunBatches_GroupsParallel(t *testing.T) {
 	g := 0
+	// Parallel members carry distinct step indices (only their shared group binds
+	// them); sequential steps get their own indices too.
 	batches := tuiRunBatches([]tuiStepRun{
-		{StepName: "build"},
-		{StepName: "lint", ParallelGroup: &g},
-		{StepName: "test", ParallelGroup: &g},
-		{StepName: "deploy"},
+		{StepIndex: 0, StepName: "build"},
+		{StepIndex: 1, StepName: "lint", stage: &g},
+		{StepIndex: 2, StepName: "test", stage: &g},
+		{StepIndex: 3, StepName: "deploy"},
 	})
 	if len(batches) != 3 {
 		t.Fatalf("batches = %d, want 3", len(batches))
 	}
 	if len(batches[1]) != 2 {
 		t.Errorf("middle batch = %d steps, want 2 (parallel)", len(batches[1]))
+	}
+}
+
+// A matrix step's per-value runs all share its single step index; the diagram
+// must collapse them into one stage so the fan-out stacks in one box rather than
+// reading as several sequential steps.
+func TestTuiRunBatches_GroupsMatrixFanOut(t *testing.T) {
+	batches := tuiRunBatches([]tuiStepRun{
+		{StepIndex: 0, StepName: "build"},
+		{StepIndex: 1, StepName: "deploy [env=dev]"},
+		{StepIndex: 1, StepName: "deploy [env=staging]"},
+		{StepIndex: 1, StepName: "deploy [env=prod]"},
+		{StepIndex: 2, StepName: "notify"},
+	})
+	if len(batches) != 3 {
+		t.Fatalf("batches = %d, want 3 (build, matrix fan-out, notify)", len(batches))
+	}
+	if len(batches[1]) != 3 || !tuiBatchIsMatrix(batches[1]) {
+		t.Errorf("middle batch = %d runs (matrix=%v), want 3 grouped matrix runs", len(batches[1]), tuiBatchIsMatrix(batches[1]))
 	}
 }
 
@@ -355,8 +377,8 @@ func TestTuiFillPendingSteps_SkipsTerminalRun(t *testing.T) {
 
 func TestTuiRunDiagram_RendersGlyphsNamesArrows(t *testing.T) {
 	d := tuiRunDiagram([]tuiStepRun{
-		{StepName: "build", Status: "completed"},
-		{StepName: "deploy", Status: "running"},
+		{StepIndex: 0, StepName: "build", Status: "completed"},
+		{StepIndex: 1, StepName: "deploy", Status: "running"},
 	}, 100)
 	for _, want := range []string{"build", "deploy", "✓", "●", "→"} {
 		if !strings.Contains(d, want) {
@@ -373,9 +395,9 @@ func TestTuiRunDiagram_Empty(t *testing.T) {
 
 func TestTuiRunDiagram_NarrowFallsBackToCompact(t *testing.T) {
 	d := tuiRunDiagram([]tuiStepRun{
-		{StepName: "build", Status: "completed"},
-		{StepName: "test", Status: "running"},
-		{StepName: "deploy", Status: "pending"},
+		{StepIndex: 0, StepName: "build", Status: "completed"},
+		{StepIndex: 1, StepName: "test", Status: "running"},
+		{StepIndex: 2, StepName: "deploy", Status: "pending"},
 	}, 12)
 	if strings.ContainsAny(d, "╭╮╰╯") {
 		t.Errorf("narrow live diagram should drop the boxed form, got:\n%s", d)
@@ -525,12 +547,67 @@ func TestTuiRunDiagramPanel_FixedHeight(t *testing.T) {
 	m.runDetails["run-1"] = &tuiRunFull{
 		StepRuns: []tuiStepRun{
 			{StepName: "a", Status: "completed"},
-			{StepName: "b", Status: "running", ParallelGroup: &g},
-			{StepName: "c", Status: "pending", ParallelGroup: &g},
+			{StepName: "b", Status: "running", stage: &g},
+			{StepName: "c", Status: "pending", stage: &g},
 			{StepName: "d", Status: "pending"},
 		},
 	}
 	if got := strings.Count(m.tuiRunDiagramPanel(), "\n") + 1; got != tuiDiagReserve {
 		t.Errorf("run diagram panel = %d lines, want exactly %d", got, tuiDiagReserve)
+	}
+}
+
+// ── inline steps (DSL guard + -f round-trip) ───────────────────────────────────
+
+// The one-line DSL only round-trips stored-step references (and @repo). Inline
+// steps, gates, matrices, and wired `with` overrides must be flagged non-expressible
+// so the TUI refuses to lossily edit them via the DSL.
+func TestStepDSLExpressible(t *testing.T) {
+	g := 0
+	cases := []struct {
+		name string
+		s    tuiWorkflowStep
+		ok   bool
+	}{
+		{"stored reference", tuiWorkflowStep{StepID: "s1", Name: "build"}, true},
+		{"reference with @repo only", tuiWorkflowStep{StepID: "s1", Name: "build", With: map[string]any{"secret_refs": map[string]any{gitCloneEnv: "git:https://x/r.git"}}}, true},
+		{"inline step", tuiWorkflowStep{Name: "build", Action: "forge/run", With: map[string]any{"image": "alpine"}}, false},
+		{"approval gate", tuiWorkflowStep{Approval: &approvalGate{Message: "ok?"}}, false},
+		{"matrix", tuiWorkflowStep{StepID: "s1", Name: "build", Matrix: &matrixConfig{Var: "v", Values: []string{"a"}}}, false},
+		{"wired with override", tuiWorkflowStep{StepID: "s1", Name: "build", With: map[string]any{"env": map[string]any{"X": "${steps.a.output}"}}}, false},
+		{"parallel reference", tuiWorkflowStep{StepID: "s1", Name: "build", stage: &g}, true},
+	}
+	for _, c := range cases {
+		if stepDSLExpressible(c.s) != c.ok {
+			t.Errorf("%s: stepDSLExpressible = %v, want %v", c.name, !c.ok, c.ok)
+		}
+	}
+}
+
+// A -f pipeline file with an inline step must round-trip its action/name/with/timeout
+// into workflowStepRef (a regression guard: without the fields they were dropped).
+func TestPipelineFile_InlineStepRoundTrip(t *testing.T) {
+	raw := `{"name":"p","steps":[
+		{"step_id":"s1"},
+		{"action":"forge/run","name":"build","timeout":90,"with":{"image":"alpine","run":"make"}}
+	]}`
+	var pf pipelineFile
+	if err := json.Unmarshal([]byte(raw), &pf); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(pf.Steps) != 2 {
+		t.Fatalf("got %d steps, want 2", len(pf.Steps))
+	}
+	in := pf.Steps[1]
+	if in.StepID != "" || in.Action != "forge/run" || in.Name != "build" || in.Timeout != 90 {
+		t.Errorf("inline ref not preserved: %+v", in)
+	}
+	if in.With["image"] != "alpine" || in.With["run"] != "make" {
+		t.Errorf("inline with not preserved: %+v", in.With)
+	}
+	// It must re-marshal without a step_id (so the backend reads it as inline).
+	out, _ := json.Marshal(in)
+	if strings.Contains(string(out), "step_id") {
+		t.Errorf("inline ref marshalled with a step_id: %s", out)
 	}
 }

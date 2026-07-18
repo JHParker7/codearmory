@@ -4,7 +4,6 @@ Conductor validates inputs before forwarding to any backend:
   - POST /signup: email, username, password fields + format checks
   - POST /login: email, password fields
   - Authenticated routes with {id} path params: UUID format
-  - Blueprints routes with slug path params: alphanumeric/hyphen/underscore, 1-64 chars
 """
 
 import uuid
@@ -220,44 +219,6 @@ class TestUUIDPathValidation:
             f"{base_url}/gatekeeper/users/{new_user['user_id']}",
             headers=bearer(token),
         )
-        assert resp.status_code != 400
-
-
-# ---------------------------------------------------------------------------
-# Slug path parameter validation — Blueprints routes
-# ---------------------------------------------------------------------------
-
-
-class TestSlugPathValidation:
-    """Conductor must reject path segments that fail the slug pattern with 400."""
-
-    def test_username_with_slash_returns_404(self, base_url, token):
-        # A slash inside the username produces an extra path segment, so
-        # /blueprints/state/bad/slash/dev has three segments where the
-        # /state/{username}/{workspace} route expects two. No registered route
-        # matches, so conductor returns 404 (routing miss) before any slug check.
-        resp = requests.get(f"{base_url}/blueprints/state/bad/slash/dev", headers=bearer(token))
-        assert resp.status_code == 404
-
-    def test_username_with_special_chars_returns_400(self, base_url, token):
-        resp = requests.get(f"{base_url}/blueprints/state/bad!user/dev", headers=bearer(token))
-        assert resp.status_code == 400
-
-    def test_workspace_with_special_chars_returns_400(self, base_url, token):
-        resp = requests.get(f"{base_url}/blueprints/state/alice/bad!workspace", headers=bearer(token))
-        assert resp.status_code == 400
-
-    def test_username_too_long_returns_400(self, base_url, token):
-        resp = requests.get(f"{base_url}/blueprints/state/{'a' * 65}/dev", headers=bearer(token))
-        assert resp.status_code == 400
-
-    def test_valid_slugs_are_forwarded(self, base_url, token):
-        """Valid slug path params pass conductor; Blueprints decides the outcome."""
-        resp = requests.get(f"{base_url}/blueprints/state/alice/dev", headers=bearer(token))
-        assert resp.status_code != 400
-
-    def test_slug_with_hyphens_and_underscores_accepted(self, base_url, token):
-        resp = requests.get(f"{base_url}/blueprints/state/my-user_123/my-workspace_456", headers=bearer(token))
         assert resp.status_code != 400
 
 

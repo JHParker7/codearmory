@@ -199,16 +199,20 @@ func TestCreateSecret_Forbidden(t *testing.T) {
 	}
 }
 
+// TestCreateSecret_NoOrg: an org-less caller now creates a personal secret (201),
+// not a 400 — personal secrets let a solo user hold credentials without an org.
 func TestCreateSecret_NoOrg(t *testing.T) {
 	actor := createAuthorizedUser(t, "createSecret", "gatekeeper/secrets")
 
-	body, _ := json.Marshal(secretRequest{Name: "X", Value: "y"})
+	name := "PERSONAL_" + uuid.New().String()[:8]
+	t.Cleanup(func() { gormDB.Unscoped().Where("name = ?", name).Delete(&Secret{}) }) //nolint:errcheck
+	body, _ := json.Marshal(secretRequest{Name: name, Value: "y"})
 	r := withUserID(httptest.NewRequest(http.MethodPost, "/secrets", bytes.NewReader(body)), actor.UserID)
 	w := httptest.NewRecorder()
 	handleCreateSecret(w, r)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

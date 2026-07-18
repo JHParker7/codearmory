@@ -56,6 +56,9 @@ Commits must follow Conventional Commits format (`feat:`, `fix:`, `chore:`, etc.
 
 ## Architecture
 
+### Repository scope (core monorepo + spun-off services)
+This monorepo holds the **core control plane**: conductor, gatekeeper, registry, builder, portal, workflows, forge, **git_connector** (the credential broker), hooks, the forge **egress-proxy**, and the outpost pair (`outpost` + `outpost-gateway`). The **git_connector** service (registered/routed as `git_connector`; in-repo directory is still `src/systems/git`) is the core git integration — a backend-agnostic **credential broker** that mints short-lived clone credentials for whatever backend a repo lives on (GitHub, GitLab, Forgejo, generic). **tickets** and **containers (docker registry)** are also **core** and **in-repo** (`src/systems/tickets`, `src/systems/containers`) — built by the monorepo CI, the Helm chart deploys those images and they are registered via the registry manifest (they have no builder def). The remaining services were spun out into their own `codearmory-<svc>` repos — **argo, blueprints, chaos, mcp, notifications**, and **gitea_integration** (Forgejo/Gitea repo management — demoted from core because most users do not run Forgejo) — but are still part of the platform: **builder** deploys and registers them at runtime from the images those repos publish (their deploy defs stay in `src/systems/builder/files/services/*.json`). References to these services below describe platform behavior even though their source now lives elsewhere.
+
 ### Request flow
 Every external request enters through **Conductor** (`:8080`), the API gateway. Conductor polls **Registry** (`:8082`) every ~5 minutes for service manifests that define routes, actions, and RBAC resources. Conductor verifies permissions with **Gatekeeper** (`:8081`) before forwarding each request to the target backend.
 
@@ -68,13 +71,13 @@ Two forwarding modes are controlled by `forward_auth` in the registry manifest:
 - `forward_auth: false` (all other services): bearer token is stripped; conductor injects `X-User-ID`, `X-Conductor-Token`, and `X-Conductor-Timestamp` headers so backends can verify the request came through conductor
 
 ### Service manifests
-`infra/local/registry-manifest.json` is the source of truth for what routes each service exposes, what RBAC action/resource pairs they map to, and what permissions are granted by default on startup (`default_grants`). The Helm equivalent populates this at deploy time. Any new service must be registered here; conductor will not route to it otherwise.
+`infra/local/registry-manifest.json` is the source of truth for what routes the **core** services expose, what RBAC action/resource pairs they map to, and what permissions are granted by default on startup (`default_grants`). The Helm equivalent populates this at deploy time. It also carries the in-repo core pair (tickets, containers). The **builder-deployed** services (argo, blueprints, chaos, mcp, notifications, gitea_integration) are **not** in the Helm manifest — **builder** registers them with the registry at runtime when an admin enables them (it PUTs their endpoints/grants from its embedded defs, then notifies conductor). (For local-dev convenience the `infra/local` manifest may still list some builder-deployed services, e.g. `hooks` and `gitea_integration`, since compose does not run builder's reconciler.) A new core service must be registered in this manifest; conductor will not route to it otherwise.
 
 ### Service registration / key rotation
 Every backend service calls `registry.StartKeyRotation(ctx, gatekeeperURL, "<service-name>", secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)` on startup (from the `codearmory_sdk`). This registers the service with Gatekeeper and rotates the shared key every 25 minutes. The initial key is set in `GATEKEEPER_SERVICE_KEY` and must match the corresponding entry in Gatekeeper's `GATEKEEPER_SERVICES` env var.
 
 ### Database pattern
-All GORM-based services (`gatekeeper`, `hooks`, `tickets`, `workflows`, `gitea`, `containers`) use the same pattern:
+All GORM-based services in this repo (`gatekeeper`, `hooks`, `workflows`, `git`, `tickets`, `containers`) — plus the builder-deployed `gitea_integration` — use the same pattern:
 - A `db` interface with `Add / Update / Remove / Get / List` methods implemented on each entity struct
 - Lazy-initialized `gormDB` / `gormDBRead` singletons via `connect()` / `connectRead()`
 - `CREATE TABLE IF NOT EXISTS` auto-migration on startup — no separate migration step
@@ -85,48 +88,47 @@ All GORM-based services (`gatekeeper`, `hooks`, `tickets`, `workflows`, `gitea`,
 All services use the pattern `secret("NAME")` which checks `${NAME}_FILE` first (for k8s volume-mounted secrets), then falls back to the env var `NAME`.
 
 ### Go workspace
-`src/systems/go.work` covers all backend services as a single workspace (including `chaos`, `argo`, `outpost-gateway`, and the `outpost` agent). The CLI (`src/cli/`) is a separate module. Run `go work sync` from `src/systems/` when adding new dependencies shared across services.
+`src/systems/go.work` covers the in-repo backend services as a single workspace (including `outpost-gateway` and the `outpost` agent; spun-off services live in their own repos and are not in this workspace). The CLI (`src/cli/`) is a separate module. Run `go work sync` from `src/systems/` when adding new dependencies shared across services.
 
 ### Workflows execution model
-The Workflows service (`:8085`) executes pipelines by grouping steps into sequential/parallel batches and making authenticated HTTP calls to the target service for each step. Steps can target any service registered in the registry — forge, blueprints, or custom services. Runs are tracked in Postgres; the worker polls for pending runs and processes them, recovering stuck runs on restart.
+The Workflows service (`:8085`) executes pipelines by grouping steps into sequential/parallel batches and making authenticated HTTP calls to the target service for each step. Steps can target any service registered in the registry — forge, the spun-off services builder deploys (e.g. blueprints), or custom services. Runs are tracked in Postgres; the worker polls for pending runs and processes them, recovering stuck runs on restart.
 
 ### Forge and egress isolation
-Forge (`:8083`) runs user commands as isolated containers (Docker or Kubernetes Jobs) with dropped capabilities. In Docker mode, execution containers are placed on the `forge-exec` internal network and route all outbound traffic through the Egress Proxy (`:3128`), which enforces a domain allowlist via `PROXY_ALLOWED_DOMAINS`. In Kubernetes mode, use NetworkPolicy for equivalent isolation.
+Forge (`:8083`) runs user commands as isolated containers (Docker or Kubernetes Jobs) with dropped capabilities. The **Egress Proxy** (`src/systems/egress-proxy`, `:3128`) governs exec traffic via `PROXY_ALLOWED_DOMAINS`, which **defaults to the sentinel `*` (public-only mode)** — any public host is allowed, while the always-on dial-time IP guard still blocks loopback/private/link-local/cloud-metadata addresses, so runners reach the public internet but never internal services. Set it to a comma-separated domain allowlist to restrict further (empty = block all). Forge and workflows are **core** services (deployed by the Helm chart, registered via the registry manifest, and never managed by builder — they are in builder's `coreServices` set with no `files/services/*.json` def). The proxy is **enabled by default**: the Helm chart deploys it alongside forge (`forge.egressProxy.enabled`, default true). In Docker mode exec containers join the `forge-exec` internal network and route through it; in Kubernetes mode a NetworkPolicy restricts exec pods to it (plus DNS). It is skipped for runtimes that isolate egress themselves — set `EGRESS_PROXY_ENABLED=false` in forge's config, or select **kata**: `forge.kata.enabled=true` in the chart (which sets `RUNTIME=kata`) runs sandbox jobs in Cloud Hypervisor microVMs, so the chart skips the egress *proxy* (leaves `FORGE_EGRESS_PROXY` unset — runners aren't forced through it) but still applies a **public-only egress NetworkPolicy** to exec pods (`forge.kata.egress`, default on) that allows all public IPs and blocks every private/internal range (RFC1918, loopback, link-local/cloud-metadata `169.254/16`, CGNAT `100.64/10`) plus a configurable `blocklist`, since a kata microVM is a kernel/VM boundary, **not** a network one. forge seeds its default runner classes **privileged** (root + writable rootfs, safe behind the VM boundary). `forge.kata.enabled` requires `forge.env.k8sRuntimeClass` to name the VM-isolating RuntimeClass. The **gvisor** backend (`forge.gvisor.enabled` / `RUNTIME=gvisor`, also requires `k8sRuntimeClass`, mutually exclusive with kata) is the no-`/dev/kvm` alternative: gVisor's userspace kernel (the Sentry) is *kernel*-isolated so it likewise seeds privileged runners, but it is **not** a network boundary, so unlike kata it **keeps** the egress proxy + NetworkPolicy. The privileged gate is `isKernelIsolatedBackendType` (kata/gvisor), not VM-only.
 
 ### Outpost integration framework
-Cluster integrations (chaos, argo) never touch a customer cluster from the control plane. A single customer-deployed **outpost** (`src/systems/outpost/`, the only Kubernetes/CRD code) runs in the target cluster and dials out to the **outpost-gateway** (`:8092`) over HTTPS — long-polling a Postgres command queue (`SKIP LOCKED`) and POSTing events into a Postgres outbox that a dispatcher delivers to consumer services (`/internal/events`, shared-key HMAC) with dead-letter retry. Each integration is one outpost **module** + one thin control-plane **consumer service** (`chaos` `:8090`, `argo` `:8091`) that holds no cluster credentials. The internal command/event plane is authenticated by `OUTPOST_INTERNAL_KEY` (shared by the gateway and all consumers); outposts authenticate with per-outpost keys (bcrypt). The outpost ships via a separate chart at `infra/helm/outpost/`. Adding an integration touches neither the outpost core nor the gateway. See `docs/outpost/README.md`.
+Cluster integrations (chaos, argo) never touch a user's cluster from the control plane. A user-deployed **outpost** (`src/systems/outpost/`, the only Kubernetes/CRD code) runs in (or against) each target cluster — the same cluster as the control plane for a single-cluster setup, or one per remote cluster so pipelines can span clusters — and dials out to the **outpost-gateway** (`:8092`) over HTTPS — long-polling a Postgres command queue (`SKIP LOCKED`) and POSTing events into a Postgres outbox that a dispatcher delivers to consumer services (`/internal/events`, shared-key HMAC) with dead-letter retry. Each integration is one outpost **module** + one thin control-plane **consumer service** (`chaos` `:8090`, `argo` `:8091` — now spun off into their own repos and deployed by builder) that holds no cluster credentials. The internal command/event plane is authenticated by `OUTPOST_INTERNAL_KEY` (shared by the gateway and all consumers); outposts authenticate with per-outpost keys (bcrypt). The outpost ships via a separate chart at `infra/helm/outpost/`. Adding an integration touches neither the outpost core nor the gateway. See `docs/outpost/README.md`.
 
 ### MCP server
-`src/systems/mcp/` is a stdio-based MCP server, not an HTTP service — it is not deployed to Kubernetes. Users run it locally via `./codearmory-mcp` with `CODEARMORY_URL` pointing at a conductor endpoint. It wraps the full platform API (workflows, forge, hooks, tickets, containers) as MCP tools.
+The MCP server (spun off to its own `codearmory-mcp` repo) is a stdio-based MCP server, not an HTTP service — it is not deployed to Kubernetes. Users run it locally via `./codearmory-mcp` with `CODEARMORY_URL` pointing at a conductor endpoint. It wraps the full platform API (workflows, forge, hooks, tickets, containers) as MCP tools.
 
 ## Source layout
 
 ```
 src/
   cli/              armory CLI (cobra, separate Go module)
-  systems/
+  systems/          (core services only — see "Repository scope")
     conductor/      API gateway — routing, auth forwarding, key rotation
     gatekeeper/     Auth, RBAC, orgs, teams, roles, sessions, OIDC provider
     registry/       Service manifest store — routes, actions, default grants
-    blueprints/     Terraform/OpenTofu HTTP state backend
+    builder/        Org control plane + runtime deployer/registrar of non-core services
     forge/          Sandboxed execution (Docker + Kubernetes runtimes)
+    git/            Git credential broker — short-lived clone creds for GitHub/GitLab/Forgejo/generic backends
+    egress-proxy/   Allowlist-enforcing HTTP/CONNECT proxy for forge sandbox egress
     workflows/      Pipeline orchestrator — steps, runs, worker
     hooks/          Webhook receiver — rules, event matching, trigger
-    tickets/        Task tracker linked to runs and executions
-    containers/     OCI registry management proxy
-    egress-proxy/   Allowlist-enforcing HTTP CONNECT proxy for forge
-    gitea/          Forgejo/Gitea integration — repos, PRs, git proxy
+    tickets/        Issue/ticket tracker — boards, tickets, comments, custom fields
+    containers/     Docker registry proxy — per-tenant image repositories
     outpost-gateway/ Outpost-facing connection point + Postgres event backbone
-    chaos/          Chaos-engineering control plane (outpost integration)
-    argo/           Argo CD sync control plane (outpost integration)
-    outpost/        Customer-deployed in-cluster agent (chaos/argo modules; only K8s code)
-    mcp/            stdio MCP server (not a deployed service)
+    outpost/        User-deployed in-cluster agent (only K8s code)
     portal/         Web app — React SPA + Express BFF (Node, not Go); proxies /api to conductor
 infra/
   local/            Docker Compose stack for local development
     registry-manifest.json   Service route/action/RBAC definitions
-  helm/codearmory/  Production Helm chart
-  helm/outpost/     Customer-installable chart for the outpost agent
+  helm/codearmory/  Production Helm chart (core services; builder deploys the rest)
+  helm/outpost/     User-installable chart for the outpost agent
 tests/              Python integration tests (pytest) per service
 docs/               Per-service READMEs and platform guide
 ```
+
+**Spun off** into their own `codearmory-<svc>` repos (source not in this tree): argo, blueprints, chaos, mcp, notifications, and gitea_integration are deployed + registered by **builder** at runtime. **tickets** and **containers** are **in-repo core** (`src/systems/tickets`, `src/systems/containers`; built by the monorepo CI, Helm-deployed, registered via the registry manifest, no builder def) — they were moved back into the monorepo after being spun off. The core git integration is the in-repo **git_connector** credential broker (directory `src/systems/git`), not gitea_integration.

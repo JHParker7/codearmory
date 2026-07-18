@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -26,19 +27,19 @@ import (
 )
 
 var (
-	gatekeeperClient *gk.Client
-	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
-	gatekeeperKey    func() string // current workflows service key, updated by key rotation
-	hooksTriggerKey  = os.Getenv("HOOKS_TRIGGER_KEY")
+	gatekeeperClient  *gk.Client
+	gatekeeperURL     = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	gatekeeperKey     func() string // current workflows service key, updated by key rotation
+	hooksTriggerKey   = os.Getenv("HOOKS_TRIGGER_KEY")
 	registryNotifyKey = os.Getenv("WORKFLOWS_NOTIFY_KEY")
 
 	// serviceURLs maps registered service names to their base URLs.
 	// Seeded at startup from SERVICES env var and updated every 5 min from the registry.
-	serviceURLsMu      sync.RWMutex
-	serviceURLs        = map[string]string{}
+	serviceURLsMu sync.RWMutex
+	serviceURLs   = map[string]string{}
 	// hostToService is the reverse of serviceURLs: hostname → service name.
 	// Used by peerServiceTransport to stamp peer.service on OTel CLIENT spans.
-	hostToService      = map[string]string{}
+	hostToService = map[string]string{}
 	// catalogServiceNames tracks which names in serviceURLs came from the registry
 	// catalog (vs. env-seeded). Used to evict stale entries on each refresh.
 	catalogServiceNames = map[string]bool{}
@@ -156,12 +157,35 @@ func initServices() {
 	slog.Info("services registered", "count", len(serviceURLs))
 }
 
+// catalogSize reports how many actions are currently loaded.
+func catalogSize() int {
+	actionCatalogMu.RLock()
+	defer actionCatalogMu.RUnlock()
+	return len(actionCatalog)
+}
+
 // startCatalogPoller fetches the action catalog from the registry immediately
 // and then refreshes it every 5 minutes so newly registered services are picked
-// up without restarting workflows.
+// up without restarting workflows. Right after a co-deploy the registry may still
+// be ingesting its manifest, so the first poll can come back empty — fast-retry
+// until the catalog first populates (capped) rather than leaving forge/run missing
+// until the 5-minute tick, then settle into the steady cadence.
 func startCatalogPoller(ctx context.Context) {
 	refreshCatalog(ctx)
 	go func() {
+		backoff := 3 * time.Second
+		deadline := time.Now().Add(2 * time.Minute)
+		for catalogSize() == 0 && time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			refreshCatalog(ctx)
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+		}
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -227,6 +251,14 @@ func refreshCatalog(ctx context.Context) {
 			}
 		}
 		newCatalog[def.Name] = def
+	}
+
+	// A transient empty response (registry mid-restart or still ingesting its
+	// manifest) must not wipe a good catalog — that would make forge/run vanish
+	// from running workflows until the next poll. Keep what we already have.
+	if len(newCatalog) == 0 && catalogSize() > 0 {
+		slog.WarnContext(ctx, "catalog refresh: registry returned 0 actions; keeping existing catalog", "existing", catalogSize())
+		return
 	}
 
 	actionCatalogMu.Lock()
@@ -344,12 +376,90 @@ func main() {
 		slog.SetDefault(slog.New(telemetry.NewFanoutHandler(jsonHandler, otelHandler)))
 		defer shutdown(context.Background())
 	}
+	if err := run(ctx); err != nil {
+		slog.Error("fatal", "error", err)
+		stop()
+		os.Exit(1)
+	}
+}
+
+// buildClientTLSConfig builds the optional mTLS client-auth config from env.
+// Returns an error instead of exiting so the branches are unit-testable.
+func buildClientTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{}
+	switch os.Getenv("TLS_CLIENT_AUTH") {
+	case "require":
+		caFile := os.Getenv("TLS_CLIENT_CA_FILE")
+		if caFile == "" {
+			return nil, errors.New("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
+		}
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read TLS_CLIENT_CA_FILE %q: %w", caFile, err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("TLS_CLIENT_CA_FILE %q contains no valid PEM certificates", caFile)
+		}
+		tlsCfg.ClientCAs = caPool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	case "request":
+		tlsCfg.ClientAuth = tls.RequestClientCert
+	}
+	return tlsCfg, nil
+}
+
+// buildMux registers all routes (the cancel route needs the worker pool) and
+// returns the handler. Extracted from main so the routing table is unit-testable.
+func buildMux(workers *WorkerPool) http.Handler {
+	mux := telemetry.NewMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
+	mux.HandleFunc("GET /actions", handleListActions)
+
+	mux.HandleFunc("POST /steps", handleCreateStep)
+	mux.HandleFunc("GET /steps", handleListSteps)
+	mux.HandleFunc("GET /steps/{id}", handleGetStep)
+	mux.HandleFunc("PUT /steps/{id}", handleUpdateStep)
+	mux.HandleFunc("DELETE /steps/{id}", handleDeleteStep)
+
+	mux.HandleFunc("POST /pipelines", handleCreateWorkflow)
+	mux.HandleFunc("GET /pipelines", handleListWorkflows)
+	mux.HandleFunc("GET /pipelines/{id}", handleGetWorkflow)
+	mux.HandleFunc("PUT /pipelines/{id}", handleUpdateWorkflow)
+	mux.HandleFunc("DELETE /pipelines/{id}", handleDeleteWorkflow)
+
+	mux.HandleFunc("POST /pipelines/{id}/runs", handleTriggerRun)
+	mux.HandleFunc("POST /internal/catalog/refresh", handleCatalogRefresh)
+	mux.HandleFunc("POST /internal/pipelines/{id}/runs", handleInternalTriggerRun)
+	mux.HandleFunc("GET /internal/pipelines/{id}", handleInternalGetWorkflow)
+	mux.HandleFunc("GET /internal/runs/{id}", handleInternalGetRun)
+	// Body-addressed trigger: the create endpoint of the async workflows/trigger
+	// action (a sub-pipeline call), which can't put the pipeline id in the path.
+	mux.HandleFunc("POST /runs", handleTriggerRunByBody)
+	mux.HandleFunc("GET /runs", handleListRuns)
+	mux.HandleFunc("GET /runs/{id}", handleGetRun)
+	mux.HandleFunc("DELETE /runs/{id}", handleCancelRun(workers))
+	mux.HandleFunc("POST /runs/{id}/approve", handleApproveRun)
+	mux.HandleFunc("POST /runs/{id}/reject", handleRejectRun)
+	// Workflow-namespaced run routes: the run resource becomes
+	// workflows/runs/<workflow_ref>/<run_id> so access can be granted per workflow.
+	// The flat /runs/{id} routes above stay for back-compat.
+	mux.HandleFunc("GET /pipelines/{id}/runs/{run_id}", handleGetRun)
+	mux.HandleFunc("DELETE /pipelines/{id}/runs/{run_id}", handleCancelRun(workers))
+	mux.HandleFunc("POST /pipelines/{id}/runs/{run_id}/approve", handleApproveRun)
+	mux.HandleFunc("POST /pipelines/{id}/runs/{run_id}/reject", handleRejectRun)
+	return mux
+}
+
+// run owns the full service lifecycle (migrate, worker pool, serve, graceful
+// shutdown), returning an error instead of os.Exit-ing so it is unit-testable.
+func run(ctx context.Context) error {
 	initMetrics()
 	httpClient = initHTTPClient()
 
 	if err := connect().AutoMigrate(&Step{}, &Workflow{}, &WorkflowRun{}, &WorkflowStepRun{}); err != nil {
-		slog.Error("failed to run AutoMigrate", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("AutoMigrate: %w", err)
 	}
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_runs_queue ON workflow_runs (status, created_at) WHERE status IN ('pending', 'running')`).Error; err != nil {
 		slog.Warn("failed to create workflow_runs index", "error", err)
@@ -365,6 +475,23 @@ func main() {
 	}
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project ON workflows (project) WHERE project <> ''`).Error; err != nil {
 		slog.Warn("failed to create workflows project index", "error", err)
+	}
+	// Workflow/step names are resource identifiers (a name addresses the row in the
+	// URL and RBAC resource), so they must be unique within their visibility scope:
+	// per creator for personal rows (org_id='') and per org for shared rows. These
+	// partial unique indexes are the hard backstop; workflowNameExists/
+	// stepNameConflict are the user-facing guards. Best-effort: a fresh DB always
+	// gets them; on a DB with pre-existing duplicates the index is skipped (logged)
+	// and the app-level guard still prevents new collisions.
+	for _, idx := range []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_workflows_user_name ON workflows (created_by, name) WHERE active AND org_id=''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_workflows_org_name ON workflows (org_id, name) WHERE active AND org_id<>''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_steps_user_name ON steps (created_by, name) WHERE active AND org_id=''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_steps_org_name ON steps (org_id, name) WHERE active AND org_id<>''`,
+	} {
+		if err := connect().Exec(idx).Error; err != nil {
+			slog.Warn("failed to create unique name index (pre-existing duplicates?); app-level guard still enforces uniqueness", "index", idx, "error", err)
+		}
 	}
 	slog.Info("database initialized")
 
@@ -389,34 +516,8 @@ func main() {
 	workers.Start(ctx, 5)
 	slog.Info("worker pool started", "workers", 5)
 
-	mux := telemetry.NewMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
-	mux.HandleFunc("GET /actions", handleListActions)
-
-	mux.HandleFunc("POST /steps", handleCreateStep)
-	mux.HandleFunc("GET /steps", handleListSteps)
-	mux.HandleFunc("GET /steps/{id}", handleGetStep)
-	mux.HandleFunc("PUT /steps/{id}", handleUpdateStep)
-	mux.HandleFunc("DELETE /steps/{id}", handleDeleteStep)
-
-	mux.HandleFunc("POST /pipelines", handleCreateWorkflow)
-	mux.HandleFunc("GET /pipelines", handleListWorkflows)
-	mux.HandleFunc("GET /pipelines/{id}", handleGetWorkflow)
-	mux.HandleFunc("PUT /pipelines/{id}", handleUpdateWorkflow)
-	mux.HandleFunc("DELETE /pipelines/{id}", handleDeleteWorkflow)
-
-	mux.HandleFunc("POST /pipelines/{id}/runs", handleTriggerRun)
-	mux.HandleFunc("POST /internal/catalog/refresh", handleCatalogRefresh)
-	mux.HandleFunc("POST /internal/pipelines/{id}/runs", handleInternalTriggerRun)
-	mux.HandleFunc("GET /internal/pipelines/{id}", handleInternalGetWorkflow)
-	mux.HandleFunc("GET /internal/runs/{id}", handleInternalGetRun)
-	mux.HandleFunc("GET /runs", handleListRuns)
-	mux.HandleFunc("GET /runs/{id}", handleGetRun)
-	mux.HandleFunc("DELETE /runs/{id}", handleCancelRun(workers))
-
 	port := envOrDefault("PORT", "8085")
-	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{mux}), "workflows",
+	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{buildMux(workers)}), "workflows",
 		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 	)
 
@@ -430,31 +531,13 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 	if certFile != "" && keyFile != "" {
-		tlsCfg := &tls.Config{}
-		switch os.Getenv("TLS_CLIENT_AUTH") {
-		case "require":
-			caFile := os.Getenv("TLS_CLIENT_CA_FILE")
-			if caFile == "" {
-				slog.Error("TLS_CLIENT_AUTH=require but TLS_CLIENT_CA_FILE is not set")
-				os.Exit(1)
-			}
-			caCert, err := os.ReadFile(caFile)
-			if err != nil {
-				slog.Error("failed to read TLS_CLIENT_CA_FILE", "path", caFile, "error", err)
-				os.Exit(1)
-			}
-			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(caCert) {
-				slog.Error("TLS_CLIENT_CA_FILE contains no valid PEM certificates", "path", caFile)
-				os.Exit(1)
-			}
-			tlsCfg.ClientCAs = caPool
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		case "request":
-			tlsCfg.ClientAuth = tls.RequestClientCert
+		tlsCfg, err := buildClientTLSConfig()
+		if err != nil {
+			return fmt.Errorf("TLS client-auth config: %w", err)
 		}
 		srv.TLSConfig = tlsCfg
 	}
+	serveErr := make(chan error, 1)
 	go func() {
 		var err error
 		if certFile != "" && keyFile != "" {
@@ -465,17 +548,20 @@ func main() {
 			err = srv.ListenAndServe()
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
+			serveErr <- err
 		}
 	}()
 
-	<-ctx.Done()
-	stop()
+	select {
+	case err := <-serveErr:
+		return fmt.Errorf("server error: %w", err)
+	case <-ctx.Done():
+	}
 	slog.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown error", "error", err)
+		return fmt.Errorf("shutdown: %w", err)
 	}
+	return nil
 }

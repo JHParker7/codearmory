@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -169,6 +170,15 @@ func TestHandleUpdateServiceEndpoints_NoServiceKey(t *testing.T) {
 // statusResponseWriter
 // ---------------------------------------------------------------------------
 
+func TestHandleUpsertServiceAccount_NoServiceKey(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/service-accounts", nil)
+	w := httptest.NewRecorder()
+	handleUpsertServiceAccount(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", w.Code)
+	}
+}
+
 func TestStatusResponseWriter_CapturesStatus(t *testing.T) {
 	rec := httptest.NewRecorder()
 	rw := &statusResponseWriter{ResponseWriter: rec, status: http.StatusOK}
@@ -196,4 +206,38 @@ func TestStatusResponseWriter_DelegatesWrite(t *testing.T) {
 	if rec.Body.String() != "not found" {
 		t.Fatalf("expected body 'not found', got %q", rec.Body.String())
 	}
+}
+
+// ---------------------------------------------------------------------------
+// notifyConductor — best-effort push to conductor /internal/refresh (no DB)
+// ---------------------------------------------------------------------------
+
+func TestNotifyConductor_PostsRefresh(t *testing.T) {
+	var gotPath, gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotKey = r.Header.Get("X-Service-Key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("CONDUCTOR_URL", srv.URL)
+	t.Setenv("CONDUCTOR_NOTIFY_KEY", "notifykey")
+
+	// notifyService is synchronous, so the stub has been hit by the time it returns.
+	notifyConductor(context.Background())
+
+	if gotPath != "/internal/refresh" {
+		t.Errorf("path = %q, want /internal/refresh", gotPath)
+	}
+	if gotKey != "registry:notifykey" {
+		t.Errorf("key = %q, want registry:notifykey", gotKey)
+	}
+}
+
+func TestNotifyConductor_NoopWithoutEnv(t *testing.T) {
+	t.Setenv("CONDUCTOR_URL", "")
+	t.Setenv("CONDUCTOR_NOTIFY_KEY", "")
+	// Unconfigured notify must be a prompt no-op (no panic, no network).
+	notifyConductor(context.Background())
 }

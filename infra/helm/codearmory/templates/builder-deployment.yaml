@@ -90,6 +90,18 @@ spec:
               value: {{ $full }}-conductor
             - name: BUILDER_RECONCILE_INTERVAL
               value: {{ .Values.builder.reconcile.interval | quote }}
+            {{- if .Values.builder.reconcile.defaultReplicas }}
+            # Replica floor applied to every managed (non-core) workload. Combined with
+            # the surge-first rollout strategy + PDB, keeps ≥ (this − 1) pods healthy.
+            - name: BUILDER_DEFAULT_REPLICAS
+              value: {{ .Values.builder.reconcile.defaultReplicas | quote }}
+            {{- end }}
+            {{- if .Values.builder.reconcile.rotateInterval }}
+            # Periodic rolling restart of every managed workload — restores pods to the
+            # image to shed drift / a compromised process. Go duration, e.g. "30m".
+            - name: BUILDER_ROTATE_INTERVAL
+              value: {{ .Values.builder.reconcile.rotateInterval | quote }}
+            {{- end }}
             - name: BUILDER_TARGET_NAMESPACE
               value: {{ .Values.builder.reconcile.targetNamespace | default .Release.Namespace | quote }}
             - name: BUILDER_RELEASE_PREFIX
@@ -98,10 +110,98 @@ spec:
               value: {{ .Values.imageRegistry | quote }}
             - name: BUILDER_IMAGE_TAG
               value: {{ .Values.imageTag | quote }}
+            {{- if .Values.imagePullSecrets }}
+            # Attached to every builder-deployed (non-core) workload, for private registries.
+            - name: BUILDER_IMAGE_PULL_SECRETS
+              value: "{{- range $i, $s := .Values.imagePullSecrets }}{{ if $i }},{{ end }}{{ $s.name }}{{- end }}"
+            {{- end }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- end }}
+            {{- /* Database backend for builder-deployed (non-core) services. Applies
+                   independently of the reconciler: sql provisioning also runs at
+                   enable-time in the /services handler. Backend-specific blocks render
+                   when that backend is selected OR its keys are set (a per-service
+                   dbBackend override can select a backend the global default doesn't). */}}
+            {{- with .Values.builder.db }}
+            {{- if ne .backend "manual" }}
+            - name: BUILDER_DB_BACKEND
+              value: {{ .backend | quote }}
+            {{- end }}
+            {{- if or (eq .backend "sql") .sql.ownerRole .sql.maintenanceUrl .sql.sslMode }}
+            # sql backend. Maintenance URL / owner password come from the builder Secret
+            # (optional: unset => ephemeral mode, the credential is supplied per enable call).
+            - name: BUILDER_DB_SQL_CREATE_ROLE
+              value: {{ .sql.createRole | quote }}
+            {{- with .sql.ownerRole }}
+            - name: BUILDER_DB_SQL_OWNER_ROLE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .sql.sslMode }}
+            - name: BUILDER_DB_SQL_SSLMODE
+              value: {{ . | quote }}
+            {{- end }}
+            - name: BUILDER_DB_SQL_MAINTENANCE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $full }}-builder
+                  key: db-sql-maintenance-url
+                  optional: true
+            - name: BUILDER_DB_SQL_OWNER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $full }}-builder
+                  key: db-sql-owner-password
+                  optional: true
+            {{- end }}
+            {{- if or (eq .backend "cnpg") .cnpg.cluster }}
+            # cnpg backend (CloudNativePG). CR RBAC is in builder-rbac.yaml.
+            {{- with .cnpg.cluster }}
+            - name: BUILDER_DB_CNPG_CLUSTER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .cnpg.namespace }}
+            - name: BUILDER_DB_CNPG_NAMESPACE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .cnpg.credSecretTemplate }}
+            - name: BUILDER_DB_CNPG_CRED_SECRET_TEMPLATE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .cnpg.credKey }}
+            - name: BUILDER_DB_CNPG_CRED_KEY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if or (eq .backend "external") .external.storeRef }}
+            # external backend (External Secrets Operator). CR RBAC is in builder-rbac.yaml.
+            {{- with .external.storeRef }}
+            - name: BUILDER_DB_EXTERNAL_STORE_REF
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .external.storeKind }}
+            - name: BUILDER_DB_EXTERNAL_STORE_KIND
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .external.pathTemplate }}
+            - name: BUILDER_DB_EXTERNAL_PATH_TEMPLATE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .external.property }}
+            - name: BUILDER_DB_EXTERNAL_PROPERTY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .external.refresh }}
+            - name: BUILDER_DB_EXTERNAL_REFRESH
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .external.apiVersion }}
+            - name: BUILDER_DB_EXTERNAL_API_VERSION
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
             {{- include "codearmory.tls.envs" .Values.builder.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.builder.tls) }}

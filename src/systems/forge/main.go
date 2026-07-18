@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -57,6 +58,36 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envFloatOrDefault reads key as a float, falling back to def when unset, empty,
+// or unparseable (an invalid value is logged and ignored rather than crashing).
+func envFloatOrDefault(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		slog.Warn("forge: ignoring invalid env value, using default", "key", key, "value", v, "default", def)
+		return def
+	}
+	return f
+}
+
+// envIntOrDefault reads key as an int, falling back to def under the same rules as
+// envFloatOrDefault.
+func envIntOrDefault(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		slog.Warn("forge: ignoring invalid env value, using default", "key", key, "value", v, "default", def)
+		return def
+	}
+	return n
 }
 
 // secret reads a secret from an env var. If NAME_FILE is set, the value is read
@@ -157,12 +188,28 @@ func main() {
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS executions_user_project ON executions (user_id, project) WHERE project <> ''`).Error; err != nil {
 		slog.Warn("failed to create executions project index", "error", err)
 	}
+	// Partial indexes backing the per-org / per-user running-count subqueries in
+	// claimPendingExecution's concurrency-limit gate.
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS executions_running_org ON executions (org_id) WHERE status = 'running'`).Error; err != nil {
+		slog.Warn("failed to create executions running-org index", "error", err)
+	}
+	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS executions_running_user ON executions (user_id) WHERE status = 'running'`).Error; err != nil {
+		slog.Warn("failed to create executions running-user index", "error", err)
+	}
+	if err := migrateConcurrencyLimits(); err != nil {
+		slog.Error("failed to migrate concurrency limits", "error", err)
+		os.Exit(1)
+	}
 	if err := migrateAndSeedRunnerClasses(); err != nil {
 		slog.Error("failed to migrate runner classes", "error", err)
 		os.Exit(1)
 	}
 	if err := migrateAndSeedRuntimeBackends(); err != nil {
 		slog.Error("failed to migrate runtime backends", "error", err)
+		os.Exit(1)
+	}
+	if err := connect().AutoMigrate(&Volume{}); err != nil {
+		slog.Error("failed to migrate volumes", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("database initialized")
@@ -178,11 +225,23 @@ func main() {
 	slog.Info("runtime registry initialized", "default_type", defaultRuntimeType())
 
 	initAllowedImages(os.Getenv("ALLOWED_IMAGES"))
+	initVolumeConfig()
+	initBuildConfig()
+	initCheckoutConfig()
+	initConcurrencyConfig()
 
-	// Reap proxmox VMs orphaned by a previous crash. Must run before the worker
-	// pool starts: the sweep blanket-destroys forge-* VMs and so is only safe while
-	// nothing is processing jobs.
-	sweepProxmoxOrphans(ctx, reg)
+	// Percent-based admission budget: if configured, derive the CPU/memory budget from
+	// live cluster capacity and keep it current as the cluster autoscales. The default
+	// runtime is resolved above (reg.Get(ctx, "default")); when it can report cluster
+	// capacity (the kubernetes backend), use it. A docker backend does not implement
+	// clusterCapacity, so startResourceBudget falls back to the absolute values.
+	if def, err := reg.Get(ctx, "default"); err == nil {
+		if cap, ok := def.(clusterCapacity); ok {
+			startResourceBudget(ctx, cap)
+		} else {
+			startResourceBudget(ctx, nil)
+		}
+	}
 
 	// Rotate the gatekeeper service key every 25 minutes. GATEKEEPER_SERVICE_KEY
 	// must match the key in GATEKEEPER_SERVICES on gatekeeper. No-op if unset.
@@ -194,6 +253,15 @@ func main() {
 	workers := newWorkerPool(reg)
 	workers.Start(ctx, 10)
 	slog.Info("worker pool started", "workers", 10)
+
+	// Reap shared workspace volumes orphaned by a workflow that crashed before
+	// tearing them down. Normal runs delete their own volumes; this is the backstop.
+	go startVolumeReaper(ctx, reg)
+
+	// Reap executions stuck non-terminal past their deadline — work orphaned by a
+	// forge restart or a vanished pod. Critical because a stranded running row keeps
+	// holding cluster budget in the scheduler and wedges the queue for everyone.
+	go startExecutionReaper(ctx, reg)
 
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -208,11 +276,19 @@ func main() {
 	mux.HandleFunc("GET /runner-classes/{name}", handleGetRunnerClass)
 	mux.HandleFunc("PUT /runner-classes/{name}", handleUpdateRunnerClass)
 	mux.HandleFunc("DELETE /runner-classes/{name}", handleDeleteRunnerClass)
+	mux.HandleFunc("POST /volumes", handleCreateVolume(reg))
+	mux.HandleFunc("GET /volumes", handleListVolumes)
+	mux.HandleFunc("GET /volumes/{id}", handleGetVolume(reg))
+	mux.HandleFunc("DELETE /volumes", handleDeleteVolumes(reg))
 	mux.HandleFunc("GET /runtime-backends", handleListRuntimeBackends)
 	mux.HandleFunc("POST /runtime-backends", handleCreateRuntimeBackend)
 	mux.HandleFunc("GET /runtime-backends/{name}", handleGetRuntimeBackend)
 	mux.HandleFunc("PUT /runtime-backends/{name}", handleUpdateRuntimeBackend(reg))
 	mux.HandleFunc("DELETE /runtime-backends/{name}", handleDeleteRuntimeBackend(reg))
+	mux.HandleFunc("GET /concurrency-limits", handleListConcurrencyLimits)
+	mux.HandleFunc("GET /concurrency-limits/{scope}/{scope_id}", handleGetConcurrencyLimit)
+	mux.HandleFunc("PUT /concurrency-limits/{scope}/{scope_id}", handleSetConcurrencyLimit)
+	mux.HandleFunc("DELETE /concurrency-limits/{scope}/{scope_id}", handleDeleteConcurrencyLimit)
 
 	port := envOrDefault("PORT", "8083")
 	wrapped := otelhttp.NewHandler(&logger{mux}, "forge",

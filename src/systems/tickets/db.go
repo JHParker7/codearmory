@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -152,6 +153,289 @@ func (t Ticket) List(ctx context.Context, limit, offset int) ([]db, error) {
 	return result, nil
 }
 
+// ── Board ─────────────────────────────────────────────────────────────────────
+
+func (b Board) Add(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.add")
+	defer span.End()
+	span.SetAttributes(attribute.String("board.id", b.BoardID))
+	if err := connect().WithContext(ctx).Create(&b).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (b Board) Update(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.update")
+	defer span.End()
+	span.SetAttributes(attribute.String("board.id", b.BoardID))
+	b.UpdatedAt = time.Now().UTC()
+	if err := connect().WithContext(ctx).Save(&b).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (b Board) Remove(ctx context.Context) error {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.remove")
+	defer span.End()
+	span.SetAttributes(attribute.String("board.id", b.BoardID))
+	if err := connect().WithContext(ctx).Model(&Board{}).
+		Where("board_id=? AND active=?", b.BoardID, true).
+		Update("active", false).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+func (b Board) Get(ctx context.Context) (db, error) {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.get")
+	defer span.End()
+	span.SetAttributes(attribute.String("board.id", b.BoardID))
+	var result Board
+	if err := connectRead().WithContext(ctx).Where("board_id=? AND active=?", b.BoardID, true).First(&result).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return result, nil
+}
+
+func (b Board) List(ctx context.Context, limit, offset int) ([]db, error) {
+	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.list")
+	defer span.End()
+	boards, err := listBoards(ctx, b.CreatedBy, b.OrgID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	if limit > 0 {
+		if offset >= len(boards) {
+			boards = nil
+		} else {
+			end := offset + limit
+			if end > len(boards) {
+				end = len(boards)
+			}
+			boards = boards[offset:end]
+		}
+	}
+	span.SetStatus(codes.Ok, "")
+	result := make([]db, len(boards))
+	for i, bd := range boards {
+		result[i] = bd
+	}
+	return result, nil
+}
+
+// getBoard returns a single active board by ID.
+func getBoard(ctx context.Context, id string) (Board, error) {
+	row, err := (Board{BoardID: id}).Get(ctx)
+	if err != nil {
+		return Board{}, err
+	}
+	return row.(Board), nil
+}
+
+// listBoards returns active boards accessible to the caller (owned or same-org),
+// ordered by position then name, each with its open/total ticket counts.
+func listBoards(ctx context.Context, userID, orgID string) ([]Board, error) {
+	var boards []Board
+	if err := connectRead().WithContext(ctx).
+		Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID).
+		Order("position, name, created_at").
+		Find(&boards).Error; err != nil {
+		return nil, err
+	}
+	if boards == nil {
+		boards = []Board{}
+	}
+	attachBoardCounts(ctx, userID, orgID, boards)
+	return boards, nil
+}
+
+// attachBoardCounts populates OpenCount/TotalCount on each board from a single
+// grouped ticket query. Best-effort: a query failure leaves the counts at zero
+// and logs rather than failing the board list, since the counts are decorative.
+func attachBoardCounts(ctx context.Context, userID, orgID string, boards []Board) {
+	if len(boards) == 0 {
+		return
+	}
+	total, open, err := boardTicketCounts(ctx, userID, orgID)
+	if err != nil {
+		slog.WarnContext(ctx, "board counts: query failed", "user_id", userID, "error", err)
+		return
+	}
+	for i := range boards {
+		boards[i].TotalCount = total[boards[i].BoardID]
+		boards[i].OpenCount = open[boards[i].BoardID]
+	}
+}
+
+// boardTicketCounts returns, keyed by board_id, the number of active tickets
+// visible to the caller on each board (total) and how many are still open (not
+// in a terminal status). Boards with no visible tickets are absent from both
+// maps (their count is the zero value).
+func boardTicketCounts(ctx context.Context, userID, orgID string) (total, open map[string]int64, err error) {
+	// FILTER is Postgres-native; terminalStatuses are compile-time constants so
+	// building the IN list from them carries no injection risk.
+	quoted := make([]string, len(terminalStatuses))
+	for i, s := range terminalStatuses {
+		quoted[i] = "'" + s + "'"
+	}
+	openExpr := "COUNT(*) FILTER (WHERE status NOT IN (" + strings.Join(quoted, ",") + ")) AS open_count"
+	type countRow struct {
+		BoardID   string `gorm:"column:board_id"`
+		Total     int64  `gorm:"column:total_count"`
+		OpenCount int64  `gorm:"column:open_count"`
+	}
+	var rows []countRow
+	if err := connectRead().WithContext(ctx).Model(&Ticket{}).
+		Select("board_id, COUNT(*) AS total_count, "+openExpr).
+		Where("active = ? AND board_id IS NOT NULL AND board_id <> '' AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID).
+		Group("board_id").
+		Scan(&rows).Error; err != nil {
+		return nil, nil, err
+	}
+	total = make(map[string]int64, len(rows))
+	open = make(map[string]int64, len(rows))
+	for _, r := range rows {
+		total[r.BoardID] = r.Total
+		open[r.BoardID] = r.OpenCount
+	}
+	return total, open, nil
+}
+
+// boardNameTaken reports whether an active board with the same name already
+// exists in the caller's scope (org-shared when org-backed, else per-user),
+// excluding the board with excludeID (empty to check all).
+func boardNameTaken(ctx context.Context, name, userID, orgID, excludeID string) (bool, error) {
+	q := connectRead().WithContext(ctx).Model(&Board{}).Where("active = ? AND name = ?", true, name)
+	if orgID != "" {
+		q = q.Where("org_id = ?", orgID)
+	} else {
+		q = q.Where("org_id = '' AND created_by = ?", userID)
+	}
+	if excludeID != "" {
+		q = q.Where("board_id <> ?", excludeID)
+	}
+	var count int64
+	if err := q.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// deleteBoardTickets soft-deletes every active ticket on boardID. Boards are
+// required, so deleting a board cascade-deletes its tickets rather than orphaning
+// them to a board-less "unassigned" pile.
+func deleteBoardTickets(ctx context.Context, boardID string) error {
+	return connect().WithContext(ctx).Model(&Ticket{}).
+		Where("board_id = ? AND active = ?", boardID, true).
+		Update("active", false).Error
+}
+
+// defaultBoardName is the name of the per-scope board a ticket lands on when the
+// caller creates it without naming a board. Every ticket must belong to a board.
+const defaultBoardName = "Default"
+
+// findDefaultBoard looks up the caller's existing default board within its owner
+// scope (shared per-org for org-backed callers, else per-user), returning
+// gorm.ErrRecordNotFound when it has not been created yet.
+func findDefaultBoard(ctx context.Context, userID, orgID string) (Board, error) {
+	q := connectRead().WithContext(ctx).Where("active = ? AND name = ?", true, defaultBoardName)
+	if orgID != "" {
+		q = q.Where("org_id = ?", orgID)
+	} else {
+		q = q.Where("org_id = '' AND created_by = ?", userID)
+	}
+	var b Board
+	err := q.First(&b).Error
+	return b, err
+}
+
+// getOrCreateDefaultBoard returns the caller's default board, creating it (and
+// seeding its own status columns) on first use. It is the board a ticket is
+// placed on when the caller does not specify one, so the "every ticket has a
+// board" invariant holds without every client having to pick a board.
+func getOrCreateDefaultBoard(ctx context.Context, userID, orgID string) (Board, error) {
+	existing, err := findDefaultBoard(ctx, userID, orgID)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return Board{}, err
+	}
+
+	now := time.Now().UTC()
+	b := Board{
+		BoardID:     uuid.New().String(),
+		Name:        defaultBoardName,
+		Description: "Default board",
+		CreatedBy:   userID,
+		OrgID:       orgID,
+		Active:      true,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := b.Add(ctx); err != nil {
+		// A concurrent create may have won the race against the unique name
+		// index; fall back to reading the board it inserted.
+		if raced, rerr := findDefaultBoard(ctx, userID, orgID); rerr == nil {
+			return raced, nil
+		}
+		return Board{}, err
+	}
+	// Best-effort, matching handleCreateBoard: on failure the board falls back to
+	// the org/global status set rather than failing ticket creation.
+	if err := seedBoardStatuses(ctx, b); err != nil {
+		slog.WarnContext(ctx, "default board: seed status columns failed", "board_id", b.BoardID, "error", err)
+	}
+	return b, nil
+}
+
+// backfillTicketBoards assigns any pre-existing board-less tickets to their
+// scope's default board, so the "every ticket has a board" invariant also holds
+// for rows created before boards were required. Idempotent: once every ticket
+// has a board it is a no-op.
+func backfillTicketBoards(ctx context.Context) error {
+	type scope struct {
+		CreatedBy string
+		OrgID     string
+	}
+	var scopes []scope
+	if err := connect().WithContext(ctx).Model(&Ticket{}).
+		Select("created_by, org_id").
+		Where("active = ? AND (board_id IS NULL OR board_id = '')", true).
+		Group("created_by, org_id").
+		Scan(&scopes).Error; err != nil {
+		return err
+	}
+	for _, s := range scopes {
+		b, err := getOrCreateDefaultBoard(ctx, s.CreatedBy, s.OrgID)
+		if err != nil {
+			return err
+		}
+		if err := connect().WithContext(ctx).Model(&Ticket{}).
+			Where("active = ? AND (board_id IS NULL OR board_id = '') AND created_by = ? AND org_id = ?", true, s.CreatedBy, s.OrgID).
+			Update("board_id", b.BoardID).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // getTicket returns a single active ticket by ID with an empty comments slice.
 func getTicket(ctx context.Context, id string) (Ticket, error) {
 	row, err := (Ticket{TicketID: id}).Get(ctx)
@@ -162,9 +446,10 @@ func getTicket(ctx context.Context, id string) (Ticket, error) {
 }
 
 // listTickets returns active tickets accessible to the caller with optional filters.
-// projectFilter is a view filter only — it never widens access beyond the
-// created_by/org_id scope above.
-func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilter, assigneeFilter, timescaleFilter, projectFilter string) ([]Ticket, error) {
+// projectFilter/boardFilter are view filters only — they never widen access beyond
+// the created_by/org_id scope above. A boardFilter of "none" selects unassigned
+// tickets (no board).
+func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilter, assigneeFilter, timescaleFilter, projectFilter, boardFilter string) ([]Ticket, error) {
 	q := connectRead().WithContext(ctx).
 		Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID)
 	if statusFilter != "" {
@@ -181,6 +466,11 @@ func listTickets(ctx context.Context, userID, orgID, statusFilter, priorityFilte
 	}
 	if projectFilter != "" {
 		q = q.Where("project = ?", projectFilter)
+	}
+	if boardFilter == "none" {
+		q = q.Where("board_id IS NULL OR board_id = ''")
+	} else if boardFilter != "" {
+		q = q.Where("board_id = ?", boardFilter)
 	}
 	var tickets []Ticket
 	if err := q.Order("created_at DESC").Limit(100).Find(&tickets).Error; err != nil {
@@ -374,7 +664,7 @@ func (f TicketFieldDef) Get(ctx context.Context) (db, error) {
 func (f TicketFieldDef) List(ctx context.Context, limit, offset int) ([]db, error) {
 	ctx, span := otel.Tracer("tickets").Start(ctx, "db.field_def.list")
 	defer span.End()
-	defs, err := listFieldDefs(ctx, f.OrgID, f.Kind)
+	defs, err := listFieldDefs(ctx, f.OrgID, f.Kind, f.BoardID)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -399,12 +689,13 @@ func (f TicketFieldDef) List(ctx context.Context, limit, offset int) ([]db, erro
 	return result, nil
 }
 
-// listFieldDefs returns active field defs visible to orgID: system defaults
-// (OrgID='') plus org-specific ones, ordered by position. Org-specific defs
-// override global ones with the same Kind+Value.
-func listFieldDefs(ctx context.Context, orgID, kind string) ([]TicketFieldDef, error) {
+// queryFieldDefs returns active field defs at an exact board scope visible to
+// orgID: system defaults (OrgID=”) plus org-specific ones, ordered by position.
+// Org-specific defs override global ones with the same Kind+Value. boardID is
+// matched exactly (” = the org/global level).
+func queryFieldDefs(ctx context.Context, orgID, kind, boardID string) ([]TicketFieldDef, error) {
 	q := connectRead().WithContext(ctx).
-		Where("active = ? AND (org_id = '' OR org_id = ?)", true, orgID)
+		Where("active = ? AND board_id = ? AND (org_id = '' OR org_id = ?)", true, boardID, orgID)
 	if kind != "" {
 		q = q.Where("kind = ?", kind)
 	}
@@ -425,9 +716,56 @@ func listFieldDefs(ctx context.Context, orgID, kind string) ([]TicketFieldDef, e
 	return deduped, nil
 }
 
-// getFieldDefValues returns distinct valid values for a kind visible to orgID.
-// Falls back to the provided defaults if the DB pool is uninitialised or returns nothing.
-func getFieldDefValues(ctx context.Context, orgID, kind string, fallback []string) []string {
+// listFieldDefs returns the field defs visible to orgID in the context of
+// boardID. Status columns are board-scoped: a board's own status defs fully
+// replace the org/global set, falling back to org/global when the board has
+// configured none (or boardID==""). Priority/timescale defs are always
+// org/global. Results are ordered by position within each kind.
+func listFieldDefs(ctx context.Context, orgID, kind, boardID string) ([]TicketFieldDef, error) {
+	// Non-status kinds are never board-scoped.
+	if kind != "" && kind != FieldKindStatus {
+		return queryFieldDefs(ctx, orgID, kind, "")
+	}
+
+	// Resolve the effective status set: the board's own columns, else org/global.
+	var statuses []TicketFieldDef
+	if boardID != "" {
+		own, err := queryFieldDefs(ctx, orgID, FieldKindStatus, boardID)
+		if err != nil {
+			return nil, err
+		}
+		statuses = own
+	}
+	if len(statuses) == 0 {
+		base, err := queryFieldDefs(ctx, orgID, FieldKindStatus, "")
+		if err != nil {
+			return nil, err
+		}
+		statuses = base
+	}
+	if kind == FieldKindStatus {
+		return statuses, nil
+	}
+
+	// kind == "": all kinds — board-scoped statuses plus org/global others.
+	others, err := queryFieldDefs(ctx, orgID, "", "")
+	if err != nil {
+		return nil, err
+	}
+	out := statuses
+	for _, d := range others {
+		if d.Kind != FieldKindStatus {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// getFieldDefValues returns distinct valid values for a kind visible to orgID
+// in the context of boardID (only status is board-scoped), ordered by position
+// so the first element is the left-most column. Falls back to the provided
+// defaults if the DB pool is uninitialised or returns nothing.
+func getFieldDefValues(ctx context.Context, orgID, kind, boardID string, fallback []string) []string {
 	// Skip the DB call entirely when no connection pool has been opened yet
 	// (e.g. unit-test processes that never call connect()).
 	dbInitMu.Lock()
@@ -437,7 +775,7 @@ func getFieldDefValues(ctx context.Context, orgID, kind string, fallback []strin
 		return fallback
 	}
 
-	defs, err := listFieldDefs(ctx, orgID, kind)
+	defs, err := listFieldDefs(ctx, orgID, kind, boardID)
 	if err != nil || len(defs) == 0 {
 		return fallback
 	}
@@ -450,6 +788,52 @@ func getFieldDefValues(ctx context.Context, orgID, kind string, fallback []strin
 		}
 	}
 	return values
+}
+
+// builtinStatusDefs returns the hard-coded default status columns, used to seed
+// a board when the org/global status set is somehow empty.
+func builtinStatusDefs() []TicketFieldDef {
+	return []TicketFieldDef{
+		{Kind: FieldKindStatus, Value: StatusOpen, Label: "Open", Position: 0},
+		{Kind: FieldKindStatus, Value: StatusInProgress, Label: "In Progress", Position: 1},
+		{Kind: FieldKindStatus, Value: StatusResolved, Label: "Resolved", Position: 2},
+		{Kind: FieldKindStatus, Value: StatusClosed, Label: "Closed", Position: 3},
+	}
+}
+
+// seedBoardStatuses gives a freshly-created board its own copy of the effective
+// org/global status columns so its columns can be edited independently of other
+// boards. Best-effort: a failure leaves the board falling back to org/global
+// statuses, so callers log rather than fail board creation.
+func seedBoardStatuses(ctx context.Context, b Board) error {
+	base, err := queryFieldDefs(ctx, b.OrgID, FieldKindStatus, "")
+	if err != nil {
+		return err
+	}
+	if len(base) == 0 {
+		base = builtinStatusDefs()
+	}
+	now := time.Now().UTC()
+	defs := make([]TicketFieldDef, 0, len(base))
+	for i, s := range base {
+		defs = append(defs, TicketFieldDef{
+			FieldDefID: uuid.New().String(),
+			OrgID:      b.OrgID,
+			BoardID:    b.BoardID,
+			Kind:       FieldKindStatus,
+			Value:      s.Value,
+			Label:      s.Label,
+			Color:      s.Color,
+			Position:   i,
+			Active:     true,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		})
+	}
+	if len(defs) == 0 {
+		return nil
+	}
+	return connect().WithContext(ctx).Create(&defs).Error
 }
 
 // seedDefaultFieldDefs inserts global system defaults for each kind

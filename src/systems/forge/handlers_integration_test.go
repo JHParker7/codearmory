@@ -35,9 +35,19 @@ func setupForgeTestDB() {
 	gormDB = conn
 	gormDBMu.Unlock()
 
-	if err := conn.AutoMigrate(&Execution{}, &RunnerClass{}, &RuntimeBackend{}); err != nil {
+	if err := conn.AutoMigrate(&Execution{}, &RunnerClass{}, &RuntimeBackend{}, &Volume{}, &ConcurrencyLimit{}); err != nil {
 		return
 	}
+	// Seed the default runner classes and the "default" runtime backend exactly as
+	// production startup does (migrateAndSeedRunnerClasses / migrateAndSeedRuntimeBackends).
+	// handleSubmit resolves req.RunnerClass ("standard" by default) against the DB, so
+	// without the seed every DB-backed submit would 400 with "runner class not found".
+	for i := range defaultRunnerClasses {
+		c := defaultRunnerClasses[i]
+		conn.Where(RunnerClass{Name: c.Name}).FirstOrCreate(&c)
+	}
+	def := RuntimeBackend{Name: "default", Type: "docker", Enabled: true, Config: map[string]string{}, SecretRefs: map[string]string{}}
+	conn.Where(RuntimeBackend{Name: def.Name}).FirstOrCreate(&def)
 	forgeTestDBReady = true
 }
 

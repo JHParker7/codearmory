@@ -13,18 +13,49 @@ info:
     referenced by many workflows. Changing a step affects every pipeline that
     references it.
 
-    A **Workflow** is an ordered list of step references (`step_id` +
-    optional `parallel_group`). Steps sharing the same non-nil `parallel_group`
-    execute concurrently; the run waits for all before advancing.
+    A **Workflow** is a set of step references (`step_id` + optional
+    `matrix`) plus the `routes` between them — a graph. A
+    step runs once every inbound route is resolved and at least one was taken,
+    and a route may carry a `when` condition, so a pipeline can branch, join,
+    and handle failure. A step reference with a `matrix` fans the step out over
+    a list of values (see below); that fan-out is internal to the step, so a
+    matrix step is one node, not many.
+
+    Omit `routes` and the edges are derived as a plain chain in array order: a
+    bare step array is a sequence, nothing more.
+
+    Routes are the ONLY way to express parallelism — two edges out of one step
+    fork the run, and a step with two inbound routes joins it. Fan-out WITHIN a
+    step (`matrix`, `scatter`, or a map region) is that step's own concern and
+    carries its own `max_concurrent`.
 
     ## Action types
 
     Each step's `action` field is either:
     - `"http"` — raw HTTP escape hatch. `with` must include `service` and
       `path`; `method` defaults to `POST`.
+    - `"approval"` — a built-in manual-approval gate. When the run reaches it, it
+      pauses in `awaiting_approval` until an authorized user calls
+      `POST /runs/{id}/approve` (resume) or `POST /runs/{id}/reject` (fail).
+      Optional `with.message` is the prompt shown to approvers; optional
+      `with.approvers` is a username allow-list (anyone with `approveRun`
+      permission may decide when it is empty). A gate can also be declared
+      **inline** on a step ref via `approval: {message, approvers}` (no step_id) —
+      no reusable step required; see WorkflowStepRef.
     - Any other string (e.g. `"forge/run"`, `"tickets/create"`) — looked up in
       the action catalog loaded from the registry. `with` fields are
       action-specific.
+
+    ## Matrix fan-out
+
+    A step reference's `matrix` runs the same step once per value in a list, each
+    execution binding `${matrix.<var>}` (and the generic `${matrix.value}`) to a
+    different value of its `with` template. Values come from a literal `values`
+    list or a `values_from` reference (a JSON array or comma-separated string,
+    e.g. `${inputs.regions}`). The executions run concurrently and the step's
+    output is the JSON array of their outputs. Set `max_concurrent` to throttle
+    how many run at once — useful when each value spins up a resource-heavy
+    runner.
 
     ## Authentication
 
@@ -42,8 +73,9 @@ info:
     `${...}` references in any string value inside a step's `with` map are
     resolved at execution time (recursively, into nested maps and arrays):
     `${inputs.NAME}` (or bare `${NAME}`) for run inputs, `${steps.STEP.output}`
-    for an earlier step's output, and `${steps.STEP.output.field}` for a JSON
-    field of it. Only outputs of steps from a prior group are visible.
+    for an earlier step's output, `${steps.STEP.output.field}` for a JSON field
+    of it, and `${matrix.VAR}` (or `${matrix.value}`) for a matrix step's
+    per-execution value. Only outputs of steps from a prior group are visible.
     Unrecognised references are left as-is.
   version: 2.0.0
   contact:
@@ -255,6 +287,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A workflow with that name already exists
+          content:
+            text/plain:
+              schema:
+                type: string
 
     get:
       summary: List workflows
@@ -550,8 +588,8 @@ paths:
       summary: Cancel run
       operationId: cancelRun
       description: |
-        Cancels a run that is in `pending` or `running` state. Returns `409`
-        if the run has already reached a terminal state.
+        Cancels a run that is in `pending`, `running`, or `awaiting_approval`
+        state. Returns `409` if the run has already reached a terminal state.
 
         Permission: `cancelRun` on `workflows/runs/{id}`.
       responses:
@@ -565,6 +603,86 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: Run is not in a cancellable state (already terminal)
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /runs/{id}/approve:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      summary: Approve a paused run
+      operationId: approveRun
+      description: |
+        Approves a run paused on a manual-approval step (status
+        `awaiting_approval`), re-queueing it so it resumes from where it paused.
+        A fresh run token is minted so a long pause cannot resume on an expired
+        credential. Returns `409` if the run is not awaiting approval, and `403`
+        if the gate declares an `approvers` allow-list the caller is not on.
+
+        Permission: `approveRun` on `workflows/runs/{id}`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecisionRequest'
+      responses:
+        '200':
+          description: Run approved and resumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Run is not awaiting approval
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /runs/{id}/reject:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      summary: Reject a paused run
+      operationId: rejectRun
+      description: |
+        Rejects a run paused on a manual-approval step (status
+        `awaiting_approval`), failing it. Requires the same `approveRun`
+        permission as approval. Returns `409` if the run is not awaiting
+        approval, and `403` if the gate declares an `approvers` allow-list the
+        caller is not on.
+
+        Permission: `approveRun` on `workflows/runs/{id}`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecisionRequest'
+      responses:
+        '200':
+          description: Run rejected and failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Run is not awaiting approval
           content:
             text/plain:
               schema:
@@ -596,6 +714,13 @@ components:
           type: string
           description: Unique action name used as the `action` field on a step
           example: forge/run
+        summary:
+          type: string
+          description: Short one-line human description of the action
+          example: Run a shell command in a sandboxed container
+        description:
+          type: string
+          description: Longer human description of what the action does and how to use it
         service_name:
           type: string
           description: Name of the service that handles this action
@@ -692,36 +817,99 @@ components:
           format: date-time
           readOnly: true
 
+    MatrixConfig:
+      type: object
+      description: |
+        Fans a single step out into one execution per value in a list. Each
+        execution runs the same step with `${matrix.<var>}` (and the generic
+        `${matrix.value}`) bound to that value, so the same `with` template
+        targets a different input each time. Executions run concurrently (capped
+        at 10, or fewer via `max_concurrent`) and the step's output is the JSON
+        array of each execution's output, addressable as `${steps.<name>.output}`.
+        Not allowed on an `approval` step. Capped at 50 values.
+      required:
+        - var
+      properties:
+        var:
+          type: string
+          description: Binding name exposed to substitution as ${matrix.<var>}
+          example: region
+        values:
+          type: array
+          description: Literal list of values (each may contain ${...} references). Exactly one of values or values_from is required.
+          items:
+            type: string
+          example: ["us-east-1", "eu-west-1"]
+        values_from:
+          type: string
+          description: |
+            A ${...} reference resolved at run time to the value list — a JSON
+            array or a comma-separated string (e.g. "${inputs.regions}").
+            Exactly one of values or values_from is required.
+          example: ${inputs.regions}
+        max_concurrent:
+          type: integer
+          minimum: 0
+          description: |
+            Caps how many fan-out executions run at once. 0 (unset) uses the
+            global concurrency ceiling (10); a smaller positive value throttles
+            the fan-out so a matrix over resource-heavy runners doesn't launch
+            every value simultaneously. Values above the ceiling have no effect.
+          example: 3
+
+    ApprovalGate:
+      type: object
+      description: |
+        An inline manual-approval gate declared directly on a pipeline step ref —
+        no separate step is needed. The run pauses at this position in
+        `awaiting_approval` until an authorized user approves or rejects it.
+      properties:
+        message:
+          type: string
+          description: Prompt shown to approvers
+          example: Approve deploy to prod?
+        approvers:
+          type: array
+          description: Optional username allow-list (empty = anyone with approveRun permission)
+          items:
+            type: string
+          example: ["alice", "bob"]
+
     WorkflowStepRef:
       type: object
       description: |
-        A reference to a step within a workflow. Steps sharing the same
-        non-null `parallel_group` integer execute concurrently.
-      required:
-        - step_id
+        A position in a workflow, which is EITHER a reference to a stored step
+        (`step_id`) OR an inline `approval` gate. A step ref may additionally
+        carry a `matrix` (fans the step out over a list) or a `map_id` (joins a
+        map region). Steps do NOT carry parallelism: that is the shape of the
+        `routes` between them.
       properties:
         step_id:
           type: string
           format: uuid
-          description: ID of the step to execute
-        parallel_group:
-          type: integer
+          description: ID of the step to execute (omit for an approval gate)
+        matrix:
+          allOf:
+            - $ref: '#/components/schemas/MatrixConfig'
           nullable: true
-          description: |
-            When non-null, steps with the same value run concurrently. The run
-            waits for all steps in a group before advancing. Must be
-            non-negative.
-          example: 1
+        approval:
+          allOf:
+            - $ref: '#/components/schemas/ApprovalGate'
+          nullable: true
 
     WorkflowStep:
       allOf:
         - $ref: '#/components/schemas/Step'
         - type: object
           properties:
-            parallel_group:
-              type: integer
+            matrix:
+              allOf:
+                - $ref: '#/components/schemas/MatrixConfig'
               nullable: true
-              description: Parallel group assigned in the workflow, if any
+            approval:
+              allOf:
+                - $ref: '#/components/schemas/ApprovalGate'
+              nullable: true
 
     Workflow:
       type: object
@@ -748,6 +936,13 @@ components:
         active:
           type: boolean
           readOnly: true
+        routes:
+          type: array
+          description: |
+            Explicit edges between steps. Absent/empty means the edges are derived
+            as a chain in array order.
+          items:
+            $ref: '#/components/schemas/WorkflowRoute'
         steps:
           type: array
           description: |
@@ -785,6 +980,51 @@ components:
           items:
             $ref: '#/components/schemas/WorkflowStepRef'
           maxItems: 50
+        routes:
+          type: array
+          description: |
+            Explicit edges between steps, forming a graph, and the only way to
+            express a fork or a join. Omit for a plain sequence: the edges are
+            then derived as a chain in array order at run time. Maximum 200.
+          items:
+            $ref: '#/components/schemas/WorkflowRoute'
+          maxItems: 200
+
+    WorkflowRoute:
+      type: object
+      description: |
+        A directed edge between two steps, identified by step name. A step with no
+        inbound route is an entry step. A step runs once every inbound route is
+        resolved and at least one was taken; a step whose inbound routes all
+        resolve to not-taken is skipped, which is what lets a conditional diamond
+        join rather than deadlock.
+      required: [from, to]
+      properties:
+        from:
+          type: string
+          description: Name of the source step.
+        to:
+          type: string
+          description: Name of the target step.
+        when:
+          type: string
+          description: |
+            Optional boolean expression deciding whether this edge is taken,
+            evaluated once `from` reaches a terminal state. Omit for the default:
+            taken only if `from` completed, so an unhandled failure skips
+            everything downstream. Condition a route on
+            `steps.<name>.status == "failed"` to run a failure handler.
+
+            Available: steps.<name>.status (completed|failed|skipped|cancelled),
+            steps.<name>.output (raw string), steps.<name>.json.<field> (output
+            parsed as JSON; absent when it isn't), inputs.<name>, run.id. Only
+            steps in a terminal state are visible.
+
+            This is an expression, NOT ${...} templating: it is compiled when the
+            pipeline is saved, so an unknown identifier is a 400 here rather than
+            a silently dead branch at run time.
+          example: steps.build.json.published == true
+          maxLength: 1000
 
     TriggerRunRequest:
       type: object
@@ -823,7 +1063,10 @@ components:
           description: Inherited from the parent pipeline at trigger time
         status:
           type: string
-          enum: [pending, running, completed, failed, cancelled]
+          description: |
+            `awaiting_approval` is a non-terminal, resumable state — the run is
+            paused on a manual-approval gate until it is approved or rejected.
+          enum: [pending, running, awaiting_approval, completed, failed, cancelled]
         current_step:
           type: integer
           description: Zero-indexed position of the step currently executing
@@ -868,15 +1111,32 @@ components:
           type: string
         status:
           type: string
-          enum: [pending, running, completed, failed, cancelled]
+          description: |
+            `awaiting_approval` marks a manual-approval gate paused for a human
+            decision; its `output` holds the approval prompt, then the decision
+            audit line (e.g. "approved by alice") once decided.
+          enum: [pending, running, awaiting_approval, completed, failed, cancelled]
         output:
           type: string
           nullable: true
           description: |
-            Action result stored after the step completes. For `http` steps,
-            this is the response body. For catalog actions, this is the action
-            output. Up to 1 MB is stored. Null while the step is pending or
-            running.
+            The consumable action result stored after the step completes, used by
+            `${steps.NAME.output}`. For `http` steps, the response body. For
+            forge steps, the JSON-encoded `output_env` capture map (empty when none
+            was declared — stdout is never the consumable output). On a failed step
+            it carries the failure reason (the backing service's error / exit-code
+            summary); the step's stdout is in `logs`, not here. For an `http` step
+            that fails, the response body is appended before the error. Up to 1 MB
+            is stored. Null while the step is pending or running.
+        logs:
+          type: string
+          nullable: true
+          description: |
+            The step's execution log — the backing action's stdout (forge: the
+            command's stdout), captured for viewing on every terminal outcome
+            (success, failure, cancel). Distinct from `output`: stdout is shown
+            here but is never the consumable output. Null when the action exposes
+            no stdout (e.g. `http` steps).
         started_at:
           type: string
           format: date-time
@@ -885,6 +1145,15 @@ components:
           type: string
           format: date-time
           nullable: true
+
+    ApprovalDecisionRequest:
+      type: object
+      description: Optional body for an approve/reject decision.
+      properties:
+        comment:
+          type: string
+          description: Optional note recorded in the gate's audit line.
+          example: looks good, ship it
 
   responses:
     BadRequest:

@@ -106,6 +106,28 @@ type createRuleRequest struct {
 	InputMapping map[string]string `json:"input_mapping"`
 }
 
+// ruleNameTaken reports whether an active rule with the given name already
+// exists in the same scope (the org when set, else the creator), excluding the
+// rule identified by excludeID. It backs the uq_pipeline_rules_* unique indexes
+// with a friendly 409 instead of a raw DB constraint error; on query error it
+// fails open and lets the index be the backstop.
+func ruleNameTaken(ctx context.Context, orgID, createdBy, name, excludeID string) bool {
+	q := connect().WithContext(ctx).Model(&PipelineRule{}).Where("name = ? AND active = true", name)
+	if orgID != "" {
+		q = q.Where("org_id = ?", orgID)
+	} else {
+		q = q.Where("org_id = '' AND created_by = ?", createdBy)
+	}
+	if excludeID != "" {
+		q = q.Where("rule_id <> ?", excludeID)
+	}
+	var count int64
+	if err := q.Count(&count).Error; err != nil {
+		return false
+	}
+	return count > 0
+}
+
 func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("hooks").Start(r.Context(), "handleCreateRule")
 	defer span.End()
@@ -158,6 +180,12 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.InputMapping == nil {
 		req.InputMapping = map[string]string{}
+	}
+	// Rule names must be unique within their scope so a rule can be referenced
+	// by name rather than its UUID (enforced by the uq_pipeline_rules_* indexes).
+	if ruleNameTaken(ctx, orgID, userID, req.Name, "") {
+		http.Error(w, "rule with that name already exists", http.StatusConflict)
+		return
 	}
 
 	rule := PipelineRule{
@@ -330,6 +358,11 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.InputMapping == nil {
 		req.InputMapping = map[string]string{}
+	}
+
+	if req.Name != existing.Name && ruleNameTaken(ctx, existing.OrgID, existing.CreatedBy, req.Name, existing.RuleID) {
+		http.Error(w, "rule with that name already exists", http.StatusConflict)
+		return
 	}
 
 	// secret update semantics: nil = leave unchanged, non-empty = replace. Clearing ("") is rejected above.

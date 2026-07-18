@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -79,6 +80,33 @@ func encryptSecret(plaintext, aad string) ([]byte, error) {
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
 	return aead.Seal(nonce, nonce, []byte(plaintext), []byte(aad)), nil
+}
+
+// encryptSecretsMap JSON-encodes an admin-supplied sensitive config map and encrypts
+// it. The AAD namespaces it (service+":secrets") distinctly from the db_url ciphertext
+// so neither can be substituted for the other by a database-write attacker.
+func encryptSecretsMap(secrets map[string]string, service string) ([]byte, error) {
+	b, err := json.Marshal(secrets)
+	if err != nil {
+		return nil, err
+	}
+	return encryptSecret(string(b), service+":secrets")
+}
+
+// decryptSecretsMap reverses encryptSecretsMap. An empty ciphertext yields (nil, nil).
+func decryptSecretsMap(ct []byte, service string) (map[string]string, error) {
+	if len(ct) == 0 {
+		return nil, nil
+	}
+	pt, err := decryptSecret(ct, service+":secrets")
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(pt), &m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // decryptSecret reverses encryptSecret; aad must match what was used to encrypt.

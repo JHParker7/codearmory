@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -25,6 +26,7 @@ func init() {
 	var (
 		ticketTitle     string
 		ticketDesc      string
+		ticketStatus    string
 		ticketPriority  string
 		ticketTimescale string
 		ticketDueDate   string
@@ -32,6 +34,7 @@ func init() {
 		ticketWorkflow  string
 		ticketRun       string
 		ticketForge     string
+		ticketBoard     string
 	)
 
 	createTicketCmd := &cobra.Command{
@@ -48,6 +51,9 @@ func init() {
 			payload := map[string]any{"title": ticketTitle}
 			if ticketDesc != "" {
 				payload["description"] = ticketDesc
+			}
+			if ticketStatus != "" {
+				payload["status"] = ticketStatus
 			}
 			if ticketPriority != "" {
 				payload["priority"] = ticketPriority
@@ -70,6 +76,9 @@ func init() {
 			if ticketForge != "" {
 				payload["forge_execution_id"] = ticketForge
 			}
+			if ticketBoard != "" {
+				payload["board_id"] = ticketBoard
+			}
 			// Tag the ticket with the project the user is working in.
 			if p := projectFilter(); p != "" {
 				payload["project"] = p
@@ -83,6 +92,7 @@ func init() {
 	}
 	createTicketCmd.Flags().StringVar(&ticketTitle, "title", "", "Ticket title (required)")
 	createTicketCmd.Flags().StringVar(&ticketDesc, "description", "", "Ticket description")
+	createTicketCmd.Flags().StringVar(&ticketStatus, "status", "", "Status value (defaults to the board's left-most column)")
 	createTicketCmd.Flags().StringVar(&ticketPriority, "priority", "", "Priority value (e.g. low, medium, high, critical)")
 	createTicketCmd.Flags().StringVar(&ticketTimescale, "timescale", "", "Timescale value (e.g. Q1 2026, sprint-3)")
 	createTicketCmd.Flags().StringVar(&ticketDueDate, "due-date", "", "Due date in YYYY-MM-DD format")
@@ -90,6 +100,7 @@ func init() {
 	createTicketCmd.Flags().StringVar(&ticketWorkflow, "workflow", "", "Linked pipeline ID")
 	createTicketCmd.Flags().StringVar(&ticketRun, "run", "", "Linked pipeline run ID")
 	createTicketCmd.Flags().StringVar(&ticketForge, "forge-execution", "", "Linked forge execution ID")
+	createTicketCmd.Flags().StringVar(&ticketBoard, "board", "", "Board ID to place the ticket on")
 
 	// ── armory tickets list ───────────────────────────────────────────────────
 
@@ -98,6 +109,8 @@ func init() {
 		listPriority  string
 		listTimescale string
 		listAssignee  string
+		listBoard     string
+		listJSON      bool
 	)
 
 	listTicketsCmd := &cobra.Command{
@@ -118,12 +131,25 @@ func init() {
 			if listAssignee != "" {
 				q.Set("assignee_id", listAssignee)
 			}
+			if listBoard != "" {
+				q.Set("board_id", listBoard)
+			}
 			if p := projectFilter(); p != "" {
 				q.Set("project", p)
 			}
 			path := "/tickets/tickets"
 			if len(q) > 0 {
 				path += "?" + q.Encode()
+			}
+			if listJSON {
+				// Emit the raw API response verbatim (pretty-printed), skipping
+				// the human-readable renderer.
+				data, err := doRequest("GET", path, nil)
+				if err != nil {
+					return err
+				}
+				printJSON(data)
+				return nil
 			}
 			return apiCall("GET", path, nil)
 		},
@@ -132,17 +158,32 @@ func init() {
 	listTicketsCmd.Flags().StringVar(&listPriority, "priority", "", "Filter by priority value")
 	listTicketsCmd.Flags().StringVar(&listTimescale, "timescale", "", "Filter by timescale value")
 	listTicketsCmd.Flags().StringVar(&listAssignee, "assignee", "", "Filter by assignee user ID")
+	listTicketsCmd.Flags().StringVar(&listBoard, "board", "", "Filter by board ID (\"none\" for unassigned)")
+	listTicketsCmd.Flags().BoolVar(&listJSON, "json", false, "Print the full ticket list as raw JSON instead of a formatted table")
 
 	// ── armory tickets get ────────────────────────────────────────────────────
+
+	var getJSON bool
 
 	getTicketCmd := &cobra.Command{
 		Use:   "get <id>",
 		Short: "Get a ticket with its comments",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if getJSON {
+				// Emit the raw API response verbatim (pretty-printed), skipping
+				// the human-readable renderer.
+				data, err := doRequest("GET", "/tickets/tickets/"+args[0], nil)
+				if err != nil {
+					return err
+				}
+				printJSON(data)
+				return nil
+			}
 			return apiCall("GET", "/tickets/tickets/"+args[0], nil)
 		},
 	}
+	getTicketCmd.Flags().BoolVar(&getJSON, "json", false, "Print the full ticket as raw JSON instead of a formatted summary")
 
 	// ── armory tickets update ─────────────────────────────────────────────────
 
@@ -276,6 +317,96 @@ func init() {
 
 	commentCmd.AddCommand(addCommentCmd, deleteCommentCmd)
 
+	// ── armory tickets boards ─────────────────────────────────────────────────
+
+	boardsCmd := &cobra.Command{
+		Use:   "boards",
+		Short: "Manage ticket boards",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return apiCall("GET", "/tickets/boards", nil)
+		},
+	}
+
+	var (
+		boardName  string
+		boardDesc  string
+		boardColor string
+	)
+
+	createBoardCmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a board",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if boardName == "" {
+				return fmt.Errorf("--name is required")
+			}
+			payload := map[string]any{"name": boardName}
+			if boardDesc != "" {
+				payload["description"] = boardDesc
+			}
+			if boardColor != "" {
+				payload["color"] = boardColor
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			return apiCall("POST", "/tickets/boards", body)
+		},
+	}
+	createBoardCmd.Flags().StringVar(&boardName, "name", "", "Board name (required)")
+	createBoardCmd.Flags().StringVar(&boardDesc, "description", "", "Board description")
+	createBoardCmd.Flags().StringVar(&boardColor, "color", "", "Board color (hex, e.g. #aabbcc)")
+
+	listBoardsCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List boards",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return apiCall("GET", "/tickets/boards", nil)
+		},
+	}
+
+	var boardDeleteConfirm string
+	deleteBoardCmd := &cobra.Command{
+		Use:   "delete <id>",
+		Short: "Delete a board and all of its tickets",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := args[0]
+			confirmName := boardDeleteConfirm
+			if confirmName == "" {
+				// Deleting a board cascade-deletes its tickets, so look up the
+				// board's name and require the user to retype it.
+				body, err := doRequest("GET", "/tickets/boards/"+id, nil)
+				if err != nil {
+					return err
+				}
+				var b struct {
+					Name string `json:"name"`
+				}
+				if err := json.Unmarshal(body, &b); err != nil {
+					return fmt.Errorf("could not read board: %w", err)
+				}
+				fmt.Fprintf(os.Stderr, "Deleting board %q also permanently deletes all of its tickets.\n", b.Name)
+				typed, err := prompt("Type the board name to confirm", "")
+				if err != nil {
+					return err
+				}
+				if typed != b.Name {
+					return fmt.Errorf("confirmation %q did not match board name %q; aborted", typed, b.Name)
+				}
+				confirmName = b.Name
+			}
+			return apiCall("DELETE", "/tickets/boards/"+id+"?confirm="+url.QueryEscape(confirmName), nil)
+		},
+	}
+	deleteBoardCmd.Flags().StringVar(&boardDeleteConfirm, "confirm", "", "Board name, to confirm deletion non-interactively")
+
+	boardsCmd.AddCommand(createBoardCmd, listBoardsCmd, deleteBoardCmd)
+
 	ticketsCmd.AddCommand(
 		createTicketCmd,
 		listTicketsCmd,
@@ -283,9 +414,11 @@ func init() {
 		updateTicketCmd,
 		deleteTicketCmd,
 		commentCmd,
+		boardsCmd,
 	)
 	RegisterModule(Module{
 		Name:    "tickets",
+		Service: "tickets",
 		Order:   20,
 		Command: ticketsCmd,
 		Screens: []HubScreen{{

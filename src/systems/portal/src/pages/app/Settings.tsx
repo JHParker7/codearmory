@@ -1,19 +1,27 @@
+/**
+ * `/app/settings` page — the account/profile screen. Edits identity (email, username,
+ * optional name, password) via the `saveUser` thunk, shows read-only org/team/role
+ * membership, and hosts preference cards for theme selection and session inspect/revoke
+ * (all session calls go through the BFF client).
+ */
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { T, THEMES, applyTheme, getStoredTheme } from '../../theme';
+import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { saveUser, logout } from '../../store/authSlice';
 import { getSession, deleteSession } from '../../api/bff';
 import type { Session } from '../../api/bff';
 import { decodeJwtPayload } from '../../utils';
 
+/** Pulls the session id out of the JWT payload, trying session_id/sid/jti in order; returns '' if none is a string. */
 function decodeSessionId(token: string): string {
   const p = decodeJwtPayload(token);
   const id = p?.session_id ?? p?.sid ?? p?.jti;
   return typeof id === 'string' ? id : '';
 }
 
-// Theme picker — applies live and persists to localStorage.
+/** Theme picker — applies live and persists to localStorage. */
 function ThemeCard() {
   const [theme, setTheme] = useState(getStoredTheme());
   const choose = (name: string) => { applyTheme(name); setTheme(name); };
@@ -37,7 +45,11 @@ function ThemeCard() {
   );
 }
 
-// Inspect or revoke a session by id (current session id is prefilled from the JWT).
+/**
+ * Inspect or revoke a session by id (current session id is prefilled from the JWT).
+ * Inspect/revoke hit the BFF; revoking your own current session dispatches logout so
+ * the UI signs out immediately.
+ */
 function SessionsCard({ token }: { token: string }) {
   const dispatch = useAppDispatch();
   const currentSessionId = decodeSessionId(token);
@@ -46,6 +58,7 @@ function SessionsCard({ token }: { token: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [msg, setMsg] = useState('');
+  const [confirm, confirmEl] = useConfirm();
 
   const inspect = async () => {
     if (!id.trim()) return;
@@ -56,6 +69,8 @@ function SessionsCard({ token }: { token: string }) {
   };
   const revoke = async () => {
     if (!id.trim()) return;
+    const own = id.trim() === currentSessionId;
+    if (!(await confirm({ message: `Revoke session ${id.trim()}?${own ? ' This is your current session — you will be signed out immediately.' : ''}`, confirmLabel: 'revoke' }))) return;
     setBusy(true); setError(''); setMsg('');
     try {
       await deleteSession(token, id.trim());
@@ -71,6 +86,7 @@ function SessionsCard({ token }: { token: string }) {
 
   return (
     <div style={{ background: T.card, border: `1px solid ${T.border}`, padding: '20px 22px', marginBottom: 20 }}>
+      {confirmEl}
       <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 6 }}>SESSIONS</div>
       <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, marginBottom: 12 }}>inspect or revoke a session by id · revoking your current session signs you out</div>
       {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>ERR · {error}</div>}
@@ -121,6 +137,7 @@ interface FieldProps {
   onBlur: () => void;
 }
 
+/** Labeled prompt-style text input with focus highlight and an optional right slot (e.g. show/hide toggle); a controlled field used across the settings form. */
 function Field({ name, label, value, onChange, type = 'text', placeholder, rightSlot, focused, onFocus, onBlur }: FieldProps) {
   const active = focused === name;
   return (
@@ -137,6 +154,7 @@ function Field({ name, label, value, onChange, type = 'text', placeholder, right
   );
 }
 
+/** Settings page component: renders the identity/name/password form (submits via saveUser), read-only membership info, and the theme + sessions preference cards. */
 export function Settings() {
   const dispatch = useAppDispatch();
   const { user, token, userId } = useAppSelector(s => s.auth);
@@ -146,6 +164,7 @@ export function Settings() {
   const [firstname, setFirstname] = useState(user?.firstname ?? '');
   const [lastname, setLastname] = useState(user?.lastname ?? '');
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
   const [showPw, setShowPw] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -156,6 +175,10 @@ export function Settings() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (password && password !== confirm) {
+      setError('passwords do not match');
+      return;
+    }
     setSaving(true);
     setError('');
     setSaved(false);
@@ -173,6 +196,7 @@ export function Settings() {
     if (saveUser.fulfilled.match(result)) {
       setSaved(true);
       setPassword('');
+      setConfirm('');
       setTimeout(() => setSaved(false), 3000);
     } else {
       setError((result.payload as string) ?? 'update failed');
@@ -223,6 +247,10 @@ export function Settings() {
               </button>
             }
           />
+          <Field name="confirm" label="confirm new password" value={confirm} onChange={setConfirm} type={showPw ? 'text' : 'password'} placeholder="••••••••" focused={focused} onFocus={setFocused} onBlur={() => setFocused(null)} />
+          {confirm && password !== confirm && (
+            <div style={{ fontFamily: T.mono, fontSize: 11, color: T.red, marginTop: -8 }}>✗ passwords do not match</div>
+          )}
         </div>
 
         {/* Org & team info (read-only) */}

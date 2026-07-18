@@ -1,3 +1,10 @@
+/**
+ * Workspaces slice — the user's pinned blueprints workspaces and their fetched
+ * state views. The entry list is persisted to localStorage (and cleared on logout
+ * or session expiry so the next user can't see another's workspace paths); each
+ * workspace's normalized state is fetched lazily and tracked per-path under
+ * `details`.
+ */
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import type { PayloadAction } from '@reduxjs/toolkit';
 import { getWorkspaceState, deleteWorkspaceState } from '../api/bff';
@@ -29,6 +36,7 @@ const initialState: WorkspacesState = {
 
 // ── Thunks ────────────────────────────────────────────────────────────────────
 
+/** Fetch and store one workspace's normalized state view, keyed by path. Rejects with {path, message} so the reducer can mark just that entry failed. */
 export const fetchWorkspace = createAsyncThunk(
   'workspaces/fetchOne',
   async ({ token, path }: { token: string; path: string }, { rejectWithValue: reject }) => {
@@ -42,6 +50,7 @@ export const fetchWorkspace = createAsyncThunk(
   },
 );
 
+/** Delete a workspace's remote state, then drop it from the local list. A missing remote state is non-fatal — the entry is removed regardless. */
 export const removeWorkspaceAndCleanup = createAsyncThunk(
   'workspaces/remove',
   async ({ token, path }: { token: string; path: string }) => {
@@ -60,12 +69,14 @@ const workspacesSlice = createSlice({
   name: 'workspaces',
   initialState,
   reducers: {
+    /** Pin a workspace (dedup by path), persist the list, and select it. */
     addWorkspace(state, action: PayloadAction<WorkspaceEntry>) {
       if (state.entries.some(e => e.path === action.payload.path)) return;
       state.entries.push(action.payload);
       localStorage.setItem(WS_KEY, JSON.stringify(state.entries));
       state.selected = action.payload.path;
     },
+    /** Unpin a workspace locally (without touching remote state), re-selecting the first remaining entry if it was selected. */
     removeWorkspace(state, action: PayloadAction<string>) {
       state.entries = state.entries.filter(e => e.path !== action.payload);
       delete state.details[action.payload];
@@ -74,6 +85,7 @@ const workspacesSlice = createSlice({
         state.selected = state.entries[0]?.path ?? null;
       }
     },
+    /** Set the currently focused workspace path (or null). */
     setSelected(state, action: PayloadAction<string | null>) {
       state.selected = action.payload;
     },

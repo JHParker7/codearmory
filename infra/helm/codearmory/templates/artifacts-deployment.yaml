@@ -1,0 +1,147 @@
+{{- if .Values.artifacts.enabled }}
+{{- $fullname := include "codearmory.fullname" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-artifacts
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifacts
+spec:
+  replicas: {{ .Values.artifacts.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "codearmory.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: artifacts
+  template:
+    metadata:
+      labels:
+        {{- include "codearmory.labels" . | nindent 8 }}
+        app.kubernetes.io/component: artifacts
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
+      containers:
+        - name: artifacts
+          image: "{{ include "codearmory.image" (list . .Values.artifacts) }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.artifacts.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.artifacts.port | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.artifacts.env.logLevel | quote }}
+            - name: GATEKEEPER_URL
+              value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+            {{- include "codearmory.otel.envs" (list . .Values.artifacts.env) | nindent 12 }}
+            {{- include "codearmory.postgresql.env" (list . "artifacts" "artifacts" $fullname) | nindent 12 }}
+            - name: GATEKEEPER_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-artifacts
+                  key: gatekeeper-service-key
+            {{- if .Values.artifacts.s3.enabled }}
+            # S3 object storage: shared across nodes, so artifacts can run >1 replica.
+            # This is what removes the single-node ReadWriteOnce pin — see values.yaml.
+            - name: ARTIFACTS_S3_BUCKET
+              value: {{ .Values.artifacts.s3.bucket | quote }}
+            {{- with .Values.artifacts.s3.endpoint }}
+            - name: ARTIFACTS_S3_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            - name: ARTIFACTS_S3_REGION
+              value: {{ .Values.artifacts.s3.region | quote }}
+            - name: ARTIFACTS_S3_FORCE_PATH_STYLE
+              value: {{ .Values.artifacts.s3.forcePathStyle | quote }}
+            {{- if .Values.artifacts.s3.accessKeySecret }}
+            # Static credentials from a Secret. Omit the secret to fall back to the
+            # default AWS credential chain (IRSA / instance profile) on real AWS.
+            - name: ARTIFACTS_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.artifacts.s3.accessKeySecret }}
+                  key: {{ .Values.artifacts.s3.accessKeySecretKey }}
+            - name: ARTIFACTS_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.artifacts.s3.secretKeySecret }}
+                  key: {{ .Values.artifacts.s3.secretKeySecretKey }}
+            {{- end }}
+            # Staging scratch for uploads before they go to object storage. The root
+            # filesystem is read-only, so this points at a writable emptyDir (below),
+            # NOT /tmp.
+            - name: ARTIFACTS_TMP_DIR
+              value: /scratch
+            {{- else }}
+            - name: ARTIFACTS_DATA_DIR
+              value: {{ .Values.artifacts.storage.mountPath | quote }}
+            {{- end }}
+            # The default per-user allowance. An admin overrides individual users at
+            # runtime via PUT /artifacts/quotas/user/{id}; this is the fallback for
+            # everyone who has no override.
+            - name: ARTIFACTS_DEFAULT_QUOTA_MB
+              value: {{ .Values.artifacts.defaultQuotaMB | quote }}
+            {{- include "codearmory.tls.envs" .Values.artifacts.tls | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.artifacts.s3.enabled }}
+            - name: scratch
+              mountPath: /scratch
+            {{- else }}
+            - name: data
+              mountPath: {{ .Values.artifacts.storage.mountPath }}
+            {{- end }}
+            {{- with (include "codearmory.tls.volumeMounts" .Values.artifacts.tls) }}
+            {{- . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.artifacts.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.artifacts.s3.enabled }}
+        # Ephemeral per-pod scratch for staging uploads (see ARTIFACTS_TMP_DIR). Not
+        # shared and not persistent — the object store holds the durable copy.
+        - name: scratch
+          emptyDir: {}
+        {{- else }}
+        - name: data
+          {{- if .Values.artifacts.storage.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $fullname }}-artifacts
+          {{- else }}
+          # No PVC: artifacts live only as long as the pod. Fine for a throwaway
+          # environment, useless as a cache — which is the point of the store.
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- with (include "codearmory.tls.volumes" .Values.artifacts.tls) }}
+        {{- . | nindent 8 }}
+        {{- end }}
+{{- end }}

@@ -148,6 +148,11 @@ func main() {
 	}
 	initMetrics()
 	initSecretsEncryption()
+	initSecretDerivation()
+	globalDBConfig = loadDBConfig()
+	if globalDBConfig.backend != dbBackendManual {
+		slog.Info("database backend configured", "backend", globalDBConfig.backend)
+	}
 	httpClient = initHTTPClient()
 
 	if err := connect().AutoMigrate(&OrgService{}); err != nil {
@@ -183,10 +188,13 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
 
-	mux.HandleFunc("GET /orgs/{id}/services", handleListOrgServices)
-	mux.HandleFunc("GET /orgs/{id}/services/{service}", handleGetOrgService)
-	mux.HandleFunc("PUT /orgs/{id}/services/{service}", handleSetOrgService)
-	mux.HandleFunc("DELETE /orgs/{id}/services/{service}", handleDeleteOrgService)
+	// The service control plane operates on a single GLOBAL baseline — there is no
+	// per-org scope. Only the system admin holds the builder grant, enforced
+	// server-side per handler.
+	mux.HandleFunc("GET /services", handleListOrgServices)
+	mux.HandleFunc("GET /services/{service}", handleGetOrgService)
+	mux.HandleFunc("PUT /services/{service}", handleSetOrgService)
+	mux.HandleFunc("DELETE /services/{service}", handleDeleteOrgService)
 
 	// Internal: consumed by the gatekeeper disable-gate (shared-key auth).
 	mux.HandleFunc("GET /internal/org-services/effective", handleInternalEffective)

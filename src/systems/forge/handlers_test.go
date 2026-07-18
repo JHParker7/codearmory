@@ -32,6 +32,8 @@ func fakeGatekeeper(t *testing.T, status int, body string) *httptest.Server {
 func TestMain(m *testing.M) {
 	initMetrics()
 	forgeHTTPClient = initHTTPClient()
+	initVolumeConfig()
+	initBuildConfig()
 	setupForgeTestDB()
 	os.Exit(m.Run())
 }
@@ -240,6 +242,66 @@ func TestHandleSubmit_DisallowedImage(t *testing.T) {
 	}
 }
 
+// A checkout step that supplies no image runs on forge's controlled minimal git
+// image, so it must NOT be rejected by the (deny-all here) image allowlist. It fails
+// later at checkout validation because GIT_CLONE_URL is unset — proving it got past
+// the image check on the injected git image rather than a user-supplied one.
+func TestHandleSubmit_GitCheckoutBypassesAllowlist(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
+	initAllowedImages("") // deny-all
+	initCheckoutConfig()
+	t.Cleanup(func() { initAllowedImages("") })
+	r := httptest.NewRequest(http.MethodPost, "/executions",
+		bytes.NewBufferString(`{"checkout":{},"command":["sh","-c","true"]}`))
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	handleSubmit(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "image not allowed") {
+		t.Errorf("checkout step was rejected by the image allowlist: %q", body)
+	}
+	if !strings.Contains(body, defaultCheckoutEnv) { // GIT_CLONE_URL
+		t.Errorf("body = %q, want the checkout URL-missing error (proves the git image was accepted)", body)
+	}
+}
+
+// A checkout step with no image still needs a command (the `run`, defaulted to a
+// no-op by callers). Missing it is caught in the git-checkout branch, pre-DB.
+func TestHandleSubmit_GitCheckoutMissingCommand(t *testing.T) {
+	fakeGatekeeper(t, http.StatusOK, `{"authorized":true,"user_id":"user-123"}`)
+	initAllowedImages("") // deny-all — irrelevant to the checkout path
+	t.Cleanup(func() { initAllowedImages("") })
+	r := httptest.NewRequest(http.MethodPost, "/executions",
+		bytes.NewBufferString(`{"checkout":{}}`))
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	handleSubmit(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "command is required") {
+		t.Errorf("body = %q, want the command-required error", w.Body.String())
+	}
+}
+
+// --- initCheckoutConfig ---
+
+func TestInitCheckoutConfig_DefaultAndOverride(t *testing.T) {
+	t.Setenv("FORGE_GIT_IMAGE", "")
+	initCheckoutConfig()
+	if !strings.Contains(gitImage, "runner-git") {
+		t.Errorf("default git image = %q, want the forge runner-git image", gitImage)
+	}
+	t.Setenv("FORGE_GIT_IMAGE", "example.com/custom/git:1.2.3")
+	initCheckoutConfig()
+	if gitImage != "example.com/custom/git:1.2.3" {
+		t.Errorf("git image = %q, want the override", gitImage)
+	}
+}
+
 // --- handleGet (pre-DB) ---
 
 func TestHandleGet_Unauthorized(t *testing.T) {
@@ -380,7 +442,7 @@ func TestWorkerPool_Cancel_Found(t *testing.T) {
 }
 
 // TestWorkerPool_Cancel_CallsRuntimeCancel verifies Cancel also drives the
-// resolved runtime's Cancel (stop+destroy for proxmox, job delete for k8s).
+// resolved runtime's Cancel (job delete for k8s, no-op for docker).
 func TestWorkerPool_Cancel_CallsRuntimeCancel(t *testing.T) {
 	pool := &WorkerPool{}
 	rt := &fakeRuntime{}

@@ -1,12 +1,9 @@
-{{- if and .Values.outpostGateway.enabled .Values.outpostGateway.deploy }}
-{{- $full := include "codearmory.fullname" . -}}
-{{- $consumers := list -}}
-{{- if .Values.chaos.enabled }}{{- $consumers = append $consumers (printf "chaos=http://%s-chaos:%v" $full .Values.chaos.port) -}}{{- end }}
-{{- if .Values.argo.enabled }}{{- $consumers = append $consumers (printf "argo=http://%s-argo:%v" $full .Values.argo.port) -}}{{- end }}
+{{- if .Values.outpostGateway.enabled }}
+{{- $fullname := include "codearmory.fullname" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ $full }}-outpost-gateway
+  name: {{ $fullname }}-outpost-gateway
   labels:
     {{- include "codearmory.labels" . | nindent 4 }}
     app.kubernetes.io/component: outpost-gateway
@@ -54,26 +51,25 @@ spec:
             - name: LOG_LEVEL
               value: {{ .Values.outpostGateway.env.logLevel | quote }}
             - name: GATEKEEPER_URL
-              value: "http://{{ $full }}-gatekeeper:{{ .Values.gatekeeper.port }}"
-            - name: EVENT_CONSUMERS
-              value: {{ join "," $consumers | quote }}
+              value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
             {{- include "codearmory.otel.envs" (list . .Values.outpostGateway.env) | nindent 12 }}
-            {{- include "codearmory.postgresql.env" (list . "outpost-gateway" "outpost_gateway" $full) | nindent 12 }}
+            {{- include "codearmory.postgresql.env" (list . "outpost-gateway" "outpost_gateway" $fullname) | nindent 12 }}
             - name: GATEKEEPER_SERVICE_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ $full }}-outpost-gateway
+                  name: {{ $fullname }}-outpost-gateway
                   key: gatekeeper-service-key
+            # Shared HMAC for the internal command/event plane (consumers ↔ gateway).
             - name: OUTPOST_INTERNAL_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ $full }}-outpost-gateway
-                  key: outpost-internal-key
-            {{- include "codearmory.tls.envs" .Values.outpostGateway.tls | nindent 12 }}
-          {{- with (include "codearmory.tls.volumeMounts" .Values.outpostGateway.tls) }}
-          volumeMounts:
-            {{- . | nindent 12 }}
-          {{- end }}
+                  name: {{ $fullname }}-outpost-gateway
+                  key: internal-key
+            {{- with .Values.outpostGateway.env.eventConsumers }}
+            # integration=url,... — where the gateway POSTs an integration's events.
+            - name: EVENT_CONSUMERS
+              value: {{ . | quote }}
+            {{- end }}
           livenessProbe:
             tcpSocket:
               port: http
@@ -86,8 +82,4 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.outpostGateway.resources | nindent 12 }}
-      {{- with (include "codearmory.tls.volumes" .Values.outpostGateway.tls) }}
-      volumes:
-        {{- . | nindent 8 }}
-      {{- end }}
 {{- end }}

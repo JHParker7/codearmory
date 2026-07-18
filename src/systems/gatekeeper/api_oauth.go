@@ -652,6 +652,10 @@ func handleCreateOAuthClient(w http.ResponseWriter, r *http.Request) {
 		client.RoleID = &req.RoleID
 	}
 	if err := client.Add(r.Context()); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			http.Error(w, "oauth client with that name already exists", http.StatusConflict)
+			return
+		}
 		slog.ErrorContext(r.Context(), "oauth client: create failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return

@@ -30,6 +30,7 @@ type Service struct {
 	URL         string    `json:"url"`
 	Description string    `json:"description"`
 	ForwardAuth bool      `json:"forward_auth"`
+	UIPath      string    `json:"ui_path,omitempty"`
 	Active      bool      `json:"active"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -92,6 +93,8 @@ type ServiceAction struct {
 	ServiceName    string          `json:"service_name"`
 	ServiceURL     string          `json:"service_url"`
 	Name           string          `json:"name"`
+	Summary        string          `json:"summary,omitempty"`
+	Description    string          `json:"description,omitempty"`
 	Method         string          `json:"method"`
 	Path           string          `json:"path"`
 	BodyTransforms json.RawMessage `json:"body_transforms,omitempty"`
@@ -350,6 +353,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		Description string `json:"description"`
 		ForwardAuth bool   `json:"forward_auth"`
 		ServiceKey  string `json:"service_key"`
+		UIPath      string `json:"ui_path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.URL == "" {
 		span.SetStatus(codes.Error, "bad request")
@@ -373,6 +377,64 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reactivate-or-create by name. A disabled service is soft-deleted (active=false)
+	// but keeps the unique name slot, so a plain insert would 409 forever once a
+	// service has been disabled then re-enabled. Look up by name first: an active row
+	// is a genuine duplicate (409); an inactive row is reactivated in place, preserving
+	// its service_id (the caller replaces its endpoints/grants next via PUT).
+	if existing, getErr := (ServiceModel{Name: req.Name}).Get(ctx); getErr == nil {
+		cur := existing.(ServiceModel)
+		if cur.Active {
+			span.SetStatus(codes.Error, "service already registered")
+			http.Error(w, "service already registered", http.StatusConflict)
+			return
+		}
+		if err := reactivateServiceByName(ctx, req.Name, req.URL, req.Description, req.UIPath, req.ForwardAuth, hashedKey, req.ServiceKey != ""); err != nil {
+			slog.ErrorContext(ctx, "create service: reactivate", "error", err, "service", req.Name)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "reactivate failed")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		reactivated, err := (ServiceModel{Name: req.Name}).Get(ctx)
+		if err != nil {
+			slog.ErrorContext(ctx, "create service: fetch after reactivate", "error", err, "service", req.Name)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "fetch after reactivate failed")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		m := reactivated.(ServiceModel)
+		span.SetAttributes(attribute.String("service.id", m.ServiceID))
+		// Drop the endpoints/actions carried over from before it was disabled: the caller
+		// replaces them via PUT next, and conductor must never serve the stale manifest in
+		// the gap (a changed route would mis-route, or point at a gone backend). Clearing
+		// also lets a crash before the PUT self-heal — the service then reports no
+		// endpoints, so the next reconcile re-pushes instead of treating it as complete.
+		if err := replaceServiceManifest(ctx, m.ServiceID, "", "", nil, nil, nil, nil); err != nil {
+			slog.ErrorContext(ctx, "create service: clear stale manifest on reactivate", "error", err, "service", req.Name)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "clear manifest failed")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		slog.InfoContext(ctx, "service reactivated", "service", m.Name)
+		span.SetStatus(codes.Ok, "")
+		// No conductor notify here — the PUT /endpoints notifies once the manifest is
+		// whole, so conductor refreshes to the fresh routes, never the (now-cleared) stale
+		// ones.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(serviceFromModel(m)) //nolint:errcheck
+		return
+	} else if !isDbNotFound(getErr) {
+		slog.ErrorContext(ctx, "create service: lookup", "error", getErr, "service", req.Name)
+		span.RecordError(getErr)
+		span.SetStatus(codes.Error, "lookup failed")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
 	id := uuid.New().String()
 	newSvcModel := ServiceModel{
 		ServiceID:   id,
@@ -381,6 +443,7 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		ForwardAuth: req.ForwardAuth,
 		ServiceKey:  hashedKey,
+		UIPath:      req.UIPath,
 	}
 	if err := newSvcModel.Add(ctx); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -404,23 +467,89 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	fetchedModel := fetchedRow.(ServiceModel)
-	svc := Service{
-		ServiceID:   fetchedModel.ServiceID,
-		Name:        fetchedModel.Name,
-		URL:         fetchedModel.URL,
-		Description: fetchedModel.Description,
-		ForwardAuth: fetchedModel.ForwardAuth,
-		Active:      fetchedModel.Active,
-		CreatedAt:   fetchedModel.CreatedAt,
-		UpdatedAt:   fetchedModel.UpdatedAt,
-	}
+	svc := serviceFromModel(fetchedRow.(ServiceModel))
 
 	slog.InfoContext(ctx, "service registered", "service", svc.Name)
 	span.SetStatus(codes.Ok, "")
+	// No conductor notify here: a freshly-created service has no endpoints yet. The
+	// caller's PUT /endpoints notifies once the manifest is complete, so conductor never
+	// refreshes to a route-less service.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(svc)
+}
+
+// handleUpsertServiceAccount creates or refreshes a service account (admin key
+// required). Builder uses it to grant a runtime-deployed service (e.g. workflows) the
+// registry READ account it needs to pull the action catalog — accounts that, before
+// builder owned non-core deployment, existed only when seeded from env at startup. The
+// role defaults to "read"; an existing account's stored key is preserved (the caller
+// sends a deterministic derived key, so it keeps matching).
+func handleUpsertServiceAccount(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("registry").Start(r.Context(), "handleUpsertServiceAccount")
+	defer span.End()
+
+	caller, ok := requireAdminAuth(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "unauthorized")
+		return
+	}
+	span.SetAttributes(attribute.String("caller.service", caller))
+
+	var req struct {
+		Name string `json:"name"`
+		Key  string `json:"key"`
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.Key == "" {
+		span.SetStatus(codes.Error, "bad request")
+		http.Error(w, "name and key are required", http.StatusBadRequest)
+		return
+	}
+	role := req.Role
+	if role == "" {
+		role = "read"
+	}
+	if role != "read" && role != "admin" {
+		span.SetStatus(codes.Error, "invalid role")
+		http.Error(w, "role must be read or admin", http.StatusBadRequest)
+		return
+	}
+	span.SetAttributes(attribute.String("account.name", req.Name), attribute.String("account.role", role))
+
+	hash, err := hashServiceKey(req.Key)
+	if err != nil || hash == "" {
+		slog.ErrorContext(ctx, "upsert service account: hash key", "error", err, "account", req.Name)
+		span.SetStatus(codes.Error, "hash key failed")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	acct := ServiceAccountModel{AccountID: uuid.New().String(), Name: req.Name, HashedKey: hash, Role: role}
+	if err := upsertServiceAccount(ctx, acct); err != nil {
+		slog.ErrorContext(ctx, "upsert service account: db", "error", err, "account", req.Name)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "db upsert failed")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	slog.InfoContext(ctx, "service account upserted", "account", req.Name, "role", role)
+	span.SetStatus(codes.Ok, "")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// serviceFromModel maps a persisted ServiceModel to the API Service shape.
+func serviceFromModel(m ServiceModel) Service {
+	return Service{
+		ServiceID:   m.ServiceID,
+		Name:        m.Name,
+		URL:         m.URL,
+		Description: m.Description,
+		ForwardAuth: m.ForwardAuth,
+		UIPath:      m.UIPath,
+		Active:      m.Active,
+		CreatedAt:   m.CreatedAt,
+		UpdatedAt:   m.UpdatedAt,
+	}
 }
 
 // handleDeleteService soft-deletes a service by ID (admin key required).
@@ -451,6 +580,7 @@ func handleDeleteService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.SetStatus(codes.Ok, "")
+	notifyConductor(ctx)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -505,6 +635,7 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.SetStatus(codes.Ok, "")
+	notifyConductor(ctx)
 	w.WriteHeader(http.StatusNoContent)
 }
 

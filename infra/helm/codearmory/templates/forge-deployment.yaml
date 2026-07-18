@@ -1,4 +1,4 @@
-{{- if and .Values.forge.enabled .Values.forge.deploy }}
+{{- if .Values.forge.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,15 +52,177 @@ spec:
             - name: LOG_LEVEL
               value: {{ .Values.forge.env.logLevel | quote }}
             - name: RUNTIME
+              {{- if and .Values.forge.kata.enabled .Values.forge.gvisor.enabled }}
+              {{- fail "forge.kata.enabled and forge.gvisor.enabled are mutually exclusive — enable only one" }}
+              {{- end }}
+              {{- if .Values.forge.kata.enabled }}
+              # kata: the Kubernetes runtime pinned to a VM-isolating RuntimeClass
+              # (env.k8sRuntimeClass). Each sandbox Job runs in a Cloud Hypervisor microVM.
+              value: "kata"
+              {{- else if .Values.forge.gvisor.enabled }}
+              # gvisor: the Kubernetes runtime pinned to a gVisor RuntimeClass
+              # (env.k8sRuntimeClass). Each sandbox Job runs under the gVisor userspace
+              # kernel (the Sentry) — no hardware virtualization (/dev/kvm) required.
+              value: "gvisor"
+              {{- else }}
               value: {{ .Values.forge.env.runtime | quote }}
+              {{- end }}
             - name: ALLOWED_IMAGES
               value: {{ .Values.forge.env.allowedImages | quote }}
+            {{- with .Values.forge.admission }}
+            # Admission control: count caps per org/user plus cluster-wide CPU/memory
+            # budgets that pace a large fan-out to what the cluster can actually run.
+            # Each is emitted only when non-zero; a 0/unset value keeps that gate off.
+            {{- if .maxConcurrentPerOrg }}
+            - name: FORGE_MAX_CONCURRENT_PER_ORG
+              value: {{ .maxConcurrentPerOrg | quote }}
+            {{- end }}
+            {{- if .maxConcurrentPerUser }}
+            - name: FORGE_MAX_CONCURRENT_PER_USER
+              value: {{ .maxConcurrentPerUser | quote }}
+            {{- end }}
+            {{- if .maxTotalCpuMillicores }}
+            - name: FORGE_MAX_TOTAL_CPU_MILLICORES
+              value: {{ .maxTotalCpuMillicores | quote }}
+            {{- end }}
+            {{- if .maxTotalMemoryMB }}
+            - name: FORGE_MAX_TOTAL_MEMORY_MB
+              value: {{ .maxTotalMemoryMB | quote }}
+            {{- end }}
+            # Percent-based budget: a fraction of live cluster capacity, so the same
+            # value is correct on any cluster and follows autoscaling. Takes precedence
+            # over the absolute values above for whichever dimension it is set on;
+            # requires the node-list ClusterRole (forge-rbac.yaml).
+            {{- if .cpuPercent }}
+            - name: FORGE_MAX_TOTAL_CPU_PERCENT
+              value: {{ .cpuPercent | quote }}
+            {{- end }}
+            {{- if .memoryPercent }}
+            - name: FORGE_MAX_TOTAL_MEMORY_PERCENT
+              value: {{ .memoryPercent | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.forge.execScheduling }}
+            # Place exec (sandbox) pods on nodes that can run the kata/gvisor
+            # RuntimeClass. Prefer configuring the RuntimeClass's own `scheduling` block
+            # — the scheduler applies it automatically — and use these only as an
+            # explicit override. nodeSelector is "key=value,key2=value2"; tolerateKeys
+            # is a comma-separated list of taint keys to tolerate (Exists).
+            {{- with .nodeSelector }}
+            - name: FORGE_EXEC_NODE_SELECTOR
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .tolerateKeys }}
+            - name: FORGE_EXEC_TOLERATE_KEYS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.forge.volumes }}
+            # Shared workspace volumes: per-workflow total-size cap (0 disables the
+            # feature), optional per-volume cap, PVC StorageClass/access mode, and the
+            # orphan-reaper age. Empty values fall back to the binary defaults.
+            - name: FORGE_MAX_WORKFLOW_VOLUME_MB
+              value: {{ .maxWorkflowMB | quote }}
+            {{- if .maxVolumeMB }}
+            - name: FORGE_MAX_VOLUME_MB
+              value: {{ .maxVolumeMB | quote }}
+            {{- end }}
+            {{- if .storageClass }}
+            - name: FORGE_VOLUME_STORAGE_CLASS
+              value: {{ .storageClass | quote }}
+            {{- end }}
+            {{- if .accessMode }}
+            - name: FORGE_VOLUME_ACCESS_MODE
+              value: {{ .accessMode | quote }}
+            {{- end }}
+            {{- if .maxAgeSecs }}
+            - name: FORGE_VOLUME_MAX_AGE_SECS
+              value: {{ .maxAgeSecs | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.forge.build }}
+            # Image builds (forge/build-image) use Kaniko. Override the builder image
+            # to point at a private mirror in an air-gapped install; empty = the binary
+            # default (gcr.io/kaniko-project/executor:debug).
+            {{- if .builderImage }}
+            - name: FORGE_BUILDER_IMAGE
+              value: {{ .builderImage | quote }}
+            {{- end }}
+            {{- end }}
+            # The forge/git-clone step runs on a forge-controlled minimal git image,
+            # versioned in lockstep with forge (same release pipeline, same tag). When
+            # gitImage is unset, default it to the runner-git image at forge's own
+            # registry and tag — NOT the binary default runner-git:latest, which the
+            # pipeline publishes only from the main branch, so an alpha/beta deployment
+            # would try to pull a tag that was never built (ImagePullBackOff). Override
+            # gitImage to pin a digest or point at a private mirror.
+            # Where the artifact store lives. Forge config, never a request field: a
+            # sandbox must not be able to aim a workspace upload at an arbitrary host.
+            {{- if .Values.artifacts.enabled }}
+            - name: FORGE_ARTIFACTS_URL
+              value: "http://{{ include "codearmory.fullname" . }}-artifacts:{{ .Values.artifacts.port }}"
+            {{- end }}
+            # Remap base-image pulls to the in-cluster mirror so a build matrix does not
+            # pull the same base once per leg from a public registry. Operator config,
+            # never a request field: a build must not choose where its base comes from.
+            # Kaniko falls back to the origin registry on a miss, so this is safe even
+            # when the mirror is empty or down.
+            {{- if and .Values.registryMirror.enabled .Values.registryMirror.registryMap }}
+            {{- $mirror := printf "%s-registry-mirror:%v" (include "codearmory.fullname" .) (.Values.registryMirror.port | toString) }}
+            - name: FORGE_REGISTRY_MAP
+              value: {{ .Values.registryMirror.registryMap | replace "{{ mirror }}" $mirror | quote }}
+            {{- if .Values.registryMirror.buildCache.enabled }}
+            # Kaniko caches intermediate layers (the go-mod-download layer, mostly) to a
+            # repo on the same mirror, so cache traffic stays in-cluster. Warms across
+            # runs; kaniko does not evict, so the mirror PVC is the bound.
+            - name: FORGE_BUILD_CACHE_REPO
+              value: {{ printf "%s/%s" $mirror .Values.registryMirror.buildCache.repo | quote }}
+            {{- end }}
+            {{- end }}
+            {{- /* Registries kaniko may reach over plain HTTP: the in-cluster mirror
+                   (public images, no creds) plus any operator-listed private registry —
+                   e.g. a self-hosted Forgejo the CI pushes preview images to. Combined
+                   into one env so an extra registry does not require the mirror. */ -}}
+            {{- $insecure := list -}}
+            {{- if and .Values.registryMirror.enabled .Values.registryMirror.registryMap }}
+            {{- $insecure = append $insecure (printf "%s-registry-mirror:%v" (include "codearmory.fullname" .) (.Values.registryMirror.port | toString)) -}}
+            {{- end -}}
+            {{- range .Values.forge.build.insecureRegistries }}
+            {{- $insecure = append $insecure . -}}
+            {{- end -}}
+            {{- if $insecure }}
+            - name: FORGE_INSECURE_REGISTRIES
+              value: {{ join "," $insecure | quote }}
+            {{- end }}
+            - name: FORGE_GIT_IMAGE
+            {{- if .Values.forge.gitImage }}
+              value: {{ .Values.forge.gitImage | quote }}
+            {{- else }}
+              {{- $gitTag := include "codearmory.imageTag" (list . .Values.forge) }}
+              {{- if .Values.imageRegistry }}
+              value: {{ printf "%s/runner-git:%s" .Values.imageRegistry $gitTag | quote }}
+              {{- else }}
+              value: {{ printf "runner-git:%s" $gitTag | quote }}
+              {{- end }}
+            {{- end }}
             - name: GATEKEEPER_URL
               value: "http://{{ include "codearmory.fullname" . }}-gatekeeper:{{ .Values.gatekeeper.port }}"
-            {{- if eq .Values.forge.env.runtime "kubernetes" }}
+            {{- if or (eq .Values.forge.env.runtime "kubernetes") .Values.forge.kata.enabled .Values.forge.gvisor.enabled }}
             - name: K8S_NAMESPACE
-              value: {{ .Values.forge.env.k8sNamespace | quote }}
-            {{- if .Values.forge.env.k8sRuntimeClass }}
+              value: {{ .Values.forge.env.k8sNamespace | default .Release.Namespace | quote }}
+            {{- if .Values.forge.kata.enabled }}
+            {{- if not .Values.forge.env.k8sRuntimeClass }}
+            {{- fail "forge.kata.enabled=true requires forge.env.k8sRuntimeClass to name the VM-isolating RuntimeClass (e.g. \"kata\")" }}
+            {{- end }}
+            - name: K8S_RUNTIME_CLASS
+              value: {{ .Values.forge.env.k8sRuntimeClass | quote }}
+            {{- else if .Values.forge.gvisor.enabled }}
+            {{- if not .Values.forge.env.k8sRuntimeClass }}
+            {{- fail "forge.gvisor.enabled=true requires forge.env.k8sRuntimeClass to name the gVisor RuntimeClass (e.g. \"gvisor\")" }}
+            {{- end }}
+            - name: K8S_RUNTIME_CLASS
+              value: {{ .Values.forge.env.k8sRuntimeClass | quote }}
+            {{- else if .Values.forge.env.k8sRuntimeClass }}
             - name: K8S_RUNTIME_CLASS
               value: {{ .Values.forge.env.k8sRuntimeClass | quote }}
             {{- end }}
@@ -70,9 +232,13 @@ spec:
               value: {{ .Values.forge.env.containerCpuLimit | quote }}
             {{- end }}
             {{- include "codearmory.otel.envs" (list . .Values.forge.env) | nindent 12 }}
-            {{- if and (eq .Values.forge.env.runtime "docker") .Values.egressProxy.enabled }}
+            {{- if and .Values.forge.egressProxy.enabled (not .Values.forge.kata.enabled) }}
+            # Domain-allowlisting egress proxy for sandbox traffic — deployed by this
+            # chart (forge-egress-proxy.yaml) and enabled by default. Skipped under kata,
+            # whose microVMs filter egress at the VM level; KEPT under gvisor, which is a
+            # kernel sandbox, not a network boundary, so it still needs the proxy.
             - name: FORGE_EGRESS_PROXY
-              value: "http://{{ include "codearmory.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+              value: {{ .Values.forge.egressProxy.url | default (printf "http://%s-forge-egress-proxy:3128" (include "codearmory.fullname" .)) | quote }}
             {{- end }}
             {{- include "codearmory.postgresql.env" (list . "forge" "forge" (include "codearmory.fullname" .)) | nindent 12 }}
             - name: CONDUCTOR_FORWARD_KEY
@@ -85,28 +251,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-forge
                   key: gatekeeper-service-key
-            {{- if .Values.giteaIntegration.enabled }}
-            # Resolve "gitea:<owner>/<repo>" job secret_refs into Forgejo clone URLs
-            # via gitea-integration. The shared key is sourced from that service's
-            # secret so the two always match.
-            - name: GITEA_INTERNAL_URL
-              value: "http://{{ include "codearmory.fullname" . }}-gitea-integration:{{ .Values.giteaIntegration.port }}"
-            - name: GITEA_INTERNAL_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "codearmory.fullname" . }}-gitea-integration
-                  key: gitea-internal-key
-            {{- end }}
-            {{- if .Values.forge.proxmox.enabled }}
-            # Proxmox VE API token consumed by a runtime backend of type "proxmox"
-            # via secret_refs {token: "PROXMOX_TOKEN"}. Optional so a missing key
-            # degrades to that backend's executions failing, not the whole pod.
-            - name: PROXMOX_TOKEN
+            {{- if .Values.git.enabled }}
+            # git is the core (Helm-deployed) credential broker; wire forge → its
+            # /internal/clone-token so private-repo clone credentials work. Shared key
+            # matches git-secret (the canonical owner of git-internal-key).
+            - name: GIT_INTERNAL_URL
+              value: "http://{{ include "codearmory.fullname" . }}-git:{{ .Values.git.port }}"
+            - name: GIT_INTERNAL_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "codearmory.fullname" . }}-forge
-                  key: proxmox-token
-                  optional: true
+                  key: git-internal-key
             {{- end }}
             {{- include "codearmory.tls.envs" .Values.forge.tls | nindent 12 }}
           {{- $tlsMounts := include "codearmory.tls.volumeMounts" .Values.forge.tls }}

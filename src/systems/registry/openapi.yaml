@@ -341,6 +341,13 @@ components:
           type: string
           description: Unique action name used by the Workflows engine
           example: forge/run
+        summary:
+          type: string
+          description: Short one-line human description of the action
+          example: Run a shell command in a sandboxed container
+        description:
+          type: string
+          description: Longer human description of what the action does
         method:
           type: string
           example: POST

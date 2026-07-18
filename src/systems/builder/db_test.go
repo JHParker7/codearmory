@@ -16,11 +16,11 @@ func TestEnabledFrom(t *testing.T) {
 		want     bool
 	}{
 		{"core always enabled", "gatekeeper", ptr(OrgService{Enabled: false}), ptr(OrgService{Enabled: false}), true},
-		{"override wins (off)", "forge", ptr(OrgService{Enabled: false}), ptr(OrgService{Enabled: true}), false},
-		{"override wins (on)", "forge", ptr(OrgService{Enabled: true}), ptr(OrgService{Enabled: false}), true},
-		{"default fallback (off)", "forge", nil, ptr(OrgService{Enabled: false}), false},
-		{"default fallback (on)", "forge", nil, ptr(OrgService{Enabled: true}), true},
-		{"nothing configured is default-on", "forge", nil, nil, true},
+		{"override wins (off)", "blueprints", ptr(OrgService{Enabled: false}), ptr(OrgService{Enabled: true}), false},
+		{"override wins (on)", "blueprints", ptr(OrgService{Enabled: true}), ptr(OrgService{Enabled: false}), true},
+		{"default fallback (off)", "blueprints", nil, ptr(OrgService{Enabled: false}), false},
+		{"default fallback (on)", "blueprints", nil, ptr(OrgService{Enabled: true}), true},
+		{"nothing configured is default-on", "blueprints", nil, nil, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -33,29 +33,29 @@ func TestEnabledFrom(t *testing.T) {
 
 func TestComputeDisabled(t *testing.T) {
 	defaults := []OrgService{
-		{ServiceName: "forge", Enabled: false},      // disabled in baseline
-		{ServiceName: "workflows", Enabled: true},   // enabled in baseline
+		{ServiceName: "blueprints", Enabled: false}, // disabled in baseline
+		{ServiceName: "chaos", Enabled: true},       // enabled in baseline
 		{ServiceName: "gatekeeper", Enabled: false}, // core: must be ignored
 	}
 	overrides := []OrgService{
-		{ServiceName: "forge", Enabled: true},     // org re-enables forge
-		{ServiceName: "tickets", Enabled: false},  // org disables tickets
-		{ServiceName: "workflows", Enabled: true}, // no change
+		{ServiceName: "blueprints", Enabled: true}, // org re-enables blueprints
+		{ServiceName: "argo", Enabled: false},      // org disables argo
+		{ServiceName: "chaos", Enabled: true},      // no change
 	}
 
 	got := computeDisabled(defaults, overrides)
 	sort.Strings(got)
-	want := []string{"tickets"}
+	want := []string{"argo"}
 	if len(got) != len(want) || (len(got) > 0 && got[0] != want[0]) {
 		t.Fatalf("computeDisabled = %v, want %v", got, want)
 	}
 }
 
 func TestComputeDisabled_DefaultOnlyInheritsBaseline(t *testing.T) {
-	defaults := []OrgService{{ServiceName: "forge", Enabled: false}}
+	defaults := []OrgService{{ServiceName: "blueprints", Enabled: false}}
 	got := computeDisabled(defaults, nil) // an org with no overrides inherits the baseline
-	if len(got) != 1 || got[0] != "forge" {
-		t.Fatalf("computeDisabled = %v, want [forge]", got)
+	if len(got) != 1 || got[0] != "blueprints" {
+		t.Fatalf("computeDisabled = %v, want [blueprints]", got)
 	}
 }
 
@@ -66,11 +66,27 @@ func TestComputeDisabled_CoreNeverDisabled(t *testing.T) {
 	}
 }
 
-func TestScopeFromPath(t *testing.T) {
-	if got := scopeFromPath("default"); got != defaultOrgID {
-		t.Fatalf("scopeFromPath(default) = %q, want %q", got, defaultOrgID)
+// A catalog service with no baseline row must read DISABLED in the admin view: it is
+// not deployed or registered until an admin enables it, so claiming enabled-by-default
+// would contradict the (hidden) portal tab. Enabling/disabling rows then drive it.
+func TestCatalogView_DefaultDisabledThenRowDrives(t *testing.T) {
+	seed := newCatalogView(catalogEntry{Name: "blueprints", Description: "OpenTofu state"})
+	if seed.Enabled {
+		t.Fatalf("catalog seed for %q is enabled; want disabled by default", seed.Service)
 	}
-	if got := scopeFromPath("org-123"); got != "org-123" {
-		t.Fatalf("scopeFromPath(org-123) = %q, want org-123", got)
+	if seed.Source != "catalog" || seed.Kind != kindPlatform {
+		t.Fatalf("catalog seed = %+v, want source=catalog kind=platform", seed)
+	}
+
+	views := map[string]*serviceView{"blueprints": seed}
+	applyRow(views, OrgService{ServiceName: "blueprints", Enabled: true, Kind: kindPlatform}, "default")
+	if !views["blueprints"].Enabled || views["blueprints"].Source != "default" {
+		t.Fatalf("after enabling row = %+v, want enabled from default", views["blueprints"])
+	}
+
+	applyRow(views, OrgService{ServiceName: "blueprints", Enabled: false, Kind: kindPlatform}, "default")
+	if views["blueprints"].Enabled {
+		t.Fatalf("after disabling row = %+v, want disabled", views["blueprints"])
 	}
 }
+

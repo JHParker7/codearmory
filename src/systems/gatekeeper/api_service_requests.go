@@ -67,6 +67,68 @@ func handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+// handleListPermissionChecks lists the permission-evaluation audit trail (one row
+// per access decision, granted or denied) so admins can review access patterns and
+// hunt suspicious usage. Filterable by user_id/service/action/org_id (exact),
+// resource (substring), and granted (true/false). Admin-gated by listPermissionCheck.
+func handleListPermissionChecks(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleListPermissionChecks")
+	defer span.End()
+	r = r.WithContext(ctx)
+
+	callerID, _ := ctx.Value(userIDKey).(string)
+	span.SetAttributes(attribute.String("user.id", callerID))
+
+	if !requirePermission(w, r, "listPermissionCheck", "gatekeeper/permission-checks") {
+		span.SetStatus(codes.Ok, "")
+		return
+	}
+
+	limit, offset, ok := parsePagination(w, r)
+	if !ok {
+		span.SetStatus(codes.Error, "invalid pagination")
+		return
+	}
+
+	q := r.URL.Query()
+	filter := PermissionsCheck{}
+	if v := q.Get("user_id"); v != "" {
+		filter.UserID = v
+	}
+	if v := q.Get("service"); v != "" {
+		filter.Service = v
+	}
+	if v := q.Get("action"); v != "" {
+		filter.Action = v
+	}
+	if v := q.Get("org_id"); v != "" {
+		filter.OrgID = &v
+	}
+	var granted *bool
+	if v := q.Get("granted"); v != "" {
+		b := v == "true"
+		granted = &b
+	}
+
+	rows, err := filter.ListFiltered(ctx, granted, q.Get("resource"), limit, offset)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "list failed")
+		slog.ErrorContext(ctx, "list permission checks: db error", "caller_id", callerID, "error", err)
+		http.Error(w, "failed to list permission checks", http.StatusInternalServerError)
+		return
+	}
+
+	result := make([]PermissionsCheck, len(rows))
+	for i, row := range rows {
+		result[i] = row.(PermissionsCheck)
+	}
+
+	span.SetStatus(codes.Ok, "")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 type servicePermissionRequestBody struct {
 	Name      string   `json:"name"`
 	Service   string   `json:"service"`

@@ -370,15 +370,30 @@ func TestAuditView_ListHelpText(t *testing.T) {
 // ── Fetch function ────────────────────────────────────────────────────────────
 
 func TestAuditFetch_Success(t *testing.T) {
+	resetTUINameCache(t)
 	entries := makeAuditEntries(2)
 	body, _ := json.Marshal(entries)
-	srv, rec := recordingServer(t, http.StatusOK, string(body))
+
+	// The fetch resolves each user actor's id to a username via a follow-up GET,
+	// so route both the list endpoint and the user lookup.
+	mux := http.NewServeMux()
+	var listMethod, listPath string
+	mux.HandleFunc("/gatekeeper/audit-logs", func(w http.ResponseWriter, r *http.Request) {
+		listMethod, listPath = r.Method, r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body)) //nolint:errcheck
+	})
+	mux.HandleFunc("/gatekeeper/users/user-abc", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"user_id":"user-abc","username":"alice"}`)) //nolint:errcheck
+	})
+	srv := routeServer(t, mux)
 	setupCLI(t, srv)
 
 	msg := auditFetch(0)()
 
-	if rec.Method != "GET" || rec.Path != "/gatekeeper/audit-logs" {
-		t.Errorf("request = %s %s, want GET /gatekeeper/audit-logs", rec.Method, rec.Path)
+	if listMethod != "GET" || listPath != "/gatekeeper/audit-logs" {
+		t.Errorf("request = %s %s, want GET /gatekeeper/audit-logs", listMethod, listPath)
 	}
 	result, ok := msg.(auditEntriesMsg)
 	if !ok {
@@ -386,6 +401,9 @@ func TestAuditFetch_Success(t *testing.T) {
 	}
 	if len(result) != 2 {
 		t.Errorf("len(result) = %d, want 2", len(result))
+	}
+	if got := result[0].actorLabel(); got != "alice" {
+		t.Errorf("actorLabel = %q, want resolved username %q", got, "alice")
 	}
 }
 

@@ -13,9 +13,11 @@ info:
     referenced by many workflows. Changing a step affects every pipeline that
     references it.
 
-    A **Workflow** is an ordered list of step references (`step_id` +
-    optional `parallel_group`). Steps sharing the same non-nil `parallel_group`
-    execute concurrently; the run waits for all before advancing.
+    A **Workflow** is a set of step references (`step_id`) plus the `routes`
+    between them — a graph. A step runs once every inbound route is resolved and
+    at least one was taken, so two edges out of one step fork the run and two
+    edges into one step join it. Omit `routes` for a plain sequence: the edges
+    are then derived as a chain in array order.
 
     ## Action types
 
@@ -253,6 +255,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A workflow with that name already exists
+          content:
+            text/plain:
+              schema:
+                type: string
 
     get:
       summary: List workflows
@@ -687,8 +695,8 @@ components:
     WorkflowStepRef:
       type: object
       description: |
-        A reference to a step within a workflow. Steps sharing the same
-        non-null `parallel_group` integer execute concurrently.
+        A reference to a step within a workflow. A step carries no parallelism
+        of its own — that is the shape of the workflow's `routes`.
       required:
         - step_id
       properties:
@@ -696,25 +704,10 @@ components:
           type: string
           format: uuid
           description: ID of the step to execute
-        parallel_group:
-          type: integer
-          nullable: true
-          description: |
-            When non-null, steps with the same value run concurrently. The run
-            waits for all steps in a group before advancing. Must be
-            non-negative.
-          example: 1
 
     WorkflowStep:
       allOf:
         - $ref: '#/components/schemas/Step'
-        - type: object
-          properties:
-            parallel_group:
-              type: integer
-              nullable: true
-              description: Parallel group assigned in the workflow, if any
-
     Workflow:
       type: object
       properties:

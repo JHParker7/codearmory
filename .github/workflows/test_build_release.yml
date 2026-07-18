@@ -28,7 +28,7 @@ jobs:
       - name: Run gatekeeper unit tests
         run: cd src/systems/gatekeeper; go test .
 
-  blueprints-unit-test:
+  builder-unit-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,8 +37,8 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: "1.25"
-      - name: Run blueprints unit tests
-        run: cd src/systems/blueprints; go test .
+      - name: Run builder unit tests
+        run: cd src/systems/builder; go test .
 
   conductor-unit-test:
     runs-on: ubuntu-latest
@@ -62,7 +62,7 @@ jobs:
         with:
           go-version: "1.25"
       - name: Run cli unit tests
-        run: cd src/cli; go test .
+        run: cd src/cli; go test ./...
 
   forge-unit-test:
     runs-on: ubuntu-latest
@@ -75,6 +75,18 @@ jobs:
           go-version: "1.25"
       - name: Run forge unit tests
         run: cd src/systems/forge; go test .
+
+  egress-proxy-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run egress-proxy unit tests
+        run: cd src/systems/egress-proxy; go test .
 
   registry-unit-test:
     runs-on: ubuntu-latest
@@ -112,6 +124,18 @@ jobs:
       - name: Run hooks unit tests
         run: cd src/systems/hooks; go test .
 
+  git-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run git unit tests
+        run: cd src/systems/git; go test .
+
   tickets-unit-test:
     runs-on: ubuntu-latest
     steps:
@@ -124,17 +148,71 @@ jobs:
       - name: Run tickets unit tests
         run: cd src/systems/tickets; go test .
 
+  containers-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run containers unit tests
+        run: cd src/systems/containers; go test .
+
+  outpost-gateway-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run outpost-gateway unit tests
+        run: cd src/systems/outpost-gateway; go test .
+
+  outpost-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run outpost unit tests
+        run: cd src/systems/outpost; go test .
+
+  portal-bff-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.25"
+      - name: Run portal-bff unit tests
+        run: cd src/systems/portal-bff; GOWORK=off go test ./...
+
   release:
     needs:
       - gatekeeper-unit-test
-      - blueprints-unit-test
+      - builder-unit-test
       - conductor-unit-test
       - cli-unit-test
       - forge-unit-test
+      - egress-proxy-unit-test
       - registry-unit-test
       - workflows-unit-test
       - hooks-unit-test
+      - git-unit-test
       - tickets-unit-test
+      - containers-unit-test
+      - outpost-gateway-unit-test
+      - outpost-unit-test
+      - portal-bff-unit-test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -186,40 +264,37 @@ jobs:
         include:
           - name: gatekeeper
             context: src/systems/gatekeeper
-          - name: blueprints
-            context: src/systems/blueprints
+          - name: builder
+            context: src/systems/builder
           - name: conductor
             context: src/systems/conductor
           - name: forge
             context: src/systems/forge
+          - name: egress-proxy
+            context: src/systems/egress-proxy
           - name: registry
             context: src/systems/registry
           - name: workflows
             context: src/systems/workflows
-          - name: tickets
-            context: src/systems/tickets
           - name: hooks
             context: src/systems/hooks
-          - name: egress-proxy
-            context: src/systems/egress-proxy
+          - name: git
+            context: src/systems/git
+          - name: tickets
+            context: src/systems/tickets
           - name: containers
             context: src/systems/containers
-          - name: gitea_integration
-            context: src/systems/gitea_integration
-          - name: mcp
-            context: src/systems/mcp
           - name: outpost-gateway
             context: src/systems/outpost-gateway
-          - name: chaos
-            context: src/systems/chaos
-          - name: argo
-            context: src/systems/argo
           - name: outpost
             context: src/systems/outpost
+          - name: portal
+            context: src/systems
+            dockerfile: portal-bff/Dockerfile
+          - name: runner-git
+            context: infra/runner-images/git
           - name: gatekeeper-tests
             context: tests/gatekeeper
-          - name: blueprints-tests
-            context: tests/blueprints
           - name: conductor-tests
             context: tests/conductor
           - name: forge-tests
@@ -228,18 +303,12 @@ jobs:
             context: tests/registry
           - name: workflows-tests
             context: tests/workflows
-          - name: tickets-tests
-            context: tests/tickets
           - name: hooks-tests
             context: tests/hooks
-          - name: gitea_integration-tests
-            context: tests/gitea_integration
+          - name: tickets-tests
+            context: tests/tickets
           - name: outpost-gateway-tests
             context: tests/outpost-gateway
-          - name: chaos-tests
-            context: tests/chaos
-          - name: argo-tests
-            context: tests/argo
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -257,6 +326,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile && format('{0}/{1}', matrix.context, matrix.dockerfile) || format('{0}/Dockerfile', matrix.context) }}
           platforms: linux/amd64
           push: true
           tags: |

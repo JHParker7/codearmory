@@ -311,12 +311,10 @@ func handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 	var memberAction, permResource, permName string
 	switch invite.ResourceType {
 	case "org":
-		if caller.OrgID != nil && *caller.OrgID != invite.ResourceID {
-			span.SetStatus(codes.Error, "already in org")
-			slog.WarnContext(ctx, "accept invite: caller already belongs to a different org", "caller_id", callerID, "invite_id", id)
-			http.Error(w, "you already belong to an org; leave it before accepting this invite", http.StatusConflict)
-			return
-		}
+		// A user may belong to many orgs at once, so accepting an org invite no
+		// longer requires leaving a current org — it adds a membership. The only
+		// conflict is re-accepting an org the caller is already a member of, which
+		// is detected under the row lock inside acceptInviteAtomic.
 		memberAction = "getOrg"
 		permResource = fmt.Sprintf("%s/gatekeeper/orgs/%s", caller.Username, invite.ResourceID)
 		permName = fmt.Sprintf("%s-org-member-read", caller.Username)

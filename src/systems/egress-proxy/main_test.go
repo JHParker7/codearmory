@@ -98,6 +98,40 @@ func TestPermits_MultipleEntries(t *testing.T) {
 	}
 }
 
+// "*" is the public-only sentinel: it passes the hostname check for ANY host, so an
+// operator can grant broad outbound access (e.g. all of AWS) without enumerating
+// domains. The dial-time IP guard still applies (see TestHandleHTTP_StarStillBlocksInternalIP).
+func TestPermits_StarAllowsAnyHost(t *testing.T) {
+	al := parseAllowlist("*")
+	for _, h := range []string{"github.com", "sts.amazonaws.com", "anything.example.org"} {
+		if !al.permits(h) {
+			t.Errorf("permits(%q) = false, want true under \"*\"", h)
+		}
+	}
+}
+
+// "*" wins even when mixed with explicit entries.
+func TestPermits_StarAmongEntries(t *testing.T) {
+	if !parseAllowlist("github.com,*").permits("unlisted.example") {
+		t.Error("\"*\" in the list should permit any host")
+	}
+}
+
+func TestAllowsAll(t *testing.T) {
+	if !parseAllowlist("*").allowsAll() {
+		t.Error("allowsAll() = false for \"*\"")
+	}
+	if !parseAllowlist("a.com, *").allowsAll() {
+		t.Error("allowsAll() = false when \"*\" is present among entries")
+	}
+	if parseAllowlist("github.com,*.docker.io").allowsAll() {
+		t.Error("allowsAll() = true for a normal allowlist (a *.suffix wildcard is not the \"*\" sentinel)")
+	}
+	if parseAllowlist("").allowsAll() {
+		t.Error("allowsAll() = true for an empty allowlist")
+	}
+}
+
 // ── proxy.ServeHTTP ───────────────────────────────────────────────────────────
 
 func TestServeHTTP_Healthz(t *testing.T) {
@@ -160,6 +194,26 @@ func TestHandleHTTP_AllowedHost(t *testing.T) {
 	p.handleHTTP(w, r)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("got %d, want 204", w.Code)
+	}
+}
+
+// Public-only mode ("*") passes the hostname check for any host, but the dial-time IP
+// guard still runs: a host resolving to a loopback/private/metadata address is blocked
+// (the dial fails → 502), proving "*" grants PUBLIC destinations only, never internal
+// ones. allowDialIP is deliberately NOT relaxed here (unlike TestHandleHTTP_AllowedHost)
+// so the real isDisallowedIP guard rejects the httptest loopback upstream.
+func TestHandleHTTP_StarStillBlocksInternalIP(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	p := &proxy{al: allowlist{"*"}}
+	r := httptest.NewRequest(http.MethodGet, upstream.URL+"/ok", nil)
+	w := httptest.NewRecorder()
+	p.handleHTTP(w, r)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("got %d, want 502 — the \"*\" name match must NOT bypass the IP guard for a loopback upstream", w.Code)
 	}
 }
 

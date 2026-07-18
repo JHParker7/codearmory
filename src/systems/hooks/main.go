@@ -225,6 +225,15 @@ func main() {
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_pipeline_rules_repo_active ON pipeline_rules (repo, active) WHERE active = true`).Error; err != nil {
 		slog.Warn("failed to create pipeline_rules index", "error", err)
 	}
+	// Rule names are unique within their scope (the org when set, else the
+	// creator) so a rule can be referenced by name rather than its UUID. Partial
+	// indexes (WHERE active) let a name be reused after its rule is deleted.
+	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_rules_org_name ON pipeline_rules (org_id, name) WHERE active AND org_id <> ''`).Error; err != nil {
+		slog.Warn("failed to create pipeline_rules org-name unique index (existing duplicate names?)", "error", err)
+	}
+	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_rules_user_name ON pipeline_rules (created_by, name) WHERE active AND org_id = ''`).Error; err != nil {
+		slog.Warn("failed to create pipeline_rules user-name unique index (existing duplicate names?)", "error", err)
+	}
 	if err := connect().Exec(`CREATE INDEX IF NOT EXISTS idx_hook_trigger_retries_next ON hook_trigger_retries (next_retry_at) WHERE next_retry_at IS NOT NULL`).Error; err != nil {
 		slog.Warn("failed to create hook_trigger_retries index", "error", err)
 	}
@@ -272,6 +281,7 @@ func main() {
 
 	mux.HandleFunc("POST /hooks", handleWebhook)
 	mux.HandleFunc("POST /hooks/git", handleGitWebhook)
+	mux.HandleFunc("POST /hooks/gitea", handleGiteaWebhook)
 	// Internal: trusted services (e.g. tickets) emit lifecycle events here,
 	// authenticated by the shared HOOKS_TRIGGER_KEY HMAC rather than conductor.
 	mux.HandleFunc("POST /internal/events", handleInternalEvent)

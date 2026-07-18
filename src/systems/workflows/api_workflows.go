@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -20,41 +21,180 @@ import (
 	"gorm.io/gorm"
 )
 
+// workflowRolePermsVersion is the version of the permission-derivation logic
+// below. The scoped run role is provisioned once at workflow create/update and
+// reused for every run, so a change here would otherwise never reach workflows
+// created earlier. Bump it whenever collectWorkflowPermissions changes what it
+// grants; handleTriggerRun re-provisions any workflow whose stored role predates
+// the current version. v1 added the async-poll read grant (getExecution) that
+// stops forge steps from hanging at "running". v2 added the deleteVolume companion
+// grant so a run that creates shared workspace volumes can tear them down at the end.
+// v3 made forge/create-volume async, so the generic async-poll rule now also grants
+// getVolume on forge/volumes/* — without the bump, volume workflows created earlier
+// would 403 every create-volume status poll and hang until timeout.
+// v4 added the workflows/trigger sub-pipeline step, whose run role needs triggerRun
+// + getRun on workflows/runs/* to create and poll the sub-run.
+// v5 added map regions: a region with a volume clones the workspace per iteration and
+// gathers outputs back, so — exactly like a scatter step — its run role needs forge's
+// create-volume and volume-copy on top of the body's own actions. Without the bump, a
+// workflow created earlier would 403 its first clone and hang.
+const workflowRolePermsVersion = 6
+
+// resourcePathParamRe matches a "{param}" segment of an endpoint's resource template.
+var resourcePathParamRe = regexp.MustCompile(`\{[^}]+\}`)
+
+// wildcardPathParams turns an endpoint's resource TEMPLATE into a pattern a role can
+// match: "tickets/tickets/{id}" -> "tickets/tickets/*".
+//
+// A run cannot know the id it will act on when its role is provisioned — the ticket it
+// updates is created by an earlier step of the same run — so the grant has to span the
+// id space. It is still scoped to that one service and action.
+func wildcardPathParams(resource string) string {
+	return resourcePathParamRe.ReplaceAllString(resource, "*")
+}
+
 // collectWorkflowPermissions returns the deduplicated set of gatekeeper
 // permissions declared by the workflow's step actions in the current catalog.
-func collectWorkflowPermissions(steps []WorkflowStep) []PermissionSpec {
+func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef, ticket *TicketConfig) []PermissionSpec {
 	seen := map[string]struct{}{}
 	var out []PermissionSpec
 	actionCatalogMu.RLock()
 	defer actionCatalogMu.RUnlock()
-	for _, ws := range steps {
-		if ws.Action == ActionHTTP {
-			continue // ActionHTTP permissions are runtime-dynamic; can't enumerate statically
-		}
-		def, ok := actionCatalog[ws.Action]
+
+	// addAction grants the permissions a single catalog action needs: its required
+	// permission, the async-poll companion, and the deleteVolume companion for a
+	// create-volume. Factored out so a scatter step can also grant the forge actions it
+	// drives internally (resolve-paths, create-volume, volume-copy).
+	addAction := func(action string) {
+		def, ok := actionCatalog[action]
 		if !ok || def.RequiredPermission == nil {
-			continue
+			return
 		}
 		p := def.RequiredPermission
-		key := p.Service + ":" + p.Action + ":" + p.Resource
+		// The registry DERIVES an action's permission from its endpoint, whose resource
+		// is a TEMPLATE ("tickets/tickets/{id}", "forge/executions/{id}"). A role carries
+		// this string verbatim and gatekeeper knows nothing about "{id}" — it matches
+		// exact strings, "*", "foo/*" and "foo/*/bar" — so granting the literal would
+		// 403 every call on a real id. Rewrite each path param to the wildcard the role
+		// can actually match.
+		resource := wildcardPathParams(p.Resource)
+		key := p.Service + ":" + p.Action + ":" + resource
 		if _, dup := seen[key]; dup {
-			continue
+			return
 		}
 		seen[key] = struct{}{}
 		out = append(out, PermissionSpec{
 			Service:  p.Service,
 			Action:   p.Action,
-			Resource: p.Resource,
+			Resource: resource,
 		})
+
+		// Async actions submit a job and then POLL it to a terminal state (forge:
+		// POST /executions then GET /executions/{id}). The scoped run role grants
+		// only the submit permission above, so every poll is 403 and the step never
+		// observes completion — it hangs to the timeout. Also grant the read
+		// permission for the submitted item. The submit permission is a "create"
+		// (createExecution/createSync/…) and the poll reads the same resource, so
+		// the read is its "get" counterpart on the item resource; the owner already
+		// holds it for jobs they create (gatekeeper drops it otherwise).
+		if def.Async != nil && strings.HasPrefix(p.Action, "create") {
+			pollSpec := PermissionSpec{
+				Service:  p.Service,
+				Action:   "get" + strings.TrimPrefix(p.Action, "create"),
+				Resource: strings.TrimRight(resource, "/") + "/*",
+			}
+			pollKey := pollSpec.Service + ":" + pollSpec.Action + ":" + pollSpec.Resource
+			if _, dup := seen[pollKey]; !dup {
+				seen[pollKey] = struct{}{}
+				out = append(out, pollSpec)
+			}
+		}
+
+		// A create-volume step's run tears its volumes down when it finishes (DELETE
+		// /volumes?workflow_id=...). Grant the matching deleteVolume on the same
+		// resource so teardown isn't 403'd and volumes linger until the age reaper.
+		if p.Action == "createVolume" {
+			delSpec := PermissionSpec{Service: p.Service, Action: "deleteVolume", Resource: resource}
+			delKey := delSpec.Service + ":" + delSpec.Action + ":" + delSpec.Resource
+			if _, dup := seen[delKey]; !dup {
+				seen[delKey] = struct{}{}
+				out = append(out, delSpec)
+			}
+		}
+
+		// A workflows/trigger step creates a sub-run (triggerRun) and then polls it to
+		// a terminal state (getRun). Both checks are item-scoped (workflows/runs/<id>),
+		// which the generic async companion above does not cover (it only fires for
+		// "create*" actions and grants a collection-scoped poll). Grant both on the
+		// wildcard run space so the step can trigger and observe the sub-run.
+		if p.Action == "triggerRun" {
+			for _, act := range []string{"triggerRun", "getRun"} {
+				spec := PermissionSpec{Service: p.Service, Action: act, Resource: "workflows/runs/*"}
+				k := spec.Service + ":" + spec.Action + ":" + spec.Resource
+				if _, dup := seen[k]; !dup {
+					seen[k] = struct{}{}
+					out = append(out, spec)
+				}
+			}
+		}
+
+		// An outpost-gateway/enqueueCommand step enqueues a command (POST
+		// /outposts/<id>/commands) and then polls it to a terminal state (GET
+		// /outpost-commands/<cmdId>). The poll reads a DIFFERENT resource space than the
+		// submit (a globally-unique command id, not scoped under the outpost), so the
+		// generic create→get companion above cannot cover it. Grant getCommand on the
+		// command space explicitly, mirroring the triggerRun case.
+		if p.Action == "enqueueCommand" {
+			spec := PermissionSpec{Service: p.Service, Action: "getCommand", Resource: "outpost-gateway/outpost-commands/*"}
+			k := spec.Service + ":" + spec.Action + ":" + spec.Resource
+			if _, dup := seen[k]; !dup {
+				seen[k] = struct{}{}
+				out = append(out, spec)
+			}
+		}
+	}
+
+	for _, ws := range steps {
+		if ws.Action == ActionHTTP {
+			continue // ActionHTTP permissions are runtime-dynamic; can't enumerate statically
+		}
+		addAction(ws.Action)
+		// A scatter step drives forge itself to resolve paths, clone a volume per leg,
+		// and gather results — grant those forge actions on top of the leg action.
+		if ws.Scatter != nil {
+			addAction(actionForgeResolvePaths)
+			addAction(ActionForgeCreateVolume)
+			addAction(actionForgeVolumeCopy)
+		}
+	}
+	// A map region with a volume clones the base workspace per iteration and gathers
+	// owned outputs back, driving the same forge actions a scatter step does.
+	for _, d := range maps {
+		if d.Volume != "" {
+			addAction(ActionForgeCreateVolume)
+			addAction(actionForgeVolumeCopy)
+		}
+	}
+	// Mirroring a run into a ticket is done with the RUN TOKEN, so the workflow's role
+	// must carry the ticket permissions — but only when the workflow opted in. A
+	// workflow with no ticket config grants nothing extra, which is why enabling this
+	// cannot widen what any existing run can do.
+	if ticket != nil && ticket.Enabled {
+		for _, p := range ticketPermissions() {
+			key := p.Service + ":" + p.Action + ":" + p.Resource
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, p)
+		}
 	}
 	return out
-}
-
-// provisionWorkflowRole asks gatekeeper to create a minimal-permission role for
+} // provisionWorkflowRole asks gatekeeper to create a minimal-permission role for
 // workflowID. Returns the new role_id, or "" when the key is unconfigured or the
 // permission list is empty (runs will use the user's full session permissions).
-func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string, steps []WorkflowStep) string {
-	perms := collectWorkflowPermissions(steps)
+func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string, steps []WorkflowStep, maps []MapDef, ticket *TicketConfig) string {
+	perms := collectWorkflowPermissions(steps, maps, ticket)
 	if len(perms) == 0 {
 		return ""
 	}
@@ -162,10 +302,50 @@ func bearerToken(r *http.Request) string {
 }
 
 type createWorkflowRequest struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Project     string            `json:"project,omitempty"`
-	Steps       []WorkflowStepRef `json:"steps,omitempty"`
+	Name        string              `json:"name"`
+	Description string              `json:"description"`
+	Project     string              `json:"project,omitempty"`
+	Steps       []WorkflowStepRef   `json:"steps,omitempty"`
+	Inputs      []WorkflowInputDef  `json:"inputs,omitempty"`
+	Outputs     []WorkflowOutputDef `json:"outputs,omitempty"`
+	// Routes are the explicit edges between steps, and the only way to express a
+	// fork or a join. Omit them for a plain sequence: the edges are then derived as
+	// a chain in array order at run time.
+	Routes []WorkflowRoute `json:"routes,omitempty"`
+	// Maps declare the map regions steps join via map_id — see MapDef.
+	Maps []MapDef `json:"maps,omitempty"`
+	// Ticket opts every run of this workflow into being mirrored to a ticket — see
+	// TicketConfig. Omit it and nothing changes.
+	Ticket *TicketConfig `json:"ticket,omitempty"`
+}
+
+// validateWorkflowIO checks the declared inputs/outputs: unique, named, and every
+// output carries a value template. Returns "" when valid.
+func validateWorkflowIO(inputs []WorkflowInputDef, outputs []WorkflowOutputDef) string {
+	seenIn := map[string]bool{}
+	for _, in := range inputs {
+		if strings.TrimSpace(in.Name) == "" {
+			return "each declared input requires a name"
+		}
+		if seenIn[in.Name] {
+			return "duplicate input name: " + in.Name
+		}
+		seenIn[in.Name] = true
+	}
+	seenOut := map[string]bool{}
+	for _, o := range outputs {
+		if strings.TrimSpace(o.Name) == "" {
+			return "each declared output requires a name"
+		}
+		if seenOut[o.Name] {
+			return "duplicate output name: " + o.Name
+		}
+		seenOut[o.Name] = true
+		if strings.TrimSpace(o.Value) == "" {
+			return "output " + o.Name + " requires a value expression"
+		}
+	}
+	return ""
 }
 
 func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +373,10 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
+	if msg := validateResourceName(req.Name); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
 	if len(req.Steps) == 0 {
 		http.Error(w, "at least one step is required", http.StatusBadRequest)
 		return
@@ -202,14 +386,26 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i, ref := range req.Steps {
-		if ref.StepID == "" {
-			http.Error(w, fmt.Sprintf("step %d: step_id is required", i), http.StatusBadRequest)
+		if msg := validateStepRefShape(i, ref); msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
 			return
 		}
-		if ref.ParallelGroup != nil && *ref.ParallelGroup < 0 {
-			http.Error(w, fmt.Sprintf("step %d: parallel_group must be non-negative", i), http.StatusBadRequest)
-			return
-		}
+	}
+	if msg := validateWorkflowIO(req.Inputs, req.Outputs); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+
+	// Name is the workflow's resource identifier, so it must be unique per caller.
+	if exists, cerr := workflowNameExists(ctx, req.Name, userID, orgID); cerr != nil {
+		span.RecordError(cerr)
+		span.SetStatus(codes.Error, "db error")
+		http.Error(w, "failed to create workflow", http.StatusInternalServerError)
+		return
+	} else if exists {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "a workflow with that name already exists", http.StatusConflict)
+		return
 	}
 
 	// Validate all referenced steps exist and are accessible.
@@ -229,6 +425,11 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:   userID,
 		OrgID:       orgID,
 		Active:      true,
+		Inputs:      req.Inputs,
+		Outputs:     req.Outputs,
+		Routes:      req.Routes,
+		Maps:        req.Maps,
+		Ticket:      req.Ticket,
 		StepRefs:    refs,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -244,8 +445,22 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	wf.Steps = steps
 
+	// Routes are validated against the ENRICHED steps, since a route names a step
+	// by the name it actually runs under (a stored-step reference may override it).
+	if msg := validateTicket(wf.Ticket); msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	if msg := validateGraph(wf.Steps, wf.Routes, wf.Maps); msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+
 	// Provision a scoped service role before persisting so the role_id is stored atomically.
-	wf.RoleID = provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps)
+	wf.RoleID = provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps, wf.Maps, wf.Ticket)
+	wf.RolePermsVersion = workflowRolePermsVersion
 
 	if err := wf.Add(ctx); err != nil {
 		span.RecordError(err)
@@ -312,7 +527,7 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	wf, err := getWorkflow(ctx, id)
+	wf, err := resolveWorkflowRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -333,6 +548,18 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
+	// ?raw=true additionally exposes the stored, unenriched step refs (normally hidden:
+	// Workflow.StepRefs is json:"-"). A client that wants to mutate a pipeline (e.g. the
+	// CLI convert/localize) needs the raw refs so it can re-PUT them faithfully — the
+	// default `steps` are enriched with each stored step's merged With, which would bake
+	// a referenced step's definition into its per-occurrence override on round-trip.
+	if r.URL.Query().Get("raw") == "true" {
+		json.NewEncoder(w).Encode(struct { //nolint:errcheck
+			Workflow
+			StepRefs []WorkflowStepRef `json:"step_refs"`
+		}{Workflow: wf, StepRefs: wf.StepRefs})
+		return
+	}
 	json.NewEncoder(w).Encode(wf) //nolint:errcheck
 }
 
@@ -352,7 +579,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	existing, err := getWorkflow(ctx, id)
+	existing, err := resolveWorkflowRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -380,6 +607,26 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
+	// Validate the name charset only on an actual rename, so editing a workflow whose
+	// name predates this rule isn't blocked unless the name itself is changed.
+	if req.Name != existing.Name {
+		if msg := validateResourceName(req.Name); msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
+			return
+		}
+	}
+	// A rename must not collide with another of the caller's workflows; keeping its
+	// own name is allowed (excludes existing.WorkflowID).
+	if conflict, cerr := workflowNameConflict(ctx, req.Name, existing.WorkflowID, userID, orgID); cerr != nil {
+		span.RecordError(cerr)
+		span.SetStatus(codes.Error, "db error")
+		http.Error(w, "failed to update workflow", http.StatusInternalServerError)
+		return
+	} else if conflict {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, "a workflow with that name already exists", http.StatusConflict)
+		return
+	}
 	if len(req.Steps) == 0 {
 		http.Error(w, "at least one step is required", http.StatusBadRequest)
 		return
@@ -389,14 +636,14 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i, ref := range req.Steps {
-		if ref.StepID == "" {
-			http.Error(w, fmt.Sprintf("step %d: step_id is required", i), http.StatusBadRequest)
+		if msg := validateStepRefShape(i, ref); msg != "" {
+			http.Error(w, msg, http.StatusBadRequest)
 			return
 		}
-		if ref.ParallelGroup != nil && *ref.ParallelGroup < 0 {
-			http.Error(w, fmt.Sprintf("step %d: parallel_group must be non-negative", i), http.StatusBadRequest)
-			return
-		}
+	}
+	if msg := validateWorkflowIO(req.Inputs, req.Outputs); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
 	}
 	if err := validateStepRefs(ctx, req.Steps, userID, orgID, w); err != nil {
 		return
@@ -415,25 +662,42 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if msg := validateTicket(req.Ticket); msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	if msg := validateGraph(newSteps, req.Routes, req.Maps); msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+
 	oldRoleID := existing.RoleID
 	existing.Name = req.Name
 	existing.Description = req.Description
+	existing.Routes = req.Routes
+	existing.Maps = req.Maps
+	existing.Ticket = req.Ticket
 	// Guard like tickets: a partial PUT that omits project must not silently
 	// wipe the stored label (the CLI/TUI update payloads don't send project).
 	if req.Project != "" {
 		existing.Project = req.Project
 	}
+	existing.Inputs = req.Inputs
+	existing.Outputs = req.Outputs
 	existing.StepRefs = refs
 	existing.Steps = newSteps
 	existing.UpdatedAt = time.Now().UTC()
 
 	// Re-provision the role with the updated step set.
-	existing.RoleID = provisionWorkflowRole(ctx, id, userID, orgID, newSteps)
+	existing.RoleID = provisionWorkflowRole(ctx, existing.WorkflowID, userID, orgID, newSteps, req.Maps, req.Ticket)
+	existing.RolePermsVersion = workflowRolePermsVersion
 
 	if err := existing.Update(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db update failed")
-		slog.ErrorContext(ctx, "update workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "update workflow: db error", "workflow_id", existing.WorkflowID, "user_id", userID, "error", err)
 		deleteWorkflowRole(ctx, existing.RoleID)
 		http.Error(w, "failed to update workflow", http.StatusInternalServerError)
 		return
@@ -442,7 +706,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	deleteWorkflowRole(ctx, oldRoleID)
 
 	span.SetStatus(codes.Ok, "")
-	slog.InfoContext(ctx, "workflow updated", "workflow_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "workflow updated", "workflow_id", existing.WorkflowID, "user_id", userID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(existing) //nolint:errcheck
 }
@@ -463,7 +727,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	wf, err := getWorkflow(ctx, id)
+	wf, err := resolveWorkflowRef(ctx, id, userID, orgID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Ok, "")
@@ -486,13 +750,13 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err := wf.Remove(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db error")
-		slog.ErrorContext(ctx, "delete workflow: db error", "workflow_id", id, "user_id", userID, "error", err)
+		slog.ErrorContext(ctx, "delete workflow: db error", "workflow_id", wf.WorkflowID, "user_id", userID, "error", err)
 		http.Error(w, "failed to delete workflow", http.StatusInternalServerError)
 		return
 	}
 	deleteWorkflowRole(ctx, roleID)
 
 	span.SetStatus(codes.Ok, "")
-	slog.InfoContext(ctx, "workflow deleted", "workflow_id", id, "user_id", userID)
+	slog.InfoContext(ctx, "workflow deleted", "workflow_id", wf.WorkflowID, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)
 }

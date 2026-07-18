@@ -48,6 +48,23 @@ func validateEnvKeys(env map[string]string) error {
 	return nil
 }
 
+// maxOutputEnv caps how many env vars an execution may capture as output.
+const maxOutputEnv = 32
+
+// validateOutputEnv checks the output_env names are valid POSIX identifiers (they
+// are injected into the capture shell loop) and bounds the count.
+func validateOutputEnv(names []string) error {
+	if len(names) > maxOutputEnv {
+		return fmt.Errorf("output_env: at most %d variables may be captured", maxOutputEnv)
+	}
+	for _, k := range names {
+		if !envKeyRe.MatchString(k) {
+			return fmt.Errorf("invalid output_env name %q: must match [A-Za-z_][A-Za-z0-9_]*", k)
+		}
+	}
+	return nil
+}
+
 // allowedImages is nil when ALLOWED_IMAGES is not configured → deny all submissions.
 // allowedImageList is the same set, deduplicated and sorted, served by GET /images
 // so clients (e.g. the CLI's forge TUI) can offer the permitted images for selection.
@@ -204,34 +221,163 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Image == "" || len(req.Command) == 0 {
-		http.Error(w, "image and command are required", http.StatusBadRequest)
-		return
+	if req.Env == nil {
+		req.Env = map[string]string{}
 	}
-	// allowedImages == nil means ALLOWED_IMAGES was not configured: deny all.
-	if allowedImages == nil || !allowedImages[req.Image] {
-		http.Error(w, "image not allowed", http.StatusBadRequest)
-		return
+	if req.SecretRefs == nil {
+		req.SecretRefs = map[string]string{}
 	}
-	if req.Timeout <= 0 {
-		req.Timeout = defaultTimeout
+
+	// An image-build execution derives its image (forge's Kaniko builder)
+	// and command (the assembled build invocation) from the build spec, so the usual
+	// image/command/allowlist checks don't apply to it. The engine choice and the
+	// privileged-runner requirement are enforced once the runner class resolves its
+	// backend, below.
+	isBuild := req.Build != nil
+	// A volume-copy execution (the scatter-clone / gather primitive) derives its image
+	// (forge's minimal runner image) and command (a synthesised `cp` script) from the
+	// copy spec, so — like build — it bypasses the user image/command/allowlist checks.
+	isCopy := req.Copy != nil
+	// A resolve-paths execution (the scatter fan-out generator) likewise derives its
+	// image and command (a synthesised find | grep) from the resolve spec.
+	isResolve := req.Resolve != nil
+	// An artifact transfer derives its image (forge's minimal runner) and command (a
+	// synthesised tar|curl) from the spec, so like copy/resolve it bypasses the user
+	// image/command/allowlist checks — the caller never picks an image just to move a
+	// cache in or out.
+	isArtifact := req.Artifact != nil
+	// A checkout step that supplies no image of its own (the forge/git-clone action)
+	// runs on forge's controlled minimal git image: like the Kaniko builder it is
+	// forge-supplied and bypasses ALLOWED_IMAGES, so users never pick or maintain a
+	// git-capable image just to clone a repo into a shared volume.
+	isDefaultGitCheckout := !isBuild && !isCopy && !isResolve && !isArtifact && req.Checkout != nil && req.Image == ""
+	switch {
+	case isBuild:
+		if err := validateBuild(req.Build, req.SecretRefs, req.Env); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Timeout <= 0 {
+			req.Timeout = defaultBuildTimeoutSecs
+		}
+	case isArtifact:
+		// Wire the store bearer automatically unless the caller supplied their own.
+		// Forge mints one scoped to this user's artifacts alone, so save/restore needs
+		// no configuration and no standing credential — and the sandbox gets authority
+		// over nothing else.
+		if tok := req.Artifact.tokenEnv(); req.SecretRefs[tok] == "" && req.Env[tok] == "" {
+			if req.SecretRefs == nil {
+				req.SecretRefs = map[string]string{}
+			}
+			req.SecretRefs[tok] = refSchemeToken + ":" + tokenArgArtifacts
+		}
+		if err := validateArtifact(req.Artifact, req.SecretRefs, req.Env, req.Volumes); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Command is materialised below, once the attached volumes are validated (the
+		// script cds into the workdir mount).
+		req.Image = gitImage
+		if req.Timeout <= 0 {
+			req.Timeout = defaultTimeout
+		}
+	case isCopy, isResolve:
+		// Command is materialised below, once the attached volumes have been shape- and
+		// ownership-validated (the scripts reference their mount paths).
+		req.Image = gitImage
+		if req.Timeout <= 0 {
+			req.Timeout = defaultTimeout
+		}
+	case isDefaultGitCheckout:
+		if len(req.Command) == 0 {
+			http.Error(w, "command is required", http.StatusBadRequest)
+			return
+		}
+		req.Image = gitImage
+		if req.Timeout <= 0 {
+			req.Timeout = defaultTimeout
+		}
+	default:
+		if req.Image == "" || len(req.Command) == 0 {
+			http.Error(w, "image and command are required", http.StatusBadRequest)
+			return
+		}
+		// allowedImages == nil means ALLOWED_IMAGES was not configured: deny all.
+		if allowedImages == nil || !allowedImages[req.Image] {
+			http.Error(w, "image not allowed", http.StatusBadRequest)
+			return
+		}
+		if req.Timeout <= 0 {
+			req.Timeout = defaultTimeout
+		}
 	}
 	if req.Timeout > maxTimeout {
 		req.Timeout = maxTimeout
-	}
-	if req.Env == nil {
-		req.Env = map[string]string{}
 	}
 	if err := validateEnvKeys(req.Env); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.SecretRefs == nil {
-		req.SecretRefs = map[string]string{}
-	}
-	if err := validateSecretRefs(req.SecretRefs, req.Env, orgID); err != nil {
+	if err := validateOutputEnv(req.OutputEnv); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if err := validateSecretRefs(req.SecretRefs, req.Env, orgID, userID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateCheckout(req.Checkout, req.Command, req.SecretRefs, req.Env); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateVolumeMounts(req.Volumes); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Each attached volume must already exist and belong to the caller, so a job
+	// cannot mount another user's workspace. The run-scoped identity that created the
+	// volume is the same one that submits the steps attaching it.
+	for _, m := range req.Volumes {
+		vol, err := getActiveVolume(ctx, m.WorkflowID, m.Name)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, fmt.Sprintf("volume %q not found for workflow %q (create it first)", m.Name, m.WorkflowID), http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			slog.ErrorContext(ctx, "submit: volume lookup", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if vol.UserID != userID {
+			http.Error(w, fmt.Sprintf("volume %q is not owned by the caller", m.Name), http.StatusForbidden)
+			return
+		}
+	}
+	// Materialise the artifact transfer now that the volume mounts are validated: the
+	// script cds into the workdir mount and streams tar to/from the store.
+	if isArtifact {
+		req.Command = artifactCommand(req.Artifact, req.Volumes)
+	}
+	// Materialise the copy command now that the volume mounts are validated: it copies
+	// declared paths between them (whole-tree clone, or a disjoint-checked gather union).
+	if isCopy {
+		if err := validateCopy(req.Copy, req.Volumes); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.Command = copyCommand(req.Copy, req.Volumes)
+	}
+	// Materialise the resolve scan and ensure its captured variable is in output_env so
+	// the matched-path list is returned as the step's structured output.
+	if isResolve {
+		if err := validateResolve(req.Resolve, req.Volumes); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.Command = resolveCommand(req.Resolve, req.Volumes)
+		if v := resolveOutputVar(req.Resolve); !containsString(req.OutputEnv, v) {
+			req.OutputEnv = append(req.OutputEnv, v)
+		}
 	}
 	if req.RunnerClass == "" {
 		req.RunnerClass = "standard"
@@ -246,6 +392,20 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	backend := rc.Backend
 	if backend == "" {
 		backend = "default"
+	}
+
+	// Materialise an image build: it requires a privileged runner class (root +
+	// writable rootfs), which forge only honours on a kernel-isolated backend (kata or
+	// gvisor) — so that one check is the whole guard. Forge builds it with Kaniko,
+	// setting the forge-controlled builder image and the assembled build command, which
+	// bypass the user image allowlist checked above.
+	if isBuild {
+		if !rc.Privileged {
+			http.Error(w, "image builds require a privileged runner class (root + writable rootfs on a kata or gvisor backend)", http.StatusBadRequest)
+			return
+		}
+		req.Image = builderImage
+		req.Command = kanikoCommand(req.Build)
 	}
 
 	executionID := uuid.New().String()
@@ -268,6 +428,12 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		OrgID:       orgID,
 		Project:     req.Project,
 		SecretRefs:  req.SecretRefs,
+		OutputEnv:   req.OutputEnv,
+		Checkout:    req.Checkout,
+		Volumes:     req.Volumes,
+		Build:       req.Build,
+		Copy:        req.Copy,
+		Resolve:     req.Resolve,
 		Status:      StatusPending,
 	}
 	if err := exec.Add(ctx); err != nil {

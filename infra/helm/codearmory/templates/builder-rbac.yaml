@@ -24,11 +24,41 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
+  # PodDisruptionBudgets so the reconciler can keep a managed workload above its
+  # replica floor during node drains / involuntary evictions.
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   # Secrets: read (resolve references, read conductor-forward-key) and write
   # (synthesize a service's Secret when provisioning it with no Helm change).
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # ServiceAccounts + RBAC so the reconciler can grant forge the rights to create its
+  # sandbox Jobs (its SA in this namespace, bound to a Role in the exec namespace —
+  # which defaults to this namespace). Scoped to .Release.Namespace, like the rest.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  {{- if or (eq .Values.builder.db.backend "cnpg") .Values.builder.db.cnpg.cluster }}
+  # cnpg db backend: create/read CloudNativePG Database CRs so builder can provision a
+  # service's database declaratively. Builder never edits or deletes the CR (teardown
+  # leaves data intact), so no update/delete — its only DB privilege is this RBAC grant.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["databases"]
+    verbs: ["get", "list", "watch", "create"]
+  {{- end }}
+  {{- if or (eq .Values.builder.db.backend "external") .Values.builder.db.external.storeRef }}
+  # external db backend: manage ExternalSecret CRs so the External Secrets Operator
+  # materializes the per-service db Secret. Builder holds only the reference; delete is
+  # for teardown of its own ExternalSecret (the remote store is never touched).
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

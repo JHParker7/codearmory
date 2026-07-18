@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -13,30 +12,8 @@ import (
 var validRuntimeTypes = map[string]bool{
 	"docker":     true,
 	"kubernetes": true,
-	"proxmox":    true,
 	"kata":       true,
-}
-
-// requiredProxmoxConfigKeys must be present (non-empty) in a proxmox backend's
-// config before it will be accepted.
-var requiredProxmoxConfigKeys = []string{pmKeyURL, pmKeyNode, pmKeyTemplate, pmKeyStorage, pmKeyBridge}
-
-// validateProxmoxBackend checks the config/secret shape a proxmox backend needs
-// so a misconfiguration is rejected at create/update time rather than surfacing
-// only when a job tries to run.
-func validateProxmoxBackend(b runtimeBackendBody) error {
-	for _, k := range requiredProxmoxConfigKeys {
-		if strings.TrimSpace(b.Config[k]) == "" {
-			return fmt.Errorf("proxmox config key %q is required", k)
-		}
-	}
-	if _, err := strconv.Atoi(strings.TrimSpace(b.Config[pmKeyTemplate])); err != nil {
-		return fmt.Errorf("proxmox config key %q must be an integer VMID", pmKeyTemplate)
-	}
-	if strings.TrimSpace(b.SecretRefs[pmSecretToken]) == "" {
-		return fmt.Errorf("proxmox secret_ref %q is required", pmSecretToken)
-	}
-	return nil
+	"gvisor":     true,
 }
 
 // validateKataBackend checks a kata backend names a RuntimeClass. Kata is the
@@ -47,6 +24,19 @@ func validateProxmoxBackend(b runtimeBackendBody) error {
 func validateKataBackend(b runtimeBackendBody) error {
 	if strings.TrimSpace(b.Config[k8sKeyRuntimeClass]) == "" {
 		return fmt.Errorf("kata config key %q is required (the Kubernetes RuntimeClass, e.g. kata-qemu)", k8sKeyRuntimeClass)
+	}
+	return nil
+}
+
+// validateGvisorBackend checks a gvisor backend names a RuntimeClass. gVisor is the
+// kubernetes runtime pinned to a gVisor RuntimeClass (handler runsc); without one the
+// pod would silently fall back to the cluster's default runtime (runc) and run with
+// no gVisor sandbox at all, so an empty runtime_class is a configuration error rather
+// than a permissive default — exactly as for kata. (Unlike kata, gVisor needs no
+// hardware virtualization, but it still requires the RuntimeClass to take effect.)
+func validateGvisorBackend(b runtimeBackendBody) error {
+	if strings.TrimSpace(b.Config[k8sKeyRuntimeClass]) == "" {
+		return fmt.Errorf("gvisor config key %q is required (the Kubernetes RuntimeClass, e.g. gvisor or runsc)", k8sKeyRuntimeClass)
 	}
 	return nil
 }
@@ -62,10 +52,11 @@ func migrateAndSeedRuntimeBackends() error {
 	}
 	rtype := defaultRuntimeType()
 	cfg := map[string]string{}
-	// A seeded kata backend must carry a RuntimeClass or buildRuntime rejects it as
-	// unsandboxed. Seed it from the legacy K8S_RUNTIME_CLASS env so a RUNTIME=kata +
-	// K8S_RUNTIME_CLASS deployment comes up with a valid, self-describing backend.
-	if rtype == "kata" {
+	// A seeded kata or gvisor backend must carry a RuntimeClass or buildRuntime
+	// rejects it as unsandboxed. Seed it from the legacy K8S_RUNTIME_CLASS env so a
+	// RUNTIME=kata|gvisor + K8S_RUNTIME_CLASS deployment comes up with a valid,
+	// self-describing backend.
+	if rtype == "kata" || rtype == "gvisor" {
 		if rc := os.Getenv("K8S_RUNTIME_CLASS"); rc != "" {
 			cfg[k8sKeyRuntimeClass] = rc
 		}

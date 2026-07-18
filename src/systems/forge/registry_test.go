@@ -10,7 +10,7 @@ import (
 
 // fakeRuntime is a Runtime test double: it records the last execution it Ran and
 // the last id it was asked to Cancel, so tests can assert wiring without a live
-// docker/k8s/proxmox backend.
+// docker/k8s backend.
 type fakeRuntime struct {
 	result    RunResult
 	runErr    error

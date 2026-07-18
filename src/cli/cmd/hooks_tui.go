@@ -115,13 +115,15 @@ var (
 		{"ACTIVE", 7, 0},
 		{"CREATED", 14, 0},
 	}
+	// Events have no human name, so the primary label is meaningful context —
+	// event type + repo + ref — and the short id is a secondary detail column.
 	hookEventCols = []tuiColSpec{
-		{"ID", 10, 0},
 		{"TYPE", 14, 1},
 		{"REPO", 18, 2},
 		{"REF", 14, 1},
 		{"MATCHED", 8, 0},
 		{"TIME", 14, 0},
+		{"ID", 10, 0},
 	}
 )
 
@@ -274,12 +276,12 @@ func (m hooksModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := make([]table.Row, len(m.events))
 		for i, e := range m.events {
 			rows[i] = table.Row{
-				tuiShortID(e.EventID),
 				e.EventType,
 				e.Repo,
 				e.Ref,
 				fmt.Sprintf("%d", e.RulesMatched),
 				e.CreatedAt.Local().Format("Jan 02 15:04"),
+				tuiShortID(e.EventID),
 			}
 		}
 		m.eTable.SetRows(rows)
@@ -737,6 +739,7 @@ func init() {
 	})
 	RegisterModule(Module{
 		Name:    "hooks",
+		Service: "hooks",
 		Order:   40,
 		Command: hooksCmd,
 		Screens: []HubScreen{{

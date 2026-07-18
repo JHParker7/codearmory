@@ -25,10 +25,28 @@ import (
 type substContext struct {
 	inputs  map[string]string // run-level inputs, by name
 	outputs map[string]string // earlier step outputs, by step name
+	matrix  map[string]string // matrix bindings for this execution, by var name
+	// mapVars are the map-region bindings for this iteration, by var name, exposed as
+	// ${map.<var>}. Kept separate from matrix: a step inside a map region can still
+	// have its own matrix, so the two namespaces must not collide.
+	mapVars map[string]string
+	// scatterPath is the workspace path a scatter leg is bound to, exposed as
+	// ${scatter.path} so the leg's command targets its own partition.
+	scatterPath string
+	runID       string // this run's id, exposed as ${run_id} / ${run.id}
+	// workflowID is the PIPELINE's id, exposed as ${workflow_id}. Distinct from runID:
+	// it identifies the definition across every run of it, which is what links a
+	// created ticket back to the pipeline rather than to one execution of it.
+	workflowID string
+	// depth is the run's sub-pipeline nesting depth, propagated to a workflows/trigger
+	// step so the created sub-run is one level deeper (not itself a substitution
+	// value, so it is excluded from empty()).
+	depth int
 }
 
 func (sc substContext) empty() bool {
-	return len(sc.inputs) == 0 && len(sc.outputs) == 0
+	return len(sc.inputs) == 0 && len(sc.outputs) == 0 && len(sc.matrix) == 0 &&
+		len(sc.mapVars) == 0 && sc.scatterPath == "" && sc.runID == ""
 }
 
 var refPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
@@ -72,6 +90,48 @@ func (sc substContext) resolve(expr string) (string, bool) {
 	if key, ok := strings.CutPrefix(expr, "inputs."); ok {
 		v, ok := sc.inputs[key]
 		return v, ok
+	}
+	// ${matrix.<var>} resolves to this execution's matrix binding; ${matrix.value}
+	// is a generic alias for the bound value regardless of the var name.
+	if key, ok := strings.CutPrefix(expr, "matrix."); ok {
+		if v, ok := sc.matrix[key]; ok {
+			return v, true
+		}
+		if key == "value" && len(sc.matrix) == 1 {
+			for _, v := range sc.matrix {
+				return v, true
+			}
+		}
+		return "", false
+	}
+	// ${map.<var>} resolves to this map iteration's binding — the region-scoped twin
+	// of ${matrix.<var>}, kept in its own namespace so a step inside a region can
+	// still carry a matrix of its own.
+	if key, ok := strings.CutPrefix(expr, "map."); ok {
+		if v, ok := sc.mapVars[key]; ok {
+			return v, true
+		}
+		if key == "value" && len(sc.mapVars) == 1 {
+			for _, v := range sc.mapVars {
+				return v, true
+			}
+		}
+		return "", false
+	}
+	// ${scatter.path} resolves to the workspace path this scatter leg is bound to.
+	if key, ok := strings.CutPrefix(expr, "scatter."); ok {
+		if key == "path" {
+			return sc.scatterPath, sc.scatterPath != ""
+		}
+		return "", false
+	}
+	// ${run_id} / ${run.id} expose the run's id — used to scope a shared workspace
+	// volume to the run (workflow_id) and to name it deterministically across steps.
+	if expr == "run_id" || expr == "run.id" {
+		return sc.runID, sc.runID != ""
+	}
+	if expr == "workflow_id" || expr == "workflow.id" {
+		return sc.workflowID, sc.workflowID != ""
 	}
 	// Bare ${NAME} resolves to a run input (backward compatible).
 	v, ok := sc.inputs[expr]
