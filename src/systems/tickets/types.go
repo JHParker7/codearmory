@@ -38,17 +38,20 @@ const maxBodyBytes = 64 * 1024
 // WorkflowID/RunID and ForgeExecutionID are optional references to linked resources
 // in other services; they are stored as plain text with no FK enforcement.
 type Ticket struct {
-	TicketID         string          `json:"ticket_id"          gorm:"column:ticket_id;primaryKey"`
-	Title            string          `json:"title"              gorm:"column:title"`
-	Description      string          `json:"description"        gorm:"column:description;default:''"`
-	Status           string          `json:"status"             gorm:"column:status;default:'open'"`
-	Priority         string          `json:"priority"           gorm:"column:priority;default:'medium'"`
-	Timescale        string          `json:"timescale"          gorm:"column:timescale;default:''"`
-	DueDate          *time.Time      `json:"due_date,omitempty" gorm:"column:due_date"`
-	CreatedBy        string          `json:"created_by"         gorm:"column:created_by"`
-	OrgID            string          `json:"org_id"             gorm:"column:org_id;default:''"`
-	Project          string          `json:"project,omitempty"  gorm:"column:project;default:''"`
-	BoardID          *string         `json:"board_id,omitempty" gorm:"column:board_id"`
+	TicketID    string     `json:"ticket_id"          gorm:"column:ticket_id;primaryKey"`
+	Title       string     `json:"title"              gorm:"column:title"`
+	Description string     `json:"description"        gorm:"column:description;default:''"`
+	Status      string     `json:"status"             gorm:"column:status;default:'open'"`
+	Priority    string     `json:"priority"           gorm:"column:priority;default:'medium'"`
+	Timescale   string     `json:"timescale"          gorm:"column:timescale;default:''"`
+	DueDate     *time.Time `json:"due_date,omitempty" gorm:"column:due_date"`
+	CreatedBy   string     `json:"created_by"         gorm:"column:created_by"`
+	OrgID       string     `json:"org_id"             gorm:"column:org_id;default:''"`
+	Project     string     `json:"project,omitempty"  gorm:"column:project;default:''"`
+	BoardID     *string    `json:"board_id,omitempty" gorm:"column:board_id"`
+	// ParentID links this ticket to a parent ticket (sub-ticket hierarchy). nil = a
+	// top-level ticket. Validated to exist, be accessible, and not form a cycle.
+	ParentID         *string         `json:"parent_id,omitempty" gorm:"column:parent_id"`
 	AssigneeID       *string         `json:"assignee_id,omitempty"        gorm:"column:assignee_id"`
 	WorkflowID       *string         `json:"workflow_id,omitempty"        gorm:"column:workflow_id"`
 	RunID            *string         `json:"run_id,omitempty"             gorm:"column:run_id"`
@@ -103,11 +106,11 @@ func (Board) TableName() string { return "ticket_boards" }
 // TicketFieldDef defines a custom status, priority, or timescale value.
 // OrgID="" means it is a system-wide default visible to all orgs.
 //
-// BoardID scopes a status def to a single board so each board owns its own
-// status columns ("linked to the board"). BoardID="" is the org/global level
-// used by no-board tickets and as the fallback for boards that have not
-// configured their own columns. Only status defs are ever board-scoped;
-// priority/timescale defs always keep BoardID="".
+// BoardID scopes a def to a single board so each board owns its own status columns
+// AND its own priority options ("linked to the board"), never merged across boards.
+// BoardID="" is the org/global level used as the fallback for boards that have not
+// configured their own. Status and priority defs are board-scoped; timescale defs
+// always keep BoardID="".
 type TicketFieldDef struct {
 	FieldDefID string    `json:"field_def_id"        gorm:"column:field_def_id;primaryKey"`
 	OrgID      string    `json:"org_id"              gorm:"column:org_id;default:''"`

@@ -343,7 +343,11 @@ func setupAuth(email, username string, signup bool) error {
 	if err != nil {
 		return fmt.Errorf("saving token: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "Logged in — token saved to %s\n", where)
+	if where != "" {
+		fmt.Fprintf(os.Stderr, "Logged in — token saved to %s\n", where)
+	} else {
+		fmt.Fprintln(os.Stderr, "Logged in.")
+	}
 	return nil
 }
 

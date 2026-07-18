@@ -617,6 +617,8 @@ export interface Ticket {
   project?: string;
   /** The board this ticket belongs to. New tickets always have a board; null/absent only for legacy rows. */
   board_id?: string | null;
+  /** Parent ticket (sub-ticket hierarchy); null/absent for a top-level ticket. */
+  parent_id?: string | null;
   created_by: string;
   org_id?: string | null;
   assignee_id?: string | null;
@@ -636,13 +638,13 @@ export function getTicket(token: string, id: string) {
   return req<Ticket>('GET', `/tickets/tickets/${id}`, token);
 }
 
-export function createTicket(token: string, payload: { title: string; description?: string; status?: string; priority?: string; project?: string; board_id?: string; timescale?: string; due_date?: string; assignee_id?: string }) {
+export function createTicket(token: string, payload: { title: string; description?: string; status?: string; priority?: string; project?: string; board_id?: string; parent_id?: string; timescale?: string; due_date?: string; assignee_id?: string }) {
   return req<Ticket>('POST', '/tickets/tickets', token, payload);
 }
 
 // board_id: a string assigns the ticket to that board; "" re-homes it to the default board; omit to leave unchanged.
 // due_date accepts YYYY-MM-DD; "" clears it. assignee_id "" unassigns. timescale "" is ignored server-side (kept).
-export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string; board_id: string; timescale: string; due_date: string }>) {
+export function updateTicket(token: string, id: string, payload: Partial<{ title: string; description: string; status: string; priority: string; assignee_id: string; board_id: string; parent_id: string; project: string; timescale: string; due_date: string }>) {
   return req<Ticket>('PUT', `/tickets/tickets/${id}`, token, payload);
 }
 

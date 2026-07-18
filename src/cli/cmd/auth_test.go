@@ -51,7 +51,12 @@ func TestLogin_Success(t *testing.T) {
 	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
 	orig := readPassword
 	readPassword = func() (string, error) { return "supersecret", nil }
-	t.Cleanup(func() { readPassword = orig })
+	// These cases are the interactive login (they stub the password prompt), so they
+	// must present as a terminal — otherwise resolvePassword refuses to prompt and
+	// directs the user to CODEARMORY_PASSWORD / --password-stdin instead.
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { readPassword = orig; stdinIsTerminal = origTerm })
 
 	if err := loginCmd.RunE(loginCmd, nil); err != nil {
 		t.Fatalf("login: %v", err)
@@ -217,36 +222,13 @@ func TestAuthStatus_KeychainToken(t *testing.T) {
 	}
 }
 
-func TestAuthStatus_ConfigFileToken(t *testing.T) {
-	keyring.MockInit()
-	isolateHome(t)
-	t.Setenv("CODEARMORY_TOKEN", "")
-	t.Cleanup(func() { flagToken = ""; flagURL = "" })
-	flagToken = ""
-	flagURL = "http://test:8082"
-	// No keychain token, but a config-file token.
-	saveConfig(cliConfig{Token: "config-file-token-long-enough", URL: "http://test:8082"}) //nolint:errcheck
-	silenceStdout(t)
-
-	if err := authStatusCmd.RunE(authStatusCmd, nil); err != nil {
-		t.Fatalf("status with config-file token: %v", err)
-	}
-}
-
-func TestLogin_StoreTokenError(t *testing.T) {
-	// Force both keyring and saveConfig to fail so loginCmd.RunE returns
-	// "saving token: ..." error (covering auth.go:35-37).
+func TestLogin_KeychainUnavailable_NoPlaintext(t *testing.T) {
+	// When the keychain is unavailable, login must still succeed but must NOT write a
+	// plaintext token — it prints an `export CODEARMORY_TOKEN=…` line instead.
 	keyring.MockInitWithError(fmt.Errorf("keyring unavailable"))
 	t.Cleanup(func() { keyring.MockInit() })
 	isolateHome(t)
 	silenceStdout(t)
-
-	// Make $HOME/.config a regular file to cause saveConfig / MkdirAll to fail.
-	home, _ := os.UserHomeDir()
-	cfgParent := home + "/.config"
-	if err := os.WriteFile(cfgParent, []byte("not a dir"), 0600); err != nil {
-		t.Fatalf("setup: %v", err)
-	}
 
 	srv, _ := recordingServer(t, http.StatusOK, `{"token":"jwt-from-server"}`)
 	setupCLINoToken(t, srv)
@@ -254,10 +236,18 @@ func TestLogin_StoreTokenError(t *testing.T) {
 	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
 	orig := readPassword
 	readPassword = func() (string, error) { return "supersecret", nil }
-	t.Cleanup(func() { readPassword = orig })
+	// These cases are the interactive login (they stub the password prompt), so they
+	// must present as a terminal — otherwise resolvePassword refuses to prompt and
+	// directs the user to CODEARMORY_PASSWORD / --password-stdin instead.
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { readPassword = orig; stdinIsTerminal = origTerm })
 
-	if err := loginCmd.RunE(loginCmd, nil); err == nil {
-		t.Fatal("expected error when token cannot be stored, got nil")
+	if err := loginCmd.RunE(loginCmd, nil); err != nil {
+		t.Fatalf("login should succeed on a keychain-less host, got %v", err)
+	}
+	if cfg := loadConfig(); cfg.Token != "" {
+		t.Errorf("login wrote a plaintext token %q; it must never persist the token to disk", cfg.Token)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -28,6 +29,7 @@ type boardTicket struct {
 	WorkflowID       *string `json:"workflow_id,omitempty"`
 	RunID            *string `json:"run_id,omitempty"`
 	ForgeExecutionID *string `json:"forge_execution_id,omitempty"`
+	UpdatedAt        string  `json:"updated_at"`
 }
 
 // boardInfo is a board the tickets can be grouped by (the board switcher's entries).
@@ -74,6 +76,15 @@ type boardDataMsg struct {
 type boardStatusesMsg struct{ statuses []boardFieldDef }
 type boardMovedMsg struct{}
 type boardErrMsg struct{ err error }
+
+// boardTickMsg drives the periodic auto-refresh (see boardTick).
+type boardTickMsg struct{}
+
+// boardTick fires a boardTickMsg every 5s so the board live-refreshes without the
+// user pressing r; each tick reschedules the next from Update.
+func boardTick() tea.Cmd {
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg { return boardTickMsg{} })
+}
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -229,7 +240,7 @@ func statusBoardScope(boardFilter string) string {
 func fetchBoardData(boardFilter string) tea.Cmd {
 	return func() tea.Msg {
 		statuses := fetchBoardFieldDefs("status", defaultBoardStatuses, statusBoardScope(boardFilter))
-		priorities := fetchBoardFieldDefs("priority", defaultBoardPriorities, "")
+		priorities := fetchBoardFieldDefs("priority", defaultBoardPriorities, statusBoardScope(boardFilter))
 		boards := fetchBoards()
 
 		data, err := doRequest("GET", appendProjectParam("/tickets/tickets"), nil)
@@ -310,44 +321,67 @@ func (m boardModel) boardCounts() (open, total int) {
 	return open, total
 }
 
-// ticketInFilter reports whether a ticket matches the active board filter.
+// ticketInFilter reports whether a ticket belongs to the selected board. Every
+// ticket has a board and there is no all/unassigned view, so this is a plain match.
 func (m boardModel) ticketInFilter(t boardTicket) bool {
-	switch m.boardFilter {
-	case "":
-		return true
-	case boardFilterNone:
-		return t.BoardID == nil || *t.BoardID == ""
-	default:
-		return t.BoardID != nil && *t.BoardID == m.boardFilter
-	}
+	return t.BoardID != nil && *t.BoardID == m.boardFilter
 }
 
-// boardFilterKeys returns the ordered set of board-filter values the user can
-// cycle through: all boards, then each board, then the unassigned pile.
+// boardFilterKeys returns the boards the user can cycle through — one per board, no
+// all/unassigned entries.
 func (m boardModel) boardFilterKeys() []string {
-	keys := []string{""}
+	keys := make([]string, 0, len(m.boards))
 	for _, b := range m.boards {
 		keys = append(keys, b.ID)
 	}
-	keys = append(keys, boardFilterNone)
 	return keys
 }
 
-// boardFilterLabel renders the active board filter for the help line.
+// boardFilterLabel renders the selected board's name for the help line.
 func (m boardModel) boardFilterLabel() string {
-	switch m.boardFilter {
-	case "":
-		return "all"
-	case boardFilterNone:
-		return "unassigned"
-	default:
-		for _, b := range m.boards {
-			if b.ID == m.boardFilter {
-				return b.Name
-			}
+	for _, b := range m.boards {
+		if b.ID == m.boardFilter {
+			return b.Name
 		}
-		return "—"
 	}
+	return "—"
+}
+
+// boardExists reports whether id is one of the loaded boards.
+func (m boardModel) boardExists(id string) bool {
+	for _, b := range m.boards {
+		if b.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// defaultBoard picks the board to open: the one with the most recent ticket
+// activity (max updated_at), else the first board, else "" when there are none.
+func (m boardModel) defaultBoard() string {
+	latest := map[string]string{}
+	for _, t := range m.allTickets {
+		if t.BoardID == nil || *t.BoardID == "" {
+			continue
+		}
+		if t.UpdatedAt > latest[*t.BoardID] {
+			latest[*t.BoardID] = t.UpdatedAt
+		}
+	}
+	best, bestTS := "", ""
+	for _, b := range m.boards {
+		if latest[b.ID] > bestTS {
+			best, bestTS = b.ID, latest[b.ID]
+		}
+	}
+	if best != "" {
+		return best
+	}
+	if len(m.boards) > 0 {
+		return m.boards[0].ID
+	}
+	return ""
 }
 
 // cycleBoard advances the board filter by dir (+1/-1) and regroups.
@@ -422,7 +456,7 @@ func sendMoveTicket(t boardTicket, newStatus string) tea.Cmd {
 
 // ── Init / Update / View ─────────────────────────────────────────────────────
 
-func (m boardModel) Init() tea.Cmd { return fetchBoardData(m.boardFilter) }
+func (m boardModel) Init() tea.Cmd { return tea.Batch(fetchBoardData(m.boardFilter), boardTick()) }
 
 func (m boardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Mode-independent messages.
@@ -432,18 +466,14 @@ func (m boardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case boardDataMsg:
 		m.statuses, m.priorities, m.boards, m.allTickets = msg.statuses, msg.priorities, msg.boards, msg.tickets
-		// Drop a board filter that no longer resolves (its board was deleted).
-		if m.boardFilter != "" && m.boardFilter != boardFilterNone {
-			stillThere := false
-			for _, b := range m.boards {
-				if b.ID == m.boardFilter {
-					stillThere = true
-					break
-				}
-			}
-			if !stillThere {
-				m.boardFilter = ""
-			}
+		// Ensure a real board is selected (there is no all/unassigned view): keep the
+		// current one if it still exists, else default to the most-recently-active
+		// board. A changed selection means the board-scoped statuses/priorities in this
+		// message are for the wrong board, so refetch them below.
+		refetch := false
+		if !m.boardExists(m.boardFilter) {
+			m.boardFilter = m.defaultBoard()
+			refetch = m.boardFilter != ""
 		}
 		m = m.regroup()
 		m.loading, m.err = false, nil
@@ -469,6 +499,9 @@ func (m boardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.cols) > 0 {
 			m.row = boardClamp(m.row, len(m.cols[m.col]))
 		}
+		if refetch {
+			return m, fetchBoardData(m.boardFilter)
+		}
 		return m, nil
 	case boardStatusesMsg:
 		m.statuses = msg.statuses
@@ -490,6 +523,18 @@ func (m boardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading, m.err = false, msg.err
 		m.mode = boardModeNav
 		return m, nil
+	case boardTickMsg:
+		// Auto-refresh every 5s so board changes (from the web UI or another CLI)
+		// appear without pressing r — but only in nav mode (never mid-form) and not
+		// during the initial load. Follow the selected ticket so the cursor doesn't
+		// jump when the columns rebuild. Always reschedule the tick.
+		if m.mode == boardModeNav && !m.loading {
+			if m.col >= 0 && m.col < len(m.cols) && m.row >= 0 && m.row < len(m.cols[m.col]) {
+				m.followID = m.cols[m.col][m.row].ID
+			}
+			return m, tea.Batch(fetchBoardData(m.boardFilter), boardTick())
+		}
+		return m, boardTick()
 	}
 
 	switch m.mode {
@@ -534,10 +579,10 @@ func (m boardModel) updateNav(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case "tab":
 		m = m.cycleBoard(1)
-		return m, fetchBoardStatuses(m.boardFilter)
+		return m, fetchBoardData(m.boardFilter)
 	case "shift+tab":
 		m = m.cycleBoard(-1)
-		return m, fetchBoardStatuses(m.boardFilter)
+		return m, fetchBoardData(m.boardFilter)
 	case "b":
 		m = openNewBoardForm(m)
 		return m, m.formTitle.Focus()

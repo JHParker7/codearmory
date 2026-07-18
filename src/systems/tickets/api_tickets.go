@@ -29,6 +29,7 @@ type createTicketRequest struct {
 	Priority         string  `json:"priority"`
 	Project          string  `json:"project"`
 	BoardID          *string `json:"board_id"`
+	ParentID         *string `json:"parent_id"`
 	Timescale        string  `json:"timescale"`
 	DueDate          *string `json:"due_date"`
 	AssigneeID       *string `json:"assignee_id"`
@@ -44,6 +45,7 @@ type updateTicketRequest struct {
 	Priority         string  `json:"priority"`
 	Project          string  `json:"project"`
 	BoardID          *string `json:"board_id"`
+	ParentID         *string `json:"parent_id"`
 	Timescale        string  `json:"timescale"`
 	DueDate          *string `json:"due_date"`
 	AssigneeID       *string `json:"assignee_id"`
@@ -71,6 +73,48 @@ func normalizeBoardID(ctx context.Context, boardID *string, userID, orgID string
 		return nil, false, nil
 	}
 	id := b.BoardID
+	return &id, true, nil
+}
+
+// normalizeParentID validates a ticket's requested parent (sub-ticket hierarchy):
+// nil/empty means no parent. Otherwise the parent must exist, be accessible, not be
+// the ticket itself, and not create a cycle — its ancestor chain must not reach
+// selfID (empty on create, since a brand-new ticket can't be an ancestor). The bool
+// is false when the parent is missing/inaccessible/cyclic (caller 400s); a non-nil
+// error is a DB failure (500).
+func normalizeParentID(ctx context.Context, parentID *string, selfID, userID, orgID string) (*string, bool, error) {
+	if parentID == nil || *parentID == "" {
+		return nil, true, nil
+	}
+	if *parentID == selfID {
+		return nil, false, nil // a ticket cannot be its own parent
+	}
+	// Walk the ancestor chain from the requested parent to the root, checking each
+	// exists + is accessible and that we never reach selfID (a cycle). maxParentDepth
+	// bounds the walk against any pre-existing cycle in the data.
+	const maxParentDepth = 64
+	cur := *parentID
+	for range maxParentDepth {
+		row, err := (Ticket{TicketID: cur}).Get(ctx)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, false, nil
+			}
+			return nil, false, err
+		}
+		t := row.(Ticket)
+		if !canAccessTicket(t, userID, orgID) {
+			return nil, false, nil
+		}
+		if t.ParentID == nil || *t.ParentID == "" {
+			break // reached a root without hitting selfID
+		}
+		if *t.ParentID == selfID {
+			return nil, false, nil // would form a cycle
+		}
+		cur = *t.ParentID
+	}
+	id := *parentID
 	return &id, true, nil
 }
 
@@ -142,7 +186,6 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate priority (not board-scoped) up front, before resolving the board.
 	priority := req.Priority
 	if priority == "" {
 		priority = PriorityMedium
@@ -169,6 +212,18 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	scopeBoard := boardScope(boardID)
 
+	parentID, parentOK, err := normalizeParentID(ctx, req.ParentID, "", userID, orgID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "parent lookup failed")
+		http.Error(w, "failed to create ticket", http.StatusInternalServerError)
+		return
+	}
+	if !parentOK {
+		http.Error(w, "parent ticket not found or not accessible", http.StatusBadRequest)
+		return
+	}
+
 	// Status defaults to the board's left-most column when the client omits it.
 	statusValues := getFieldDefValues(ctx, orgID, FieldKindStatus, scopeBoard, validStatuses)
 	status := req.Status
@@ -194,6 +249,7 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		Priority:         priority,
 		Project:          req.Project,
 		BoardID:          boardID,
+		ParentID:         parentID,
 		Timescale:        req.Timescale,
 		DueDate:          dueDate,
 		CreatedBy:        userID,
@@ -402,6 +458,25 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		effectiveBoardID = boardScope(newBoardID)
 	}
 
+	// A parent change is validated up-front (exists, accessible, no cycle). A nil
+	// pointer keeps the current parent; an explicit "" clears it.
+	parentChanged := req.ParentID != nil
+	var newParentID *string
+	if parentChanged {
+		pid, parentOK, err := normalizeParentID(ctx, req.ParentID, existing.TicketID, userID, orgID)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "parent lookup failed")
+			http.Error(w, "failed to update ticket", http.StatusInternalServerError)
+			return
+		}
+		if !parentOK {
+			http.Error(w, "parent ticket not found, not accessible, or would create a cycle", http.StatusBadRequest)
+			return
+		}
+		newParentID = pid
+	}
+
 	if req.Status == "" {
 		req.Status = existing.Status
 	}
@@ -465,6 +540,9 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	if boardChanged {
 		existing.BoardID = newBoardID
+	}
+	if parentChanged {
+		existing.ParentID = newParentID
 	}
 
 	if err := existing.Update(ctx); err != nil {
