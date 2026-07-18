@@ -199,6 +199,54 @@ function edgePath(x1: number, y1: number, x2: number, y2: number): string {
   return `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2}`;
 }
 
+/** The outcome a route's condition selects, so a branch reads as pass / fail / other
+ * at a glance instead of every conditional edge looking identical. A `status`
+ * comparison against a success-y value (or `!=` a failure-y one) is the taken-on-
+ * success branch; the opposite is the failure branch; anything else is a neutral
+ * data condition. */
+function conditionColor(when?: string): string {
+  if (!when) return T.faint; // unconditional — taken when the source succeeds
+  const m = when.match(/status\s*(==|!=)\s*["']([a-zA-Z_]+)["']/);
+  if (m) {
+    const pass = /^(completed|complete|success|succeeded|ok|passed)$/i.test(m[2]);
+    const isEq = m[1] === '==';
+    return (isEq && pass) || (!isEq && !pass) ? T.green : T.red;
+  }
+  return T.violet;
+}
+
+/** A short label drawn ON a conditional edge — the crux of the redesign: the branch
+ * shows what it tests, not a generic badge. A `steps.X.status == "failed"` becomes
+ * `failed`; other expressions are truncated. The full text stays in the tooltip and
+ * the route inspector. */
+function conditionLabel(when: string): string {
+  const eq = when.match(/status\s*==\s*["']([a-zA-Z_]+)["']/);
+  if (eq) return eq[1];
+  const ne = when.match(/status\s*!=\s*["']([a-zA-Z_]+)["']/);
+  if (ne) return `≠ ${ne[1]}`;
+  const s = when.trim();
+  return s.length > 22 ? s.slice(0, 21) + '…' : s;
+}
+
+type NodeShape = 'terminator' | 'gate' | 'decision' | 'fanout' | 'step';
+
+/** The SVG outline for a node's box, so the graph uses real flow-chart symbols:
+ * a rounded stadium for a run's entry/exit, a diamond for a decision (an approval
+ * gate or a step that branches on a condition), a double-barred box for a fan-out,
+ * and a plain rounded rect for an ordinary step. */
+function shapeOutline(shape: NodeShape, x: number, y: number, w: number, h: number): string {
+  const cx = x + w / 2, cy = y + h / 2;
+  if (shape === 'gate' || shape === 'decision') {
+    return `M ${cx} ${y} L ${x + w} ${cy} L ${cx} ${y + h} L ${x} ${cy} Z`;
+  }
+  // terminator = stadium (fully rounded ends); step/fanout = lightly rounded rect.
+  const r = shape === 'terminator' ? h / 2 : 5;
+  return `M ${x + r} ${y} L ${x + w - r} ${y} A ${r} ${r} 0 0 1 ${x + w} ${y + r}`
+    + ` L ${x + w} ${y + h - r} A ${r} ${r} 0 0 1 ${x + w - r} ${y + h}`
+    + ` L ${x + r} ${y + h} A ${r} ${r} 0 0 1 ${x} ${y + h - r}`
+    + ` L ${x} ${y + r} A ${r} ${r} 0 0 1 ${x + r} ${y} Z`;
+}
+
 export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasProps>(function PipelineCanvas({
   initialSteps, initialRoutes, initialMaps, catalog, editable = false, palette = [], actions = [],
   onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed, runStatus, activeNode,
@@ -270,6 +318,37 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     blocks.forEach((b) => m.set(nodeName(b, defName), b.uid));
     return m;
   }, [blocks, defName]);
+
+  /** Edges leaving one node are spread across its lower edge (and edges entering a
+   * join spread across its upper edge) so siblings fan out to distinct points rather
+   * than stacking on the exact centre — the main reason the old drawing was hard to
+   * read. Each name maps to the ordered route indices out of / into it. */
+  const edgeGeom = useMemo(() => {
+    const outByFrom = new Map<string, number[]>();
+    const inByTo = new Map<string, number[]>();
+    routes.forEach((r, i) => {
+      if (!outByFrom.has(r.from)) outByFrom.set(r.from, []);
+      outByFrom.get(r.from)!.push(i);
+      if (!inByTo.has(r.to)) inByTo.set(r.to, []);
+      inByTo.get(r.to)!.push(i);
+    });
+    return { outByFrom, inByTo };
+  }, [routes]);
+
+  /** Names that branch on a condition (an if/else): drawn as a decision diamond. */
+  const decisionNames = useMemo(() => {
+    const s = new Set<string>();
+    routes.forEach((r) => { if (r.when) s.add(r.from); });
+    return s;
+  }, [routes]);
+
+  /** The endpoint x for a route: slotted across the source's lower / target's upper
+   * edge by this route's position among its siblings. A lone edge stays centred. */
+  const slotX = (nodeX: number, siblings: number[], routeIdx: number): number => {
+    const k = siblings.indexOf(routeIdx);
+    const n = siblings.length;
+    return nodeX + (NODE_W * (k + 1)) / (n + 1);
+  };
 
   const selectedNode = useMemo(() => blocks.find((b) => b.uid === selectedUid) ?? null, [blocks, selectedUid]);
   const cycle = useMemo(() => findCycle(blocks, routes, defName), [blocks, routes, defName]);
@@ -565,44 +644,91 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               </span>
             </div>
           ))}
-          {/* Edges are drawn under the nodes so a route never covers a step's text. */}
+          {/* Node shapes + routing edges, under the interactive node layer so a route
+              never covers a step's text and the shapes read as flow-chart symbols
+              behind the labels and ports. */}
           <svg width={width} height={height} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
             <defs>
-              <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                <path d="M 0 0 L 8 4 L 0 8 z" fill={T.faint} />
-              </marker>
-              <marker id="arrow-sel" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                <path d="M 0 0 L 8 4 L 0 8 z" fill={T.green} />
-              </marker>
+              {([['faint', T.faint], ['green', T.green], ['red', T.red], ['violet', T.violet]] as const).map(([id, col]) => (
+                <marker key={id} id={`arr-${id}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+                  <path d="M 0 0 L 8 4 L 0 8 z" fill={col} />
+                </marker>
+              ))}
             </defs>
+
+            {/* Node outlines: stadium = a run's start/end, diamond = a decision (an
+                approval gate or a step that branches on a condition), double-barred
+                box = a fan-out, rounded rect = an ordinary step. Drawn first so the
+                edges, labels and ports sit on top. */}
+            {blocks.map((b) => {
+              const p = posOf.get(b.uid);
+              if (!p) return null;
+              const name = nodeName(b, defName);
+              const action = b.inline?.action ?? catalog[b.stepId]?.action ?? '';
+              const isGate = action === 'approval' || !!b.approval;
+              const isDecision = decisionNames.has(name);
+              const isEntry = !routes.some((r) => r.to === name);
+              const isTerminal = !routes.some((r) => r.from === name);
+              const isFanout = !!b.matrix || !!b.scatter;
+              const shape: NodeShape = isGate ? 'gate' : isDecision ? 'decision'
+                : isEntry || isTerminal ? 'terminator' : isFanout ? 'fanout' : 'step';
+              const run = runStatus?.[name];
+              const on = selectedUid === b.uid || activeNode === name;
+              const stroke = on ? T.green
+                : run ? runColor(run.status)
+                : isGate ? T.blue
+                : isDecision ? T.violet
+                : isEntry ? T.green
+                : b.matrix ? T.amber
+                : b.scatter ? T.green
+                : T.border;
+              const fill = on ? T.greenSoft : isGate ? T.blueSoft : isDecision ? T.violetSoft : T.bgAlt;
+              return (
+                <g key={`shape-${b.uid}`}>
+                  <path d={shapeOutline(shape, p.x, p.y, NODE_W, NODE_H)}
+                    fill={fill} stroke={stroke} strokeWidth={on ? 2 : 1.4} />
+                  {shape === 'fanout' && (
+                    <>
+                      <line x1={p.x + 7} y1={p.y} x2={p.x + 7} y2={p.y + NODE_H} stroke={stroke} strokeWidth={1} />
+                      <line x1={p.x + NODE_W - 7} y1={p.y} x2={p.x + NODE_W - 7} y2={p.y + NODE_H} stroke={stroke} strokeWidth={1} />
+                    </>
+                  )}
+                </g>
+              );
+            })}
+
             {routes.map((r, i) => {
               const a = posOf.get(byName.get(r.from) ?? '');
               const b = posOf.get(byName.get(r.to) ?? '');
               if (!a || !b) return null; // endpoint gone; pruned on save
-              const x1 = a.x + NODE_W / 2, y1 = a.y + NODE_H;
-              const x2 = b.x + NODE_W / 2, y2 = b.y;
+              const outs = edgeGeom.outByFrom.get(r.from) ?? [i];
+              const ins = edgeGeom.inByTo.get(r.to) ?? [i];
+              const x1 = slotX(a.x, outs, i), y1 = a.y + NODE_H;
+              const x2 = slotX(b.x, ins, i), y2 = b.y;
               const sel = selectedEdge === i;
+              const col = sel ? T.green : conditionColor(r.when);
+              const markerId = sel ? 'green' : !r.when ? 'faint' : col === T.green ? 'green' : col === T.red ? 'red' : 'violet';
+              const lab = r.when ? conditionLabel(r.when) : '';
+              const lx = x1 + (x2 - x1) * 0.42, ly = y1 + (y2 - y1) * 0.42;
               return (
                 <g key={`${r.from}->${r.to}-${i}`}>
                   <path d={edgePath(x1, y1, x2, y2)} fill="none"
-                    stroke={sel ? T.green : T.faint} strokeWidth={sel ? 2 : 1.2}
+                    stroke={col} strokeWidth={sel ? 2.2 : 1.5}
                     strokeDasharray={r.when ? '5 3' : undefined}
-                    markerEnd={`url(#${sel ? 'arrow-sel' : 'arrow'})`} />
-                  {/* A fat invisible stroke gives the thin edge a clickable target. */}
-                  <path d={edgePath(x1, y1, x2, y2)} fill="none" stroke="transparent" strokeWidth={12}
+                    markerEnd={`url(#arr-${markerId})`} />
+                  {/* Fat invisible stroke = clickable target for selecting the edge. */}
+                  <path d={edgePath(x1, y1, x2, y2)} fill="none" stroke="transparent" strokeWidth={14}
                     style={{ pointerEvents: editable ? 'stroke' : 'none', cursor: 'pointer' }}
                     onClick={() => { setSelectedEdge(i); setSelectedUid(null); }} />
-                  {/* A conditional route is marked with a compact badge, not its
-                      expression: printing every condition along every edge buried the
-                      graph in text. The expression lives in the inspector (and the
-                      tooltip), where there is room to read it. */}
-                  {r.when && (
+                  {/* The condition, ON the edge: a labelled pill coloured by outcome, so
+                      a branch says what it tests without opening the inspector. The full
+                      expression stays in the tooltip and the route inspector. */}
+                  {lab && (
                     <g style={{ pointerEvents: 'none' }}>
                       <title>{r.when}</title>
-                      <circle cx={(x1 + x2) / 2} cy={(y1 + y2) / 2} r={8}
-                        fill={T.bg} stroke={sel ? T.green : T.faint} strokeWidth={1} />
-                      <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 + 3} textAnchor="middle"
-                        fill={sel ? T.green : T.faint} fontSize={9} fontFamily={T.mono}>⑂</text>
+                      <rect x={lx - (lab.length * 3.4 + 7)} y={ly - 8} width={lab.length * 6.8 + 14} height={16} rx={8}
+                        fill={T.bg} stroke={col} strokeWidth={sel ? 1.4 : 1} />
+                      <text x={lx} y={ly + 3.5} textAnchor="middle" fill={col} fontSize={10} fontFamily={T.mono} fontWeight={600}>{lab}</text>
                     </g>
                   )}
                 </g>
@@ -617,21 +743,21 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
             const action = b.inline?.action ?? catalog[b.stepId]?.action ?? '';
             const isEntry = !routes.some((r) => r.to === name);
             const isGate = action === 'approval' || !!b.approval;
+            const isDecision = decisionNames.has(name);
+            const diamond = isGate || isDecision;
             const linking = linkFrom === b.uid;
             const run = runStatus?.[name];
-            // A run colours the node by outcome; the editor colours it by role.
-            const bar = run ? runColor(run.status) : isGate ? T.amber : isEntry ? T.green : T.border;
-            const isActive = activeNode === name;
             return (
+              // Transparent: the SVG layer draws this node's outline + fill, so the box
+              // can be a stadium / diamond / fan-out rather than only a rectangle. This
+              // layer carries the label, the ports and the click target.
               <div key={b.uid} style={{
                 position: 'absolute', left: p.x, top: p.y, width: NODE_W, height: NODE_H,
-                boxSizing: 'border-box',
-                background: selectedUid === b.uid || isActive ? T.greenSoft : T.bgAlt,
-                border: `1px solid ${selectedUid === b.uid || isActive ? T.green : T.border}`,
-                // A run colours the node by outcome; the editor colours it by role.
-                borderLeft: `3px solid ${bar}`,
+                boxSizing: 'border-box', background: 'transparent',
                 display: 'flex', flexDirection: 'column', justifyContent: 'center',
-                padding: '6px 10px', cursor: 'pointer',
+                textAlign: diamond ? 'center' : 'left',
+                // A diamond's points eat the corners, so pad the label inward.
+                padding: diamond ? '6px 26px' : '6px 10px', cursor: 'pointer',
               }} onClick={() => select(b)}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
                   <span style={{ fontFamily: T.mono, fontSize: 12, color: T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -652,6 +778,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                       {isGate ? 'manual approval' : action}
                       {b.matrix?.var ? ` · ⊞ ${b.matrix.var}` : ''}
                       {b.scatter?.regex ? ' · ⊟ scatter' : ''}
+                      {isDecision && !isGate ? ' · ⑂ branches' : ''}
                     </>
                   )}
                 </div>
