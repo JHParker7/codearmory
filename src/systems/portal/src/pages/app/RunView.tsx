@@ -480,14 +480,6 @@ export function RunView() {
                   }}
                 />
               </div>
-              {/* The selected node's executions, in their own scrollable strip below the
-                  graph so they never push the graph out of view. */}
-              {selectedLegs.length > 0 && (
-                <div style={{ flexShrink: 0, maxHeight: '40%', overflowY: 'auto', padding: '10px 16px 16px' }}>
-                  <MatrixBlock steps={selectedLegs} selected={selected} setSelected={setSelected}
-                    deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
-                </div>
-              )}
             </>
           )}
         </div>
@@ -517,18 +509,31 @@ export function RunView() {
             <button onClick={minimiseLogs} title="minimise logs"
               style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '2px 8px', cursor: 'pointer' }}>–</button>
           </div>
+          {/* The combination selector lives here — at the top of the logs — and only
+              when the selected step actually fanned out (a matrix / map / scatter).
+              A single execution needs no picker; a single gate still shows its
+              approve/reject controls. */}
+          {selectedLegs.length > 1 ? (
+            <div style={{ flexShrink: 0, padding: '10px 16px', borderBottom: `1px solid ${T.border}`, background: T.bg }}>
+              <MatrixBlock steps={selectedLegs} selected={selected} setSelected={setSelected}
+                deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
+            </div>
+          ) : selectedSr?.status === 'awaiting_approval' ? (
+            <div style={{ flexShrink: 0, padding: '10px 16px', borderBottom: `1px solid ${T.border}`, background: T.bg }}>
+              <ApprovalPanel gate={selectedLegs[0]?.gate} deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
+            </div>
+          ) : null}
           <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
             {!selectedSr ? (
               <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ select a step to see its logs</div>
             ) : selectedSr.status === 'awaiting_approval' ? (
-              // Approval gate: the decision controls now sit on the gate's pipeline
-              // block (left), so here we just surface its prompt/output for context
-              // and point the approver at the block.
+              // Approval gate: the approve/reject controls sit at the TOP of this panel;
+              // here we just surface its prompt/output for context.
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 640 }}>
                 <div style={{ border: `1px solid ${T.blue}`, background: T.blueSoft, padding: 16, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <div style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.blue }}>⏸ paused for manual approval</div>
                   <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, lineHeight: 1.5 }}>
-                    Approve or reject on the highlighted gate step in the pipeline at left.
+                    Approve or reject with the controls above.
                   </div>
                 </div>
                 {selectedSr.output && (

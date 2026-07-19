@@ -198,26 +198,30 @@ function seedCondition(from: string): string {
 
 type EdgeSide = 'top' | 'bottom' | 'left' | 'right';
 
-/** A bezier between two attachment points that leaves each node PERPENDICULAR to the
- * side it exits — so an edge off the right side bows rightward, one off the top rises,
- * etc. — giving the natural flow-chart look instead of everything dropping straight down. */
+const sideNormal = (s: EdgeSide): [number, number] => (s === 'top' ? [0, -1] : s === 'bottom' ? [0, 1] : s === 'left' ? [-1, 0] : [1, 0]);
+
+/** An ORTHOGONAL connector (straight segments, right-angle bends) between two
+ * attachment points: it leaves each node with a short stub perpendicular to the side
+ * it exits, then runs in straight lines to the target — a clean flow-chart edge rather
+ * than a curve. Vertical-first when the source exits top/bottom, horizontal-first when
+ * it exits a side. */
 function sidePath(a: { x: number; y: number }, aSide: EdgeSide, b: { x: number; y: number }, bSide: EdgeSide): string {
-  const k = Math.max(24, Math.hypot(b.x - a.x, b.y - a.y) * 0.35);
-  const n = (s: EdgeSide): [number, number] => (s === 'top' ? [0, -1] : s === 'bottom' ? [0, 1] : s === 'left' ? [-1, 0] : [1, 0]);
-  const [ax, ay] = n(aSide), [bx, by] = n(bSide);
-  return `M ${a.x} ${a.y} C ${a.x + ax * k} ${a.y + ay * k}, ${b.x + bx * k} ${b.y + by * k}, ${b.x} ${b.y}`;
+  const s = 16;
+  const [nax, nay] = sideNormal(aSide), [nbx, nby] = sideNormal(bSide);
+  const a1 = { x: a.x + nax * s, y: a.y + nay * s };
+  const b1 = { x: b.x + nbx * s, y: b.y + nby * s };
+  const horizontalExit = aSide === 'left' || aSide === 'right';
+  const cx = horizontalExit ? b1.x : a1.x;
+  const cy = horizontalExit ? a1.y : b1.y;
+  return `M ${a.x} ${a.y} L ${a1.x} ${a1.y} L ${cx} ${cy} L ${b1.x} ${b1.y} L ${b.x} ${b.y}`;
 }
 
-/** A path that leaves a node, bows out to a vertical channel at `cx` (left or right of
- * the node columns), runs down it, and curves back into the target. Used for a long
- * edge that spans intermediate ranks, so it goes AROUND the steps between its ends
- * instead of straight down through them. */
+/** An orthogonal path for a long edge that goes AROUND intermediate ranks: a stub out
+ * of the source, across to a vertical channel at `cx` (left/right of the columns),
+ * straight down it, then across and into the target — all straight lines. */
 function sideChannelPath(x1: number, y1: number, x2: number, y2: number, cx: number): string {
-  const out = 26; // how far below/above the endpoints the turn happens
-  return `M ${x1} ${y1}`
-    + ` C ${x1} ${y1 + out}, ${cx} ${y1}, ${cx} ${y1 + out + 8}`
-    + ` L ${cx} ${y2 - out - 8}`
-    + ` C ${cx} ${y2}, ${x2} ${y2 - out}, ${x2} ${y2}`;
+  const s = 16;
+  return `M ${x1} ${y1} L ${x1} ${y1 + s} L ${cx} ${y1 + s} L ${cx} ${y2 - s} L ${x2} ${y2 - s} L ${x2} ${y2}`;
 }
 
 /** A short, readable NAME for a branch arm leaving a decision, so each path says what
