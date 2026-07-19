@@ -398,18 +398,37 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
   const members = useMemo(() => regionMembers(blocks, defName), [blocks, defName]);
   const issues = useMemo(() => mapIssues(blocks, maps, routes, defName), [blocks, maps, routes, defName]);
 
-  /** The bounding box of each region's nodes, so a map reads as an enclosure rather
-   * than a per-node label — its body is a subgraph, and the drawing should say so. */
-  const regionBoxes = useMemo(() => {
+  /** Each region drawn as the UNION of its members' per-layer cells, outlined as one
+   * rectilinear path — NOT a single bounding box. A bounding box over the members would,
+   * once ranks are centred independently (see `offset` above), span the gaps between them
+   * and visually swallow non-member nodes that happen to sit there. Building the outline
+   * layer-by-layer keeps the enclosure tight to the columns the members actually occupy
+   * (the band layout in displayGraph guarantees non-members never share those columns on a
+   * member layer), so a step like `track-tested` that only follows a map member is never
+   * wrapped. Returns the path plus a label anchor at the top-left of the first slab. */
+  const regionShapes = useMemo(() => {
     return maps.map((m) => {
       const pts = blocks.filter((b) => b.mapId === m.id).map((b) => posOf.get(b.uid)).filter(Boolean) as { x: number; y: number }[];
       if (pts.length === 0) return null;
-      const x = Math.min(...pts.map((p) => p.x)) - 14;
-      const y = Math.min(...pts.map((p) => p.y)) - 22;
-      const x2 = Math.max(...pts.map((p) => p.x)) + NODE_W + 14;
-      const y2 = Math.max(...pts.map((p) => p.y)) + NODE_H + 14;
-      return { def: m, x, y, w: x2 - x, h: y2 - y };
-    }).filter(Boolean) as { def: MapDef; x: number; y: number; w: number; h: number }[];
+      const byY = new Map<number, { x: number; y: number }[]>();
+      pts.forEach((p) => { if (!byY.has(p.y)) byY.set(p.y, []); byY.get(p.y)!.push(p); });
+      const PADX = 12, PADT = 12, PADB = 12;
+      const rows = [...byY.entries()].sort((a, b) => a[0] - b[0]).map(([y, ps]) => ({
+        t: y, b: y + NODE_H,
+        l: Math.min(...ps.map((p) => p.x)) - PADX,
+        r: Math.max(...ps.map((p) => p.x)) + NODE_W + PADX,
+      }));
+      rows[0].t -= PADT;
+      rows[rows.length - 1].b += PADB;
+      for (let i = 0; i < rows.length - 1; i++) { const mid = (rows[i].b + rows[i + 1].t) / 2; rows[i].b = mid; rows[i + 1].t = mid; }
+      const n = rows.length;
+      let d = `M ${rows[0].l} ${rows[0].t} L ${rows[0].r} ${rows[0].t}`;
+      for (let i = 0; i < n; i++) { d += ` L ${rows[i].r} ${rows[i].b}`; if (i < n - 1) d += ` L ${rows[i + 1].r} ${rows[i].b}`; }
+      d += ` L ${rows[n - 1].l} ${rows[n - 1].b}`;
+      for (let i = n - 1; i >= 0; i--) { d += ` L ${rows[i].l} ${rows[i].t}`; if (i > 0) d += ` L ${rows[i - 1].l} ${rows[i].t}`; }
+      d += ' Z';
+      return { def: m, d, labelX: rows[0].l, labelY: rows[0].t };
+    }).filter(Boolean) as { def: MapDef; d: string; labelX: number; labelY: number }[];
   }, [maps, blocks, posOf]);
   const width = Math.max(PAD * 2 + cols.max * (NODE_W + GAP_X), 400);
   const height = Math.max(...display.nodes.map((n) => PAD * 2 + (n.layer + 1) * (NODE_H + GAP_Y)), 260);
@@ -673,19 +692,17 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
         )}
 
         <div style={{ position: 'relative', width, height, margin: '0 auto' }}>
-          {/* Region enclosures, behind everything: a map's body is a subgraph, so it
-              is drawn as a box around its steps rather than a badge on each one. */}
-          {regionBoxes.map((r) => (
-            <div key={r.def.id} style={{
-              position: 'absolute', left: r.x, top: r.y, width: r.w, height: r.h,
-              border: `1px dashed ${T.blue}`, background: T.blueSoft, pointerEvents: 'none',
+          {/* Region enclosure labels; the enclosure outlines themselves are drawn as SVG
+              paths inside the edge layer below (behind the nodes). */}
+          {regionShapes.map((r) => (
+            <span key={r.def.id} style={{
+              position: 'absolute', left: r.labelX + 8, top: r.labelY - 8, background: T.bg,
+              padding: '0 4px', fontFamily: T.mono, fontSize: 9, color: T.blue, pointerEvents: 'none',
             }}>
-              <span style={{ position: 'absolute', top: -8, left: 8, background: T.bg, padding: '0 4px', fontFamily: T.mono, fontSize: 9, color: T.blue }}>
-                ⟳ map · per {r.def.var || '?'}
-                {r.def.volume ? ' · own workspace' : ''}
-                {r.def.sequential ? ' · one at a time' : ''}
-              </span>
-            </div>
+              ⟳ map · per {r.def.var || '?'}
+              {r.def.volume ? ' · own workspace' : ''}
+              {r.def.sequential ? ' · one at a time' : ''}
+            </span>
           ))}
           {/* Edges are drawn under the nodes so a route never covers a step's text. */}
           <svg width={width} height={height} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
@@ -697,6 +714,11 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                 <path d="M 0 0 L 8 4 L 0 8 z" fill={T.green} />
               </marker>
             </defs>
+            {/* Map region enclosures — a tight outline of the members' cells, drawn first
+                so it sits behind the edges and nodes. */}
+            {regionShapes.map((r) => (
+              <path key={r.def.id} d={r.d} fill={T.blueSoft} stroke={T.blue} strokeWidth={1} strokeDasharray="4 3" />
+            ))}
             {display.edges.map((e, k) => {
               const ep = endpoints.get(k);
               if (!ep) return null; // endpoint gone; pruned on save

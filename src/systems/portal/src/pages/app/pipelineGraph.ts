@@ -473,7 +473,72 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
       if (ids) { ids.sort((a, b) => bary(a, succs) - bary(b, succs)); reindex(); }
     }
   }
-  const nodes: DisplayNode[] = ordered.map((n) => ({ ...n, layer: layer.get(n.id) ?? 0, row: pos.get(n.id) ?? 0 }));
+  // Reserve a column BAND for each map region so its enclosure box (a bounding rect over
+  // member nodes) can never wrap a non-member. A map's members occupy the same columns on
+  // every layer they span; free nodes are pushed out of those columns at the member layers,
+  // so the box is a clean vertical strip containing only members. Bands are ordered by their
+  // barycenter column, so the map stays roughly where the flow naturally places it.
+  const mapOf = new Map<string, string>();
+  blocks.forEach((b) => {
+    if (b.mapId) mapOf.set(b.uid, b.mapId);
+  });
+  const membersOf = new Map<string, string[]>();
+  mapOf.forEach((m, id) => {
+    if (!membersOf.has(m)) membersOf.set(m, []);
+    membersOf.get(m)!.push(id);
+  });
+  const bandWidth = new Map<string, number>();
+  membersOf.forEach((ids, m) => {
+    const perLayer = new Map<number, number>();
+    ids.forEach((id) => {
+      const l = layer.get(id) ?? 0;
+      perLayer.set(l, (perLayer.get(l) ?? 0) + 1);
+    });
+    bandWidth.set(m, Math.max(1, ...perLayer.values()));
+  });
+  const targetCol = (m: string): number => {
+    const ids = membersOf.get(m)!;
+    return ids.reduce((s, id) => s + (pos.get(id) ?? 0), 0) / ids.length;
+  };
+  const bandStart = new Map<string, number>();
+  let cursor = 0;
+  [...membersOf.keys()]
+    .sort((a, b) => targetCol(a) - targetCol(b))
+    .forEach((m) => {
+      const start = Math.max(cursor, Math.round(targetCol(m)));
+      bandStart.set(m, start);
+      cursor = start + bandWidth.get(m)!;
+    });
+
+  const col = new Map<string, number>();
+  byLayer.forEach((ids) => {
+    const inOrder = [...ids].sort((a, b) => (pos.get(a) ?? 0) - (pos.get(b) ?? 0));
+    const used = new Set<number>();
+    const reserved = new Set<number>();
+    const memberIdx = new Map<string, number>();
+    // Members first: fixed band columns, and reserve the whole band on this layer.
+    inOrder.forEach((id) => {
+      const m = mapOf.get(id);
+      if (!m) return;
+      const idx = memberIdx.get(m) ?? 0;
+      memberIdx.set(m, idx + 1);
+      const base = bandStart.get(m) ?? 0;
+      col.set(id, base + idx);
+      used.add(base + idx);
+      for (let i = 0; i < (bandWidth.get(m) ?? 1); i++) reserved.add(base + i);
+    });
+    // Free nodes fill the remaining columns, skipping any reserved band column.
+    let c = 0;
+    inOrder.forEach((id) => {
+      if (mapOf.has(id)) return;
+      while (used.has(c) || reserved.has(c)) c++;
+      col.set(id, c);
+      used.add(c);
+      c++;
+    });
+  });
+
+  const nodes: DisplayNode[] = ordered.map((n) => ({ ...n, layer: layer.get(n.id) ?? 0, row: col.get(n.id) ?? pos.get(n.id) ?? 0 }));
   return { nodes, edges };
 }
 
