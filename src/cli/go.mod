@@ -9,6 +9,7 @@ require (
 	github.com/spf13/cobra v1.9.1
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/term v0.43.0
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -38,5 +39,4 @@ require (
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.3.8 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
