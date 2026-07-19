@@ -451,10 +451,20 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
   }, [display, posOf, nodeById]);
 
   /** Route-label placement with overlap resolution. Each labelled edge starts at the
-   * midpoint of its drawn path, then labels whose pills would collide are pushed apart on
-   * the y-axis (some ride higher, some lower) so sibling branch labels — "if failed" /
-   * "else" off one decision, or several routes converging — stay legible. */
+   * midpoint of its drawn path, then labels are pushed on the y-axis (some higher, some
+   * lower) until they clear BOTH one another AND the step/map/decision boxes — which act
+   * as fixed obstacles with a margin — so a pill never sits on top of a node or another
+   * pill. Where a label ends up nudged off its route, a leader ties it back. */
   const labelPos = useMemo(() => {
+    const M = 5; // clearance kept around every box
+    // Fixed obstacles: the node boxes. Members live inside their map box, which covers them.
+    const boxes: { x: number; y: number; w: number; h: number }[] = [];
+    display.nodes.forEach((n) => {
+      const p = posOf.get(n.id);
+      if (!p) return;
+      if (n.kind === 'decision') boxes.push({ x: p.x + NODE_W / 2 - DEC_W / 2, y: p.y + heightOf(n) / 2 - DEC_H / 2, w: DEC_W, h: DEC_H });
+      else boxes.push({ x: p.x, y: p.y, w: NODE_W, h: heightOf(n) });
+    });
     const items: { k: number; x: number; y: number; w: number; h: number }[] = [];
     display.edges.forEach((e, k) => {
       const ep = endpoints.get(k);
@@ -479,12 +489,27 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       items.push({ k, x, y, w: label.length * 6.6 + 14, h: 16 });
     });
     items.sort((p, q) => p.x - q.x || p.y - q.y);
-    for (let iter = 0; iter < 24; iter++) {
+    // xHit: two horizontal spans (centre ± half-width, both padded by M) overlap.
+    const xHit = (ax: number, aw: number, bx: number, bw: number) => Math.abs(ax - bx) < (aw + bw) / 2 + M;
+    for (let iter = 0; iter < 40; iter++) {
       let moved = false;
+      // Push labels off the node boxes first (out the nearer side).
+      for (const A of items) {
+        for (const o of boxes) {
+          if (!xHit(A.x, A.w, o.x + o.w / 2, o.w)) continue;
+          const aTop = A.y - A.h / 2, aBot = A.y + A.h / 2;
+          const oTop = o.y - M, oBot = o.y + o.h + M;
+          if (aBot <= oTop || aTop >= oBot) continue;
+          const up = aBot - oTop, down = oBot - aTop;
+          A.y += up < down ? -(up + 0.5) : down + 0.5;
+          moved = true;
+        }
+      }
+      // Then separate labels from each other.
       for (let i = 0; i < items.length; i++) {
         for (let j = i + 1; j < items.length; j++) {
           const A = items[i], B = items[j];
-          if (Math.abs(A.x - B.x) > (A.w + B.w) / 2 + 4) continue; // pills don't overlap in x
+          if (!xHit(A.x, A.w, B.x, B.w)) continue;
           const dy = B.y - A.y;
           const gap = (A.h + B.h) / 2 + 3;
           if (Math.abs(dy) >= gap) continue;
