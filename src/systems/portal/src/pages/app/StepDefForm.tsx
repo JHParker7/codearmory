@@ -182,6 +182,14 @@ export function StepDefForm({ token, initial, lockAction, inline, onSaved, onCan
                 <div style={{ marginBottom: 6 }}>
                   <PipelineSelect value={val} onChange={v => setWith(key, v)} workflows={pipelines} placeholder={f.placeholder} fontSize={11} />
                 </div>
+              ) : f.options ? (
+                // A closed set of values → a dropdown. A non-required field keeps a
+                // blank "(default)" choice; a legacy value outside the set is preserved.
+                <select value={val} onChange={e => setWith(key, e.target.value)} style={inputStyle}>
+                  {!f.required && <option value="">{f.placeholder || '(default)'}</option>}
+                  {val && !f.options.includes(val) && <option value={val}>{val}</option>}
+                  {f.options.map(o => <option key={o} value={o}>{o}</option>)}
+                </select>
               ) : f.multiline ? (
                 <textarea value={val} onChange={e => setWith(key, e.target.value)} placeholder={f.placeholder}
                   rows={f.key === 'run' ? 3 : 2} style={{ ...inputStyle, resize: 'vertical' }} />

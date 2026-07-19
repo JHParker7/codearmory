@@ -246,6 +246,9 @@ export interface StepField {
    * forge/create-volume step. Pipeline fields are hidden from the step-definition
    * form and surfaced (as a selector where possible) in the block's inputs editor. */
   pipeline?: boolean;
+  /** A closed set of allowed values — rendered as a dropdown instead of free text.
+   * A non-required field also offers a blank "(default)" choice. */
+  options?: string[];
 }
 
 /**
@@ -265,7 +268,7 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
   'forge/create-volume': [
     { key: 'name', label: 'Volume name', placeholder: 'workspace (default)', config: true },
     { key: 'size_mb', label: 'Size MB', placeholder: '1024 (optional)', kind: 'int', config: true },
-    { key: 'medium', label: 'Medium', placeholder: 'memory (default) | disk', config: true },
+    { key: 'medium', label: 'Medium', placeholder: 'memory (default)', options: ['memory', 'disk'], config: true },
     { key: 'mount_path', label: 'Mount path', placeholder: '/workspace (default)', config: true },
   ],
   'forge/build-image': [
@@ -297,16 +300,16 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
   ],
   'tickets/create': [
     { key: 'title', label: 'Title', placeholder: 'Build failed', required: true },
-    { key: 'description', label: 'Description', placeholder: 'ticket body (optional)' },
-    { key: 'priority', label: 'Priority', placeholder: 'low|medium|high|critical (optional)' },
-    { key: 'status', label: 'Status', placeholder: 'open|in_progress|resolved|closed (optional)' },
+    { key: 'description', label: 'Description', placeholder: 'ticket body (optional)', multiline: true },
+    { key: 'priority', label: 'Priority', placeholder: '(optional)', options: ['low', 'medium', 'high', 'critical'] },
+    { key: 'status', label: 'Status', placeholder: '(optional)', options: ['open', 'in_progress', 'resolved', 'closed'] },
   ],
   'tickets/update': [
     { key: 'id', label: 'Ticket ID', placeholder: 'ticket_id (required)', required: true },
     { key: 'title', label: 'Title', placeholder: 'ticket title (required)', required: true },
-    { key: 'status', label: 'Status', placeholder: 'open|in_progress|resolved|closed (optional)' },
-    { key: 'priority', label: 'Priority', placeholder: 'low|medium|high|critical (optional)' },
-    { key: 'description', label: 'Description', placeholder: 'ticket body (optional)' },
+    { key: 'status', label: 'Status', placeholder: '(optional)', options: ['open', 'in_progress', 'resolved', 'closed'] },
+    { key: 'priority', label: 'Priority', placeholder: '(optional)', options: ['low', 'medium', 'high', 'critical'] },
+    { key: 'description', label: 'Description', placeholder: 'ticket body (optional)', multiline: true },
   ],
   'tickets/delete': [
     { key: 'id', label: 'Ticket ID', placeholder: 'ticket_id (required)', required: true },
@@ -321,7 +324,7 @@ export const STEP_ACTION_SCHEMA: Record<string, StepField[]> = {
     { key: 'experiment_type', label: 'Type', placeholder: 'pod-delete|pod-network-latency (required)', required: true },
     { key: 'target_app_ns', label: 'Namespace', placeholder: 'k8s namespace (required)', required: true },
     { key: 'target_app_label', label: 'Selector', placeholder: 'app=foo label selector (required)', required: true },
-    { key: 'target_app_kind', label: 'Kind', placeholder: 'deployment (optional)' },
+    { key: 'target_app_kind', label: 'Kind', placeholder: 'deployment (default)', options: ['deployment', 'statefulset', 'daemonset', 'deploymentconfig', 'rollout'] },
     { key: 'params', label: 'Params', placeholder: 'KEY=VALUE tuning (optional)', kind: 'env' },
   ],
   'blueprints/backend': [
