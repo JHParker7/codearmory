@@ -450,6 +450,58 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     return out;
   }, [display, posOf, nodeById]);
 
+  /** Route-label placement with overlap resolution. Each labelled edge starts at the
+   * midpoint of its drawn path, then labels whose pills would collide are pushed apart on
+   * the y-axis (some ride higher, some lower) so sibling branch labels — "if failed" /
+   * "else" off one decision, or several routes converging — stay legible. */
+  const labelPos = useMemo(() => {
+    const items: { k: number; x: number; y: number; w: number; h: number }[] = [];
+    display.edges.forEach((e, k) => {
+      const ep = endpoints.get(k);
+      if (!ep) return;
+      const label = e.name || (e.arm ? (e.when ? conditionLabel(e.when) : 'else') : '');
+      if (!label) return;
+      const { a, b } = ep;
+      const fromLayer = nodeById.get(e.from)?.layer ?? 0;
+      const toLayer = nodeById.get(e.to)?.layer ?? 0;
+      let x: number, y: number;
+      if (toLayer - fromLayer >= 2) {
+        const tp = posOf.get(e.to);
+        const toLeft = tp ? tp.x : b.x;
+        const fromCentre = (posOf.get(e.from)?.x ?? a.x) + NODE_W / 2;
+        const goLeft = fromCentre <= toLeft + NODE_W / 2;
+        x = goLeft ? toLeft - GAP_X / 2 : toLeft + NODE_W + GAP_X / 2;
+        y = (a.y + b.y) / 2;
+      } else {
+        x = (a.x + b.x) / 2;
+        y = (a.y + b.y) / 2;
+      }
+      items.push({ k, x, y, w: label.length * 6.6 + 14, h: 16 });
+    });
+    items.sort((p, q) => p.x - q.x || p.y - q.y);
+    for (let iter = 0; iter < 24; iter++) {
+      let moved = false;
+      for (let i = 0; i < items.length; i++) {
+        for (let j = i + 1; j < items.length; j++) {
+          const A = items[i], B = items[j];
+          if (Math.abs(A.x - B.x) > (A.w + B.w) / 2 + 4) continue; // pills don't overlap in x
+          const dy = B.y - A.y;
+          const gap = (A.h + B.h) / 2 + 3;
+          if (Math.abs(dy) >= gap) continue;
+          const push = (gap - Math.abs(dy)) / 2 + 0.5;
+          const dir = dy === 0 ? (i % 2 === 0 ? 1 : -1) : dy > 0 ? 1 : -1;
+          A.y -= dir * push;
+          B.y += dir * push;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    const m = new Map<number, { x: number; y: number }>();
+    items.forEach((it) => m.set(it.k, { x: it.x, y: it.y }));
+    return m;
+  }, [display, endpoints, nodeById, posOf]);
+
   /** The routes that live WHOLLY inside a collapsed map region — drawn as short
    * connectors between the members stacked in the box, since they aren't part of the
    * outer flow. Empty in the editable (expanded) view, where they are normal edges. */
@@ -820,14 +872,21 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                       style={{ pointerEvents: editable ? 'stroke' : 'none', cursor: 'pointer' }}
                       onClick={() => { setSelectedEdge(e.routeIndex); setSelectedUid(null); }} />
                   )}
-                  {label && (
-                    <g style={{ pointerEvents: 'none' }}>
-                      <title>{[e.name, e.when].filter(Boolean).join(' — ') || 'default branch (else)'}</title>
-                      <rect x={lx - (label.length * 3.3 + 7)} y={ly - 8} width={label.length * 6.6 + 14} height={16} rx={8}
-                        fill={T.bg} stroke={sel ? T.green : T.faint} strokeWidth={1} />
-                      <text x={lx} y={ly + 3.5} textAnchor="middle" fill={sel ? T.green : T.dim} fontSize={9.5} fontFamily={T.mono}>{label}</text>
-                    </g>
-                  )}
+                  {label && (() => {
+                    const lp = labelPos.get(k) ?? { x: lx, y: ly };
+                    return (
+                      <g style={{ pointerEvents: 'none' }}>
+                        <title>{[e.name, e.when].filter(Boolean).join(' — ') || 'default branch (else)'}</title>
+                        {/* A thin leader ties a nudged label back to the point on its route. */}
+                        {Math.abs(lp.y - ly) > 10 && (
+                          <line x1={lp.x} y1={lp.y} x2={lx} y2={ly} stroke={T.faint} strokeWidth={0.75} strokeDasharray="2 2" />
+                        )}
+                        <rect x={lp.x - (label.length * 3.3 + 7)} y={lp.y - 8} width={label.length * 6.6 + 14} height={16} rx={8}
+                          fill={T.bg} stroke={sel ? T.green : T.faint} strokeWidth={1} />
+                        <text x={lp.x} y={lp.y + 3.5} textAnchor="middle" fill={sel ? T.green : T.dim} fontSize={9.5} fontFamily={T.mono}>{label}</text>
+                      </g>
+                    );
+                  })()}
                 </g>
               );
             })}
