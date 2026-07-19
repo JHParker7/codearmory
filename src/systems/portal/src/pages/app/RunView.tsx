@@ -371,7 +371,7 @@ export function RunView() {
 
   const backBtn = (
     <button onClick={() => navigate('/app/workflows')}
-      style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>
+      style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>
       ← runs
     </button>
   );
@@ -399,7 +399,7 @@ export function RunView() {
         <div style={{ flex: 1 }} />
         {isRunActive(run.status) && (
           <button onClick={handleCancel}
-            style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+            style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
             [ cancel ]
           </button>
         )}
@@ -439,7 +439,7 @@ export function RunView() {
             style={{
               flexShrink: 0, cursor: 'pointer', background: T.bgAlt,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: T.faint, fontFamily: T.mono, fontSize: 12,
+              color: T.green, fontFamily: T.mono, fontSize: 13,
               ...(narrow ? { width: '100%', height: 26, borderBottom: `1px solid ${T.border}` } : { width: 26, borderRight: `1px solid ${T.border}` }),
             }}>▸</div>
         ) : (
@@ -452,7 +452,7 @@ export function RunView() {
             <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>pipeline</span>
             <div style={{ flex: 1 }} />
             <button onClick={minimisePipeline} title="minimise pipeline"
-              style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.faint, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '2px 8px', cursor: 'pointer' }}>–</button>
+              style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '2px 8px', cursor: 'pointer' }}>–</button>
           </div>
           {stepRuns.length === 0 && !workflow ? (
             <div style={{ padding: '0 16px 16px', fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ {isRunActive(run.status) ? 'waiting for the first step…' : 'no steps recorded'}</div>
@@ -503,7 +503,7 @@ export function RunView() {
             style={{
               flexShrink: 0, cursor: 'pointer', background: T.bgAlt,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: T.faint, fontFamily: T.mono, fontSize: 12,
+              color: T.green, fontFamily: T.mono, fontSize: 13,
               ...(narrow ? { width: '100%', height: 26, borderTop: `1px solid ${T.border}` } : { width: 26, borderLeft: `1px solid ${T.border}` }),
             }}>{narrow ? '▴' : '◂'}</div>
         ) : (
@@ -515,7 +515,7 @@ export function RunView() {
             {selectedSr?.started_at && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{fmtDuration(selectedSr.started_at, selectedSr.ended_at)}</span>}
             <div style={{ flex: 1 }} />
             <button onClick={minimiseLogs} title="minimise logs"
-              style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.faint, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '2px 8px', cursor: 'pointer' }}>–</button>
+              style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '2px 8px', cursor: 'pointer' }}>–</button>
           </div>
           <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
             {!selectedSr ? (
