@@ -341,6 +341,42 @@ type createWorkflowRequest struct {
 	// Ticket opts every run of this workflow into being mirrored to a ticket — see
 	// TicketConfig. Omit it and nothing changes.
 	Ticket *TicketConfig `json:"ticket,omitempty"`
+	// StateMachine is the human-authored pipeline as a state machine (see smDoc). When
+	// present it is expanded into Steps/Routes/Maps (and fills Name/Description/Inputs/
+	// Outputs if those are unset) BEFORE the normal validation chain, so a client can
+	// POST either shape and everything downstream is unchanged. Explicit top-level
+	// fields still win over the document's.
+	StateMachine *smDoc `json:"state_machine,omitempty"`
+}
+
+// applyStateMachine expands a state-machine document on the request into the
+// (steps, routes, maps) triple the rest of the handler already knows how to
+// validate and store. Name/description/inputs/outputs are filled from the document
+// only when the request did not set them, so an explicit top-level field wins.
+// Returns a user-facing message on a malformed document, "" otherwise (including
+// when no document was sent).
+func applyStateMachine(req *createWorkflowRequest) string {
+	if req.StateMachine == nil {
+		return ""
+	}
+	steps, routes, maps, err := smToModel(req.StateMachine)
+	if err != nil {
+		return err.Error()
+	}
+	req.Steps, req.Routes, req.Maps = steps, routes, maps
+	if req.Name == "" {
+		req.Name = req.StateMachine.Name
+	}
+	if req.Description == "" {
+		req.Description = req.StateMachine.Description
+	}
+	if len(req.Inputs) == 0 {
+		req.Inputs = req.StateMachine.Inputs
+	}
+	if len(req.Outputs) == 0 {
+		req.Outputs = req.StateMachine.Outputs
+	}
+	return ""
 }
 
 // validateWorkflowIO checks the declared inputs/outputs: unique, named, and every
@@ -391,6 +427,13 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.SetStatus(codes.Error, "invalid body")
 		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	// A state-machine document is expanded into steps/routes/maps before any of the
+	// checks below, so both request shapes take the identical validation path.
+	if msg := applyStateMachine(&req); msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 	if req.Name == "" {
@@ -572,6 +615,14 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	span.SetStatus(codes.Ok, "")
 	w.Header().Set("Content-Type", "application/json")
+	// Render the pipeline as a state machine too, so a client can display/edit it in
+	// that shape. Uses effective routes — a route-less pipeline is a plain sequence,
+	// whose chain is derived — so the document shows real transitions either way.
+	smRoutes := wf.Routes
+	if len(smRoutes) == 0 {
+		smRoutes = deriveRoutes(wf.Steps)
+	}
+	wf.StateMachine = modelToSM(wf.Name, wf.Description, wf.Steps, smRoutes, wf.Maps, wf.Inputs, wf.Outputs)
 	// ?raw=true additionally exposes the stored, unenriched step refs (normally hidden:
 	// Workflow.StepRefs is json:"-"). A client that wants to mutate a pipeline (e.g. the
 	// CLI convert/localize) needs the raw refs so it can re-PUT them faithfully — the
@@ -625,6 +676,11 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	var req createWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if msg := applyStateMachine(&req); msg != "" {
+		span.SetStatus(codes.Ok, "")
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 	if req.Name == "" {

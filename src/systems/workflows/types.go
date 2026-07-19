@@ -405,6 +405,10 @@ type Workflow struct {
 	Ticket   *TicketConfig     `json:"ticket,omitempty" gorm:"column:ticket;serializer:json"`
 	StepRefs []WorkflowStepRef `json:"-"            gorm:"column:steps;serializer:json"`
 	Steps    []WorkflowStep    `json:"steps"        gorm:"-"`
+	// StateMachine is the pipeline rendered as a human-authored state machine (see
+	// smDoc), computed on read so a client can display/edit it in that shape. Never
+	// stored — GORM ignores it — and omitted from responses that don't populate it.
+	StateMachine *smDoc `json:"state_machine,omitempty" gorm:"-"`
 	// LastRunAt is the trigger time of this workflow's most recent run, or nil if it
 	// has never run. Not a stored column — computed by listWorkflows from the runs
 	// table so the UIs can show a "last ran" column.
