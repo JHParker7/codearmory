@@ -395,7 +395,11 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
         if (dy > 0 && Math.abs(dx) < dy * 0.5) return 'bottom';
         return dx >= 0 ? 'right' : 'left';
       }
-      if (Math.abs(dy) >= Math.abs(dx)) return dy >= 0 ? 'bottom' : 'top';
+      // Attach vertically whenever the other node is in a different RANK, so the edge drops
+      // into the inter-rank gap and transfers there — never along its own y-level, where it
+      // would run straight through same-rank neighbours. Side attach is only for peers that
+      // sit level with each other.
+      if (Math.abs(dy) > NODE_H * 0.75) return dy >= 0 ? 'bottom' : 'top';
       return dx >= 0 ? 'right' : 'left';
     };
     const sSide = new Map<number, Side>(), tSide = new Map<number, Side>();
