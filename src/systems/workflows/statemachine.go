@@ -39,26 +39,33 @@ type smDoc struct {
 	States      map[string]*smState `json:"states"`
 }
 
-// smState is one state. Exactly one "kind" is set: Run (an inline action), Use (a
-// reference to a stored step by id), Approval (a manual gate), or Map (a region — a
-// nested subgraph repeated per value). Matrix/Scatter fan the single Run/Use state
-// out and are mutually exclusive with Map. Exactly one transition is set: Next (one
-// target, or a list for a parallel fan-out), Choice (conditional branches), or End.
+// smState is one state, of exactly one KIND:
+//   - a task (Run an inline action, or Use a stored step) — does work, then flows on
+//     via Next (one target, or a list for a parallel fan-out) or End;
+//   - an Approval gate — a manual pause, likewise Next/End;
+//   - a Map region — a nested subgraph repeated per value;
+//   - a Choice — a pure decision that only routes: it does NO work, and instead of
+//     Next carries Choice branches. Keeping the decision OUT of the runner states
+//     (as a real state machine does) is deliberate: a step that both runs and
+//     branches is the thing that reads confusingly.
+//
+// So Choice is mutually exclusive with Run/Use/Approval/Map and with Next/End; a
+// task/approval/map state must NOT carry Choice.
 type smState struct {
 	// One kind:
 	Run      string         `json:"run,omitempty"`  // inline step: the action it runs
 	Use      string         `json:"use,omitempty"`  // reference: a stored step_id
 	Approval *ApprovalGate  `json:"approval,omitempty"`
 	Map      *smMap         `json:"map,omitempty"`
+	Choice   []smChoice     `json:"choice,omitempty"` // decision kind — no Run/Next
 	// Task modifiers (Run/Use only):
 	With    map[string]any `json:"with,omitempty"`
 	Timeout int64          `json:"timeout,omitempty"`
 	Matrix  *MatrixConfig  `json:"matrix,omitempty"`
 	Scatter *ScatterConfig `json:"scatter,omitempty"`
-	// One transition:
-	Next   smNext     `json:"next,omitempty"`
-	Choice []smChoice `json:"choice,omitempty"`
-	End    bool       `json:"end,omitempty"`
+	// Transition for the non-Choice kinds:
+	Next smNext `json:"next,omitempty"`
+	End  bool   `json:"end,omitempty"`
 }
 
 // smMap is a map region embedded in a state. Over maps to MapDef.ValuesFrom; the
@@ -114,13 +121,15 @@ func (n smNext) MarshalJSON() ([]byte, error) {
 
 // ── document -> internal model ──────────────────────────────────────────────────
 
-// smToModel converts a state-machine document into the stored triple. It resolves
-// map containers (which are NOT nodes themselves) into their member sub-states and
-// rewires the region boundary: an edge INTO a container becomes edges into the
-// region's entry sub-states, and a container's own transition becomes edges out of
-// the region's exit sub-states. It performs only structural checks (a state names a
-// kind, transitions resolve, names are unique); semantic validation — cycles,
-// unknown steps, region rules — is left to the existing validateGraph chain.
+// smToModel converts a state-machine document into the stored triple.
+//
+// A CHOICE state is not a node: it is a decision that lowers to the conditional
+// routes leaving whatever step flows INTO it — so a runner step never carries the
+// branch itself. A MAP container is not a node either; it resolves to its member
+// sub-states, with the region boundary rewired (an edge into the container → edges
+// into the region's entry sub-states; the container's own transition → edges out of
+// its exit sub-states). Only structural checks happen here; cycles, unknown steps
+// and region rules are left to the existing validateGraph chain.
 func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, maps []MapDef, err error) {
 	if doc == nil || len(doc.States) == 0 {
 		return nil, nil, nil, fmt.Errorf("state machine has no states")
@@ -131,8 +140,15 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 		entries []string // sub-states with no inbound edge from within the region
 		exits   []string // sub-states that terminate the region (End or no outbound)
 	}
+	// branch is one lowered choice arm: a target and the condition that selects it.
+	type branch struct {
+		to   string
+		when string
+	}
 	regions := map[string]*region{}
-	seenNames := map[string]bool{}
+	choices := map[string][]branch{} // choice state name -> its arms
+	stepNodes := map[string]bool{}   // names that ARE backend steps (not choices/maps)
+	seenNames := map[string]bool{}   // every state/sub-state name, for uniqueness
 
 	claim := func(name string) error {
 		if strings.TrimSpace(name) == "" {
@@ -145,8 +161,26 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 		return nil
 	}
 
-	// taskRef builds the WorkflowStepRef for a Run/Use/Approval state (not a map).
+	// isChoiceState reports a pure decision (Choice set, nothing else) and validates
+	// that a choice carries no work / no plain transition.
+	isChoiceState := func(name string, st *smState) (bool, error) {
+		if len(st.Choice) == 0 {
+			return false, nil
+		}
+		if st.Run != "" || st.Use != "" || st.Approval != nil || st.Map != nil {
+			return false, fmt.Errorf("choice state %q cannot also run a step — a choice only routes", name)
+		}
+		if len(st.Next) > 0 || st.End {
+			return false, fmt.Errorf("choice state %q cannot set next/end — put targets in its branches", name)
+		}
+		return true, nil
+	}
+
+	// taskRef builds the WorkflowStepRef for a Run/Use/Approval state (not a map/choice).
 	taskRef := func(name string, st *smState, mapID string) (WorkflowStepRef, error) {
+		if len(st.Choice) > 0 {
+			return WorkflowStepRef{}, fmt.Errorf("state %q sets choice but also a step kind", name)
+		}
 		ref := WorkflowStepRef{Name: name, With: st.With, MapID: mapID}
 		switch {
 		case st.Approval != nil:
@@ -157,7 +191,7 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 			ref.Action = st.Run
 			ref.Timeout = st.Timeout
 		default:
-			return ref, fmt.Errorf("state %q must set one of run, use, approval or map", name)
+			return ref, fmt.Errorf("state %q must set one of run, use, approval, map or choice", name)
 		}
 		if st.Matrix != nil {
 			ref.Matrix = st.Matrix
@@ -168,40 +202,42 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 		return ref, nil
 	}
 
-	// transitionEdges turns a state's Next/Choice into (target,when) pairs. Targets
-	// are raw names here (possibly map containers); they are resolved to concrete
-	// nodes by the caller via resolveTargets.
-	type edge struct {
-		to   string
-		when string
+	// nextTargets validates and returns a non-choice state's plain transition targets.
+	nextTargets := func(name string, st *smState) ([]string, error) {
+		if st.End && len(st.Next) > 0 {
+			return nil, fmt.Errorf("state %q sets end together with next", name)
+		}
+		return []string(st.Next), nil
 	}
-	transitionEdges := func(name string, st *smState) ([]edge, error) {
-		hasNext, hasChoice := len(st.Next) > 0, len(st.Choice) > 0
-		if st.End && (hasNext || hasChoice) {
-			return nil, fmt.Errorf("state %q sets end together with a transition", name)
+
+	// Pass 1a — record choice states (they are not nodes).
+	for name, st := range doc.States {
+		choice, err := isChoiceState(name, st)
+		if err != nil {
+			return nil, nil, nil, err
 		}
-		if hasNext && hasChoice {
-			return nil, fmt.Errorf("state %q sets both next and choice", name)
+		if !choice {
+			continue
 		}
-		var edges []edge
-		for _, t := range st.Next {
-			edges = append(edges, edge{to: t})
+		if err := claim(name); err != nil {
+			return nil, nil, nil, err
 		}
+		arms := make([]branch, 0, len(st.Choice))
 		for _, c := range st.Choice {
 			switch {
 			case c.Default != "":
-				edges = append(edges, edge{to: c.Default}) // else: no `when`
+				arms = append(arms, branch{to: c.Default}) // else: no `when`
 			case c.Next != "":
-				edges = append(edges, edge{to: c.Next, when: c.When})
+				arms = append(arms, branch{to: c.Next, when: c.When})
 			default:
-				return nil, fmt.Errorf("state %q: a choice branch needs next or default", name)
+				return nil, nil, nil, fmt.Errorf("choice state %q: a branch needs next or default", name)
 			}
 		}
-		return edges, nil
+		choices[name] = arms
 	}
 
-	// Pass 1 — register every node (top-level task states and map sub-states) and,
-	// for each map, compute its internal routes plus its entry/exit sub-states.
+	// Pass 1b — register map regions and their sub-states, computing internal routes
+	// and each region's entry/exit sub-states. (A map body is task states only.)
 	var internalRoutes []WorkflowRoute
 	for name, st := range doc.States {
 		if st.Map == nil {
@@ -221,34 +257,92 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 		})
 		reg := &region{}
 		hasInbound := map[string]bool{}
+		// A map body may itself use choice states (a per-value iteration that branches),
+		// lowered to conditional internal routes exactly as at the top level.
+		subChoices := map[string][]branch{}
+		regionStep := map[string]bool{}
 		for subName, sub := range m.States {
 			if sub.Map != nil {
 				return nil, nil, nil, fmt.Errorf("map %q: nested maps are not supported", name)
 			}
+			choice, cerr := isChoiceState(subName, sub)
+			if cerr != nil {
+				return nil, nil, nil, cerr
+			}
+			if !choice {
+				continue
+			}
 			if err := claim(subName); err != nil {
 				return nil, nil, nil, err
 			}
-			ref, err := taskRef(subName, sub, name)
-			if err != nil {
+			arms := make([]branch, 0, len(sub.Choice))
+			for _, c := range sub.Choice {
+				switch {
+				case c.Default != "":
+					arms = append(arms, branch{to: c.Default})
+				case c.Next != "":
+					arms = append(arms, branch{to: c.Next, when: c.When})
+				default:
+					return nil, nil, nil, fmt.Errorf("map %q: choice %q needs next or default", name, subName)
+				}
+			}
+			subChoices[subName] = arms
+		}
+		for subName, sub := range m.States {
+			if _, isCh := subChoices[subName]; isCh {
+				continue
+			}
+			if err := claim(subName); err != nil {
 				return nil, nil, nil, err
+			}
+			ref, rerr := taskRef(subName, sub, name)
+			if rerr != nil {
+				return nil, nil, nil, rerr
 			}
 			steps = append(steps, ref)
-			edges, err := transitionEdges(subName, sub)
-			if err != nil {
-				return nil, nil, nil, err
+			regionStep[subName] = true
+		}
+		resolveRegion := func(t string) (string, error) {
+			if regionStep[t] {
+				return t, nil
 			}
-			if len(edges) == 0 {
+			if _, ok := subChoices[t]; ok {
+				return "", fmt.Errorf("map %q: a choice cannot route to another choice (%q)", name, t)
+			}
+			return "", fmt.Errorf("map %q: state %q is not in the region", name, t)
+		}
+		for subName, sub := range m.States {
+			if _, isCh := subChoices[subName]; isCh {
+				continue
+			}
+			tgts, terr := nextTargets(subName, sub)
+			if terr != nil {
+				return nil, nil, nil, terr
+			}
+			if len(tgts) == 0 {
 				reg.exits = append(reg.exits, subName) // End or no transition
 			}
-			for _, e := range edges {
-				if _, ok := m.States[e.to]; !ok {
-					return nil, nil, nil, fmt.Errorf("map %q: state %q routes to %q which is not in the region", name, subName, e.to)
+			for _, raw := range tgts {
+				if arms, ok := subChoices[raw]; ok {
+					for _, a := range arms {
+						d, derr := resolveRegion(a.to)
+						if derr != nil {
+							return nil, nil, nil, derr
+						}
+						internalRoutes = append(internalRoutes, WorkflowRoute{From: subName, To: d, When: a.when})
+						hasInbound[d] = true
+					}
+					continue
 				}
-				internalRoutes = append(internalRoutes, WorkflowRoute{From: subName, To: e.to, When: e.when})
-				hasInbound[e.to] = true
+				d, derr := resolveRegion(raw)
+				if derr != nil {
+					return nil, nil, nil, derr
+				}
+				internalRoutes = append(internalRoutes, WorkflowRoute{From: subName, To: d})
+				hasInbound[d] = true
 			}
 		}
-		for subName := range m.States {
+		for subName := range regionStep {
 			if !hasInbound[subName] {
 				reg.entries = append(reg.entries, subName)
 			}
@@ -257,8 +351,10 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 		sort.Strings(reg.exits)
 		regions[name] = reg
 	}
+
+	// Pass 1c — register top-level task/approval states as step nodes.
 	for name, st := range doc.States {
-		if st.Map != nil {
+		if st.Map != nil || len(st.Choice) > 0 {
 			continue
 		}
 		if err := claim(name); err != nil {
@@ -269,10 +365,11 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 			return nil, nil, nil, err
 		}
 		steps = append(steps, ref)
+		stepNodes[name] = true
 	}
 
-	// resolveTargets expands a raw transition target: a map container resolves to
-	// its entry sub-states, any other name to itself.
+	// resolveTargets expands a NON-choice raw target: a map container to its entry
+	// sub-states, a step node to itself.
 	resolveTargets := func(name string) ([]string, error) {
 		if reg, ok := regions[name]; ok {
 			if len(reg.entries) == 0 {
@@ -280,14 +377,18 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 			}
 			return reg.entries, nil
 		}
-		if !seenNames[name] {
+		if !stepNodes[name] {
+			if _, ok := choices[name]; ok {
+				return nil, fmt.Errorf("a choice cannot route directly to another choice (%q)", name)
+			}
 			return nil, fmt.Errorf("transition to unknown state %q", name)
 		}
 		return []string{name}, nil
 	}
 
-	// Pass 2 — outer transitions. A task state emits edges from itself; a map
-	// container emits from each of its exit sub-states.
+	// Pass 2 — routes. Each source (a step, or a map container via its exits) flows to
+	// its Next targets; a target that is a CHOICE lowers to that choice's conditional
+	// arms, so the branch attaches to the SOURCE step, never a runner state of its own.
 	routes = append(routes, internalRoutes...)
 	seenRoute := map[WorkflowRoute]bool{}
 	for _, r := range routes {
@@ -300,8 +401,12 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 			routes = append(routes, r)
 		}
 	}
+	reachedChoice := map[string]bool{}
 	for name, st := range doc.States {
-		edges, err := transitionEdges(name, st)
+		if len(st.Choice) > 0 {
+			continue // a choice emits no routes of its own; its predecessors do
+		}
+		tgts, err := nextTargets(name, st)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -311,16 +416,36 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 		} else {
 			sources = []string{name}
 		}
-		for _, e := range edges {
-			targets, err := resolveTargets(e.to)
+		for _, raw := range tgts {
+			if arms, ok := choices[raw]; ok {
+				reachedChoice[raw] = true
+				for _, a := range arms {
+					dests, err := resolveTargets(a.to)
+					if err != nil {
+						return nil, nil, nil, err
+					}
+					for _, src := range sources {
+						for _, d := range dests {
+							addRoute(src, d, a.when)
+						}
+					}
+				}
+				continue
+			}
+			dests, err := resolveTargets(raw)
 			if err != nil {
 				return nil, nil, nil, err
 			}
 			for _, src := range sources {
-				for _, tgt := range targets {
-					addRoute(src, tgt, e.when)
+				for _, d := range dests {
+					addRoute(src, d, "")
 				}
 			}
+		}
+	}
+	for name := range choices {
+		if !reachedChoice[name] {
+			return nil, nil, nil, fmt.Errorf("choice state %q is unreachable — a step must route to it", name)
 		}
 	}
 
@@ -426,9 +551,31 @@ func modelToSM(name, description string, steps []WorkflowStep, routes []Workflow
 		outer[display(r.From)] = append(outer[display(r.From)], edge{display(r.To), r.When})
 	}
 
-	transition := func(edges []edge) (smNext, []smChoice, bool) {
+	// used tracks every taken name, so a synthetic choice-state name never collides.
+	used := map[string]bool{}
+	for _, s := range steps {
+		used[s.Name] = true
+	}
+	for _, m := range maps {
+		used[m.ID] = true
+	}
+	uniqueChoiceName := func(base string) string {
+		n := base + "_choice"
+		for i := 2; used[n]; i++ {
+			n = fmt.Sprintf("%s_choice%d", base, i)
+		}
+		used[n] = true
+		return n
+	}
+
+	// apply lowers a node's outbound edges onto its state. Unconditional edges become
+	// Next (one target, or a list for parallelism); the moment any edge is conditional
+	// the branch is split OUT into its own Choice state (emitted via emit), so the
+	// runner state only ever points at the decision — never carries it.
+	apply := func(node string, edges []edge, st *smState, emit func(name string, s *smState)) {
 		if len(edges) == 0 {
-			return nil, nil, true // end
+			st.End = true
+			return
 		}
 		conditional := false
 		for _, e := range edges {
@@ -442,9 +589,12 @@ func modelToSM(name, description string, steps []WorkflowStep, routes []Workflow
 				ns = append(ns, e.to)
 			}
 			sort.Strings(ns)
-			return ns, nil, false
+			st.Next = ns
+			return
 		}
-		var cs []smChoice
+		cname := uniqueChoiceName(node)
+		st.Next = smNext{cname}
+		cs := make([]smChoice, 0, len(edges))
 		for _, e := range edges { // when-branches first, defaults last
 			if e.when != "" {
 				cs = append(cs, smChoice{When: e.when, Next: e.to})
@@ -455,7 +605,7 @@ func modelToSM(name, description string, steps []WorkflowStep, routes []Workflow
 				cs = append(cs, smChoice{Default: e.to})
 			}
 		}
-		return nil, cs, false
+		emit(cname, &smState{Choice: cs})
 	}
 
 	taskState := func(s WorkflowStep) *smState {
@@ -477,39 +627,33 @@ func modelToSM(name, description string, steps []WorkflowStep, routes []Workflow
 
 	doc := &smDoc{Name: name, Description: description, Inputs: inputs, Outputs: outputs, States: map[string]*smState{}}
 	// Map containers first, with their nested states.
-	byID := map[string]MapDef{}
 	for _, m := range maps {
-		byID[m.ID] = m
-	}
-	for _, m := range maps {
-		sm := &smMap{
+		doc.States[m.ID] = &smState{Map: &smMap{
 			Var: m.Var, Values: m.Values, Over: m.ValuesFrom,
 			MaxConcurrent: m.MaxConcurrent, Sequential: m.Sequential,
 			Volume: m.Volume, MountPath: m.MountPath, SizeMB: m.SizeMB, Medium: m.Medium, Outputs: m.Outputs,
 			States: map[string]*smState{},
-		}
-		doc.States[m.ID] = &smState{Map: sm}
+		}}
 	}
 	for _, s := range steps {
 		st := taskState(s)
 		if s.MapID != "" {
-			// sub-state: transition comes from internal edges
-			next, choice, end := transition(internal[s.Name])
-			st.Next, st.Choice, st.End = next, choice, end
-			if container, ok := doc.States[s.MapID]; ok && container.Map != nil {
-				container.Map.States[s.Name] = st
+			container := doc.States[s.MapID]
+			if container == nil || container.Map == nil {
+				continue
 			}
+			// A conditional edge inside the region emits a choice SUB-state.
+			apply(s.Name, internal[s.Name], st, func(n string, cs *smState) { container.Map.States[n] = cs })
+			container.Map.States[s.Name] = st
 			continue
 		}
-		next, choice, end := transition(outer[s.Name])
-		st.Next, st.Choice, st.End = next, choice, end
+		apply(s.Name, outer[s.Name], st, func(n string, cs *smState) { doc.States[n] = cs })
 		doc.States[s.Name] = st
 	}
 	// Map containers' own transitions come from their outer edges.
 	for _, m := range maps {
-		next, choice, end := transition(outer[m.ID])
 		if c := doc.States[m.ID]; c != nil {
-			c.Next, c.Choice, c.End = next, choice, end
+			apply(m.ID, outer[m.ID], c, func(n string, cs *smState) { doc.States[n] = cs })
 		}
 	}
 	return doc

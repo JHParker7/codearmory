@@ -43,19 +43,21 @@ export interface SMMap {
   states: Record<string, SMState>;
 }
 
-/** One state. Exactly one kind (run | use | approval | map) and at most one
- * transition (next | choice | end). */
+/** One state, of exactly one KIND: a task (run | use), an approval gate, a map
+ * region, or a CHOICE — a pure decision that only routes (it carries `choice` and no
+ * `run`/`next`). Keeping the decision out of the runner states is the point: a step
+ * that both runs and branches is what reads confusingly. */
 export interface SMState {
   run?: string;   // inline step: the action it runs
   use?: string;   // reference: a stored step_id
   approval?: ApprovalGate;
   map?: SMMap;
+  choice?: SMChoice[]; // decision kind — no run/next
   with?: Record<string, unknown>;
   timeout?: number;
   matrix?: MatrixConfig;
   scatter?: ScatterConfig;
   next?: SMNext;
-  choice?: SMChoice[];
   end?: boolean;
 }
 
@@ -97,19 +99,33 @@ export function modelToDoc(
     (outer.get(key) ?? outer.set(key, []).get(key)!).push({ to: display(r.to), when: r.when });
   });
 
-  /** Turn a node's outbound edges into a transition. All-unconditional → `next`
-   * (a bare name, or a list for a fork); any condition present → `choice`, with the
-   * when-less edges rendered as `default`. No edges → `end`. */
-  const transition = (edges: Edge[] | undefined): Pick<SMState, 'next' | 'choice' | 'end'> => {
-    if (!edges || edges.length === 0) return { end: true };
+  const states: Record<string, SMState> = {};
+  // used tracks taken names so a synthetic choice-state name never collides.
+  const used = new Set<string>([...steps.map(nameOf), ...maps.map((m) => m.id)]);
+  const uniqueChoiceName = (base: string): string => {
+    let n = `${base}_choice`;
+    for (let i = 2; used.has(n); i++) n = `${base}_choice${i}`;
+    used.add(n);
+    return n;
+  };
+
+  /** Lower a node's outbound edges onto its state. Unconditional edges → `next` (one
+   * target, or a list for parallelism); the moment any edge is conditional the branch
+   * is split OUT into its own Choice state (via emit), so a runner state only points
+   * at the decision, never carries it. No edges → `end`. */
+  const apply = (node: string, edges: Edge[] | undefined, st: SMState, emit: (name: string, s: SMState) => void): void => {
+    if (!edges || edges.length === 0) { st.end = true; return; }
     if (edges.every((e) => !e.when)) {
       const tos = edges.map((e) => e.to).sort();
-      return { next: tos.length === 1 ? tos[0] : tos };
+      st.next = tos.length === 1 ? tos[0] : tos;
+      return;
     }
+    const cname = uniqueChoiceName(node);
+    st.next = cname;
     const choice: SMChoice[] = [];
     edges.filter((e) => e.when).forEach((e) => choice.push({ when: e.when, next: e.to }));
     edges.filter((e) => !e.when).forEach((e) => choice.push({ default: e.to }));
-    return { choice };
+    emit(cname, { choice });
   };
 
   const taskState = (s: StepRef): SMState => {
@@ -123,7 +139,6 @@ export function modelToDoc(
     return st;
   };
 
-  const states: Record<string, SMState> = {};
   // Map containers first, with their nested states.
   maps.forEach((m) => {
     states[m.id] = {
@@ -139,16 +154,17 @@ export function modelToDoc(
     const nm = nameOf(s);
     const st = taskState(s);
     if (s.map_id) {
-      Object.assign(st, transition(internal.get(nm)));
       const container = states[s.map_id];
-      if (container?.map) container.map.states[nm] = st;
+      if (!container?.map) return;
+      apply(nm, internal.get(nm), st, (n, cs) => { container.map!.states[n] = cs; });
+      container.map.states[nm] = st;
       return;
     }
-    Object.assign(st, transition(outer.get(nm)));
+    apply(nm, outer.get(nm), st, (n, cs) => { states[n] = cs; });
     states[nm] = st;
   });
   // Containers' own transitions come from their outer edges.
-  maps.forEach((m) => { if (states[m.id]) Object.assign(states[m.id], transition(outer.get(m.id))); });
+  maps.forEach((m) => { const c = states[m.id]; if (c) apply(m.id, outer.get(m.id), c, (n, cs) => { states[n] = cs; }); });
 
   const doc: SMDoc = { states };
   if (name) doc.name = name;
@@ -179,12 +195,25 @@ export function docToModel(doc: SMDoc): Model {
   const steps: StepRef[] = [];
   const routes: Route[] = [];
   const maps: MapDef[] = [];
+  type Branch = { to: string; when?: string };
   const seen = new Set<string>();
   const claim = (name: string) => {
     if (!name || !name.trim()) throw new Error('a state name cannot be empty');
     if (seen.has(name)) throw new Error(`duplicate state name "${name}"`);
     seen.add(name);
   };
+
+  const isChoiceState = (name: string, st: SMState): boolean => {
+    if (!st.choice || st.choice.length === 0) return false;
+    if (st.run || st.use || st.approval || st.map) throw new Error(`choice state "${name}" cannot also run a step — a choice only routes`);
+    if ((st.next != null && (!Array.isArray(st.next) || st.next.length > 0)) || st.end) throw new Error(`choice state "${name}" cannot set next/end — put targets in its branches`);
+    return true;
+  };
+  const armsOf = (name: string, st: SMState): Branch[] => (st.choice ?? []).map((c) => {
+    if (c.default) return { to: c.default };
+    if (c.next) return { to: c.next, when: c.when };
+    throw new Error(`choice state "${name}": a branch needs next or default`);
+  });
 
   const taskRef = (name: string, st: SMState, mapId?: string): StepRef => {
     const ref: StepRef = { name };
@@ -193,31 +222,30 @@ export function docToModel(doc: SMDoc): Model {
     if (st.approval) ref.approval = st.approval;
     else if (st.use) ref.step_id = st.use;
     else if (st.run) { ref.action = st.run; if (st.timeout) ref.timeout = st.timeout; }
-    else throw new Error(`state "${name}" must set one of run, use, approval or map`);
+    else throw new Error(`state "${name}" must set one of run, use, approval, map or choice`);
     if (st.matrix) ref.matrix = st.matrix;
     if (st.scatter) ref.scatter = st.scatter;
     return ref;
   };
-
-  type Edge = { to: string; when?: string };
-  const edgesOf = (name: string, st: SMState): Edge[] => {
-    const hasNext = st.next != null && (Array.isArray(st.next) ? st.next.length > 0 : true);
-    const hasChoice = !!st.choice && st.choice.length > 0;
-    if (st.end && (hasNext || hasChoice)) throw new Error(`state "${name}" sets end together with a transition`);
-    if (hasNext && hasChoice) throw new Error(`state "${name}" sets both next and choice`);
-    const out: Edge[] = [];
-    if (hasNext) (Array.isArray(st.next) ? st.next : [st.next as string]).forEach((t) => out.push({ to: t }));
-    (st.choice ?? []).forEach((c) => {
-      if (c.default) out.push({ to: c.default });
-      else if (c.next) out.push({ to: c.next, when: c.when });
-      else throw new Error(`state "${name}": a choice branch needs next or default`);
-    });
-    return out;
+  const nextTargets = (name: string, st: SMState): string[] => {
+    const list = st.next == null ? [] : (Array.isArray(st.next) ? st.next : [st.next]);
+    if (st.end && list.length > 0) throw new Error(`state "${name}" sets end together with next`);
+    return list;
   };
 
   // Pass 1 — register nodes; process map regions, recording entry/exit sub-states.
+  const stepNodes = new Set<string>();
   const regions = new Map<string, { entries: string[]; exits: string[] }>();
+  const choices = new Map<string, Branch[]>();
   const internalRoutes: Route[] = [];
+
+  // 1a: record top-level choice states (they are not nodes).
+  for (const [name, st] of Object.entries(doc.states)) {
+    if (!isChoiceState(name, st)) continue;
+    claim(name);
+    choices.set(name, armsOf(name, st));
+  }
+  // 1b: map regions (with region-local choices) + their sub-states.
   for (const [name, st] of Object.entries(doc.states)) {
     if (!st.map) continue;
     const m = st.map;
@@ -228,27 +256,44 @@ export function docToModel(doc: SMDoc): Model {
       max_concurrent: m.max_concurrent, sequential: m.sequential,
       volume: m.volume, mount_path: m.mount_path, size_mb: m.size_mb, medium: m.medium, outputs: m.outputs,
     });
+    const subChoices = new Map<string, Branch[]>();
+    const regionStep = new Set<string>();
+    for (const [subName, sub] of Object.entries(m.states)) {
+      if (sub.map) throw new Error(`map "${name}": nested maps are not supported`);
+      if (isChoiceState(subName, sub)) { claim(subName); subChoices.set(subName, armsOf(subName, sub)); }
+    }
+    for (const [subName, sub] of Object.entries(m.states)) {
+      if (subChoices.has(subName)) continue;
+      claim(subName);
+      steps.push(taskRef(subName, sub, name));
+      regionStep.add(subName);
+    }
+    const resolveRegion = (t: string): string => {
+      if (regionStep.has(t)) return t;
+      if (subChoices.has(t)) throw new Error(`map "${name}": a choice cannot route to another choice ("${t}")`);
+      throw new Error(`map "${name}": state "${t}" is not in the region`);
+    };
     const hasInbound = new Set<string>();
     const exits: string[] = [];
     for (const [subName, sub] of Object.entries(m.states)) {
-      if (sub.map) throw new Error(`map "${name}": nested maps are not supported`);
-      claim(subName);
-      steps.push(taskRef(subName, sub, name));
-      const edges = edgesOf(subName, sub);
-      if (edges.length === 0) exits.push(subName);
-      edges.forEach((e) => {
-        if (!(e.to in m.states)) throw new Error(`map "${name}": state "${subName}" routes to "${e.to}" which is not in the region`);
-        internalRoutes.push({ from: subName, to: e.to, when: e.when });
-        hasInbound.add(e.to);
-      });
+      if (subChoices.has(subName)) continue;
+      const tgts = nextTargets(subName, sub);
+      if (tgts.length === 0) exits.push(subName);
+      for (const raw of tgts) {
+        const arms = subChoices.get(raw);
+        if (arms) arms.forEach((a) => { const d = resolveRegion(a.to); internalRoutes.push({ from: subName, to: d, when: a.when }); hasInbound.add(d); });
+        else { const d = resolveRegion(raw); internalRoutes.push({ from: subName, to: d }); hasInbound.add(d); }
+      }
     }
-    const entries = Object.keys(m.states).filter((n) => !hasInbound.has(n)).sort();
+    const entries = [...regionStep].filter((n) => !hasInbound.has(n)).sort();
     regions.set(name, { entries, exits: exits.sort() });
   }
+  // 1c: top-level task/approval states.
   for (const [name, st] of Object.entries(doc.states)) {
-    if (st.map) continue;
+    if (st.map || isChoiceState(name, st)) continue;
     claim(name);
     steps.push(taskRef(name, st));
+    stepNodes.add(name);
   }
 
   const resolveTargets = (name: string): string[] => {
@@ -257,7 +302,10 @@ export function docToModel(doc: SMDoc): Model {
       if (reg.entries.length === 0) throw new Error(`map "${name}" has no entry state (its states form a cycle)`);
       return reg.entries;
     }
-    if (!seen.has(name)) throw new Error(`transition to unknown state "${name}"`);
+    if (!stepNodes.has(name)) {
+      if (choices.has(name)) throw new Error(`a choice cannot route directly to another choice ("${name}")`);
+      throw new Error(`transition to unknown state "${name}"`);
+    }
     return [name];
   };
 
@@ -269,15 +317,24 @@ export function docToModel(doc: SMDoc): Model {
     if (!seenRoute.has(key(r))) { seenRoute.add(key(r)); routes.push(r); }
   };
   internalRoutes.forEach((r) => addRoute(r.from, r.to, r.when));
+  const reachedChoice = new Set<string>();
   for (const [name, st] of Object.entries(doc.states)) {
-    const edges = edgesOf(name, st);
+    if (choices.has(name)) continue;
+    const tgts = nextTargets(name, st);
     const reg = regions.get(name);
     const sources = reg ? reg.exits : [name];
-    for (const e of edges) {
-      for (const tgt of resolveTargets(e.to)) {
-        for (const src of sources) addRoute(src, tgt, e.when);
+    for (const raw of tgts) {
+      const arms = choices.get(raw);
+      if (arms) {
+        reachedChoice.add(raw);
+        for (const a of arms) for (const d of resolveTargets(a.to)) for (const src of sources) addRoute(src, d, a.when);
+        continue;
       }
+      for (const d of resolveTargets(raw)) for (const src of sources) addRoute(src, d);
     }
+  }
+  for (const name of choices.keys()) {
+    if (!reachedChoice.has(name)) throw new Error(`choice state "${name}" is unreachable`);
   }
 
   return {

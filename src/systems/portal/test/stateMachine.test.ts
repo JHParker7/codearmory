@@ -25,19 +25,29 @@ describe('stateMachine docToModel', () => {
     expect(m.steps[0].step_id).to.equal(undefined);
   });
 
-  it('expands a choice with a default', () => {
+  it('lowers a separate choice state to conditional routes', () => {
     const m = docToModel(doc({ states: {
-      tests: { run: 'test', choice: [
+      tests: { run: 'test', next: 'decide' },
+      decide: { choice: [
         { when: 'steps.tests.status == "failed"', next: 'mark' },
         { default: 'done' },
       ] },
       mark: { run: 'm', end: true },
       done: { run: 'n', end: true },
     } }));
+    // "decide" is a choice, not a step.
+    expect(m.steps.map(s => s.name)).to.not.include('decide');
     expect(routeSet(m.routes)).to.deep.equal([
       'tests->done@',
       'tests->mark@steps.tests.status == "failed"',
     ]);
+  });
+
+  it('rejects a choice on a runner step', () => {
+    expect(() => docToModel(doc({ states: {
+      tests: { run: 'test', choice: [{ default: 'done' }] },
+      done: { run: 'n', end: true },
+    } }))).to.throw(/only routes/);
   });
 
   it('expands a parallel fork and join', () => {
@@ -69,7 +79,7 @@ describe('stateMachine docToModel', () => {
 
   it('rejects malformed documents', () => {
     expect(() => docToModel(doc({ states: {} }))).to.throw();
-    expect(() => docToModel(doc({ states: { a: { next: 'b' }, b: { end: true } } }))).to.throw(/run, use, approval or map/);
+    expect(() => docToModel(doc({ states: { a: { next: 'b' }, b: { end: true } } }))).to.throw(/run, use, approval, map or choice/);
     expect(() => docToModel(doc({ states: { a: { run: 'r', next: 'ghost' } } }))).to.throw(/unknown state/);
   });
 });
@@ -80,7 +90,8 @@ describe('stateMachine round-trip', () => {
       build: { run: 'b', next: ['lint', 'test'] },
       lint: { run: 'l', next: 'check' },
       test: { run: 't', next: 'check' },
-      check: { run: 'c', choice: [{ when: 'x == 1', next: 'ship' }, { default: 'skip' }] },
+      check: { run: 'c', next: 'decide' },
+      decide: { choice: [{ when: 'x == 1', next: 'ship' }, { default: 'skip' }] },
       ship: { run: 's', end: true },
       skip: { run: 'k', end: true },
     } }));

@@ -59,16 +59,25 @@ func TestSMToModel_Sequence(t *testing.T) {
 	}
 }
 
-func TestSMToModel_ChoiceAndDefault(t *testing.T) {
+func TestSMToModel_ChoiceIsASeparateState(t *testing.T) {
+	// The choice is its OWN state, not a field on the runner step; it lowers to the
+	// conditional routes leaving the step that flows into it.
 	doc := mustSM(t, `{"name":"c","states":{
-		"tests":{"run":"test","choice":[
+		"tests":{"run":"test","next":"decide"},
+		"decide":{"choice":[
 			{"when":"steps.tests.status == \"failed\"","next":"mark_failed"},
 			{"default":"done"}]},
 		"mark_failed":{"run":"mark","end":true},
 		"done":{"end":true,"run":"noop"}}}`)
-	_, routes, _, err := smToModel(doc)
+	steps, routes, _, err := smToModel(doc)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// "decide" is a choice — it is NOT a backend step.
+	for _, s := range steps {
+		if s.Name == "decide" {
+			t.Fatalf("choice state leaked in as a step: %+v", s)
+		}
 	}
 	want := []string{
 		`tests->done@`,
@@ -76,6 +85,15 @@ func TestSMToModel_ChoiceAndDefault(t *testing.T) {
 	}
 	if got := smRouteSet(routes); !reflect.DeepEqual(got, want) {
 		t.Fatalf("routes = %v, want %v", got, want)
+	}
+}
+
+func TestSMToModel_ChoiceOnRunStateRejected(t *testing.T) {
+	doc := mustSM(t, `{"name":"c","states":{
+		"tests":{"run":"test","choice":[{"default":"done"}]},
+		"done":{"run":"n","end":true}}}`)
+	if _, _, _, err := smToModel(doc); err == nil {
+		t.Fatal("expected a choice-on-a-runner-step to be rejected")
 	}
 }
 
@@ -134,7 +152,8 @@ func TestRoundTrip(t *testing.T) {
 		"build":{"run":"b","next":["lint","test"]},
 		"lint":{"run":"l","next":"check"},
 		"test":{"run":"t","next":"check"},
-		"check":{"run":"c","choice":[{"when":"x == 1","next":"ship"},{"default":"skip"}]},
+		"check":{"run":"c","next":"decide"},
+		"decide":{"choice":[{"when":"x == 1","next":"ship"},{"default":"skip"}]},
 		"ship":{"run":"s","end":true},
 		"skip":{"run":"k","end":true}}}`)
 	steps, routes, maps, err := smToModel(doc)
