@@ -215,11 +215,13 @@ export function RunView() {
   // so the pipeline side can be grown or shrunk against the logs.
   const narrow = width < 1000;
   const splitRef = useRef<HTMLDivElement>(null);
+  // Wide max / small otherMin so the divider can grow the pipeline right across the
+  // pane and shrink the logs to a sliver (or minimise either side outright, below).
   const [pipelineW, widthHandle] = useResizablePane('split.runview.pipeline.w', 400, {
-    min: 280, max: 900, side: 'left', direction: 'horizontal', containerRef: splitRef, otherMin: 320,
+    min: 220, max: 2400, side: 'left', direction: 'horizontal', containerRef: splitRef, otherMin: 180,
   });
   const [pipelineH, heightHandle] = useResizablePane('split.runview.pipeline.h', 320, {
-    min: 140, max: 1200, side: 'left', direction: 'vertical', containerRef: splitRef, otherMin: 200,
+    min: 120, max: 2000, side: 'left', direction: 'vertical', containerRef: splitRef, otherMin: 120,
   });
 
   const [run, setRun] = useState<WorkflowRun | null>(null);
@@ -231,8 +233,12 @@ export function RunView() {
   // synthetic `idx:N` for a still-pending step. Keyed per run, not per step_index,
   // so matrix combinations (which share an index) are individually selectable.
   const [selected, setSelected] = useState<string | null>(null);
-  // Minimise the pipeline (left/top) panel to give the logs the full pane.
+  // Either panel can be minimised to a thin strip to give the whole pane to the
+  // other; at most one is minimised at a time.
   const [collapsed, setCollapsed] = useState(false);
+  const [logsCollapsed, setLogsCollapsed] = useState(false);
+  const minimisePipeline = () => { setCollapsed(true); setLogsCollapsed(false); };
+  const minimiseLogs = () => { setLogsCollapsed(true); setCollapsed(false); };
   const [deciding, setDeciding] = useState(false);
   // Approve/reject failures show inline beside the gate controls rather than
   // replacing the whole run view (which `error` does for a failed load).
@@ -436,13 +442,14 @@ export function RunView() {
             }}>▸</div>
         ) : (
         <div style={{
-          flexShrink: 0, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', background: T.bg,
-          ...(narrow ? { width: '100%', height: pipelineH } : { width: pipelineW }),
+          display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, overflow: 'hidden', background: T.bg,
+          // Fill the pane when the logs side is minimised; otherwise take its draggable size.
+          ...(logsCollapsed ? { flex: 1 } : { flexShrink: 0, ...(narrow ? { width: '100%', height: pipelineH } : { width: pipelineW }) }),
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '16px 16px 8px', flexShrink: 0 }}>
             <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>pipeline</span>
             <div style={{ flex: 1 }} />
-            <button onClick={() => setCollapsed(true)} title="minimise pipeline"
+            <button onClick={minimisePipeline} title="minimise pipeline"
               style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.faint, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '2px 8px', cursor: 'pointer' }}>–</button>
           </div>
           {stepRuns.length === 0 && !workflow ? (
@@ -485,16 +492,28 @@ export function RunView() {
         )}
 
         {/* Drag to rebalance the pipeline side against the logs side (hidden while
-            the pipeline panel is minimised). */}
-        {!collapsed && (narrow ? heightHandle : widthHandle)}
+            either panel is minimised). */}
+        {!collapsed && !logsCollapsed && (narrow ? heightHandle : widthHandle)}
 
-        {/* Logs for the selected step */}
+        {/* Logs for the selected step — minimisable to a strip like the pipeline. */}
+        {logsCollapsed ? (
+          <div onClick={() => setLogsCollapsed(false)} title="expand logs"
+            style={{
+              flexShrink: 0, cursor: 'pointer', background: T.bgAlt,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: T.faint, fontFamily: T.mono, fontSize: 12,
+              ...(narrow ? { width: '100%', height: 26, borderTop: `1px solid ${T.border}` } : { width: 26, borderLeft: `1px solid ${T.border}` }),
+            }}>{narrow ? '▴' : '◂'}</div>
+        ) : (
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: T.bg }}>
           <div style={{ padding: '10px 16px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>logs</span>
             {selectedSr && <Pill tone={statusTone(selectedSr.status)}>{selectedSr.status}</Pill>}
             <span style={{ fontFamily: T.mono, fontSize: 12, color: T.textHi, fontWeight: 600 }}>{selectedSr?.step_name ?? '—'}</span>
             {selectedSr?.started_at && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{fmtDuration(selectedSr.started_at, selectedSr.ended_at)}</span>}
+            <div style={{ flex: 1 }} />
+            <button onClick={minimiseLogs} title="minimise logs"
+              style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.faint, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '2px 8px', cursor: 'pointer' }}>–</button>
           </div>
           <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
             {!selectedSr ? (
@@ -539,6 +558,7 @@ export function RunView() {
             )}
           </div>
         </div>
+        )}
       </div>
     </div>
   );
