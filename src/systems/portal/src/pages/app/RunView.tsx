@@ -400,7 +400,9 @@ export function RunView() {
       {/* Captured outputs: the pipeline-level outputs resolved at completion. Shown
           above the panels so a finished run's published values read at a glance. */}
       {run.outputs && Object.keys(run.outputs).length > 0 && (
-        <div style={{ padding: '10px 20px', borderBottom: `1px solid ${T.border}`, background: T.bg }}>
+        // Capped + scrollable so a large (pretty-printed) outputs block never squeezes
+        // the pipeline/logs split below it off the screen.
+        <div style={{ padding: '10px 20px', borderBottom: `1px solid ${T.border}`, background: T.bg, flexShrink: 0, maxHeight: '30vh', overflowY: 'auto' }}>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>captured outputs</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {Object.entries(run.outputs).map(([k, v]) => {
@@ -434,23 +436,23 @@ export function RunView() {
             }}>▸</div>
         ) : (
         <div style={{
-          flexShrink: 0, overflow: 'auto', padding: 16, background: T.bg,
+          flexShrink: 0, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', background: T.bg,
           ...(narrow ? { width: '100%', height: pipelineH } : { width: pipelineW }),
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '16px 16px 8px', flexShrink: 0 }}>
             <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>pipeline</span>
             <div style={{ flex: 1 }} />
             <button onClick={() => setCollapsed(true)} title="minimise pipeline"
               style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.faint, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '2px 8px', cursor: 'pointer' }}>–</button>
           </div>
           {stepRuns.length === 0 && !workflow ? (
-            <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ {isRunActive(run.status) ? 'waiting for the first step…' : 'no steps recorded'}</div>
+            <div style={{ padding: '0 16px 16px', fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ {isRunActive(run.status) ? 'waiting for the first step…' : 'no steps recorded'}</div>
           ) : (
             <>
-              {/* The run drawn as the graph it is — same renderer as the editor, so
-                  the two can never disagree about the pipeline's shape. A node with
-                  no execution (a route that was not taken) stays neutral. */}
-              <div style={{ minHeight: 240, marginBottom: 12 }}>
+              {/* The run drawn as the graph it is — same renderer as the editor. It sits
+                  in a BOUNDED flex region so a wide/tall flow scrolls both ways within
+                  it (its own scrollbars stay reachable) instead of being clipped. */}
+              <div style={{ flex: 1, minHeight: 160, padding: '0 16px' }}>
                 <PipelineCanvas
                   initialSteps={workflow?.steps ?? []}
                   initialRoutes={workflow?.routes ?? []}
@@ -469,11 +471,13 @@ export function RunView() {
                   }}
                 />
               </div>
-              {/* The selected node's executions: one for a plain step, several for a
-                  matrix or map fan-out. MatrixBlock also carries the gate controls. */}
+              {/* The selected node's executions, in their own scrollable strip below the
+                  graph so they never push the graph out of view. */}
               {selectedLegs.length > 0 && (
-                <MatrixBlock steps={selectedLegs} selected={selected} setSelected={setSelected}
-                  deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
+                <div style={{ flexShrink: 0, maxHeight: '40%', overflowY: 'auto', padding: '10px 16px 16px' }}>
+                  <MatrixBlock steps={selectedLegs} selected={selected} setSelected={setSelected}
+                    deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
+                </div>
               )}
             </>
           )}
