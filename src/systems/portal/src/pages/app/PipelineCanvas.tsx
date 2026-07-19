@@ -570,10 +570,13 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       }
       if (!moved) break;
     }
+    // Keep each pill fully inside the SVG so a label at a margin corridor isn't clipped;
+    // the leader line then bridges from the pill back to the route.
+    const svgW = PAD * 2 + cols.max * (NODE_W + GAP_X);
     const m = new Map<number, { x: number; y: number }>();
-    items.forEach((it) => m.set(it.k, { x: it.x, y: it.y }));
+    items.forEach((it) => m.set(it.k, { x: Math.max(it.w / 2 + 6, Math.min(svgW - it.w / 2 - 6, it.x)), y: it.y }));
     return m;
-  }, [display, endpoints, nodeById, posOf, longEdgeCx]);
+  }, [display, endpoints, nodeById, posOf, longEdgeCx, cols]);
 
   /** The routes that live WHOLLY inside a collapsed map region — drawn as short
    * connectors between the members stacked in the box, since they aren't part of the
@@ -945,8 +948,8 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                     return (
                       <g style={{ pointerEvents: 'none' }}>
                         <title>{[e.name, e.when].filter(Boolean).join(' — ') || 'default branch (else)'}</title>
-                        {/* A thin leader ties a nudged label back to the point on its route. */}
-                        {Math.abs(lp.y - ly) > 10 && (
+                        {/* A thin leader ties a nudged or clamped label back to its route. */}
+                        {Math.hypot(lp.x - lx, lp.y - ly) > 12 && (
                           <line x1={lp.x} y1={lp.y} x2={lx} y2={ly} stroke={T.faint} strokeWidth={0.75} strokeDasharray="2 2" />
                         )}
                         <rect x={lp.x - (label.length * 3.3 + 7)} y={lp.y - 8} width={label.length * 6.6 + 14} height={16} rx={8}
