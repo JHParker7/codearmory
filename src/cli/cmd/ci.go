@@ -779,25 +779,30 @@ reusable step, or "localize-step" to copy a shared step's definition inline.`,
 				Routes      []workflowRoute     `json:"routes,omitempty"`
 				Maps        []map[string]any    `json:"maps,omitempty"`
 				Ticket      map[string]any      `json:"ticket,omitempty"`
+				// StateMachine carries a state-machine document straight through to the
+				// service, which converts it (see -f help). Only one of this / Steps is set.
+				StateMachine json.RawMessage `json:"state_machine,omitempty"`
 			}
 
 			if pipelineFileFlag != "" {
-				data, err := os.ReadFile(pipelineFileFlag)
+				isSM, sm, pf, err := loadPipelineConfig(pipelineFileFlag)
 				if err != nil {
-					return fmt.Errorf("reading pipeline file: %w", err)
+					return err
 				}
-				var pf pipelineFile
-				if err := json.Unmarshal(data, &pf); err != nil {
-					return fmt.Errorf("parsing pipeline file: %w", err)
+				if isSM {
+					// The service expands the document; the CLI only picks a name default.
+					payload.StateMachine = sm
+					payload.Name = stateMachineName(sm)
+				} else {
+					payload.Name = pf.Name
+					payload.Description = pf.Description
+					payload.Steps = pf.Steps
+					payload.Inputs = pf.Inputs
+					payload.Outputs = pf.Outputs
+					payload.Routes = pf.Routes
+					payload.Maps = pf.Maps
+					payload.Ticket = pf.Ticket
 				}
-				payload.Name = pf.Name
-				payload.Description = pf.Description
-				payload.Steps = pf.Steps
-				payload.Inputs = pf.Inputs
-				payload.Outputs = pf.Outputs
-				payload.Routes = pf.Routes
-				payload.Maps = pf.Maps
-				payload.Ticket = pf.Ticket
 			} else {
 				nodes, err := parseDSL(args[2])
 				if err != nil {
@@ -833,7 +838,7 @@ reusable step, or "localize-step" to copy a shared step's definition inline.`,
 			return apiCall("POST", "/workflows/pipelines", body)
 		},
 	}
-	createPipelineCmd.Flags().StringVarP(&pipelineFileFlag, "file", "f", "", "JSON pipeline definition file")
+	createPipelineCmd.Flags().StringVarP(&pipelineFileFlag, "file", "f", "", "pipeline file — a state machine (YAML or JSON, top-level states:) or the legacy flat steps/routes JSON")
 	createPipelineCmd.Flags().StringArrayVar(&pipelineMapFlags, "map", nil, `define a map region the DSL refers to as [body]*<id>, as JSON (repeatable): {"id":"per-module","var":"module","values_from":"${steps.discover.output.MODULES}"}`)
 	ciCreateCmd.AddCommand(createPipelineCmd)
 
@@ -966,25 +971,29 @@ gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`
 			var dslRoutes []workflowRoute
 			var inputs []pipelineInputDef
 			var outputs []pipelineOutputDef
+			var smDoc json.RawMessage // set when -f is a state-machine document
 			if updatePipelineFile != "" {
-				data, err := os.ReadFile(updatePipelineFile)
+				isSM, sm, pf, err := loadPipelineConfig(updatePipelineFile)
 				if err != nil {
-					return fmt.Errorf("reading pipeline file: %w", err)
+					return err
 				}
-				var pf pipelineFile
-				if err := json.Unmarshal(data, &pf); err != nil {
-					return fmt.Errorf("parsing pipeline file: %w", err)
+				if isSM {
+					smDoc = sm
+					if updatePipelineName == "" {
+						updatePipelineName = stateMachineName(sm)
+					}
+				} else {
+					steps = pf.Steps
+					inputs = pf.Inputs
+					outputs = pf.Outputs
+					if updatePipelineName == "" {
+						updatePipelineName = pf.Name
+					}
+					if updatePipelineDesc == "" {
+						updatePipelineDesc = pf.Description
+					}
+					dslRoutes = pf.Routes
 				}
-				steps = pf.Steps
-				inputs = pf.Inputs
-				outputs = pf.Outputs
-				if updatePipelineName == "" {
-					updatePipelineName = pf.Name
-				}
-				if updatePipelineDesc == "" {
-					updatePipelineDesc = pf.Description
-				}
-				dslRoutes = pf.Routes
 			} else {
 				nodes, err := parseDSL(args[1])
 				if err != nil {
@@ -1011,9 +1020,12 @@ gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`
 				updatePipelineName = current.Name
 			}
 
-			payload := map[string]any{
-				"name":  updatePipelineName,
-				"steps": steps,
+			payload := map[string]any{"name": updatePipelineName}
+			if smDoc != nil {
+				// The service expands the document into steps/routes/maps.
+				payload["state_machine"] = smDoc
+			} else {
+				payload["steps"] = steps
 			}
 			if len(dslRoutes) > 0 {
 				payload["routes"] = dslRoutes
@@ -1040,7 +1052,7 @@ gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`
 			return apiCall("PUT", "/workflows/pipelines/"+id, body)
 		},
 	}
-	updatePipelineCmd.Flags().StringVarP(&updatePipelineFile, "file", "f", "", "JSON pipeline definition file")
+	updatePipelineCmd.Flags().StringVarP(&updatePipelineFile, "file", "f", "", "pipeline file — a state machine (YAML or JSON, top-level states:) or the legacy flat steps/routes JSON")
 	updatePipelineCmd.Flags().StringArrayVar(&pipelineMapFlags, "map", nil, `define a map region the DSL refers to as [body]*<id>, as JSON (repeatable)`)
 	updatePipelineCmd.Flags().StringVar(&updatePipelineName, "name", "", "Pipeline name (fetched automatically if omitted)")
 	updatePipelineCmd.Flags().StringVar(&updatePipelineDesc, "description", "", "Pipeline description")
