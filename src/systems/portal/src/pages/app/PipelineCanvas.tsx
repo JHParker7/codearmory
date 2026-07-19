@@ -579,7 +579,10 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     setRoutes((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
 
   return (
-    <div ref={splitRef} style={{ display: 'flex', height: '100%', minHeight: 0, border: `1px solid ${T.border}`, background: T.bg }}>
+    // Editable: fill the flex container and scroll internally. Read-only (a run / a
+    // pipeline preview): size to the graph's own width so the ENCLOSING panel scrolls
+    // both ways — otherwise a wide flow is clipped with the scrollbar out of reach.
+    <div ref={splitRef} style={{ display: 'flex', height: editable ? '100%' : 'auto', width: editable ? undefined : 'max-content', minHeight: 0, border: `1px solid ${T.border}`, background: T.bg }}>
       {editable && (
         <>
           <div style={{ width: paletteW, flexShrink: 0, overflowY: 'auto', borderRight: `1px solid ${T.border}`, background: T.bgAlt, padding: 10 }}>
@@ -654,7 +657,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
         </>
       )}
 
-      <div style={{ flex: 1, minWidth: 0, overflow: 'auto', position: 'relative' }}>
+      <div style={{ flex: 1, minWidth: 0, overflow: editable ? 'auto' : 'visible', position: 'relative' }}>
         {/* What a save would be rejected for, shown before the API says so. */}
         {(cycle.length > 0 || issues.length > 0) && (
           <div style={{ position: 'sticky', top: 0, zIndex: 5, background: T.redSoft, color: T.red, padding: '6px 10px', fontFamily: T.mono, fontSize: 11, lineHeight: 1.5 }}>
