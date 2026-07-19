@@ -120,6 +120,9 @@ export interface Route {
   from: string;
   to: string;
   when?: string;
+  /** Optional human label for the edge (e.g. "if_discover_failed"), shown on the
+   * branch instead of the raw condition. Display-only — the engine ignores it. */
+  name?: string;
 }
 
 /** A map region: a SUBGRAPH repeated once per value. Steps join it by naming its id
@@ -335,6 +338,275 @@ export function layoutGraph(blocks: Block[], routes: Route[], defName: (id: stri
     rowOf.set(l, row + 1);
     return { uid: b.uid, name, layer: l, row };
   });
+}
+
+/** The prefix for a synthetic decision node's id — see displayGraph. A choice is not
+ * a step; the canvas draws it as a diamond derived from a step's conditional routes,
+ * so its id is namespaced to never collide with a real block uid. */
+const DECISION_PREFIX = ' dec:';
+export function decisionId(sourceName: string): string { return DECISION_PREFIX + sourceName; }
+export function isDecisionId(id: string): boolean { return id.startsWith(DECISION_PREFIX); }
+
+/** A node in the DRAWN graph: either a real step (kind 'step', carrying its block
+ * uid) or a synthetic decision diamond (kind 'decision', carrying the name of the
+ * step it branches from). layer/row place it on the canvas grid. */
+export interface DisplayNode {
+  id: string;
+  kind: 'step' | 'decision' | 'map';
+  uid?: string;
+  name?: string;
+  sourceName?: string;
+  /** kind 'map' only: the region's id and its member steps (names + block uids, in
+   * order) — so the canvas can draw the region as one node in the outer flow while still
+   * laying its member step blocks out INSIDE the box. */
+  mapId?: string;
+  members?: string[];
+  memberUids?: string[];
+  layer: number;
+  row: number;
+}
+
+/** An edge in the DRAWN graph. routeIndex ties a drawn edge back to the underlying
+ * Route (for selection/deletion); it is null for the plain step→decision link, which
+ * is synthetic. `arm` marks the branch edges leaving a decision, so the renderer can
+ * label them (the condition, or "else" for the unconditional default). */
+export interface DisplayEdge {
+  from: string;
+  to: string;
+  when?: string;
+  name?: string;
+  routeIndex: number | null;
+  arm?: boolean;
+}
+
+/**
+ * The graph as DRAWN, not as stored. A step whose out-routes include a conditional one
+ * "branches": its routes are re-drawn through a synthetic decision diamond, so the
+ * runner step never appears to carry the branch — mirroring the state-machine model,
+ * where a choice is its own state. A step with only unconditional routes (a plain
+ * sequence, or a parallel fork) is drawn directly, unchanged.
+ *
+ * This is a pure VIEW over (blocks, routes): the stored model is untouched, and every
+ * drawn branch edge still carries the index of the Route it came from, so selecting or
+ * editing a condition works exactly as before.
+ */
+export function displayGraph(blocks: Block[], routes: Route[], defName: (id: string) => string | undefined, collapseMaps = false): { nodes: DisplayNode[]; edges: DisplayEdge[] } {
+  const uidOf = new Map<string, string>(); // step name -> block uid
+  blocks.forEach((b) => uidOf.set(nodeName(b, defName), b.uid));
+
+  // When collapsing, a whole map region is drawn as ONE node: its member steps share a
+  // single node id, the routes wholly inside the region vanish (they are its body, not
+  // top-level flow), and only the edges crossing the boundary remain — so the pipeline's
+  // routes no longer thread through and around the region's individual steps.
+  const mapOfName = new Map<string, string>();      // member step name -> map id
+  const membersByMap = new Map<string, string[]>();  // map id -> member step names, in order
+  const memberUidsByMap = new Map<string, string[]>(); // map id -> member block uids, in order
+  if (collapseMaps) {
+    blocks.forEach((b) => {
+      if (!b.mapId) return;
+      const nm = nodeName(b, defName);
+      mapOfName.set(nm, b.mapId);
+      if (!membersByMap.has(b.mapId)) { membersByMap.set(b.mapId, []); memberUidsByMap.set(b.mapId, []); }
+      membersByMap.get(b.mapId)!.push(nm);
+      memberUidsByMap.get(b.mapId)!.push(b.uid);
+    });
+  }
+  const mapNodeId = (mapId: string) => 'map:' + mapId;
+  // The display-node id a step name resolves to (its map's node if collapsed, else its block).
+  const resolve = (name: string): string | undefined => {
+    const mid = mapOfName.get(name);
+    return mid ? mapNodeId(mid) : uidOf.get(name);
+  };
+
+  // Resolved out-edges per SOURCE node id: internal-to-a-region edges are dropped, and
+  // duplicate boundary edges (several members → the same outside step) are collapsed to one.
+  const outByNode = new Map<string, { to: string; when?: string; name?: string; i: number }[]>();
+  routes.forEach((r, i) => {
+    const s = resolve(r.from), t = resolve(r.to);
+    if (!s || !t || s === t) return;
+    if (!outByNode.has(s)) outByNode.set(s, []);
+    const arr = outByNode.get(s)!;
+    if (arr.some((e) => e.to === t && e.when === r.when && e.name === r.name)) return;
+    arr.push({ to: t, when: r.when, name: r.name, i });
+  });
+  const branchesNode = (id: string) => (outByNode.get(id) ?? []).some((e) => !!e.when);
+
+  // Ordered node list (a decision follows its source) for stable row packing. A region is
+  // emitted once, at its first member's position; the other members are skipped.
+  const ordered: Omit<DisplayNode, 'layer' | 'row'>[] = [];
+  const emittedMap = new Set<string>();
+  blocks.forEach((b) => {
+    const name = nodeName(b, defName);
+    const mid = collapseMaps ? b.mapId : undefined;
+    if (mid) {
+      if (emittedMap.has(mid)) return;
+      emittedMap.add(mid);
+      const id = mapNodeId(mid);
+      const members = membersByMap.get(mid) ?? [];
+      ordered.push({ id, kind: 'map', mapId: mid, name: mid, members, memberUids: memberUidsByMap.get(mid) ?? [] });
+      if (branchesNode(id)) ordered.push({ id: decisionId(id), kind: 'decision', sourceName: mid });
+    } else {
+      ordered.push({ id: b.uid, kind: 'step', uid: b.uid, name });
+      if (branchesNode(b.uid)) ordered.push({ id: decisionId(b.uid), kind: 'decision', sourceName: name });
+    }
+  });
+
+  const edges: DisplayEdge[] = [];
+  ordered.forEach((n) => {
+    if (n.kind === 'decision') return;
+    const outs = outByNode.get(n.id) ?? [];
+    if (outs.length === 0) return;
+    if (branchesNode(n.id)) {
+      edges.push({ from: n.id, to: decisionId(n.id), routeIndex: null });
+      outs.forEach((e) => edges.push({ from: decisionId(n.id), to: e.to, when: e.when, name: e.name, routeIndex: e.i, arm: true }));
+    } else {
+      outs.forEach((e) => edges.push({ from: n.id, to: e.to, when: e.when, name: e.name, routeIndex: e.i }));
+    }
+  });
+
+  // Longest-path layering (mirrors layoutGraph), bounded by node count so a cycle
+  // terminates; a decision sits one layer below its source, pushing its targets down.
+  const ids = ordered.map((n) => n.id);
+  const layer = new Map<string, number>();
+  ids.forEach((id) => layer.set(id, 0));
+  for (let k = 0; k < ids.length; k++) {
+    let changed = false;
+    for (const e of edges) {
+      if (!layer.has(e.from) || !layer.has(e.to)) continue;
+      const want = (layer.get(e.from) as number) + 1;
+      if (want > (layer.get(e.to) as number)) { layer.set(e.to, want); changed = true; }
+    }
+    if (!changed) break;
+  }
+  // Order nodes WITHIN each layer to reduce edge crossings (a barycenter sweep, the
+  // classic Sugiyama heuristic): a node drifts toward the average position of its
+  // neighbours in the adjacent layer, so e.g. two siblings feeding the same joins end
+  // up on the side that doesn't make their edges cross. Seeded from block order and
+  // run a few down/up passes; stable, and a no-op when nothing crosses.
+  const byLayer = new Map<number, string[]>();
+  ordered.forEach((n) => {
+    const l = layer.get(n.id) ?? 0;
+    if (!byLayer.has(l)) byLayer.set(l, []);
+    byLayer.get(l)!.push(n.id);
+  });
+  const maxLayer = Math.max(0, ...byLayer.keys());
+  const preds = new Map<string, string[]>();
+  const succs = new Map<string, string[]>();
+  edges.forEach((e) => {
+    if (!succs.has(e.from)) succs.set(e.from, []);
+    succs.get(e.from)!.push(e.to);
+    if (!preds.has(e.to)) preds.set(e.to, []);
+    preds.get(e.to)!.push(e.from);
+  });
+  const pos = new Map<string, number>();
+  const reindex = () => byLayer.forEach((ids) => ids.forEach((id, i) => pos.set(id, i)));
+  reindex();
+  const bary = (id: string, neigh: Map<string, string[]>): number => {
+    const ns = neigh.get(id) ?? [];
+    if (ns.length === 0) return pos.get(id) ?? 0;
+    return ns.reduce((s, n) => s + (pos.get(n) ?? 0), 0) / ns.length;
+  };
+  for (let iter = 0; iter < 4; iter++) {
+    for (let l = 1; l <= maxLayer; l++) {
+      const ids = byLayer.get(l);
+      if (ids) { ids.sort((a, b) => bary(a, preds) - bary(b, preds)); reindex(); }
+    }
+    for (let l = maxLayer - 1; l >= 0; l--) {
+      const ids = byLayer.get(l);
+      if (ids) { ids.sort((a, b) => bary(a, succs) - bary(b, succs)); reindex(); }
+    }
+  }
+  // When maps are collapsed there are no member nodes to fence off, so column = barycenter
+  // order and we skip the band machinery entirely.
+  const col = new Map<string, number>();
+  if (collapseMaps) {
+    byLayer.forEach((ids) => ids.forEach((id) => col.set(id, pos.get(id) ?? 0)));
+    const nodes: DisplayNode[] = ordered.map((n) => ({ ...n, layer: layer.get(n.id) ?? 0, row: col.get(n.id) ?? 0 }));
+    return { nodes, edges };
+  }
+
+  // Reserve a column BAND for each map region so its enclosure — drawn as a plain
+  // rectangle over the member cells — never wraps a non-member. A map's members occupy the
+  // same columns on every layer, and the band is reserved across the region's WHOLE layer
+  // span (min..max member layer, not only the layers that hold members), so any non-member
+  // that falls between them is pushed sideways out of the rectangle rather than being
+  // enclosed. Bands are ordered by their barycenter column so a region stays roughly where
+  // the flow naturally places it. (Keeping members column-aligned is what lets the box stay
+  // a clean rectangle once ranks are centred — see the shared per-group shift in the canvas.)
+  const mapOf = new Map<string, string>();
+  blocks.forEach((b) => {
+    if (b.mapId) mapOf.set(b.uid, b.mapId);
+  });
+  const membersOf = new Map<string, string[]>();
+  mapOf.forEach((m, id) => {
+    if (!membersOf.has(m)) membersOf.set(m, []);
+    membersOf.get(m)!.push(id);
+  });
+  const bandWidth = new Map<string, number>();
+  const mapLo = new Map<string, number>();
+  const mapHi = new Map<string, number>();
+  membersOf.forEach((ids, m) => {
+    const perLayer = new Map<number, number>();
+    let lo = Infinity, hi = -Infinity;
+    ids.forEach((id) => {
+      const l = layer.get(id) ?? 0;
+      perLayer.set(l, (perLayer.get(l) ?? 0) + 1);
+      lo = Math.min(lo, l);
+      hi = Math.max(hi, l);
+    });
+    bandWidth.set(m, Math.max(1, ...perLayer.values()));
+    mapLo.set(m, lo);
+    mapHi.set(m, hi);
+  });
+  const targetCol = (m: string): number => {
+    const ids = membersOf.get(m)!;
+    return ids.reduce((s, id) => s + (pos.get(id) ?? 0), 0) / ids.length;
+  };
+  const bandStart = new Map<string, number>();
+  let cursor = 0;
+  [...membersOf.keys()]
+    .sort((a, b) => targetCol(a) - targetCol(b))
+    .forEach((m) => {
+      const start = Math.max(cursor, Math.round(targetCol(m)));
+      bandStart.set(m, start);
+      cursor = start + bandWidth.get(m)!;
+    });
+
+  byLayer.forEach((ids, l) => {
+    const inOrder = [...ids].sort((a, b) => (pos.get(a) ?? 0) - (pos.get(b) ?? 0));
+    const used = new Set<number>();
+    const reserved = new Set<number>();
+    // Reserve every band whose region spans this layer (even with no member here), so the
+    // box's rectangle can hold no free node anywhere within its vertical extent.
+    membersOf.forEach((_ids, m) => {
+      if ((mapLo.get(m) ?? 0) <= l && l <= (mapHi.get(m) ?? 0)) {
+        const base = bandStart.get(m) ?? 0;
+        for (let i = 0; i < (bandWidth.get(m) ?? 1); i++) reserved.add(base + i);
+      }
+    });
+    const memberIdx = new Map<string, number>();
+    inOrder.forEach((id) => {
+      const m = mapOf.get(id);
+      if (!m) return;
+      const idx = memberIdx.get(m) ?? 0;
+      memberIdx.set(m, idx + 1);
+      const c = (bandStart.get(m) ?? 0) + idx;
+      col.set(id, c);
+      used.add(c);
+    });
+    // Free nodes fill the remaining columns, skipping any reserved band column.
+    let c = 0;
+    inOrder.forEach((id) => {
+      if (mapOf.has(id)) return;
+      while (used.has(c) || reserved.has(c)) c++;
+      col.set(id, c);
+      used.add(c);
+      c++;
+    });
+  });
+
+  const nodes: DisplayNode[] = ordered.map((n) => ({ ...n, layer: layer.get(n.id) ?? 0, row: col.get(n.id) ?? pos.get(n.id) ?? 0 }));
+  return { nodes, edges };
 }
 
 /** Reports the cycle-forming routes, if any: a graph is acyclic exactly when a

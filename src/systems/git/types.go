@@ -83,6 +83,13 @@ type GitRepo struct {
 	URL       string    `gorm:"uniqueIndex:ux_gitrepo_owner_url" json:"url"`
 	Host      string    `json:"host"`
 	CreatedAt time.Time `json:"created_at"`
+	// WorkflowSync opts this repo into GitOps: the workflows service syncs pipeline
+	// configs from `.armory/workflows/*` on a push. Off by default. Branches is the
+	// allowlist — configs are synced ONLY from these branches, so a push to a feature
+	// branch or an untrusted PR can never register or run a workflow. Empty branches
+	// with sync enabled means "main only" (see effectiveSyncBranches).
+	WorkflowSyncEnabled  bool     `gorm:"default:false" json:"workflow_sync_enabled"`
+	WorkflowSyncBranches []string `gorm:"serializer:json" json:"workflow_sync_branches"`
 }
 
 // Repo source labels: a repo is either discovered by enumerating a backend's API
@@ -102,6 +109,9 @@ type repoView struct {
 	Backend     string `json:"backend,omitempty"`
 	BackendType string `json:"backend_type,omitempty"`
 	Source      string `json:"source"`
+	// GitOps sync settings — only meaningful for a pinned (manual) repo.
+	WorkflowSyncEnabled  bool     `json:"workflow_sync_enabled,omitempty"`
+	WorkflowSyncBranches []string `json:"workflow_sync_branches,omitempty"`
 }
 
 // createRepoRequest is the body of POST /repos. Name is optional; when blank it is

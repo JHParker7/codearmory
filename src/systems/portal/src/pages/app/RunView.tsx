@@ -29,6 +29,18 @@ function statusColor(status: string): string {
   return t === 'green' ? T.green : t === 'amber' ? T.amber : t === 'red' ? T.red : t === 'blue' ? T.blue : T.dim;
 }
 
+/** Pretty-print a captured value when it is JSON (an object or array), so a step's
+ * output/outputs read as an indented tree instead of one dense line; anything else
+ * (a plain scalar or non-JSON text) is returned unchanged. */
+function pretty(v: unknown): string {
+  const s = typeof v === 'string' ? v : v == null ? '' : String(v);
+  const t = s.trim();
+  if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
+    try { return JSON.stringify(JSON.parse(t), null, 2); } catch { /* not JSON — leave as-is */ }
+  }
+  return s;
+}
+
 /** The decision controls for a run paused on a manual-approval gate, rendered
  * right on the gate's pipeline block so the call to action sits where the eye
  * already is (rather than only in the logs panel). The optional gate message
@@ -197,17 +209,21 @@ export function RunView() {
   const navigate = useNavigate();
   const token = useAppSelector((s) => s.auth.token)!;
   const userNames = useUserNames(token);
-  const { width } = useViewport();
+  const { width, height } = useViewport();
   // Below ~1000px the page splits vertically (pipeline over logs); above it, the
   // panels sit side by side. Either way the split is user-draggable (and persisted)
   // so the pipeline side can be grown or shrunk against the logs.
   const narrow = width < 1000;
   const splitRef = useRef<HTMLDivElement>(null);
-  const [pipelineW, widthHandle] = useResizablePane('split.runview.pipeline.w', 400, {
-    min: 280, max: 900, side: 'left', direction: 'horizontal', containerRef: splitRef, otherMin: 320,
+  // Default the pipeline to 4/5 of the pane so the logs open at ~1/5 (key bumped to
+  // apply the new default). Wide max / small otherMin so the divider can still grow
+  // the pipeline right across the pane and shrink the logs to a sliver — or minimise
+  // either side outright (below).
+  const [pipelineW, widthHandle] = useResizablePane('split.runview.pipeline.w2', Math.round(width * 0.8), {
+    min: 220, max: 3200, side: 'left', direction: 'horizontal', containerRef: splitRef, otherMin: 180,
   });
-  const [pipelineH, heightHandle] = useResizablePane('split.runview.pipeline.h', 320, {
-    min: 140, max: 1200, side: 'left', direction: 'vertical', containerRef: splitRef, otherMin: 200,
+  const [pipelineH, heightHandle] = useResizablePane('split.runview.pipeline.h2', Math.round(height * 0.8), {
+    min: 120, max: 2600, side: 'left', direction: 'vertical', containerRef: splitRef, otherMin: 120,
   });
 
   const [run, setRun] = useState<WorkflowRun | null>(null);
@@ -219,6 +235,12 @@ export function RunView() {
   // synthetic `idx:N` for a still-pending step. Keyed per run, not per step_index,
   // so matrix combinations (which share an index) are individually selectable.
   const [selected, setSelected] = useState<string | null>(null);
+  // Either panel can be minimised to a thin strip to give the whole pane to the
+  // other; at most one is minimised at a time.
+  const [collapsed, setCollapsed] = useState(false);
+  const [logsCollapsed, setLogsCollapsed] = useState(false);
+  const minimisePipeline = () => { setCollapsed(true); setLogsCollapsed(false); };
+  const minimiseLogs = () => { setLogsCollapsed(true); setCollapsed(false); };
   const [deciding, setDeciding] = useState(false);
   // Approve/reject failures show inline beside the gate controls rather than
   // replacing the whole run view (which `error` does for a failed load).
@@ -349,7 +371,7 @@ export function RunView() {
 
   const backBtn = (
     <button onClick={() => navigate('/app/workflows')}
-      style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>
+      style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>
       ← runs
     </button>
   );
@@ -377,7 +399,7 @@ export function RunView() {
         <div style={{ flex: 1 }} />
         {isRunActive(run.status) && (
           <button onClick={handleCancel}
-            style={{ background: 'transparent', border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
+            style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer' }}>
             [ cancel ]
           </button>
         )}
@@ -386,35 +408,60 @@ export function RunView() {
       {/* Captured outputs: the pipeline-level outputs resolved at completion. Shown
           above the panels so a finished run's published values read at a glance. */}
       {run.outputs && Object.keys(run.outputs).length > 0 && (
-        <div style={{ padding: '10px 20px', borderBottom: `1px solid ${T.border}`, background: T.bg }}>
+        // Capped + scrollable so a large (pretty-printed) outputs block never squeezes
+        // the pipeline/logs split below it off the screen.
+        <div style={{ padding: '10px 20px', borderBottom: `1px solid ${T.border}`, background: T.bg, flexShrink: 0, maxHeight: '30vh', overflowY: 'auto' }}>
           <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>captured outputs</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {Object.entries(run.outputs).map(([k, v]) => (
-              <div key={k} style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.green, fontWeight: 600 }}>{k}</span>
-                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.text, wordBreak: 'break-word' }}>{v}</span>
-              </div>
-            ))}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {Object.entries(run.outputs).map(([k, v]) => {
+              const pv = pretty(v);
+              return (
+                <div key={k} style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                  <span style={{ fontFamily: T.mono, fontSize: 11, color: T.green, fontWeight: 600 }}>{k}</span>
+                  {pv.includes('\n') ? (
+                    <pre style={{ margin: 0, flex: 1, minWidth: 0, fontFamily: T.mono, fontSize: 11, color: T.text, whiteSpace: 'pre', overflowX: 'auto', background: T.cardHi, border: `1px solid ${T.border}`, padding: '6px 8px' }}>{pv}</pre>
+                  ) : (
+                    <span style={{ fontFamily: T.mono, fontSize: 11, color: T.text, wordBreak: 'break-word' }}>{pv}</span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
 
       <div ref={splitRef} style={{ display: 'flex', flexDirection: narrow ? 'column' : 'row', flex: 1, overflow: 'hidden' }}>
         {/* Pipeline with live status — its size (width when side-by-side, height when
-            stacked) is the draggable side of the split; the divider follows. */}
+            stacked) is the draggable side of the split, and it can be minimised to a
+            thin strip so the logs take the whole pane. */}
+        {collapsed ? (
+          <div onClick={() => setCollapsed(false)} title="expand pipeline"
+            style={{
+              flexShrink: 0, cursor: 'pointer', background: T.bgAlt,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: T.green, fontFamily: T.mono, fontSize: 13,
+              ...(narrow ? { width: '100%', height: 26, borderBottom: `1px solid ${T.border}` } : { width: 26, borderRight: `1px solid ${T.border}` }),
+            }}>▸</div>
+        ) : (
         <div style={{
-          flexShrink: 0, overflow: 'auto', padding: 16, background: T.bg,
-          ...(narrow ? { width: '100%', height: pipelineH } : { width: pipelineW }),
+          display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, overflow: 'hidden', background: T.bg,
+          // Fill the pane when the logs side is minimised; otherwise take its draggable size.
+          ...(logsCollapsed ? { flex: 1 } : { flexShrink: 0, ...(narrow ? { width: '100%', height: pipelineH } : { width: pipelineW }) }),
         }}>
-          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 }}>pipeline</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '16px 16px 8px', flexShrink: 0 }}>
+            <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>pipeline</span>
+            <div style={{ flex: 1 }} />
+            <button onClick={minimisePipeline} title="minimise pipeline"
+              style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '2px 8px', cursor: 'pointer' }}>–</button>
+          </div>
           {stepRuns.length === 0 && !workflow ? (
-            <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ {isRunActive(run.status) ? 'waiting for the first step…' : 'no steps recorded'}</div>
+            <div style={{ padding: '0 16px 16px', fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ {isRunActive(run.status) ? 'waiting for the first step…' : 'no steps recorded'}</div>
           ) : (
             <>
-              {/* The run drawn as the graph it is — same renderer as the editor, so
-                  the two can never disagree about the pipeline's shape. A node with
-                  no execution (a route that was not taken) stays neutral. */}
-              <div style={{ minHeight: 240, marginBottom: 12 }}>
+              {/* The run drawn as the graph it is — same renderer as the editor. It sits
+                  in a BOUNDED flex region so a wide/tall flow scrolls both ways within
+                  it (its own scrollbars stay reachable) instead of being clipped. */}
+              <div style={{ flex: 1, minHeight: 160, padding: '0 16px' }}>
                 <PipelineCanvas
                   initialSteps={workflow?.steps ?? []}
                   initialRoutes={workflow?.routes ?? []}
@@ -433,43 +480,64 @@ export function RunView() {
                   }}
                 />
               </div>
-              {/* The selected node's executions: one for a plain step, several for a
-                  matrix or map fan-out. MatrixBlock also carries the gate controls. */}
-              {selectedLegs.length > 0 && (
-                <MatrixBlock steps={selectedLegs} selected={selected} setSelected={setSelected}
-                  deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
-              )}
             </>
           )}
         </div>
+        )}
 
-        {/* Drag to rebalance the pipeline side against the logs side. */}
-        {narrow ? heightHandle : widthHandle}
+        {/* Drag to rebalance the pipeline side against the logs side (hidden while
+            either panel is minimised). */}
+        {!collapsed && !logsCollapsed && (narrow ? heightHandle : widthHandle)}
 
-        {/* Logs for the selected step */}
+        {/* Logs for the selected step — minimisable to a strip like the pipeline. */}
+        {logsCollapsed ? (
+          <div onClick={() => setLogsCollapsed(false)} title="expand logs"
+            style={{
+              flexShrink: 0, cursor: 'pointer', background: T.bgAlt,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: T.green, fontFamily: T.mono, fontSize: 13,
+              ...(narrow ? { width: '100%', height: 26, borderTop: `1px solid ${T.border}` } : { width: 26, borderLeft: `1px solid ${T.border}` }),
+            }}>{narrow ? '▴' : '◂'}</div>
+        ) : (
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: T.bg }}>
           <div style={{ padding: '10px 16px', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>logs</span>
             {selectedSr && <Pill tone={statusTone(selectedSr.status)}>{selectedSr.status}</Pill>}
             <span style={{ fontFamily: T.mono, fontSize: 12, color: T.textHi, fontWeight: 600 }}>{selectedSr?.step_name ?? '—'}</span>
             {selectedSr?.started_at && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>{fmtDuration(selectedSr.started_at, selectedSr.ended_at)}</span>}
+            <div style={{ flex: 1 }} />
+            <button onClick={minimiseLogs} title="minimise logs"
+              style={{ background: 'transparent', border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11, lineHeight: 1, padding: '2px 8px', cursor: 'pointer' }}>–</button>
           </div>
+          {/* The combination selector lives here — at the top of the logs — and only
+              when the selected step actually fanned out (a matrix / map / scatter).
+              A single execution needs no picker; a single gate still shows its
+              approve/reject controls. */}
+          {selectedLegs.length > 1 ? (
+            <div style={{ flexShrink: 0, padding: '10px 16px', borderBottom: `1px solid ${T.border}`, background: T.bg }}>
+              <MatrixBlock steps={selectedLegs} selected={selected} setSelected={setSelected}
+                deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
+            </div>
+          ) : selectedSr?.status === 'awaiting_approval' ? (
+            <div style={{ flexShrink: 0, padding: '10px 16px', borderBottom: `1px solid ${T.border}`, background: T.bg }}>
+              <ApprovalPanel gate={selectedLegs[0]?.gate} deciding={deciding} decideErr={decideErr} onApprove={handleApprove} onReject={handleReject} />
+            </div>
+          ) : null}
           <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
             {!selectedSr ? (
               <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>→ select a step to see its logs</div>
             ) : selectedSr.status === 'awaiting_approval' ? (
-              // Approval gate: the decision controls now sit on the gate's pipeline
-              // block (left), so here we just surface its prompt/output for context
-              // and point the approver at the block.
+              // Approval gate: the approve/reject controls sit at the TOP of this panel;
+              // here we just surface its prompt/output for context.
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 640 }}>
                 <div style={{ border: `1px solid ${T.blue}`, background: T.blueSoft, padding: 16, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <div style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.blue }}>⏸ paused for manual approval</div>
                   <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim, lineHeight: 1.5 }}>
-                    Approve or reject on the highlighted gate step in the pipeline at left.
+                    Approve or reject with the controls above.
                   </div>
                 </div>
                 {selectedSr.output && (
-                  <pre style={{ margin: 0, fontFamily: T.mono, fontSize: 12, color: T.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selectedSr.output}</pre>
+                  <pre style={{ margin: 0, fontFamily: T.mono, fontSize: 12, color: T.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{pretty(selectedSr.output)}</pre>
                 )}
               </div>
             ) : (selectedSr.logs || selectedSr.output) ? (
@@ -486,7 +554,7 @@ export function RunView() {
                     <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>
                       {selectedSr.status === 'completed' ? 'captured outputs' : 'failure detail'}
                     </div>
-                    <pre style={{ margin: 0, fontFamily: T.mono, fontSize: 12, color: T.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{selectedSr.output}</pre>
+                    <pre style={{ margin: 0, fontFamily: T.mono, fontSize: 12, color: T.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{pretty(selectedSr.output)}</pre>
                   </div>
                 )}
               </div>
@@ -497,6 +565,7 @@ export function RunView() {
             )}
           </div>
         </div>
+        )}
       </div>
     </div>
   );

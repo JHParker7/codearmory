@@ -192,7 +192,10 @@ func mergeRepos(backends []GitBackend, enumerated []repoView, manual []GitRepo) 
 			continue
 		}
 		seen[key] = true
-		v := repoView{ID: m.ID, Name: m.Name, URL: m.URL, Source: repoSourceManual}
+		v := repoView{
+			ID: m.ID, Name: m.Name, URL: m.URL, Source: repoSourceManual,
+			WorkflowSyncEnabled: m.WorkflowSyncEnabled, WorkflowSyncBranches: m.WorkflowSyncBranches,
+		}
 		if b, ok := byHost[m.Host]; ok {
 			v.Backend, v.BackendType = b.Name, b.Type
 		}

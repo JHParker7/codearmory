@@ -3,7 +3,96 @@ import {
   blocksFromSteps, stepsFromBlocks, StepRef, Block,
   stepsToPayload, configToJson, parseConfig, collectRefs,
   effectiveStepName, duplicateStepNames,
+  displayGraph, isDecisionId,
 } from '../src/pages/app/pipelineGraph.ts';
+
+describe('displayGraph', () => {
+  const defName = (_id: string) => undefined;
+  it('draws a plain sequence directly, with no decision node', () => {
+    const blocks: Block[] = [
+      { uid: 'a', stepId: '', name: 'a', inline: { action: 'x' } },
+      { uid: 'b', stepId: '', name: 'b', inline: { action: 'y' } },
+    ];
+    const { nodes, edges } = displayGraph(blocks, [{ from: 'a', to: 'b' }], defName);
+    expect(nodes.filter((n) => n.kind === 'decision')).to.have.length(0);
+    expect(edges).to.have.length(1);
+    expect(edges[0]).to.include({ from: 'a', to: 'b', routeIndex: 0 });
+  });
+
+  it('routes a conditional branch through a synthetic decision node', () => {
+    const blocks: Block[] = [
+      { uid: 'a', stepId: '', name: 'tests', inline: { action: 'test' } },
+      { uid: 'b', stepId: '', name: 'ok', inline: { action: 'ship' } },
+      { uid: 'c', stepId: '', name: 'bad', inline: { action: 'notify' } },
+    ];
+    const routes = [
+      { from: 'tests', to: 'bad', when: 'steps.tests.status == "failed"' },
+      { from: 'tests', to: 'ok' },
+    ];
+    const { nodes, edges } = displayGraph(blocks, routes, defName);
+    const dec = nodes.find((n) => n.kind === 'decision');
+    expect(dec, 'a decision node exists').to.not.equal(undefined);
+    expect(dec!.sourceName).to.equal('tests');
+    // The step links to the decision (no route index); the arms leave the decision.
+    const toDec = edges.find((e) => e.from === 'a' && isDecisionId(e.to));
+    expect(toDec).to.include({ routeIndex: null });
+    const arms = edges.filter((e) => e.arm);
+    expect(arms.map((e) => e.to).sort()).to.deep.equal(['b', 'c']);
+    expect(arms.every((e) => isDecisionId(e.from))).to.equal(true);
+    // The decision sits between the step (layer 0) and its targets (layer 2).
+    expect(dec!.layer).to.equal(1);
+    expect(nodes.find((n) => n.uid === 'b')!.layer).to.equal(2);
+  });
+
+  it('leaves an unconditional parallel fork as direct edges', () => {
+    const blocks: Block[] = [
+      { uid: 'a', stepId: '', name: 'build', inline: { action: 'b' } },
+      { uid: 'b', stepId: '', name: 'lint', inline: { action: 'l' } },
+      { uid: 'c', stepId: '', name: 'test', inline: { action: 't' } },
+    ];
+    const { nodes } = displayGraph(blocks, [{ from: 'build', to: 'lint' }, { from: 'build', to: 'test' }], defName);
+    expect(nodes.filter((n) => n.kind === 'decision')).to.have.length(0);
+  });
+
+  it('collapses a map region into one node, rewiring boundary edges and dropping internal ones', () => {
+    const blocks: Block[] = [
+      { uid: 'd', stepId: '', name: 'discover', inline: { action: 'x' } },
+      { uid: 't', stepId: '', name: 'test', inline: { action: 'x' }, mapId: 'm1' },
+      { uid: 'i', stepId: '', name: 'image', inline: { action: 'x' }, mapId: 'm1' },
+      { uid: 'g', stepId: '', name: 'gocache', inline: { action: 'x' } },
+    ];
+    const routes = [
+      { from: 'discover', to: 'test' },  // boundary in
+      { from: 'test', to: 'image' },     // internal — dropped
+      { from: 'image', to: 'gocache' },  // boundary out
+      { from: 'test', to: 'gocache' },   // second boundary out, dedupes with above target? different source member
+    ];
+    const { nodes, edges } = displayGraph(blocks, routes, defName, true);
+    const mapNodes = nodes.filter((n) => n.kind === 'map');
+    expect(mapNodes).to.have.length(1);
+    expect(mapNodes[0].members).to.deep.equal(['test', 'image']);
+    // The member steps are no longer their own nodes.
+    expect(nodes.some((n) => n.uid === 't' || n.uid === 'i')).to.equal(false);
+    const mid = mapNodes[0].id;
+    // Boundary edges attach to the region node; the internal test→image edge is gone.
+    expect(edges.some((e) => e.from === 'd' && e.to === mid)).to.equal(true);
+    expect(edges.some((e) => e.from === mid && e.to === 'g')).to.equal(true);
+    expect(edges.some((e) => e.from === 't' || e.to === 't' || e.from === 'i' || e.to === 'i')).to.equal(false);
+    // The two members both routing to gocache collapse to a single map→gocache edge.
+    expect(edges.filter((e) => e.from === mid && e.to === 'g')).to.have.length(1);
+  });
+
+  it('keeps map members expanded when not collapsing (the editable builder)', () => {
+    const blocks: Block[] = [
+      { uid: 't', stepId: '', name: 'test', inline: { action: 'x' }, mapId: 'm1' },
+      { uid: 'i', stepId: '', name: 'image', inline: { action: 'x' }, mapId: 'm1' },
+    ];
+    const { nodes } = displayGraph(blocks, [{ from: 'test', to: 'image' }], defName);
+    expect(nodes.some((n) => n.uid === 't')).to.equal(true);
+    expect(nodes.some((n) => n.uid === 'i')).to.equal(true);
+    expect(nodes.some((n) => n.kind === 'map')).to.equal(false);
+  });
+});
 
 describe('blocksFromSteps', () => {
   it('maps steps to blocks 1:1, in order, with unique instance ids', () => {

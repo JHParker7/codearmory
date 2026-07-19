@@ -199,6 +199,45 @@ func (rp GitRepo) Remove(ctx context.Context) error {
 	return nil
 }
 
+// UpdateSync sets the GitOps workflow-sync settings on a manual repo owned by the
+// caller. Select forces the zero values (disabled / empty allowlist) to persist, and
+// the []string branch allowlist round-trips through the field's json serializer.
+func (rp GitRepo) UpdateSync(ctx context.Context) error {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.repo.update_sync")
+	defer span.End()
+	span.SetAttributes(attribute.String("repo.id", rp.ID))
+	res := connect().WithContext(ctx).
+		Model(&GitRepo{}).
+		Where("id = ? AND owner = ?", rp.ID, rp.Owner).
+		Select("workflow_sync_enabled", "workflow_sync_branches").
+		Updates(GitRepo{WorkflowSyncEnabled: rp.WorkflowSyncEnabled, WorkflowSyncBranches: rp.WorkflowSyncBranches})
+	if res.Error != nil {
+		span.RecordError(res.Error)
+		span.SetStatus(codes.Error, res.Error.Error())
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errRepoNotFound
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
+}
+
+// reposByURL returns every pinned repo (across all owners) with the given clone URL.
+// A GitOps push webhook names a repo by URL, and the same repo may be pinned by more
+// than one user; the sync policy is resolved per matching owner.
+func reposByURL(ctx context.Context, url string) ([]GitRepo, error) {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.repo.by_url")
+	defer span.End()
+	var repos []GitRepo
+	if err := connectRead().WithContext(ctx).Where("url = ?", url).Find(&repos).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	return repos, nil
+}
+
 // listRepos returns all manually-registered repos owned by the caller, newest first.
 func listRepos(ctx context.Context, owner string) ([]GitRepo, error) {
 	ctx, span := otel.Tracer("git").Start(ctx, "db.repo.list")

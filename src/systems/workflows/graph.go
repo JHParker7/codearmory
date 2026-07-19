@@ -64,6 +64,9 @@ type WorkflowRoute struct {
 	From string `json:"from"`
 	To   string `json:"to"`
 	When string `json:"when,omitempty"`
+	// Name is an optional human label for the edge (e.g. "if_discover_failed"), shown
+	// on the branch instead of the raw condition. Display-only — the engine ignores it.
+	Name string `json:"name,omitempty"`
 }
 
 // workflowGraph is the runtime view of a workflow: the node set (index-addressable,

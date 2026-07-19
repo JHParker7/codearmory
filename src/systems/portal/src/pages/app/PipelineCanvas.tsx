@@ -23,11 +23,11 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import { T } from '../../theme';
 import { useResizablePane } from '../../components/ResizeHandle';
 import {
-  layoutGraph, findCycle, nodeName, pruneRoutes, stepsFromNodes, routesFromBlocks, blocksFromSteps, blockDef,
+  displayGraph, findCycle, nodeName, pruneRoutes, stepsFromNodes, routesFromBlocks, blocksFromSteps, blockDef,
   regionMembers, pruneMaps, mapIssues,
 } from './pipelineGraph';
 import type {
-  Block, Route, StepRef, BlockSelection, MatrixConfig, ScatterConfig, ApprovalGate, MapDef,
+  Block, Route, StepRef, BlockSelection, MatrixConfig, ScatterConfig, ApprovalGate, MapDef, DisplayNode,
 } from './pipelineGraph';
 import type { Step, WorkflowAction, GitRepo } from '../../api/bff';
 
@@ -38,6 +38,19 @@ const NODE_H = 62;
 const GAP_X = 30; // between siblings across a row
 const GAP_Y = 76; // between depths — the edges run through here
 const PAD = 28;
+// A decision diamond occupies one grid cell but is drawn smaller than a step box,
+// centred, so it reads as a distinct flow-chart symbol rather than another step.
+const DEC_W = 104;
+const DEC_H = 48;
+// A collapsed map region is drawn as a CONTAINER box: it is one node in the outer flow
+// (so routes attach to the group, not its members) but its member step blocks are laid
+// out stacked INSIDE it. These size the box around that inner stack.
+const MAP_LABEL_H = 22; // label strip at the top of the box
+const MAP_INNER_GAP = 24; // vertical gap between stacked members
+const MAP_PAD_B = 12; // padding below the last member
+const MAP_PAD_X = 16; // horizontal inset of members from the box sides (box stays grid-aligned)
+const mapBoxHeight = (memberCount: number) =>
+  MAP_LABEL_H + Math.max(1, memberCount) * NODE_H + (Math.max(1, memberCount) - 1) * MAP_INNER_GAP + MAP_PAD_B;
 
 /** The canvas reports the same selection shape the block builder did, so the host's
  * step editor is unchanged by the switch to a graph. */
@@ -192,11 +205,70 @@ function seedCondition(from: string): string {
   return `steps.${from}.status == "completed"`;
 }
 
-/** A cubic bezier from one node's bottom port to another's top port, bulging
- * vertically so sibling edges stay distinguishable rather than overlapping. */
-function edgePath(x1: number, y1: number, x2: number, y2: number): string {
-  const dy = Math.max(28, Math.abs(y2 - y1) * 0.5);
-  return `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2}`;
+type EdgeSide = 'top' | 'bottom' | 'left' | 'right';
+
+const SIDE_N: Record<EdgeSide, [number, number]> = { top: [0, -1], bottom: [0, 1], left: [-1, 0], right: [1, 0] };
+
+/** Builds an SVG polyline from waypoints, dropping duplicate and COLLINEAR points — so a
+ * route that happens to line up straight is drawn as one segment (no corner) and a Z keeps
+ * only the corners it actually turns at, instead of always emitting every stub. */
+function polyPath(pts: { x: number; y: number }[]): string {
+  const p: { x: number; y: number }[] = [];
+  for (const q of pts) {
+    const last = p[p.length - 1];
+    if (!last || Math.abs(last.x - q.x) > 0.5 || Math.abs(last.y - q.y) > 0.5) p.push(q);
+  }
+  if (p.length <= 2) return `M ${p.map((q) => `${q.x} ${q.y}`).join(' L ')}`;
+  const out = [p[0]];
+  for (let i = 1; i < p.length - 1; i++) {
+    const a = out[out.length - 1], b = p[i], c = p[i + 1];
+    const coll = (Math.abs(a.x - b.x) < 0.5 && Math.abs(b.x - c.x) < 0.5) || (Math.abs(a.y - b.y) < 0.5 && Math.abs(b.y - c.y) < 0.5);
+    if (!coll) out.push(b);
+  }
+  out.push(p[p.length - 1]);
+  return `M ${out.map((q) => `${q.x} ${q.y}`).join(' L ')}`;
+}
+
+/** An ORTHOGONAL connector between two attachment points that respects BOTH the side it
+ * leaves and the side it enters (so the arrowhead meets the target square-on), and keeps
+ * its long cross-run down in the inter-rank GAP — right next to the target's entry stub —
+ * rather than at a node's own y-level where it would cut across neighbours. Each node is
+ * left/entered via a short perpendicular stub; `stagger` shifts the transfer lane toward
+ * the source so sibling edges don't share one. */
+function sidePath(a: { x: number; y: number }, aSide: EdgeSide, b: { x: number; y: number }, bSide: EdgeSide, stagger = 0): string {
+  const s = 16;
+  const a1 = { x: a.x + SIDE_N[aSide][0] * s, y: a.y + SIDE_N[aSide][1] * s };
+  const b1 = { x: b.x + SIDE_N[bSide][0] * s, y: b.y + SIDE_N[bSide][1] * s };
+  const verticalEntry = bSide === 'top' || bSide === 'bottom';
+  if (verticalEntry) {
+    // Horizontal transfer lane hugging the target's entry stub (in the gap), staggered.
+    const yT = b1.y - (b1.y >= a1.y ? 1 : -1) * stagger;
+    return polyPath([a, a1, { x: a1.x, y: yT }, { x: b1.x, y: yT }, b1, b]);
+  }
+  // Horizontal entry (a same-rank peer): vertical transfer lane hugging the entry stub.
+  const xT = b1.x - (b1.x >= a1.x ? 1 : -1) * stagger;
+  return polyPath([a, a1, { x: xT, y: a1.y }, { x: xT, y: b1.y }, b1, b]);
+}
+
+/** An orthogonal path for a long edge that goes AROUND intermediate ranks: a stub out
+ * of the source, across to a vertical channel at `cx` (left/right of the columns),
+ * straight down it, then across and into the target — all straight lines. */
+function sideChannelPath(x1: number, y1: number, x2: number, y2: number, cx: number, sOut = 16, sIn = 16): string {
+  return polyPath([{ x: x1, y: y1 }, { x: x1, y: y1 + sOut }, { x: cx, y: y1 + sOut }, { x: cx, y: y2 - sIn }, { x: x2, y: y2 - sIn }, { x: x2, y: y2 }]);
+}
+
+/** A short, readable NAME for a branch arm leaving a decision, so each path says what
+ * it is rather than a bare value: `steps.X.status == "failed"` reads as `if failed`,
+ * `!= "ok"` as `if not ok`; other expressions are truncated. The full text stays in
+ * the tooltip and the route inspector. The unconditional default is labelled `else`
+ * by the caller. */
+function conditionLabel(when: string): string {
+  const eq = when.match(/status\s*==\s*["']([a-zA-Z_]+)["']/);
+  if (eq) return `if ${eq[1]}`;
+  const ne = when.match(/status\s*!=\s*["']([a-zA-Z_]+)["']/);
+  if (ne) return `if not ${ne[1]}`;
+  const s = when.trim();
+  return s.length > 20 ? `if ${s.slice(0, 19)}…` : `if ${s}`;
 }
 
 export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasProps>(function PipelineCanvas({
@@ -256,29 +328,305 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     onChange(stepsFromNodes(blocks), pruneRoutes(routes, names), pruneMaps(maps, blocks));
   }, [blocks, routes, maps, editable, onChange, defName]);
 
-  const placed = useMemo(() => layoutGraph(blocks, routes, defName), [blocks, routes, defName]);
+  // The DRAWN graph: real steps plus a synthetic decision diamond for every step that
+  // branches on a condition, so a runner step never carries the branch itself.
+  // In the read-only views (pipeline detail, run) each map region collapses to ONE block,
+  // so the pipeline's routes stop threading around its individual steps. The editable
+  // builder keeps them expanded (with the region box) so members can still be edited.
+  const display = useMemo(() => displayGraph(blocks, routes, defName, !editable), [blocks, routes, defName, editable]);
+  const nodeById = useMemo(() => {
+    const m = new Map<string, DisplayNode>();
+    display.nodes.forEach((n) => m.set(n.id, n));
+    return m;
+  }, [display]);
+  /** The widest rank sets the grid; every narrower rank is CENTRED under it, so the flow
+   * reads as a balanced tree down the middle rather than hugging the left. The one twist:
+   * all the ranks a map region spans must share a SINGLE shift, otherwise centring each of
+   * them independently would slide the region's members to different x per layer and its
+   * (rectangular) enclosure would no longer be a clean box. So ranks are grouped by the map
+   * spans that connect them (union-find over layers), and each group is centred as one unit
+   * on its widest rank; map-free ranks are still centred individually. */
+  const cols = useMemo(() => {
+    const perLayer = new Map<number, number>();
+    display.nodes.forEach((n) => perLayer.set(n.layer, Math.max(perLayer.get(n.layer) ?? 0, n.row + 1)));
+    const max = Math.max(1, ...perLayer.values());
+    // Layer spans of each map region.
+    const nodeByUid = new Map(display.nodes.map((n) => [n.id, n] as const));
+    const lo = new Map<string, number>(), hi = new Map<string, number>();
+    blocks.forEach((b) => {
+      if (!b.mapId) return;
+      const n = nodeByUid.get(b.uid);
+      if (!n) return;
+      lo.set(b.mapId, Math.min(lo.get(b.mapId) ?? Infinity, n.layer));
+      hi.set(b.mapId, Math.max(hi.get(b.mapId) ?? -Infinity, n.layer));
+    });
+    // Union the layers each region spans so they share one centring shift.
+    const parent = new Map<number, number>();
+    const find = (x: number): number => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x)!)!); x = parent.get(x)!; } return x; };
+    [...perLayer.keys()].forEach((l) => parent.set(l, l));
+    lo.forEach((a, m) => { const b = hi.get(m)!; for (let l = a; l <= b; l++) { if (!parent.has(l)) parent.set(l, l); parent.set(find(l), find(a)); } });
+    const groupW = new Map<number, number>();
+    perLayer.forEach((w, l) => { const g = find(l); groupW.set(g, Math.max(groupW.get(g) ?? 0, w)); });
+    const shift = new Map<number, number>();
+    perLayer.forEach((w, l) => { const g = find(l); shift.set(l, (max - (groupW.get(g) ?? w)) / 2); });
+    return { shift, max };
+  }, [display, blocks]);
+  /** A collapsed map node is taller than a step, so ranks can't share one height. Each
+   * rank's LANE height is its tallest node; y accumulates lane by lane. */
+  const heightOf = (n: DisplayNode) => (n.kind === 'map' ? mapBoxHeight(n.members?.length ?? 1) : NODE_H);
+  const lanes = useMemo(() => {
+    const h = new Map<number, number>();
+    display.nodes.forEach((n) => h.set(n.layer, Math.max(h.get(n.layer) ?? NODE_H, heightOf(n))));
+    const y = new Map<number, number>();
+    let acc = PAD;
+    const maxL = Math.max(0, ...h.keys());
+    for (let l = 0; l <= maxL; l++) { y.set(l, acc); acc += (h.get(l) ?? NODE_H) + GAP_Y; }
+    return { h, y, bottom: acc };
+  }, [display]);
   const posOf = useMemo(() => {
     const m = new Map<string, { x: number; y: number }>();
-    placed.forEach((p) => m.set(p.uid, {
-      x: PAD + p.row * (NODE_W + GAP_X),
-      y: PAD + p.layer * (NODE_H + GAP_Y),
-    }));
+    display.nodes.forEach((n) => {
+      const laneH = lanes.h.get(n.layer) ?? NODE_H;
+      const laneY = lanes.y.get(n.layer) ?? PAD;
+      const nh = heightOf(n);
+      const x = PAD + ((cols.shift.get(n.layer) ?? 0) + n.row) * (NODE_W + GAP_X);
+      const y = laneY + (laneH - nh) / 2; // centre the node within its lane
+      m.set(n.id, { x, y });
+      // Member step blocks are stacked inside the map box, below its label strip.
+      if (n.kind === 'map') {
+        (n.memberUids ?? []).forEach((uid, i) => {
+          m.set(uid, { x, y: y + MAP_LABEL_H + i * (NODE_H + MAP_INNER_GAP) });
+        });
+      }
+    });
     return m;
-  }, [placed]);
-  const byName = useMemo(() => {
-    const m = new Map<string, string>(); // name -> uid
-    blocks.forEach((b) => m.set(nodeName(b, defName), b.uid));
+  }, [display, cols, lanes]);
+  /** Where each drawn edge attaches. An edge meets a node on the SIDE that faces the
+   * other end — a step's four sides, a decision's four tips — so a route coming from
+   * the right lands on the right and doesn't cross the ones arriving from above.
+   * Endpoints sharing a side are then fanned across it, ordered by the other end's
+   * position so they don't cross each other either. Returns per edge index the two
+   * points and the sides they leave through (for the curve's direction). */
+  const endpoints = useMemo(() => {
+    type Side = 'top' | 'bottom' | 'left' | 'right';
+    const h = (id: string) => { const n = nodeById.get(id); return n ? heightOf(n) : NODE_H; };
+    const centre = (id: string) => { const p = posOf.get(id)!; return { x: p.x + NODE_W / 2, y: p.y + h(id) / 2 }; };
+    // The side of `nodeId` that faces `otherId`. A decision ARM prefers the bottom tip
+    // only when the target is nearly straight below, else a left/right tip.
+    const sideFor = (nodeId: string, otherId: string, decisionArm: boolean): Side => {
+      const n = centre(nodeId), o = centre(otherId);
+      const dx = o.x - n.x, dy = o.y - n.y;
+      if (decisionArm) {
+        if (dy > 0 && Math.abs(dx) < dy * 0.5) return 'bottom';
+        return dx >= 0 ? 'right' : 'left';
+      }
+      // Attach vertically whenever the other node is in a different RANK, so the edge drops
+      // into the inter-rank gap and transfers there — never along its own y-level, where it
+      // would run straight through same-rank neighbours. Side attach is only for peers that
+      // sit level with each other.
+      if (Math.abs(dy) > NODE_H * 0.75) return dy >= 0 ? 'bottom' : 'top';
+      return dx >= 0 ? 'right' : 'left';
+    };
+    const sSide = new Map<number, Side>(), tSide = new Map<number, Side>();
+    display.edges.forEach((e, k) => {
+      if (!posOf.get(e.from) || !posOf.get(e.to)) return;
+      sSide.set(k, sideFor(e.from, e.to, nodeById.get(e.from)?.kind === 'decision'));
+      tSide.set(k, nodeById.get(e.to)?.kind === 'decision' ? 'top' : sideFor(e.to, e.from, false));
+    });
+    // Group endpoints by (node, side, out/in), then order each group by the OTHER
+    // end's coordinate along that side, so slots line up with the neighbours.
+    const groups = new Map<string, number[]>();
+    const add = (key: string, k: number) => { if (!groups.has(key)) groups.set(key, []); groups.get(key)!.push(k); };
+    display.edges.forEach((e, k) => {
+      if (!sSide.has(k)) return;
+      add(`${e.from}|${sSide.get(k)}|o`, k);
+      add(`${e.to}|${tSide.get(k)}|i`, k);
+    });
+    const otherPerp = (k: number, end: 'o' | 'i', side: Side) => {
+      const e = display.edges[k];
+      const c = centre(end === 'o' ? e.to : e.from);
+      return side === 'top' || side === 'bottom' ? c.x : c.y;
+    };
+    groups.forEach((ks, key) => {
+      const [, side, end] = key.split('|') as [string, Side, 'o' | 'i'];
+      ks.sort((a, b) => otherPerp(a, end, side) - otherPerp(b, end, side));
+    });
+    const pointOn = (nodeId: string, side: Side, k: number, end: 'o' | 'i') => {
+      const p = posOf.get(nodeId)!;
+      const nh = h(nodeId);
+      const cx = p.x + NODE_W / 2, cy = p.y + nh / 2;
+      if (nodeById.get(nodeId)?.kind === 'decision') {
+        if (side === 'top') return { x: cx, y: cy - DEC_H / 2 };
+        if (side === 'bottom') return { x: cx, y: cy + DEC_H / 2 };
+        if (side === 'left') return { x: cx - DEC_W / 2, y: cy };
+        return { x: cx + DEC_W / 2, y: cy };
+      }
+      const ks = groups.get(`${nodeId}|${side}|${end}`) ?? [k];
+      const frac = (Math.max(0, ks.indexOf(k)) + 1) / (ks.length + 1);
+      if (side === 'top') return { x: p.x + NODE_W * frac, y: p.y };
+      if (side === 'bottom') return { x: p.x + NODE_W * frac, y: p.y + nh };
+      if (side === 'left') return { x: p.x, y: p.y + nh * frac };
+      return { x: p.x + NODE_W, y: p.y + nh * frac };
+    };
+    const out = new Map<number, { a: { x: number; y: number }; aSide: Side; b: { x: number; y: number }; bSide: Side; aFan: number; aFanN: number }>();
+    display.edges.forEach((e, k) => {
+      if (!sSide.has(k)) return;
+      const og = groups.get(`${e.from}|${sSide.get(k)}|o`) ?? [k];
+      out.set(k, {
+        a: pointOn(e.from, sSide.get(k)!, k, 'o'), aSide: sSide.get(k)!,
+        b: pointOn(e.to, tSide.get(k)!, k, 'i'), bSide: tSide.get(k)!,
+        aFan: Math.max(0, og.indexOf(k)), aFanN: og.length,
+      });
+    });
+    return out;
+  }, [display, posOf, nodeById]);
+
+  /** The vertical channel x for each spanning edge. It starts in the gap right next to the
+   * target (on the source's side) — so a clear edge stays local — but if that column is
+   * blocked by a step at any rank BETWEEN source and target, it steps outward until it
+   * finds a corridor free of every box in those ranks. That's what makes the fail-ticket
+   * fan-in route AROUND the steps below it rather than straight through them. */
+  const longEdgeCx = useMemo(() => {
+    const boxesByLayer = new Map<number, { l: number; r: number }[]>();
+    display.nodes.forEach((n) => {
+      const p = posOf.get(n.id);
+      if (!p) return;
+      const w = n.kind === 'decision' ? DEC_W : NODE_W;
+      const x = n.kind === 'decision' ? p.x + NODE_W / 2 - DEC_W / 2 : p.x;
+      if (!boxesByLayer.has(n.layer)) boxesByLayer.set(n.layer, []);
+      boxesByLayer.get(n.layer)!.push({ l: x, r: x + w });
+    });
+    const MARGIN = 10;
+    const rightEdge = PAD + cols.max * (NODE_W + GAP_X);
+    const clampX = (x: number) => Math.max(8, Math.min(rightEdge + PAD - 8, x));
+    const m = new Map<number, number>();
+    display.edges.forEach((e, k) => {
+      const fl = nodeById.get(e.from)?.layer ?? 0, tl = nodeById.get(e.to)?.layer ?? 0;
+      if (tl - fl < 2) return;
+      const tp = posOf.get(e.to);
+      if (!tp) return;
+      const fromCentre = (posOf.get(e.from)?.x ?? tp.x) + NODE_W / 2;
+      const goLeft = fromCentre <= tp.x + NODE_W / 2;
+      const preferX = goLeft ? tp.x - GAP_X / 2 : tp.x + NODE_W + GAP_X / 2;
+      const forbidden: [number, number][] = [];
+      for (let r = Math.min(fl, tl) + 1; r <= Math.max(fl, tl) - 1; r++)
+        (boxesByLayer.get(r) ?? []).forEach((b) => forbidden.push([b.l - MARGIN, b.r + MARGIN]));
+      const free = (x: number) => !forbidden.some(([a, b]) => x >= a && x <= b);
+      let cx = preferX;
+      if (!free(cx)) {
+        const dir = goLeft ? -1 : 1;
+        for (let s = 1; s <= 300; s++) { const x = preferX + dir * s * 4; if (free(x)) { cx = x; break; } cx = x; }
+      }
+      m.set(k, clampX(cx));
+    });
     return m;
-  }, [blocks, defName]);
+  }, [display, posOf, nodeById, cols]);
+
+  /** Route-label placement with overlap resolution. Each labelled edge starts at the
+   * midpoint of its drawn path, then labels are pushed on the y-axis (some higher, some
+   * lower) until they clear BOTH one another AND the step/map/decision boxes — which act
+   * as fixed obstacles with a margin — so a pill never sits on top of a node or another
+   * pill. Where a label ends up nudged off its route, a leader ties it back. */
+  const labelPos = useMemo(() => {
+    const M = 5; // clearance kept around every box
+    // Fixed obstacles: the node boxes. Members live inside their map box, which covers them.
+    const boxes: { x: number; y: number; w: number; h: number }[] = [];
+    display.nodes.forEach((n) => {
+      const p = posOf.get(n.id);
+      if (!p) return;
+      if (n.kind === 'decision') boxes.push({ x: p.x + NODE_W / 2 - DEC_W / 2, y: p.y + heightOf(n) / 2 - DEC_H / 2, w: DEC_W, h: DEC_H });
+      else boxes.push({ x: p.x, y: p.y, w: NODE_W, h: heightOf(n) });
+    });
+    const items: { k: number; x: number; y: number; w: number; h: number }[] = [];
+    display.edges.forEach((e, k) => {
+      const ep = endpoints.get(k);
+      if (!ep) return;
+      const label = e.name || (e.arm ? (e.when ? conditionLabel(e.when) : 'else') : '');
+      if (!label) return;
+      const { a, b } = ep;
+      const fromLayer = nodeById.get(e.from)?.layer ?? 0;
+      const toLayer = nodeById.get(e.to)?.layer ?? 0;
+      let x: number, y: number;
+      if (toLayer - fromLayer >= 2) {
+        x = longEdgeCx.get(k) ?? (a.x + b.x) / 2;
+        y = (a.y + b.y) / 2;
+      } else {
+        x = (a.x + b.x) / 2;
+        y = (a.y + b.y) / 2;
+      }
+      items.push({ k, x, y, w: label.length * 6.6 + 14, h: 16 });
+    });
+    items.sort((p, q) => p.x - q.x || p.y - q.y);
+    // xHit: two horizontal spans (centre ± half-width, both padded by M) overlap.
+    const xHit = (ax: number, aw: number, bx: number, bw: number) => Math.abs(ax - bx) < (aw + bw) / 2 + M;
+    for (let iter = 0; iter < 40; iter++) {
+      let moved = false;
+      // Push labels off the node boxes first (out the nearer side).
+      for (const A of items) {
+        for (const o of boxes) {
+          if (!xHit(A.x, A.w, o.x + o.w / 2, o.w)) continue;
+          const aTop = A.y - A.h / 2, aBot = A.y + A.h / 2;
+          const oTop = o.y - M, oBot = o.y + o.h + M;
+          if (aBot <= oTop || aTop >= oBot) continue;
+          const up = aBot - oTop, down = oBot - aTop;
+          A.y += up < down ? -(up + 0.5) : down + 0.5;
+          moved = true;
+        }
+      }
+      // Then separate labels from each other.
+      for (let i = 0; i < items.length; i++) {
+        for (let j = i + 1; j < items.length; j++) {
+          const A = items[i], B = items[j];
+          if (!xHit(A.x, A.w, B.x, B.w)) continue;
+          const dy = B.y - A.y;
+          const gap = (A.h + B.h) / 2 + 3;
+          if (Math.abs(dy) >= gap) continue;
+          const push = (gap - Math.abs(dy)) / 2 + 0.5;
+          const dir = dy === 0 ? (i % 2 === 0 ? 1 : -1) : dy > 0 ? 1 : -1;
+          A.y -= dir * push;
+          B.y += dir * push;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    // Keep each pill fully inside the SVG so a label at a margin corridor isn't clipped;
+    // the leader line then bridges from the pill back to the route.
+    const svgW = PAD * 2 + cols.max * (NODE_W + GAP_X);
+    const m = new Map<number, { x: number; y: number }>();
+    items.forEach((it) => m.set(it.k, { x: Math.max(it.w / 2 + 6, Math.min(svgW - it.w / 2 - 6, it.x)), y: it.y }));
+    return m;
+  }, [display, endpoints, nodeById, posOf, longEdgeCx, cols]);
+
+  /** The routes that live WHOLLY inside a collapsed map region — drawn as short
+   * connectors between the members stacked in the box, since they aren't part of the
+   * outer flow. Empty in the editable (expanded) view, where they are normal edges. */
+  const innerEdges = useMemo(() => {
+    if (editable) return [] as { from: string; to: string }[];
+    const uidByName = new Map(blocks.map((b) => [nodeName(b, defName), b.uid] as const));
+    const mapByUid = new Map(blocks.filter((b) => b.mapId).map((b) => [b.uid, b.mapId!] as const));
+    const out: { from: string; to: string }[] = [];
+    routes.forEach((r) => {
+      const fu = uidByName.get(r.from), tu = uidByName.get(r.to);
+      if (!fu || !tu) return;
+      const fm = mapByUid.get(fu), tm = mapByUid.get(tu);
+      if (fm && fm === tm) out.push({ from: fu, to: tu });
+    });
+    return out;
+  }, [blocks, routes, defName, editable]);
 
   const selectedNode = useMemo(() => blocks.find((b) => b.uid === selectedUid) ?? null, [blocks, selectedUid]);
   const cycle = useMemo(() => findCycle(blocks, routes, defName), [blocks, routes, defName]);
   const members = useMemo(() => regionMembers(blocks, defName), [blocks, defName]);
   const issues = useMemo(() => mapIssues(blocks, maps, routes, defName), [blocks, maps, routes, defName]);
 
-  /** The bounding box of each region's nodes, so a map reads as an enclosure rather
-   * than a per-node label — its body is a subgraph, and the drawing should say so. */
+  /** The bounding box of each region's nodes, so a map reads as an enclosure rather than a
+   * per-node label — its body is a subgraph, and the drawing should say so. The layout
+   * (band reservation in displayGraph + the shared per-group shift above) keeps every
+   * member column-aligned and every non-member out of the band, so this plain rectangle
+   * wraps only the region's own steps. */
   const regionBoxes = useMemo(() => {
+    if (!editable) return []; // read-only collapses each region into a container node instead
     return maps.map((m) => {
       const pts = blocks.filter((b) => b.mapId === m.id).map((b) => posOf.get(b.uid)).filter(Boolean) as { x: number; y: number }[];
       if (pts.length === 0) return null;
@@ -288,9 +636,9 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       const y2 = Math.max(...pts.map((p) => p.y)) + NODE_H + 14;
       return { def: m, x, y, w: x2 - x, h: y2 - y };
     }).filter(Boolean) as { def: MapDef; x: number; y: number; w: number; h: number }[];
-  }, [maps, blocks, posOf]);
-  const width = Math.max(...placed.map((p) => PAD * 2 + (p.row + 1) * (NODE_W + GAP_X)), 400);
-  const height = Math.max(...placed.map((p) => PAD * 2 + (p.layer + 1) * (NODE_H + GAP_Y)), 260);
+  }, [maps, blocks, posOf, editable]);
+  const width = Math.max(PAD * 2 + cols.max * (NODE_W + GAP_X), 400);
+  const height = Math.max(lanes.bottom + PAD, 260);
 
   const addStep = (stepId: string, name: string) => {
     const uid = `n${seq.current++}-${Date.now()}`;
@@ -550,7 +898,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
           </div>
         )}
 
-        <div style={{ position: 'relative', width, height }}>
+        <div style={{ position: 'relative', width, height, margin: '0 auto' }}>
           {/* Region enclosures, behind everything: a map's body is a subgraph, so it
               is drawn as a box around its steps rather than a badge on each one. */}
           {regionBoxes.map((r) => (
@@ -575,40 +923,116 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                 <path d="M 0 0 L 8 4 L 0 8 z" fill={T.green} />
               </marker>
             </defs>
-            {routes.map((r, i) => {
-              const a = posOf.get(byName.get(r.from) ?? '');
-              const b = posOf.get(byName.get(r.to) ?? '');
-              if (!a || !b) return null; // endpoint gone; pruned on save
-              const x1 = a.x + NODE_W / 2, y1 = a.y + NODE_H;
-              const x2 = b.x + NODE_W / 2, y2 = b.y;
-              const sel = selectedEdge === i;
+            {display.edges.map((e, k) => {
+              const ep = endpoints.get(k);
+              if (!ep) return null; // endpoint gone; pruned on save
+              const { a, b, aSide, bSide } = ep;
+              const sel = e.routeIndex != null && selectedEdge === e.routeIndex;
+              // The edge's NAME wins if set; otherwise a branch arm is labelled with its
+              // condition ("else" for the unconditional default). The plain
+              // step→decision link stays unlabelled.
+              const label = e.name || (e.arm ? (e.when ? conditionLabel(e.when) : 'else') : '');
+              // A route that spans intermediate ranks is drawn AROUND them via a side
+              // channel; everything else attaches to the nearest side of each node.
+              const fromLayer = nodeById.get(e.from)?.layer ?? 0;
+              const toLayer = nodeById.get(e.to)?.layer ?? 0;
+              const long = toLayer - fromLayer >= 2;
+              let d: string, lx: number, ly: number;
+              if (long) {
+                // Drop down the target-side channel corridor (clear of the steps in between),
+                // so same-target edges merge and none cut through a box. See `longEdgeCx`.
+                const cx = longEdgeCx.get(k) ?? (a.x + b.x) / 2;
+                d = sideChannelPath(a.x, a.y, b.x, b.y, cx);
+                lx = cx; ly = (a.y + b.y) / 2;
+              } else {
+                // Stagger sibling edges leaving the same node into separate transfer lanes.
+                const stagger = ep.aFanN > 1 ? Math.min(ep.aFan * 10, 44) : 0;
+                d = sidePath(a, aSide, b, bSide, stagger);
+                lx = (a.x + b.x) / 2; ly = (a.y + b.y) / 2;
+              }
               return (
-                <g key={`${r.from}->${r.to}-${i}`}>
-                  <path d={edgePath(x1, y1, x2, y2)} fill="none"
+                <g key={k}>
+                  <path d={d} fill="none"
                     stroke={sel ? T.green : T.faint} strokeWidth={sel ? 2 : 1.2}
-                    strokeDasharray={r.when ? '5 3' : undefined}
+                    strokeDasharray={e.when ? '5 3' : undefined}
                     markerEnd={`url(#${sel ? 'arrow-sel' : 'arrow'})`} />
-                  {/* A fat invisible stroke gives the thin edge a clickable target. */}
-                  <path d={edgePath(x1, y1, x2, y2)} fill="none" stroke="transparent" strokeWidth={12}
-                    style={{ pointerEvents: editable ? 'stroke' : 'none', cursor: 'pointer' }}
-                    onClick={() => { setSelectedEdge(i); setSelectedUid(null); }} />
-                  {/* A conditional route is marked with a compact badge, not its
-                      expression: printing every condition along every edge buried the
-                      graph in text. The expression lives in the inspector (and the
-                      tooltip), where there is room to read it. */}
-                  {r.when && (
-                    <g style={{ pointerEvents: 'none' }}>
-                      <title>{r.when}</title>
-                      <circle cx={(x1 + x2) / 2} cy={(y1 + y2) / 2} r={8}
-                        fill={T.bg} stroke={sel ? T.green : T.faint} strokeWidth={1} />
-                      <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 + 3} textAnchor="middle"
-                        fill={sel ? T.green : T.faint} fontSize={9} fontFamily={T.mono}>⑂</text>
-                    </g>
+                  {/* A fat invisible stroke gives the thin edge a clickable target,
+                      selecting the underlying route so its condition can be edited. */}
+                  {e.routeIndex != null && (
+                    <path d={d} fill="none" stroke="transparent" strokeWidth={12}
+                      style={{ pointerEvents: editable ? 'stroke' : 'none', cursor: 'pointer' }}
+                      onClick={() => { setSelectedEdge(e.routeIndex); setSelectedUid(null); }} />
                   )}
+                  {label && (() => {
+                    const lp = labelPos.get(k) ?? { x: lx, y: ly };
+                    return (
+                      <g style={{ pointerEvents: 'none' }}>
+                        <title>{[e.name, e.when].filter(Boolean).join(' — ') || 'default branch (else)'}</title>
+                        {/* A thin leader ties a nudged or clamped label back to its route. */}
+                        {Math.hypot(lp.x - lx, lp.y - ly) > 12 && (
+                          <line x1={lp.x} y1={lp.y} x2={lx} y2={ly} stroke={T.faint} strokeWidth={0.75} strokeDasharray="2 2" />
+                        )}
+                        <rect x={lp.x - (label.length * 3.3 + 7)} y={lp.y - 8} width={label.length * 6.6 + 14} height={16} rx={8}
+                          fill={T.bg} stroke={sel ? T.green : T.faint} strokeWidth={1} />
+                        <text x={lp.x} y={lp.y + 3.5} textAnchor="middle" fill={sel ? T.green : T.dim} fontSize={9.5} fontFamily={T.mono}>{label}</text>
+                      </g>
+                    );
+                  })()}
+                </g>
+              );
+            })}
+            {/* Internal connectors of a collapsed map region: its members are stacked, so
+                each internal route is a short link from one member's bottom to the next's top. */}
+            {innerEdges.map((e, k) => {
+              const a = posOf.get(e.from), b = posOf.get(e.to);
+              if (!a || !b) return null;
+              const ax = a.x + NODE_W / 2, ay = a.y + NODE_H;
+              const bx = b.x + NODE_W / 2, by = b.y;
+              return <path key={`ie${k}`} d={`M ${ax} ${ay} L ${bx} ${by}`} fill="none" stroke={T.faint} strokeWidth={1.2} markerEnd="url(#arrow)" />;
+            })}
+            {/* Decision diamonds: a step that branches on a condition flows into one
+                of these, so the routing reads as a flow chart and the runner step
+                never carries the branch. Drawn over the edges, behind the step boxes. */}
+            {display.nodes.filter((n) => n.kind === 'decision').map((n) => {
+              const p = posOf.get(n.id);
+              if (!p) return null;
+              const cx = p.x + NODE_W / 2, cy = p.y + NODE_H / 2;
+              const d = `M ${cx} ${cy - DEC_H / 2} L ${cx + DEC_W / 2} ${cy} L ${cx} ${cy + DEC_H / 2} L ${cx - DEC_W / 2} ${cy} Z`;
+              return (
+                <g key={n.id} style={{ pointerEvents: 'none' }}>
+                  <title>{`branch on ${n.sourceName}`}</title>
+                  <path d={d} fill={T.bgAlt} stroke={T.blue} strokeWidth={1.4} />
+                  <text x={cx} y={cy + 4} textAnchor="middle" fill={T.blue} fontSize={13} fontFamily={T.mono}>⑂</text>
                 </g>
               );
             })}
           </svg>
+
+          {/* Map-region CONTAINER boxes (read-only): one node in the outer flow, drawn as
+              a labelled box behind its member step blocks — which are laid out inside it. */}
+          {display.nodes.filter((n) => n.kind === 'map').map((n) => {
+            const p = posOf.get(n.id);
+            if (!p) return null;
+            const def = maps.find((m) => m.id === n.mapId);
+            const boxH = mapBoxHeight(n.members?.length ?? 1);
+            const memberRuns = (n.members ?? []).map((nm) => runStatus?.[nm]).filter(Boolean) as { status: string; legs: number }[];
+            const worst = memberRuns.length
+              ? (['failed', 'awaiting_approval', 'running', 'cancelled'].find((s) => memberRuns.some((r) => r.status === s)) ?? memberRuns[0].status)
+              : undefined;
+            return (
+              <div key={n.id} title={`map region · per ${def?.var || '?'}`} style={{
+                position: 'absolute', left: p.x, top: p.y, width: NODE_W, height: boxH, boxSizing: 'border-box',
+                background: 'transparent', border: `1px dashed ${worst ? runColor(worst) : T.blue}`,
+                borderRadius: 4, pointerEvents: 'none',
+              }}>
+                <span style={{ position: 'absolute', top: 4, left: 8, fontFamily: T.mono, fontSize: 9.5, color: worst ? runColor(worst) : T.blue }}>
+                  ⟳ map · per {def?.var || '?'}
+                  {def?.volume ? ' · own ws' : ''}
+                  {def?.sequential ? ' · seq' : ''}
+                </span>
+              </div>
+            );
+          })}
 
           {blocks.map((b) => {
             const p = posOf.get(b.uid);
@@ -622,9 +1046,13 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
             // A run colours the node by outcome; the editor colours it by role.
             const bar = run ? runColor(run.status) : isGate ? T.amber : isEntry ? T.green : T.border;
             const isActive = activeNode === name;
+            // A member of a collapsed map region is inset inside its container box so it
+            // doesn't touch the box border (read-only only; the editor keeps them full width).
+            const inMap = !editable && !!b.mapId;
             return (
               <div key={b.uid} style={{
-                position: 'absolute', left: p.x, top: p.y, width: NODE_W, height: NODE_H,
+                position: 'absolute', left: p.x + (inMap ? MAP_PAD_X : 0), top: p.y,
+                width: inMap ? NODE_W - MAP_PAD_X * 2 : NODE_W, height: NODE_H,
                 boxSizing: 'border-box',
                 background: selectedUid === b.uid || isActive ? T.greenSoft : T.bgAlt,
                 border: `1px solid ${selectedUid === b.uid || isActive ? T.green : T.border}`,
@@ -671,6 +1099,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               </div>
             );
           })}
+
         </div>
 
         {/* Node inspector: a step's fan-out (matrix/scatter) and gate config. The
@@ -744,6 +1173,13 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                 remove route
               </button>
             </div>
+            {/* Optional name: shown on the branch in place of the raw condition. */}
+            <input
+              value={routes[selectedEdge].name ?? ''}
+              onChange={(e) => patchRoute(selectedEdge, { name: e.target.value || undefined })}
+              placeholder={'branch name (optional) — e.g. if_discover_failed'}
+              style={{ width: '100%', boxSizing: 'border-box', background: T.bg, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '5px 7px', marginBottom: 6 }}
+            />
             <input
               value={routes[selectedEdge].when ?? ''}
               onChange={(e) => patchRoute(selectedEdge, { when: e.target.value || undefined })}
@@ -751,7 +1187,8 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               style={{ width: '100%', boxSizing: 'border-box', background: T.bg, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '5px 7px' }}
             />
             <div style={{ fontSize: 10, color: T.faint, marginTop: 5, lineHeight: 1.45, fontFamily: T.mono }}>
-              Leave empty to follow this route only when <b>{routes[selectedEdge].from}</b> succeeds.
+              The <b>name</b> labels this path on the diagram; leave it blank to show the condition.
+              Leave the condition empty to follow this route only when <b>{routes[selectedEdge].from}</b> succeeds.
               Available: steps.NAME.status / .output / .json.FIELD, inputs.NAME, run.id.
             </div>
           </div>
