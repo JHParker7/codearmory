@@ -91,6 +91,8 @@ type smChoice struct {
 	When    string `json:"when,omitempty"`
 	Next    string `json:"next,omitempty"`
 	Default string `json:"default,omitempty"`
+	// Name is an optional label for this branch, shown instead of the condition.
+	Name string `json:"name,omitempty"`
 }
 
 // smNext is a transition target that accepts either a single state name ("next: x")
@@ -144,6 +146,7 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 	type branch struct {
 		to   string
 		when string
+		name string
 	}
 	regions := map[string]*region{}
 	choices := map[string][]branch{} // choice state name -> its arms
@@ -226,9 +229,9 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 		for _, c := range st.Choice {
 			switch {
 			case c.Default != "":
-				arms = append(arms, branch{to: c.Default}) // else: no `when`
+				arms = append(arms, branch{to: c.Default, name: c.Name}) // else: no `when`
 			case c.Next != "":
-				arms = append(arms, branch{to: c.Next, when: c.When})
+				arms = append(arms, branch{to: c.Next, when: c.When, name: c.Name})
 			default:
 				return nil, nil, nil, fmt.Errorf("choice state %q: a branch needs next or default", name)
 			}
@@ -279,9 +282,9 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 			for _, c := range sub.Choice {
 				switch {
 				case c.Default != "":
-					arms = append(arms, branch{to: c.Default})
+					arms = append(arms, branch{to: c.Default, name: c.Name})
 				case c.Next != "":
-					arms = append(arms, branch{to: c.Next, when: c.When})
+					arms = append(arms, branch{to: c.Next, when: c.When, name: c.Name})
 				default:
 					return nil, nil, nil, fmt.Errorf("map %q: choice %q needs next or default", name, subName)
 				}
@@ -329,7 +332,7 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 						if derr != nil {
 							return nil, nil, nil, derr
 						}
-						internalRoutes = append(internalRoutes, WorkflowRoute{From: subName, To: d, When: a.when})
+						internalRoutes = append(internalRoutes, WorkflowRoute{From: subName, To: d, When: a.when, Name: a.name})
 						hasInbound[d] = true
 					}
 					continue
@@ -394,8 +397,8 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 	for _, r := range routes {
 		seenRoute[r] = true
 	}
-	addRoute := func(from, to, when string) {
-		r := WorkflowRoute{From: from, To: to, When: when}
+	addRoute := func(from, to, when, name string) {
+		r := WorkflowRoute{From: from, To: to, When: when, Name: name}
 		if !seenRoute[r] {
 			seenRoute[r] = true
 			routes = append(routes, r)
@@ -426,7 +429,7 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 					}
 					for _, src := range sources {
 						for _, d := range dests {
-							addRoute(src, d, a.when)
+							addRoute(src, d, a.when, a.name)
 						}
 					}
 				}
@@ -438,7 +441,7 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 			}
 			for _, src := range sources {
 				for _, d := range dests {
-					addRoute(src, d, "")
+					addRoute(src, d, "", "")
 				}
 			}
 		}
@@ -537,18 +540,18 @@ func modelToSM(name, description string, steps []WorkflowStep, routes []Workflow
 		return n
 	}
 	// Partition routes: internal (both ends in the same region) vs outer.
-	type edge struct{ to, when string }
+	type edge struct{ to, when, name string }
 	outer := map[string][]edge{}
 	internal := map[string][]edge{}
 	inboundInternal := map[string]bool{}
 	for _, r := range routes {
 		fm, tm := mapOf[r.From], mapOf[r.To]
 		if fm != "" && fm == tm {
-			internal[r.From] = append(internal[r.From], edge{r.To, r.When})
+			internal[r.From] = append(internal[r.From], edge{r.To, r.When, r.Name})
 			inboundInternal[r.To] = true
 			continue
 		}
-		outer[display(r.From)] = append(outer[display(r.From)], edge{display(r.To), r.When})
+		outer[display(r.From)] = append(outer[display(r.From)], edge{display(r.To), r.When, r.Name})
 	}
 
 	// used tracks every taken name, so a synthetic choice-state name never collides.
@@ -597,12 +600,12 @@ func modelToSM(name, description string, steps []WorkflowStep, routes []Workflow
 		cs := make([]smChoice, 0, len(edges))
 		for _, e := range edges { // when-branches first, defaults last
 			if e.when != "" {
-				cs = append(cs, smChoice{When: e.when, Next: e.to})
+				cs = append(cs, smChoice{When: e.when, Next: e.to, Name: e.name})
 			}
 		}
 		for _, e := range edges {
 			if e.when == "" {
-				cs = append(cs, smChoice{Default: e.to})
+				cs = append(cs, smChoice{Default: e.to, Name: e.name})
 			}
 		}
 		emit(cname, &smState{Choice: cs})

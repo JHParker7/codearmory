@@ -91,6 +91,7 @@ type workflowRoute struct {
 	From string `json:"from"`
 	To   string `json:"to"`
 	When string `json:"when,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 // gitCloneEnv is the env var a per-step git repo is injected as. forge resolves the

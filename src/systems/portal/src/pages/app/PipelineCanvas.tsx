@@ -203,6 +203,18 @@ function edgePath(x1: number, y1: number, x2: number, y2: number): string {
   return `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2}`;
 }
 
+/** A path that leaves a node, bows out to a vertical channel at `cx` (left or right of
+ * the node columns), runs down it, and curves back into the target. Used for a long
+ * edge that spans intermediate ranks, so it goes AROUND the steps between its ends
+ * instead of straight down through them. */
+function sideChannelPath(x1: number, y1: number, x2: number, y2: number, cx: number): string {
+  const out = 26; // how far below/above the endpoints the turn happens
+  return `M ${x1} ${y1}`
+    + ` C ${x1} ${y1 + out}, ${cx} ${y1}, ${cx} ${y1 + out + 8}`
+    + ` L ${cx} ${y2 - out - 8}`
+    + ` C ${cx} ${y2}, ${x2} ${y2 - out}, ${x2} ${y2}`;
+}
+
 /** A short, readable NAME for a branch arm leaving a decision, so each path says what
  * it is rather than a bare value: `steps.X.status == "failed"` reads as `if failed`,
  * `!= "ok"` as `if not ok`; other expressions are truncated. The full text stays in
@@ -631,29 +643,44 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               const b = anchor(e.to, 'top', k);
               if (!a || !b) return null; // endpoint gone; pruned on save
               const sel = e.routeIndex != null && selectedEdge === e.routeIndex;
-              // A branch arm is labelled with its condition (or "else" for the
-              // unconditional default); the plain step→decision link is unlabelled.
-              const label = e.arm ? (e.when ? conditionLabel(e.when) : 'else') : '';
-              const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+              // The edge's NAME wins if set; otherwise a branch arm is labelled with its
+              // condition ("else" for the unconditional default). The plain
+              // step→decision link stays unlabelled.
+              const label = e.name || (e.arm ? (e.when ? conditionLabel(e.when) : 'else') : '');
+              // A route that spans intermediate ranks is drawn AROUND them via a side
+              // channel, so it doesn't run straight down over the steps in between.
+              const fromLayer = nodeById.get(e.from)?.layer ?? 0;
+              const toLayer = nodeById.get(e.to)?.layer ?? 0;
+              const long = toLayer - fromLayer >= 2;
+              let d: string, lx: number, ly: number;
+              if (long) {
+                const right = (a.x + b.x) / 2 > width / 2;
+                const cx = right ? width - 12 - (k % 3) * 13 : 12 + (k % 3) * 13;
+                d = sideChannelPath(a.x, a.y, b.x, b.y, cx);
+                lx = cx; ly = (a.y + b.y) / 2;
+              } else {
+                d = edgePath(a.x, a.y, b.x, b.y);
+                lx = (a.x + b.x) / 2; ly = (a.y + b.y) / 2;
+              }
               return (
                 <g key={k}>
-                  <path d={edgePath(a.x, a.y, b.x, b.y)} fill="none"
+                  <path d={d} fill="none"
                     stroke={sel ? T.green : T.faint} strokeWidth={sel ? 2 : 1.2}
                     strokeDasharray={e.when ? '5 3' : undefined}
                     markerEnd={`url(#${sel ? 'arrow-sel' : 'arrow'})`} />
                   {/* A fat invisible stroke gives the thin edge a clickable target,
                       selecting the underlying route so its condition can be edited. */}
                   {e.routeIndex != null && (
-                    <path d={edgePath(a.x, a.y, b.x, b.y)} fill="none" stroke="transparent" strokeWidth={12}
+                    <path d={d} fill="none" stroke="transparent" strokeWidth={12}
                       style={{ pointerEvents: editable ? 'stroke' : 'none', cursor: 'pointer' }}
                       onClick={() => { setSelectedEdge(e.routeIndex); setSelectedUid(null); }} />
                   )}
                   {label && (
                     <g style={{ pointerEvents: 'none' }}>
-                      <title>{e.when || 'default branch (else)'}</title>
-                      <rect x={mx - (label.length * 3.3 + 7)} y={my - 8} width={label.length * 6.6 + 14} height={16} rx={8}
+                      <title>{[e.name, e.when].filter(Boolean).join(' — ') || 'default branch (else)'}</title>
+                      <rect x={lx - (label.length * 3.3 + 7)} y={ly - 8} width={label.length * 6.6 + 14} height={16} rx={8}
                         fill={T.bg} stroke={sel ? T.green : T.faint} strokeWidth={1} />
-                      <text x={mx} y={my + 3.5} textAnchor="middle" fill={sel ? T.green : T.dim} fontSize={9.5} fontFamily={T.mono}>{label}</text>
+                      <text x={lx} y={ly + 3.5} textAnchor="middle" fill={sel ? T.green : T.dim} fontSize={9.5} fontFamily={T.mono}>{label}</text>
                     </g>
                   )}
                 </g>
@@ -811,6 +838,13 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                 remove route
               </button>
             </div>
+            {/* Optional name: shown on the branch in place of the raw condition. */}
+            <input
+              value={routes[selectedEdge].name ?? ''}
+              onChange={(e) => patchRoute(selectedEdge, { name: e.target.value || undefined })}
+              placeholder={'branch name (optional) — e.g. if_discover_failed'}
+              style={{ width: '100%', boxSizing: 'border-box', background: T.bg, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '5px 7px', marginBottom: 6 }}
+            />
             <input
               value={routes[selectedEdge].when ?? ''}
               onChange={(e) => patchRoute(selectedEdge, { when: e.target.value || undefined })}
@@ -818,7 +852,8 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               style={{ width: '100%', boxSizing: 'border-box', background: T.bg, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11, padding: '5px 7px' }}
             />
             <div style={{ fontSize: 10, color: T.faint, marginTop: 5, lineHeight: 1.45, fontFamily: T.mono }}>
-              Leave empty to follow this route only when <b>{routes[selectedEdge].from}</b> succeeds.
+              The <b>name</b> labels this path on the diagram; leave it blank to show the condition.
+              Leave the condition empty to follow this route only when <b>{routes[selectedEdge].from}</b> succeeds.
               Available: steps.NAME.status / .output / .json.FIELD, inputs.NAME, run.id.
             </div>
           </div>

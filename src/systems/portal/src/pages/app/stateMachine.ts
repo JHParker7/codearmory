@@ -25,7 +25,7 @@ export type SMNext = string | string[];
 
 /** One conditional branch out of a `choice` state: `next` when `when` holds, or
  * `default` (the else — an unconditional edge taken on completion). */
-export interface SMChoice { when?: string; next?: string; default?: string }
+export interface SMChoice { when?: string; next?: string; default?: string; name?: string }
 
 /** A map region embedded in a state: `over` is MapDef.values_from; `states` is the
  * region body (its own sub-graph), repeated once per value. */
@@ -86,17 +86,17 @@ export function modelToDoc(
   steps.forEach((s) => { if (s.map_id) mapOf.set(nameOf(s), s.map_id); });
   const display = (n: string) => mapOf.get(n) ?? n;
 
-  type Edge = { to: string; when?: string };
+  type Edge = { to: string; when?: string; name?: string };
   const outer = new Map<string, Edge[]>();
   const internal = new Map<string, Edge[]>();
   routes.forEach((r) => {
     const fm = mapOf.get(r.from), tm = mapOf.get(r.to);
     if (fm && fm === tm) {
-      (internal.get(r.from) ?? internal.set(r.from, []).get(r.from)!).push({ to: r.to, when: r.when });
+      (internal.get(r.from) ?? internal.set(r.from, []).get(r.from)!).push({ to: r.to, when: r.when, name: r.name });
       return;
     }
     const key = display(r.from);
-    (outer.get(key) ?? outer.set(key, []).get(key)!).push({ to: display(r.to), when: r.when });
+    (outer.get(key) ?? outer.set(key, []).get(key)!).push({ to: display(r.to), when: r.when, name: r.name });
   });
 
   const states: Record<string, SMState> = {};
@@ -123,8 +123,8 @@ export function modelToDoc(
     const cname = uniqueChoiceName(node);
     st.next = cname;
     const choice: SMChoice[] = [];
-    edges.filter((e) => e.when).forEach((e) => choice.push({ when: e.when, next: e.to }));
-    edges.filter((e) => !e.when).forEach((e) => choice.push({ default: e.to }));
+    edges.filter((e) => e.when).forEach((e) => choice.push({ when: e.when, next: e.to, name: e.name }));
+    edges.filter((e) => !e.when).forEach((e) => choice.push({ default: e.to, name: e.name }));
     emit(cname, { choice });
   };
 
@@ -195,7 +195,7 @@ export function docToModel(doc: SMDoc): Model {
   const steps: StepRef[] = [];
   const routes: Route[] = [];
   const maps: MapDef[] = [];
-  type Branch = { to: string; when?: string };
+  type Branch = { to: string; when?: string; name?: string };
   const seen = new Set<string>();
   const claim = (name: string) => {
     if (!name || !name.trim()) throw new Error('a state name cannot be empty');
@@ -210,8 +210,8 @@ export function docToModel(doc: SMDoc): Model {
     return true;
   };
   const armsOf = (name: string, st: SMState): Branch[] => (st.choice ?? []).map((c) => {
-    if (c.default) return { to: c.default };
-    if (c.next) return { to: c.next, when: c.when };
+    if (c.default) return { to: c.default, name: c.name };
+    if (c.next) return { to: c.next, when: c.when, name: c.name };
     throw new Error(`choice state "${name}": a branch needs next or default`);
   });
 
@@ -281,7 +281,7 @@ export function docToModel(doc: SMDoc): Model {
       if (tgts.length === 0) exits.push(subName);
       for (const raw of tgts) {
         const arms = subChoices.get(raw);
-        if (arms) arms.forEach((a) => { const d = resolveRegion(a.to); internalRoutes.push({ from: subName, to: d, when: a.when }); hasInbound.add(d); });
+        if (arms) arms.forEach((a) => { const d = resolveRegion(a.to); internalRoutes.push({ from: subName, to: d, when: a.when, name: a.name }); hasInbound.add(d); });
         else { const d = resolveRegion(raw); internalRoutes.push({ from: subName, to: d }); hasInbound.add(d); }
       }
     }
@@ -312,11 +312,13 @@ export function docToModel(doc: SMDoc): Model {
   // Pass 2 — outer transitions.
   const seenRoute = new Set<string>();
   const key = (r: Route) => `${r.from} ${r.to} ${r.when ?? ''}`;
-  const addRoute = (from: string, to: string, when?: string) => {
-    const r: Route = when ? { from, to, when } : { from, to };
+  const addRoute = (from: string, to: string, when?: string, name?: string) => {
+    const r: Route = { from, to };
+    if (when) r.when = when;
+    if (name) r.name = name;
     if (!seenRoute.has(key(r))) { seenRoute.add(key(r)); routes.push(r); }
   };
-  internalRoutes.forEach((r) => addRoute(r.from, r.to, r.when));
+  internalRoutes.forEach((r) => addRoute(r.from, r.to, r.when, r.name));
   const reachedChoice = new Set<string>();
   for (const [name, st] of Object.entries(doc.states)) {
     if (choices.has(name)) continue;
@@ -327,7 +329,7 @@ export function docToModel(doc: SMDoc): Model {
       const arms = choices.get(raw);
       if (arms) {
         reachedChoice.add(raw);
-        for (const a of arms) for (const d of resolveTargets(a.to)) for (const src of sources) addRoute(src, d, a.when);
+        for (const a of arms) for (const d of resolveTargets(a.to)) for (const src of sources) addRoute(src, d, a.when, a.name);
         continue;
       }
       for (const d of resolveTargets(raw)) for (const src of sources) addRoute(src, d);

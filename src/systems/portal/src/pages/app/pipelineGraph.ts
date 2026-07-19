@@ -120,6 +120,9 @@ export interface Route {
   from: string;
   to: string;
   when?: string;
+  /** Optional human label for the edge (e.g. "if_discover_failed"), shown on the
+   * branch instead of the raw condition. Display-only — the engine ignores it. */
+  name?: string;
 }
 
 /** A map region: a SUBGRAPH repeated once per value. Steps join it by naming its id
@@ -365,6 +368,7 @@ export interface DisplayEdge {
   from: string;
   to: string;
   when?: string;
+  name?: string;
   routeIndex: number | null;
   arm?: boolean;
 }
@@ -407,12 +411,12 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
       edges.push({ from: b.uid, to: decisionId(name), routeIndex: null });
       outs.forEach(({ r, i }) => {
         const t = uidOf.get(r.to);
-        if (t) edges.push({ from: decisionId(name), to: t, when: r.when, routeIndex: i, arm: true });
+        if (t) edges.push({ from: decisionId(name), to: t, when: r.when, name: r.name, routeIndex: i, arm: true });
       });
     } else {
       outs.forEach(({ r, i }) => {
         const t = uidOf.get(r.to);
-        if (t) edges.push({ from: b.uid, to: t, when: r.when, routeIndex: i });
+        if (t) edges.push({ from: b.uid, to: t, when: r.when, name: r.name, routeIndex: i });
       });
     }
   });
@@ -431,13 +435,45 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
     }
     if (!changed) break;
   }
-  const rowOf = new Map<number, number>();
-  const nodes: DisplayNode[] = ordered.map((n) => {
+  // Order nodes WITHIN each layer to reduce edge crossings (a barycenter sweep, the
+  // classic Sugiyama heuristic): a node drifts toward the average position of its
+  // neighbours in the adjacent layer, so e.g. two siblings feeding the same joins end
+  // up on the side that doesn't make their edges cross. Seeded from block order and
+  // run a few down/up passes; stable, and a no-op when nothing crosses.
+  const byLayer = new Map<number, string[]>();
+  ordered.forEach((n) => {
     const l = layer.get(n.id) ?? 0;
-    const row = rowOf.get(l) ?? 0;
-    rowOf.set(l, row + 1);
-    return { ...n, layer: l, row };
+    if (!byLayer.has(l)) byLayer.set(l, []);
+    byLayer.get(l)!.push(n.id);
   });
+  const maxLayer = Math.max(0, ...byLayer.keys());
+  const preds = new Map<string, string[]>();
+  const succs = new Map<string, string[]>();
+  edges.forEach((e) => {
+    if (!succs.has(e.from)) succs.set(e.from, []);
+    succs.get(e.from)!.push(e.to);
+    if (!preds.has(e.to)) preds.set(e.to, []);
+    preds.get(e.to)!.push(e.from);
+  });
+  const pos = new Map<string, number>();
+  const reindex = () => byLayer.forEach((ids) => ids.forEach((id, i) => pos.set(id, i)));
+  reindex();
+  const bary = (id: string, neigh: Map<string, string[]>): number => {
+    const ns = neigh.get(id) ?? [];
+    if (ns.length === 0) return pos.get(id) ?? 0;
+    return ns.reduce((s, n) => s + (pos.get(n) ?? 0), 0) / ns.length;
+  };
+  for (let iter = 0; iter < 4; iter++) {
+    for (let l = 1; l <= maxLayer; l++) {
+      const ids = byLayer.get(l);
+      if (ids) { ids.sort((a, b) => bary(a, preds) - bary(b, preds)); reindex(); }
+    }
+    for (let l = maxLayer - 1; l >= 0; l--) {
+      const ids = byLayer.get(l);
+      if (ids) { ids.sort((a, b) => bary(a, succs) - bary(b, succs)); reindex(); }
+    }
+  }
+  const nodes: DisplayNode[] = ordered.map((n) => ({ ...n, layer: layer.get(n.id) ?? 0, row: pos.get(n.id) ?? 0 }));
   return { nodes, edges };
 }
 
