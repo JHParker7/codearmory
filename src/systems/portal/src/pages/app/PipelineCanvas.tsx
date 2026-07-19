@@ -294,14 +294,24 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     display.nodes.forEach((n) => m.set(n.id, n));
     return m;
   }, [display]);
+  /** The widest rank sets the grid; every narrower rank is CENTRED under it, so the
+   * flow reads as a balanced tree down the middle rather than hugging the left. */
+  const cols = useMemo(() => {
+    const perLayer = new Map<number, number>();
+    display.nodes.forEach((n) => perLayer.set(n.layer, Math.max(perLayer.get(n.layer) ?? 0, n.row + 1)));
+    return { perLayer, max: Math.max(1, ...perLayer.values()) };
+  }, [display]);
   const posOf = useMemo(() => {
     const m = new Map<string, { x: number; y: number }>();
-    display.nodes.forEach((n) => m.set(n.id, {
-      x: PAD + n.row * (NODE_W + GAP_X),
-      y: PAD + n.layer * (NODE_H + GAP_Y),
-    }));
+    display.nodes.forEach((n) => {
+      const offset = (cols.max - (cols.perLayer.get(n.layer) ?? 1)) / 2; // centre this rank
+      m.set(n.id, {
+        x: PAD + (offset + n.row) * (NODE_W + GAP_X),
+        y: PAD + n.layer * (NODE_H + GAP_Y),
+      });
+    });
     return m;
-  }, [display]);
+  }, [display, cols]);
   /** Which drawn edges leave / enter each node, in order — so sibling edges can be
    * fanned across a node's edge instead of stacking on its exact centre, the main
    * thing that made the old drawing look like a different graph than it was. */
@@ -352,7 +362,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       return { def: m, x, y, w: x2 - x, h: y2 - y };
     }).filter(Boolean) as { def: MapDef; x: number; y: number; w: number; h: number }[];
   }, [maps, blocks, posOf]);
-  const width = Math.max(...display.nodes.map((n) => PAD * 2 + (n.row + 1) * (NODE_W + GAP_X)), 400);
+  const width = Math.max(PAD * 2 + cols.max * (NODE_W + GAP_X), 400);
   const height = Math.max(...display.nodes.map((n) => PAD * 2 + (n.layer + 1) * (NODE_H + GAP_Y)), 260);
 
   const addStep = (stepId: string, name: string) => {
@@ -613,7 +623,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
           </div>
         )}
 
-        <div style={{ position: 'relative', width, height }}>
+        <div style={{ position: 'relative', width, height, margin: '0 auto' }}>
           {/* Region enclosures, behind everything: a map's body is a subgraph, so it
               is drawn as a box around its steps rather than a badge on each one. */}
           {regionBoxes.map((r) => (
