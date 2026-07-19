@@ -48,6 +48,7 @@ const DEC_H = 48;
 const MAP_LABEL_H = 22; // label strip at the top of the box
 const MAP_INNER_GAP = 24; // vertical gap between stacked members
 const MAP_PAD_B = 12; // padding below the last member
+const MAP_PAD_X = 16; // horizontal inset of members from the box sides (box stays grid-aligned)
 const mapBoxHeight = (memberCount: number) =>
   MAP_LABEL_H + Math.max(1, memberCount) * NODE_H + (Math.max(1, memberCount) - 1) * MAP_INNER_GAP + MAP_PAD_B;
 
@@ -888,9 +889,13 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
             // A run colours the node by outcome; the editor colours it by role.
             const bar = run ? runColor(run.status) : isGate ? T.amber : isEntry ? T.green : T.border;
             const isActive = activeNode === name;
+            // A member of a collapsed map region is inset inside its container box so it
+            // doesn't touch the box border (read-only only; the editor keeps them full width).
+            const inMap = !editable && !!b.mapId;
             return (
               <div key={b.uid} style={{
-                position: 'absolute', left: p.x, top: p.y, width: NODE_W, height: NODE_H,
+                position: 'absolute', left: p.x + (inMap ? MAP_PAD_X : 0), top: p.y,
+                width: inMap ? NODE_W - MAP_PAD_X * 2 : NODE_W, height: NODE_H,
                 boxSizing: 'border-box',
                 background: selectedUid === b.uid || isActive ? T.greenSoft : T.bgAlt,
                 border: `1px solid ${selectedUid === b.uid || isActive ? T.green : T.border}`,
