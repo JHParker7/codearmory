@@ -20,7 +20,9 @@ import type { CanvasSelection, PipelineCanvasHandle } from './PipelineCanvas';
 import { StepDefForm } from './StepDefForm';
 import { StepsTab } from './StepLibrary';
 import type { StepRef, Route, MapDef } from './pipelineGraph';
-import { stepsToPayload, configToJson, parseConfig, duplicateStepNames, blockDef } from './pipelineGraph';
+import { stepsToPayload, duplicateStepNames, blockDef } from './pipelineGraph';
+import { modelToDoc, docToModel, serializeDoc, parseDoc } from './stateMachine';
+import type { DocFormat } from './stateMachine';
 import { splitPipelineWith } from './stepSchema';
 import { timeAgo, statusTone, isRunActive, fmtDuration } from '../../utils';
 
@@ -164,6 +166,19 @@ function PipelineBuilderOverlay({
   const initialMaps = useMemo<MapDef[]>(() => initial?.maps ?? [], [initial]);
   const [maps, setMaps] = useState<MapDef[]>(initialMaps);
   const onGraphChange = useCallback((s: StepRef[], r: Route[], m: MapDef[]) => { setSteps(s); setRoutes(r); setMaps(m); }, []);
+  // Seeds re-seed the visual canvas — they change only when a CONFIG edit is applied
+  // (or the workflow is (re)loaded), never on the canvas's own edits, so dragging a
+  // block doesn't reset the graph. The config panel now carries routes/maps too (a
+  // state machine has transitions), so applying an edit must push all three.
+  const [routesSeed, setRoutesSeed] = useState<Route[]>(initialRoutes);
+  const [mapsSeed, setMapsSeed] = useState<MapDef[]>(initialMaps);
+  // The step-name resolver a stored-step reference needs to know the node name it
+  // runs under — the identity routes and the state machine address it by.
+  const defName = useCallback((id: string) => catalog[id]?.name, [catalog]);
+  // The config panel authors the pipeline as a state machine, in YAML (default, the
+  // readable CI shape) or JSON (toggle) — both are the same document.
+  const [docFormat, setDocFormat] = useState<DocFormat>(() => (localStorage.getItem('ci.builder.docFormat') as DocFormat) || 'yaml');
+  useEffect(() => { localStorage.setItem('ci.builder.docFormat', docFormat); }, [docFormat]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Tag a brand-new pipeline with the active project (workspace) so it isn't
@@ -175,32 +190,38 @@ function PipelineBuilderOverlay({
   // blip that bounces the app to sign-in — doesn't discard it. Keyed by workflow id
   // (or "new" when creating) so an edit and a fresh create don't clobber each other.
   const draftKey = `ci.pipeline.draft:${initial?.workflow_id ?? 'new'}`;
-  // The saved workflow's config; a draft equal to this means "no unsaved changes",
-  // so it is neither persisted nor restored.
-  const baselineJson = useMemo(
-    () => configToJson(initial?.name ?? '', initial?.description ?? '', initialStepRefs, initial?.inputs ?? [], initial?.outputs ?? []),
-    [initial, initialStepRefs],
+  // The saved workflow as a state-machine document; a draft whose NORMALISED form
+  // (format-independent) equals this means "no unsaved changes", so it is neither
+  // persisted nor restored. Routes/maps are part of the document now, so a graph edit
+  // is captured too — the old JSON config held only steps.
+  const baselineNorm = useMemo(
+    () => JSON.stringify(modelToDoc(initial?.name ?? '', initial?.description ?? '', initialStepRefs, initial?.routes ?? [], initial?.maps ?? [], initial?.inputs ?? [], initial?.outputs ?? [], defName)),
+    [initial, initialStepRefs, defName],
   );
   // Read any persisted draft ONCE, synchronously on first render — before the
   // persist effect below can clear it — so the restore effect works off this
-  // snapshot rather than racing localStorage.
+  // snapshot rather than racing localStorage. Drafts are stored as normalised JSON,
+  // which parseDoc reads back regardless of the panel's current YAML/JSON view.
   const pendingRestore = useRef<string | null | undefined>(undefined);
   if (pendingRestore.current === undefined) {
     const raw = loadDraft(draftKey);
-    pendingRestore.current = raw && raw !== baselineJson ? raw : null;
+    pendingRestore.current = raw && raw !== baselineNorm ? raw : null;
   }
   const [restoredDraft, setRestoredDraft] = useState(false);
 
-  // Live, editable JSON mirror. The textarea drives `jsonDraft`; while the user is
-  // typing in it (jsonFocused) builder-side updates don't overwrite their text.
-  const [jsonDraft, setJsonDraft] = useState(() => configToJson(initial?.name ?? '', initial?.description ?? '', initialStepRefs, initial?.inputs ?? [], initial?.outputs ?? []));
-  const [jsonError, setJsonError] = useState<string | null>(null);
-  const jsonFocused = useRef(false);
+  // Live, editable state-machine mirror, serialised as YAML or JSON per docFormat.
+  // The textarea drives configDraft; while the user is typing in it (configFocused)
+  // builder-side updates don't overwrite their text.
+  const [configDraft, setConfigDraft] = useState(() => serializeDoc(
+    modelToDoc(initial?.name ?? '', initial?.description ?? '', initialStepRefs, initial?.routes ?? [], initial?.maps ?? [], initial?.inputs ?? [], initial?.outputs ?? [], defName),
+    (localStorage.getItem('ci.builder.docFormat') as DocFormat) || 'yaml'));
+  const [configError, setConfigError] = useState<string | null>(null);
+  const configFocused = useRef(false);
 
   // Right-panel tabs: the step editor (create a step inline from a chosen action, or
-  // edit the step behind the selected block) and the live JSON config. Selecting a
+  // edit the step behind the selected block) and the live pipeline config. Selecting a
   // block — or picking an action to create — switches to the step editor.
-  const [rightTab, setRightTab] = useState<'step' | 'json'>('json');
+  const [rightTab, setRightTab] = useState<'step' | 'config'>('config');
   // Draggable split between the visual builder and the right (inspector/JSON) pane.
   // Width is in px, persisted so the layout survives reopening the builder; the
   // divider clamps it so neither pane collapses below a usable minimum.
@@ -317,66 +338,80 @@ function PipelineBuilderOverlay({
     () => steps.map(s => (s.name && s.step_id && s.name === catalog[s.step_id]?.name) ? { ...s, name: undefined } : s),
     [steps, catalog],
   );
-  const canonicalJson = useMemo(() => configToJson(name, desc, cleanedSteps, inputs, outputs), [name, desc, cleanedSteps, inputs, outputs]);
+  // The pipeline as a state-machine document: its normalised (format-independent)
+  // form drives draft persistence and unsaved-change detection; the serialised text
+  // (YAML or JSON) is what the panel shows.
+  const canonicalDoc = useMemo(() => modelToDoc(name, desc, cleanedSteps, routes, maps, inputs, outputs, defName), [name, desc, cleanedSteps, routes, maps, inputs, outputs, defName]);
+  const canonicalNorm = useMemo(() => JSON.stringify(canonicalDoc), [canonicalDoc]);
+  const canonicalText = useMemo(() => serializeDoc(canonicalDoc, docFormat), [canonicalDoc, docFormat]);
 
   // Persist the live config whenever it diverges from the saved workflow; clear the
-  // draft once it matches again (nothing unsaved to keep).
+  // draft once it matches again (nothing unsaved to keep). Stored normalised so a
+  // YAML/JSON toggle alone never reads as an unsaved change.
   useEffect(() => {
-    if (canonicalJson === baselineJson) clearDraft(draftKey);
-    else saveDraft(draftKey, canonicalJson);
-  }, [canonicalJson, baselineJson, draftKey]);
+    if (canonicalNorm === baselineNorm) clearDraft(draftKey);
+    else saveDraft(draftKey, canonicalNorm);
+  }, [canonicalNorm, baselineNorm, draftKey]);
 
-  // Reflect builder/name/description changes into the JSON panel, unless the user
-  // is actively editing the JSON (their text is authoritative then).
+  // Reflect builder/name/description/format changes into the config panel, unless the
+  // user is actively editing it (their text is authoritative then).
   useEffect(() => {
-    if (jsonFocused.current) return;
-    setJsonDraft(canonicalJson);
-    setJsonError(null);
-  }, [canonicalJson]);
+    if (configFocused.current) return;
+    setConfigDraft(canonicalText);
+    setConfigError(null);
+  }, [canonicalText]);
 
-  // Apply a JSON edit back into the builder. On valid parse, name/description sync
-  // immediately and the builder is re-seeded only when the steps actually changed
-  // (so editing the name in JSON doesn't reset block state). Invalid JSON surfaces
-  // an inline error and leaves the builder untouched.
-  const applyJson = useCallback((raw: string) => {
-    setJsonDraft(raw);
-    let parsed: ReturnType<typeof parseConfig>;
-    try { parsed = parseConfig(raw); }
-    catch (e: unknown) { setJsonError((e as Error).message); return; }
-    setJsonError(null);
-    setName(parsed.name);
-    setDesc(parsed.description);
-    setInputs(parsed.inputs ?? []);
-    setOutputs(parsed.outputs ?? []);
-    if (configToJson('', '', parsed.steps) !== configToJson('', '', builderSeed)) {
-      setBuilderSeed(parsed.steps);
-      setSteps(parsed.steps);
+  // Apply a config edit back into the builder. On a valid parse, name/description/IO
+  // sync immediately and the visual canvas is re-seeded only when the graph actually
+  // changed (so editing the name doesn't reset block state). A malformed document
+  // surfaces an inline error and leaves the builder untouched.
+  const applyConfig = useCallback((raw: string) => {
+    setConfigDraft(raw);
+    let m: ReturnType<typeof docToModel>;
+    try { m = docToModel(parseDoc(raw)); }
+    catch (e: unknown) { setConfigError((e as Error).message); return; }
+    setConfigError(null);
+    setName(m.name);
+    setDesc(m.description);
+    setInputs(m.inputs);
+    setOutputs(m.outputs);
+    setSteps(m.steps);
+    setRoutes(m.routes);
+    setMaps(m.maps);
+    // Re-seed the canvas only when the parsed graph differs from what it holds, so a
+    // pure name/description edit doesn't reset the layout.
+    const nextNorm = JSON.stringify(modelToDoc('', '', m.steps, m.routes, m.maps, [], [], defName));
+    const seedNorm = JSON.stringify(modelToDoc('', '', builderSeed, routesSeed, mapsSeed, [], [], defName));
+    if (nextNorm !== seedNorm) {
+      setBuilderSeed(m.steps);
+      setRoutesSeed(m.routes);
+      setMapsSeed(m.maps);
     }
-  }, [builderSeed]);
+  }, [builderSeed, routesSeed, mapsSeed, defName]);
 
-  // Restore a persisted draft once, on mount (see pendingRestore above). Applying
-  // it through applyJson re-seeds the builder, JSON panel, name/desc and I/O decls
-  // in one go, exactly as a JSON edit would.
+  // Restore a persisted draft once, on mount (see pendingRestore above). Applying it
+  // through applyConfig re-seeds the builder, config panel, name/desc and I/O decls
+  // in one go, exactly as a config edit would.
   const didRestore = useRef(false);
   useEffect(() => {
     if (didRestore.current || !pendingRestore.current) return;
     didRestore.current = true;
     try {
-      parseConfig(pendingRestore.current); // validate before applying
-      applyJson(pendingRestore.current);
+      docToModel(parseDoc(pendingRestore.current)); // validate before applying
+      applyConfig(pendingRestore.current);
       setRestoredDraft(true);
     } catch {
       clearDraft(draftKey); // corrupt draft — drop it
     }
-  }, [applyJson, draftKey]);
+  }, [applyConfig, draftKey]);
 
   // Discard the restored draft and revert to the saved workflow (empty for a new
   // pipeline).
   const discardDraft = useCallback(() => {
     clearDraft(draftKey);
-    applyJson(baselineJson);
+    applyConfig(baselineNorm);
     setRestoredDraft(false);
-  }, [applyJson, baselineJson, draftKey]);
+  }, [applyConfig, baselineNorm, draftKey]);
 
   // Two blocks sharing one effective name collide in the run output map, so
   // ${steps.<name>.output} wiring silently resolves against the wrong step. The
@@ -385,7 +420,7 @@ function PipelineBuilderOverlay({
     () => duplicateStepNames(cleanedSteps, (id) => catalog[id]?.name),
     [cleanedSteps, catalog],
   );
-  const canSave = !!name.trim() && !saving && !jsonError && dupNames.length === 0;
+  const canSave = !!name.trim() && !saving && !configError && dupNames.length === 0;
 
   const handleSave = async () => {
     if (!name.trim() || dupNames.length > 0) return;
@@ -461,7 +496,7 @@ function PipelineBuilderOverlay({
       )}
       <div ref={splitRow} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0, padding: '14px 3px 14px 14px' }}>
-          <PipelineCanvas ref={canvasApi} editable initialSteps={builderSeed} initialRoutes={initialRoutes} initialMaps={initialMaps}
+          <PipelineCanvas ref={canvasApi} editable initialSteps={builderSeed} initialRoutes={routesSeed} initialMaps={mapsSeed}
             catalog={catalog} palette={palette} actions={actions} repos={repos} token={token}
             onChange={onGraphChange} onInspect={onInspect} onPickAction={onPickAction}
             pendingAdd={pendingAdd} onPendingConsumed={() => setPendingAdd(null)} />
@@ -472,14 +507,26 @@ function PipelineBuilderOverlay({
             edit the selected block's step) and the live, editable JSON config, as tabs. */}
         <div style={{ width: rightW, minWidth: 280, flexShrink: 0, padding: '14px 14px 14px 3px', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div style={{ display: 'flex', alignItems: 'stretch', border: `1px solid ${T.border}`, borderBottom: 'none', background: T.bgAlt }}>
-            {(['step', 'json'] as const).map(tab => (
+            {(['step', 'config'] as const).map(tab => (
               <button key={tab} onClick={() => setRightTab(tab)}
                 style={{ background: rightTab === tab ? T.bg : 'transparent', border: 'none', borderRight: `1px solid ${T.border}`, color: rightTab === tab ? T.textHi : T.faint, fontFamily: T.mono, fontSize: 10, letterSpacing: 1, textTransform: 'uppercase', padding: '8px 14px', cursor: 'pointer' }}>
-                {tab === 'step' ? 'step' : 'pipeline.json'}
+                {tab === 'step' ? 'step' : 'pipeline'}
               </button>
             ))}
             <div style={{ flex: 1 }} />
-            {rightTab === 'json' && <span style={{ alignSelf: 'center', padding: '0 12px', fontFamily: T.mono, fontSize: 9, color: jsonError ? T.red : T.green }}>{jsonError ? '✗ invalid' : '✓ in sync'}</span>}
+            {rightTab === 'config' && (
+              <>
+                {/* YAML (readable, default) or JSON (same document) — the fence the
+                    format was on is resolved by offering both. */}
+                {(['yaml', 'json'] as const).map(f => (
+                  <button key={f} onClick={() => setDocFormat(f)} title={`show the pipeline as ${f.toUpperCase()}`}
+                    style={{ background: 'transparent', border: 'none', color: docFormat === f ? T.green : T.faint, fontFamily: T.mono, fontSize: 9, letterSpacing: 1, textTransform: 'uppercase', padding: '0 8px', cursor: 'pointer' }}>
+                    {f}
+                  </button>
+                ))}
+                <span style={{ alignSelf: 'center', padding: '0 12px', fontFamily: T.mono, fontSize: 9, color: configError ? T.red : T.green }}>{configError ? '✗ invalid' : '✓ in sync'}</span>
+              </>
+            )}
           </div>
           <div style={{ flex: 1, minHeight: 0, border: `1px solid ${T.border}`, background: T.bg, display: 'flex', flexDirection: 'column' }}>
             {rightTab === 'step' ? (
@@ -532,13 +579,13 @@ function PipelineBuilderOverlay({
               )
             ) : (
               <>
-                <textarea value={jsonDraft} spellCheck={false}
-                  onChange={e => applyJson(e.target.value)}
-                  onFocus={() => { jsonFocused.current = true; }}
-                  onBlur={() => { jsonFocused.current = false; if (!jsonError) setJsonDraft(canonicalJson); }}
+                <textarea value={configDraft} spellCheck={false}
+                  onChange={e => applyConfig(e.target.value)}
+                  onFocus={() => { configFocused.current = true; }}
+                  onBlur={() => { configFocused.current = false; if (!configError) setConfigDraft(canonicalText); }}
                   style={{ flex: 1, minHeight: 0, resize: 'none', background: T.bg, border: 'none', color: T.text, fontFamily: T.mono, fontSize: 12, lineHeight: 1.5, padding: 12, outline: 'none', whiteSpace: 'pre', overflow: 'auto', tabSize: 2 }} />
-                <div style={{ minHeight: 16, padding: '4px 10px', borderTop: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 10, color: jsonError ? T.red : T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {jsonError ? `✗ ${jsonError}` : 'edit here or drag blocks — both stay in sync'}
+                <div style={{ minHeight: 16, padding: '4px 10px', borderTop: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 10, color: configError ? T.red : T.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {configError ? `✗ ${configError}` : 'a state machine — edit here or drag blocks, both stay in sync'}
                 </div>
               </>
             )}
