@@ -20,6 +20,15 @@ const (
 	// and from stuck-run recovery (only 'running' is reaped), so a paused run
 	// survives a worker restart untouched until someone approves or rejects it.
 	StatusAwaitingApproval = "awaiting_approval"
+	// StatusWaitingResources is a non-terminal display state for a step whose backing
+	// job has been submitted but is still QUEUED by the target service — forge holds an
+	// execution until the summed CPU/memory of running runners plus its own fits the
+	// admission budget (FORGE_MAX_TOTAL_*). Without it a fan-out of 15 legs all read
+	// "running" while only 5 have a container, which reads as a hang rather than a
+	// queue doing its job. Only the step run's display status is affected: it is never
+	// persisted as a run status, never claimed by Dequeue, and never reaped by
+	// stuck-run recovery (both of which key off 'pending'/'running' on the RUN).
+	StatusWaitingResources = "waiting_for_resources"
 )
 
 // ActionApproval is a built-in gate action (like ActionHTTP it is not a registry
@@ -59,6 +68,13 @@ type AsyncConfig struct {
 	SuccessStates    []string `json:"success_states"`
 	FailureStates    []string `json:"failure_states"`
 	CancelStates     []string `json:"cancel_states"`
+	// QueuedStates are the non-terminal states meaning "accepted but not started" —
+	// the job is sitting in the target service's admission queue waiting for capacity.
+	// While the poll reports one of these the step run displays StatusWaitingResources
+	// instead of "running". Defaults to ["pending"] (what forge reports for a queued
+	// execution) when an async action does not declare it, so existing manifests get
+	// the behaviour with no change.
+	QueuedStates []string `json:"queued_states,omitempty"`
 	OutputField      string   `json:"output_field"`
 	// OutputMapField names a response field holding an object (e.g. forge's captured
 	// output_env map). When set, it is the ONLY source of the SUCCESS step output:
@@ -181,8 +197,28 @@ type ScatterConfig struct {
 	// fails the gather. Empty = gather nothing (legs are independent; collect their
 	// results via output_env instead).
 	Outputs []string `json:"outputs,omitempty"`
+	// ShareBase mounts the base workspace READ-ONLY into every leg instead of giving each
+	// leg its own clone — no per-leg volume, and no per-leg volume-copy (which is itself a
+	// sandbox pod: on a kernel-isolated backend that is one microVM boot per leg, just to
+	// duplicate a source tree none of the legs will write to).
+	//
+	// Use it for read-only fan-outs — compile/test/lint each partition — where legs write
+	// nothing back into the workspace. The saving is not disk (a source tree is small); it
+	// is the N clone volumes and N copy pods. It also lets legs share ONE writable cache
+	// volume (declared in the step's own `volumes`), so they reuse compiled artifacts
+	// instead of each starting from a cold cache — the thing a per-leg clone makes
+	// impossible, since a cache seeded into the base would be duplicated N times.
+	//
+	// The trade-off is deliberate and is why this is opt-in: every leg attaches the SAME
+	// PVC, which is exactly what cloning exists to avoid. On ReadWriteOnce block storage
+	// that only works while all legs land on ONE node; across nodes it Multi-Attach fails.
+	// Safe on a single-node cluster, or on a ReadOnlyMany/ReadWriteMany storage class.
+	//
+	// Mutually exclusive with Outputs: there are no per-leg volumes, so there is nothing
+	// to gather. Legs return results via output_env.
+	ShareBase bool `json:"share_base,omitempty"`
 	// SizeMB / Medium size the per-leg clone volumes (should hold the workspace copy).
-	// Empty = forge's create-volume defaults.
+	// Empty = forge's create-volume defaults. Ignored when ShareBase is set.
 	SizeMB int64  `json:"size_mb,omitempty"`
 	Medium string `json:"medium,omitempty"`
 	// MaxConcurrent caps how many legs run at once. 0 = the default fan-out
@@ -369,6 +405,10 @@ type Workflow struct {
 	Ticket   *TicketConfig     `json:"ticket,omitempty" gorm:"column:ticket;serializer:json"`
 	StepRefs []WorkflowStepRef `json:"-"            gorm:"column:steps;serializer:json"`
 	Steps    []WorkflowStep    `json:"steps"        gorm:"-"`
+	// LastRunAt is the trigger time of this workflow's most recent run, or nil if it
+	// has never run. Not a stored column — computed by listWorkflows from the runs
+	// table so the UIs can show a "last ran" column.
+	LastRunAt *time.Time `json:"last_run_at,omitempty" gorm:"-"`
 }
 
 func (Workflow) TableName() string { return "workflows" }
@@ -400,13 +440,20 @@ type WorkflowRun struct {
 	// it resumes, and without this it would open a second ticket for the same run; and
 	// it is the link a client follows from a run to its ticket, which the tickets API
 	// cannot serve in reverse (it has no run_id filter).
-	TicketID     string            `json:"ticket_id,omitempty" gorm:"column:ticket_id;default:''"`
-	Token        string            `json:"-"            gorm:"column:token"`
-	RunSessionID string            `json:"-"            gorm:"column:run_session_id"`
-	StepRuns     []WorkflowStepRun `json:"step_runs"    gorm:"-"`
-	CreatedAt    time.Time         `json:"created_at"   gorm:"column:created_at"`
-	StartedAt    *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`
-	EndedAt      *time.Time        `json:"ended_at,omitempty"   gorm:"column:ended_at"`
+	TicketID     string `json:"ticket_id,omitempty" gorm:"column:ticket_id;default:''"`
+	Token        string `json:"-"            gorm:"column:token"`
+	RunSessionID string `json:"-"            gorm:"column:run_session_id"`
+	// RoleID is the workflow role the run's token was scoped to at trigger time.
+	// Recorded per-run (not just on the Workflow) because the workflow's role is
+	// re-provisioned on update: a run keeps authenticating against the role it started
+	// with, so that role must not be deleted while the run is still active, and it is
+	// garbage-collected once the last run using it finishes. AutoMigrate backfills
+	// existing rows to '' (harmless — those runs are already terminal).
+	RoleID    string            `json:"-"            gorm:"column:role_id;default:''"`
+	StepRuns  []WorkflowStepRun `json:"step_runs"    gorm:"-"`
+	CreatedAt time.Time         `json:"created_at"   gorm:"column:created_at"`
+	StartedAt *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`
+	EndedAt   *time.Time        `json:"ended_at,omitempty"   gorm:"column:ended_at"`
 }
 
 func (WorkflowRun) TableName() string { return "workflow_runs" }

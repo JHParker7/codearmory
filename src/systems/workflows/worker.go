@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	neturl "net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -251,6 +252,19 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	(WorkflowRun{RunID: runID}).Complete(context.Background(), finalStatus, runOutputs)
 	revokeRunToken(context.Background(), store.getSessionID())
 	slog.InfoContext(ctx, "worker: run finished", "run_id", runID, "status", finalStatus)
+
+	// Garbage-collect this run's role if the workflow has since been re-provisioned
+	// (update or role-heal) onto a newer role and no other active run still uses the
+	// old one. The role was intentionally kept alive while this run was in flight
+	// (deleteWorkflowRoleIfUnused); now that the run is terminal it can be reclaimed.
+	// Re-fetch the workflow so we compare against its *current* role, not the one read
+	// at run start (which a mid-run update would have left stale). Best-effort.
+	bg := context.Background()
+	if roleID := runRoleID(bg, runID); roleID != "" {
+		if cur, err := getWorkflow(bg, workflowID); err == nil {
+			deleteWorkflowRoleIfUnused(bg, roleID, cur.RoleID)
+		}
+	}
 }
 
 // resolveWorkflowOutputs resolves each declared output's ${...} template against the
@@ -570,7 +584,7 @@ func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID,
 				return
 			}
 			defer func() { <-sem }() // release
-			res, err := p.executeStep(ctx, store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, mapVars: t.mapVars, runID: runID, workflowID: workflowID, depth: depth})
+			res, err := p.executeStep(withStepRunID(ctx, stepRunIDs[k]), store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, mapVars: t.mapVars, runID: runID, workflowID: workflowID, depth: depth})
 			resCh <- taskResult{name: t.name, output: res.Output, logs: res.Logs, usedMB: res.MemoryUsedMB, limitMB: res.MemoryLimitMB, err: err, idx: k}
 		}(k, t)
 	}
@@ -856,6 +870,27 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 	}
 	pollURL := strings.TrimRight(def.ServiceURL, "/") + strings.ReplaceAll(def.Async.PollPath, "{id}", jobID)
 
+	// Mirror the backing job's queue state onto the step run so a fan-out held by the
+	// target service's admission budget reads "waiting_for_resources" rather than
+	// "running". Only transitions are written (a poll every 2s must not be a write every
+	// 2s), and only when this step owns a step run.
+	stepRunID := stepRunIDFrom(ctx)
+	shown := StatusRunning
+	reflectQueueState := func(status string) {
+		if stepRunID == "" {
+			return
+		}
+		want := StatusRunning
+		if isQueuedState(def.Async, status) {
+			want = StatusWaitingResources
+		}
+		if want == shown {
+			return
+		}
+		shown = want
+		(WorkflowStepRun{StepRunID: stepRunID}).SetStatus(ctx, want)
+	}
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -894,6 +929,7 @@ func (p *WorkerPool) pollAction(ctx context.Context, store *tokenStore, def Acti
 			continue
 		}
 		status, _ := result[def.Async.StatusField].(string)
+		reflectQueueState(status)
 
 		// memory_used_mb / memory_limit_mb are present on a forge execution's poll
 		// response and absent elsewhere; jsonInt64Ptr yields nil when missing, so
@@ -1062,6 +1098,34 @@ func snapshotOutputs(m map[string]string) map[string]string {
 		c[k] = v
 	}
 	return c
+}
+
+// stepRunIDKey carries the step run a step is executing under, so the async poll deep
+// in the call chain can reflect the backing job's queue state onto it without threading
+// the id through executeStep/executeAction/pollAction (which also serve callers that own
+// no step run — a scatter's resolve and gather).
+type stepRunIDKey struct{}
+
+func withStepRunID(ctx context.Context, stepRunID string) context.Context {
+	return context.WithValue(ctx, stepRunIDKey{}, stepRunID)
+}
+
+// stepRunIDFrom returns the step run this execution belongs to, or "" when there is
+// none (the caller owns no step run, so there is nothing to reflect status onto).
+func stepRunIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(stepRunIDKey{}).(string)
+	return id
+}
+
+// isQueuedState reports whether the polled status means "accepted but not yet started" —
+// the job is in the target service's admission queue. Defaults to forge's "pending" when
+// the action declares no queued_states, so existing manifests need no change.
+func isQueuedState(async *AsyncConfig, status string) bool {
+	states := async.QueuedStates
+	if len(states) == 0 {
+		states = []string{StatusPending}
+	}
+	return slices.Contains(states, status)
 }
 
 func (p *WorkerPool) startStepRun(runID, stepRunID string, index int, name string) error {

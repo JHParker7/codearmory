@@ -424,6 +424,8 @@ export interface Workflow {
   outputs?: WorkflowOutputDef[];
   created_at: string;
   updated_at: string;
+  /** Trigger time of the most recent run, or null/absent if it has never run. Computed server-side for the list; powers the "last ran" column. */
+  last_run_at?: string | null;
 }
 
 export interface WorkflowStepRun {

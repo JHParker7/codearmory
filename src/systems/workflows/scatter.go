@@ -75,6 +75,11 @@ func validateScatter(c *ScatterConfig) string {
 	if c.MaxConcurrent < 0 {
 		return "scatter.max_concurrent must be >= 0"
 	}
+	// share_base gives legs no volume of their own, so a gather has nothing to read from.
+	// Fail loudly rather than silently dropping the outputs the caller asked for.
+	if c.ShareBase && len(c.Outputs) > 0 {
+		return "scatter.share_base mounts the base read-only and gives legs no volume to own, so scatter.outputs cannot be gathered — drop outputs, or unset share_base to clone per leg"
+	}
 	return ""
 }
 
@@ -151,8 +156,59 @@ func scatterLegStep(ws WorkflowStep, c *ScatterConfig, runID, shard string) Step
 	for k, v := range ws.With {
 		with[k] = v
 	}
-	with["volumes"] = []any{volMount(runID, shard, c.mount(), true, false)}
+	with["volumes"] = scatterLegVolumes(ws.With, c, runID, shard)
 	return Step{Name: ws.Name, Action: ws.Action, With: with, Timeout: ws.Timeout}
+}
+
+// scatterLegVolumes builds a leg's volume list: its OWN clone at the workspace mount
+// (workdir), plus every other volume the step declared, carried through unchanged.
+//
+// Carrying the extras through is what makes a SHARED dependency cache possible. Cloning
+// the workspace per leg is the point of scatter (parallel legs must never share a PVC),
+// but it also means anything seeded into the base workspace is duplicated N times — a
+// 1.4GB warm Go cache across 15 legs is 21GB of disk and blows the workflow volume cap.
+// A cache wants the opposite treatment: provisioned ONCE and mounted into every leg, so
+// legs share compiled artifacts instead of each starting cold. Replacing `volumes`
+// outright made that impossible to express.
+//
+// Dropped: any declared volume naming the base volume, or mounting at the workspace mount
+// path — the leg's clone replaces the base there, and two mounts at one path is invalid.
+func scatterLegVolumes(with map[string]any, c *ScatterConfig, runID, shard string) []any {
+	// share_base: the base itself is the leg's workspace, mounted read-only. No clone, so
+	// no shard volume exists to mount.
+	workspace := volMount(runID, shard, c.mount(), true, false)
+	if c.ShareBase {
+		workspace = volMount(runID, c.baseVolume(), c.mount(), true, true)
+	}
+	vols := []any{workspace}
+	declared, _ := with["volumes"].([]any)
+	for _, v := range declared {
+		m, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := m["name"].(string); name == c.baseVolume() {
+			continue
+		}
+		// An empty mount_path would land on forge's default — the same place the clone
+		// mounts — so it is dropped rather than silently colliding with the workspace.
+		mp, _ := m["mount_path"].(string)
+		if mp == "" || mp == c.mount() {
+			continue
+		}
+		// The clone is the leg's working directory; a second workdir is ambiguous, so
+		// strip it from the extras (on a copy — the step definition is shared across legs
+		// and must not be mutated).
+		extra := make(map[string]any, len(m))
+		for k, val := range m {
+			if k == "workdir" {
+				continue
+			}
+			extra[k] = val
+		}
+		vols = append(vols, extra)
+	}
+	return vols
 }
 
 // scatterGatherStep unions each leg's declared owned outputs back into the base
@@ -264,24 +320,40 @@ func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, run
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
+				// Cancelled while still queued: the leg never ran, so leave its
+				// started_at NULL (zero duration) and just record the terminal state.
 				results[i] = taskResult{idx: i, err: context.Canceled}
+				p.finishStepRun(stepRunIDs[i], StatusCancelled, nil, nil, nil, nil)
 				return
 			}
-			results[i] = p.runScatterLeg(ctx, store, runID, workflowID, ws, &cfg, shards[i], paths[i], inputs, visible, depth)
+			r := p.runScatterLeg(withStepRunID(ctx, stepRunIDs[i]), store, runID, workflowID, ws, &cfg, shards[i], paths[i], inputs, visible, depth)
+			results[i] = r
+			// Record this leg's own terminal time the moment it finishes, so each leg
+			// shows its real end instead of the instant the whole group's barrier was
+			// reached (which made every leg display an identical end time). started_at is
+			// stamped by the withStepRunID poller path (queued→running), so no begin here.
+			st := StatusCompleted
+			switch {
+			case r.err != nil && ctx.Err() != nil:
+				st = StatusCancelled
+			case r.err != nil:
+				st = StatusFailed
+			}
+			p.finishStepRun(stepRunIDs[i], st, strPtrOrNil(r.output), strPtrOrNil(r.logs), r.usedMB, r.limitMB)
 		}(i)
 	}
 	wg.Wait()
 
+	// Aggregate the group's overall status from the per-leg results; each leg already
+	// recorded its own step-run terminal state above.
 	status := StatusCompleted
-	for i, r := range results {
-		st := StatusCompleted
+	for _, r := range results {
 		switch {
 		case r.err != nil && ctx.Err() != nil:
-			st, status = StatusCancelled, worstStatus(status, StatusCancelled)
+			status = worstStatus(status, StatusCancelled)
 		case r.err != nil:
-			st, status = StatusFailed, StatusFailed
+			status = StatusFailed
 		}
-		p.finishStepRun(stepRunIDs[i], st, strPtrOrNil(r.output), strPtrOrNil(r.logs), r.usedMB, r.limitMB)
 	}
 	if status != StatusCompleted {
 		return "", status
@@ -300,11 +372,16 @@ func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, run
 // and runs the user's step on it bound to its matched path.
 func (p *WorkerPool) runScatterLeg(ctx context.Context, store *tokenStore, runID, workflowID string, ws WorkflowStep, cfg *ScatterConfig, shard, path string, inputs, visible map[string]string, depth int) taskResult {
 	base := substContext{inputs: inputs, outputs: visible, runID: runID, workflowID: workflowID, depth: depth}
-	if _, err := p.executeStep(ctx, store, scatterCreateShardStep(cfg, runID, shard), base); err != nil {
-		return taskResult{err: fmt.Errorf("create clone volume: %w", err)}
-	}
-	if _, err := p.executeStep(ctx, store, scatterCloneStep(cfg, runID, shard), base); err != nil {
-		return taskResult{err: fmt.Errorf("clone workspace: %w", err)}
+	// share_base skips both the clone volume and the copy that seeds it — the leg mounts
+	// the base read-only instead. That is two fewer sandbox pods per leg (on kata, two
+	// fewer microVM boots).
+	if !cfg.ShareBase {
+		if _, err := p.executeStep(ctx, store, scatterCreateShardStep(cfg, runID, shard), base); err != nil {
+			return taskResult{err: fmt.Errorf("create clone volume: %w", err)}
+		}
+		if _, err := p.executeStep(ctx, store, scatterCloneStep(cfg, runID, shard), base); err != nil {
+			return taskResult{err: fmt.Errorf("clone workspace: %w", err)}
+		}
 	}
 	legCtx := substContext{inputs: inputs, outputs: visible, scatterPath: path, runID: runID, workflowID: workflowID, depth: depth}
 	res, err := p.executeStep(ctx, store, scatterLegStep(ws, cfg, runID, shard), legCtx)

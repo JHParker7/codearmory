@@ -320,6 +320,38 @@ func getWorkflow(ctx context.Context, id string) (Workflow, error) {
 	return wf, nil
 }
 
+// roleInUseByActiveRun reports whether any pending or running run still
+// authenticates with roleID. Used to hold off deleting a workflow role that an
+// in-flight run's token is scoped to (a mid-run re-provision must not pull the run's
+// permissions out from under it). awaiting_approval runs are excluded: they hold no
+// live worker and re-mint a fresh token against the current role when they resume.
+func roleInUseByActiveRun(ctx context.Context, roleID string) (bool, error) {
+	if roleID == "" {
+		return false, nil
+	}
+	var n int64
+	if err := connectRead().WithContext(ctx).
+		Model(&WorkflowRun{}).
+		Where("role_id = ? AND status IN ('pending','running')", roleID).
+		Limit(1).
+		Count(&n).Error; err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// runRoleID returns the role a run was triggered with, or "" if unknown.
+func runRoleID(ctx context.Context, runID string) string {
+	var run WorkflowRun
+	if err := connectRead().WithContext(ctx).
+		Select("role_id").
+		Where("run_id = ?", runID).
+		First(&run).Error; err != nil {
+		return ""
+	}
+	return run.RoleID
+}
+
 // listWorkflows returns active workflows accessible to the caller, with an
 // optional project filter (a view filter, not a security boundary).
 func listWorkflows(ctx context.Context, userID, orgID, projectFilter string) ([]Workflow, error) {
@@ -338,7 +370,46 @@ func listWorkflows(ctx context.Context, userID, orgID, projectFilter string) ([]
 	if wfs == nil {
 		wfs = []Workflow{}
 	}
+	populateLastRunAt(ctx, wfs)
 	return wfs, nil
+}
+
+// populateLastRunAt sets each workflow's LastRunAt to the trigger time of its most
+// recent run, in a single grouped query over the runs of the listed workflows. It is
+// best-effort: a query error leaves LastRunAt nil (the list still renders, just
+// without the "last ran" value) rather than failing the whole listing.
+func populateLastRunAt(ctx context.Context, wfs []Workflow) {
+	if len(wfs) == 0 {
+		return
+	}
+	ids := make([]string, len(wfs))
+	for i := range wfs {
+		ids[i] = wfs[i].WorkflowID
+	}
+	type lastRun struct {
+		WorkflowID string    `gorm:"column:workflow_id"`
+		LastRunAt  time.Time `gorm:"column:last_run_at"`
+	}
+	var rows []lastRun
+	if err := connectRead().WithContext(ctx).
+		Model(&WorkflowRun{}).
+		Select("workflow_id, MAX(created_at) AS last_run_at").
+		Where("workflow_id IN ?", ids).
+		Group("workflow_id").
+		Scan(&rows).Error; err != nil {
+		slog.WarnContext(ctx, "listWorkflows: last-run lookup failed", "error", err)
+		return
+	}
+	byID := make(map[string]time.Time, len(rows))
+	for _, r := range rows {
+		byID[r.WorkflowID] = r.LastRunAt
+	}
+	for i := range wfs {
+		if t, ok := byID[wfs[i].WorkflowID]; ok {
+			at := t
+			wfs[i].LastRunAt = &at
+		}
+	}
 }
 
 // enrichStepRefs looks up the full Step definition for each step ref and assembles
@@ -901,6 +972,26 @@ func (sr WorkflowStepRun) Complete(_ context.Context, status string, output, log
 		`UPDATE workflow_step_runs SET status=?, response_body=?, logs=?, memory_used_mb=?, memory_limit_mb=?, ended_at=CURRENT_TIMESTAMP WHERE step_run_id=?`,
 		status, output, logs, usedMB, limitMB, sr.StepRunID)
 	span.SetStatus(codes.Ok, "")
+}
+
+// SetStatus updates a step run's live (non-terminal) display status — used to move it
+// between 'running' and 'waiting_for_resources' as the backing job leaves and re-enters
+// the target service's admission queue. Guarded to rows that are still live so a poll
+// racing Complete() can never resurrect a finished step: ended_at IS NULL is the
+// terminal marker Complete() always sets.
+func (sr WorkflowStepRun) SetStatus(_ context.Context, status string) {
+	// Restamp started_at when a queued step is finally admitted. A step run row is created
+	// — and started_at stamped — for EVERY leg of a fan-out up front, long before most of
+	// them have capacity to run. Left alone, a leg that waited 20 minutes in the admission
+	// queue reports that wait as runtime, and every leg of a scatter reports an identical
+	// duration spanning the whole group (15 legs all claiming ~1352s when only 5 ever had
+	// a container). started_at should mark when the work began, not when it was enqueued.
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — display-only; the terminal status is authoritative
+		`UPDATE workflow_step_runs
+		    SET status = ?,
+		        started_at = CASE WHEN ? = ? THEN CURRENT_TIMESTAMP ELSE started_at END
+		  WHERE step_run_id = ? AND ended_at IS NULL`,
+		status, status, StatusRunning, sr.StepRunID)
 }
 
 // recoverStuckRunsDB marks any runs left in 'running' state as 'failed' on startup.

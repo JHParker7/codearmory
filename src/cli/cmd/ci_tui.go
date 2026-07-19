@@ -64,8 +64,13 @@ func buildCITUIStyles() {
 		"running":           lipgloss.Color(activeTheme.Warning),
 		"pending":           lipgloss.Color(activeTheme.Muted),
 		"awaiting_approval": lipgloss.Color(activeTheme.Warning),
-		"failed":            lipgloss.Color(activeTheme.Danger),
-		"cancelled":         lipgloss.Color(activeTheme.Muted),
+		// Queued by the target service's admission budget — submitted but not started.
+		// Muted like `pending`, because that is what it is: waiting, not working. Colouring
+		// it like `running` is what made a 15-leg fan-out look as though every leg were
+		// building at once when only a handful had a container.
+		"waiting_for_resources": lipgloss.Color(activeTheme.Muted),
+		"failed":                lipgloss.Color(activeTheme.Danger),
+		"cancelled":             lipgloss.Color(activeTheme.Muted),
 	}
 }
 
@@ -86,11 +91,12 @@ func tuiRunStatusActive(s string) bool {
 // ── API types ─────────────────────────────────────────────────────────────────
 
 type tuiPipeline struct {
-	WorkflowID  string    `json:"workflow_id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Active      bool      `json:"active"`
-	CreatedAt   time.Time `json:"created_at"`
+	WorkflowID  string     `json:"workflow_id"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Active      bool       `json:"active"`
+	CreatedAt   time.Time  `json:"created_at"`
+	LastRunAt   *time.Time `json:"last_run_at"`
 }
 
 type tuiRun struct {
@@ -353,6 +359,7 @@ var (
 		{"DESCRIPTION", 20, 3},
 		{"ACTIVE", 6, 0},
 		{"CREATED", 14, 0},
+		{"LAST RAN", 14, 0},
 	}
 	// Runs have no human name; the runs list is already scoped to one pipeline
 	// (its name is in the view title), so the primary label is meaningful context
@@ -737,11 +744,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !p.Active {
 				active = "○"
 			}
+			lastRan := "—"
+			if p.LastRunAt != nil {
+				lastRan = p.LastRunAt.Local().Format("Jan 02 15:04")
+			}
 			rows[i] = table.Row{
 				p.Name,
 				p.Description,
 				active,
 				p.CreatedAt.Local().Format("Jan 02 15:04"),
+				lastRan,
 			}
 		}
 		m.pTable.SetRows(rows)
@@ -1872,13 +1884,18 @@ func tuiClampHeight(s string, n int) string {
 // ── Live run diagram ──────────────────────────────────────────────────────────
 
 // tuiStatusGlyph is a compact per-step status marker so the live diagram reads
-// even without colour (✓ done, ● running, ○ pending, ✗ failed, ⊘ cancelled).
+// even without colour (✓ done, ● running, ◔ queued, ○ pending, ✗ failed, ⊘ cancelled).
 func tuiStatusGlyph(status string) string {
 	switch status {
 	case "completed":
 		return "✓"
 	case "running":
 		return "●"
+	// Submitted, but held in the target service's admission queue. Distinct from both
+	// `running` (it has no container yet) and `pending` (it has been handed off), so a
+	// fan-out reads as "5 building, 10 queued" rather than "15 building".
+	case "waiting_for_resources":
+		return "◔"
 	case "failed":
 		return "✗"
 	case "cancelled":
@@ -1912,10 +1929,12 @@ func tuiRunBatches(stepRuns []tuiStepRun) [][]tuiStepRun {
 }
 
 // tuiStageStatus reduces a stage's step statuses to one, by precedence
-// failed > running > pending > cancelled > completed — the colour the stage box
-// border takes (a failed step makes the whole stage read as failed, etc.).
+// failed > running > waiting_for_resources > pending > cancelled > completed — the colour
+// the stage box border takes (a failed step makes the whole stage read as failed, etc.).
+// A stage with some legs admitted and some still queued reads as running: work IS
+// happening in it, which is the useful signal.
 func tuiStageStatus(batch []tuiStepRun) string {
-	rank := map[string]int{"completed": 0, "cancelled": 1, "pending": 2, "running": 3, "failed": 4}
+	rank := map[string]int{"completed": 0, "cancelled": 1, "pending": 2, "waiting_for_resources": 3, "running": 4, "failed": 5}
 	best, bestRank := "completed", 0
 	for _, sr := range batch {
 		if r, ok := rank[sr.Status]; ok && r >= bestRank {

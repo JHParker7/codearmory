@@ -266,6 +266,30 @@ func deleteWorkflowRole(ctx context.Context, roleID string) {
 	resp.Body.Close()
 }
 
+// deleteWorkflowRoleIfUnused deletes a superseded workflow role, but only once no
+// in-flight run still depends on it. keepRoleID is the workflow's current role: a
+// role equal to it is never deleted (it is still the live one). A role an active run
+// is still authenticating with is left in place — deleting it would 403 that run's
+// every subsequent step (this is exactly the bug where updating a workflow mid-run
+// killed the run). The role is instead garbage-collected when the last run using it
+// finishes (see the run-completion GC in the worker). On a query error it errs toward
+// keeping the role — a leaked role is harmless; a wrongly-deleted one breaks a run.
+func deleteWorkflowRoleIfUnused(ctx context.Context, roleID, keepRoleID string) {
+	if roleID == "" || roleID == keepRoleID {
+		return
+	}
+	inUse, err := roleInUseByActiveRun(ctx, roleID)
+	if err != nil {
+		slog.WarnContext(ctx, "deleteWorkflowRoleIfUnused: active-run check failed, keeping role", "role_id", roleID, "error", err)
+		return
+	}
+	if inUse {
+		slog.InfoContext(ctx, "deleteWorkflowRoleIfUnused: role still used by an active run, deferring deletion", "role_id", roleID)
+		return
+	}
+	deleteWorkflowRole(ctx, roleID)
+}
+
 var validMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE"}
 
 // handleListActions returns the current in-memory action catalog loaded from the registry.
@@ -702,8 +726,10 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to update workflow", http.StatusInternalServerError)
 		return
 	}
-	// Old role is now superseded; clean it up after the DB write succeeds.
-	deleteWorkflowRole(ctx, oldRoleID)
+	// Old role is now superseded; delete it only if no in-flight run is still
+	// authenticating with it — otherwise the run would 403 on its next step. A role
+	// left behind for an active run is GC'd when that run finishes.
+	deleteWorkflowRoleIfUnused(ctx, oldRoleID, existing.RoleID)
 
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "workflow updated", "workflow_id", existing.WorkflowID, "user_id", userID)
