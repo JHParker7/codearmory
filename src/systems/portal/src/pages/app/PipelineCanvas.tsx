@@ -209,6 +209,26 @@ type EdgeSide = 'top' | 'bottom' | 'left' | 'right';
 
 const SIDE_N: Record<EdgeSide, [number, number]> = { top: [0, -1], bottom: [0, 1], left: [-1, 0], right: [1, 0] };
 
+/** Builds an SVG polyline from waypoints, dropping duplicate and COLLINEAR points — so a
+ * route that happens to line up straight is drawn as one segment (no corner) and a Z keeps
+ * only the corners it actually turns at, instead of always emitting every stub. */
+function polyPath(pts: { x: number; y: number }[]): string {
+  const p: { x: number; y: number }[] = [];
+  for (const q of pts) {
+    const last = p[p.length - 1];
+    if (!last || Math.abs(last.x - q.x) > 0.5 || Math.abs(last.y - q.y) > 0.5) p.push(q);
+  }
+  if (p.length <= 2) return `M ${p.map((q) => `${q.x} ${q.y}`).join(' L ')}`;
+  const out = [p[0]];
+  for (let i = 1; i < p.length - 1; i++) {
+    const a = out[out.length - 1], b = p[i], c = p[i + 1];
+    const coll = (Math.abs(a.x - b.x) < 0.5 && Math.abs(b.x - c.x) < 0.5) || (Math.abs(a.y - b.y) < 0.5 && Math.abs(b.y - c.y) < 0.5);
+    if (!coll) out.push(b);
+  }
+  out.push(p[p.length - 1]);
+  return `M ${out.map((q) => `${q.x} ${q.y}`).join(' L ')}`;
+}
+
 /** An ORTHOGONAL connector between two attachment points that respects BOTH the side it
  * leaves and the side it enters (so the arrowhead meets the target square-on), and keeps
  * its long cross-run down in the inter-rank GAP — right next to the target's entry stub —
@@ -223,18 +243,18 @@ function sidePath(a: { x: number; y: number }, aSide: EdgeSide, b: { x: number; 
   if (verticalEntry) {
     // Horizontal transfer lane hugging the target's entry stub (in the gap), staggered.
     const yT = b1.y - (b1.y >= a1.y ? 1 : -1) * stagger;
-    return `M ${a.x} ${a.y} L ${a1.x} ${a1.y} L ${a1.x} ${yT} L ${b1.x} ${yT} L ${b1.x} ${b1.y} L ${b.x} ${b.y}`;
+    return polyPath([a, a1, { x: a1.x, y: yT }, { x: b1.x, y: yT }, b1, b]);
   }
   // Horizontal entry (a same-rank peer): vertical transfer lane hugging the entry stub.
   const xT = b1.x - (b1.x >= a1.x ? 1 : -1) * stagger;
-  return `M ${a.x} ${a.y} L ${a1.x} ${a1.y} L ${xT} ${a1.y} L ${xT} ${b1.y} L ${b1.x} ${b1.y} L ${b.x} ${b.y}`;
+  return polyPath([a, a1, { x: xT, y: a1.y }, { x: xT, y: b1.y }, b1, b]);
 }
 
 /** An orthogonal path for a long edge that goes AROUND intermediate ranks: a stub out
  * of the source, across to a vertical channel at `cx` (left/right of the columns),
  * straight down it, then across and into the target — all straight lines. */
 function sideChannelPath(x1: number, y1: number, x2: number, y2: number, cx: number, sOut = 16, sIn = 16): string {
-  return `M ${x1} ${y1} L ${x1} ${y1 + sOut} L ${cx} ${y1 + sOut} L ${cx} ${y2 - sIn} L ${x2} ${y2 - sIn} L ${x2} ${y2}`;
+  return polyPath([{ x: x1, y: y1 }, { x: x1, y: y1 + sOut }, { x: cx, y: y1 + sOut }, { x: cx, y: y2 - sIn }, { x: x2, y: y2 - sIn }, { x: x2, y: y2 }]);
 }
 
 /** A short, readable NAME for a branch arm leaving a decision, so each path says what
