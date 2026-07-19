@@ -207,22 +207,22 @@ function seedCondition(from: string): string {
 
 type EdgeSide = 'top' | 'bottom' | 'left' | 'right';
 
-const sideNormal = (s: EdgeSide): [number, number] => (s === 'top' ? [0, -1] : s === 'bottom' ? [0, 1] : s === 'left' ? [-1, 0] : [1, 0]);
-
 /** An ORTHOGONAL connector (straight segments, right-angle bends) between two
- * attachment points: it leaves each node with a short stub perpendicular to the side
- * it exits, then runs in straight lines to the target — a clean flow-chart edge rather
- * than a curve. Vertical-first when the source exits top/bottom, horizontal-first when
- * it exits a side. */
-function sidePath(a: { x: number; y: number }, aSide: EdgeSide, b: { x: number; y: number }, bSide: EdgeSide): string {
-  const s = 16;
-  const [nax, nay] = sideNormal(aSide), [nbx, nby] = sideNormal(bSide);
-  const a1 = { x: a.x + nax * s, y: a.y + nay * s };
-  const b1 = { x: b.x + nbx * s, y: b.y + nby * s };
+ * attachment points: a Z with a single transfer lane between the ranks. Vertical-first
+ * when the source exits top/bottom, horizontal-first when it exits a side. `stagger`
+ * shifts the transfer lane toward the source so sibling edges don't share one. */
+function sidePath(a: { x: number; y: number }, aSide: EdgeSide, b: { x: number; y: number }, stagger = 0): string {
   const horizontalExit = aSide === 'left' || aSide === 'right';
-  const cx = horizontalExit ? b1.x : a1.x;
-  const cy = horizontalExit ? a1.y : b1.y;
-  return `M ${a.x} ${a.y} L ${a1.x} ${a1.y} L ${cx} ${cy} L ${b1.x} ${b1.y} L ${b.x} ${b.y}`;
+  if (horizontalExit) {
+    // Vertical transfer lane between the two, nudged toward the source by `stagger` so
+    // sibling edges leaving the same node don't share one lane and overlap.
+    const dir = a.x <= b.x ? 1 : -1;
+    const xL = b.x - dir * (16 + stagger);
+    return `M ${a.x} ${a.y} L ${xL} ${a.y} L ${xL} ${b.y} L ${b.x} ${b.y}`;
+  }
+  const dir = a.y <= b.y ? 1 : -1;
+  const yL = b.y - dir * (16 + stagger);
+  return `M ${a.x} ${a.y} L ${a.x} ${yL} L ${b.x} ${yL} L ${b.x} ${b.y}`;
 }
 
 /** An orthogonal path for a long edge that goes AROUND intermediate ranks: a stub out
@@ -439,12 +439,14 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       if (side === 'left') return { x: p.x, y: p.y + nh * frac };
       return { x: p.x + NODE_W, y: p.y + nh * frac };
     };
-    const out = new Map<number, { a: { x: number; y: number }; aSide: Side; b: { x: number; y: number }; bSide: Side }>();
+    const out = new Map<number, { a: { x: number; y: number }; aSide: Side; b: { x: number; y: number }; bSide: Side; aFan: number; aFanN: number }>();
     display.edges.forEach((e, k) => {
       if (!sSide.has(k)) return;
+      const og = groups.get(`${e.from}|${sSide.get(k)}|o`) ?? [k];
       out.set(k, {
         a: pointOn(e.from, sSide.get(k)!, k, 'o'), aSide: sSide.get(k)!,
         b: pointOn(e.to, tSide.get(k)!, k, 'i'), bSide: tSide.get(k)!,
+        aFan: Math.max(0, og.indexOf(k)), aFanN: og.length,
       });
     });
     return out;
@@ -892,7 +894,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
             {display.edges.map((e, k) => {
               const ep = endpoints.get(k);
               if (!ep) return null; // endpoint gone; pruned on save
-              const { a, b, aSide, bSide } = ep;
+              const { a, b, aSide } = ep;
               const sel = e.routeIndex != null && selectedEdge === e.routeIndex;
               // The edge's NAME wins if set; otherwise a branch arm is labelled with its
               // condition ("else" for the unconditional default). The plain
@@ -911,7 +913,9 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                 d = sideChannelPath(a.x, a.y, b.x, b.y, cx);
                 lx = cx; ly = (a.y + b.y) / 2;
               } else {
-                d = sidePath(a, aSide, b, bSide);
+                // Stagger sibling edges leaving the same node into separate transfer lanes.
+                const stagger = ep.aFanN > 1 ? Math.min(ep.aFan * 10, 44) : 0;
+                d = sidePath(a, aSide, b, stagger);
                 lx = (a.x + b.x) / 2; ly = (a.y + b.y) / 2;
               }
               return (
