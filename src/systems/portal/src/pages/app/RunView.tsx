@@ -209,19 +209,21 @@ export function RunView() {
   const navigate = useNavigate();
   const token = useAppSelector((s) => s.auth.token)!;
   const userNames = useUserNames(token);
-  const { width } = useViewport();
+  const { width, height } = useViewport();
   // Below ~1000px the page splits vertically (pipeline over logs); above it, the
   // panels sit side by side. Either way the split is user-draggable (and persisted)
   // so the pipeline side can be grown or shrunk against the logs.
   const narrow = width < 1000;
   const splitRef = useRef<HTMLDivElement>(null);
-  // Wide max / small otherMin so the divider can grow the pipeline right across the
-  // pane and shrink the logs to a sliver (or minimise either side outright, below).
-  const [pipelineW, widthHandle] = useResizablePane('split.runview.pipeline.w', 400, {
-    min: 220, max: 2400, side: 'left', direction: 'horizontal', containerRef: splitRef, otherMin: 180,
+  // Default the pipeline to 4/5 of the pane so the logs open at ~1/5 (key bumped to
+  // apply the new default). Wide max / small otherMin so the divider can still grow
+  // the pipeline right across the pane and shrink the logs to a sliver — or minimise
+  // either side outright (below).
+  const [pipelineW, widthHandle] = useResizablePane('split.runview.pipeline.w2', Math.round(width * 0.8), {
+    min: 220, max: 3200, side: 'left', direction: 'horizontal', containerRef: splitRef, otherMin: 180,
   });
-  const [pipelineH, heightHandle] = useResizablePane('split.runview.pipeline.h', 320, {
-    min: 120, max: 2000, side: 'left', direction: 'vertical', containerRef: splitRef, otherMin: 120,
+  const [pipelineH, heightHandle] = useResizablePane('split.runview.pipeline.h2', Math.round(height * 0.8), {
+    min: 120, max: 2600, side: 'left', direction: 'vertical', containerRef: splitRef, otherMin: 120,
   });
 
   const [run, setRun] = useState<WorkflowRun | null>(null);
