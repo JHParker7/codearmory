@@ -972,7 +972,8 @@ gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`
 			var dslRoutes []workflowRoute
 			var inputs []pipelineInputDef
 			var outputs []pipelineOutputDef
-			var smDoc json.RawMessage // set when -f is a state-machine document
+			var fileMaps []map[string]any // map regions declared in the -f file
+			var smDoc json.RawMessage     // set when -f is a state-machine document
 			if updatePipelineFile != "" {
 				isSM, sm, pf, err := loadPipelineConfig(updatePipelineFile)
 				if err != nil {
@@ -987,6 +988,7 @@ gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`
 					steps = pf.Steps
 					inputs = pf.Inputs
 					outputs = pf.Outputs
+					fileMaps = pf.Maps
 					if updatePipelineName == "" {
 						updatePipelineName = pf.Name
 					}
@@ -1031,7 +1033,10 @@ gates, or matrices. Use -f JSON (see "create pipeline --help") to author those.`
 			if len(dslRoutes) > 0 {
 				payload["routes"] = dslRoutes
 			}
-			if mp, err := parseMapFlags(pipelineMapFlags); err != nil {
+			if len(fileMaps) > 0 {
+				// Map regions from the -f file (the DSL --map flags are for the DSL path).
+				payload["maps"] = fileMaps
+			} else if mp, err := parseMapFlags(pipelineMapFlags); err != nil {
 				return err
 			} else if len(mp) > 0 {
 				payload["maps"] = mp
