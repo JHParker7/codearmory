@@ -450,6 +450,47 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     return out;
   }, [display, posOf, nodeById]);
 
+  /** The vertical channel x for each spanning edge. It starts in the gap right next to the
+   * target (on the source's side) — so a clear edge stays local — but if that column is
+   * blocked by a step at any rank BETWEEN source and target, it steps outward until it
+   * finds a corridor free of every box in those ranks. That's what makes the fail-ticket
+   * fan-in route AROUND the steps below it rather than straight through them. */
+  const longEdgeCx = useMemo(() => {
+    const boxesByLayer = new Map<number, { l: number; r: number }[]>();
+    display.nodes.forEach((n) => {
+      const p = posOf.get(n.id);
+      if (!p) return;
+      const w = n.kind === 'decision' ? DEC_W : NODE_W;
+      const x = n.kind === 'decision' ? p.x + NODE_W / 2 - DEC_W / 2 : p.x;
+      if (!boxesByLayer.has(n.layer)) boxesByLayer.set(n.layer, []);
+      boxesByLayer.get(n.layer)!.push({ l: x, r: x + w });
+    });
+    const MARGIN = 10;
+    const rightEdge = PAD + cols.max * (NODE_W + GAP_X);
+    const clampX = (x: number) => Math.max(8, Math.min(rightEdge + PAD - 8, x));
+    const m = new Map<number, number>();
+    display.edges.forEach((e, k) => {
+      const fl = nodeById.get(e.from)?.layer ?? 0, tl = nodeById.get(e.to)?.layer ?? 0;
+      if (tl - fl < 2) return;
+      const tp = posOf.get(e.to);
+      if (!tp) return;
+      const fromCentre = (posOf.get(e.from)?.x ?? tp.x) + NODE_W / 2;
+      const goLeft = fromCentre <= tp.x + NODE_W / 2;
+      const preferX = goLeft ? tp.x - GAP_X / 2 : tp.x + NODE_W + GAP_X / 2;
+      const forbidden: [number, number][] = [];
+      for (let r = Math.min(fl, tl) + 1; r <= Math.max(fl, tl) - 1; r++)
+        (boxesByLayer.get(r) ?? []).forEach((b) => forbidden.push([b.l - MARGIN, b.r + MARGIN]));
+      const free = (x: number) => !forbidden.some(([a, b]) => x >= a && x <= b);
+      let cx = preferX;
+      if (!free(cx)) {
+        const dir = goLeft ? -1 : 1;
+        for (let s = 1; s <= 300; s++) { const x = preferX + dir * s * 4; if (free(x)) { cx = x; break; } cx = x; }
+      }
+      m.set(k, clampX(cx));
+    });
+    return m;
+  }, [display, posOf, nodeById, cols]);
+
   /** Route-label placement with overlap resolution. Each labelled edge starts at the
    * midpoint of its drawn path, then labels are pushed on the y-axis (some higher, some
    * lower) until they clear BOTH one another AND the step/map/decision boxes — which act
@@ -476,11 +517,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       const toLayer = nodeById.get(e.to)?.layer ?? 0;
       let x: number, y: number;
       if (toLayer - fromLayer >= 2) {
-        const tp = posOf.get(e.to);
-        const toLeft = tp ? tp.x : b.x;
-        const fromCentre = (posOf.get(e.from)?.x ?? a.x) + NODE_W / 2;
-        const goLeft = fromCentre <= toLeft + NODE_W / 2;
-        x = goLeft ? toLeft - GAP_X / 2 : toLeft + NODE_W + GAP_X / 2;
+        x = longEdgeCx.get(k) ?? (a.x + b.x) / 2;
         y = (a.y + b.y) / 2;
       } else {
         x = (a.x + b.x) / 2;
@@ -525,7 +562,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     const m = new Map<number, { x: number; y: number }>();
     items.forEach((it) => m.set(it.k, { x: it.x, y: it.y }));
     return m;
-  }, [display, endpoints, nodeById, posOf]);
+  }, [display, endpoints, nodeById, posOf, longEdgeCx]);
 
   /** The routes that live WHOLLY inside a collapsed map region — drawn as short
    * connectors between the members stacked in the box, since they aren't part of the
@@ -868,16 +905,9 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               const long = toLayer - fromLayer >= 2;
               let d: string, lx: number, ly: number;
               if (long) {
-                // A spanning edge drops down a vertical channel in the gap right NEXT to its
-                // target, on the side the source comes from — so it stays local (no far-margin
-                // detour) and, since the channel is keyed to the target, several edges heading
-                // to the same node (e.g. every "if failed → fail-ticket") share it and merge
-                // rather than fanning into separate lanes.
-                const tp = posOf.get(e.to);
-                const toLeft = tp ? tp.x : b.x;
-                const fromCentre = (posOf.get(e.from)?.x ?? a.x) + NODE_W / 2;
-                const goLeft = fromCentre <= toLeft + NODE_W / 2;
-                const cx = goLeft ? toLeft - GAP_X / 2 : toLeft + NODE_W + GAP_X / 2;
+                // Drop down the target-side channel corridor (clear of the steps in between),
+                // so same-target edges merge and none cut through a box. See `longEdgeCx`.
+                const cx = longEdgeCx.get(k) ?? (a.x + b.x) / 2;
                 d = sideChannelPath(a.x, a.y, b.x, b.y, cx);
                 lx = cx; ly = (a.y + b.y) / 2;
               } else {
