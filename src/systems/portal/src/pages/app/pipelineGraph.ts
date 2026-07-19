@@ -473,11 +473,14 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
       if (ids) { ids.sort((a, b) => bary(a, succs) - bary(b, succs)); reindex(); }
     }
   }
-  // Reserve a column BAND for each map region so its enclosure box (a bounding rect over
-  // member nodes) can never wrap a non-member. A map's members occupy the same columns on
-  // every layer they span; free nodes are pushed out of those columns at the member layers,
-  // so the box is a clean vertical strip containing only members. Bands are ordered by their
-  // barycenter column, so the map stays roughly where the flow naturally places it.
+  // Reserve a column BAND for each map region so its enclosure — drawn as a plain
+  // rectangle over the member cells — never wraps a non-member. A map's members occupy the
+  // same columns on every layer, and the band is reserved across the region's WHOLE layer
+  // span (min..max member layer, not only the layers that hold members), so any non-member
+  // that falls between them is pushed sideways out of the rectangle rather than being
+  // enclosed. Bands are ordered by their barycenter column so a region stays roughly where
+  // the flow naturally places it. (Keeping members column-aligned is what lets the box stay
+  // a clean rectangle once ranks are centred — see the shared per-group shift in the canvas.)
   const mapOf = new Map<string, string>();
   blocks.forEach((b) => {
     if (b.mapId) mapOf.set(b.uid, b.mapId);
@@ -488,13 +491,20 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
     membersOf.get(m)!.push(id);
   });
   const bandWidth = new Map<string, number>();
+  const mapLo = new Map<string, number>();
+  const mapHi = new Map<string, number>();
   membersOf.forEach((ids, m) => {
     const perLayer = new Map<number, number>();
+    let lo = Infinity, hi = -Infinity;
     ids.forEach((id) => {
       const l = layer.get(id) ?? 0;
       perLayer.set(l, (perLayer.get(l) ?? 0) + 1);
+      lo = Math.min(lo, l);
+      hi = Math.max(hi, l);
     });
     bandWidth.set(m, Math.max(1, ...perLayer.values()));
+    mapLo.set(m, lo);
+    mapHi.set(m, hi);
   });
   const targetCol = (m: string): number => {
     const ids = membersOf.get(m)!;
@@ -511,21 +521,27 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
     });
 
   const col = new Map<string, number>();
-  byLayer.forEach((ids) => {
+  byLayer.forEach((ids, l) => {
     const inOrder = [...ids].sort((a, b) => (pos.get(a) ?? 0) - (pos.get(b) ?? 0));
     const used = new Set<number>();
     const reserved = new Set<number>();
+    // Reserve every band whose region spans this layer (even with no member here), so the
+    // box's rectangle can hold no free node anywhere within its vertical extent.
+    membersOf.forEach((_ids, m) => {
+      if ((mapLo.get(m) ?? 0) <= l && l <= (mapHi.get(m) ?? 0)) {
+        const base = bandStart.get(m) ?? 0;
+        for (let i = 0; i < (bandWidth.get(m) ?? 1); i++) reserved.add(base + i);
+      }
+    });
     const memberIdx = new Map<string, number>();
-    // Members first: fixed band columns, and reserve the whole band on this layer.
     inOrder.forEach((id) => {
       const m = mapOf.get(id);
       if (!m) return;
       const idx = memberIdx.get(m) ?? 0;
       memberIdx.set(m, idx + 1);
-      const base = bandStart.get(m) ?? 0;
-      col.set(id, base + idx);
-      used.add(base + idx);
-      for (let i = 0; i < (bandWidth.get(m) ?? 1); i++) reserved.add(base + i);
+      const c = (bandStart.get(m) ?? 0) + idx;
+      col.set(id, c);
+      used.add(c);
     });
     // Free nodes fill the remaining columns, skipping any reserved band column.
     let c = 0;
