@@ -177,6 +177,7 @@ func main() {
 	// Repo selector: enumerate clone targets across linked backends and pin extras.
 	mux.HandleFunc("GET /repos", handleListRepos)
 	mux.HandleFunc("POST /repos", handleCreateRepo)
+	mux.HandleFunc("PUT /repos/{id}", handleUpdateRepo)
 	mux.HandleFunc("DELETE /repos/{id}", handleDeleteRepo)
 	// Branch selector: enumerate the branches of a clone URL (?url=) for checkout.ref.
 	mux.HandleFunc("GET /repos/branches", handleListBranches)
@@ -186,6 +187,9 @@ func main() {
 	// Internal: forge/workflows mint a clone URL for a repo. Authenticated by the
 	// shared GIT_INTERNAL_KEY HMAC rather than conductor.
 	mux.HandleFunc("POST /internal/clone-token", handleInternalCloneToken)
+	// Internal: the workflows service asks whether a repo's `.armory/workflows` should
+	// sync and from which branches. Same GIT_INTERNAL_KEY auth.
+	mux.HandleFunc("POST /internal/repos/sync-config", handleInternalSyncConfig)
 
 	port := envOrDefault("PORT", "8096")
 	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{mux}), "git",

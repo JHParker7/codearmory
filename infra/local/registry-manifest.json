@@ -1685,6 +1685,12 @@
         "resource": "git_connector/repos"
       },
       {
+        "method": "PUT",
+        "path": "/repos/{id}",
+        "action": "updateRepo",
+        "resource": "git_connector/repos/{id}"
+      },
+      {
         "method": "DELETE",
         "path": "/repos/{id}",
         "action": "deleteRepo",
@@ -1722,6 +1728,7 @@
       {
         "grant_on": "user",
         "actions": [
+          "updateRepo",
           "deleteRepo"
         ],
         "resources": [
