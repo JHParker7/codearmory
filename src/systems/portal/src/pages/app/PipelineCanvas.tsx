@@ -228,9 +228,8 @@ function sidePath(a: { x: number; y: number }, aSide: EdgeSide, b: { x: number; 
 /** An orthogonal path for a long edge that goes AROUND intermediate ranks: a stub out
  * of the source, across to a vertical channel at `cx` (left/right of the columns),
  * straight down it, then across and into the target — all straight lines. */
-function sideChannelPath(x1: number, y1: number, x2: number, y2: number, cx: number): string {
-  const s = 16;
-  return `M ${x1} ${y1} L ${x1} ${y1 + s} L ${cx} ${y1 + s} L ${cx} ${y2 - s} L ${x2} ${y2 - s} L ${x2} ${y2}`;
+function sideChannelPath(x1: number, y1: number, x2: number, y2: number, cx: number, sOut = 16, sIn = 16): string {
+  return `M ${x1} ${y1} L ${x1} ${y1 + sOut} L ${cx} ${y1 + sOut} L ${cx} ${y2 - sIn} L ${x2} ${y2 - sIn} L ${x2} ${y2}`;
 }
 
 /** A short, readable NAME for a branch arm leaving a decision, so each path says what
@@ -359,13 +358,42 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     for (let l = 0; l <= maxL; l++) { y.set(l, acc); acc += (h.get(l) ?? NODE_H) + GAP_Y; }
     return { h, y, bottom: acc };
   }, [display]);
+  /** Long edges (spanning ≥2 ranks) are drawn AROUND the columns through a vertical
+   * channel to one side. Each gets its OWN channel lane (not one of three shared ones) so
+   * they don't stack; lanes are ordered by span so shorter edges nest inside longer ones
+   * and don't cross. Computed from layers/columns only (not pixel positions) so `posOf`
+   * can reserve room for the lanes without a dependency cycle. */
+  const CH_SP = 13; // horizontal spacing between adjacent channel lanes
+  const CH_MARGIN = 12; // gap between the outermost lane and the columns
+  const channels = useMemo(() => {
+    const colX = (id: string) => { const n = nodeById.get(id); return n ? (cols.shift.get(n.layer) ?? 0) + n.row : 0; };
+    const longs: { k: number; side: 'L' | 'R'; span: number; fl: number }[] = [];
+    display.edges.forEach((e, k) => {
+      const fl = nodeById.get(e.from)?.layer ?? 0, tl = nodeById.get(e.to)?.layer ?? 0;
+      if (tl - fl < 2) return;
+      const mid = (colX(e.from) + colX(e.to)) / 2;
+      longs.push({ k, side: mid > cols.max / 2 ? 'R' : 'L', span: tl - fl, fl });
+    });
+    const lane = new Map<number, number>();
+    let countL = 0, countR = 0;
+    (['L', 'R'] as const).forEach((side) => {
+      const list = longs.filter((l) => l.side === side).sort((a, b) => a.span - b.span || a.fl - b.fl);
+      list.forEach((l, i) => lane.set(l.k, i));
+      if (side === 'L') countL = list.length; else countR = list.length;
+    });
+    const sideOf = new Map(longs.map((l) => [l.k, l.side] as const));
+    const laneL = countL ? countL * CH_SP + CH_MARGIN : 0;
+    const laneR = countR ? countR * CH_SP + CH_MARGIN : 0;
+    return { lane, sideOf, laneL, laneR };
+  }, [display, nodeById, cols]);
+
   const posOf = useMemo(() => {
     const m = new Map<string, { x: number; y: number }>();
     display.nodes.forEach((n) => {
       const laneH = lanes.h.get(n.layer) ?? NODE_H;
       const laneY = lanes.y.get(n.layer) ?? PAD;
       const nh = heightOf(n);
-      const x = PAD + ((cols.shift.get(n.layer) ?? 0) + n.row) * (NODE_W + GAP_X);
+      const x = PAD + channels.laneL + ((cols.shift.get(n.layer) ?? 0) + n.row) * (NODE_W + GAP_X);
       const y = laneY + (laneH - nh) / 2; // centre the node within its lane
       m.set(n.id, { x, y });
       // Member step blocks are stacked inside the map box, below its label strip.
@@ -376,7 +404,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       }
     });
     return m;
-  }, [display, cols, lanes]);
+  }, [display, cols, lanes, channels]);
   /** Where each drawn edge attaches. An edge meets a node on the SIDE that faces the
    * other end — a step's four sides, a decision's four tips — so a route coming from
    * the right lands on the right and doesn't cross the ones arriving from above.
@@ -490,7 +518,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       return { def: m, x, y, w: x2 - x, h: y2 - y };
     }).filter(Boolean) as { def: MapDef; x: number; y: number; w: number; h: number }[];
   }, [maps, blocks, posOf, editable]);
-  const width = Math.max(PAD * 2 + cols.max * (NODE_W + GAP_X), 400);
+  const width = Math.max(PAD * 2 + channels.laneL + channels.laneR + cols.max * (NODE_W + GAP_X), 400);
   const height = Math.max(lanes.bottom + PAD, 260);
 
   const addStep = (stepId: string, name: string) => {
@@ -792,9 +820,13 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               const long = toLayer - fromLayer >= 2;
               let d: string, lx: number, ly: number;
               if (long) {
-                const right = (a.x + b.x) / 2 > width / 2;
-                const cx = right ? width - 12 - (k % 3) * 13 : 12 + (k % 3) * 13;
-                d = sideChannelPath(a.x, a.y, b.x, b.y, cx);
+                // Each long edge gets its own channel lane just outside the columns; the
+                // stub lengths are staggered by lane so their horizontal runs don't coincide.
+                const lane = channels.lane.get(k) ?? 0;
+                const side = channels.sideOf.get(k) ?? ((a.x + b.x) / 2 > width / 2 ? 'R' : 'L');
+                const contentL = PAD + channels.laneL, contentR = width - PAD - channels.laneR;
+                const cx = side === 'L' ? contentL - CH_MARGIN - lane * CH_SP : contentR + CH_MARGIN + lane * CH_SP;
+                d = sideChannelPath(a.x, a.y, b.x, b.y, cx, 16 + lane * 4, 16 + lane * 4);
                 lx = cx; ly = (a.y + b.y) / 2;
               } else {
                 d = sidePath(a, aSide, b, bSide);
