@@ -207,22 +207,27 @@ function seedCondition(from: string): string {
 
 type EdgeSide = 'top' | 'bottom' | 'left' | 'right';
 
-/** An ORTHOGONAL connector (straight segments, right-angle bends) between two
- * attachment points: a Z with a single transfer lane between the ranks. Vertical-first
- * when the source exits top/bottom, horizontal-first when it exits a side. `stagger`
- * shifts the transfer lane toward the source so sibling edges don't share one. */
-function sidePath(a: { x: number; y: number }, aSide: EdgeSide, b: { x: number; y: number }, stagger = 0): string {
-  const horizontalExit = aSide === 'left' || aSide === 'right';
-  if (horizontalExit) {
-    // Vertical transfer lane between the two, nudged toward the source by `stagger` so
-    // sibling edges leaving the same node don't share one lane and overlap.
-    const dir = a.x <= b.x ? 1 : -1;
-    const xL = b.x - dir * (16 + stagger);
-    return `M ${a.x} ${a.y} L ${xL} ${a.y} L ${xL} ${b.y} L ${b.x} ${b.y}`;
+const SIDE_N: Record<EdgeSide, [number, number]> = { top: [0, -1], bottom: [0, 1], left: [-1, 0], right: [1, 0] };
+
+/** An ORTHOGONAL connector between two attachment points that respects BOTH the side it
+ * leaves and the side it enters (so the arrowhead meets the target square-on), and keeps
+ * its long cross-run down in the inter-rank GAP — right next to the target's entry stub —
+ * rather than at a node's own y-level where it would cut across neighbours. Each node is
+ * left/entered via a short perpendicular stub; `stagger` shifts the transfer lane toward
+ * the source so sibling edges don't share one. */
+function sidePath(a: { x: number; y: number }, aSide: EdgeSide, b: { x: number; y: number }, bSide: EdgeSide, stagger = 0): string {
+  const s = 16;
+  const a1 = { x: a.x + SIDE_N[aSide][0] * s, y: a.y + SIDE_N[aSide][1] * s };
+  const b1 = { x: b.x + SIDE_N[bSide][0] * s, y: b.y + SIDE_N[bSide][1] * s };
+  const verticalEntry = bSide === 'top' || bSide === 'bottom';
+  if (verticalEntry) {
+    // Horizontal transfer lane hugging the target's entry stub (in the gap), staggered.
+    const yT = b1.y - (b1.y >= a1.y ? 1 : -1) * stagger;
+    return `M ${a.x} ${a.y} L ${a1.x} ${a1.y} L ${a1.x} ${yT} L ${b1.x} ${yT} L ${b1.x} ${b1.y} L ${b.x} ${b.y}`;
   }
-  const dir = a.y <= b.y ? 1 : -1;
-  const yL = b.y - dir * (16 + stagger);
-  return `M ${a.x} ${a.y} L ${a.x} ${yL} L ${b.x} ${yL} L ${b.x} ${b.y}`;
+  // Horizontal entry (a same-rank peer): vertical transfer lane hugging the entry stub.
+  const xT = b1.x - (b1.x >= a1.x ? 1 : -1) * stagger;
+  return `M ${a.x} ${a.y} L ${a1.x} ${a1.y} L ${xT} ${a1.y} L ${xT} ${b1.y} L ${b1.x} ${b1.y} L ${b.x} ${b.y}`;
 }
 
 /** An orthogonal path for a long edge that goes AROUND intermediate ranks: a stub out
@@ -898,7 +903,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
             {display.edges.map((e, k) => {
               const ep = endpoints.get(k);
               if (!ep) return null; // endpoint gone; pruned on save
-              const { a, b, aSide } = ep;
+              const { a, b, aSide, bSide } = ep;
               const sel = e.routeIndex != null && selectedEdge === e.routeIndex;
               // The edge's NAME wins if set; otherwise a branch arm is labelled with its
               // condition ("else" for the unconditional default). The plain
@@ -919,7 +924,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               } else {
                 // Stagger sibling edges leaving the same node into separate transfer lanes.
                 const stagger = ep.aFanN > 1 ? Math.min(ep.aFan * 10, 44) : 0;
-                d = sidePath(a, aSide, b, stagger);
+                d = sidePath(a, aSide, b, bSide, stagger);
                 lx = (a.x + b.x) / 2; ly = (a.y + b.y) / 2;
               }
               return (
