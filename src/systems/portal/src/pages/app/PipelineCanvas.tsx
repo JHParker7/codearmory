@@ -203,16 +203,18 @@ function edgePath(x1: number, y1: number, x2: number, y2: number): string {
   return `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2}`;
 }
 
-/** A short label for a branch arm leaving a decision: `steps.X.status == "failed"`
- * reads as `failed`; other expressions are truncated. The full text stays in the
- * tooltip and the route inspector. */
+/** A short, readable NAME for a branch arm leaving a decision, so each path says what
+ * it is rather than a bare value: `steps.X.status == "failed"` reads as `if failed`,
+ * `!= "ok"` as `if not ok`; other expressions are truncated. The full text stays in
+ * the tooltip and the route inspector. The unconditional default is labelled `else`
+ * by the caller. */
 function conditionLabel(when: string): string {
   const eq = when.match(/status\s*==\s*["']([a-zA-Z_]+)["']/);
-  if (eq) return eq[1];
+  if (eq) return `if ${eq[1]}`;
   const ne = when.match(/status\s*!=\s*["']([a-zA-Z_]+)["']/);
-  if (ne) return `≠ ${ne[1]}`;
+  if (ne) return `if not ${ne[1]}`;
   const s = when.trim();
-  return s.length > 18 ? `${s.slice(0, 17)}…` : s;
+  return s.length > 20 ? `if ${s.slice(0, 19)}…` : `if ${s}`;
 }
 
 export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasProps>(function PipelineCanvas({
@@ -288,9 +290,25 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     }));
     return m;
   }, [display]);
-  /** The point an edge attaches to on a node's top or bottom — the box edge for a
-   * step, the diamond tip for a decision, so edges meet the shape they touch. */
-  const anchor = useCallback((id: string, side: 'top' | 'bottom') => {
+  /** Which drawn edges leave / enter each node, in order — so sibling edges can be
+   * fanned across a node's edge instead of stacking on its exact centre, the main
+   * thing that made the old drawing look like a different graph than it was. */
+  const edgeSlots = useMemo(() => {
+    const out = new Map<string, number[]>();
+    const inc = new Map<string, number[]>();
+    display.edges.forEach((e, k) => {
+      if (!out.has(e.from)) out.set(e.from, []);
+      out.get(e.from)!.push(k);
+      if (!inc.has(e.to)) inc.set(e.to, []);
+      inc.get(e.to)!.push(k);
+    });
+    return { out, inc };
+  }, [display]);
+
+  /** The point drawn-edge `k` attaches to on a node's top or bottom. A step spreads
+   * its edges across its box width by slot, so a fork fans out and a join fans in; a
+   * decision's arms all leave its bottom tip (a clean flow-chart split). */
+  const anchor = useCallback((id: string, side: 'top' | 'bottom', edgeIdx: number) => {
     const p = posOf.get(id);
     if (!p) return null;
     const cx = p.x + NODE_W / 2;
@@ -298,8 +316,11 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       const cy = p.y + NODE_H / 2;
       return { x: cx, y: side === 'top' ? cy - DEC_H / 2 : cy + DEC_H / 2 };
     }
-    return { x: cx, y: side === 'top' ? p.y : p.y + NODE_H };
-  }, [posOf, nodeById]);
+    const slots = (side === 'top' ? edgeSlots.inc : edgeSlots.out).get(id) ?? [edgeIdx];
+    const k = Math.max(0, slots.indexOf(edgeIdx));
+    const x = p.x + (NODE_W * (k + 1)) / (slots.length + 1);
+    return { x, y: side === 'top' ? p.y : p.y + NODE_H };
+  }, [posOf, nodeById, edgeSlots]);
 
   const selectedNode = useMemo(() => blocks.find((b) => b.uid === selectedUid) ?? null, [blocks, selectedUid]);
   const cycle = useMemo(() => findCycle(blocks, routes, defName), [blocks, routes, defName]);
@@ -606,8 +627,8 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               </marker>
             </defs>
             {display.edges.map((e, k) => {
-              const a = anchor(e.from, 'bottom');
-              const b = anchor(e.to, 'top');
+              const a = anchor(e.from, 'bottom', k);
+              const b = anchor(e.to, 'top', k);
               if (!a || !b) return null; // endpoint gone; pruned on save
               const sel = e.routeIndex != null && selectedEdge === e.routeIndex;
               // A branch arm is labelled with its condition (or "else" for the
