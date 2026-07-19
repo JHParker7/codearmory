@@ -42,6 +42,14 @@ const PAD = 28;
 // centred, so it reads as a distinct flow-chart symbol rather than another step.
 const DEC_W = 104;
 const DEC_H = 48;
+// A collapsed map region is drawn as a CONTAINER box: it is one node in the outer flow
+// (so routes attach to the group, not its members) but its member step blocks are laid
+// out stacked INSIDE it. These size the box around that inner stack.
+const MAP_LABEL_H = 22; // label strip at the top of the box
+const MAP_INNER_GAP = 24; // vertical gap between stacked members
+const MAP_PAD_B = 12; // padding below the last member
+const mapBoxHeight = (memberCount: number) =>
+  MAP_LABEL_H + Math.max(1, memberCount) * NODE_H + (Math.max(1, memberCount) - 1) * MAP_INNER_GAP + MAP_PAD_B;
 
 /** The canvas reports the same selection shape the block builder did, so the host's
  * step editor is unchanged by the switch to a graph. */
@@ -338,16 +346,36 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     perLayer.forEach((w, l) => { const g = find(l); shift.set(l, (max - (groupW.get(g) ?? w)) / 2); });
     return { shift, max };
   }, [display, blocks]);
+  /** A collapsed map node is taller than a step, so ranks can't share one height. Each
+   * rank's LANE height is its tallest node; y accumulates lane by lane. */
+  const heightOf = (n: DisplayNode) => (n.kind === 'map' ? mapBoxHeight(n.members?.length ?? 1) : NODE_H);
+  const lanes = useMemo(() => {
+    const h = new Map<number, number>();
+    display.nodes.forEach((n) => h.set(n.layer, Math.max(h.get(n.layer) ?? NODE_H, heightOf(n))));
+    const y = new Map<number, number>();
+    let acc = PAD;
+    const maxL = Math.max(0, ...h.keys());
+    for (let l = 0; l <= maxL; l++) { y.set(l, acc); acc += (h.get(l) ?? NODE_H) + GAP_Y; }
+    return { h, y, bottom: acc };
+  }, [display]);
   const posOf = useMemo(() => {
     const m = new Map<string, { x: number; y: number }>();
     display.nodes.forEach((n) => {
-      m.set(n.id, {
-        x: PAD + ((cols.shift.get(n.layer) ?? 0) + n.row) * (NODE_W + GAP_X),
-        y: PAD + n.layer * (NODE_H + GAP_Y),
-      });
+      const laneH = lanes.h.get(n.layer) ?? NODE_H;
+      const laneY = lanes.y.get(n.layer) ?? PAD;
+      const nh = heightOf(n);
+      const x = PAD + ((cols.shift.get(n.layer) ?? 0) + n.row) * (NODE_W + GAP_X);
+      const y = laneY + (laneH - nh) / 2; // centre the node within its lane
+      m.set(n.id, { x, y });
+      // Member step blocks are stacked inside the map box, below its label strip.
+      if (n.kind === 'map') {
+        (n.memberUids ?? []).forEach((uid, i) => {
+          m.set(uid, { x, y: y + MAP_LABEL_H + i * (NODE_H + MAP_INNER_GAP) });
+        });
+      }
     });
     return m;
-  }, [display, cols]);
+  }, [display, cols, lanes]);
   /** Where each drawn edge attaches. An edge meets a node on the SIDE that faces the
    * other end — a step's four sides, a decision's four tips — so a route coming from
    * the right lands on the right and doesn't cross the ones arriving from above.
@@ -356,7 +384,8 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
    * points and the sides they leave through (for the curve's direction). */
   const endpoints = useMemo(() => {
     type Side = 'top' | 'bottom' | 'left' | 'right';
-    const centre = (id: string) => { const p = posOf.get(id)!; return { x: p.x + NODE_W / 2, y: p.y + NODE_H / 2 }; };
+    const h = (id: string) => { const n = nodeById.get(id); return n ? heightOf(n) : NODE_H; };
+    const centre = (id: string) => { const p = posOf.get(id)!; return { x: p.x + NODE_W / 2, y: p.y + h(id) / 2 }; };
     // The side of `nodeId` that faces `otherId`. A decision ARM prefers the bottom tip
     // only when the target is nearly straight below, else a left/right tip.
     const sideFor = (nodeId: string, otherId: string, decisionArm: boolean): Side => {
@@ -395,7 +424,8 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     });
     const pointOn = (nodeId: string, side: Side, k: number, end: 'o' | 'i') => {
       const p = posOf.get(nodeId)!;
-      const cx = p.x + NODE_W / 2, cy = p.y + NODE_H / 2;
+      const nh = h(nodeId);
+      const cx = p.x + NODE_W / 2, cy = p.y + nh / 2;
       if (nodeById.get(nodeId)?.kind === 'decision') {
         if (side === 'top') return { x: cx, y: cy - DEC_H / 2 };
         if (side === 'bottom') return { x: cx, y: cy + DEC_H / 2 };
@@ -405,9 +435,9 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       const ks = groups.get(`${nodeId}|${side}|${end}`) ?? [k];
       const frac = (Math.max(0, ks.indexOf(k)) + 1) / (ks.length + 1);
       if (side === 'top') return { x: p.x + NODE_W * frac, y: p.y };
-      if (side === 'bottom') return { x: p.x + NODE_W * frac, y: p.y + NODE_H };
-      if (side === 'left') return { x: p.x, y: p.y + NODE_H * frac };
-      return { x: p.x + NODE_W, y: p.y + NODE_H * frac };
+      if (side === 'bottom') return { x: p.x + NODE_W * frac, y: p.y + nh };
+      if (side === 'left') return { x: p.x, y: p.y + nh * frac };
+      return { x: p.x + NODE_W, y: p.y + nh * frac };
     };
     const out = new Map<number, { a: { x: number; y: number }; aSide: Side; b: { x: number; y: number }; bSide: Side }>();
     display.edges.forEach((e, k) => {
@@ -420,6 +450,23 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     return out;
   }, [display, posOf, nodeById]);
 
+  /** The routes that live WHOLLY inside a collapsed map region — drawn as short
+   * connectors between the members stacked in the box, since they aren't part of the
+   * outer flow. Empty in the editable (expanded) view, where they are normal edges. */
+  const innerEdges = useMemo(() => {
+    if (editable) return [] as { from: string; to: string }[];
+    const uidByName = new Map(blocks.map((b) => [nodeName(b, defName), b.uid] as const));
+    const mapByUid = new Map(blocks.filter((b) => b.mapId).map((b) => [b.uid, b.mapId!] as const));
+    const out: { from: string; to: string }[] = [];
+    routes.forEach((r) => {
+      const fu = uidByName.get(r.from), tu = uidByName.get(r.to);
+      if (!fu || !tu) return;
+      const fm = mapByUid.get(fu), tm = mapByUid.get(tu);
+      if (fm && fm === tm) out.push({ from: fu, to: tu });
+    });
+    return out;
+  }, [blocks, routes, defName, editable]);
+
   const selectedNode = useMemo(() => blocks.find((b) => b.uid === selectedUid) ?? null, [blocks, selectedUid]);
   const cycle = useMemo(() => findCycle(blocks, routes, defName), [blocks, routes, defName]);
   const members = useMemo(() => regionMembers(blocks, defName), [blocks, defName]);
@@ -431,6 +478,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
    * member column-aligned and every non-member out of the band, so this plain rectangle
    * wraps only the region's own steps. */
   const regionBoxes = useMemo(() => {
+    if (!editable) return []; // read-only collapses each region into a container node instead
     return maps.map((m) => {
       const pts = blocks.filter((b) => b.mapId === m.id).map((b) => posOf.get(b.uid)).filter(Boolean) as { x: number; y: number }[];
       if (pts.length === 0) return null;
@@ -440,9 +488,9 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       const y2 = Math.max(...pts.map((p) => p.y)) + NODE_H + 14;
       return { def: m, x, y, w: x2 - x, h: y2 - y };
     }).filter(Boolean) as { def: MapDef; x: number; y: number; w: number; h: number }[];
-  }, [maps, blocks, posOf]);
+  }, [maps, blocks, posOf, editable]);
   const width = Math.max(PAD * 2 + cols.max * (NODE_W + GAP_X), 400);
-  const height = Math.max(...display.nodes.map((n) => PAD * 2 + (n.layer + 1) * (NODE_H + GAP_Y)), 260);
+  const height = Math.max(lanes.bottom + PAD, 260);
 
   const addStep = (stepId: string, name: string) => {
     const uid = `n${seq.current++}-${Date.now()}`;
@@ -775,6 +823,15 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                 </g>
               );
             })}
+            {/* Internal connectors of a collapsed map region: its members are stacked, so
+                each internal route is a short link from one member's bottom to the next's top. */}
+            {innerEdges.map((e, k) => {
+              const a = posOf.get(e.from), b = posOf.get(e.to);
+              if (!a || !b) return null;
+              const ax = a.x + NODE_W / 2, ay = a.y + NODE_H;
+              const bx = b.x + NODE_W / 2, by = b.y;
+              return <path key={`ie${k}`} d={`M ${ax} ${ay} L ${bx} ${by}`} fill="none" stroke={T.faint} strokeWidth={1.2} markerEnd="url(#arrow)" />;
+            })}
             {/* Decision diamonds: a step that branches on a condition flows into one
                 of these, so the routing reads as a flow chart and the runner step
                 never carries the branch. Drawn over the edges, behind the step boxes. */}
@@ -792,6 +849,32 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               );
             })}
           </svg>
+
+          {/* Map-region CONTAINER boxes (read-only): one node in the outer flow, drawn as
+              a labelled box behind its member step blocks — which are laid out inside it. */}
+          {display.nodes.filter((n) => n.kind === 'map').map((n) => {
+            const p = posOf.get(n.id);
+            if (!p) return null;
+            const def = maps.find((m) => m.id === n.mapId);
+            const boxH = mapBoxHeight(n.members?.length ?? 1);
+            const memberRuns = (n.members ?? []).map((nm) => runStatus?.[nm]).filter(Boolean) as { status: string; legs: number }[];
+            const worst = memberRuns.length
+              ? (['failed', 'awaiting_approval', 'running', 'cancelled'].find((s) => memberRuns.some((r) => r.status === s)) ?? memberRuns[0].status)
+              : undefined;
+            return (
+              <div key={n.id} title={`map region · per ${def?.var || '?'}`} style={{
+                position: 'absolute', left: p.x, top: p.y, width: NODE_W, height: boxH, boxSizing: 'border-box',
+                background: 'transparent', border: `1px dashed ${worst ? runColor(worst) : T.blue}`,
+                borderRadius: 4, pointerEvents: 'none',
+              }}>
+                <span style={{ position: 'absolute', top: 4, left: 8, fontFamily: T.mono, fontSize: 9.5, color: worst ? runColor(worst) : T.blue }}>
+                  ⟳ map · per {def?.var || '?'}
+                  {def?.volume ? ' · own ws' : ''}
+                  {def?.sequential ? ' · seq' : ''}
+                </span>
+              </div>
+            );
+          })}
 
           {blocks.map((b) => {
             const p = posOf.get(b.uid);
@@ -855,40 +938,6 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
             );
           })}
 
-          {/* Collapsed map regions (read-only views): one block standing in for the whole
-              region, listing its member steps as the body it runs per value. */}
-          {display.nodes.filter((n) => n.kind === 'map').map((n) => {
-            const p = posOf.get(n.id);
-            if (!p) return null;
-            const def = maps.find((m) => m.id === n.mapId);
-            const members = n.members ?? [];
-            const memberRuns = members.map((nm) => runStatus?.[nm]).filter(Boolean) as { status: string; legs: number }[];
-            const worst = memberRuns.length
-              ? (['failed', 'awaiting_approval', 'running', 'cancelled'].find((s) => memberRuns.some((r) => r.status === s)) ?? memberRuns[0].status)
-              : undefined;
-            const legs = memberRuns.reduce((s, r) => s + r.legs, 0);
-            const isActive = !!activeNode && members.includes(activeNode);
-            const bar = worst ? runColor(worst) : T.blue;
-            return (
-              <div key={n.id} title={`map region · per ${def?.var || '?'} · ${members.join(' → ')}`}
-                onClick={() => { const b = blocks.find((bb) => bb.mapId === n.mapId); if (b) select(b); }}
-                style={{
-                  position: 'absolute', left: p.x, top: p.y, width: NODE_W, height: NODE_H, boxSizing: 'border-box',
-                  background: isActive ? T.greenSoft : T.blueSoft,
-                  border: `1px dashed ${isActive ? T.green : T.blue}`, borderLeft: `3px solid ${bar}`,
-                  display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 2,
-                  padding: '6px 10px', cursor: 'pointer',
-                }}>
-                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.blue, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  ⟳ map · per {def?.var || '?'}
-                  {def?.volume ? ' · own workspace' : ''}
-                </span>
-                <span style={{ fontFamily: T.mono, fontSize: 9.5, color: worst ? runColor(worst) : T.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {worst ? `${worst}${legs > 1 ? ` · ${legs}×` : ''}` : members.join(' → ') || '(empty)'}
-                </span>
-              </div>
-            );
-          })}
         </div>
 
         {/* Node inspector: a step's fan-out (matrix/scatter) and gate config. The

@@ -356,10 +356,12 @@ export interface DisplayNode {
   uid?: string;
   name?: string;
   sourceName?: string;
-  /** kind 'map' only: the region's id and the step names of its members, in order —
-   * so the canvas can draw the collapsed region as one block listing its body. */
+  /** kind 'map' only: the region's id and its member steps (names + block uids, in
+   * order) — so the canvas can draw the region as one node in the outer flow while still
+   * laying its member step blocks out INSIDE the box. */
   mapId?: string;
   members?: string[];
+  memberUids?: string[];
   layer: number;
   row: number;
 }
@@ -396,15 +398,17 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
   // single node id, the routes wholly inside the region vanish (they are its body, not
   // top-level flow), and only the edges crossing the boundary remain — so the pipeline's
   // routes no longer thread through and around the region's individual steps.
-  const mapOfName = new Map<string, string>();     // member step name -> map id
-  const membersByMap = new Map<string, string[]>(); // map id -> member step names, in order
+  const mapOfName = new Map<string, string>();      // member step name -> map id
+  const membersByMap = new Map<string, string[]>();  // map id -> member step names, in order
+  const memberUidsByMap = new Map<string, string[]>(); // map id -> member block uids, in order
   if (collapseMaps) {
     blocks.forEach((b) => {
       if (!b.mapId) return;
       const nm = nodeName(b, defName);
       mapOfName.set(nm, b.mapId);
-      if (!membersByMap.has(b.mapId)) membersByMap.set(b.mapId, []);
+      if (!membersByMap.has(b.mapId)) { membersByMap.set(b.mapId, []); memberUidsByMap.set(b.mapId, []); }
       membersByMap.get(b.mapId)!.push(nm);
+      memberUidsByMap.get(b.mapId)!.push(b.uid);
     });
   }
   const mapNodeId = (mapId: string) => 'map:' + mapId;
@@ -439,7 +443,7 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
       emittedMap.add(mid);
       const id = mapNodeId(mid);
       const members = membersByMap.get(mid) ?? [];
-      ordered.push({ id, kind: 'map', mapId: mid, name: mid, members });
+      ordered.push({ id, kind: 'map', mapId: mid, name: mid, members, memberUids: memberUidsByMap.get(mid) ?? [] });
       if (branchesNode(id)) ordered.push({ id: decisionId(id), kind: 'decision', sourceName: mid });
     } else {
       ordered.push({ id: b.uid, kind: 'step', uid: b.uid, name });
