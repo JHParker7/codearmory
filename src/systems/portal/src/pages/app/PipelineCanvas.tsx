@@ -196,11 +196,16 @@ function seedCondition(from: string): string {
   return `steps.${from}.status == "completed"`;
 }
 
-/** A cubic bezier from one node's bottom port to another's top port, bulging
- * vertically so sibling edges stay distinguishable rather than overlapping. */
-function edgePath(x1: number, y1: number, x2: number, y2: number): string {
-  const dy = Math.max(28, Math.abs(y2 - y1) * 0.5);
-  return `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2}`;
+type EdgeSide = 'top' | 'bottom' | 'left' | 'right';
+
+/** A bezier between two attachment points that leaves each node PERPENDICULAR to the
+ * side it exits — so an edge off the right side bows rightward, one off the top rises,
+ * etc. — giving the natural flow-chart look instead of everything dropping straight down. */
+function sidePath(a: { x: number; y: number }, aSide: EdgeSide, b: { x: number; y: number }, bSide: EdgeSide): string {
+  const k = Math.max(24, Math.hypot(b.x - a.x, b.y - a.y) * 0.35);
+  const n = (s: EdgeSide): [number, number] => (s === 'top' ? [0, -1] : s === 'bottom' ? [0, 1] : s === 'left' ? [-1, 0] : [1, 0]);
+  const [ax, ay] = n(aSide), [bx, by] = n(bSide);
+  return `M ${a.x} ${a.y} C ${a.x + ax * k} ${a.y + ay * k}, ${b.x + bx * k} ${b.y + by * k}, ${b.x} ${b.y}`;
 }
 
 /** A path that leaves a node, bows out to a vertical channel at `cx` (left or right of
@@ -312,37 +317,77 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     });
     return m;
   }, [display, cols]);
-  /** Which drawn edges leave / enter each node, in order — so sibling edges can be
-   * fanned across a node's edge instead of stacking on its exact centre, the main
-   * thing that made the old drawing look like a different graph than it was. */
-  const edgeSlots = useMemo(() => {
-    const out = new Map<string, number[]>();
-    const inc = new Map<string, number[]>();
+  /** Where each drawn edge attaches. An edge meets a node on the SIDE that faces the
+   * other end — a step's four sides, a decision's four tips — so a route coming from
+   * the right lands on the right and doesn't cross the ones arriving from above.
+   * Endpoints sharing a side are then fanned across it, ordered by the other end's
+   * position so they don't cross each other either. Returns per edge index the two
+   * points and the sides they leave through (for the curve's direction). */
+  const endpoints = useMemo(() => {
+    type Side = 'top' | 'bottom' | 'left' | 'right';
+    const centre = (id: string) => { const p = posOf.get(id)!; return { x: p.x + NODE_W / 2, y: p.y + NODE_H / 2 }; };
+    // The side of `nodeId` that faces `otherId`. A decision ARM prefers the bottom tip
+    // only when the target is nearly straight below, else a left/right tip.
+    const sideFor = (nodeId: string, otherId: string, decisionArm: boolean): Side => {
+      const n = centre(nodeId), o = centre(otherId);
+      const dx = o.x - n.x, dy = o.y - n.y;
+      if (decisionArm) {
+        if (dy > 0 && Math.abs(dx) < dy * 0.5) return 'bottom';
+        return dx >= 0 ? 'right' : 'left';
+      }
+      if (Math.abs(dy) >= Math.abs(dx)) return dy >= 0 ? 'bottom' : 'top';
+      return dx >= 0 ? 'right' : 'left';
+    };
+    const sSide = new Map<number, Side>(), tSide = new Map<number, Side>();
     display.edges.forEach((e, k) => {
-      if (!out.has(e.from)) out.set(e.from, []);
-      out.get(e.from)!.push(k);
-      if (!inc.has(e.to)) inc.set(e.to, []);
-      inc.get(e.to)!.push(k);
+      if (!posOf.get(e.from) || !posOf.get(e.to)) return;
+      sSide.set(k, sideFor(e.from, e.to, nodeById.get(e.from)?.kind === 'decision'));
+      tSide.set(k, nodeById.get(e.to)?.kind === 'decision' ? 'top' : sideFor(e.to, e.from, false));
     });
-    return { out, inc };
-  }, [display]);
-
-  /** The point drawn-edge `k` attaches to on a node's top or bottom. A step spreads
-   * its edges across its box width by slot, so a fork fans out and a join fans in; a
-   * decision's arms all leave its bottom tip (a clean flow-chart split). */
-  const anchor = useCallback((id: string, side: 'top' | 'bottom', edgeIdx: number) => {
-    const p = posOf.get(id);
-    if (!p) return null;
-    const cx = p.x + NODE_W / 2;
-    if (nodeById.get(id)?.kind === 'decision') {
-      const cy = p.y + NODE_H / 2;
-      return { x: cx, y: side === 'top' ? cy - DEC_H / 2 : cy + DEC_H / 2 };
-    }
-    const slots = (side === 'top' ? edgeSlots.inc : edgeSlots.out).get(id) ?? [edgeIdx];
-    const k = Math.max(0, slots.indexOf(edgeIdx));
-    const x = p.x + (NODE_W * (k + 1)) / (slots.length + 1);
-    return { x, y: side === 'top' ? p.y : p.y + NODE_H };
-  }, [posOf, nodeById, edgeSlots]);
+    // Group endpoints by (node, side, out/in), then order each group by the OTHER
+    // end's coordinate along that side, so slots line up with the neighbours.
+    const groups = new Map<string, number[]>();
+    const add = (key: string, k: number) => { if (!groups.has(key)) groups.set(key, []); groups.get(key)!.push(k); };
+    display.edges.forEach((e, k) => {
+      if (!sSide.has(k)) return;
+      add(`${e.from}|${sSide.get(k)}|o`, k);
+      add(`${e.to}|${tSide.get(k)}|i`, k);
+    });
+    const otherPerp = (k: number, end: 'o' | 'i', side: Side) => {
+      const e = display.edges[k];
+      const c = centre(end === 'o' ? e.to : e.from);
+      return side === 'top' || side === 'bottom' ? c.x : c.y;
+    };
+    groups.forEach((ks, key) => {
+      const [, side, end] = key.split('|') as [string, Side, 'o' | 'i'];
+      ks.sort((a, b) => otherPerp(a, end, side) - otherPerp(b, end, side));
+    });
+    const pointOn = (nodeId: string, side: Side, k: number, end: 'o' | 'i') => {
+      const p = posOf.get(nodeId)!;
+      const cx = p.x + NODE_W / 2, cy = p.y + NODE_H / 2;
+      if (nodeById.get(nodeId)?.kind === 'decision') {
+        if (side === 'top') return { x: cx, y: cy - DEC_H / 2 };
+        if (side === 'bottom') return { x: cx, y: cy + DEC_H / 2 };
+        if (side === 'left') return { x: cx - DEC_W / 2, y: cy };
+        return { x: cx + DEC_W / 2, y: cy };
+      }
+      const ks = groups.get(`${nodeId}|${side}|${end}`) ?? [k];
+      const frac = (Math.max(0, ks.indexOf(k)) + 1) / (ks.length + 1);
+      if (side === 'top') return { x: p.x + NODE_W * frac, y: p.y };
+      if (side === 'bottom') return { x: p.x + NODE_W * frac, y: p.y + NODE_H };
+      if (side === 'left') return { x: p.x, y: p.y + NODE_H * frac };
+      return { x: p.x + NODE_W, y: p.y + NODE_H * frac };
+    };
+    const out = new Map<number, { a: { x: number; y: number }; aSide: Side; b: { x: number; y: number }; bSide: Side }>();
+    display.edges.forEach((e, k) => {
+      if (!sSide.has(k)) return;
+      out.set(k, {
+        a: pointOn(e.from, sSide.get(k)!, k, 'o'), aSide: sSide.get(k)!,
+        b: pointOn(e.to, tSide.get(k)!, k, 'i'), bSide: tSide.get(k)!,
+      });
+    });
+    return out;
+  }, [display, posOf, nodeById]);
 
   const selectedNode = useMemo(() => blocks.find((b) => b.uid === selectedUid) ?? null, [blocks, selectedUid]);
   const cycle = useMemo(() => findCycle(blocks, routes, defName), [blocks, routes, defName]);
@@ -649,16 +694,16 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
               </marker>
             </defs>
             {display.edges.map((e, k) => {
-              const a = anchor(e.from, 'bottom', k);
-              const b = anchor(e.to, 'top', k);
-              if (!a || !b) return null; // endpoint gone; pruned on save
+              const ep = endpoints.get(k);
+              if (!ep) return null; // endpoint gone; pruned on save
+              const { a, b, aSide, bSide } = ep;
               const sel = e.routeIndex != null && selectedEdge === e.routeIndex;
               // The edge's NAME wins if set; otherwise a branch arm is labelled with its
               // condition ("else" for the unconditional default). The plain
               // step→decision link stays unlabelled.
               const label = e.name || (e.arm ? (e.when ? conditionLabel(e.when) : 'else') : '');
               // A route that spans intermediate ranks is drawn AROUND them via a side
-              // channel, so it doesn't run straight down over the steps in between.
+              // channel; everything else attaches to the nearest side of each node.
               const fromLayer = nodeById.get(e.from)?.layer ?? 0;
               const toLayer = nodeById.get(e.to)?.layer ?? 0;
               const long = toLayer - fromLayer >= 2;
@@ -669,7 +714,7 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                 d = sideChannelPath(a.x, a.y, b.x, b.y, cx);
                 lx = cx; ly = (a.y + b.y) / 2;
               } else {
-                d = edgePath(a.x, a.y, b.x, b.y);
+                d = sidePath(a, aSide, b, bSide);
                 lx = (a.x + b.x) / 2; ly = (a.y + b.y) / 2;
               }
               return (
