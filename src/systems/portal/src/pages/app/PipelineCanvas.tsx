@@ -23,11 +23,11 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import { T } from '../../theme';
 import { useResizablePane } from '../../components/ResizeHandle';
 import {
-  layoutGraph, findCycle, nodeName, pruneRoutes, stepsFromNodes, routesFromBlocks, blocksFromSteps, blockDef,
+  displayGraph, findCycle, nodeName, pruneRoutes, stepsFromNodes, routesFromBlocks, blocksFromSteps, blockDef,
   regionMembers, pruneMaps, mapIssues,
 } from './pipelineGraph';
 import type {
-  Block, Route, StepRef, BlockSelection, MatrixConfig, ScatterConfig, ApprovalGate, MapDef,
+  Block, Route, StepRef, BlockSelection, MatrixConfig, ScatterConfig, ApprovalGate, MapDef, DisplayNode,
 } from './pipelineGraph';
 import type { Step, WorkflowAction, GitRepo } from '../../api/bff';
 
@@ -38,6 +38,10 @@ const NODE_H = 62;
 const GAP_X = 30; // between siblings across a row
 const GAP_Y = 76; // between depths — the edges run through here
 const PAD = 28;
+// A decision diamond occupies one grid cell but is drawn smaller than a step box,
+// centred, so it reads as a distinct flow-chart symbol rather than another step.
+const DEC_W = 104;
+const DEC_H = 48;
 
 /** The canvas reports the same selection shape the block builder did, so the host's
  * step editor is unchanged by the switch to a graph. */
@@ -199,6 +203,18 @@ function edgePath(x1: number, y1: number, x2: number, y2: number): string {
   return `M ${x1} ${y1} C ${x1} ${y1 + dy}, ${x2} ${y2 - dy}, ${x2} ${y2}`;
 }
 
+/** A short label for a branch arm leaving a decision: `steps.X.status == "failed"`
+ * reads as `failed`; other expressions are truncated. The full text stays in the
+ * tooltip and the route inspector. */
+function conditionLabel(when: string): string {
+  const eq = when.match(/status\s*==\s*["']([a-zA-Z_]+)["']/);
+  if (eq) return eq[1];
+  const ne = when.match(/status\s*!=\s*["']([a-zA-Z_]+)["']/);
+  if (ne) return `≠ ${ne[1]}`;
+  const s = when.trim();
+  return s.length > 18 ? `${s.slice(0, 17)}…` : s;
+}
+
 export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasProps>(function PipelineCanvas({
   initialSteps, initialRoutes, initialMaps, catalog, editable = false, palette = [], actions = [],
   onChange, onInspect, onPickAction, pendingAdd, onPendingConsumed, runStatus, activeNode,
@@ -256,20 +272,34 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
     onChange(stepsFromNodes(blocks), pruneRoutes(routes, names), pruneMaps(maps, blocks));
   }, [blocks, routes, maps, editable, onChange, defName]);
 
-  const placed = useMemo(() => layoutGraph(blocks, routes, defName), [blocks, routes, defName]);
+  // The DRAWN graph: real steps plus a synthetic decision diamond for every step that
+  // branches on a condition, so a runner step never carries the branch itself.
+  const display = useMemo(() => displayGraph(blocks, routes, defName), [blocks, routes, defName]);
+  const nodeById = useMemo(() => {
+    const m = new Map<string, DisplayNode>();
+    display.nodes.forEach((n) => m.set(n.id, n));
+    return m;
+  }, [display]);
   const posOf = useMemo(() => {
     const m = new Map<string, { x: number; y: number }>();
-    placed.forEach((p) => m.set(p.uid, {
-      x: PAD + p.row * (NODE_W + GAP_X),
-      y: PAD + p.layer * (NODE_H + GAP_Y),
+    display.nodes.forEach((n) => m.set(n.id, {
+      x: PAD + n.row * (NODE_W + GAP_X),
+      y: PAD + n.layer * (NODE_H + GAP_Y),
     }));
     return m;
-  }, [placed]);
-  const byName = useMemo(() => {
-    const m = new Map<string, string>(); // name -> uid
-    blocks.forEach((b) => m.set(nodeName(b, defName), b.uid));
-    return m;
-  }, [blocks, defName]);
+  }, [display]);
+  /** The point an edge attaches to on a node's top or bottom — the box edge for a
+   * step, the diamond tip for a decision, so edges meet the shape they touch. */
+  const anchor = useCallback((id: string, side: 'top' | 'bottom') => {
+    const p = posOf.get(id);
+    if (!p) return null;
+    const cx = p.x + NODE_W / 2;
+    if (nodeById.get(id)?.kind === 'decision') {
+      const cy = p.y + NODE_H / 2;
+      return { x: cx, y: side === 'top' ? cy - DEC_H / 2 : cy + DEC_H / 2 };
+    }
+    return { x: cx, y: side === 'top' ? p.y : p.y + NODE_H };
+  }, [posOf, nodeById]);
 
   const selectedNode = useMemo(() => blocks.find((b) => b.uid === selectedUid) ?? null, [blocks, selectedUid]);
   const cycle = useMemo(() => findCycle(blocks, routes, defName), [blocks, routes, defName]);
@@ -289,8 +319,8 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
       return { def: m, x, y, w: x2 - x, h: y2 - y };
     }).filter(Boolean) as { def: MapDef; x: number; y: number; w: number; h: number }[];
   }, [maps, blocks, posOf]);
-  const width = Math.max(...placed.map((p) => PAD * 2 + (p.row + 1) * (NODE_W + GAP_X)), 400);
-  const height = Math.max(...placed.map((p) => PAD * 2 + (p.layer + 1) * (NODE_H + GAP_Y)), 260);
+  const width = Math.max(...display.nodes.map((n) => PAD * 2 + (n.row + 1) * (NODE_W + GAP_X)), 400);
+  const height = Math.max(...display.nodes.map((n) => PAD * 2 + (n.layer + 1) * (NODE_H + GAP_Y)), 260);
 
   const addStep = (stepId: string, name: string) => {
     const uid = `n${seq.current++}-${Date.now()}`;
@@ -575,36 +605,52 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                 <path d="M 0 0 L 8 4 L 0 8 z" fill={T.green} />
               </marker>
             </defs>
-            {routes.map((r, i) => {
-              const a = posOf.get(byName.get(r.from) ?? '');
-              const b = posOf.get(byName.get(r.to) ?? '');
+            {display.edges.map((e, k) => {
+              const a = anchor(e.from, 'bottom');
+              const b = anchor(e.to, 'top');
               if (!a || !b) return null; // endpoint gone; pruned on save
-              const x1 = a.x + NODE_W / 2, y1 = a.y + NODE_H;
-              const x2 = b.x + NODE_W / 2, y2 = b.y;
-              const sel = selectedEdge === i;
+              const sel = e.routeIndex != null && selectedEdge === e.routeIndex;
+              // A branch arm is labelled with its condition (or "else" for the
+              // unconditional default); the plain step→decision link is unlabelled.
+              const label = e.arm ? (e.when ? conditionLabel(e.when) : 'else') : '';
+              const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
               return (
-                <g key={`${r.from}->${r.to}-${i}`}>
-                  <path d={edgePath(x1, y1, x2, y2)} fill="none"
+                <g key={k}>
+                  <path d={edgePath(a.x, a.y, b.x, b.y)} fill="none"
                     stroke={sel ? T.green : T.faint} strokeWidth={sel ? 2 : 1.2}
-                    strokeDasharray={r.when ? '5 3' : undefined}
+                    strokeDasharray={e.when ? '5 3' : undefined}
                     markerEnd={`url(#${sel ? 'arrow-sel' : 'arrow'})`} />
-                  {/* A fat invisible stroke gives the thin edge a clickable target. */}
-                  <path d={edgePath(x1, y1, x2, y2)} fill="none" stroke="transparent" strokeWidth={12}
-                    style={{ pointerEvents: editable ? 'stroke' : 'none', cursor: 'pointer' }}
-                    onClick={() => { setSelectedEdge(i); setSelectedUid(null); }} />
-                  {/* A conditional route is marked with a compact badge, not its
-                      expression: printing every condition along every edge buried the
-                      graph in text. The expression lives in the inspector (and the
-                      tooltip), where there is room to read it. */}
-                  {r.when && (
+                  {/* A fat invisible stroke gives the thin edge a clickable target,
+                      selecting the underlying route so its condition can be edited. */}
+                  {e.routeIndex != null && (
+                    <path d={edgePath(a.x, a.y, b.x, b.y)} fill="none" stroke="transparent" strokeWidth={12}
+                      style={{ pointerEvents: editable ? 'stroke' : 'none', cursor: 'pointer' }}
+                      onClick={() => { setSelectedEdge(e.routeIndex); setSelectedUid(null); }} />
+                  )}
+                  {label && (
                     <g style={{ pointerEvents: 'none' }}>
-                      <title>{r.when}</title>
-                      <circle cx={(x1 + x2) / 2} cy={(y1 + y2) / 2} r={8}
+                      <title>{e.when || 'default branch (else)'}</title>
+                      <rect x={mx - (label.length * 3.3 + 7)} y={my - 8} width={label.length * 6.6 + 14} height={16} rx={8}
                         fill={T.bg} stroke={sel ? T.green : T.faint} strokeWidth={1} />
-                      <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 + 3} textAnchor="middle"
-                        fill={sel ? T.green : T.faint} fontSize={9} fontFamily={T.mono}>⑂</text>
+                      <text x={mx} y={my + 3.5} textAnchor="middle" fill={sel ? T.green : T.dim} fontSize={9.5} fontFamily={T.mono}>{label}</text>
                     </g>
                   )}
+                </g>
+              );
+            })}
+            {/* Decision diamonds: a step that branches on a condition flows into one
+                of these, so the routing reads as a flow chart and the runner step
+                never carries the branch. Drawn over the edges, behind the step boxes. */}
+            {display.nodes.filter((n) => n.kind === 'decision').map((n) => {
+              const p = posOf.get(n.id);
+              if (!p) return null;
+              const cx = p.x + NODE_W / 2, cy = p.y + NODE_H / 2;
+              const d = `M ${cx} ${cy - DEC_H / 2} L ${cx + DEC_W / 2} ${cy} L ${cx} ${cy + DEC_H / 2} L ${cx - DEC_W / 2} ${cy} Z`;
+              return (
+                <g key={n.id} style={{ pointerEvents: 'none' }}>
+                  <title>{`branch on ${n.sourceName}`}</title>
+                  <path d={d} fill={T.bgAlt} stroke={T.blue} strokeWidth={1.4} />
+                  <text x={cx} y={cy + 4} textAnchor="middle" fill={T.blue} fontSize={13} fontFamily={T.mono}>⑂</text>
                 </g>
               );
             })}

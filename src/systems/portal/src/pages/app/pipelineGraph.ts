@@ -337,6 +337,110 @@ export function layoutGraph(blocks: Block[], routes: Route[], defName: (id: stri
   });
 }
 
+/** The prefix for a synthetic decision node's id — see displayGraph. A choice is not
+ * a step; the canvas draws it as a diamond derived from a step's conditional routes,
+ * so its id is namespaced to never collide with a real block uid. */
+const DECISION_PREFIX = ' dec:';
+export function decisionId(sourceName: string): string { return DECISION_PREFIX + sourceName; }
+export function isDecisionId(id: string): boolean { return id.startsWith(DECISION_PREFIX); }
+
+/** A node in the DRAWN graph: either a real step (kind 'step', carrying its block
+ * uid) or a synthetic decision diamond (kind 'decision', carrying the name of the
+ * step it branches from). layer/row place it on the canvas grid. */
+export interface DisplayNode {
+  id: string;
+  kind: 'step' | 'decision';
+  uid?: string;
+  name?: string;
+  sourceName?: string;
+  layer: number;
+  row: number;
+}
+
+/** An edge in the DRAWN graph. routeIndex ties a drawn edge back to the underlying
+ * Route (for selection/deletion); it is null for the plain step→decision link, which
+ * is synthetic. `arm` marks the branch edges leaving a decision, so the renderer can
+ * label them (the condition, or "else" for the unconditional default). */
+export interface DisplayEdge {
+  from: string;
+  to: string;
+  when?: string;
+  routeIndex: number | null;
+  arm?: boolean;
+}
+
+/**
+ * The graph as DRAWN, not as stored. A step whose out-routes include a conditional one
+ * "branches": its routes are re-drawn through a synthetic decision diamond, so the
+ * runner step never appears to carry the branch — mirroring the state-machine model,
+ * where a choice is its own state. A step with only unconditional routes (a plain
+ * sequence, or a parallel fork) is drawn directly, unchanged.
+ *
+ * This is a pure VIEW over (blocks, routes): the stored model is untouched, and every
+ * drawn branch edge still carries the index of the Route it came from, so selecting or
+ * editing a condition works exactly as before.
+ */
+export function displayGraph(blocks: Block[], routes: Route[], defName: (id: string) => string | undefined): { nodes: DisplayNode[]; edges: DisplayEdge[] } {
+  const uidOf = new Map<string, string>(); // step name -> block uid
+  blocks.forEach((b) => uidOf.set(nodeName(b, defName), b.uid));
+  const outByName = new Map<string, { r: Route; i: number }[]>();
+  routes.forEach((r, i) => {
+    if (!outByName.has(r.from)) outByName.set(r.from, []);
+    outByName.get(r.from)!.push({ r, i });
+  });
+  const branches = (name: string) => (outByName.get(name) ?? []).some((x) => !!x.r.when);
+
+  // Ordered node list (a decision follows its source block) for stable row packing.
+  const ordered: Omit<DisplayNode, 'layer' | 'row'>[] = [];
+  blocks.forEach((b) => {
+    const name = nodeName(b, defName);
+    ordered.push({ id: b.uid, kind: 'step', uid: b.uid, name });
+    if (branches(name)) ordered.push({ id: decisionId(name), kind: 'decision', sourceName: name });
+  });
+
+  const edges: DisplayEdge[] = [];
+  blocks.forEach((b) => {
+    const name = nodeName(b, defName);
+    const outs = outByName.get(name) ?? [];
+    if (outs.length === 0) return;
+    if (branches(name)) {
+      edges.push({ from: b.uid, to: decisionId(name), routeIndex: null });
+      outs.forEach(({ r, i }) => {
+        const t = uidOf.get(r.to);
+        if (t) edges.push({ from: decisionId(name), to: t, when: r.when, routeIndex: i, arm: true });
+      });
+    } else {
+      outs.forEach(({ r, i }) => {
+        const t = uidOf.get(r.to);
+        if (t) edges.push({ from: b.uid, to: t, when: r.when, routeIndex: i });
+      });
+    }
+  });
+
+  // Longest-path layering (mirrors layoutGraph), bounded by node count so a cycle
+  // terminates; a decision sits one layer below its source, pushing its targets down.
+  const ids = ordered.map((n) => n.id);
+  const layer = new Map<string, number>();
+  ids.forEach((id) => layer.set(id, 0));
+  for (let k = 0; k < ids.length; k++) {
+    let changed = false;
+    for (const e of edges) {
+      if (!layer.has(e.from) || !layer.has(e.to)) continue;
+      const want = (layer.get(e.from) as number) + 1;
+      if (want > (layer.get(e.to) as number)) { layer.set(e.to, want); changed = true; }
+    }
+    if (!changed) break;
+  }
+  const rowOf = new Map<number, number>();
+  const nodes: DisplayNode[] = ordered.map((n) => {
+    const l = layer.get(n.id) ?? 0;
+    const row = rowOf.get(l) ?? 0;
+    rowOf.set(l, row + 1);
+    return { ...n, layer: l, row };
+  });
+  return { nodes, edges };
+}
+
 /** Reports the cycle-forming routes, if any: a graph is acyclic exactly when a
  * topological sort (Kahn) can emit every node. Mirrors the backend's check so the
  * editor can refuse to save before the API does. Returns the names left unemitted. */

@@ -3,7 +3,57 @@ import {
   blocksFromSteps, stepsFromBlocks, StepRef, Block,
   stepsToPayload, configToJson, parseConfig, collectRefs,
   effectiveStepName, duplicateStepNames,
+  displayGraph, isDecisionId,
 } from '../src/pages/app/pipelineGraph.ts';
+
+describe('displayGraph', () => {
+  const defName = (_id: string) => undefined;
+  it('draws a plain sequence directly, with no decision node', () => {
+    const blocks: Block[] = [
+      { uid: 'a', stepId: '', name: 'a', inline: { action: 'x' } },
+      { uid: 'b', stepId: '', name: 'b', inline: { action: 'y' } },
+    ];
+    const { nodes, edges } = displayGraph(blocks, [{ from: 'a', to: 'b' }], defName);
+    expect(nodes.filter((n) => n.kind === 'decision')).to.have.length(0);
+    expect(edges).to.have.length(1);
+    expect(edges[0]).to.include({ from: 'a', to: 'b', routeIndex: 0 });
+  });
+
+  it('routes a conditional branch through a synthetic decision node', () => {
+    const blocks: Block[] = [
+      { uid: 'a', stepId: '', name: 'tests', inline: { action: 'test' } },
+      { uid: 'b', stepId: '', name: 'ok', inline: { action: 'ship' } },
+      { uid: 'c', stepId: '', name: 'bad', inline: { action: 'notify' } },
+    ];
+    const routes = [
+      { from: 'tests', to: 'bad', when: 'steps.tests.status == "failed"' },
+      { from: 'tests', to: 'ok' },
+    ];
+    const { nodes, edges } = displayGraph(blocks, routes, defName);
+    const dec = nodes.find((n) => n.kind === 'decision');
+    expect(dec, 'a decision node exists').to.not.equal(undefined);
+    expect(dec!.sourceName).to.equal('tests');
+    // The step links to the decision (no route index); the arms leave the decision.
+    const toDec = edges.find((e) => e.from === 'a' && isDecisionId(e.to));
+    expect(toDec).to.include({ routeIndex: null });
+    const arms = edges.filter((e) => e.arm);
+    expect(arms.map((e) => e.to).sort()).to.deep.equal(['b', 'c']);
+    expect(arms.every((e) => isDecisionId(e.from))).to.equal(true);
+    // The decision sits between the step (layer 0) and its targets (layer 2).
+    expect(dec!.layer).to.equal(1);
+    expect(nodes.find((n) => n.uid === 'b')!.layer).to.equal(2);
+  });
+
+  it('leaves an unconditional parallel fork as direct edges', () => {
+    const blocks: Block[] = [
+      { uid: 'a', stepId: '', name: 'build', inline: { action: 'b' } },
+      { uid: 'b', stepId: '', name: 'lint', inline: { action: 'l' } },
+      { uid: 'c', stepId: '', name: 'test', inline: { action: 't' } },
+    ];
+    const { nodes } = displayGraph(blocks, [{ from: 'build', to: 'lint' }, { from: 'build', to: 'test' }], defName);
+    expect(nodes.filter((n) => n.kind === 'decision')).to.have.length(0);
+  });
+});
 
 describe('blocksFromSteps', () => {
   it('maps steps to blocks 1:1, in order, with unique instance ids', () => {
