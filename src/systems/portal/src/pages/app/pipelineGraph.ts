@@ -352,10 +352,14 @@ export function isDecisionId(id: string): boolean { return id.startsWith(DECISIO
  * step it branches from). layer/row place it on the canvas grid. */
 export interface DisplayNode {
   id: string;
-  kind: 'step' | 'decision';
+  kind: 'step' | 'decision' | 'map';
   uid?: string;
   name?: string;
   sourceName?: string;
+  /** kind 'map' only: the region's id and the step names of its members, in order —
+   * so the canvas can draw the collapsed region as one block listing its body. */
+  mapId?: string;
+  members?: string[];
   layer: number;
   row: number;
 }
@@ -384,40 +388,75 @@ export interface DisplayEdge {
  * drawn branch edge still carries the index of the Route it came from, so selecting or
  * editing a condition works exactly as before.
  */
-export function displayGraph(blocks: Block[], routes: Route[], defName: (id: string) => string | undefined): { nodes: DisplayNode[]; edges: DisplayEdge[] } {
+export function displayGraph(blocks: Block[], routes: Route[], defName: (id: string) => string | undefined, collapseMaps = false): { nodes: DisplayNode[]; edges: DisplayEdge[] } {
   const uidOf = new Map<string, string>(); // step name -> block uid
   blocks.forEach((b) => uidOf.set(nodeName(b, defName), b.uid));
-  const outByName = new Map<string, { r: Route; i: number }[]>();
-  routes.forEach((r, i) => {
-    if (!outByName.has(r.from)) outByName.set(r.from, []);
-    outByName.get(r.from)!.push({ r, i });
-  });
-  const branches = (name: string) => (outByName.get(name) ?? []).some((x) => !!x.r.when);
 
-  // Ordered node list (a decision follows its source block) for stable row packing.
+  // When collapsing, a whole map region is drawn as ONE node: its member steps share a
+  // single node id, the routes wholly inside the region vanish (they are its body, not
+  // top-level flow), and only the edges crossing the boundary remain — so the pipeline's
+  // routes no longer thread through and around the region's individual steps.
+  const mapOfName = new Map<string, string>();     // member step name -> map id
+  const membersByMap = new Map<string, string[]>(); // map id -> member step names, in order
+  if (collapseMaps) {
+    blocks.forEach((b) => {
+      if (!b.mapId) return;
+      const nm = nodeName(b, defName);
+      mapOfName.set(nm, b.mapId);
+      if (!membersByMap.has(b.mapId)) membersByMap.set(b.mapId, []);
+      membersByMap.get(b.mapId)!.push(nm);
+    });
+  }
+  const mapNodeId = (mapId: string) => 'map:' + mapId;
+  // The display-node id a step name resolves to (its map's node if collapsed, else its block).
+  const resolve = (name: string): string | undefined => {
+    const mid = mapOfName.get(name);
+    return mid ? mapNodeId(mid) : uidOf.get(name);
+  };
+
+  // Resolved out-edges per SOURCE node id: internal-to-a-region edges are dropped, and
+  // duplicate boundary edges (several members → the same outside step) are collapsed to one.
+  const outByNode = new Map<string, { to: string; when?: string; name?: string; i: number }[]>();
+  routes.forEach((r, i) => {
+    const s = resolve(r.from), t = resolve(r.to);
+    if (!s || !t || s === t) return;
+    if (!outByNode.has(s)) outByNode.set(s, []);
+    const arr = outByNode.get(s)!;
+    if (arr.some((e) => e.to === t && e.when === r.when && e.name === r.name)) return;
+    arr.push({ to: t, when: r.when, name: r.name, i });
+  });
+  const branchesNode = (id: string) => (outByNode.get(id) ?? []).some((e) => !!e.when);
+
+  // Ordered node list (a decision follows its source) for stable row packing. A region is
+  // emitted once, at its first member's position; the other members are skipped.
   const ordered: Omit<DisplayNode, 'layer' | 'row'>[] = [];
+  const emittedMap = new Set<string>();
   blocks.forEach((b) => {
     const name = nodeName(b, defName);
-    ordered.push({ id: b.uid, kind: 'step', uid: b.uid, name });
-    if (branches(name)) ordered.push({ id: decisionId(name), kind: 'decision', sourceName: name });
+    const mid = collapseMaps ? b.mapId : undefined;
+    if (mid) {
+      if (emittedMap.has(mid)) return;
+      emittedMap.add(mid);
+      const id = mapNodeId(mid);
+      const members = membersByMap.get(mid) ?? [];
+      ordered.push({ id, kind: 'map', mapId: mid, name: mid, members });
+      if (branchesNode(id)) ordered.push({ id: decisionId(id), kind: 'decision', sourceName: mid });
+    } else {
+      ordered.push({ id: b.uid, kind: 'step', uid: b.uid, name });
+      if (branchesNode(b.uid)) ordered.push({ id: decisionId(b.uid), kind: 'decision', sourceName: name });
+    }
   });
 
   const edges: DisplayEdge[] = [];
-  blocks.forEach((b) => {
-    const name = nodeName(b, defName);
-    const outs = outByName.get(name) ?? [];
+  ordered.forEach((n) => {
+    if (n.kind === 'decision') return;
+    const outs = outByNode.get(n.id) ?? [];
     if (outs.length === 0) return;
-    if (branches(name)) {
-      edges.push({ from: b.uid, to: decisionId(name), routeIndex: null });
-      outs.forEach(({ r, i }) => {
-        const t = uidOf.get(r.to);
-        if (t) edges.push({ from: decisionId(name), to: t, when: r.when, name: r.name, routeIndex: i, arm: true });
-      });
+    if (branchesNode(n.id)) {
+      edges.push({ from: n.id, to: decisionId(n.id), routeIndex: null });
+      outs.forEach((e) => edges.push({ from: decisionId(n.id), to: e.to, when: e.when, name: e.name, routeIndex: e.i, arm: true }));
     } else {
-      outs.forEach(({ r, i }) => {
-        const t = uidOf.get(r.to);
-        if (t) edges.push({ from: b.uid, to: t, when: r.when, name: r.name, routeIndex: i });
-      });
+      outs.forEach((e) => edges.push({ from: n.id, to: e.to, when: e.when, name: e.name, routeIndex: e.i }));
     }
   });
 
@@ -473,6 +512,15 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
       if (ids) { ids.sort((a, b) => bary(a, succs) - bary(b, succs)); reindex(); }
     }
   }
+  // When maps are collapsed there are no member nodes to fence off, so column = barycenter
+  // order and we skip the band machinery entirely.
+  const col = new Map<string, number>();
+  if (collapseMaps) {
+    byLayer.forEach((ids) => ids.forEach((id) => col.set(id, pos.get(id) ?? 0)));
+    const nodes: DisplayNode[] = ordered.map((n) => ({ ...n, layer: layer.get(n.id) ?? 0, row: col.get(n.id) ?? 0 }));
+    return { nodes, edges };
+  }
+
   // Reserve a column BAND for each map region so its enclosure — drawn as a plain
   // rectangle over the member cells — never wraps a non-member. A map's members occupy the
   // same columns on every layer, and the band is reserved across the region's WHOLE layer
@@ -520,7 +568,6 @@ export function displayGraph(blocks: Block[], routes: Route[], defName: (id: str
       cursor = start + bandWidth.get(m)!;
     });
 
-  const col = new Map<string, number>();
   byLayer.forEach((ids, l) => {
     const inOrder = [...ids].sort((a, b) => (pos.get(a) ?? 0) - (pos.get(b) ?? 0));
     const used = new Set<number>();

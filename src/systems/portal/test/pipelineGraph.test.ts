@@ -53,6 +53,45 @@ describe('displayGraph', () => {
     const { nodes } = displayGraph(blocks, [{ from: 'build', to: 'lint' }, { from: 'build', to: 'test' }], defName);
     expect(nodes.filter((n) => n.kind === 'decision')).to.have.length(0);
   });
+
+  it('collapses a map region into one node, rewiring boundary edges and dropping internal ones', () => {
+    const blocks: Block[] = [
+      { uid: 'd', stepId: '', name: 'discover', inline: { action: 'x' } },
+      { uid: 't', stepId: '', name: 'test', inline: { action: 'x' }, mapId: 'm1' },
+      { uid: 'i', stepId: '', name: 'image', inline: { action: 'x' }, mapId: 'm1' },
+      { uid: 'g', stepId: '', name: 'gocache', inline: { action: 'x' } },
+    ];
+    const routes = [
+      { from: 'discover', to: 'test' },  // boundary in
+      { from: 'test', to: 'image' },     // internal — dropped
+      { from: 'image', to: 'gocache' },  // boundary out
+      { from: 'test', to: 'gocache' },   // second boundary out, dedupes with above target? different source member
+    ];
+    const { nodes, edges } = displayGraph(blocks, routes, defName, true);
+    const mapNodes = nodes.filter((n) => n.kind === 'map');
+    expect(mapNodes).to.have.length(1);
+    expect(mapNodes[0].members).to.deep.equal(['test', 'image']);
+    // The member steps are no longer their own nodes.
+    expect(nodes.some((n) => n.uid === 't' || n.uid === 'i')).to.equal(false);
+    const mid = mapNodes[0].id;
+    // Boundary edges attach to the region node; the internal test→image edge is gone.
+    expect(edges.some((e) => e.from === 'd' && e.to === mid)).to.equal(true);
+    expect(edges.some((e) => e.from === mid && e.to === 'g')).to.equal(true);
+    expect(edges.some((e) => e.from === 't' || e.to === 't' || e.from === 'i' || e.to === 'i')).to.equal(false);
+    // The two members both routing to gocache collapse to a single map→gocache edge.
+    expect(edges.filter((e) => e.from === mid && e.to === 'g')).to.have.length(1);
+  });
+
+  it('keeps map members expanded when not collapsing (the editable builder)', () => {
+    const blocks: Block[] = [
+      { uid: 't', stepId: '', name: 'test', inline: { action: 'x' }, mapId: 'm1' },
+      { uid: 'i', stepId: '', name: 'image', inline: { action: 'x' }, mapId: 'm1' },
+    ];
+    const { nodes } = displayGraph(blocks, [{ from: 'test', to: 'image' }], defName);
+    expect(nodes.some((n) => n.uid === 't')).to.equal(true);
+    expect(nodes.some((n) => n.uid === 'i')).to.equal(true);
+    expect(nodes.some((n) => n.kind === 'map')).to.equal(false);
+  });
 });
 
 describe('blocksFromSteps', () => {

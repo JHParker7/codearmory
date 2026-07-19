@@ -297,7 +297,10 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
 
   // The DRAWN graph: real steps plus a synthetic decision diamond for every step that
   // branches on a condition, so a runner step never carries the branch itself.
-  const display = useMemo(() => displayGraph(blocks, routes, defName), [blocks, routes, defName]);
+  // In the read-only views (pipeline detail, run) each map region collapses to ONE block,
+  // so the pipeline's routes stop threading around its individual steps. The editable
+  // builder keeps them expanded (with the region box) so members can still be edited.
+  const display = useMemo(() => displayGraph(blocks, routes, defName, !editable), [blocks, routes, defName, editable]);
   const nodeById = useMemo(() => {
     const m = new Map<string, DisplayNode>();
     display.nodes.forEach((n) => m.set(n.id, n));
@@ -848,6 +851,41 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
                       style={{ ...port, bottom: -9, borderColor: linking ? T.green : T.border, color: linking ? T.green : T.faint }}>▾</button>
                   </>
                 )}
+              </div>
+            );
+          })}
+
+          {/* Collapsed map regions (read-only views): one block standing in for the whole
+              region, listing its member steps as the body it runs per value. */}
+          {display.nodes.filter((n) => n.kind === 'map').map((n) => {
+            const p = posOf.get(n.id);
+            if (!p) return null;
+            const def = maps.find((m) => m.id === n.mapId);
+            const members = n.members ?? [];
+            const memberRuns = members.map((nm) => runStatus?.[nm]).filter(Boolean) as { status: string; legs: number }[];
+            const worst = memberRuns.length
+              ? (['failed', 'awaiting_approval', 'running', 'cancelled'].find((s) => memberRuns.some((r) => r.status === s)) ?? memberRuns[0].status)
+              : undefined;
+            const legs = memberRuns.reduce((s, r) => s + r.legs, 0);
+            const isActive = !!activeNode && members.includes(activeNode);
+            const bar = worst ? runColor(worst) : T.blue;
+            return (
+              <div key={n.id} title={`map region · per ${def?.var || '?'} · ${members.join(' → ')}`}
+                onClick={() => { const b = blocks.find((bb) => bb.mapId === n.mapId); if (b) select(b); }}
+                style={{
+                  position: 'absolute', left: p.x, top: p.y, width: NODE_W, height: NODE_H, boxSizing: 'border-box',
+                  background: isActive ? T.greenSoft : T.blueSoft,
+                  border: `1px dashed ${isActive ? T.green : T.blue}`, borderLeft: `3px solid ${bar}`,
+                  display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 2,
+                  padding: '6px 10px', cursor: 'pointer',
+                }}>
+                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.blue, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  ⟳ map · per {def?.var || '?'}
+                  {def?.volume ? ' · own workspace' : ''}
+                </span>
+                <span style={{ fontFamily: T.mono, fontSize: 9.5, color: worst ? runColor(worst) : T.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {worst ? `${worst}${legs > 1 ? ` · ${legs}×` : ''}` : members.join(' → ') || '(empty)'}
+                </span>
               </div>
             );
           })}
