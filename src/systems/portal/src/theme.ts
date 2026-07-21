@@ -115,8 +115,68 @@ export const THEMES: ThemeMeta[] = SPECS.map(s => ({
 
 const PALETTES: Record<string, Palette> = Object.fromEntries(SPECS.map(s => [s.name, palette(s)]));
 
+// The raw accent token per theme, kept alongside PALETTES because the favicon needs the
+// oklch *numbers* rather than the `oklch(...)` string the palette stores.
+const ACCENTS: Record<string, string> = Object.fromEntries(SPECS.map(s => [s.name, s.accent]));
+
 export const DEFAULT_THEME = 'cyber';
 const STORAGE_KEY = 'ca-theme';
+
+/**
+ * Convert an accent token (`'78% 0.16 145'` — the interior of an oklch() expression, as
+ * {@link Spec.accent} stores it) to an `#rrggbb` sRGB hex, clamped to gamut.
+ *
+ * The favicon is an SVG data URI, which resolves no CSS vars and inherits no page styles,
+ * so the accent has to be a literal colour by the time it goes in. Hex rather than a raw
+ * `oklch()` string because favicon rendering is the one place where a colour the browser
+ * fails to parse degrades to *no icon at all*.
+ */
+export function oklchToHex(token: string): string {
+  const [lRaw, cRaw, hRaw] = token.trim().split(/\s+/);
+  const L = parseFloat(lRaw) / (lRaw.endsWith('%') ? 100 : 1);
+  const C = parseFloat(cRaw);
+  const h = (parseFloat(hRaw) * Math.PI) / 180;
+  const a = C * Math.cos(h);
+  const b = C * Math.sin(h);
+
+  // OKLab → LMS → (cubed) → linear sRGB, using Björn Ottosson's reference matrices.
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+
+  const linear = [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+  ];
+  const channel = (v: number) => {
+    const c = Math.min(1, Math.max(0, v));
+    const encoded = c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
+    return Math.round(encoded * 255).toString(16).padStart(2, '0');
+  };
+  return `#${linear.map(channel).join('')}`;
+}
+
+/**
+ * Repaint the browser-tab icon in `color`. The glyph is the mark from
+ * components/Logo.tsx — keep the two in step. index.html carries a static copy in the
+ * default accent so the tab is already right before this module loads; this replaces it
+ * with the live theme's. The old link is removed rather than mutated because browsers
+ * are unreliable about re-reading a favicon whose href changed in place.
+ */
+function setFavicon(color: string): void {
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22" fill="none" stroke="${color}">` +
+    '<rect x="2" y="2" width="18" height="18" stroke-width="1.4"/>' +
+    '<path d="M6 7l4 4-4 4M11 15h5" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</svg>';
+  document.querySelectorAll('link[rel="icon"]').forEach(el => el.remove());
+  const link = document.createElement('link');
+  link.rel = 'icon';
+  link.type = 'image/svg+xml';
+  link.href = `data:image/svg+xml,${encodeURIComponent(svg)}`;
+  document.head.appendChild(link);
+}
 
 /** Return the persisted theme name if valid, else the default. Tolerates localStorage being unavailable. */
 export function getStoredTheme(): string {
@@ -127,12 +187,13 @@ export function getStoredTheme(): string {
   return DEFAULT_THEME;
 }
 
-/** Write the named palette's tokens onto :root as `--ca-*` CSS vars and persist the choice (falling back to the default for an unknown name). */
+/** Write the named palette's tokens onto :root as `--ca-*` CSS vars, retint the favicon, and persist the choice (falling back to the default for an unknown name). */
 export function applyTheme(name: string): void {
-  const pal = PALETTES[name] ?? PALETTES[DEFAULT_THEME];
+  const resolved = PALETTES[name] ? name : DEFAULT_THEME;
   const root = document.documentElement;
-  for (const key of KEYS) root.style.setProperty(`--ca-${key}`, pal[key]);
-  try { localStorage.setItem(STORAGE_KEY, PALETTES[name] ? name : DEFAULT_THEME); } catch { /* ignore */ }
+  for (const key of KEYS) root.style.setProperty(`--ca-${key}`, PALETTES[resolved][key]);
+  setFavicon(oklchToHex(ACCENTS[resolved]));
+  try { localStorage.setItem(STORAGE_KEY, resolved); } catch { /* ignore */ }
 }
 
 /** Styling token map components consume; each value resolves to a live CSS var, so applyTheme() must run once before first paint. */
