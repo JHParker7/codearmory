@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>codearmory</title>
+    <!--
+      Favicon: the codearmory mark from src/components/Logo.tsx, inlined as a data URI.
+      Inline rather than a public/ asset because the portal-bff image only copies src/,
+      index.html and the configs — a public/ file would 404 in the shipped image. The
+      accent is the default `cyber` palette green (oklch(78% 0.16 145)) hard-coded, since
+      a favicon cannot read the live theme's CSS vars.
+    -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2022%2022%22%20fill=%22none%22%20stroke=%22%236ED274%22%3E%3Crect%20x=%222%22%20y=%222%22%20width=%2218%22%20height=%2218%22%20stroke-width=%221.4%22/%3E%3Cpath%20d=%22M6%207l4%204-4%204M11%2015h5%22%20stroke-width=%221.6%22%20stroke-linecap=%22round%22%20stroke-linejoin=%22round%22/%3E%3C/svg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet" />
