@@ -230,10 +230,24 @@ func requireAuthWithRole(w http.ResponseWriter, r *http.Request, requiredRole st
 	return name, true
 }
 
-// validateServiceURL rejects URLs that target loopback, link-local, or any
-// private/reserved address (IPv4 RFC-1918, IPv6 ULA fc00::/7, etc.) to prevent
-// SSRF via the service registry.
-func validateServiceURL(rawURL string) error {
+// allowPrivate / denyPrivate name validateServiceURL's second argument at the call
+// site, so the policy is readable where it is applied rather than buried in a bool.
+const (
+	allowPrivate = true
+	denyPrivate  = false
+)
+
+// validateServiceURL rejects URLs that target loopback, link-local or cloud-metadata
+// addresses to prevent SSRF via the service registry.
+//
+// RFC-1918 / ULA private addresses are a separate case, governed by allowPrivateAddrs.
+// A service registered by an authenticated admin service key is builder registering a
+// workload it just deployed, and an in-cluster ClusterIP is *always* RFC-1918 — denying
+// those makes runtime registration impossible, which is builder's entire purpose. The
+// SSRF threat model here is an untrusted URL reaching the registry; an admin service
+// key is not that. Loopback and link-local stay blocked either way: 169.254.169.254 is
+// the cloud-metadata endpoint, and neither is ever a legitimate service address.
+func validateServiceURL(rawURL string, allowPrivateAddrs bool) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -243,10 +257,13 @@ func validateServiceURL(rawURL string) error {
 	}
 	host := u.Hostname()
 
-	// checkIP rejects any address that is loopback, link-local, or private.
-	// net.IP.IsPrivate covers IPv4 RFC-1918 and IPv6 ULA (fc00::/7).
+	// checkIP rejects loopback and link-local always, and private addresses unless the
+	// caller is trusted. net.IP.IsPrivate covers IPv4 RFC-1918 and IPv6 ULA (fc00::/7).
 	checkIP := func(ip net.IP) error {
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("URL must not target a loopback or link-local address")
+		}
+		if ip.IsPrivate() && !allowPrivateAddrs {
 			return fmt.Errorf("URL must not target a private or reserved address")
 		}
 		return nil
@@ -362,7 +379,9 @@ func handleCreateService(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("service.name", req.Name))
 
-	if err := validateServiceURL(req.URL); err != nil {
+	// Admin-authenticated (requireAdminAuth above): builder registers the in-cluster
+	// ClusterIP of a workload it just deployed, which is always RFC-1918.
+	if err := validateServiceURL(req.URL, allowPrivate); err != nil {
 		span.SetStatus(codes.Error, "invalid url")
 		http.Error(w, "invalid url: "+err.Error(), http.StatusBadRequest)
 		return
@@ -614,7 +633,9 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.URL != "" {
-		if err := validateServiceURL(req.URL); err != nil {
+		// Same trust basis as create: this handler is admin-authenticated, and the URL
+		// it carries is the in-cluster address of a builder-deployed service.
+		if err := validateServiceURL(req.URL, allowPrivate); err != nil {
 			span.SetStatus(codes.Error, "invalid url")
 			http.Error(w, "invalid url: "+err.Error(), http.StatusBadRequest)
 			return
