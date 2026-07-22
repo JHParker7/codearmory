@@ -391,6 +391,7 @@ func buildMux() *http.ServeMux {
 	// Namespace roles: how an ordinary user shares what they own, without an admin.
 	// Confined to the caller's namespace and attenuated to permissions they hold.
 	mux.Handle("POST /roles/namespace", mw(handleCreateNamespaceRole))
+	mux.Handle("GET /roles/{id}/members", mw(handleListRoleMembers))
 	mux.Handle("PUT /roles/{id}/members/{user_id}", mw(handleAssignRole))
 	mux.Handle("DELETE /roles/{id}/members/{user_id}", mw(handleRevokeRole))
 

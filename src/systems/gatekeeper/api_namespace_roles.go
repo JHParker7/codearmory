@@ -193,6 +193,32 @@ func handleAssignRole(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(m)
 }
 
+// handleListRoleMembers lists who holds a role. Owner-only, like assign and revoke:
+// the membership list of a role is as sensitive as the role itself.
+func handleListRoleMembers(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleListRoleMembers")
+	defer span.End()
+	r = r.WithContext(ctx)
+
+	callerID, _ := ctx.Value(userIDKey).(string)
+	role, ok := ownedRole(w, ctx, callerID, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	var members []RoleMembership
+	if err := connectRead().WithContext(ctx).Where("role_id = ?", role.RoleID).Order("created_at").Find(&members).Error; err != nil {
+		slog.ErrorContext(ctx, "list role members", "role_id", role.RoleID, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if members == nil {
+		members = []RoleMembership{}
+	}
+	span.SetStatus(codes.Ok, "")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(members)
+}
+
 func handleRevokeRole(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("gatekeeper").Start(r.Context(), "handleRevokeRole")
 	defer span.End()

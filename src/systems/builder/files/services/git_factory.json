@@ -131,6 +131,24 @@
       "path": "/repos/{id}/archive",
       "action": "getArchive",
       "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/collaborators",
+      "action": "shareRepo",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/repos/{id}/collaborators",
+      "action": "shareRepo",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/repos/{id}/collaborators/{user}",
+      "action": "shareRepo",
+      "resource": "codearmory_git_factory/repos/{id}"
     }
   ],
   "actions": [],
@@ -160,7 +178,8 @@
         "setDefaultBranch",
         "getTree",
         "getBlob",
-        "getArchive"
+        "getArchive",
+        "shareRepo"
       ],
       "resources": [
         "{username}/codearmory_git_factory/repos/*"
