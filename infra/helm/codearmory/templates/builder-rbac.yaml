@@ -29,6 +29,14 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # PersistentVolumeClaims for services that declare durable storage. Create + read
+  # only, deliberately no delete: the claim is made once and never reconciled (a PVC's
+  # spec is near-immutable), and tearing a service down must not destroy its data.
+  # Reclaiming or resizing a volume stays a deliberate admin action, enforced here
+  # rather than left to the code path that would otherwise be free to do it.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "watch"]
   # Secrets: read (resolve references, read conductor-forward-key) and write
   # (synthesize a service's Secret when provisioning it with no Helm change).
   - apiGroups: [""]

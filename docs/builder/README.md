@@ -112,6 +112,73 @@ namespace): set `builder.reconcile.enabled=true` and `builder.serviceAccount.cre
 It connects via in-cluster config, or `KUBECONFIG` out-of-cluster. Verified live against
 a Talos cluster (`TestLiveReconcile`, opt-in via `BUILDER_LIVE_TEST=1`).
 
+## Stateful services (persistent volumes)
+
+Most builder-deployed services keep their state in Postgres and are freely
+replaceable. A service that keeps state **on disk** declares it in its def:
+
+```json
+"infra": {
+  "persistence": {
+    "mountPath": "/var/lib/git-factory",
+    "size": "20Gi",
+    "storageClass": "",
+    "accessMode": "ReadWriteOnce"
+  }
+}
+```
+
+Builder then:
+
+- **creates the PVC** `<prefix>-<k8sName>-data` if it is absent, and otherwise leaves
+  it entirely alone. A PVC's spec is near-immutable (class and access mode can never
+  change; capacity only grows, only on an expandable class), so a reconcile must never
+  try to converge one — **resizing stays a deliberate admin action**. The claim is
+  labelled `infra-of=<service>` so `ListManaged` doesn't mistake it for a stray service;
+- **mounts it** at `mountPath`, plus an `emptyDir` at `/tmp`. The scratch mount is
+  required, not incidental: workloads run with `readOnlyRootFilesystem: true`, and a
+  process that keeps state on disk (git writes lock and temp files constantly) needs
+  somewhere writable outside its data directory. The read-only rootfs is kept — mounted
+  volumes stay writable regardless, so the hardening costs nothing;
+- **never deletes it.** Disabling a service tears down the Deployment/Service/PDB but
+  not the data — the same rule the db providers follow (teardown never drops a
+  database). Builder is not even granted `delete` on PVCs, so the guarantee holds at the
+  RBAC layer, not just in the code path.
+
+### `accessMode` is the design decision
+
+`ReadWriteOnce` means exactly one writer, and that ripples through the rollout:
+
+| | RWO (default) | RWX |
+|---|---|---|
+| replicas | pinned to **1** (extra pods would never schedule) | as configured |
+| strategy | **Recreate** | RollingUpdate (`maxSurge:1`/`maxUnavailable:0`) |
+| periodic rotation | **off** | as configured |
+| PDB | none (single replica) | `minAvailable: replicas-1` |
+
+The default surge rollout brings a replacement Ready *before* retiring the old pod —
+which necessarily overlaps two pods, and the new one cannot attach a volume the old one
+still holds. Left alone it deadlocks until `progressDeadlineSeconds` on **every** deploy.
+So RWO gets `Recreate`: old pod fully gone, then the new one starts. That is a real
+trade — a short outage on each deploy — and the "always N healthy" guarantee is simply
+not available for a single-writer volume. The periodic rolling restart is disabled for
+the same reason.
+
+`ReadWriteMany` keeps the scalable shape, but only if the backing store gives real
+atomic `O_CREAT|O_EXCL` creates and working `flock`. Start RWO; treat RWX as a later
+migration once the storage is chosen.
+
+### Ingress stays in Helm
+
+Builder creates **no Ingress**, for stateful services or any other. It owns the
+workload (Deployment/Service/PDB/PVC) and the registry route, which is all that
+in-cluster traffic through conductor needs. A service that must be reachable directly
+from outside — one speaking git-over-HTTP, say, which needs `proxy-body-size: 0` and
+long timeouts that conductor's own ingress annotations don't carry — gets its Ingress
+from the chart, applied separately. The cost is that such a service is not externally
+reachable until someone applies it; the benefit is that builder's scope stays "the
+workload", with no annotation-passthrough surface to maintain.
+
 ## Dynamic provisioning (no Helm change)
 
 Builder can bring a non-core service online on a running instance with **no Helm

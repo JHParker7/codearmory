@@ -10,14 +10,17 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Stateless app infra a service needs but that is not itself a routed service: a
-// service's managed Redis cache. (Backing stores — Postgres — are admin-supplied via
-// connection URLs and never deployed by builder.) Infra objects are labelled
-// infra-of=<parent> so ListManaged ignores them and they are torn down with their
-// parent rather than reclaimed as orphans by the desired-state diff.
+// App infra a service needs but that is not itself a routed service: a service's
+// managed Redis cache, and the PVC a service that keeps durable state on disk is
+// mounted. (Backing stores — Postgres — are admin-supplied via connection URLs and
+// never deployed by builder.) Infra objects are labelled infra-of=<parent> so
+// ListManaged ignores them and they are torn down with their parent rather than
+// reclaimed as orphans by the desired-state diff — except the PVC, which is created
+// but never deleted (see teardownInfra).
 
 const (
 	labelInfraOf = "codearmory.io/infra-of"
@@ -29,6 +32,11 @@ const (
 	redisComponentSuffix = "redis"
 	redisPort            = 6379
 	defaultRedisImage    = "redis:7-alpine"
+
+	// pvcComponentSuffix names a service's durable volume (<k8sName>-data) and
+	// defaultPVCSize is the capacity used when a def declares persistence with no size.
+	pvcComponentSuffix = "data"
+	defaultPVCSize     = "10Gi"
 	// redisUser is the uid of the official image's redis user; runAsUser pins it so the
 	// container runs non-root without the entrypoint's root-then-step-down dance.
 	redisUser = int64(999)
@@ -71,10 +79,20 @@ func (b *k8sBackend) ensureInfra(ctx context.Context, spec workloadSpec) error {
 			b.deleteManagedRedis(ctx, spec.Service)
 		}
 	}
+	// Durable storage: the claim must exist before the workload references it, or the
+	// pod stays Pending on a missing volume until the next reconcile.
+	if p := def.Infra.Persistence; p != nil {
+		if err := b.ensurePVC(ctx, spec.Service, *p); err != nil {
+			return fmt.Errorf("persistence: %w", err)
+		}
+	}
 	return nil
 }
 
-// teardownInfra removes the infra a torn-down service owns.
+// teardownInfra removes the infra a torn-down service owns. Note what it does NOT
+// remove: a persistence PVC. Disabling a service must not destroy its data — same rule
+// as the db providers' teardown, which never drops a database. Reclaiming the volume
+// stays a deliberate admin action (and builder is not even granted delete on PVCs).
 func (b *k8sBackend) teardownInfra(ctx context.Context, service string) {
 	def, ok := embeddedServiceDef(service)
 	if !ok {
@@ -83,6 +101,75 @@ func (b *k8sBackend) teardownInfra(ctx context.Context, service string) {
 	if def.Infra.ManagedRedis {
 		b.deleteManagedRedis(ctx, service)
 	}
+}
+
+// persistenceFor returns the durable-volume declaration for a service, or nil when it
+// declares none (the common, stateless case).
+func persistenceFor(service string) *svcPersistence {
+	def, ok := embeddedServiceDef(service)
+	if !ok {
+		return nil
+	}
+	return def.Infra.Persistence
+}
+
+// pvcComponent / pvcName name a service's data volume (<k8sName>-data), on the same
+// DNS-1123 k8sName the Deployment/Service use.
+func (b *k8sBackend) pvcComponent(service string) string {
+	k8s := service
+	if d, ok := embeddedServiceDef(service); ok {
+		k8s = d.K8sName
+	}
+	return k8s + "-" + pvcComponentSuffix
+}
+
+func (b *k8sBackend) pvcName(service string) string {
+	return b.prefix + "-" + b.pvcComponent(service)
+}
+
+// ensurePVC creates the service's data volume if it is absent, and otherwise leaves it
+// completely alone. This is deliberately create-only: a PVC's spec is near-immutable
+// (storage class and access mode cannot change at all, and capacity only grows, only on
+// an expandable class), so a reconcile that tried to "converge" it would fail on every
+// pass. Growing the volume stays a deliberate admin action — edit the claim, or the
+// def and hand-apply. Labelled infra-of=<parent> like the managed Redis so ListManaged
+// skips it; unlike the Redis, teardown never deletes it.
+func (b *k8sBackend) ensurePVC(ctx context.Context, parent string, p svcPersistence) error {
+	name := b.pvcName(parent)
+	api := b.client.CoreV1().PersistentVolumeClaims(b.namespace)
+	if _, err := api.Get(ctx, name, metav1.GetOptions{}); err == nil {
+		return nil // already exists — never updated
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	size := strings.TrimSpace(p.Size)
+	if size == "" {
+		size = defaultPVCSize
+	}
+	qty, err := resource.ParseQuantity(size)
+	if err != nil {
+		return fmt.Errorf("parse size %q for %s: %w", size, parent, err)
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: b.namespace,
+			Labels:    b.infraLabels(b.pvcComponent(parent), parent),
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{p.accessMode()},
+			Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: qty}},
+		},
+	}
+	if sc := strings.TrimSpace(p.StorageClass); sc != "" {
+		pvc.Spec.StorageClassName = &sc
+	}
+	if _, err := api.Create(ctx, pvc, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	slog.InfoContext(ctx, "created persistent volume claim", "service", parent, "pvc", name, "size", size, "accessMode", p.accessMode())
+	return nil
 }
 
 // redisComponent is the managed-Redis component name for a service: its DNS-1123
