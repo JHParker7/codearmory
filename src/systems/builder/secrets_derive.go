@@ -83,3 +83,26 @@ func deriveKey(label string) string {
 	mac.Write([]byte(label))
 	return hex.EncodeToString(mac.Sum(nil))
 }
+
+// sharedKeyOwner names the service a shared key belongs to, by convention: a key is
+// named "<service>-<purpose>", so "hooks-trigger-key" belongs to hooks and
+// "conductor-forward-key" to conductor. The owner is the service whose own Secret is
+// authoritative — every other holder must copy that value rather than derive one.
+//
+// Returns "" when the name does not carry a recognised owner, in which case derivation
+// is the only option and every holder derives the same value anyway.
+func sharedKeyOwner(keyName string) string {
+	owner, _, found := strings.Cut(keyName, "-")
+	if !found || owner == "" {
+		return ""
+	}
+	// Only names matching a service builder knows are treated as owned, so a key like
+	// "encryption-key" is not read as belonging to a service called "encryption".
+	if _, ok := embeddedServiceDef(owner); ok {
+		return owner
+	}
+	if coreServices[owner] {
+		return owner
+	}
+	return ""
+}

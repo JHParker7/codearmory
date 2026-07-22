@@ -345,16 +345,16 @@ func buildEffectiveView(ctx context.Context) ([]serviceView, error) {
 // or registry I/O) so the precedence — core → registry-live → catalog → baseline row
 // — is unit-tested directly. Precedence, low to high:
 //
-//	0. Core control-plane services: always present, always on, never configurable.
-//	   The catalog excludes them and their rows can't be written, so seeding them here
-//	   is what puts them in the list — flagged Core so every consumer (the admin UI,
-//	   the sidebar, the CLI hub) can trust that flag instead of re-hardcoding the set.
-//	1. Catalog services. Seeded ENABLED only when the registry — the source of truth
-//	   for what conductor routes — advertises them (live), otherwise OFF. This keeps
-//	   the view honest for services registered out-of-band with no builder baseline
-//	   row (e.g. forge/workflows, which the chart ships and registers directly)
-//	   instead of claiming they're disabled while they're live and routable.
-//	2. Baseline rows: the admin's explicit desired state, which overrides everything.
+//  0. Core control-plane services: always present, always on, never configurable.
+//     The catalog excludes them and their rows can't be written, so seeding them here
+//     is what puts them in the list — flagged Core so every consumer (the admin UI,
+//     the sidebar, the CLI hub) can trust that flag instead of re-hardcoding the set.
+//  1. Catalog services. Seeded ENABLED only when the registry — the source of truth
+//     for what conductor routes — advertises them (live), otherwise OFF. This keeps
+//     the view honest for services registered out-of-band with no builder baseline
+//     row (e.g. forge/workflows, which the chart ships and registers directly)
+//     instead of claiming they're disabled while they're live and routable.
+//  2. Baseline rows: the admin's explicit desired state, which overrides everything.
 func mergeViews(catalog []catalogEntry, live map[string]bool, defaults []OrgService) []serviceView {
 	views := map[string]*serviceView{}
 

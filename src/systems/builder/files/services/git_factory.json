@@ -16,7 +16,13 @@
       "accessMode": "ReadWriteOnce"
     }
   },
-  "derivedSecrets": [],
+  "derivedSecrets": [
+    {
+      "envVar": "HOOKS_TRIGGER_KEY",
+      "kind": "shared",
+      "name": "hooks-trigger-key"
+    }
+  ],
   "requiredConfig": [
     "DATABASE_URL"
   ],
@@ -30,7 +36,8 @@
     "DATABASE_READ_URL"
   ],
   "envExtras": {
-    "GIT_STORAGE_ROOT": "/var/lib/git-factory"
+    "GIT_STORAGE_ROOT": "/var/lib/git-factory",
+    "HOOKS_URL": "http://${PREFIX}-hooks:8087"
   },
   "endpoints": [
     {

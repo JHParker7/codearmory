@@ -41,9 +41,9 @@ func TestParseRotateInterval(t *testing.T) {
 		{"1h", time.Hour},
 		{float64(45), 45 * time.Minute}, // number => minutes
 		{15, 15 * time.Minute},
-		{"45", 45 * time.Minute},             // bare numeric string => minutes (env parity)
-		{float64(1e12), maxRotateInterval},   // would overflow int64 ns => clamped
-		{"100000h", maxRotateInterval},       // huge but valid duration => clamped
+		{"45", 45 * time.Minute},           // bare numeric string => minutes (env parity)
+		{float64(1e12), maxRotateInterval}, // would overflow int64 ns => clamped
+		{"100000h", maxRotateInterval},     // huge but valid duration => clamped
 		{"garbage", 0},
 		{float64(0), 0},
 		{float64(-5), 0},
