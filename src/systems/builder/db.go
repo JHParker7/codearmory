@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -112,6 +113,23 @@ func listOrgServices(ctx context.Context, orgID string) ([]OrgService, error) {
 	return rows, nil
 }
 
+// configColumnValue encodes Config the way GORM's `serializer:json` tag would.
+// That tag is honoured for struct writes (Create/Save), but NOT for a column named
+// in the map handed to Updates — the driver then receives a raw map[string]any bound
+// to a text column and rejects the whole statement ("cannot find encode plan"), so
+// every config change on an existing row failed. A nil map becomes SQL NULL, matching
+// what the serializer stores, so reading it back still yields a nil map.
+func configColumnValue(config map[string]any) (any, error) {
+	if config == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return nil, err
+	}
+	return string(encoded), nil
+}
+
 // upsertOrgService creates or updates the row for a (org, service) scope. The
 // caller is responsible for setting Enabled/Kind/Config explicitly; we update the
 // mutable columns by hand so a false Enabled is never dropped by a GORM default.
@@ -124,10 +142,16 @@ func upsertOrgService(ctx context.Context, in OrgService) (OrgService, error) {
 	switch {
 	case err == nil:
 		now := time.Now().UTC()
+		cfg, err := configColumnValue(in.Config)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return OrgService{}, err
+		}
 		updates := map[string]any{
 			"enabled":     in.Enabled,
 			"kind":        in.Kind,
-			"config":      in.Config,
+			"config":      cfg,
 			"image":       in.Image,
 			"port":        in.Port,
 			"description": in.Description,
