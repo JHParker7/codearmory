@@ -31,9 +31,8 @@ func TestRoleMembership_GrantsWithoutReplacingOwnPermissions(t *testing.T) {
 		t.Fatalf("add own role: %v", err)
 	}
 	t.Cleanup(func() { ownRole.Remove(ctx) })
-	// Reload before mutating: Update writes the whole struct back, and the locally
-	// built User has zero values for fields the insert defaulted (Active), which would
-	// otherwise deactivate the user.
+	// Reload before mutating — good practice generally, and the shape every caller
+	// should follow even though Update no longer punishes a partial struct.
 	row, err := (User{UserID: member.UserID}).Get(ctx)
 	if err != nil {
 		t.Fatalf("reload member: %v", err)
@@ -97,5 +96,54 @@ func TestRoleMembership_GrantsWithoutReplacingOwnPermissions(t *testing.T) {
 	}
 	if ok, _, _ := evaluatePermissions(ctx, member.UserID, "git", "readRepo", sharedResource); ok {
 		t.Error("access survived revocation")
+	}
+}
+
+// Update used to Save() the whole struct, so a caller who built a User literal instead
+// of Get()ing one wrote active=false and the account vanished from every lookup — the
+// row survived, but Get filters on active, so the user simply ceased to exist.
+func TestUserUpdate_DoesNotDeactivateOrBlankIdentity(t *testing.T) {
+	ctx := context.Background()
+	u := createTestUser(t)
+	roleID := uuid.New().String()
+
+	// A partial struct, exactly as an unwary caller would build it.
+	partial := User{UserID: u.UserID, Username: u.Username, Email: u.Email, RoleID: &roleID}
+	if err := partial.Update(ctx); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	row, err := (User{UserID: u.UserID}).Get(ctx)
+	if err != nil {
+		t.Fatalf("user disappeared after a partial update: %v", err)
+	}
+	got := row.(User)
+	if !got.Active {
+		t.Error("update deactivated the user")
+	}
+	if got.RoleID == nil || *got.RoleID != roleID {
+		t.Errorf("role_id = %v, want %s", got.RoleID, roleID)
+	}
+	if got.Username != u.Username || got.Email != u.Email {
+		t.Errorf("identity changed: username=%q email=%q", got.Username, got.Email)
+	}
+	if got.CreatedAt.IsZero() {
+		t.Error("created_at was zeroed")
+	}
+
+	// Clearing a pointer must still work — that is why the columns are named rather
+	// than relying on GORM's skip-zero-values behaviour.
+	got.RoleID = nil
+	if err := got.Update(ctx); err != nil {
+		t.Fatalf("clear role: %v", err)
+	}
+	row, _ = (User{UserID: u.UserID}).Get(ctx)
+	if r := row.(User).RoleID; r != nil {
+		t.Errorf("role_id = %v, want nil after clearing", *r)
+	}
+
+	// And a struct that would blank identity is refused rather than silently applied.
+	if err := (User{UserID: u.UserID}).Update(ctx); err == nil {
+		t.Error("update with empty username/email was accepted")
 	}
 }
