@@ -62,6 +62,19 @@ const SERVICE_DESC: Record<string, string> = {
 };
 
 /**
+ * Iframe-hosted services pinned to a chosen nav slot under a friendlier label than
+ * their registry name — `codearmory_git_factory/` reads as plumbing, `repos/` reads
+ * as the thing the user came for. Pinned services are rendered explicitly below and
+ * excluded from the generic list, so they appear exactly once.
+ *
+ * The key stays the registry name because that is what the route, the ui_path lookup
+ * and the availability check all key on; only the presentation changes.
+ */
+const PINNED_SERVICES: Record<string, { label: string; desc: string }> = {
+  codearmory_git_factory: { label: 'repos/', desc: 'Host & browse git repositories' },
+};
+
+/**
  * isUnavailable reports whether a service-backed module should be hidden/blocked:
  * true only once we hold a RESOLVED, non-null routing table that omits the service.
  * While the table is in flight or errored (registeredServices === null) it stays
@@ -287,7 +300,7 @@ export function AppLayout() {
   // generic iframe nav entry — so a non-core service shows up with zero portal
   // changes. ServiceFrame handles availability/loading for the routed pane.
   const iframeServices = (registeredServices ?? [])
-    .filter(s => serviceUiPaths[s] && !BUNDLED_SERVICES.has(s))
+    .filter(s => serviceUiPaths[s] && !BUNDLED_SERVICES.has(s) && !PINNED_SERVICES[s])
     .sort();
 
   // Hydrate the user on mount, and again whenever the browser reconnects. Since a
@@ -353,10 +366,17 @@ export function AppLayout() {
           <NavSection title="tools" sidebarCollapsed={navCollapsed}>
             <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navCollapsed} icon="workflows" />
             <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navCollapsed} icon="tickets" />
-            <NavItem to="/app/git" label="git/" desc="Connect & clone your repositories" service="git_connector" collapsed={navCollapsed} icon="git" />
+            {/* Pinned iframe services (repos/) sit alongside the bundled tools rather
+                than in the discovered-modules list — they are day-to-day surfaces. */}
+            {Object.entries(PINNED_SERVICES).map(([svc, { label, desc }]) => (
+              <NavItem key={svc} to={`/app/${svc}`} label={label} desc={desc} service={svc} collapsed={navCollapsed} icon="git" />
+            ))}
           </NavSection>
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />
           <NavSection title="modules" sidebarCollapsed={navCollapsed} defaultCollapsed>
+            {/* Labelled for what it is — a credential broker for repos hosted
+                elsewhere — so it is not mistaken for repos/, which hosts them here. */}
+            <NavItem to="/app/git" label="git connector/" desc="Connect & clone your repositories" service="git_connector" collapsed={navCollapsed} icon="git" />
             <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navCollapsed} icon="forge" />
             <NavItem to="/app/hooks" label="hooks/" desc="Trigger actions from webhooks" service="hooks" collapsed={navCollapsed} icon="hooks" />
             <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navCollapsed} icon="containers" />
