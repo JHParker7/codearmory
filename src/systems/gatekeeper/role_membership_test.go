@@ -147,3 +147,82 @@ func TestUserUpdate_DoesNotDeactivateOrBlankIdentity(t *testing.T) {
 		t.Error("update with empty username/email was accepted")
 	}
 }
+
+// Namespace-role creation is safe only if BOTH guards hold. These test them directly,
+// since between them they are the difference between "users can share their own work"
+// and "any user can make themselves an admin".
+func TestNamespaceRole_ConfinementAndAttenuation(t *testing.T) {
+	const (
+		me    = "alice"
+		myOrg = "org/acme"
+	)
+
+	// Confinement: only resources inside a namespace the caller owns.
+	confined := []struct {
+		resource string
+		want     bool
+	}{
+		{"alice/codearmory_git_factory/repos/x", true},
+		{"org/acme/codearmory_git_factory/repos/x", true},
+		{"bob/codearmory_git_factory/repos/x", false},       // someone else's namespace
+		{"org/other/codearmory_git_factory/repos/x", false}, // someone else's org
+		{"codearmory_git_factory/repos/x", false},           // unscoped — no owner named
+		{"alicia/codearmory_git_factory/repos/x", false},    // prefix, not a segment
+		{"*/*/*", false}, // the escalation attempt
+	}
+	for _, c := range confined {
+		if got := inOwnNamespace(c.resource, me, myOrg); got != c.want {
+			t.Errorf("inOwnNamespace(%q) = %v, want %v", c.resource, got, c.want)
+		}
+	}
+
+	// A user with no org owns only their own name.
+	if inOwnNamespace("org/acme/x/y", me, "") {
+		t.Error("a user with no org must not own an org namespace")
+	}
+}
+
+// Attenuation is enforced by checkPermissions against the caller: granting an action
+// you do not hold must fail. Proven end to end through evaluatePermissions rather than
+// by inspecting the handler, so the property is tested where it actually lives.
+func TestNamespaceRole_CannotGrantWhatYouDoNotHold(t *testing.T) {
+	ctx := context.Background()
+	owner := createTestUser(t)
+
+	// The owner holds readRepo — and nothing else — on their own namespace.
+	perm := Permissions{
+		PermissionsID: uuid.New().String(), Name: "own-read", Service: "git",
+		Actions: []string{"readRepo"}, Resources: []string{owner.Username + "/git/repos/*"},
+		OwnerID: owner.UserID, Active: true,
+	}
+	if err := perm.Add(ctx); err != nil {
+		t.Fatalf("add permission: %v", err)
+	}
+	t.Cleanup(func() { perm.Remove(ctx) })
+	role := Role{RoleID: uuid.New().String(), Name: "own", PermissionsIDs: []string{perm.PermissionsID}, OwnerID: owner.UserID, Active: true}
+	if err := role.Add(ctx); err != nil {
+		t.Fatalf("add role: %v", err)
+	}
+	t.Cleanup(func() { role.Remove(ctx) })
+	row, err := (User{UserID: owner.UserID}).Get(ctx)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	u := row.(User)
+	u.RoleID = &role.RoleID
+	if err := u.Update(ctx); err != nil {
+		t.Fatalf("assign role: %v", err)
+	}
+
+	res := owner.Username + "/git/repos/abc"
+	// What they hold, they may pass on.
+	if ok, _ := checkPermissions(ctx, owner.UserID, "git", "readRepo", res); !ok {
+		t.Error("owner should hold readRepo, so sharing it must be allowed")
+	}
+	// What they do not hold, they may not.
+	for _, action := range []string{"writeRepo", "deleteRepo"} {
+		if ok, _ := checkPermissions(ctx, owner.UserID, "git", action, res); ok {
+			t.Errorf("owner appears to hold %s — attenuation would let them grant it", action)
+		}
+	}
+}

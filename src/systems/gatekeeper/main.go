@@ -388,6 +388,11 @@ func buildMux() *http.ServeMux {
 	mux.Handle("GET /roles/{id}", mw(handleGetRole))
 	mux.Handle("PUT /roles/{id}", mw(handleUpdateRole))
 	mux.Handle("DELETE /roles/{id}", mw(handleDeleteRole))
+	// Namespace roles: how an ordinary user shares what they own, without an admin.
+	// Confined to the caller's namespace and attenuated to permissions they hold.
+	mux.Handle("POST /roles/namespace", mw(handleCreateNamespaceRole))
+	mux.Handle("PUT /roles/{id}/members/{user_id}", mw(handleAssignRole))
+	mux.Handle("DELETE /roles/{id}/members/{user_id}", mw(handleRevokeRole))
 
 	mux.Handle("POST /permissions", mw(handleCreatePermissions))
 	mux.Handle("GET /permissions", mw(handleListPermissions))
