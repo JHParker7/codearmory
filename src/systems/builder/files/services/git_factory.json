@@ -28,6 +28,8 @@
   ],
   "optionalConfig": [
     "GIT_HTTP_BASE_URL",
+    "GIT_REPO_QUOTA_MB",
+    "GIT_MAINTENANCE_INTERVAL",
     "DATABASE_READ_URL",
     "LOG_LEVEL"
   ],
