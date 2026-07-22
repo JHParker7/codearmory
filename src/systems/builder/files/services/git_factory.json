@@ -35,33 +35,33 @@
   "endpoints": [
     {
       "method": "GET",
-      "path": "/Repos",
+      "path": "/repos",
       "action": "listRepo",
-      "resource": "codearmory_git_factory/Repos"
+      "resource": "codearmory_git_factory/repos"
     },
     {
       "method": "POST",
-      "path": "/Repos",
+      "path": "/repos",
       "action": "createRepo",
-      "resource": "codearmory_git_factory/Repos"
+      "resource": "codearmory_git_factory/repos"
     },
     {
       "method": "GET",
-      "path": "/Repos/{id}",
+      "path": "/repos/{id}",
       "action": "getRepo",
-      "resource": "codearmory_git_factory/Repos/{id}"
+      "resource": "codearmory_git_factory/repos/{id}"
     },
     {
-      "method": "PUT",
-      "path": "/Repos/{id}",
+      "method": "PATCH",
+      "path": "/repos/{id}",
       "action": "updateRepo",
-      "resource": "codearmory_git_factory/Repos/{id}"
+      "resource": "codearmory_git_factory/repos/{id}"
     },
     {
       "method": "DELETE",
-      "path": "/Repos/{id}",
+      "path": "/repos/{id}",
       "action": "deleteRepo",
-      "resource": "codearmory_git_factory/Repos/{id}"
+      "resource": "codearmory_git_factory/repos/{id}"
     }
   ],
   "actions": [],
@@ -73,7 +73,7 @@
         "listRepo"
       ],
       "resources": [
-        "{username}/codearmory_git_factory/Repos"
+        "{username}/codearmory_git_factory/repos"
       ]
     },
     {
@@ -86,7 +86,7 @@
         "writeRepo"
       ],
       "resources": [
-        "{username}/codearmory_git_factory/Repos/*"
+        "{username}/codearmory_git_factory/repos/*"
       ]
     }
   ]
