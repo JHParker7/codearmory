@@ -88,6 +88,42 @@
       "path": "/repos/{id}",
       "action": "deleteRepo",
       "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/branches",
+      "action": "listBranch",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/tags",
+      "action": "listTag",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/repos/{id}/default-branch",
+      "action": "setDefaultBranch",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/tree",
+      "action": "getTree",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/blob",
+      "action": "getBlob",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/archive",
+      "action": "getArchive",
+      "resource": "codearmory_git_factory/repos/{id}"
     }
   ],
   "actions": [],
@@ -111,7 +147,13 @@
         "updateRepo",
         "deleteRepo",
         "readRepo",
-        "writeRepo"
+        "writeRepo",
+        "listBranch",
+        "listTag",
+        "setDefaultBranch",
+        "getTree",
+        "getBlob",
+        "getArchive"
       ],
       "resources": [
         "{username}/codearmory_git_factory/repos/*"
