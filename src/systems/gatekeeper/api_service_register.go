@@ -64,6 +64,22 @@ func handleRegisterServiceAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot register a core service name", http.StatusForbidden)
 		return
 	}
+	// Re-registration with an unchanged key is the COMMON case, not the exception:
+	// builder's reconciler calls this for every managed service on every tick. Writing
+	// a row and an audit entry each time turns the audit trail into a record of
+	// polling — the register entries drown out everything a human is looking for. So
+	// an unchanged, still-active account is a no-op: same 204, nothing written.
+	// Inactive is deliberately excluded, since re-registering is how a torn-down
+	// service comes back and that genuinely is a change.
+	if existing, err := (ServiceAccount{ServiceName: req.ServiceName}).Get(r.Context()); err == nil {
+		acct := existing.(ServiceAccount)
+		if acct.Active && acct.HashedBootstrapKey != "" &&
+			bcrypt.CompareHashAndPassword([]byte(acct.HashedBootstrapKey), []byte(req.Key)) == nil {
+			slog.DebugContext(r.Context(), "service account already registered with this key", "service", req.ServiceName)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Key), 12)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
