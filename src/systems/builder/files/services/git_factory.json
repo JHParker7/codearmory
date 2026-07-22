@@ -149,6 +149,36 @@
       "path": "/repos/{id}/collaborators/{user}",
       "action": "shareRepo",
       "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/pulls",
+      "action": "listPull",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/repos/{id}/pulls",
+      "action": "createPull",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/pulls/{number}",
+      "action": "getPull",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/repos/{id}/pulls/{number}/merge",
+      "action": "mergePull",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/repos/{id}/pulls/{number}/close",
+      "action": "updatePull",
+      "resource": "codearmory_git_factory/repos/{id}"
     }
   ],
   "actions": [],
@@ -179,7 +209,12 @@
         "getTree",
         "getBlob",
         "getArchive",
-        "shareRepo"
+        "shareRepo",
+        "listPull",
+        "createPull",
+        "getPull",
+        "mergePull",
+        "updatePull"
       ],
       "resources": [
         "{username}/codearmory_git_factory/repos/*"
