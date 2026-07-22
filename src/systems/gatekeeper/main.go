@@ -205,7 +205,7 @@ func main() {
 	initSecretsEncryption()
 
 	conn := connect()
-	conn.AutoMigrate(&Org{}, &Role{}, &RoleMembership{}, &Team{}, &User{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{})
+	conn.AutoMigrate(&Org{}, &Role{}, &RoleMembership{}, &Team{}, &User{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{}, &PersonalToken{})
 	applyForeignKeys(conn)
 	applyUniqueIndexes(conn)
 	// Give existing single-org accounts a membership row so they participate in the
@@ -359,6 +359,11 @@ func buildMux() *http.ServeMux {
 	mux.Handle("GET /auth/validate", authMiddleware(http.HandlerFunc(handleAuthValidate)))
 
 	mw := func(h http.HandlerFunc) http.Handler { return authMiddleware(http.HandlerFunc(h)) }
+
+	// Scoped tokens: a user mints a credential that can do less than they can.
+	mux.Handle("POST /tokens", mw(handleCreateToken))
+	mux.Handle("GET /tokens", mw(handleListTokens))
+	mux.Handle("DELETE /tokens/{id}", mw(handleRevokeToken))
 
 	mux.Handle("POST /mfa/totp/enroll", mw(handleTOTPEnroll))
 	mux.Handle("POST /mfa/totp/confirm", mw(handleTOTPConfirm))

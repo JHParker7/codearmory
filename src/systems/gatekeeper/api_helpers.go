@@ -207,6 +207,12 @@ func authMiddleware(next http.Handler) http.Handler {
 		}
 		if session.ScopedRoleID != nil && *session.ScopedRoleID != "" {
 			authCtx = context.WithValue(authCtx, scopedRoleKey, *session.ScopedRoleID)
+			// Record that a scoped token was used, so its owner can see which of
+			// their tokens are still in service and which are dead weight. Off the
+			// request's critical path and throttled to one write per token per few
+			// minutes — see touchTokenLastUsed. Only scoped sessions are considered,
+			// so an ordinary login costs nothing.
+			go touchTokenLastUsed(context.WithoutCancel(ctx), session.SessionID)
 		}
 		next.ServeHTTP(w, r.WithContext(authCtx))
 	})

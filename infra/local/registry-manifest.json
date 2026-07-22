@@ -443,6 +443,24 @@
         "path": "/roles/{id}/members/{user_id}",
         "action": "revokeRole",
         "resource": "{username}/gatekeeper/roles"
+      },
+      {
+        "method": "POST",
+        "path": "/tokens",
+        "action": "createToken",
+        "resource": "{username}/gatekeeper/tokens"
+      },
+      {
+        "method": "GET",
+        "path": "/tokens",
+        "action": "listToken",
+        "resource": "{username}/gatekeeper/tokens"
+      },
+      {
+        "method": "DELETE",
+        "path": "/tokens/{id}",
+        "action": "deleteToken",
+        "resource": "{username}/gatekeeper/tokens"
       }
     ],
     "default_grants": [
@@ -534,6 +552,17 @@
         ],
         "resources": [
           "{username}/gatekeeper/roles"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "createToken",
+          "listToken",
+          "deleteToken"
+        ],
+        "resources": [
+          "{username}/gatekeeper/tokens"
         ]
       }
     ]

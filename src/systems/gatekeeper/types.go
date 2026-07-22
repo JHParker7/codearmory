@@ -368,3 +368,23 @@ type RoleMembership struct {
 	// and revocable without guessing at intent.
 	GrantedBy string `json:"granted_by" gorm:"column:granted_by;default:''"`
 }
+
+// PersonalToken is the record of a user-minted scoped token. It holds the token's
+// LIFECYCLE, never the credential: the JWT is verified against the session's stored
+// public key, so gatekeeper has no reason to keep the token itself, hashed or
+// otherwise. SessionID is the session the credential is bound to (deactivating it is
+// what makes revocation immediate) and RoleID is the attenuated role that decides
+// what the token may do.
+type PersonalToken struct {
+	TokenID    string     `json:"token_id"     gorm:"column:token_id;primaryKey"`
+	CreatedAt  time.Time  `json:"created_at"   gorm:"column:created_at;autoCreateTime"`
+	UserID     string     `json:"-"            gorm:"column:user_id;index"`
+	Name       string     `json:"name"         gorm:"column:name"`
+	SessionID  string     `json:"-"            gorm:"column:session_id;index"`
+	RoleID     string     `json:"-"            gorm:"column:role_id"`
+	ExpiresAt  time.Time  `json:"expires_at"   gorm:"column:expires_at"`
+	LastUsedAt *time.Time `json:"last_used_at" gorm:"column:last_used_at"`
+	Active     bool       `json:"-"            gorm:"column:active;default:true"`
+}
+
+func (PersonalToken) TableName() string { return "personal_tokens" }

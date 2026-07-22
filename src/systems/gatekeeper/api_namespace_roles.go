@@ -66,6 +66,62 @@ func inOwnNamespace(resource, username, orgNS string) bool {
 	return orgNS != "" && strings.HasPrefix(resource, orgNS+"/")
 }
 
+// attenuationError is a refusal with the status the caller should see. Confinement and
+// attenuation failures are 403 (you asked for something you may not have), a malformed
+// spec is 400, and a failed lookup is 500 — kept distinct because "you cannot grant
+// that" and "we could not tell" must not read the same to a caller deciding what to do.
+type attenuationError struct {
+	status  int
+	message string
+}
+
+// attenuatedPermissions turns requested (service, action, resource) triples into
+// stored Permissions rows, enforcing the two rules above. It is shared by namespace
+// roles and scoped tokens deliberately: both hand out a subset of the caller's own
+// authority, and the day one of them relaxes a rule by accident is the day the other
+// silently inherits it. namePrefix identifies the rows in the permissions table.
+//
+// Permissions already created when a later one is refused are left behind rather than
+// rolled back — they belong to no role, so they grant nothing, and a partial cleanup
+// that itself failed would be a worse outcome than an orphan row.
+func attenuatedPermissions(ctx context.Context, callerID, username, orgNS, namePrefix string, specs []permissionSpec) ([]string, *attenuationError) {
+	var permIDs []string
+	for _, p := range specs {
+		if p.Service == "" || p.Action == "" || p.Resource == "" {
+			return nil, &attenuationError{http.StatusBadRequest, "each permission needs service, action and resource"}
+		}
+		// CONFINEMENT: the resource must sit in a namespace the caller owns.
+		if !inOwnNamespace(p.Resource, username, orgNS) {
+			return nil, &attenuationError{http.StatusForbidden, "resource " + p.Resource + " is outside your namespace"}
+		}
+		// ATTENUATION: you may only pass on what you hold.
+		granted, err := checkPermissions(ctx, callerID, p.Service, p.Action, p.Resource)
+		if err != nil {
+			slog.ErrorContext(ctx, "attenuated permissions: permission check failed", "caller_id", callerID, "error", err)
+			return nil, &attenuationError{http.StatusInternalServerError, "internal server error"}
+		}
+		if !granted {
+			return nil, &attenuationError{http.StatusForbidden, "you do not hold " + p.Action + " on " + p.Resource}
+		}
+
+		perm := Permissions{
+			PermissionsID: uuid.New().String(),
+			Name:          namePrefix + ":" + p.Action,
+			Service:       p.Service,
+			Actions:       []string{p.Action},
+			Resources:     []string{p.Resource},
+			OwnerID:       callerID,
+			Active:        true,
+		}
+		if err := perm.Add(ctx); err != nil {
+			slog.ErrorContext(ctx, "attenuated permissions: create permission", "error", err)
+			return nil, &attenuationError{http.StatusInternalServerError, "internal server error"}
+		}
+		permIDs = append(permIDs, perm.PermissionsID)
+	}
+	return permIDs, nil
+}
+
 // handleCreateNamespaceRole creates a role in the caller's namespace. Permissions that
 // fail confinement or attenuation are REJECTED rather than silently dropped: a caller
 // who asked to share write access must not be told "created" and later discover only
@@ -99,43 +155,10 @@ func handleCreateNamespaceRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var permIDs []string
-	for _, p := range req.Permissions {
-		if p.Service == "" || p.Action == "" || p.Resource == "" {
-			http.Error(w, "each permission needs service, action and resource", http.StatusBadRequest)
-			return
-		}
-		if !inOwnNamespace(p.Resource, username, orgNS) {
-			http.Error(w, "resource "+p.Resource+" is outside your namespace", http.StatusForbidden)
-			return
-		}
-		// Attenuation: you may only pass on what you hold.
-		granted, err := checkPermissions(ctx, callerID, p.Service, p.Action, p.Resource)
-		if err != nil {
-			slog.ErrorContext(ctx, "namespace role: permission check failed", "caller_id", callerID, "error", err)
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-		if !granted {
-			http.Error(w, "you do not hold "+p.Action+" on "+p.Resource, http.StatusForbidden)
-			return
-		}
-
-		perm := Permissions{
-			PermissionsID: uuid.New().String(),
-			Name:          "ns:" + username + ":" + req.Name + ":" + p.Action,
-			Service:       p.Service,
-			Actions:       []string{p.Action},
-			Resources:     []string{p.Resource},
-			OwnerID:       callerID,
-			Active:        true,
-		}
-		if err := perm.Add(ctx); err != nil {
-			slog.ErrorContext(ctx, "namespace role: create permission", "error", err)
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-			return
-		}
-		permIDs = append(permIDs, perm.PermissionsID)
+	permIDs, attErr := attenuatedPermissions(ctx, callerID, username, orgNS, "ns:"+username+":"+req.Name, req.Permissions)
+	if attErr != nil {
+		http.Error(w, attErr.message, attErr.status)
+		return
 	}
 
 	role := Role{
