@@ -32,6 +32,13 @@ func TestScopeResource_OwnerFirst(t *testing.T) {
 		{"multi-segment unscoped still scoped", "states/alice/prod", "alice", "", "blueprints", "alice/states/alice/prod"},
 		{"segment matching another service is not an owner", "hooks/rules", "alice", "", "blueprints", "alice/hooks/rules"},
 
+		// Regression: a collection named after its own service. "tickets/tickets" is
+		// the tickets service's own collection, NOT a resource owned by someone called
+		// "tickets" — mistaking it for one denies every user their own tickets.
+		{"collection sharing the service name is unscoped", "tickets/tickets", "alice", "", "tickets", "alice/tickets/tickets"},
+		{"same, under an org", "org/acme/tickets/tickets", "alice", "acme", "tickets", "org/acme/tickets/tickets"},
+		{"another owner's same-named collection still resolves", "bob/tickets/tickets", "alice", "", "tickets", "bob/tickets/tickets"},
+
 		// No identity: nothing to scope with.
 		{"empty username is unchanged", svc + "/repos/abc", "", "", svc, svc + "/repos/abc"},
 	}

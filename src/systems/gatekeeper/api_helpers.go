@@ -295,6 +295,14 @@ func scopeResource(resource, username, orgName, service string) string {
 // multi-segment resource that simply has no owner, like "states/alice/prod" — is
 // unscoped and gets the caller's name.
 func ownerQualified(resource, service string) bool {
+	// A resource that LEADS with the service name is unscoped, full stop. This test
+	// must come first: "tickets/tickets" (the tickets service's own collection) would
+	// otherwise look owner-qualified with an owner named "tickets", and the caller's
+	// name would never be applied — silently denying every user their own tickets.
+	// Any service whose collection shares its name has this shape.
+	if strings.HasPrefix(resource, service+"/") {
+		return false
+	}
 	rest := resource
 	if after, ok := strings.CutPrefix(resource, "org/"); ok {
 		rest = after // drop "org/", leaving "<orgName>/<service>/…"
