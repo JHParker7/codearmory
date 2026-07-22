@@ -605,6 +605,31 @@ func evaluatePermissions(ctx context.Context, userID string, service string, act
 		attribute.Int("permissions.total", len(permissions)),
 	))
 
+	// Roles assigned by a namespace owner (see RoleMembership), unioned on top of the
+	// direct/default/team roles above rather than replacing any of them — being granted
+	// access to someone else's namespace must never cost a user their own permissions.
+	var memberships []RoleMembership
+	if err := connectRead().WithContext(ctx).Where("user_id = ?", userID).Find(&memberships).Error; err != nil {
+		dbLog(err, "checkPermissions: failed to load role memberships", "user_id", userID, "error", err)
+	}
+	for _, m := range memberships {
+		roleRow, err := (Role{RoleID: m.RoleID}).Get(ctx)
+		if err != nil {
+			// A membership pointing at a deleted role is stale, not fatal.
+			slog.DebugContext(ctx, "checkPermissions: assigned role not found, skipping", "user_id", userID, "role_id", m.RoleID)
+			continue
+		}
+		role := roleRow.(Role)
+		detail.Roles = appendRoleLabel(detail.Roles, role)
+		for _, pid := range role.PermissionsIDs {
+			pRow, err := (Permissions{PermissionsID: pid}).Get(ctx)
+			if err != nil {
+				continue
+			}
+			permissions = append(permissions, pRow.(Permissions))
+		}
+	}
+
 	for _, permission := range permissions {
 		if matchPermission(permission, service, action, resource) {
 			span.SetAttributes(attribute.Bool("permission.granted", true))

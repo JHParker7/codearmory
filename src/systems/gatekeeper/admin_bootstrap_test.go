@@ -27,7 +27,7 @@ func useIsolatedDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if err := conn.AutoMigrate(&User{}, &Org{}, &Team{}, &Role{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &AuditLog{}, &PermissionsCheck{}, &SignupAllowlistEntry{}, &SignupPolicy{}); err != nil {
+	if err := conn.AutoMigrate(&User{}, &Org{}, &Team{}, &Role{}, &RoleMembership{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &AuditLog{}, &PermissionsCheck{}, &SignupAllowlistEntry{}, &SignupPolicy{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	gormDB, gormDBRead = conn, nil

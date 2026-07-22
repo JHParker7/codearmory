@@ -1,0 +1,101 @@
+package main
+
+import (
+	"context"
+	"testing"
+
+	"github.com/google/uuid"
+)
+
+// A namespace owner grants access by assigning one of their roles. The user has one
+// direct role, one default role and one team — all single pointers — so the grant has
+// to be additive, or accepting access to someone else's namespace would cost the
+// recipient their own permissions.
+func TestRoleMembership_GrantsWithoutReplacingOwnPermissions(t *testing.T) {
+	ctx := context.Background()
+	owner := createTestUser(t)  // "alice" — owns the namespace
+	member := createTestUser(t) // "bob"  — being granted access
+
+	// bob's OWN permission, on his own namespace, via his direct role.
+	ownPerm := Permissions{
+		PermissionsID: uuid.New().String(), Name: "bob-own", Service: "git",
+		Actions: []string{"readRepo"}, Resources: []string{member.Username + "/git/repos/*"},
+		OwnerID: member.UserID, Active: true,
+	}
+	if err := ownPerm.Add(ctx); err != nil {
+		t.Fatalf("add own permission: %v", err)
+	}
+	t.Cleanup(func() { ownPerm.Remove(ctx) })
+	ownRole := Role{RoleID: uuid.New().String(), Name: "bob-role", PermissionsIDs: []string{ownPerm.PermissionsID}, OwnerID: member.UserID, Active: true}
+	if err := ownRole.Add(ctx); err != nil {
+		t.Fatalf("add own role: %v", err)
+	}
+	t.Cleanup(func() { ownRole.Remove(ctx) })
+	// Reload before mutating: Update writes the whole struct back, and the locally
+	// built User has zero values for fields the insert defaulted (Active), which would
+	// otherwise deactivate the user.
+	row, err := (User{UserID: member.UserID}).Get(ctx)
+	if err != nil {
+		t.Fatalf("reload member: %v", err)
+	}
+	member = row.(User)
+	member.RoleID = &ownRole.RoleID
+	if err := member.Update(ctx); err != nil {
+		t.Fatalf("assign own role: %v", err)
+	}
+
+	// alice's namespace role, granting read on ONE of her repos.
+	shared := "alice-repo-id"
+	sharedPerm := Permissions{
+		PermissionsID: uuid.New().String(), Name: "alice-share", Service: "git",
+		Actions: []string{"readRepo"}, Resources: []string{owner.Username + "/git/repos/" + shared},
+		OwnerID: owner.UserID, Active: true,
+	}
+	if err := sharedPerm.Add(ctx); err != nil {
+		t.Fatalf("add shared permission: %v", err)
+	}
+	t.Cleanup(func() { sharedPerm.Remove(ctx) })
+	nsRole := Role{RoleID: uuid.New().String(), Name: "alice-readers", PermissionsIDs: []string{sharedPerm.PermissionsID}, OwnerID: owner.UserID, Active: true}
+	if err := nsRole.Add(ctx); err != nil {
+		t.Fatalf("add namespace role: %v", err)
+	}
+	t.Cleanup(func() { nsRole.Remove(ctx) })
+
+	ownResource := member.Username + "/git/repos/anything"
+	sharedResource := owner.Username + "/git/repos/" + shared
+
+	// Before the grant: bob has his own access, and none of alice's.
+	if ok, _, err := evaluatePermissions(ctx, member.UserID, "git", "readRepo", ownResource); err != nil || !ok {
+		t.Fatalf("bob should hold his own permission (ok=%v err=%v)", ok, err)
+	}
+	if ok, _, _ := evaluatePermissions(ctx, member.UserID, "git", "readRepo", sharedResource); ok {
+		t.Fatal("bob must not reach alice's repo before being granted")
+	}
+
+	// The grant.
+	m := RoleMembership{RoleID: nsRole.RoleID, UserID: member.UserID, GrantedBy: owner.UserID}
+	if err := connect().WithContext(ctx).Create(&m).Error; err != nil {
+		t.Fatalf("assign namespace role: %v", err)
+	}
+	t.Cleanup(func() { connect().WithContext(ctx).Delete(&m) })
+
+	// After: alice's repo is reachable AND bob keeps his own permissions.
+	if ok, _, err := evaluatePermissions(ctx, member.UserID, "git", "readRepo", sharedResource); err != nil || !ok {
+		t.Errorf("assigned role did not grant access to %s (ok=%v err=%v)", sharedResource, ok, err)
+	}
+	if ok, _, err := evaluatePermissions(ctx, member.UserID, "git", "readRepo", ownResource); err != nil || !ok {
+		t.Errorf("assigning a namespace role cost bob his own permissions (ok=%v err=%v)", ok, err)
+	}
+	// The grant is scoped: it must not spill onto alice's OTHER repos.
+	if ok, _, _ := evaluatePermissions(ctx, member.UserID, "git", "readRepo", owner.Username+"/git/repos/other"); ok {
+		t.Error("the grant leaked to another repo in alice's namespace")
+	}
+
+	// Revoking the membership removes the access again.
+	if err := connect().WithContext(ctx).Where("role_id = ? AND user_id = ?", nsRole.RoleID, member.UserID).Delete(&RoleMembership{}).Error; err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if ok, _, _ := evaluatePermissions(ctx, member.UserID, "git", "readRepo", sharedResource); ok {
+		t.Error("access survived revocation")
+	}
+}

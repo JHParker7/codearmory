@@ -351,3 +351,20 @@ type MFAPending struct {
 	OAuthState       string    `gorm:"column:oauth_state"`
 	OAuthScope       string    `gorm:"column:oauth_scope"`
 }
+
+// RoleMembership assigns a role to a user in addition to the single role they already
+// carry on User.RoleID.
+//
+// It exists because a namespace owner grants access by ASSIGNING one of their roles,
+// and a user has exactly one direct role, one default role and one team — all single
+// pointers. Without a membership table, being granted access to someone else's
+// repository would mean surrendering your own role. Memberships are additive: the
+// existing three sources are evaluated unchanged, and these are unioned on top.
+type RoleMembership struct {
+	RoleID    string    `json:"role_id"    gorm:"column:role_id;primaryKey"`
+	UserID    string    `json:"user_id"    gorm:"column:user_id;primaryKey;index"`
+	CreatedAt time.Time `json:"created_at" gorm:"column:created_at"`
+	// GrantedBy records who assigned it, so a namespace owner's grants are auditable
+	// and revocable without guessing at intent.
+	GrantedBy string `json:"granted_by" gorm:"column:granted_by;default:''"`
+}

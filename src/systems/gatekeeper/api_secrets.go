@@ -98,7 +98,7 @@ func validateSecretName(name string) error {
 
 // scopeSecretQuery narrows a secrets query to the caller's ownership scope: an
 // org caller sees only their org's secrets; an org-less caller sees only their
-// own personal secrets (org_id = '' AND created_by = caller). This is the single
+// own personal secrets (org_id = ” AND created_by = caller). This is the single
 // place the org-vs-personal ownership rule is expressed, so create/list/update/
 // delete/resolve all agree on it.
 func scopeSecretQuery(q *gorm.DB, orgID, userID string) *gorm.DB {
@@ -110,7 +110,7 @@ func scopeSecretQuery(q *gorm.DB, orgID, userID string) *gorm.DB {
 
 // callerOwnsSecret reports whether the caller may read/modify s under the same
 // org-vs-personal rule scopeSecretQuery enforces for queries. An org-less caller
-// owns a secret only if it is personal (org_id = '') AND they created it — so one
+// owns a secret only if it is personal (org_id = ”) AND they created it — so one
 // org-less user cannot touch another's personal secrets.
 func callerOwnsSecret(s Secret, orgID, userID string) bool {
 	if orgID != "" {
