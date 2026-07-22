@@ -72,6 +72,12 @@
       "resource": "codearmory_git_factory/repos/{id}"
     },
     {
+      "method": "GET",
+      "path": "/repos/{id}/readme",
+      "action": "getReadme",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
       "method": "PATCH",
       "path": "/repos/{id}",
       "action": "updateRepo",
@@ -101,6 +107,7 @@
       "actions": [
         "getRepo",
         "listCommit",
+        "getReadme",
         "updateRepo",
         "deleteRepo",
         "readRepo",
