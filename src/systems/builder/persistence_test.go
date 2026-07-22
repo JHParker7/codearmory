@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"regexp"
 	"testing"
 	"time"
 
@@ -275,6 +276,50 @@ func TestPersistence_ReadWriteManyKeepsTheScalableShape(t *testing.T) {
 	}
 	if got := pvc.Spec.AccessModes; len(got) != 1 || got[0] != corev1.ReadWriteMany {
 		t.Errorf("access modes = %v, want [ReadWriteMany]", got)
+	}
+}
+
+// git_factory is the first shipped def to declare persistence. The invariant worth
+// pinning is that its storage-root env and its mount path cannot drift apart — the
+// service would happily write repositories to the container's ephemeral filesystem.
+func TestGitFactoryDef_StorageRootMatchesTheMount(t *testing.T) {
+	def, ok := embeddedServiceDef("codearmory_git_factory")
+	if !ok {
+		t.Fatal("no embedded def for codearmory_git_factory")
+	}
+	p := def.Infra.Persistence
+	if p == nil {
+		t.Fatal("git_factory declares no persistence — repos would live on an ephemeral disk")
+	}
+	if got := def.EnvExtras["GIT_STORAGE_ROOT"]; got != p.MountPath {
+		t.Errorf("GIT_STORAGE_ROOT = %q but the volume is mounted at %q", got, p.MountPath)
+	}
+	// v1 is single-node by design (ARCHITECTURE §5 step 1), so the volume is RWO and
+	// the workload must be pinned to one pod.
+	if !p.singleWriter() {
+		t.Error("git_factory is single-node in v1; RWX needs the step-2 routing table first")
+	}
+	b := &k8sBackend{prefix: "codearmory", namespace: "codearmory", defaultReplicas: 3}
+	if got := b.replicasFor(workloadSpec{Service: "codearmory_git_factory", Replicas: 3}); got != 1 {
+		t.Errorf("replicas = %d, want 1", got)
+	}
+}
+
+// Every name k8s validates as a DNS-1123 label must come from k8sName, never the
+// registry name: the apiserver rejects the whole Deployment over a container named
+// "codearmory_git_factory".
+func TestTemplatePod_ContainerNameIsDNS1123(t *testing.T) {
+	b := &k8sBackend{prefix: "codearmory", namespace: "codearmory", registry: "ghcr.io/x", tag: "v1"}
+	dns1123 := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	defs, err := loadEmbeddedDefs()
+	if err != nil {
+		t.Fatalf("load defs: %v", err)
+	}
+	for name := range defs {
+		got := b.templatePod(workloadSpec{Service: name}).Spec.Containers[0].Name
+		if !dns1123.MatchString(got) {
+			t.Errorf("%s: container name %q is not a DNS-1123 label", name, got)
+		}
 	}
 }
 

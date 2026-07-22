@@ -183,11 +183,17 @@ func newK8sBackend(namespace, prefix, registry, tag string) (*k8sBackend, error)
 // Labels/selectors keep the registry name (see labels/selector), so reconciliation
 // and identity stay keyed on the registry name.
 func (b *k8sBackend) name(service string) string {
-	k8s := service
-	if d, ok := embeddedServiceDef(service); ok {
-		k8s = d.K8sName
+	return b.prefix + "-" + k8sNameFor(service)
+}
+
+// k8sNameFor maps a registry name to the DNS-1123 name used for cluster objects and
+// anywhere else k8s demands a label-shaped string (a container name, for one). Services
+// with no embedded def are custom ones whose name is already DNS-1123.
+func k8sNameFor(service string) string {
+	if d, ok := embeddedServiceDef(service); ok && d.K8sName != "" {
+		return d.K8sName
 	}
-	return b.prefix + "-" + k8s
+	return service
 }
 
 // store returns the configured secret backend, falling back to a k8s store over the
@@ -626,7 +632,10 @@ func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
 	podSpec := corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: &runAsNonRoot},
 		Containers: []corev1.Container{{
-			Name:  spec.Service,
+			// The container name is a DNS-1123 label, so it must come from k8sName —
+			// a registry name with '_' (codearmory_git_factory) is rejected outright by
+			// the apiserver, taking the whole Deployment with it.
+			Name:  k8sNameFor(spec.Service),
 			Image: image,
 			Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: port, Protocol: corev1.ProtocolTCP}},
 			Env:   env,

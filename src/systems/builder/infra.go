@@ -116,11 +116,7 @@ func persistenceFor(service string) *svcPersistence {
 // pvcComponent / pvcName name a service's data volume (<k8sName>-data), on the same
 // DNS-1123 k8sName the Deployment/Service use.
 func (b *k8sBackend) pvcComponent(service string) string {
-	k8s := service
-	if d, ok := embeddedServiceDef(service); ok {
-		k8s = d.K8sName
-	}
-	return k8s + "-" + pvcComponentSuffix
+	return k8sNameFor(service) + "-" + pvcComponentSuffix
 }
 
 func (b *k8sBackend) pvcName(service string) string {
@@ -176,11 +172,7 @@ func (b *k8sBackend) ensurePVC(ctx context.Context, parent string, p svcPersiste
 // k8sName plus "-redis", so the object names and the connection URL stay valid even
 // for a service whose registry name has an underscore.
 func (b *k8sBackend) redisComponent(service string) string {
-	k8s := service
-	if d, ok := embeddedServiceDef(service); ok {
-		k8s = d.K8sName
-	}
-	return k8s + "-" + redisComponentSuffix
+	return k8sNameFor(service) + "-" + redisComponentSuffix
 }
 
 // managedRedisURL is the in-cluster URL the parent service connects to — the ClusterIP
