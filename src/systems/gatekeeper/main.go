@@ -351,6 +351,10 @@ func buildMux() *http.ServeMux {
 	// builder bring a non-core service online with no Helm change.
 	mux.HandleFunc("POST /internal/service-accounts", handleRegisterServiceAccount)
 	mux.HandleFunc("DELETE /internal/service-accounts/{name}", handleDeregisterServiceAccount)
+	// Audit ingest for backend services (auth: the caller's own service key). The
+	// action is prefixed with the authenticated service name, so a service can only
+	// write entries about itself.
+	mux.HandleFunc("POST /internal/audit-logs", handleIngestAuditLog)
 	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
 	mux.Handle("GET /auth/validate", authMiddleware(http.HandlerFunc(handleAuthValidate)))
 
