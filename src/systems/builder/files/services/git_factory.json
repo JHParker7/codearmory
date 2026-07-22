@@ -66,6 +66,12 @@
       "resource": "codearmory_git_factory/repos/{id}"
     },
     {
+      "method": "GET",
+      "path": "/repos/{id}/commits",
+      "action": "listCommit",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
       "method": "PATCH",
       "path": "/repos/{id}",
       "action": "updateRepo",
@@ -94,6 +100,7 @@
       "grant_on": "user",
       "actions": [
         "getRepo",
+        "listCommit",
         "updateRepo",
         "deleteRepo",
         "readRepo",
