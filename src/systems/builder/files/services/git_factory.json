@@ -5,7 +5,7 @@
   "port": 9002,
   "forward_auth": true,
   "description": "The git plane of the codearmory platform (repos + Smart-HTTP)",
-  "ui_path": "",
+  "ui_path": "/ui",
   "registryAccount": false,
   "infra": {
     "managedRedis": false,
@@ -33,6 +33,20 @@
     "GIT_STORAGE_ROOT": "/var/lib/git-factory"
   },
   "endpoints": [
+    {
+      "method": "GET",
+      "path": "/ui",
+      "action": "serveUI",
+      "resource": "codearmory_git_factory/ui",
+      "public": true
+    },
+    {
+      "method": "GET",
+      "path": "/ui/",
+      "action": "serveUI",
+      "resource": "codearmory_git_factory/ui",
+      "public": true
+    },
     {
       "method": "GET",
       "path": "/repos",
