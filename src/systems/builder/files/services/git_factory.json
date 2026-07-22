@@ -179,6 +179,24 @@
       "path": "/repos/{id}/pulls/{number}/close",
       "action": "updatePull",
       "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/protections",
+      "action": "listProtection",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/repos/{id}/protections",
+      "action": "setProtection",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/repos/{id}/protections/{pattern}",
+      "action": "setProtection",
+      "resource": "codearmory_git_factory/repos/{id}"
     }
   ],
   "actions": [],
@@ -214,7 +232,9 @@
         "createPull",
         "getPull",
         "mergePull",
-        "updatePull"
+        "updatePull",
+        "listProtection",
+        "setProtection"
       ],
       "resources": [
         "{username}/codearmory_git_factory/repos/*"
