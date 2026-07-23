@@ -85,16 +85,17 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	b := GitBackend{
-		ID:        uuid.New().String(),
-		Owner:     userID,
-		Name:      req.Name,
-		Type:      req.Type,
-		BaseURL:   strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
-		Host:      host,
-		AuthMode:  req.Auth.Mode,
-		AuthEnc:   enc,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:           uuid.New().String(),
+		Owner:        userID,
+		Name:         req.Name,
+		Type:         req.Type,
+		BaseURL:      strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
+		Host:         host,
+		AuthMode:     req.Auth.Mode,
+		AuthEnc:      enc,
+		PreferMirror: req.PreferMirror,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 	if err := b.Add(ctx); err != nil {
 		if isUniqueViolation(err) {
@@ -179,6 +180,9 @@ func handleUpdateBackend(w http.ResponseWriter, r *http.Request) {
 		}
 		b.AuthMode = req.Auth.Mode
 		b.AuthEnc = enc
+	}
+	if req.PreferMirror != nil {
+		b.PreferMirror = *req.PreferMirror
 	}
 	if err := b.Update(ctx); err != nil {
 		if isUniqueViolation(err) {

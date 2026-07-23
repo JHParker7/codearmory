@@ -93,11 +93,12 @@ func (b GitBackend) Update(ctx context.Context) error {
 		Model(&GitBackend{}).
 		Where("id = ? AND owner = ?", b.ID, b.Owner).
 		Updates(map[string]any{
-			"base_url":   b.BaseURL,
-			"host":       b.Host,
-			"auth_mode":  b.AuthMode,
-			"auth_enc":   b.AuthEnc,
-			"updated_at": b.UpdatedAt,
+			"base_url":      b.BaseURL,
+			"host":          b.Host,
+			"auth_mode":     b.AuthMode,
+			"auth_enc":      b.AuthEnc,
+			"prefer_mirror": b.PreferMirror,
+			"updated_at":    b.UpdatedAt,
 		}).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
