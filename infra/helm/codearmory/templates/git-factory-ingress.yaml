@@ -1,0 +1,48 @@
+{{- if .Values.gitFactory.ingress.enabled }}
+{{- /*
+git_factory is a builder-deployed service: builder owns its Deployment/Service/PVC and
+the registry route, and deliberately renders no Ingress (docs/builder/README.md). That is
+fine for a JSON API — conductor fronts it in-cluster — but a git client talks to the git
+plane directly, so the wire routes (/{ns}/{repo}.git/...) need a way in from outside the
+cluster. The chart supplies it here, pointing at the Service builder created.
+
+The Service name follows builder's own naming: <releasePrefix>-<k8sName>, where the prefix
+defaults to the chart fullname (builder.reconcile.releasePrefix) and k8sName is
+"git-factory" (the registry name codearmory_git_factory is not a DNS-1123 label).
+*/}}
+{{- $prefix := default (include "codearmory.fullname" .) .Values.builder.reconcile.releasePrefix -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "codearmory.fullname" . }}-git-factory
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git-factory
+  {{- with .Values.gitFactory.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.gitFactory.ingress.className }}
+  ingressClassName: {{ .Values.gitFactory.ingress.className }}
+  {{- end }}
+  {{- with .Values.gitFactory.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.gitFactory.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ $prefix }}-git-factory
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

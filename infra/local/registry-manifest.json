@@ -425,6 +425,42 @@
         "path": "/mfa/totp",
         "action": "disableTOTP",
         "resource": "gatekeeper/mfa"
+      },
+      {
+        "method": "POST",
+        "path": "/roles/namespace",
+        "action": "createNamespaceRole",
+        "resource": "{username}/gatekeeper/roles"
+      },
+      {
+        "method": "PUT",
+        "path": "/roles/{id}/members/{user_id}",
+        "action": "assignRole",
+        "resource": "{username}/gatekeeper/roles"
+      },
+      {
+        "method": "DELETE",
+        "path": "/roles/{id}/members/{user_id}",
+        "action": "revokeRole",
+        "resource": "{username}/gatekeeper/roles"
+      },
+      {
+        "method": "POST",
+        "path": "/tokens",
+        "action": "createToken",
+        "resource": "{username}/gatekeeper/tokens"
+      },
+      {
+        "method": "GET",
+        "path": "/tokens",
+        "action": "listToken",
+        "resource": "{username}/gatekeeper/tokens"
+      },
+      {
+        "method": "DELETE",
+        "path": "/tokens/{id}",
+        "action": "deleteToken",
+        "resource": "{username}/gatekeeper/tokens"
       }
     ],
     "default_grants": [
@@ -505,6 +541,28 @@
         ],
         "resources": [
           "{username}/gatekeeper/teams/{team_id}"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "createNamespaceRole",
+          "assignRole",
+          "revokeRole"
+        ],
+        "resources": [
+          "{username}/gatekeeper/roles"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "createToken",
+          "listToken",
+          "deleteToken"
+        ],
+        "resources": [
+          "{username}/gatekeeper/tokens"
         ]
       }
     ]
@@ -653,7 +711,7 @@
       {
         "name": "forge/create-volume",
         "summary": "Create a shared workspace volume for a workflow run",
-        "description": "Provisions a run-scoped shared volume (a RAM/tmpfs-backed PVC in Kubernetes, a tmpfs named volume in Docker) that later steps can attach via the `volumes` key on a `forge/run` step. A git step clones a repo into it; downstream steps mount the same volume and see the checkout plus any build artifacts — and never need `git` in their own image. Pass `workflow_id` (use `${run_id}`), an optional `name` (default `workspace`), `size_mb`, and `medium` (`memory` default, or `disk`). The summed size of all of a workflow's volumes is capped by the admin (FORGE_MAX_WORKFLOW_VOLUME_MB). Volumes are torn down automatically when the run ends.",
+        "description": "Provisions a run-scoped shared volume (a RAM/tmpfs-backed PVC in Kubernetes, a tmpfs named volume in Docker) that later steps can attach via the `volumes` key on a `forge/run` step. A git step clones a repo into it; downstream steps mount the same volume and see the checkout plus any build artifacts \u2014 and never need `git` in their own image. Pass `workflow_id` (use `${run_id}`), an optional `name` (default `workspace`), `size_mb`, and `medium` (`memory` default, or `disk`). The summed size of all of a workflow's volumes is capped by the admin (FORGE_MAX_WORKFLOW_VOLUME_MB). Volumes are torn down automatically when the run ends.",
         "method": "POST",
         "path": "/volumes",
         "required_permission": {
@@ -679,7 +737,7 @@
       {
         "name": "forge/run",
         "summary": "Run a shell command in a sandboxed container",
-        "description": "Executes the step's `run` script inside an isolated Forge container (dropped capabilities, optional egress allowlist) and polls the execution to completion. The step output is the values captured via `output_env` (none by default — stdout is not a step output); a failed run still surfaces its stdout for debugging. Use it for build, test, and deploy steps. The `run` input is wrapped as `sh -c <run>`; pass an image and resource limits via the step's other `with` keys.",
+        "description": "Executes the step's `run` script inside an isolated Forge container (dropped capabilities, optional egress allowlist) and polls the execution to completion. The step output is the values captured via `output_env` (none by default \u2014 stdout is not a step output); a failed run still surfaces its stdout for debugging. Use it for build, test, and deploy steps. The `run` input is wrapped as `sh -c <run>`; pass an image and resource limits via the step's other `with` keys.",
         "method": "POST",
         "path": "/executions",
         "body_transforms": [
@@ -717,7 +775,7 @@
       {
         "name": "forge/build-image",
         "summary": "Build and push a container image",
-        "description": "Builds a container image from a Dockerfile and pushes it to a registry, with no Docker daemon and no host socket — the actions/docker-build-push equivalent. Forge builds with Kaniko (daemonless, userspace layer extraction), which runs on both kernel-isolated backends. Builds REQUIRE a privileged runner class on a kata or gvisor backend (root + writable rootfs, safe behind the VM/Sentry boundary); they are rejected on the shared-kernel docker/kubernetes backends. Pass `build` = { context (default /workspace — usually an attached shared volume), dockerfile, destinations, build_args, target, no_push }, attach the source via `volumes`, and provide registry credentials as a Docker config.json under a `secret_refs` env named REGISTRY_AUTH. Set `runner_class` to a privileged build class.",
+        "description": "Builds a container image from a Dockerfile and pushes it to a registry, with no Docker daemon and no host socket \u2014 the actions/docker-build-push equivalent. Forge builds with Kaniko (daemonless, userspace layer extraction), which runs on both kernel-isolated backends. Builds REQUIRE a privileged runner class on a kata or gvisor backend (root + writable rootfs, safe behind the VM/Sentry boundary); they are rejected on the shared-kernel docker/kubernetes backends. Pass `build` = { context (default /workspace \u2014 usually an attached shared volume), dockerfile, destinations, build_args, target, no_push }, attach the source via `volumes`, and provide registry credentials as a Docker config.json under a `secret_refs` env named REGISTRY_AUTH. Set `runner_class` to a privileged build class.",
         "method": "POST",
         "path": "/executions",
         "required_permission": {
@@ -749,7 +807,7 @@
       {
         "name": "forge/git-clone",
         "summary": "Clone a git repo into a shared volume",
-        "description": "Clones a git repository into a run-scoped shared workspace volume so later steps build from the checkout without needing `git` in their own image (the actions/checkout equivalent). Create the volume first with `forge/create-volume`, then attach the same volume name here; the repo — wired per step via the git credential broker and injected as `$GIT_CLONE_URL` — is shallow-cloned into it on forge's built-in minimal git image (there is no image to pick or maintain; operators can override it via FORGE_GIT_IMAGE). Downstream `forge/run` steps attach the same volume to see the working tree. Optional `path` (clone dir), `ref` (branch/tag), and `depth` (0 = full clone) tune it.",
+        "description": "Clones a git repository into a run-scoped shared workspace volume so later steps build from the checkout without needing `git` in their own image (the actions/checkout equivalent). Create the volume first with `forge/create-volume`, then attach the same volume name here; the repo \u2014 wired per step via the git credential broker and injected as `$GIT_CLONE_URL` \u2014 is shallow-cloned into it on forge's built-in minimal git image (there is no image to pick or maintain; operators can override it via FORGE_GIT_IMAGE). Downstream `forge/run` steps attach the same volume to see the working tree. Optional `path` (clone dir), `ref` (branch/tag), and `depth` (0 = full clone) tune it.",
         "method": "POST",
         "path": "/executions",
         "body_transforms": [
@@ -791,7 +849,7 @@
       {
         "name": "forge/volume-copy",
         "summary": "Copy files between shared volumes (scatter-clone / gather)",
-        "description": "Copies declared paths between attached shared workspace volumes inside the sandbox — the primitive behind scatter/gather, needing no CSI clone and no ReadWriteMany. Attach the volumes via `volumes` (the destination marked `workdir: true`, sources read_only) and pass `copy` = { sources: [{ volume, paths }], disjoint }. Two shapes: a CLONE (one source, no paths → whole tree) seeds a per-leg volume from the base workspace so parallel legs never share a PVC and never Multi-Attach across nodes; a GATHER (several sources each with their declared owned paths, `disjoint: true`) unions the finished legs back into the base, failing loudly if two legs claim the same path instead of silently clobbering. Forge derives the image (its minimal runner image) and command (a synthesised `cp` script) from `copy`, so `image`/`command` are ignored. Because every source plus the destination mounts into one copy pod they attach to a single node, so it works on any ReadWriteOnce backend.",
+        "description": "Copies declared paths between attached shared workspace volumes inside the sandbox \u2014 the primitive behind scatter/gather, needing no CSI clone and no ReadWriteMany. Attach the volumes via `volumes` (the destination marked `workdir: true`, sources read_only) and pass `copy` = { sources: [{ volume, paths }], disjoint }. Two shapes: a CLONE (one source, no paths \u2192 whole tree) seeds a per-leg volume from the base workspace so parallel legs never share a PVC and never Multi-Attach across nodes; a GATHER (several sources each with their declared owned paths, `disjoint: true`) unions the finished legs back into the base, failing loudly if two legs claim the same path instead of silently clobbering. Forge derives the image (its minimal runner image) and command (a synthesised `cp` script) from `copy`, so `image`/`command` are ignored. Because every source plus the destination mounts into one copy pod they attach to a single node, so it works on any ReadWriteOnce backend.",
         "method": "POST",
         "path": "/executions",
         "required_permission": {
@@ -823,7 +881,7 @@
       {
         "name": "forge/resolve-paths",
         "summary": "List volume paths matching a regex (scatter fan-out set)",
-        "description": "Scans an attached shared volume and returns the entries — directories or files, relative to the volume root — whose path matches a regex. It is the fan-out set generator behind a scatter: each matched path becomes one parallel leg. Attach the volume via `volumes` and pass `resolve` = { volume (defaults to the workdir mount), regex (POSIX ERE / grep -E), mode (dir|file), max_depth, output (default \"paths\") }. Forge derives the image (its minimal runner image) and command (a synthesised find | grep) from `resolve`, so `image`/`command` are ignored, and captures the sorted, newline-separated match list as the named output so a workflow reads it via `outputs`. An empty match set is valid (zero legs).",
+        "description": "Scans an attached shared volume and returns the entries \u2014 directories or files, relative to the volume root \u2014 whose path matches a regex. It is the fan-out set generator behind a scatter: each matched path becomes one parallel leg. Attach the volume via `volumes` and pass `resolve` = { volume (defaults to the workdir mount), regex (POSIX ERE / grep -E), mode (dir|file), max_depth, output (default \"paths\") }. Forge derives the image (its minimal runner image) and command (a synthesised find | grep) from `resolve`, so `image`/`command` are ignored, and captures the sorted, newline-separated match list as the named output so a workflow reads it via `outputs`. An empty match set is valid (zero legs).",
         "method": "POST",
         "path": "/executions",
         "required_permission": {
@@ -855,7 +913,7 @@
       {
         "name": "forge/save-artifact",
         "summary": "Save a path from a shared volume to the artifact store",
-        "description": "Archives `path` from the attached workspace volume and stores it under `name` in the artifact store, where it OUTLIVES the run — so the next run can restore it. This is how a build cache or a compiled binary survives, since forge volumes are run-scoped and reaped at the end of a run. Saving the same name replaces it, which is what makes it usable as a cache. Forge derives the image and command (a streamed `tar | curl`), so `image`/`command` are ignored; attach the source via `volumes` with `workdir: true`, and wire the store bearer with `secret_refs` (default env ARTIFACTS_TOKEN, e.g. \"ARTIFACTS_TOKEN\": \"secret:my-artifacts-token\"). The upload is refused if it would exceed your per-user quota.",
+        "description": "Archives `path` from the attached workspace volume and stores it under `name` in the artifact store, where it OUTLIVES the run \u2014 so the next run can restore it. This is how a build cache or a compiled binary survives, since forge volumes are run-scoped and reaped at the end of a run. Saving the same name replaces it, which is what makes it usable as a cache. Forge derives the image and command (a streamed `tar | curl`), so `image`/`command` are ignored; attach the source via `volumes` with `workdir: true`, and wire the store bearer with `secret_refs` (default env ARTIFACTS_TOKEN, e.g. \"ARTIFACTS_TOKEN\": \"secret:my-artifacts-token\"). The upload is refused if it would exceed your per-user quota.",
         "method": "POST",
         "path": "/executions",
         "required_permission": {
@@ -887,7 +945,7 @@
       {
         "name": "forge/restore-artifact",
         "summary": "Restore a stored artifact into a shared volume",
-        "description": "Downloads the artifact `name` and extracts it into `path` of the attached workspace volume — the other half of forge/save-artifact. Set `optional: true` so a missing artifact is a no-op rather than a failure, which is what lets a cache warm on the FIRST run instead of failing it. Forge derives the image and command; attach the destination via `volumes` with `workdir: true` and wire the bearer with `secret_refs` (default env ARTIFACTS_TOKEN).",
+        "description": "Downloads the artifact `name` and extracts it into `path` of the attached workspace volume \u2014 the other half of forge/save-artifact. Set `optional: true` so a missing artifact is a no-op rather than a failure, which is what lets a cache warm on the FIRST run instead of failing it. Forge derives the image and command; attach the destination via `volumes` with `workdir: true` and wire the bearer with `secret_refs` (default env ARTIFACTS_TOKEN).",
         "method": "POST",
         "path": "/executions",
         "required_permission": {
@@ -1431,7 +1489,7 @@
       {
         "name": "tickets/comment",
         "summary": "Add a comment to a ticket",
-        "description": "Appends a comment to a ticket. Use it to record a pipeline's progress on the ticket a `tickets/create` step opened for the run — the ticket carries `run_id`/`workflow_id`, so the comments read as that run's timeline.",
+        "description": "Appends a comment to a ticket. Use it to record a pipeline's progress on the ticket a `tickets/create` step opened for the run \u2014 the ticket carries `run_id`/`workflow_id`, so the comments read as that run's timeline.",
         "method": "POST",
         "path": "/tickets/{id}/comments"
       },
@@ -1626,7 +1684,7 @@
   {
     "name": "git_connector",
     "url": "http://git:8096",
-    "description": "Git credential broker — mints short-lived clone credentials for linked backends (GitHub, GitLab, Forgejo, generic)",
+    "description": "Git credential broker \u2014 mints short-lived clone credentials for linked backends (GitHub, GitLab, Forgejo, generic)",
     "forward_auth": true,
     "service_key": "git-registry-local-secret",
     "endpoints": [
@@ -1839,7 +1897,7 @@
   {
     "name": "artifacts",
     "url": "http://artifacts:8097",
-    "description": "Artifact store — named, user-owned blobs that outlive a run (build caches, CLI binaries), capped by a per-user quota",
+    "description": "Artifact store \u2014 named, user-owned blobs that outlive a run (build caches, CLI binaries), capped by a per-user quota",
     "forward_auth": true,
     "service_key": "artifacts-registry-local-secret",
     "endpoints": [

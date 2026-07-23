@@ -4,7 +4,10 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 // The Helm chart ships only the core services; every non-core service is deployed AND
@@ -58,6 +61,38 @@ type svcInfra struct {
 	// cache, not durable state. REDIS_URL must stay in secretConfig (not requiredConfig)
 	// so the env is wired but enable is not blocked when it is absent.
 	ManagedRedis bool `json:"managedRedis"`
+	// Persistence, when set, declares that the service keeps durable state on a volume:
+	// builder creates a PVC (create-if-absent — never updated, never deleted) and mounts
+	// it at MountPath. Declaring it changes how the workload is rolled out: see
+	// persistenceFor / strategyFor / replicasFor.
+	Persistence *svcPersistence `json:"persistence,omitempty"`
+}
+
+// svcPersistence is a service's durable-volume claim. AccessMode is the design
+// decision underneath it: ReadWriteOnce is one writer — replicas are clamped to 1, the
+// rollout becomes Recreate (brief downtime on deploy) and periodic rotation is off,
+// because a second pod can never attach the volume the first still holds.
+// ReadWriteMany allows N replicas and keeps the surge rollout, but only if the backing
+// store gives real atomic creates and working flock.
+type svcPersistence struct {
+	MountPath    string `json:"mountPath"`    // where the volume is mounted in the container
+	Size         string `json:"size"`         // requested capacity, e.g. "20Gi"
+	StorageClass string `json:"storageClass"` // "" => cluster default
+	AccessMode   string `json:"accessMode"`   // ReadWriteOnce (default) | ReadWriteMany
+}
+
+// accessMode resolves the declared mode, defaulting to the safe single-writer one.
+func (p svcPersistence) accessMode() corev1.PersistentVolumeAccessMode {
+	if strings.EqualFold(strings.TrimSpace(p.AccessMode), string(corev1.ReadWriteMany)) {
+		return corev1.ReadWriteMany
+	}
+	return corev1.ReadWriteOnce
+}
+
+// singleWriter reports whether the volume admits only one pod at a time — the flag
+// every rollout decision downstream keys off.
+func (p svcPersistence) singleWriter() bool {
+	return p.accessMode() != corev1.ReadWriteMany
 }
 
 type derivedSecret struct {

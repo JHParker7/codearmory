@@ -107,26 +107,38 @@ func TestValidateServiceURL(t *testing.T) {
 	t.Cleanup(func() { resolveHost = orig })
 
 	tests := []struct {
-		name    string
-		url     string
-		resolve func(string) ([]string, error)
-		wantErr bool
+		name         string
+		url          string
+		resolve      func(string) ([]string, error)
+		allowPrivate bool
+		wantErr      bool
 	}{
-		{"public ip ok", "http://93.184.216.34:80", nil, false},
-		{"https public host ok", "https://example.com", func(string) ([]string, error) { return []string{"93.184.216.34"}, nil }, false},
-		{"bad scheme ftp", "ftp://example.com", nil, true},
-		{"no scheme", "example.com:80", nil, true},
-		{"loopback literal", "http://127.0.0.1", nil, true},
-		{"private 10.x literal", "http://10.0.0.5:8080", nil, true},
-		{"private 192.168 literal", "http://192.168.1.1", nil, true},
-		{"link-local literal", "http://169.254.169.254", nil, true},
-		{"ipv6 ula literal", "http://[fc00::1]", nil, true},
-		{"ipv6 loopback literal", "http://[::1]", nil, true},
-		{"unresolvable host fails closed", "http://nope.invalid", func(string) ([]string, error) { return nil, errAlwaysFail }, true},
-		{"host resolves to private", "http://sneaky.example", func(string) ([]string, error) { return []string{"10.1.2.3"}, nil }, true},
-		{"host resolves to link-local metadata", "http://meta.example", func(string) ([]string, error) { return []string{"169.254.169.254"}, nil }, true},
-		{"host resolves public ok", "http://good.example", func(string) ([]string, error) { return []string{"93.184.216.34"}, nil }, false},
-		{"malformed url", "http://%zz", nil, true},
+		{"public ip ok", "http://93.184.216.34:80", nil, denyPrivate, false},
+		{"https public host ok", "https://example.com", func(string) ([]string, error) { return []string{"93.184.216.34"}, nil }, denyPrivate, false},
+		{"bad scheme ftp", "ftp://example.com", nil, denyPrivate, true},
+		{"no scheme", "example.com:80", nil, denyPrivate, true},
+		{"loopback literal", "http://127.0.0.1", nil, denyPrivate, true},
+		{"private 10.x literal", "http://10.0.0.5:8080", nil, denyPrivate, true},
+		{"private 192.168 literal", "http://192.168.1.1", nil, denyPrivate, true},
+		{"link-local literal", "http://169.254.169.254", nil, denyPrivate, true},
+		{"ipv6 ula literal", "http://[fc00::1]", nil, denyPrivate, true},
+		{"ipv6 loopback literal", "http://[::1]", nil, denyPrivate, true},
+		{"unresolvable host fails closed", "http://nope.invalid", func(string) ([]string, error) { return nil, errAlwaysFail }, denyPrivate, true},
+		{"host resolves to private", "http://sneaky.example", func(string) ([]string, error) { return []string{"10.1.2.3"}, nil }, denyPrivate, true},
+		{"host resolves to link-local metadata", "http://meta.example", func(string) ([]string, error) { return []string{"169.254.169.254"}, nil }, denyPrivate, true},
+		{"host resolves public ok", "http://good.example", func(string) ([]string, error) { return []string{"93.184.216.34"}, nil }, denyPrivate, false},
+		{"malformed url", "http://%zz", nil, denyPrivate, true},
+
+		// An admin service key (builder) may register an in-cluster ClusterIP, which is
+		// always RFC-1918 — but never loopback or cloud metadata, which are not service
+		// addresses under any caller.
+		{"trusted caller: cluster ip ok", "http://10.111.42.43:9002", nil, allowPrivate, false},
+		{"trusted caller: cluster dns name ok", "http://ca-codearmory-git-factory:9002", func(string) ([]string, error) { return []string{"10.111.42.43"}, nil }, allowPrivate, false},
+		{"trusted caller: ipv6 ula ok", "http://[fc00::1]", nil, allowPrivate, false},
+		{"trusted caller: loopback still blocked", "http://127.0.0.1", nil, allowPrivate, true},
+		{"trusted caller: metadata still blocked", "http://169.254.169.254", nil, allowPrivate, true},
+		{"trusted caller: resolved metadata still blocked", "http://meta.example", func(string) ([]string, error) { return []string{"169.254.169.254"}, nil }, allowPrivate, true},
+		{"trusted caller: unresolvable still fails closed", "http://nope.invalid", func(string) ([]string, error) { return nil, errAlwaysFail }, allowPrivate, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -135,7 +147,7 @@ func TestValidateServiceURL(t *testing.T) {
 			} else {
 				resolveHost = orig
 			}
-			err := validateServiceURL(tt.url)
+			err := validateServiceURL(tt.url, tt.allowPrivate)
 			if tt.wantErr && err == nil {
 				t.Fatalf("validateServiceURL(%q) = nil, want error", tt.url)
 			}

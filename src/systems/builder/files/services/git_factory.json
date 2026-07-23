@@ -1,0 +1,246 @@
+{
+  "registryName": "codearmory_git_factory",
+  "k8sName": "git-factory",
+  "imageRepo": "git-factory",
+  "port": 9002,
+  "forward_auth": true,
+  "description": "The git plane of the codearmory platform (repos + Smart-HTTP)",
+  "ui_path": "/ui",
+  "registryAccount": false,
+  "infra": {
+    "managedRedis": false,
+    "persistence": {
+      "mountPath": "/var/lib/git-factory",
+      "size": "20Gi",
+      "storageClass": "",
+      "accessMode": "ReadWriteOnce"
+    }
+  },
+  "derivedSecrets": [
+    {
+      "envVar": "HOOKS_TRIGGER_KEY",
+      "kind": "shared",
+      "name": "hooks-trigger-key"
+    }
+  ],
+  "requiredConfig": [
+    "DATABASE_URL"
+  ],
+  "optionalConfig": [
+    "GIT_HTTP_BASE_URL",
+    "GIT_REPO_QUOTA_MB",
+    "GIT_MAINTENANCE_INTERVAL",
+    "DATABASE_READ_URL",
+    "LOG_LEVEL"
+  ],
+  "secretConfig": [
+    "DATABASE_URL",
+    "DATABASE_READ_URL"
+  ],
+  "envExtras": {
+    "GIT_STORAGE_ROOT": "/var/lib/git-factory",
+    "HOOKS_URL": "http://${PREFIX}-hooks:8087"
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/ui",
+      "action": "serveUI",
+      "resource": "codearmory_git_factory/ui",
+      "public": true
+    },
+    {
+      "method": "GET",
+      "path": "/ui/",
+      "action": "serveUI",
+      "resource": "codearmory_git_factory/ui",
+      "public": true
+    },
+    {
+      "method": "GET",
+      "path": "/repos",
+      "action": "listRepo",
+      "resource": "codearmory_git_factory/repos"
+    },
+    {
+      "method": "POST",
+      "path": "/repos",
+      "action": "createRepo",
+      "resource": "codearmory_git_factory/repos"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}",
+      "action": "getRepo",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/commits",
+      "action": "listCommit",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/readme",
+      "action": "getReadme",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/repos/{id}",
+      "action": "updateRepo",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/repos/{id}",
+      "action": "deleteRepo",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/branches",
+      "action": "listBranch",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/tags",
+      "action": "listTag",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/repos/{id}/default-branch",
+      "action": "setDefaultBranch",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/tree",
+      "action": "getTree",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/blob",
+      "action": "getBlob",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/archive",
+      "action": "getArchive",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/collaborators",
+      "action": "shareRepo",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/repos/{id}/collaborators",
+      "action": "shareRepo",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/repos/{id}/collaborators/{user}",
+      "action": "shareRepo",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/pulls",
+      "action": "listPull",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/repos/{id}/pulls",
+      "action": "createPull",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/pulls/{number}",
+      "action": "getPull",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/repos/{id}/pulls/{number}/merge",
+      "action": "mergePull",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/repos/{id}/pulls/{number}/close",
+      "action": "updatePull",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/repos/{id}/protections",
+      "action": "listProtection",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/repos/{id}/protections",
+      "action": "setProtection",
+      "resource": "codearmory_git_factory/repos/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/repos/{id}/protections/{pattern}",
+      "action": "setProtection",
+      "resource": "codearmory_git_factory/repos/{id}"
+    }
+  ],
+  "actions": [],
+  "default_grants": [
+    {
+      "grant_on": "user",
+      "actions": [
+        "createRepo",
+        "listRepo"
+      ],
+      "resources": [
+        "{username}/codearmory_git_factory/repos"
+      ]
+    },
+    {
+      "grant_on": "user",
+      "actions": [
+        "getRepo",
+        "listCommit",
+        "getReadme",
+        "updateRepo",
+        "deleteRepo",
+        "readRepo",
+        "writeRepo",
+        "listBranch",
+        "listTag",
+        "setDefaultBranch",
+        "getTree",
+        "getBlob",
+        "getArchive",
+        "shareRepo",
+        "listPull",
+        "createPull",
+        "getPull",
+        "mergePull",
+        "updatePull",
+        "listProtection",
+        "setProtection"
+      ],
+      "resources": [
+        "{username}/codearmory_git_factory/repos/*"
+      ]
+    }
+  ]
+}

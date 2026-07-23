@@ -57,6 +57,12 @@ const (
 	// minReadySeconds requires a new pod to stay Ready before a rollout proceeds to the
 	// next, so a crash-looping image can't churn the whole set unnoticed.
 	minReadySeconds = 10
+
+	// Volume names/paths for a service that declares persistence: its PVC, and the
+	// writable scratch an otherwise read-only rootfs denies it. See applyPersistence.
+	persistVolumeName = "data"
+	tmpVolumeName     = "tmp"
+	tmpMountPath      = "/tmp"
 )
 
 // specHash is a stable content hash of a rendered spec, used to skip no-op Updates.
@@ -177,11 +183,17 @@ func newK8sBackend(namespace, prefix, registry, tag string) (*k8sBackend, error)
 // Labels/selectors keep the registry name (see labels/selector), so reconciliation
 // and identity stay keyed on the registry name.
 func (b *k8sBackend) name(service string) string {
-	k8s := service
-	if d, ok := embeddedServiceDef(service); ok {
-		k8s = d.K8sName
+	return b.prefix + "-" + k8sNameFor(service)
+}
+
+// k8sNameFor maps a registry name to the DNS-1123 name used for cluster objects and
+// anywhere else k8s demands a label-shaped string (a container name, for one). Services
+// with no embedded def are custom ones whose name is already DNS-1123.
+func k8sNameFor(service string) string {
+	if d, ok := embeddedServiceDef(service); ok && d.K8sName != "" {
+		return d.K8sName
 	}
-	return b.prefix + "-" + k8s
+	return service
 }
 
 // store returns the configured secret backend, falling back to a k8s store over the
@@ -276,9 +288,9 @@ func (b *k8sBackend) EnsureService(ctx context.Context, spec workloadSpec) error
 	if err != nil {
 		return err
 	}
-	// A per-service replicas override is an exact target; the backend default is a
-	// floor that an admin/HPA scale-up may exceed.
-	if err := b.applyDeployment(ctx, dep, spec.Replicas <= 0); err != nil {
+	// A per-service replicas override (and the single-writer clamp) is an exact target;
+	// the backend default is a floor that an admin/HPA scale-up may exceed.
+	if err := b.applyDeployment(ctx, dep, b.replicaFloor(spec)); err != nil {
 		return fmt.Errorf("apply deployment %s: %w", dep.Name, err)
 	}
 	port := spec.Port
@@ -330,6 +342,11 @@ func (b *k8sBackend) RemoveService(ctx context.Context, service string) error {
 	if err := b.client.PolicyV1().PodDisruptionBudgets(b.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete poddisruptionbudget %s: %w", name, err)
 	}
+	// Infra teardown reclaims the ephemeral pieces (a managed Redis) and deliberately
+	// leaves a persistence PVC in place: disabling a service must not destroy the state
+	// it was keeping — repositories, in git_factory's case. Re-enabling the service
+	// re-attaches the same volume; reclaiming it is an admin action (and builder holds no
+	// delete on PVCs to do it with).
 	b.teardownInfra(ctx, service)
 	// Best-effort cleanup of provider-owned db resources (e.g. the ExternalSecret). This
 	// never drops a database or its data — destructive cleanup stays a deliberate admin
@@ -372,6 +389,12 @@ func (b *k8sBackend) buildDeployment(ctx context.Context, spec workloadSpec) (*a
 		podTemplate = b.templatePod(spec)
 	}
 	applyEnvOverrides(&podTemplate, spec.Env)
+	// Volumes are injected here, not in templatePod, for the same reason the env
+	// overrides are: both branches above must get them. A service that clones a Helm
+	// base would otherwise come up with no data volume at all.
+	if p := persistenceFor(spec.Service); p != nil {
+		applyPersistence(&podTemplate, b.pvcName(spec.Service), *p)
+	}
 
 	name := b.name(spec.Service)
 	podTemplate.Labels = mergeLabels(podTemplate.Labels, b.labels(spec.Service))
@@ -386,16 +409,30 @@ func (b *k8sBackend) buildDeployment(ctx context.Context, spec workloadSpec) (*a
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace, Labels: b.labels(spec.Service)},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{MatchLabels: b.selector(spec.Service)},
-			Template: podTemplate,
-			// maxUnavailable:0/maxSurge:1 brings a replacement Ready before retiring an
-			// old pod, so a deploy or periodic rotation never drops below the replica
-			// floor — the "always N healthy" guarantee during voluntary churn.
-			Strategy:        rollingStrategy(),
+			Replicas:        &replicas,
+			Selector:        &metav1.LabelSelector{MatchLabels: b.selector(spec.Service)},
+			Template:        podTemplate,
+			Strategy:        strategyFor(spec.Service),
 			MinReadySeconds: minReadySeconds,
 		},
 	}, nil
+}
+
+// strategyFor picks the rollout strategy for a service.
+//
+// The default (rollingStrategy) surges a replacement to Ready before retiring an old
+// pod — the "always N healthy" guarantee during voluntary churn. That guarantee is
+// bought with an overlap of the old and new pod, which a single-writer (ReadWriteOnce)
+// volume cannot satisfy: the new pod cannot attach a volume the old one still holds, so
+// the rollout wedges until progressDeadlineSeconds on every deploy. For those services
+// the honest answer is Recreate — old pod fully gone, then the new one starts. It is a
+// real trade (a short outage on each deploy), not an oversight; the alternative is RWX
+// storage, which keeps the surge rollout.
+func strategyFor(service string) appsv1.DeploymentStrategy {
+	if p := persistenceFor(service); p != nil && p.singleWriter() {
+		return appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+	}
+	return rollingStrategy()
 }
 
 // rollingStrategy keeps the ready count at the replica floor throughout a rollout:
@@ -412,9 +449,14 @@ func rollingStrategy() appsv1.DeploymentStrategy {
 	}
 }
 
-// replicasFor resolves the replica count: per-service override, else the backend
-// default, else 1 (the historical behaviour).
+// replicasFor resolves the replica count: pinned to 1 for a single-writer volume, else
+// the per-service override, else the backend default, else 1 (the historical behaviour).
+// The clamp is not a preference: with ReadWriteOnce only one pod can ever attach the
+// volume, so replicas 2..N would sit permanently Pending. RWX services scale normally.
 func (b *k8sBackend) replicasFor(spec workloadSpec) int32 {
+	if p := persistenceFor(spec.Service); p != nil && p.singleWriter() {
+		return 1
+	}
 	if spec.Replicas > 0 {
 		return spec.Replicas
 	}
@@ -424,9 +466,26 @@ func (b *k8sBackend) replicasFor(spec workloadSpec) int32 {
 	return 1
 }
 
+// replicaFloor reports whether the resolved replica count is a floor (an admin/HPA
+// scale-up above it survives reconcile) or an exact target. A per-service override is
+// exact, and so is the single-writer clamp — letting a scale-up stick there would leave
+// the extra pods unschedulable forever.
+func (b *k8sBackend) replicaFloor(spec workloadSpec) bool {
+	if p := persistenceFor(spec.Service); p != nil && p.singleWriter() {
+		return false
+	}
+	return spec.Replicas <= 0
+}
+
 // rotateFor resolves the periodic-restart cadence: per-service override, else the
-// backend default, else 0 (disabled).
+// backend default, else 0 (disabled). A single-writer volume disables it outright — the
+// rotation is a rolling restart, and it would hit exactly the deadlock strategyFor
+// avoids (and with Recreate it would mean a scheduled outage, which is worse than the
+// drift it sheds). Such a service is restarted on a real change, not on a timer.
 func (b *k8sBackend) rotateFor(spec workloadSpec) time.Duration {
+	if p := persistenceFor(spec.Service); p != nil && p.singleWriter() {
+		return 0
+	}
 	if spec.RotateInterval > 0 {
 		return spec.RotateInterval
 	}
@@ -573,7 +632,10 @@ func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
 	podSpec := corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: &runAsNonRoot},
 		Containers: []corev1.Container{{
-			Name:  spec.Service,
+			// The container name is a DNS-1123 label, so it must come from k8sName —
+			// a registry name with '_' (codearmory_git_factory) is rejected outright by
+			// the apiserver, taking the whole Deployment with it.
+			Name:  k8sNameFor(spec.Service),
 			Image: image,
 			Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: port, Protocol: corev1.ProtocolTCP}},
 			Env:   env,
@@ -661,6 +723,53 @@ func applyEnvOverrides(pt *corev1.PodTemplateSpec, env map[string]string) {
 			c.Env = append(c.Env, corev1.EnvVar{Name: k, Value: v})
 		}
 	}
+}
+
+// applyPersistence mounts a service's durable volume on the first container, plus an
+// emptyDir at /tmp. The scratch mount is not incidental: the workload runs with
+// ReadOnlyRootFilesystem, and a process that keeps state on disk (git writing lock and
+// temp files, for one) needs somewhere writable outside its data directory. Mounted
+// volumes stay writable regardless of the read-only rootfs, so the hardening is kept.
+//
+// Volumes and mounts are upserted by name so a cloned base that already declares them
+// is not duplicated, and repeated reconciles render a byte-identical template.
+func applyPersistence(pt *corev1.PodTemplateSpec, claimName string, p svcPersistence) {
+	if len(pt.Spec.Containers) == 0 || strings.TrimSpace(p.MountPath) == "" {
+		return
+	}
+	upsertVolume(&pt.Spec, corev1.Volume{
+		Name: persistVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
+		},
+	})
+	upsertVolume(&pt.Spec, corev1.Volume{
+		Name:         tmpVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	c := &pt.Spec.Containers[0]
+	upsertMount(c, corev1.VolumeMount{Name: persistVolumeName, MountPath: p.MountPath})
+	upsertMount(c, corev1.VolumeMount{Name: tmpVolumeName, MountPath: tmpMountPath})
+}
+
+func upsertVolume(ps *corev1.PodSpec, v corev1.Volume) {
+	for i := range ps.Volumes {
+		if ps.Volumes[i].Name == v.Name {
+			ps.Volumes[i] = v
+			return
+		}
+	}
+	ps.Volumes = append(ps.Volumes, v)
+}
+
+func upsertMount(c *corev1.Container, m corev1.VolumeMount) {
+	for i := range c.VolumeMounts {
+		if c.VolumeMounts[i].Name == m.Name {
+			c.VolumeMounts[i] = m
+			return
+		}
+	}
+	c.VolumeMounts = append(c.VolumeMounts, m)
 }
 
 func mergeLabels(into, add map[string]string) map[string]string {

@@ -142,11 +142,23 @@ func (b *k8sBackend) ensureServiceSecret(ctx context.Context, service, gkKey, db
 	// Deterministic, so every reconcile writes byte-identical values (no pod churn).
 	if def, ok := embeddedServiceDef(service); ok && secretDerivationEnabled() {
 		for _, ds := range def.DerivedSecrets {
-			if ds.Kind == "shared" {
-				data[ds.Name] = []byte(deriveSharedKey(ds.Name))
-			} else {
+			if ds.Kind != "shared" {
 				data[ds.Name] = []byte(derivePrivateKey(service, ds.Name))
+				continue
 			}
+			// A shared key is only shared if BOTH sides hold the same bytes. Derivation
+			// alone guarantees that only among services builder provisions: a peer the
+			// Helm chart deployed (hooks, say) carries a chart-generated key instead, so
+			// a derived value would be silently wrong — the emitter signs, the receiver
+			// rejects with 401, and nothing reports a misconfiguration. So prefer the
+			// owning service's existing value and derive only when there is none.
+			if peer := sharedKeyOwner(ds.Name); peer != "" && peer != service {
+				if existing, err := b.store().get(ctx, b.name(peer), ds.Name); err == nil && existing != "" {
+					data[ds.Name] = []byte(existing)
+					continue
+				}
+			}
+			data[ds.Name] = []byte(deriveSharedKey(ds.Name))
 		}
 		if def.RegistryAccount {
 			data["registry-service-key"] = []byte(derivePrivateKey(service, "registry-service-key"))

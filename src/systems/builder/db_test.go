@@ -89,4 +89,3 @@ func TestCatalogView_DefaultDisabledThenRowDrives(t *testing.T) {
 		t.Fatalf("after disabling row = %+v, want disabled", views["blueprints"])
 	}
 }
-

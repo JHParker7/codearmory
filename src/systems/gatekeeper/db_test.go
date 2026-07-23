@@ -22,7 +22,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	conn.AutoMigrate(&User{}, &Org{}, &Team{}, &Role{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &Invite{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &PermissionsCheck{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{})
+	conn.AutoMigrate(&User{}, &Org{}, &Team{}, &Role{}, &RoleMembership{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &Invite{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &PermissionsCheck{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{}, &PersonalToken{})
 	gormDB = conn
 	initMetrics()
 	os.Setenv("PERMITTED_SERVICES", "gatekeeper,blueprints,forge,svc,my-service,other-service,team-service,direct-service,test-service,workflows")

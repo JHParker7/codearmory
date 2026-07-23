@@ -90,3 +90,80 @@ func TestDeregisterServiceAccount(t *testing.T) {
 		t.Fatal("expected the deregistered account to be inactive")
 	}
 }
+
+// builder re-registers every managed service on every reconcile tick, so an
+// unchanged registration must write nothing: no row, and above all no audit entry.
+// Otherwise the trail becomes a log of polling and buries the entries someone is
+// actually looking for.
+func TestRegisterServiceAccount_UnchangedKeyIsNotAudited(t *testing.T) {
+	withBuilderInternalKey(t, "internal-key")
+
+	register := func() int {
+		body := `{"service_name":"quiet-svc","key":"quiet-bootstrap-key"}`
+		r := httptest.NewRequest(http.MethodPost, "/internal/service-accounts", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer internal-key")
+		w := httptest.NewRecorder()
+		handleRegisterServiceAccount(w, r)
+		return w.Code
+	}
+	countRegisterEntries := func() int {
+		rows, err := AuditLog{ResourceID: "quiet-svc", Action: "service_account.register"}.List(context.Background(), 0, 0)
+		if err != nil {
+			t.Fatalf("list audit logs: %v", err)
+		}
+		return len(rows)
+	}
+
+	if code := register(); code != http.StatusNoContent {
+		t.Fatalf("first register: got %d, want 204", code)
+	}
+	first := countRegisterEntries()
+	if first != 1 {
+		t.Fatalf("after one registration there are %d audit entries, want 1", first)
+	}
+
+	for i := 0; i < 3; i++ {
+		if code := register(); code != http.StatusNoContent {
+			t.Fatalf("repeat register %d: got %d, want 204", i, code)
+		}
+	}
+	if got := countRegisterEntries(); got != first {
+		t.Errorf("after 3 unchanged re-registrations there are %d audit entries, want %d", got, first)
+	}
+
+	// The service still authenticates — the no-op must not have disturbed anything.
+	ar := httptest.NewRequest(http.MethodPost, "/x", nil)
+	ar.Header.Set("X-Service-Key", "quiet-svc:quiet-bootstrap-key")
+	aw := httptest.NewRecorder()
+	if _, ok := requireServiceAuth(aw, ar); !ok {
+		t.Fatalf("service failed to authenticate after re-registration (status %d)", aw.Code)
+	}
+}
+
+// A CHANGED key is a real event and must still be recorded — that is the entry which
+// says "this service's credential was replaced".
+func TestRegisterServiceAccount_ChangedKeyIsAudited(t *testing.T) {
+	withBuilderInternalKey(t, "internal-key")
+
+	post := func(key string) {
+		t.Helper()
+		body := `{"service_name":"rekeyed-svc","key":"` + key + `"}`
+		r := httptest.NewRequest(http.MethodPost, "/internal/service-accounts", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer internal-key")
+		w := httptest.NewRecorder()
+		handleRegisterServiceAccount(w, r)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("register: got %d, want 204", w.Code)
+		}
+	}
+	post("first-key")
+	post("second-key")
+
+	rows, err := AuditLog{ResourceID: "rekeyed-svc", Action: "service_account.register"}.List(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("list audit logs: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("audit entries = %d, want 2 (one per real key change)", len(rows))
+	}
+}
