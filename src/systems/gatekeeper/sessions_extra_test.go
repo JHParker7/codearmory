@@ -69,6 +69,24 @@ func TestHandleCreateRunToken_Forbidden(t *testing.T) {
 	}
 }
 
+// The run-token minters are an explicit allowlist, not a general service capability:
+// a minted role can only ever be a subset of the owner's own access, but only these
+// services are trusted to choose that subset. git_connector is on it so it can
+// authorize a clone against git-factory as the user the clone is for, rather than
+// holding a shared east-west key.
+func TestCanMintScopedRoles_Allowlist(t *testing.T) {
+	for _, svc := range []string{"workflows", "forge", "git_connector"} {
+		if !canMintScopedRoles(svc) {
+			t.Errorf("%s must be allowed to mint scoped roles", svc)
+		}
+	}
+	for _, svc := range []string{"", "gatekeeper", "registry", "builder", "tickets", "codearmory_git_factory"} {
+		if canMintScopedRoles(svc) {
+			t.Errorf("%s must NOT be allowed to mint scoped roles", svc)
+		}
+	}
+}
+
 func TestHandleCreateRunToken_MissingUserAndNotFound(t *testing.T) {
 	key := seedNamedSvc(t, "workflows")
 	// Missing user_id → 400.
