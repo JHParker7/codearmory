@@ -1,0 +1,16 @@
+# CI fast-path image — built by forge/build-image (kaniko) in the codearmory-ci pipeline.
+#
+# Unlike ./Dockerfile (self-contained multi-stage, used by local `docker build`), this image
+# does NOT compile Go. The `forge` binary is prebuilt by the pipeline's `build-bin` step on the
+# shared, warm Go build-cache volume and already sits in the build context; here we only
+# package it. kaniko cannot share Go's build cache across a source change, so compiling
+# in-image otherwise recompiles the full dependency tree (~2 min) every commit; and a
+# byte-identical prebuilt binary makes the whole image a kaniko layer-cache hit.
+FROM public.ecr.aws/docker/library/alpine:3.23.3
+RUN apk --no-cache add ca-certificates && addgroup -S -g 101 svc && adduser -S -u 100 -G svc svc
+WORKDIR /home/svc/
+COPY forge ./forge
+RUN chown svc:svc ./forge
+USER 100:101
+EXPOSE 8083
+CMD ["./forge"]
