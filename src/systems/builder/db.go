@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -112,6 +114,32 @@ func listOrgServices(ctx context.Context, orgID string) ([]OrgService, error) {
 	return rows, nil
 }
 
+// orgServiceUpdates builds the explicit column set for an update of an existing row.
+//
+// Config is marshalled HERE rather than handed over as a Go map. GORM applies a
+// field's `serializer:json` only when it writes through the struct; this path
+// deliberately writes a column map instead (so a false Enabled is never dropped as a
+// zero value), which bypasses the serializer entirely. A raw map[string]any therefore
+// reaches the driver unserialized, and pgx has no encode plan for it against a text
+// column — every config update failed with "cannot find encode plan", including one
+// that wrote back a byte-identical value. Only the Create path (a struct write) ever
+// serialized correctly, so a row's config was effectively frozen after creation.
+func orgServiceUpdates(in OrgService, now time.Time) (map[string]any, error) {
+	cfg, err := json.Marshal(in.Config)
+	if err != nil {
+		return nil, fmt.Errorf("encode service config: %w", err)
+	}
+	return map[string]any{
+		"enabled":     in.Enabled,
+		"kind":        in.Kind,
+		"config":      string(cfg),
+		"image":       in.Image,
+		"port":        in.Port,
+		"description": in.Description,
+		"updated_at":  now,
+	}, nil
+}
+
 // upsertOrgService creates or updates the row for a (org, service) scope. The
 // caller is responsible for setting Enabled/Kind/Config explicitly; we update the
 // mutable columns by hand so a false Enabled is never dropped by a GORM default.
@@ -123,15 +151,11 @@ func upsertOrgService(ctx context.Context, in OrgService) (OrgService, error) {
 	existing, err := getOrgService(ctx, in.OrgID, in.ServiceName)
 	switch {
 	case err == nil:
-		now := time.Now().UTC()
-		updates := map[string]any{
-			"enabled":     in.Enabled,
-			"kind":        in.Kind,
-			"config":      in.Config,
-			"image":       in.Image,
-			"port":        in.Port,
-			"description": in.Description,
-			"updated_at":  now,
+		updates, uerr := orgServiceUpdates(in, time.Now().UTC())
+		if uerr != nil {
+			span.RecordError(uerr)
+			span.SetStatus(codes.Error, uerr.Error())
+			return OrgService{}, uerr
 		}
 		// Only overwrite the encrypted DB URL when the caller supplied a new one,
 		// so a plain enable/disable/config change never drops it.

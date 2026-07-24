@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"sort"
 	"testing"
+	"time"
 )
 
 func ptr(o OrgService) *OrgService { return &o }
@@ -90,3 +92,51 @@ func TestCatalogView_DefaultDisabledThenRowDrives(t *testing.T) {
 	}
 }
 
+
+// A config update must reach the driver as JSON TEXT, not as a Go map. GORM applies
+// `serializer:json` only to struct writes, and upsertOrgService updates an explicit
+// column map (so a false Enabled survives), so the map must be marshalled by hand.
+// Regression: passing it through raw made pgx fail with "cannot find encode plan" on
+// EVERY config change — even one writing back an identical value — which silently
+// froze each service's config at whatever it was created with.
+func TestOrgServiceUpdates_ConfigIsJSONText(t *testing.T) {
+	now := time.Now().UTC()
+	up, err := orgServiceUpdates(OrgService{
+		Enabled: false, // must survive as an explicit column, not be dropped as a zero value
+		Kind:    kindPlatform,
+		Config:  map[string]any{"GIT_REPO_QUOTA_MB": "512", "LOG_LEVEL": "info"},
+	}, now)
+	if err != nil {
+		t.Fatalf("orgServiceUpdates: %v", err)
+	}
+
+	raw, ok := up["config"].(string)
+	if !ok {
+		t.Fatalf("config is %T, want string — a map reaches pgx unserialized and the update fails", up["config"])
+	}
+	var back map[string]any
+	if err := json.Unmarshal([]byte(raw), &back); err != nil {
+		t.Fatalf("config is not valid JSON (%q): %v", raw, err)
+	}
+	if back["GIT_REPO_QUOTA_MB"] != "512" || back["LOG_LEVEL"] != "info" {
+		t.Errorf("config round-trip lost values: %v", back)
+	}
+	if up["enabled"] != false {
+		t.Errorf("enabled = %v, want false to be written explicitly", up["enabled"])
+	}
+	if up["updated_at"] != now {
+		t.Errorf("updated_at = %v, want %v", up["updated_at"], now)
+	}
+}
+
+// A cleared config must still encode (to JSON null) rather than error, so an admin can
+// remove every key from a service without the write failing.
+func TestOrgServiceUpdates_NilConfigEncodes(t *testing.T) {
+	up, err := orgServiceUpdates(OrgService{Kind: kindPlatform}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("nil config must not error: %v", err)
+	}
+	if _, ok := up["config"].(string); !ok {
+		t.Fatalf("config is %T, want string", up["config"])
+	}
+}
