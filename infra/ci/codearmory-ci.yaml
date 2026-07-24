@@ -22,42 +22,78 @@ steps:
 - action: forge/create-volume
   name: gocache
   with:
-    workflow_id: ${run_id}
+    # NOT ${run_id}: a fixed workflow_id makes this volume outlive the run, the same trick
+    # gitcache uses. create-volume is idempotent on (workflow_id, name), so the first run
+    # provisions the PVC and every later run re-attaches it with the Go module cache AND the
+    # compile (build) cache intact — the build cache is what collapses the `test` step
+    # from minutes to seconds. This replaces the old restore/save-gocache artifact dance.
+    # Caveat: forge's reaper deletes volumes older than FORGE_VOLUME_MAX_AGE_SECS (default
+    # 2h), so the cache is periodically rebuilt; warm-cache handles a cold cache by
+    # re-downloading, so a reap costs one slow run, never a failure. Raise that env on the
+    # forge deployment to make the cache longer-lived.
+    workflow_id: codearmory-ci-gocache
     name: gocache
+    size_mb: 8192
+    medium: disk
+- action: forge/create-volume
+  name: gitcache
+  with:
+    # NOT ${run_id}: a fixed workflow_id is what makes this volume outlive the run.
+    # create-volume is idempotent on (workflow_id, name), so the first run provisions the
+    # PVC and every later run re-attaches the same one with its object store intact.
+    # Caveat: forge's reaper deletes volumes older than FORGE_VOLUME_MAX_AGE_SECS
+    # (default 2h), so the cache is periodically rebuilt — checkout handles a cold cache
+    # by cloning, so a reap costs one slow run, never a failure.
+    workflow_id: codearmory-ci-gitcache
+    name: gitcache
     size_mb: 4096
     medium: disk
-- action: forge/git-clone
+- action: forge/run
   name: checkout
-  timeout: 600
+  timeout: 900
   with:
-    run: 'true'
-    timeout: 600
-    checkout:
-      depth: 2
-      ref: ${inputs.HOOK_REF}
+    image: golang:1.25
+    runner_class: ci
+    timeout: 900
+    env:
+      HOOK_REF: ${inputs.HOOK_REF}
     secret_refs:
       GIT_CLONE_URL: git:http://192.168.53.171:3000/jp01/codearmory.git
     volumes:
+    - workflow_id: codearmory-ci-gitcache
+      name: gitcache
+      mount_path: /gitcache
     - workflow_id: ${run_id}
       name: workspace
       mount_path: /workspace
       workdir: true
-- action: forge/restore-artifact
-  name: restore-gocache
-  timeout: 900
-  with:
-    runner_class: ci
-    timeout: 900
-    volumes:
-    - workflow_id: ${run_id}
-      name: gocache
-      mount_path: /gocache
-      workdir: true
-    artifact:
-      mode: restore
-      name: codearmory-gocache
-      path: .
-      optional: true
+    run: |
+      set -eu
+      git config --global --add safe.directory /workspace
+      git config --global --add safe.directory /gitcache/repo.git
+      # 1. Keep a bare mirror on the cache volume. The full transfer happens only when the
+      # cache is cold (first run, or after the reaper); every other run pays an
+      # incremental fetch of just the new objects.
+      if [ -d /gitcache/repo.git ]; then
+        git -C /gitcache/repo.git remote set-url origin "$GIT_CLONE_URL"
+        git -C /gitcache/repo.git fetch --prune --quiet
+        echo '=== gitcache warm: incremental fetch ==='
+      else
+        git clone --mirror --quiet "$GIT_CLONE_URL" /gitcache/repo.git
+        echo '=== gitcache cold: full mirror cloned ==='
+      fi
+      du -sh /gitcache/repo.git
+      # 2. Check out from the LOCAL mirror rather than over the network: no pack
+      # negotiation and no delta recompression, git just reads objects off the volume.
+      # depth 2 keeps HEAD~1 present, which is exactly what discover's HEAD~1..HEAD diff
+      # needs — same working tree as the old forge/git-clone step produced.
+      cd /workspace
+      git init -q .
+      git remote add origin file:///gitcache/repo.git 2>/dev/null \
+        || git remote set-url origin file:///gitcache/repo.git
+      git fetch -q --depth 2 origin "+refs/heads/${HOOK_REF}:refs/remotes/origin/${HOOK_REF}"
+      git checkout -q -B "${HOOK_REF}" "refs/remotes/origin/${HOOK_REF}"
+      git --no-pager log --oneline -1
 - action: forge/run
   name: warm-cache
   timeout: 1800
@@ -74,7 +110,7 @@ steps:
       name: workspace
       mount_path: /workspace
       workdir: true
-    - workflow_id: ${run_id}
+    - workflow_id: codearmory-ci-gocache
       name: gocache
       mount_path: /gocache
     run: |
@@ -191,7 +227,7 @@ steps:
       GOFLAGS: -p=2
       GOMODCACHE: /gocache/mod
     volumes:
-    - workflow_id: ${run_id}
+    - workflow_id: codearmory-ci-gocache
       name: gocache
       mount_path: /gocache
     run: |
@@ -199,6 +235,14 @@ steps:
       cd "/workspace/src/systems/${map.svc}"
       echo "=== test ${map.svc} ==="
       go test ./...
+      # Build the release binary in the SAME pod, on the warm build cache `go test` just
+      # populated — nearly free (every dependency is already compiled). It lands in the
+      # workspace shard so the image step (which the map runs sequentially after this one,
+      # on the same shard) only COPYs it — kaniko never recompiles Go. A map region clones
+      # the workspace into ONE RWO shard per iteration, shared by the region's steps in
+      # sequence; a separate concurrent build step would multi-attach that shard and fail.
+      echo "=== build ${map.svc} ==="
+      CGO_ENABLED=0 go build -o "${map.svc}" .
 - action: forge/run
   name: test-extra
   map_id: per-extra
@@ -212,7 +256,7 @@ steps:
       GOFLAGS: -p=2
       GOMODCACHE: /gocache/mod
     volumes:
-    - workflow_id: ${run_id}
+    - workflow_id: codearmory-ci-gocache
       name: gocache
       mount_path: /gocache
     run: |
@@ -236,21 +280,6 @@ steps:
       cd /workspace/src/systems/portal
       npm ci
       npm test
-- action: forge/save-artifact
-  name: save-gocache
-  timeout: 900
-  with:
-    runner_class: ci
-    timeout: 900
-    volumes:
-    - workflow_id: ${run_id}
-      name: gocache
-      mount_path: /gocache
-      workdir: true
-    artifact:
-      mode: save
-      name: codearmory-gocache
-      path: mod
 - action: forge/build-image
   name: image
   map_id: per-service
@@ -262,7 +291,10 @@ steps:
       REGISTRY_AUTH: secret:forgejo-registry-auth
     build:
       context: /workspace/src/systems/${map.svc}
-      dockerfile: Dockerfile
+      # COPY-only image over the binary the `test` step built into this same workspace
+      # shard — see Dockerfile.ci. kaniko never compiles Go. The self-contained multi-stage
+      # ./Dockerfile stays for local `docker build`.
+      dockerfile: Dockerfile.ci
       destinations:
       - 192.168.53.171:3000/jp01/${map.svc}:${steps.commit.output.SHA}
       no_push: false
@@ -348,6 +380,9 @@ maps:
 - id: per-service
   var: svc
   values_from: ${steps.discover.output.IMAGES}
+  # allow_empty: a push that touches no buildable service yields an empty IMAGES; the
+  # mapped test/image steps must then skip cleanly rather than error.
+  allow_empty: true
   volume: workspace
   mount_path: /workspace
   size_mb: 512
@@ -356,6 +391,7 @@ maps:
 - id: per-extra
   var: module
   values_from: ${steps.discover.output.EXTRAS}
+  allow_empty: true
   volume: workspace
   mount_path: /workspace
   size_mb: 512
@@ -364,15 +400,15 @@ maps:
 routes:
 - from: workspace
   to: checkout
+- from: gitcache
+  to: checkout
 - from: gocache
-  to: restore-gocache
+  to: warm-cache
 - from: checkout
   to: commit
 - from: commit
   to: open-ticket
 - from: checkout
-  to: warm-cache
-- from: restore-gocache
   to: warm-cache
 - from: warm-cache
   to: discover
@@ -381,15 +417,11 @@ routes:
 - from: discover
   to: test
 - from: test
-  to: save-gocache
-- from: test
   to: image
 - from: test
   to: track-tested
 - from: discover
   to: test-extra
-- from: test-extra
-  to: save-gocache
 - from: test-extra
   to: fail-ticket
   when: steps["test-extra"].status == 'failed'

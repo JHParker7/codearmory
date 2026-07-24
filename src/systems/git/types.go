@@ -40,8 +40,14 @@ type GitBackend struct {
 	Host      string    `gorm:"uniqueIndex:ux_git_owner_host" json:"host"`
 	AuthMode  string    `json:"auth_mode"`
 	AuthEnc   []byte    `json:"-"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	// PreferMirror opts this backend into git-factory's pull-through cache: on the
+	// INTERNAL clone-token path (Forge/Workflows), the broker asks git-factory to keep a
+	// warm mirror of the repo and returns git-factory's clone URL instead of upstream's,
+	// so runners clone from the in-cluster cache. Off by default — a backend is only
+	// mirrored when the user asks — and never affects the user-facing /credentials path.
+	PreferMirror bool      `gorm:"default:false" json:"prefer_mirror"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // authConfig is the decrypted credential material for a backend. Only the fields
@@ -123,26 +129,28 @@ type createRepoRequest struct {
 
 // backendView is the safe, secret-free projection returned by the API.
 type backendView struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	BaseURL   string    `json:"base_url"`
-	Host      string    `json:"host"`
-	AuthMode  string    `json:"auth_mode"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Type         string    `json:"type"`
+	BaseURL      string    `json:"base_url"`
+	Host         string    `json:"host"`
+	AuthMode     string    `json:"auth_mode"`
+	PreferMirror bool      `json:"prefer_mirror"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 func (b GitBackend) view() backendView {
 	return backendView{
-		ID:        b.ID,
-		Name:      b.Name,
-		Type:      b.Type,
-		BaseURL:   b.BaseURL,
-		Host:      b.Host,
-		AuthMode:  b.AuthMode,
-		CreatedAt: b.CreatedAt,
-		UpdatedAt: b.UpdatedAt,
+		ID:           b.ID,
+		Name:         b.Name,
+		Type:         b.Type,
+		BaseURL:      b.BaseURL,
+		Host:         b.Host,
+		AuthMode:     b.AuthMode,
+		PreferMirror: b.PreferMirror,
+		CreatedAt:    b.CreatedAt,
+		UpdatedAt:    b.UpdatedAt,
 	}
 }
 
@@ -152,13 +160,17 @@ type createBackendRequest struct {
 	Type    string     `json:"type"`
 	BaseURL string     `json:"base_url"`
 	Auth    authConfig `json:"auth"`
+	// PreferMirror opts the backend into git-factory's pull-through cache (default off).
+	PreferMirror bool `json:"prefer_mirror"`
 }
 
-// updateBackendRequest is the body of PUT /backends/{id}. Only base_url and auth
-// may change; the host derived from base_url must not collide with another backend.
+// updateBackendRequest is the body of PUT /backends/{id}. Only base_url, auth, and the
+// mirror preference may change; the host derived from base_url must not collide with
+// another backend. PreferMirror is a pointer so "omitted" is distinct from "set false".
 type updateBackendRequest struct {
-	BaseURL string      `json:"base_url"`
-	Auth    *authConfig `json:"auth"`
+	BaseURL      string      `json:"base_url"`
+	Auth         *authConfig `json:"auth"`
+	PreferMirror *bool       `json:"prefer_mirror"`
 }
 
 // credential is the broker's response: an authenticated clone URL plus the raw

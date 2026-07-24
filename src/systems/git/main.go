@@ -25,6 +25,11 @@ var (
 	// internalKey authenticates forge/workflows → /internal/clone-token calls
 	// (sent as X-Internal-Key). Empty disables the internal endpoint.
 	internalKey = secret("GIT_INTERNAL_KEY")
+	// gitFactoryURL/gitFactoryKey reach git-factory's internal mirror surface. Both must
+	// be set for a PreferMirror backend to be served from the cache; otherwise the broker
+	// silently returns the upstream URL (the feature degrades to today's behaviour).
+	gitFactoryURL = strings.TrimRight(envOrDefault("GIT_FACTORY_URL", ""), "/")
+	gitFactoryKey = secret("GIT_FACTORY_INTERNAL_KEY")
 )
 
 func envOrDefault(key, def string) string {
