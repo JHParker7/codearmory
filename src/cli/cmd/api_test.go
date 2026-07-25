@@ -336,6 +336,10 @@ func TestBearerTokenSentOnAllRequests(t *testing.T) {
 }
 
 func TestNoTokenOnPublicEndpoints(t *testing.T) {
+	// Isolate HOME and clear the env token so bearerToken's config-file fallback can't
+	// pick up a real developer token and add an Authorization header.
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
 	srv, rec := recordingServer(t, http.StatusOK, `{"token":"x"}`)
 	setupCLINoToken(t, srv)
 	silenceStdout(t)

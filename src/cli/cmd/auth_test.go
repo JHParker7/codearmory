@@ -222,9 +222,10 @@ func TestAuthStatus_KeychainToken(t *testing.T) {
 	}
 }
 
-func TestLogin_KeychainUnavailable_NoPlaintext(t *testing.T) {
-	// When the keychain is unavailable, login must still succeed but must NOT write a
-	// plaintext token — it prints an `export CODEARMORY_TOKEN=…` line instead.
+func TestLogin_KeychainUnavailable_PersistsToConfig(t *testing.T) {
+	// When the keychain is unavailable (e.g. a headless host), login must still succeed
+	// and persist the token to the owner-only (0600) config file, so later commands pick
+	// it up automatically without a manual `export`. bearerToken then reads it back.
 	keyring.MockInitWithError(fmt.Errorf("keyring unavailable"))
 	t.Cleanup(func() { keyring.MockInit() })
 	isolateHome(t)
@@ -246,8 +247,15 @@ func TestLogin_KeychainUnavailable_NoPlaintext(t *testing.T) {
 	if err := loginCmd.RunE(loginCmd, nil); err != nil {
 		t.Fatalf("login should succeed on a keychain-less host, got %v", err)
 	}
-	if cfg := loadConfig(); cfg.Token != "" {
-		t.Errorf("login wrote a plaintext token %q; it must never persist the token to disk", cfg.Token)
+	if cfg := loadConfig(); cfg.Token != "jwt-from-server" {
+		t.Errorf("login must persist the token to the config file on a keychain-less host; got %q", cfg.Token)
+	}
+	// The persisted token must be readable back for subsequent commands.
+	t.Setenv("CODEARMORY_TOKEN", "")
+	flagToken = ""
+	t.Cleanup(func() { flagToken = "" })
+	if got := bearerToken(); got != "jwt-from-server" {
+		t.Errorf("bearerToken must read the persisted config token; got %q", got)
 	}
 }
 
