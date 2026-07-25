@@ -170,6 +170,48 @@ It does **not** provide an in-VM Docker daemon; to build container images use fo
 built-in daemonless image build (BuildKit on kata), which needs no daemon or host
 socket. The egress proxy / NetworkPolicy isolation applies to privileged jobs too.
 
+## Faster boots with VM templating (`kata-qemu`)
+
+Every kata job boots a fresh guest kernel. Under **QEMU** you can cut most of that
+guest-boot cost with Kata's **VM templating (factory)**: the node boots *one* base
+microVM once, snapshots it, and clones each job's VM from that pre-booted template
+(copy-on-write memory) instead of cold-booting from scratch. On busy nodes this is
+the single biggest win on kata start latency.
+
+**This is a node-side Kata setting — it needs no Forge or Helm code change.** Forge
+sets `runtimeClassName` straight from the backend's `runtime_class` config and injects
+no kata pod annotations, so every sandbox VM uses Kata's uniform default config — which
+is exactly the uniformity templating requires. Point a backend at `kata-qemu` (step 2)
+and enable the factory on the nodes:
+
+1. **QEMU only.** Templating lives in `configuration-qemu.toml`'s `[factory]` section;
+   `kata-clh` (Cloud Hypervisor) and `kata-fc` (Firecracker) have no factory support.
+   Use a `kata-qemu` RuntimeClass for the templated backend.
+2. On each Kata-capable node, in `/opt/kata/share/defaults/kata-containers/configuration-qemu.toml`:
+   ```toml
+   [factory]
+   enable_template = true
+   ```
+   then initialise the factory VM once per node:
+   ```bash
+   kata-runtime factory init      # boots + snapshots the base VM; run per node (e.g. via kata-deploy DaemonSet)
+   kata-runtime factory status    # verify the template is live
+   ```
+3. **Size the factory to match the pods.** The template's `default_memory` /
+   `default_vcpus` are the *base* every clone starts from; per-runner-class `memory_mb`
+   / `cpu_millicores` above that are satisfied by Kata **hotplug** on top of the clone.
+   Keep the factory defaults at (or just below) your common runner-class size so most
+   jobs clone without extra hotplug.
+
+Caveats:
+
+- Templating snapshots the **guest-boot** portion only — it does not speed up per-pod
+  rootfs/image setup or pod scheduling. **Measure boot before/after** on your cluster
+  (compare pod `Initialized`→container-start timing) rather than assuming a fixed win;
+  the payoff scales with how much of your start time is guest boot vs. image pull.
+- The factory VM must be re-initialised if the node reboots or the kata config changes;
+  driving `factory init` from the `kata-deploy` DaemonSet keeps it in sync.
+
 ## Notes & limits
 
 - **Image and command** work exactly as for the kubernetes backend — the submitted
@@ -177,7 +219,8 @@ socket. The egress proxy / NetworkPolicy isolation applies to privileged jobs to
   `ALLOWED_IMAGES` allowlist.
 - **Boot latency.** Each job boots a microVM (typically tens to a few hundred ms,
   VMM-dependent) on top of normal pod scheduling — slower to start than a plain
-  container, far faster than booting a full VM.
+  container, far faster than booting a full VM. On QEMU, **VM templating** amortizes
+  most of the guest-boot cost across jobs — see *Faster boots with VM templating* above.
 - **Node support is operator responsibility.** If a node lacks `/dev/kvm` or the
   Kata binaries, pods scheduled there fail to start; that surfaces as a per-job
   failure, not a worker crash. Constrain scheduling (taints/affinity) to Kata-capable
