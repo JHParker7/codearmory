@@ -174,17 +174,35 @@ process via ` + "`ps`" + ` and lands in the shell history. Pipe it or use the en
 			}
 		}
 
-		password, err := resolvePassword(passwordStdin)
-		if err != nil {
-			return fmt.Errorf("reading password: %w", err)
+		// Interactive password entry gets up to 3 tries; an unattended password
+		// (--password-stdin or CODEARMORY_PASSWORD) is read once — re-prompting it makes
+		// no sense and would only burn the login rate limit. gatekeeper's login limiter
+		// defaults to 5/min, so 3 tries stays safely under it.
+		interactive := !passwordStdin && os.Getenv(envPassword) == "" && stdinIsTerminal()
+		attempts := 1
+		if interactive {
+			attempts = 3
 		}
-		if password == "" {
-			return fmt.Errorf("password is empty")
-		}
-		body, _ := json.Marshal(map[string]string{"email": email, "password": password})
-		data, err := doRequest("POST", "/gatekeeper/login", body)
-		if err != nil {
-			return err
+		var data []byte
+		for i := 0; ; i++ {
+			password, err := resolvePassword(passwordStdin)
+			if err != nil {
+				return fmt.Errorf("reading password: %w", err)
+			}
+			if password == "" {
+				return fmt.Errorf("password is empty")
+			}
+			body, _ := json.Marshal(map[string]string{"email": email, "password": password})
+			data, err = doRequest("POST", "/gatekeeper/login", body)
+			if err == nil {
+				break
+			}
+			// Re-prompt only on an interactive credential rejection (HTTP 401) while
+			// tries remain; any other error (network, rate limit, 5xx) returns at once.
+			if !interactive || !strings.Contains(err.Error(), "HTTP 401") || i >= attempts-1 {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "Login failed: invalid credentials. %d attempt(s) remaining.\n", attempts-1-i)
 		}
 		var resp struct {
 			Token string `json:"token"`

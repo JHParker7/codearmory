@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -392,5 +393,106 @@ func TestAuthStatus_ValidToken(t *testing.T) {
 	}
 	if !strings.Contains(out, "expires in") {
 		t.Errorf("authStatusCmd output should show expiry time, got: %q", out)
+	}
+}
+
+// loginRetryServer returns an httptest server whose /login answers 401 for the first
+// failN calls, then 200 with a token. loginHits counts the calls.
+func loginRetryServer(t *testing.T, failN int) (*httptest.Server, *int) {
+	t.Helper()
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/login") {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		hits++
+		if hits <= failN {
+			http.Error(w, "invalid credentials", http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"token":"good-jwt"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+func TestLogin_InteractiveRetriesPasswordUpTo3Times(t *testing.T) {
+	// A wrong password is re-prompted; login succeeds on the 3rd try.
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	silenceStdout(t)
+
+	srv, hits := loginRetryServer(t, 2) // fail twice, then succeed
+	setupCLINoToken(t, srv)
+	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
+
+	pwCalls := 0
+	origPw := readPassword
+	readPassword = func() (string, error) { pwCalls++; return "pw", nil }
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { readPassword = origPw; stdinIsTerminal = origTerm })
+
+	if err := loginCmd.RunE(loginCmd, nil); err != nil {
+		t.Fatalf("login should succeed on the 3rd attempt, got %v", err)
+	}
+	if *hits != 3 {
+		t.Errorf("login endpoint hit %d times, want 3", *hits)
+	}
+	if pwCalls != 3 {
+		t.Errorf("password prompted %d times, want 3", pwCalls)
+	}
+}
+
+func TestLogin_InteractiveGivesUpAfter3(t *testing.T) {
+	// After 3 wrong tries login fails and does not prompt a 4th time.
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	silenceStdout(t)
+
+	srv, hits := loginRetryServer(t, 99) // always fail
+	setupCLINoToken(t, srv)
+	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
+
+	pwCalls := 0
+	origPw := readPassword
+	readPassword = func() (string, error) { pwCalls++; return "pw", nil }
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { readPassword = origPw; stdinIsTerminal = origTerm })
+
+	if err := loginCmd.RunE(loginCmd, nil); err == nil {
+		t.Fatal("login should fail after 3 bad attempts")
+	}
+	if *hits != 3 || pwCalls != 3 {
+		t.Errorf("attempts = %d hits / %d prompts, want 3 / 3 (no 4th try)", *hits, pwCalls)
+	}
+}
+
+func TestLogin_UnattendedPasswordDoesNotRetry(t *testing.T) {
+	// A password from CODEARMORY_PASSWORD is tried exactly once — retrying an env/piped
+	// secret is pointless and would only burn the login rate limit.
+	keyring.MockInit()
+	isolateHome(t)
+	t.Setenv("CODEARMORY_TOKEN", "")
+	t.Setenv("CODEARMORY_PASSWORD", "pw")
+	silenceStdout(t)
+
+	srv, hits := loginRetryServer(t, 99) // always fail
+	setupCLINoToken(t, srv)
+	loginCmd.Flags().Set("email", "user@example.com") //nolint:errcheck
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true } // terminal present, but env password wins
+	t.Cleanup(func() { stdinIsTerminal = origTerm })
+
+	if err := loginCmd.RunE(loginCmd, nil); err == nil {
+		t.Fatal("login should fail with a bad env password")
+	}
+	if *hits != 1 {
+		t.Errorf("login endpoint hit %d times, want 1 (no retry for an unattended password)", *hits)
 	}
 }
