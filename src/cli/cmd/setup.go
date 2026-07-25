@@ -78,6 +78,14 @@ For a TUI form, use ` + "`armory settings`" + `.`,
 		if urlVal == "" {
 			return fmt.Errorf("conductor URL is required")
 		}
+		// The URL the user just chose is authoritative for the rest of setup: the
+		// connectivity check and login below must hit it. conductorURL() resolves in
+		// the order flagURL → CODEARMORY_URL env → config, so without this a stale
+		// CODEARMORY_URL env var (or the setup --url landing in the command-local
+		// flagSetupURL, which shadows the root --url) silently wins and setup appears
+		// to ignore the URL it just saved. Propagate it into flagURL so it takes
+		// precedence for this process.
+		flagURL = urlVal
 
 		cfg := loadConfig()
 		cfg.URL = urlVal

@@ -94,6 +94,13 @@ func handleInternalCloneToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not build clone url", http.StatusBadGateway)
 		return
 	}
+	// Opt-in pull-through cache: for a PreferMirror backend, hand back git-factory's
+	// warm in-cluster URL instead of upstream's. Best-effort — an empty result means the
+	// mirror is off/unreachable and we keep the upstream URL, so clones never break.
+	if mirrorURL, mirrorExp := maybeMirrorCloneURL(ctx, req.UserID, req.RepoURL, cred); mirrorURL != "" {
+		cred.CloneURL = mirrorURL
+		cred.ExpiresAt = mirrorExp
+	}
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"clone_url":  cred.CloneURL,

@@ -158,6 +158,17 @@ func handleCreateVolume(reg *runtimeRegistry) http.HandlerFunc {
 				writeJSON(w, http.StatusOK, existing)
 				return
 			}
+			// Not a race: a soft-deleted row is still holding this deterministic
+			// resource_name (the reaper removed the backend resource but kept the row),
+			// which blocks the insert forever. Revive it so a reused volume name — a
+			// cache shared across runs — can be recreated instead of being permanently
+			// wedged. See reviveDeletedVolume.
+			if revived, rerr := reviveDeletedVolume(ctx, vol); rerr == nil {
+				span.SetStatus(codes.Ok, "")
+				slog.InfoContext(ctx, "volume revived (reused name after reap)", "user_id", userID, "resource_name", resourceName, "workflow_id", req.WorkflowID)
+				writeJSON(w, http.StatusCreated, revived)
+				return
+			}
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "db insert failed")
 			slog.ErrorContext(ctx, "create volume: db error", "user_id", userID, "resource_name", resourceName, "error", err)

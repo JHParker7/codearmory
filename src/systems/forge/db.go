@@ -881,6 +881,46 @@ func markVolumeDeleted(ctx context.Context, resourceName string) error {
 	).Error
 }
 
+// reviveDeletedVolume flips a soft-deleted row back to active and re-stamps its spec.
+//
+// This is what makes a REUSED volume name recoverable. markVolumeDeleted keeps the row
+// (its primary key is resource_name) so a double-delete stays a no-op, and
+// getActiveVolume only matches status=active — so a later create of the same
+// (workflow_id, name) finds nothing and takes the insert path. But resource_name is
+// derived deterministically from those very fields, so the insert collides on the
+// primary key and fails. Without this, a volume name is permanently unusable once the
+// reaper has removed it: fatal for any long-lived volume whose name is stable by
+// design, such as a cache shared across runs. Fresh runs never hit it because their
+// workflow_id is a new UUID each time, which is why it went unnoticed.
+//
+// Returns gorm.ErrRecordNotFound when there is no deleted row to revive, so the caller
+// can fall through to its normal error handling.
+func reviveDeletedVolume(ctx context.Context, v Volume) (Volume, error) {
+	res := connect().WithContext(ctx).Model(&Volume{}).
+		Where("resource_name = ? AND status = ?", v.ResourceName, volumeStatusDeleted).
+		Updates(map[string]any{
+			"workflow_id": v.WorkflowID,
+			"name":        v.Name,
+			"user_id":     v.UserID,
+			"org_id":      v.OrgID,
+			"backend":     v.Backend,
+			"size_mb":     v.SizeMB,
+			"medium":      v.Medium,
+			"mount_path":  v.MountPath,
+			"status":      volumeStatusActive,
+			// Re-stamp the clock: the reaper ages volumes from created_at, and a
+			// revived volume is new storage, not the old one still ticking.
+			"created_at": time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return Volume{}, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return Volume{}, gorm.ErrRecordNotFound
+	}
+	return getActiveVolume(ctx, v.WorkflowID, v.Name)
+}
+
 // listReapableVolumes returns active volumes created before cutoff — orphans whose
 // workflow ended without tearing them down. The reaper deletes their backend
 // resource then marks the row deleted.
