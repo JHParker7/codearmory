@@ -10,8 +10,9 @@
  * close/reopen, and delete. The create/edit form (TicketFormModal) exposes the
  * same fields, matching the CLI board form. Data via the bff.
  */
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useUrlParam } from '../../hooks/useUrlState';
+import { loadDraft, saveDraft, clearDraft } from '../../draftStorage';
 import type { CSSProperties } from 'react';
 import { T } from '../../theme';
 import { useResizableWidth } from '../../components/ResizeHandle';
@@ -116,17 +117,65 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOp
   const token = useAppSelector(s => s.auth.token)!;
   // Status columns left-to-right; a new ticket defaults to the left-most.
   const ordered = useMemo(() => [...statuses].sort((a, b) => a.position - b.position), [statuses]);
-  const [title, setTitle] = useState(ticket?.title ?? '');
-  const [description, setDescription] = useState(ticket?.description ?? '');
-  const [priority, setPriority] = useState(ticket?.priority ?? 'medium');
-  const [status, setStatus] = useState(ticket?.status ?? ordered[0]?.value ?? 'open');
-  const [timescale, setTimescale] = useState(ticket?.timescale ?? '');
-  const [dueDate, setDueDate] = useState(ticket?.due_date ? ticket.due_date.slice(0, 10) : '');
-  const [assigneeId, setAssigneeId] = useState(ticket?.assignee_id ?? '');
-  const [parent, setParent] = useState(ticket?.parent_id ?? '');
-  const [project, setProject] = useState(ticket?.project ?? '');
+
+  // ── Draft persistence ─────────────────────────────────────────────────────────
+  // An in-progress ticket write-up lives only in this modal's state, so a refresh
+  // (or a connection blip that bounces the app to sign-in) used to discard it. Mirror
+  // the form to localStorage keyed by the ticket being edited (or the board for a new
+  // one), restore it when the modal reopens, and clear it once the ticket is saved.
+  const draftKey = `ci.ticket.draft:${mode}:${ticket?.ticket_id ?? boardId ?? 'new'}`;
+  const baseline = useMemo(() => ({
+    title: ticket?.title ?? '',
+    description: ticket?.description ?? '',
+    priority: ticket?.priority ?? 'medium',
+    status: ticket?.status ?? ordered[0]?.value ?? 'open',
+    timescale: ticket?.timescale ?? '',
+    dueDate: ticket?.due_date ? ticket.due_date.slice(0, 10) : '',
+    assigneeId: ticket?.assignee_id ?? '',
+    parent: ticket?.parent_id ?? '',
+    project: ticket?.project ?? '',
+  }), [ticket, ordered]);
+  // Read any saved draft once, on first render, and seed the fields from it. Only a
+  // draft that actually differs from the saved values counts as one to restore.
+  const seed = useRef<typeof baseline | null>(null);
+  const seededFromDraft = useRef(false);
+  if (seed.current === null) {
+    const raw = loadDraft(draftKey);
+    let d: typeof baseline | null = null;
+    if (raw) { try { const p = JSON.parse(raw); if (p && typeof p === 'object') d = { ...baseline, ...p }; } catch { /* stale/corrupt draft — ignore */ } }
+    if (d && JSON.stringify(d) !== JSON.stringify(baseline)) { seed.current = d; seededFromDraft.current = true; }
+    else seed.current = baseline;
+  }
+  const init = seed.current;
+  const [title, setTitle] = useState(init.title);
+  const [description, setDescription] = useState(init.description);
+  const [priority, setPriority] = useState(init.priority);
+  const [status, setStatus] = useState(init.status);
+  const [timescale, setTimescale] = useState(init.timescale);
+  const [dueDate, setDueDate] = useState(init.dueDate);
+  const [assigneeId, setAssigneeId] = useState(init.assigneeId);
+  const [parent, setParent] = useState(init.parent);
+  const [project, setProject] = useState(init.project);
+  const [restoredDraft, setRestoredDraft] = useState(seededFromDraft.current);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Mirror the form to storage whenever it diverges from the saved baseline; clear
+  // the draft when it matches, so there's nothing stale to restore next time.
+  const baselineNorm = useMemo(() => JSON.stringify(baseline), [baseline]);
+  useEffect(() => {
+    const current = JSON.stringify({ title, description, priority, status, timescale, dueDate, assigneeId, parent, project });
+    if (current !== baselineNorm) saveDraft(draftKey, current);
+    else clearDraft(draftKey);
+  }, [title, description, priority, status, timescale, dueDate, assigneeId, parent, project, draftKey, baselineNorm]);
+
+  // Discard the restored draft and snap the form back to the saved values.
+  const discardDraft = () => {
+    setTitle(baseline.title); setDescription(baseline.description); setPriority(baseline.priority);
+    setStatus(baseline.status); setTimescale(baseline.timescale); setDueDate(baseline.dueDate);
+    setAssigneeId(baseline.assigneeId); setParent(baseline.parent); setProject(baseline.project);
+    clearDraft(draftKey); setRestoredDraft(false);
+  };
 
   // This board's own priority options (per-board, never merged across boards), plus
   // the ticket's current value if it isn't among them so an edit never silently
@@ -145,18 +194,22 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOp
     try {
       if (mode === 'edit' && ticket) {
         // "" clears the due date / unassigns; timescale "" is ignored server-side.
-        onSaved(await updateTicket(token, ticket.ticket_id, {
+        const saved = await updateTicket(token, ticket.ticket_id, {
           title: title.trim(), description: description.trim(), status, priority,
           timescale: timescale.trim(), due_date: dueDate, assignee_id: assigneeId, parent_id: parent,
           project: project.trim(),
-        }));
+        });
+        clearDraft(draftKey); // the write-up is saved server-side now — drop the local draft
+        onSaved(saved);
       } else {
         // Place the new ticket on the active board so it shows up where the user is looking.
-        onSaved(await createTicket(token, {
+        const saved = await createTicket(token, {
           title: title.trim(), description: description.trim() || undefined, status, priority, board_id: boardId,
           timescale: timescale.trim() || undefined, due_date: dueDate || undefined, assignee_id: assigneeId || undefined,
           parent_id: parent || undefined, project: project.trim() || undefined,
-        }));
+        });
+        clearDraft(draftKey);
+        onSaved(saved);
       }
     } catch (e: unknown) {
       setError((e as Error).message);
@@ -178,6 +231,12 @@ function TicketFormModal({ mode, ticket, boardId, statuses, priorities, parentOp
         </div>
         <div style={{ padding: '16px 20px' }}>
           {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>{error}</div>}
+          {restoredDraft && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, background: T.amberSoft, border: `1px solid ${T.amber}`, padding: '7px 12px', fontFamily: T.mono, fontSize: 11, color: T.amber, marginBottom: 12 }}>
+              <span>↺ restored an unsaved draft</span>
+              <button onClick={discardDraft} style={{ background: 'transparent', border: `1px solid ${T.amber}`, color: T.amber, fontFamily: T.mono, fontSize: 10, padding: '2px 8px', cursor: 'pointer' }}>discard</button>
+            </div>
+          )}
           <div style={{ marginBottom: 12 }}>
             {fieldLabel('TITLE')}
             <input value={title} onChange={e => setTitle(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSubmit()} autoFocus
