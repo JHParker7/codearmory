@@ -6,8 +6,9 @@
  * createExecution / listRunnerClasses / listRuntimeBackends / …); write actions are
  * gated by the forge:createRunnerClass and forge:createRuntimeBackend permissions.
  */
-import { useState, useEffect, useCallback, type CSSProperties } from 'react';
+import { useState, useEffect, useCallback, useMemo, type CSSProperties } from 'react';
 import { useUrlState, useUrlParam } from '../../hooks/useUrlState';
+import { useDraftSeed, useDraftPersist, clearDraft } from '../../hooks/useFormDraft';
 import { T } from '../../theme';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
@@ -84,20 +85,40 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
   onClose: () => void;
   onSubmit: (input: ExecutionInput) => Promise<void>;
 }) {
-  const [image, setImage] = useState('');
-  const [cmd, setCmd] = useState('');
-  const [envStr, setEnvStr] = useState('');
-  const [repoUrl, setRepoUrl] = useState('');
+  // ── Draft persistence ─────────────────────────────────────────────────────────
+  // Keep an in-progress execution (the command a user is composing, the image/repo
+  // they picked) across a refresh. ENV is deliberately NOT persisted — it can carry
+  // secrets, and plaintext in localStorage is XSS-readable.
+  const DRAFT_KEY = 'ci.forge.run.draft';
+  const draftBaseline = useMemo(() => ({
+    image: '', cmd: '', repoUrl: '', checkout: false, checkoutPath: '', checkoutRef: '', timeout: '', runnerClass: '',
+  }), []);
+  const { initial: draftInit, restored } = useDraftSeed(DRAFT_KEY, draftBaseline);
+
+  const [image, setImage] = useState(draftInit.image);
+  const [cmd, setCmd] = useState(draftInit.cmd);
+  const [envStr, setEnvStr] = useState(''); // never persisted — may contain secrets
+  const [repoUrl, setRepoUrl] = useState(draftInit.repoUrl);
   // Checkout: when on, forge clones the selected repo into the working dir and cd's
   // into it before the command runs (actions/checkout-style). Only meaningful with a
   // repo selected. checkoutPath overrides the clone dir (blank = derived repo name);
   // checkoutRef picks the branch/tag to clone (blank = the remote's default branch).
-  const [checkout, setCheckout] = useState(false);
-  const [checkoutPath, setCheckoutPath] = useState('');
-  const [checkoutRef, setCheckoutRef] = useState('');
-  const [timeout, setTimeout_] = useState('');
-  const [runnerClass, setRunnerClass] = useState('');
+  const [checkout, setCheckout] = useState(draftInit.checkout);
+  const [checkoutPath, setCheckoutPath] = useState(draftInit.checkoutPath);
+  const [checkoutRef, setCheckoutRef] = useState(draftInit.checkoutRef);
+  const [timeout, setTimeout_] = useState(draftInit.timeout);
+  const [runnerClass, setRunnerClass] = useState(draftInit.runnerClass);
+  const [restoredDraft, setRestoredDraft] = useState(restored);
   const [submitting, setSubmitting] = useState(false);
+
+  useDraftPersist(DRAFT_KEY, draftBaseline, { image, cmd, repoUrl, checkout, checkoutPath, checkoutRef, timeout, runnerClass });
+
+  // Discard the restored draft and snap the form back to empty (env is left alone).
+  const discardDraft = () => {
+    setImage(''); setCmd(''); setRepoUrl(''); setCheckout(false);
+    setCheckoutPath(''); setCheckoutRef(''); setTimeout_(''); setRunnerClass('');
+    clearDraft(DRAFT_KEY); setRestoredDraft(false);
+  };
   const [createError, setCreateError] = useState<string | null>(null);
   const [imageOptions, setImageOptions] = useState<string[]>([]);
   const [repos, setRepos] = useState<GitRepo[]>([]);
@@ -146,6 +167,7 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
           ...(checkoutRef.trim() ? { ref: checkoutRef.trim() } : {}),
         } : undefined,
       });
+      clearDraft(DRAFT_KEY); // the execution is dispatched — drop the local draft
     } catch (e: unknown) { setCreateError((e as Error).message); }
     finally { setSubmitting(false); }
   };
@@ -164,6 +186,12 @@ function CreateExecutionModal({ token, runnerClasses, onClose, onSubmit }: {
 
         <div style={{ padding: '18px 20px 16px' }}>
           {createError && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 11, marginBottom: 12 }}>{createError}</div>}
+          {restoredDraft && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, background: T.amberSoft, border: `1px solid ${T.amber}`, padding: '7px 12px', fontFamily: T.mono, fontSize: 11, color: T.amber, marginBottom: 12 }}>
+              <span>↺ restored an unsaved draft</span>
+              <button onClick={discardDraft} style={{ background: 'transparent', border: `1px solid ${T.amber}`, color: T.amber, fontFamily: T.mono, fontSize: 10, padding: '2px 8px', cursor: 'pointer' }}>discard</button>
+            </div>
+          )}
 
           <div style={label}>IMAGE</div>
           <div style={{ marginBottom: 14 }}>
