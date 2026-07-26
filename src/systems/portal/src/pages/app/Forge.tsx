@@ -7,6 +7,7 @@
  * gated by the forge:createRunnerClass and forge:createRuntimeBackend permissions.
  */
 import { useState, useEffect, useCallback, type CSSProperties } from 'react';
+import { useUrlState, useUrlParam } from '../../hooks/useUrlState';
 import { T } from '../../theme';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppSelector } from '../../store/hooks';
@@ -246,8 +247,8 @@ function ExecutionsTab() {
   const [runnerClasses, setRunnerClasses] = useState<RunnerClass[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [outputTab, setOutputTab] = useState<'stdout' | 'stderr'>('stdout');
+  const [selected, setSelected] = useUrlParam('run');
+  const [outputTab, setOutputTab] = useUrlState<'stdout' | 'stderr'>('otab', 'stdout');
 
   const [showCreate, setShowCreate] = useState(false);
 
@@ -919,7 +920,7 @@ function RuntimeBackendsTab() {
 
 /** Forge route: tabbed shell switching between the executions, runner-classes and runtime-backends tabs. */
 export function Forge() {
-  const [tab, setTab] = useState<ForgeTab>('executions');
+  const [tab, setTab] = useUrlState<ForgeTab>('tab', 'executions');
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden', flexDirection: 'column' }}>

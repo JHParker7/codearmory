@@ -11,6 +11,7 @@
  * same fields, matching the CLI board form. Data via the bff.
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useUrlParam } from '../../hooks/useUrlState';
 import type { CSSProperties } from 'react';
 import { T } from '../../theme';
 import { useResizableWidth } from '../../components/ResizeHandle';
@@ -410,7 +411,7 @@ export function Tickets() {
   const [board, setBoard] = useState<string | null>(() => localStorage.getItem(LAST_BOARD_KEY));
   // When on, the board switcher lists only boards that have at least one open ticket.
   const [openBoardsOnly, setOpenBoardsOnly] = useState(false);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useUrlParam('ticket');
   const [showCreate, setShowCreate] = useState(false);
   // The ticket currently being edited in the form modal (null = not editing), plus
   // the status columns of that ticket's own board — which can differ from the board

@@ -4,6 +4,7 @@
  * deleting a manifest by digest when permitted. data via the bff.
  */
 import { useState, useEffect, useCallback } from 'react';
+import { useUrlState, useUrlParam } from '../../hooks/useUrlState';
 import { T } from '../../theme';
 import { useResizableWidth } from '../../components/ResizeHandle';
 import { useConfirm } from '../../components/ConfirmDialog';
@@ -22,11 +23,12 @@ export function Containers() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ContainerRepo | null>(null);
-  const [tab, setTab] = useState<RepoTab>('tags');
+  const [selFull, setSelFull] = useUrlParam('repo');
+  const [tab, setTab] = useUrlState<RepoTab>('tab', 'tags');
 
   const [tags, setTags] = useState<ImageTag[]>([]);
   const [tagsLoading, setTagsLoading] = useState(false);
-  const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [selectedTag, setSelectedTag] = useUrlParam('tag');
   const [manifest, setManifest] = useState<ImageManifest | null>(null);
   const [manifestLoading, setManifestLoading] = useState(false);
   const [manifestError, setManifestError] = useState<string | null>(null);
@@ -48,6 +50,7 @@ export function Containers() {
 
   const selectRepo = useCallback(async (repo: ContainerRepo) => {
     setSelected(repo);
+    setSelFull(repo.full_name); // mirror the selection into the URL so a refresh reopens it
     setTab('tags');
     setSelectedTag(null);
     setManifest(null);
@@ -59,7 +62,14 @@ export function Containers() {
     } finally {
       setTagsLoading(false);
     }
-  }, [token]);
+  }, [token, setSelFull, setTab, setSelectedTag]);
+
+  // Reopen the repo named in the URL once the list has loaded (e.g. after a refresh).
+  useEffect(() => {
+    if (selected || !selFull || repos.length === 0) return;
+    const r = repos.find((x) => x.full_name === selFull);
+    if (r) selectRepo(r);
+  }, [selected, selFull, repos, selectRepo]);
 
   const viewManifest = useCallback(async (ref: string) => {
     if (!selected) return;

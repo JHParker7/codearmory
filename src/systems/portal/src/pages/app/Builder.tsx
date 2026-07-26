@@ -8,6 +8,7 @@
  * builder/orgs/default, which only the wildcard admin matches).
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useUrlParam } from '../../hooks/useUrlState';
 import type { ReactNode } from 'react';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
@@ -160,7 +161,7 @@ export function Builder() {
   const [services, setServices] = useState<OrgService[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useUrlParam('sel');
   const [busy, setBusy] = useState<string | null>(null);
   const [confirm, confirmEl] = useConfirm();
   const [railW, railHandle] = useResizableWidth('rail.builder.services', 280, { min: 240, max: 560 });

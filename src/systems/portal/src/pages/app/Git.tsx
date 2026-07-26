@@ -8,6 +8,7 @@
  * mintGitCredential / …) which passes through verbatim to /api/git_connector/*.
  */
 import { useState, useEffect, useCallback } from 'react';
+import { useUrlParam } from '../../hooks/useUrlState';
 import { T } from '../../theme';
 import { useResizableWidth } from '../../components/ResizeHandle';
 import { Pill } from '../../components/Pill';
@@ -259,7 +260,8 @@ export function Git() {
   const [backends, setBackends] = useState<GitBackend[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<GitBackend | null>(null);
+  const [selId, setSelId] = useUrlParam('backend');
+  const selected = backends.find((b) => b.id === selId) ?? null; // derived so a refresh reopens it
   const [showCreate, setShowCreate] = useState(false);
 
   const [testing, setTesting] = useState(false);
@@ -284,7 +286,7 @@ export function Git() {
   useEffect(() => { fetchBackends(); }, [fetchBackends]);
 
   const selectBackend = (b: GitBackend) => {
-    setSelected(b);
+    setSelId(b.id);
     setTestResult(null);
     setTestError(null);
   };
@@ -313,7 +315,7 @@ export function Git() {
     try {
       await deleteGitBackend(token, b.id);
       setBackends(prev => prev.filter(x => x.id !== b.id));
-      if (selected?.id === b.id) setSelected(null);
+      if (selected?.id === b.id) setSelId(null);
     } catch (e: unknown) {
       setError((e as Error).message);
     }

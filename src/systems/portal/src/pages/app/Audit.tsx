@@ -8,6 +8,7 @@
  * data via the bff.
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useUrlState } from '../../hooks/useUrlState';
 import { T } from '../../theme';
 import { useResizableWidth } from '../../components/ResizeHandle';
 import { useAppSelector } from '../../store/hooks';
@@ -66,7 +67,7 @@ function DetailGrid({ rows }: { rows: [string, string][] }) {
 export function Audit() {
   const permissions = useAppSelector(s => s.auth.permissions);
   const canAccessChecks = !!permissions?.['gatekeeper:listPermissionCheck'];
-  const [tab, setTab] = useState<'mutations' | 'access'>('mutations');
+  const [tab, setTab] = useUrlState<'mutations' | 'access'>('tab', 'mutations');
 
   const tabBtn = (key: 'mutations' | 'access', label: string) => (
     <button onClick={() => setTab(key)}

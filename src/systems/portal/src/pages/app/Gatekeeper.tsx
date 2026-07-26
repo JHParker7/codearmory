@@ -6,6 +6,7 @@
  * conductor; tabs are gated on the caller's redux permissions.
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useUrlState } from '../../hooks/useUrlState';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
@@ -1595,7 +1596,7 @@ export function Gatekeeper() {
   const visibleTabs = permissions
     ? ALL_TABS.filter(t => permissions[t.permission])
     : [];
-  const [tab, setTab] = useState<Tab>('users');
+  const [tab, setTab] = useUrlState<Tab>('tab', 'users');
 
   useEffect(() => {
     if (visibleTabs.length > 0 && !visibleTabs.find(t => t.id === tab)) {

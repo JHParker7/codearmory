@@ -5,6 +5,7 @@
  * via the bff.
  */
 import { useState, useEffect, useCallback } from 'react';
+import { useUrlState, useUrlParam } from '../../hooks/useUrlState';
 import { T } from '../../theme';
 import { useResizableWidth } from '../../components/ResizeHandle';
 import { Pill } from '../../components/Pill';
@@ -149,17 +150,17 @@ function RuleFormModal({ token, rule, onClose, onSaved }: {
 export function Hooks() {
   const token = useAppSelector(s => s.auth.token)!;
   const workflowNames = useWorkflowNames(token);
-  const [tab, setTab] = useState<'rules' | 'events'>('rules');
+  const [tab, setTab] = useUrlState<'rules' | 'events'>('tab', 'rules');
 
   const [rules, setRules] = useState<PipelineRule[]>([]);
   const [rulesLoading, setRulesLoading] = useState(true);
   const [rulesError, setRulesError] = useState<string | null>(null);
-  const [selectedRule, setSelectedRule] = useState<string | null>(null);
+  const [selectedRule, setSelectedRule] = useUrlParam('rule');
 
   const [events, setEvents] = useState<HookEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
-  const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
+  const [selectedEvent, setSelectedEvent] = useUrlParam('event');
   const [eventsFetched, setEventsFetched] = useState(false);
 
   const fetchRules = useCallback(async () => {

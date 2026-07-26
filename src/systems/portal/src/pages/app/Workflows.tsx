@@ -1,5 +1,6 @@
 /** Workflows page — the CI/CD control surface, a tabbed view over pipelines and the action catalog. pipelines tab creates/triggers/cancels/deletes workflows, lists their runs, and opens the visual builder (which now also hosts the reusable-step library); actions tab browses the read-only action catalog. all data goes through the typed BFF client (listWorkflows/createWorkflow/etc), never conductor directly. */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useUrlState, useUrlParam } from '../../hooks/useUrlState';
 import type { ReactNode, CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { T } from '../../theme';
@@ -623,7 +624,7 @@ function PipelinesTab() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useUrlParam('pipeline');
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
   const [triggering, setTriggering] = useState(false);
@@ -944,7 +945,7 @@ function ActionsTab() {
   const [actions, setActions] = useState<WorkflowAction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useUrlParam('action');
   const [railW, railHandle] = useResizableWidth('rail.workflows.actions', 260, { min: 200, max: 480 });
 
   useEffect(() => {
@@ -1049,7 +1050,7 @@ function ActionsTab() {
 
 /** Workflows route — top tab bar switching between the pipelines, steps (pre-configured reusable steps), and actions tabs. Steps can also be created and configured inline while building a pipeline. */
 export function Workflows() {
-  const [tab, setTab] = useState<MainTab>('pipelines');
+  const [tab, setTab] = useUrlState<MainTab>('tab', 'pipelines');
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden', flexDirection: 'column' }}>
