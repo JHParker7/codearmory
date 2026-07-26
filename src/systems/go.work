@@ -9,6 +9,7 @@ use (
 	./forge
 	./gatekeeper
 	./git
+	./events
 	./hooks
 	./outpost
 	./outpost-gateway

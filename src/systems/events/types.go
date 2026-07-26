@@ -3,9 +3,12 @@
 // pipeline, open a ticket, notify, …). It folds in the former `hooks` service — the
 // git-webhook adapters and pipeline dispatch move here, the git-specific rule model is
 // replaced by the general envelope + filter defined in this file. See docs/events/design.md.
-package events
+package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // SpecVersion is the current event-envelope version. Consumers may switch on it; new
 // optional fields are backward compatible, so this only bumps on a breaking change.
@@ -72,13 +75,15 @@ func (m Match) isGroup() bool { return len(m.All) > 0 || len(m.Any) > 0 || m.Not
 // Actions dispatch. Stored/served by the CRUD + dispatch layers (added next); defined here
 // so the filter engine and its tests are self-contained.
 type Trigger struct {
-	ID        string   `json:"id"`
-	OrgID     string   `json:"org_id,omitempty"`
-	CreatedBy string   `json:"created_by,omitempty"`
-	Name      string   `json:"name"`
-	Match     Match    `json:"match"`
-	Actions   []Action `json:"actions"`
-	Enabled   bool     `json:"enabled"`
+	ID        string    `json:"id"                   gorm:"primaryKey"`
+	OrgID     string    `json:"org_id,omitempty"     gorm:"index"`
+	CreatedBy string    `json:"created_by,omitempty" gorm:"index"`
+	Name      string    `json:"name"`
+	Match     Match     `json:"match"                gorm:"serializer:json"`
+	Actions   []Action  `json:"actions"              gorm:"serializer:json"`
+	Enabled   bool      `json:"enabled"              gorm:"default:true"`
+	CreatedAt time.Time `json:"created_at"           gorm:"autoCreateTime"`
+	UpdatedAt time.Time `json:"updated_at"           gorm:"autoUpdateTime"`
 }
 
 // Action is one thing a matched trigger does. Kind selects the executor; Config carries its
