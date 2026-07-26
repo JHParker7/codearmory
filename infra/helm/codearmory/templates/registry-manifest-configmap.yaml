@@ -18,6 +18,9 @@
 {{- if .Values.hooks.enabled -}}
 {{- $manifest = replace "http://hooks:"             (printf "http://%s-hooks:" $fullname)             $manifest -}}
 {{- end -}}
+{{- if .Values.events.enabled -}}
+{{- $manifest = replace "http://events:"            (printf "http://%s-events:" $fullname)            $manifest -}}
+{{- end -}}
 {{- if .Values.outpostGateway.enabled -}}
 {{- $manifest = replace "http://outpost-gateway:"    (printf "http://%s-outpost-gateway:" $fullname)    $manifest -}}
 {{- end -}}

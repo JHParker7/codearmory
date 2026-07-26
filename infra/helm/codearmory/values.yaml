@@ -50,7 +50,7 @@ gatekeeper:
     # Comma-separated list of service names permitted to register. Core services
     # deployed by this chart (incl. the forge + workflows CI/CD pair) are listed
     # here; non-core services are auto-permitted at runtime when builder registers them.
-    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git_connector,containers,hooks,outpost-gateway"
+    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git_connector,containers,hooks,events,outpost-gateway"
     # Comma-separated services allowed to resolve org secrets via the internal
     # lookup endpoint (deny-all when empty). Defaults to "forge" so forge can resolve
     # "secret:<name>" job secret_refs; add "containers" to let the container registry
@@ -746,6 +746,44 @@ hooks:
     clientCertSecret: ""
     caBundle: ""
 
+# ── Events ───────────────────────────────────────────
+# Event collector + reactor (folds in hooks): services emit JSON events to
+# /internal/events; triggers whose field-filters match dispatch actions (run a
+# pipeline, open a ticket, notify, ...). Runs alongside hooks during the cutover.
+events:
+  enabled: true
+  image:
+    repository: events
+    tag: ""
+  replicaCount: 1
+  port: 8093
+  service:
+    type: ClusterIP
+    nodePort: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+  secret:
+    databaseUrl: ""
+    gatekeeperServiceKey: ""
+    # Shared HMAC authenticating emitters posting to /internal/events and signing
+    # events' internal calls. Must match what emitters sign with (the former hooks
+    # trigger key during cutover). Leave empty for auto-generation.
+    eventsTriggerKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+
 # ── Outpost gateway ───────────────────────────────────────────────────────────
 # Connection point + event backbone for user-deployed outposts (in-cluster agents that
 # actuate a target cluster — e.g. the deploy module that redeploys a workload). Off by
@@ -1036,4 +1074,5 @@ postgresql:
           CREATE DATABASE git;
           CREATE DATABASE artifacts;
           CREATE DATABASE hooks;
+          CREATE DATABASE events;
           CREATE DATABASE outpost_gateway;
