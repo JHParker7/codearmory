@@ -113,6 +113,8 @@ func (p *codearmoryProvider) Resources(_ context.Context) []func() resource.Reso
 	return []func() resource.Resource{
 		newRunnerClassResource,
 		newHookRuleResource,
+		newGitRepositoryResource,
+		newPipelineResource,
 	}
 }
 
