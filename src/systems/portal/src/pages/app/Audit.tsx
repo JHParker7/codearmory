@@ -102,9 +102,10 @@ function MutationsView() {
   const permissionNames = usePermissionNames(token);
   const secretNames = useSecretNames(token);
 
-  const [filterActor, setFilterActor] = useState('');
-  const [filterAction, setFilterAction] = useState('');
-  const [filterResource, setFilterResource] = useState('');
+  // Filters live in the URL so a refresh keeps them and a filtered view is shareable.
+  const [filterActor, setFilterActor] = useUrlState<string>('actor', '');
+  const [filterAction, setFilterAction] = useUrlState<string>('action', '');
+  const [filterResource, setFilterResource] = useUrlState<string>('resource', '');
 
   // Reverse of userNames (username → user-id), for translating the actor filter.
   const idByActor = useMemo(
@@ -264,11 +265,13 @@ function AccessChecksView() {
   const userNames = useUserNames(token);
   const orgNames = useOrgNames(token);
 
-  const [filterUser, setFilterUser] = useState('');
-  const [filterService, setFilterService] = useState('');
-  const [filterAction, setFilterAction] = useState('');
-  const [filterResource, setFilterResource] = useState('');
-  const [filterGranted, setFilterGranted] = useState(''); // '' | 'true' | 'false'
+  // URL-backed filters (distinct keys from the mutations view, which shares the query
+  // string) so a refresh keeps them and a filtered access-check view is shareable.
+  const [filterUser, setFilterUser] = useUrlState<string>('cu', '');
+  const [filterService, setFilterService] = useUrlState<string>('cs', '');
+  const [filterAction, setFilterAction] = useUrlState<string>('ca', '');
+  const [filterResource, setFilterResource] = useUrlState<string>('cr', '');
+  const [filterGranted, setFilterGranted] = useUrlState<'' | 'true' | 'false'>('cg', ''); // '' | 'true' | 'false'
 
   const idByUser = useMemo(
     () => Object.fromEntries(Object.entries(userNames).map(([id, name]) => [name, id])),
@@ -316,7 +319,7 @@ function AccessChecksView() {
           <input value={filterService} onChange={e => setFilterService(e.target.value)} placeholder="service" style={{ ...inputStyle, width: 120 }} />
           <input value={filterAction} onChange={e => setFilterAction(e.target.value)} placeholder="action" style={{ ...inputStyle, width: 150 }} />
           <input value={filterResource} onChange={e => setFilterResource(e.target.value)} placeholder="resource contains…" style={{ ...inputStyle, width: 180 }} />
-          <select value={filterGranted} onChange={e => setFilterGranted(e.target.value)} style={{ ...inputStyle, width: 110 }}>
+          <select value={filterGranted} onChange={e => setFilterGranted(e.target.value as '' | 'true' | 'false')} style={{ ...inputStyle, width: 110 }}>
             <option value="">all</option>
             <option value="false">denied</option>
             <option value="true">granted</option>
