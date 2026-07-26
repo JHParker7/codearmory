@@ -113,37 +113,27 @@ resource "codearmory_hook_rule" "git_factory_push" {
   }
 }
 
-# ── codearmory monorepo: build + test on push to main ────────────────────────────
+# ── codearmory monorepo: its full CI/CD pipeline, authored as YAML in the repo ────
+# Pipeline-as-code — the source of truth is infra/ci/codearmory-ci.yaml (checkout ->
+# per-module build+test -> image builds -> deploy via the outpost deploy integration,
+# with persistent go/git caches and a tracking ticket). Terraform just deploys it.
 resource "codearmory_pipeline" "codearmory" {
-  name        = "codearmory-ci"
-  description = "Build & test the monorepo on push to main"
-
-  step = [
-    {
-      name      = "test"
-      action    = "forge/run"
-      timeout   = 1800
-      with      = { image = var.ci_image }
-      with_json = jsonencode({
-        run         = "cd src/systems && go test ./... && cd ../cli && go build ./..."
-        secret_refs = { GIT_CLONE_URL = "git:jhparker7/codearmory" }
-        checkout    = { ref = "main" }
-      })
-    },
-  ]
+  definition_json = jsonencode(yamldecode(file("${path.module}/../../ci/codearmory-ci.yaml")))
 }
 
 resource "codearmory_hook_rule" "codearmory_push" {
-  name        = "codearmory-build-on-push"
+  name        = "codearmory-ci-on-main"
   source      = "jhparker7/codearmory"
   events      = ["push"]
   ref_filter  = "refs/heads/main"
   workflow_id = codearmory_pipeline.codearmory.id
   secret      = var.webhook_secret
 
+  # Feed the pipeline's declared inputs from the webhook payload.
   input_mapping = {
-    BRANCH = "ref"
-    SHA    = "commit"
+    HOOK_REF    = "ref"
+    HOOK_COMMIT = "commit"
+    HOOK_REPO   = "repo"
   }
 }
 

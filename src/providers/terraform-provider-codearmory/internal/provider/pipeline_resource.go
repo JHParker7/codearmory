@@ -32,15 +32,16 @@ type pipelineResource struct {
 func newPipelineResource() resource.Resource { return &pipelineResource{} }
 
 type pipelineModel struct {
-	ID          types.String `tfsdk:"id"`
-	Name        types.String `tfsdk:"name"`
-	Description types.String `tfsdk:"description"`
-	Project     types.String `tfsdk:"project"`
-	Steps       types.List   `tfsdk:"step"`
-	CreatedBy   types.String `tfsdk:"created_by"`
-	OrgID       types.String `tfsdk:"org_id"`
-	Active      types.Bool   `tfsdk:"active"`
-	CreatedAt   types.String `tfsdk:"created_at"`
+	ID             types.String `tfsdk:"id"`
+	Name           types.String `tfsdk:"name"`
+	Description    types.String `tfsdk:"description"`
+	Project        types.String `tfsdk:"project"`
+	Steps          types.List   `tfsdk:"step"`
+	DefinitionJSON types.String `tfsdk:"definition_json"`
+	CreatedBy      types.String `tfsdk:"created_by"`
+	OrgID          types.String `tfsdk:"org_id"`
+	Active         types.Bool   `tfsdk:"active"`
+	CreatedAt      types.String `tfsdk:"created_at"`
 }
 
 type pipelineStepModel struct {
@@ -94,8 +95,10 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"name": schema.StringAttribute{
-				Required:            true,
-				MarkdownDescription: "Pipeline name.",
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "Pipeline name. Required with `step`; taken from `definition_json` when that is used.",
+				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"description": schema.StringAttribute{
 				Optional:            true,
@@ -113,9 +116,13 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"org_id":     schema.StringAttribute{Computed: true, MarkdownDescription: "Owning org ID, if any.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"active":     schema.BoolAttribute{Computed: true, MarkdownDescription: "Whether the pipeline is active."},
 			"created_at": schema.StringAttribute{Computed: true, MarkdownDescription: "Creation timestamp (RFC3339).", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
+			"definition_json": schema.StringAttribute{
+				Optional:            true,
+				MarkdownDescription: "A complete pipeline definition as a JSON object string (name/description/inputs/steps/maps/routes/state_machine), sent verbatim. Use for pipeline-as-code from a repo YAML: `jsonencode(yamldecode(file(\"pipeline.yaml\")))`. Mutually exclusive with `step`.",
+			},
 			"step": schema.ListNestedAttribute{
-				Required:            true,
-				MarkdownDescription: "The pipeline's steps, in run order.",
+				Optional:            true,
+				MarkdownDescription: "The pipeline's steps, in run order. Mutually exclusive with `definition_json`.",
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"name":    schema.StringAttribute{Required: true, MarkdownDescription: "Step name (referenced as ${steps.<name>.output})."},
@@ -136,9 +143,18 @@ func (r *pipelineResource) Configure(_ context.Context, req resource.ConfigureRe
 	r.client = client
 }
 
-// toRequest builds the create/update body from the plan.
-func (m pipelineModel) toRequest(ctx context.Context) (createWorkflowRequest, diag.Diagnostics) {
+// toRequest builds the create/update body from the plan. When definition_json is set
+// it is sent verbatim (the whole pipeline document); otherwise the body is assembled
+// from name + the inline steps.
+func (m pipelineModel) toRequest(ctx context.Context) (any, diag.Diagnostics) {
 	var diags diag.Diagnostics
+	if !m.DefinitionJSON.IsNull() && !m.DefinitionJSON.IsUnknown() && m.DefinitionJSON.ValueString() != "" {
+		var body map[string]any
+		if err := json.Unmarshal([]byte(m.DefinitionJSON.ValueString()), &body); err != nil {
+			diags.AddError("Invalid definition_json", err.Error())
+		}
+		return body, diags
+	}
 	var steps []pipelineStepModel
 	diags.Append(m.Steps.ElementsAs(ctx, &steps, false)...)
 	if diags.HasError() {
@@ -185,13 +201,23 @@ func (m pipelineModel) toRequest(ctx context.Context) (createWorkflowRequest, di
 // from configuration/state to avoid perpetual diffs from server-side normalization.
 func (m *pipelineModel) fromResponse(out workflowResponse) {
 	m.ID = types.StringValue(out.WorkflowID)
-	m.Name = types.StringValue(out.Name)
-	m.Description = types.StringValue(out.Description)
-	m.Project = types.StringValue(out.Project)
 	m.CreatedBy = types.StringValue(out.CreatedBy)
 	m.OrgID = types.StringValue(out.OrgID)
 	m.Active = types.BoolValue(out.Active)
 	m.CreatedAt = types.StringValue(out.CreatedAt)
+	// In definition_json mode the document owns name/description/project; Terraform
+	// planned them from prior state, so overwriting from the response would be an
+	// "inconsistent result". Fill `name` only when it's still unknown (create), and
+	// leave description/project on their planned (defaulted/prior) values.
+	if !m.DefinitionJSON.IsNull() && !m.DefinitionJSON.IsUnknown() && m.DefinitionJSON.ValueString() != "" {
+		if m.Name.IsUnknown() {
+			m.Name = types.StringValue(out.Name)
+		}
+		return
+	}
+	m.Name = types.StringValue(out.Name)
+	m.Description = types.StringValue(out.Description)
+	m.Project = types.StringValue(out.Project)
 }
 
 func (r *pipelineResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
