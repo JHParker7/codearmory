@@ -47,6 +47,18 @@ variable "registry_secret_name" {
   default     = ""
 }
 
+variable "outpost_id" {
+  type        = string
+  description = "The outpost (with the deploy integration) that rolls out the new image into the cluster. Same outpost the monorepo pipeline uses."
+  default     = "b38de6c5-6393-4dd2-aa93-b1ec5cf1bb86"
+}
+
+variable "git_factory_deployment" {
+  type        = string
+  description = "The k8s deployment the git_factory image rolls out to."
+  default     = "ca-codearmory-git-factory"
+}
+
 provider "codearmory" {} # endpoint/token from CODEARMORY_URL / CODEARMORY_TOKEN
 
 locals {
@@ -96,20 +108,43 @@ resource "codearmory_pipeline" "git_factory" {
         runner_class = "ci"
       }, length(local.registry_secret_refs) > 0 ? { secret_refs = local.registry_secret_refs } : {}))
     },
+    {
+      # Roll the freshly-pushed image into the cluster via the outpost deploy integration —
+      # the platform-correct path (the outpost actuates the cluster; a sandboxed runner can't
+      # reach the kube API). Mirrors the monorepo pipeline's redeploy step.
+      name    = "deploy"
+      action  = "outpost-gateway/enqueueCommand"
+      timeout = 300
+      with_json = jsonencode({
+        id          = var.outpost_id
+        integration = "deploy"
+        type        = "set-image"
+        payload = {
+          deployment     = var.git_factory_deployment
+          image          = "${var.ci_registry}:dev"
+          ignore_missing = true
+        }
+      })
+    },
   ]
 }
 
 resource "codearmory_hook_rule" "git_factory_push" {
-  name        = "git_factory-cd-on-dev"
-  source      = "jhparker7/codearmory_git_factory"
-  events      = ["push"]
-  ref_filter  = "refs/heads/dev"
+  name = "git_factory-cd-on-dev"
+  # git_factory emits every repo's push to hooks' /internal/events with a SHARED
+  # source constant ("codearmory_git_factory") and event "git.push"; the ref is the
+  # short branch name. Repos are NOT distinguishable by source — only by ref_filter —
+  # so this fires on any git_factory repo pushed to `dev`.
+  source      = "codearmory_git_factory"
+  events      = ["git.push"]
+  ref_filter  = "dev"
   workflow_id = codearmory_pipeline.git_factory.id
-  secret      = var.webhook_secret
+  secret      = var.webhook_secret # unused for internal events (HMAC-verified), required by the API
 
   input_mapping = {
-    BRANCH = "ref"
-    SHA    = "commit"
+    HOOK_REF    = "ref"
+    HOOK_COMMIT = "commit"
+    HOOK_REPO   = "repo"
   }
 }
 
@@ -122,10 +157,14 @@ resource "codearmory_pipeline" "codearmory" {
 }
 
 resource "codearmory_hook_rule" "codearmory_push" {
-  name        = "codearmory-ci-on-main"
-  source      = "jhparker7/codearmory"
-  events      = ["push"]
-  ref_filter  = "refs/heads/main"
+  name = "codearmory-ci-on-main"
+  # Same shared git_factory source; distinguished from the git_factory-cd rule only by
+  # the branch. NOTE: the pipeline's checkout clones the Gitea copy
+  # (192.168.53.171:3000/jp01/codearmory) — if the monorepo's real pushes land there
+  # rather than on git_factory, wire the Gitea webhook path instead of this rule.
+  source      = "codearmory_git_factory"
+  events      = ["git.push"]
+  ref_filter  = "main"
   workflow_id = codearmory_pipeline.codearmory.id
   secret      = var.webhook_secret
 
