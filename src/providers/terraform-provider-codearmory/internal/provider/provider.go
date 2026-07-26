@@ -115,6 +115,16 @@ func (p *codearmoryProvider) Resources(_ context.Context) []func() resource.Reso
 		newHookRuleResource,
 		newGitRepositoryResource,
 		newPipelineResource,
+		newStepResource,
+		newGitBackendResource,
+		newOrgResource,
+		newTeamResource,
+		newRoleResource,
+		newSecretResource,
+		newBoardResource,
+		newOrgServiceResource,
+		newOutpostResource,
+		newContainerRegistryResource,
 	}
 }
 
