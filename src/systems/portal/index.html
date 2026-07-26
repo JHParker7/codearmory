@@ -55,18 +55,23 @@
       :root { accent-color: var(--ca-green, #4ade80); }
       ::selection { background: var(--ca-greenSoft, rgba(74,222,128,.18)); color: var(--ca-textHi, #fff); }
 
-      /* Themed, unobtrusive scrollbars so panels don't render the default chrome bar. */
-      * { scrollbar-width: thin; scrollbar-color: var(--ca-border, #1a2018) transparent; }
-      ::-webkit-scrollbar { width: 10px; height: 10px; }
+      /* Themed scrollbars — rounded, tinted thumb on Chrome/Safari that highlights to the
+         accent on hover; thin tinted bar on Firefox. The Firefox rule is scoped behind an
+         @supports because setting scrollbar-color also DISABLES the richer ::-webkit thumb
+         on Chromium 121+, which would leave a near-invisible bar instead. */
+      ::-webkit-scrollbar { width: 11px; height: 11px; }
       ::-webkit-scrollbar-track { background: transparent; }
       ::-webkit-scrollbar-thumb {
-        background: var(--ca-border, #1a2018);
+        background: var(--ca-borderHi, #2a3328);
         border-radius: 6px;
         border: 2px solid transparent;
         background-clip: padding-box;
       }
-      ::-webkit-scrollbar-thumb:hover { background: var(--ca-borderHi, #2a3328); background-clip: padding-box; }
+      ::-webkit-scrollbar-thumb:hover { background: var(--ca-green, #6ED274); background-clip: padding-box; }
       ::-webkit-scrollbar-corner { background: transparent; }
+      @supports not selector(::-webkit-scrollbar) {
+        * { scrollbar-width: thin; scrollbar-color: var(--ca-borderHi, #2a3328) transparent; }
+      }
 
       @keyframes blink {
         0%, 100% { opacity: 1; }
