@@ -10,7 +10,54 @@
     <style>
       *, *::before, *::after { box-sizing: border-box; }
       html, body, #root { margin: 0; padding: 0; height: 100%; }
-      body { background: var(--ca-bg, #070907); }
+      body {
+        background: var(--ca-bg, #070907);
+        color: var(--ca-text, #d6dcd2);
+        font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
+      }
+
+      /* Interactive polish — the "small things". Inline styles can't express :hover or
+         :focus, so these are the one place hover/press/focus feedback and motion live.
+         Every interactive element eases its color/border/opacity changes instead of
+         snapping, and shows a themed focus ring on keyboard focus (but not on click). */
+      button, a, select, input, textarea, [role="button"], [data-interactive] {
+        transition: background-color .12s ease, border-color .12s ease, color .12s ease,
+                    box-shadow .12s ease, opacity .12s ease, transform .06s ease;
+      }
+      button:not(:disabled), a, select, [role="button"], [data-interactive] { cursor: pointer; }
+      button:disabled { cursor: not-allowed; }
+      /* Universal hover/press feedback. Because backgrounds are set inline per button,
+         a brightness nudge is the one cue that reads on every variant (solid, ghost,
+         transparent row) without knowing its color; the press adds a tactile 1px dip. */
+      button:not(:disabled):hover, [role="button"]:hover { filter: brightness(1.12); }
+      button:not(:disabled):active, [role="button"]:active { transform: translateY(1px); }
+      a:hover { filter: brightness(1.15); }
+      :focus { outline: none; }
+      :focus-visible {
+        outline: 2px solid var(--ca-green, #4ade80);
+        outline-offset: 2px;
+        border-radius: 3px;
+      }
+      /* Accent the native form controls (checkboxes, radios, range) to the theme. */
+      :root { accent-color: var(--ca-green, #4ade80); }
+      ::selection { background: var(--ca-greenSoft, rgba(74,222,128,.18)); color: var(--ca-textHi, #fff); }
+
+      /* Themed, unobtrusive scrollbars so panels don't render the default chrome bar. */
+      * { scrollbar-width: thin; scrollbar-color: var(--ca-border, #1a2018) transparent; }
+      ::-webkit-scrollbar { width: 10px; height: 10px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb {
+        background: var(--ca-border, #1a2018);
+        border-radius: 6px;
+        border: 2px solid transparent;
+        background-clip: padding-box;
+      }
+      ::-webkit-scrollbar-thumb:hover { background: var(--ca-borderHi, #2a3328); background-clip: padding-box; }
+      ::-webkit-scrollbar-corner { background: transparent; }
+
       @keyframes blink {
         0%, 100% { opacity: 1; }
         50% { opacity: 0; }
@@ -21,6 +68,15 @@
       }
       @keyframes spin {
         to { transform: rotate(360deg); }
+      }
+
+      /* Respect users who ask for less motion — drop the eased transitions and loops. */
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: .01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: .01ms !important;
+        }
       }
     </style>
   </head>
