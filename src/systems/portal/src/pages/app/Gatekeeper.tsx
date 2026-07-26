@@ -7,6 +7,7 @@
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useUrlState } from '../../hooks/useUrlState';
+import { useDraftSeed, useDraftPersist, clearDraft } from '../../hooks/useFormDraft';
 import { T } from '../../theme';
 import { Pill } from '../../components/Pill';
 import { useConfirm } from '../../components/ConfirmDialog';
@@ -239,14 +240,26 @@ function RolesTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newPermIds, setNewPermIds] = useState('');
+  // ── Draft persistence (create form) ───────────────────────────────────────────
+  // Composing a role's comma-separated permission-id set is real typing to lose on a
+  // refresh; mirror the create form to localStorage and reopen it if a draft returns.
+  // (Editing an existing role isn't drafted — that would also need the selection to
+  // survive the refresh, which the roles rail doesn't persist.)
+  const ROLE_DRAFT_KEY = 'ci.role.draft:new';
+  const roleDraftBaseline = useMemo(() => ({ name: '', permIds: '' }), []);
+  const { initial: roleDraftInit, restored: roleRestored } = useDraftSeed(ROLE_DRAFT_KEY, roleDraftBaseline);
+  const [showCreate, setShowCreate] = useState(roleRestored); // auto-open when a draft returns
+  const [newName, setNewName] = useState(roleDraftInit.name);
+  const [newPermIds, setNewPermIds] = useState(roleDraftInit.permIds);
+  const [roleRestoredDraft, setRoleRestoredDraft] = useState(roleRestored);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
   const [editPermIds, setEditPermIds] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
+
+  useDraftPersist(ROLE_DRAFT_KEY, roleDraftBaseline, { name: newName, permIds: newPermIds });
+  const discardRoleDraft = () => { setNewName(''); setNewPermIds(''); clearDraft(ROLE_DRAFT_KEY); setRoleRestoredDraft(false); };
 
   const fetchAll = useCallback(async () => {
     setLoading(true); setError(null);
@@ -285,6 +298,7 @@ function RolesTab() {
       const role = await createRole(token, { name: newName.trim() || undefined, permissions_ids: ids });
       setRoles(prev => [role, ...prev]);
       setNewName(''); setNewPermIds(''); setShowCreate(false);
+      clearDraft(ROLE_DRAFT_KEY); setRoleRestoredDraft(false);
     } catch (e: unknown) { setError((e as Error).message); }
     finally { setCreating(false); }
   };
@@ -317,6 +331,12 @@ function RolesTab() {
         {showCreate && (
           <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.border}`, background: T.card }}>
             {error && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{error}</div>}
+            {roleRestoredDraft && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: T.amberSoft, border: `1px solid ${T.amber}`, padding: '5px 8px', fontFamily: T.mono, fontSize: 9, color: T.amber, marginBottom: 6 }}>
+                <span>↺ restored draft</span>
+                <button onClick={discardRoleDraft} style={{ background: 'transparent', border: `1px solid ${T.amber}`, color: T.amber, fontFamily: T.mono, fontSize: 9, padding: '1px 6px', cursor: 'pointer' }}>discard</button>
+              </div>
+            )}
             <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="role name (e.g. ci-deployer)" autoFocus
               style={{ ...inputStyle, fontSize: 11, marginBottom: 6 }} />
             <input value={newPermIds} onChange={e => setNewPermIds(e.target.value)} placeholder="permission IDs (comma-separated)"

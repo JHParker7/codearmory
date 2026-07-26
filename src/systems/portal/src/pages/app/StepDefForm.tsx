@@ -17,6 +17,7 @@
  */
 import { useState, useEffect, useMemo } from 'react';
 import type { ReactNode, CSSProperties } from 'react';
+import { useDraftSeed, useDraftPersist, clearDraft } from '../../hooks/useFormDraft';
 import { T } from '../../theme';
 import { ImageSelect } from '../../components/ImageSelect';
 import { PipelineSelect } from '../../components/PipelineSelect';
@@ -57,17 +58,41 @@ export function StepDefForm({ token, initial, lockAction, inline, onSaved, onCan
   const [actions, setActions] = useState<WorkflowAction[]>([]);
   const [images, setImages] = useState<string[]>([]);
   const [pipelines, setPipelines] = useState<Workflow[]>([]);
-  const [name, setName] = useState(initial?.name ?? defaultName ?? '');
-  const [description, setDescription] = useState(initial?.description ?? '');
-  const [timeoutSecs, setTimeoutSecs] = useState(initial?.timeout != null ? String(initial.timeout) : '');
+  // ── Draft persistence ─────────────────────────────────────────────────────────
+  // Keep an in-progress step definition across a refresh. Disabled (empty key) in the
+  // pipeline builder's INLINE mode, where the whole pipeline is already drafted and an
+  // inline step is embedded on save — so we don't double-persist or restore a stale
+  // standalone step into the builder.
+  const draftKey = inline ? '' : `ci.step.draft:${initial?.step_id ?? 'new'}`;
+  const draftBaseline = useMemo(() => ({
+    name: initial?.name ?? defaultName ?? '',
+    description: initial?.description ?? '',
+    timeoutSecs: initial?.timeout != null ? String(initial.timeout) : '',
+    action: lockAction ?? initial?.action ?? 'forge/run',
+    withVals: (initial ? formValsFromWith(initial.action, initial.with ?? {}) : {}) as Record<string, string>,
+  }), [initial, defaultName, lockAction]);
+  const { initial: draftInit, restored } = useDraftSeed(draftKey, draftBaseline);
+
+  const [name, setName] = useState(draftInit.name);
+  const [description, setDescription] = useState(draftInit.description);
+  const [timeoutSecs, setTimeoutSecs] = useState(draftInit.timeoutSecs);
   // Action is fixed when lockAction is set (builder) or when editing; otherwise it
   // defaults to forge/run on a fresh create in the Steps tab.
-  const [action, setAction] = useState(lockAction ?? initial?.action ?? 'forge/run');
-  const [withVals, setWithVals] = useState<Record<string, string>>(
-    () => (initial ? formValsFromWith(initial.action, initial.with ?? {}) : {}),
-  );
+  const [action, setAction] = useState(draftInit.action);
+  const [withVals, setWithVals] = useState<Record<string, string>>(draftInit.withVals);
+  const [restoredDraft, setRestoredDraft] = useState(restored);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useDraftPersist(draftKey, draftBaseline, { name, description, timeoutSecs, action, withVals });
+
+  // Discard the restored draft and snap every field back to its saved value.
+  const discardDraft = () => {
+    setName(draftBaseline.name); setDescription(draftBaseline.description);
+    setTimeoutSecs(draftBaseline.timeoutSecs); setAction(draftBaseline.action);
+    setWithVals(draftBaseline.withVals);
+    clearDraft(draftKey); setRestoredDraft(false);
+  };
 
   // Load the action catalog (for the Action selector and the output-reference
   // helper) and the forge image allowlist (so the image field is a picker).
@@ -112,6 +137,7 @@ export function StepDefForm({ token, initial, lockAction, inline, onSaved, onCan
       const saved = initial
         ? await updateStep(token, initial.step_id, payload)
         : await createStep(token, payload);
+      clearDraft(draftKey); // persisted server-side now — drop the local draft
       onSaved(saved, !initial);
     } catch (e: unknown) { setError((e as Error).message); }
     finally { setBusy(false); }
@@ -150,6 +176,12 @@ export function StepDefForm({ token, initial, lockAction, inline, onSaved, onCan
   return (
     <div>
       {error && <div style={{ color: T.red, fontFamily: T.mono, fontSize: 10, marginBottom: 6 }}>{error}</div>}
+      {restoredDraft && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, background: T.amberSoft, border: `1px solid ${T.amber}`, padding: '6px 10px', fontFamily: T.mono, fontSize: 10, color: T.amber, marginBottom: 8 }}>
+          <span>↺ restored an unsaved draft</span>
+          <button onClick={discardDraft} style={{ background: 'transparent', border: `1px solid ${T.amber}`, color: T.amber, fontFamily: T.mono, fontSize: 9, padding: '2px 7px', cursor: 'pointer' }}>discard</button>
+        </div>
+      )}
 
       <label style={labelStyle}>name *</label>
       <input value={name} onChange={e => setName(e.target.value)} placeholder="unit_tests" autoFocus={autoFocus} style={inputStyle} />

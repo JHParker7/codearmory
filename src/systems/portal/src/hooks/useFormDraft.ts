@@ -35,16 +35,22 @@ export { clearDraft } from '../draftStorage';
 export function useDraftSeed<T extends Record<string, unknown>>(key: string, baseline: T): { initial: T; restored: boolean } {
   const seed = useRef<{ initial: T; restored: boolean } | null>(null);
   if (seed.current === null) {
-    const raw = loadDraft(key);
-    let d: T | null = null;
-    if (raw) {
-      try {
-        const p = JSON.parse(raw);
-        if (p && typeof p === 'object') d = { ...baseline, ...(p as Partial<T>) };
-      } catch { /* stale/corrupt draft — ignore */ }
+    // An empty key disables persistence (e.g. a form reused in a context that already
+    // has its own draft) — seed straight from the baseline, restore nothing.
+    if (!key) {
+      seed.current = { initial: baseline, restored: false };
+    } else {
+      const raw = loadDraft(key);
+      let d: T | null = null;
+      if (raw) {
+        try {
+          const p = JSON.parse(raw);
+          if (p && typeof p === 'object') d = { ...baseline, ...(p as Partial<T>) };
+        } catch { /* stale/corrupt draft — ignore */ }
+      }
+      const restored = !!d && JSON.stringify(d) !== JSON.stringify(baseline);
+      seed.current = { initial: restored ? (d as T) : baseline, restored };
     }
-    const restored = !!d && JSON.stringify(d) !== JSON.stringify(baseline);
-    seed.current = { initial: restored ? (d as T) : baseline, restored };
   }
   return seed.current;
 }
@@ -57,6 +63,7 @@ export function useDraftPersist<T extends Record<string, unknown>>(key: string, 
   const baseNorm = JSON.stringify(baseline);
   const curNorm = JSON.stringify(current);
   useEffect(() => {
+    if (!key) return; // persistence disabled for this form instance
     if (curNorm !== baseNorm) saveDraft(key, curNorm);
     else clearDraft(key);
   }, [key, curNorm, baseNorm]);
