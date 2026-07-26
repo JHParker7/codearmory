@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -43,19 +44,22 @@ type pipelineModel struct {
 }
 
 type pipelineStepModel struct {
-	Name    types.String `tfsdk:"name"`
-	Action  types.String `tfsdk:"action"`
-	Timeout types.Int64  `tfsdk:"timeout"`
-	With    types.Map    `tfsdk:"with"`
+	Name     types.String `tfsdk:"name"`
+	Action   types.String `tfsdk:"action"`
+	Timeout  types.Int64  `tfsdk:"timeout"`
+	With     types.Map    `tfsdk:"with"`
+	WithJSON types.String `tfsdk:"with_json"`
 }
 
 // pipelineStepRequest is one inline step in the create/update body: an action plus its
-// full `with` config (mirrors workflows' WorkflowStepRef for an inline step).
+// full `with` config (mirrors workflows' WorkflowStepRef for an inline step). With is
+// map[string]any so nested forge config (checkout, build, volumes, secret_refs) — set
+// via with_json — round-trips as real objects, not stringified.
 type pipelineStepRequest struct {
-	Name    string            `json:"name,omitempty"`
-	Action  string            `json:"action,omitempty"`
-	Timeout int64             `json:"timeout,omitempty"`
-	With    map[string]string `json:"with,omitempty"`
+	Name    string         `json:"name,omitempty"`
+	Action  string         `json:"action,omitempty"`
+	Timeout int64          `json:"timeout,omitempty"`
+	With    map[string]any `json:"with,omitempty"`
 }
 
 type createWorkflowRequest struct {
@@ -115,9 +119,10 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"name":    schema.StringAttribute{Required: true, MarkdownDescription: "Step name (referenced as ${steps.<name>.output})."},
-						"action":  schema.StringAttribute{Required: true, MarkdownDescription: "The action the step runs, e.g. `forge/run`."},
+						"action":  schema.StringAttribute{Required: true, MarkdownDescription: "The action the step runs, e.g. `forge/run`, `forge/build-image`."},
 						"timeout": schema.Int64Attribute{Optional: true, MarkdownDescription: "Per-step timeout in seconds (0 / unset = service default)."},
-						"with":    schema.MapAttribute{ElementType: types.StringType, Optional: true, MarkdownDescription: "The step's full config for its action (e.g. `image`, `run` for `forge/run`)."},
+						"with":    schema.MapAttribute{ElementType: types.StringType, Optional: true, MarkdownDescription: "Simple string config for the action (e.g. `image`, `run` for `forge/run`)."},
+						"with_json": schema.StringAttribute{Optional: true, MarkdownDescription: "Advanced config as a JSON object string, merged over `with`. Use for nested forge config — `checkout`, `build`, `volumes`, `secret_refs` — that can't be expressed as flat strings."},
 					},
 				},
 			},
@@ -141,9 +146,25 @@ func (m pipelineModel) toRequest(ctx context.Context) (createWorkflowRequest, di
 	}
 	reqSteps := make([]pipelineStepRequest, 0, len(steps))
 	for _, s := range steps {
-		with := map[string]string{}
+		with := map[string]any{}
 		if !s.With.IsNull() && !s.With.IsUnknown() {
-			diags.Append(s.With.ElementsAs(ctx, &with, false)...)
+			strs := map[string]string{}
+			diags.Append(s.With.ElementsAs(ctx, &strs, false)...)
+			for k, v := range strs {
+				with[k] = v
+			}
+		}
+		// with_json carries nested config (checkout/build/volumes/secret_refs); its keys
+		// override the flat `with` map.
+		if !s.WithJSON.IsNull() && !s.WithJSON.IsUnknown() && s.WithJSON.ValueString() != "" {
+			var nested map[string]any
+			if err := json.Unmarshal([]byte(s.WithJSON.ValueString()), &nested); err != nil {
+				diags.AddError("Invalid with_json", err.Error())
+				return createWorkflowRequest{}, diags
+			}
+			for k, v := range nested {
+				with[k] = v
+			}
 		}
 		reqSteps = append(reqSteps, pipelineStepRequest{
 			Name:    s.Name.ValueString(),
