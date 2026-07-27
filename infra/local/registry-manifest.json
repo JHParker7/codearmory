@@ -461,6 +461,48 @@
         "path": "/tokens/{id}",
         "action": "deleteToken",
         "resource": "{username}/gatekeeper/tokens"
+      },
+      {
+        "method": "POST",
+        "path": "/projects",
+        "action": "createProject",
+        "resource": "{username}/gatekeeper/projects"
+      },
+      {
+        "method": "GET",
+        "path": "/projects",
+        "action": "listProject",
+        "resource": "{username}/gatekeeper/projects"
+      },
+      {
+        "method": "GET",
+        "path": "/projects/{id}",
+        "action": "getProject",
+        "resource": "{username}/gatekeeper/projects"
+      },
+      {
+        "method": "PUT",
+        "path": "/projects/{id}",
+        "action": "updateProject",
+        "resource": "{username}/gatekeeper/projects"
+      },
+      {
+        "method": "DELETE",
+        "path": "/projects/{id}",
+        "action": "deleteProject",
+        "resource": "{username}/gatekeeper/projects"
+      },
+      {
+        "method": "POST",
+        "path": "/projects/{id}/members",
+        "action": "manageProjectMembers",
+        "resource": "{username}/gatekeeper/projects"
+      },
+      {
+        "method": "DELETE",
+        "path": "/projects/{id}/members/{user_id}",
+        "action": "manageProjectMembers",
+        "resource": "{username}/gatekeeper/projects"
       }
     ],
     "default_grants": [
@@ -552,6 +594,20 @@
         ],
         "resources": [
           "{username}/gatekeeper/roles"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "createProject",
+          "listProject",
+          "getProject",
+          "updateProject",
+          "deleteProject",
+          "manageProjectMembers"
+        ],
+        "resources": [
+          "{username}/gatekeeper/projects"
         ]
       },
       {

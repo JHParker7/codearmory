@@ -388,3 +388,29 @@ type PersonalToken struct {
 }
 
 func (PersonalToken) TableName() string { return "personal_tokens" }
+
+// Project is a first-class grouping of resources (repos, pipelines, boards, executions)
+// that turns the former free-text "project" view-filter into a permission SCOPE. It
+// lives under a namespace exactly like a repo does — "<username>" or "org/<orgName>" —
+// so the owner of the namespace owns the project's scope, and confinement checks apply.
+//
+// Resources join a project by carrying its Slug in their own "project" column; a
+// participating service then builds its RBAC resource string with a
+// "projects/<slug>" segment (see docs/projects/design.md), so one wildcard permission
+// on "<ns>/<service>/projects/<slug>/*" covers every resource the project holds in that
+// service. Three built-in roles (viewer/developer/admin) hold exactly those wildcards;
+// membership is the ordinary RoleMembership on whichever tier role.
+type Project struct {
+	ProjectID       string    `json:"project_id"        gorm:"column:project_id;primaryKey"`
+	Slug            string    `json:"slug"              gorm:"column:slug;uniqueIndex:ux_project_ns_slug,priority:2"`
+	Namespace       string    `json:"namespace"         gorm:"column:namespace;uniqueIndex:ux_project_ns_slug,priority:1"`
+	Name            string    `json:"name"              gorm:"column:name;default:''"`
+	OwnerID         string    `json:"owner_id"          gorm:"column:owner_id;index"`
+	ViewerRoleID    string    `json:"viewer_role_id"    gorm:"column:viewer_role_id;default:''"`
+	DeveloperRoleID string    `json:"developer_role_id" gorm:"column:developer_role_id;default:''"`
+	AdminRoleID     string    `json:"admin_role_id"     gorm:"column:admin_role_id;default:''"`
+	CreatedAt       time.Time `json:"created_at"        gorm:"column:created_at;autoCreateTime"`
+	Active          bool      `json:"-"                 gorm:"column:active;default:true"`
+}
+
+func (Project) TableName() string { return "projects" }

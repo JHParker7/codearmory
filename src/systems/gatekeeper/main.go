@@ -205,7 +205,7 @@ func main() {
 	initSecretsEncryption()
 
 	conn := connect()
-	conn.AutoMigrate(&Org{}, &Role{}, &RoleMembership{}, &Team{}, &User{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{}, &PersonalToken{})
+	conn.AutoMigrate(&Org{}, &Role{}, &RoleMembership{}, &Team{}, &User{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{}, &PersonalToken{}, &Project{})
 	applyForeignKeys(conn)
 	applyUniqueIndexes(conn)
 	// Give existing single-org accounts a membership row so they participate in the
@@ -403,6 +403,16 @@ func buildMux() *http.ServeMux {
 	mux.Handle("GET /roles/{id}/members", mw(handleListRoleMembers))
 	mux.Handle("PUT /roles/{id}/members/{user_id}", mw(handleAssignRole))
 	mux.Handle("DELETE /roles/{id}/members/{user_id}", mw(handleRevokeRole))
+
+	// Projects — a first-class resource-grouping scope over the namespace-role
+	// primitives (see docs/projects/design.md).
+	mux.Handle("POST /projects", mw(handleCreateProject))
+	mux.Handle("GET /projects", mw(handleListProjects))
+	mux.Handle("GET /projects/{id}", mw(handleGetProject))
+	mux.Handle("PUT /projects/{id}", mw(handleUpdateProject))
+	mux.Handle("DELETE /projects/{id}", mw(handleDeleteProject))
+	mux.Handle("POST /projects/{id}/members", mw(handleAddProjectMember))
+	mux.Handle("DELETE /projects/{id}/members/{user_id}", mw(handleRemoveProjectMember))
 
 	mux.Handle("POST /permissions", mw(handleCreatePermissions))
 	mux.Handle("GET /permissions", mw(handleListPermissions))
