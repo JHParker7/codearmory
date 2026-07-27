@@ -297,6 +297,24 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	path := r.URL.Path
 
+	// Conductor's own introspection endpoints are registered on the mux at their bare
+	// paths, but the SPA reaches everything through "/api". A stripped "/services" (or
+	// "/health") is a SINGLE segment with no service-name prefix, so without this it
+	// falls through to the SPA fallback below — the portal then gets HTML for its
+	// GET /api/services routing-table fetch, leaves registeredServices null, and the
+	// sidebar fails OPEN (showing modules for services that aren't actually routable,
+	// e.g. git_factory). Dispatch the native GETs here so /api/services works too.
+	if r.Method == http.MethodGet {
+		switch path {
+		case "/services":
+			handleListServices(w, r)
+			return
+		case "/health":
+			handleServicesHealth(w, r)
+			return
+		}
+	}
+
 	// All routes require a service-name prefix (e.g. /forge/executions, /gatekeeper/login).
 	trimmed := strings.TrimPrefix(path, "/")
 	if slashIdx := strings.Index(trimmed, "/"); slashIdx > 0 {

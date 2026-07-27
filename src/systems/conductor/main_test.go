@@ -837,3 +837,32 @@ func TestHandleListServices_ReturnsRegisteredNamesSorted(t *testing.T) {
 		t.Fatalf("forge description = %q, want \"exec\"", body.Services[1].Description)
 	}
 }
+
+// The SPA fetches its routing table at /api/services; conductor must dispatch that to
+// handleListServices (not the SPA fallback), or the portal never learns which services
+// are routable and its sidebar fails open. Regression guard for that path.
+func TestHandleServiceProxy_ApiServicesReturnsCatalog(t *testing.T) {
+	withServices(t, map[string]serviceState{
+		"forge":      {url: "http://forge"},
+		"gatekeeper": {url: "http://gk"},
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "/api/services", nil)
+	w := httptest.NewRecorder()
+	handleServiceProxy(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/services status = %d, want 200 (must reach handleListServices, not the SPA fallback)", w.Code)
+	}
+	var body struct {
+		Services []struct {
+			Name string `json:"name"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /api/services: %v (body=%q)", err, w.Body.String())
+	}
+	if len(body.Services) != 2 {
+		t.Fatalf("got %d services, want 2", len(body.Services))
+	}
+}
