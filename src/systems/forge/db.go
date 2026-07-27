@@ -111,6 +111,25 @@ func (e Execution) Get(ctx context.Context) (db, error) {
 	return out, nil
 }
 
+// getExecution fetches an execution by ID alone, unscoped by owner, so the caller can
+// apply the "owner OR project" gate (authorizeExecution) itself — a project member who
+// does not own the row must still be able to read it.
+func getExecution(ctx context.Context, id string) (Execution, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.execution.get_by_id")
+	defer span.End()
+	span.SetAttributes(attribute.String("execution.id", id))
+	var out Execution
+	if err := connect().WithContext(ctx).
+		Where("execution_id = ?", id).
+		First(&out).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return Execution{}, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return out, nil
+}
+
 // List returns executions for the UserID on the receiver, ordered most recent first.
 // A limit <= 0 defaults to 100.
 func (e Execution) List(ctx context.Context, limit, offset int) ([]db, error) {
@@ -147,6 +166,47 @@ func (e Execution) List(ctx context.Context, limit, offset int) ([]db, error) {
 		rows[i] = ex
 	}
 	return rows, nil
+}
+
+// listExecutions returns executions the caller may see: their own, plus — via
+// projectIDs, the gatekeeper projects they can reach — any execution filed into one of
+// those projects. project, when set, is an optional view filter (not a security
+// boundary). Ordered most recent first; a limit <= 0 defaults to 100.
+func listExecutions(ctx context.Context, userID, project string, limit, offset int, projectIDs []string) ([]Execution, error) {
+	ctx, span := otel.Tracer("forge").Start(ctx, "db.execution.list")
+	defer span.End()
+	span.SetAttributes(attribute.String("user.id", userID))
+	if limit <= 0 {
+		limit = 100
+	}
+	var executions []Execution
+	// command, env, and timeout_secs are selected so list consumers (e.g. the CLI
+	// rerun action) can resubmit an execution without a second fetch; stdout/stderr
+	// stay out of the list because they can be large.
+	q := connect().WithContext(ctx).
+		Select("execution_id, user_id, image, command, env, timeout_secs, status, exit_code, memory_used_mb, memory_limit_mb, created_at, started_at, ended_at, runner_class, project").
+		Order("created_at DESC").
+		Limit(limit)
+	// Widen to executions in any project the caller can reach; otherwise owner-only.
+	if len(projectIDs) > 0 {
+		q = q.Where("user_id = ? OR project_id IN ?", userID, projectIDs)
+	} else {
+		q = q.Where("user_id = ?", userID)
+	}
+	// Project is an optional view filter, not a security boundary.
+	if project != "" {
+		q = q.Where("project = ?", project)
+	}
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	if err := q.Find(&executions).Error; err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return executions, nil
 }
 
 // Cancel sets a pending execution to cancelled. Returns false when the execution

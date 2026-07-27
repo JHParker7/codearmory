@@ -436,6 +436,25 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 		Resolve:     req.Resolve,
 		Status:      StatusPending,
 	}
+
+	// If Project names a real gatekeeper project the caller can reach, file the
+	// execution into it — but only if the caller may create within it (developer/admin/
+	// owner). A slug that resolves to nothing stays a free-text label (unchanged
+	// behaviour); a slug the caller may only view is refused rather than silently
+	// downgraded to a label.
+	if req.Project != "" {
+		bearer := r.Header.Get("Authorization")
+		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
+			if !checkProjectPermission(ctx, bearer, "createExecution", p.Namespace, "executions", p.Slug, "") {
+				span.SetStatus(codes.Ok, "")
+				http.Error(w, "you cannot create executions in project "+p.Slug, http.StatusForbidden)
+				return
+			}
+			exec.ProjectID = p.ProjectID
+			exec.ProjectNamespace = p.Namespace
+		}
+	}
+
 	if err := exec.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -460,7 +479,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	executionID := r.PathValue("id")
-	userID, ok := checkGatekeeper(ctx, w, r, "getExecution", "forge/executions/"+executionID)
+	userID, orgID, ok := checkGatekeeperOrg(ctx, w, r, "getExecution", "forge/executions/"+executionID)
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -472,7 +491,7 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("permission.granted")
 	slog.InfoContext(ctx, "get execution request", "user_id", userID, "execution_id", executionID)
 
-	row, err := (Execution{ExecutionID: executionID, UserID: userID}).Get(ctx)
+	exec, err := getExecution(ctx, executionID)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		span.SetStatus(codes.Error, "execution not found")
 		slog.WarnContext(ctx, "get execution: not found", "user_id", userID, "execution_id", executionID)
@@ -485,7 +504,14 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	exec := row.(Execution)
+	// Owner OR a member of the project the execution is filed into. A non-owner without
+	// a project grant is indistinguishable from a missing row (404, not 403).
+	if !authorizeExecution(ctx, r.Header.Get("Authorization"), "getExecution", exec, userID, orgID) {
+		span.SetStatus(codes.Ok, "")
+		slog.WarnContext(ctx, "get execution: forbidden", "user_id", userID, "execution_id", executionID)
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
 
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "get execution: success", "user_id", userID, "execution_id", executionID, "status", exec.Status)
@@ -508,16 +534,12 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	span.AddEvent("permission.granted")
 	slog.InfoContext(ctx, "list executions request", "user_id", userID)
 
-	rows, err := (Execution{UserID: userID, Project: r.URL.Query().Get("project")}).List(ctx, 100, 0)
+	executions, err := listExecutions(ctx, userID, r.URL.Query().Get("project"), 100, 0, accessibleProjectIDs(ctx, r.Header.Get("Authorization")))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
-	}
-	executions := make([]Execution, len(rows))
-	for i, r := range rows {
-		executions[i] = r.(Execution)
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -534,7 +556,7 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		defer span.End()
 
 		executionID := r.PathValue("id")
-		userID, ok := checkGatekeeper(ctx, w, r, "deleteExecution", "forge/executions/"+executionID)
+		userID, orgID, ok := checkGatekeeperOrg(ctx, w, r, "deleteExecution", "forge/executions/"+executionID)
 		if !ok {
 			span.SetStatus(codes.Ok, "")
 			return
@@ -546,7 +568,7 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 		span.AddEvent("permission.granted")
 		slog.InfoContext(ctx, "cancel execution request", "user_id", userID, "execution_id", executionID)
 
-		row, err := (Execution{ExecutionID: executionID, UserID: userID}).Get(ctx)
+		exec, err := getExecution(ctx, executionID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			span.SetStatus(codes.Error, "execution not found")
 			slog.WarnContext(ctx, "cancel execution: not found", "user_id", userID, "execution_id", executionID)
@@ -560,7 +582,13 @@ func handleCancel(pool *WorkerPool) http.HandlerFunc {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
-		exec := row.(Execution)
+		// Owner OR a member of the execution's project holding deleteExecution on it.
+		if !authorizeExecution(ctx, r.Header.Get("Authorization"), "deleteExecution", exec, userID, orgID) {
+			span.SetStatus(codes.Ok, "")
+			slog.WarnContext(ctx, "cancel execution: forbidden", "user_id", userID, "execution_id", executionID)
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 
 		switch exec.Status {
 		case StatusCompleted, StatusFailed, StatusTimedOut, StatusCancelled:

@@ -43,9 +43,17 @@ type Execution struct {
 	// check at submit time. The worker uses it to resolve org-scoped secrets
 	// (secret: refs) at dispatch without a live request context.
 	OrgID string `gorm:"column:org_id;not null;default:''" json:"org_id,omitempty"`
-	// Project is a free-text workspace label used only to filter list views; it is
-	// not a security boundary (access stays governed by UserID/OrgID).
+	// Project is the workspace label. When it names a real gatekeeper Project the
+	// caller can reach, ProjectID/ProjectNamespace are set at submit and access widens
+	// to that project's members via a project role; otherwise it stays a free-text
+	// view-filter label and access stays governed by UserID.
 	Project string `gorm:"column:project;not null;default:''" json:"project,omitempty"`
+	// ProjectID/ProjectNamespace are set when Project resolves to a real gatekeeper
+	// Project (not just a free-text label): ProjectID lets list views widen to a
+	// project's members cheaply, ProjectNamespace is the owner namespace a member's
+	// project grant must be qualified with. Both empty ⇒ Project is a plain label.
+	ProjectID        string `gorm:"column:project_id;not null;default:''" json:"project_id,omitempty"`
+	ProjectNamespace string `gorm:"column:project_namespace;not null;default:''" json:"project_namespace,omitempty"`
 	// SecretRefs maps a target env var NAME to a credential reference resolved at
 	// dispatch and injected into the runtime env — never into the persisted env.
 	// Reference schemes: "secret:<name>" (gatekeeper org secret),
