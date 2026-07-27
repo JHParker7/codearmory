@@ -24,6 +24,7 @@ type createBoardRequest struct {
 	Description string `json:"description"`
 	Color       string `json:"color"`
 	Position    int    `json:"position"`
+	Project     string `json:"project,omitempty"`
 }
 
 type updateBoardRequest struct {
@@ -31,6 +32,7 @@ type updateBoardRequest struct {
 	Description *string `json:"description"`
 	Color       *string `json:"color"`
 	Position    *int    `json:"position"`
+	Project     *string `json:"project,omitempty"`
 }
 
 func handleCreateBoard(w http.ResponseWriter, r *http.Request) {
@@ -75,10 +77,29 @@ func handleCreateBoard(w http.ResponseWriter, r *http.Request) {
 		Position:    req.Position,
 		CreatedBy:   userID,
 		OrgID:       orgID,
+		Project:     req.Project,
 		Active:      true,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
+
+	// If Project names a real gatekeeper project the caller can reach, file the board
+	// into it — but only if the caller may create within it (developer/admin/owner). A
+	// slug that resolves to nothing stays a free-text label (unchanged behaviour); a
+	// slug the caller may only view is refused rather than silently downgraded.
+	if req.Project != "" {
+		bearer := r.Header.Get("Authorization")
+		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
+			if !checkProjectPermission(ctx, bearer, "createBoard", p.Namespace, "boards", p.Slug, "") {
+				span.SetStatus(codes.Ok, "")
+				http.Error(w, "you cannot create boards in project "+p.Slug, http.StatusForbidden)
+				return
+			}
+			b.ProjectID = p.ProjectID
+			b.ProjectNamespace = p.Namespace
+		}
+	}
+
 	if err := b.Add(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db insert failed")
@@ -114,7 +135,7 @@ func handleListBoards(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(attribute.String("user.id", userID), attribute.String("org.id", orgID))
 
-	boards, err := listBoards(ctx, userID, orgID)
+	boards, err := listBoards(ctx, userID, orgID, accessibleProjectIDs(ctx, r.Header.Get("Authorization")))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
@@ -153,7 +174,7 @@ func handleGetBoard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get board", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessBoard(b, userID, orgID) {
+	if !authorizeBoard(ctx, r.Header.Get("Authorization"), "getBoard", b, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "board not found", http.StatusNotFound)
 		return
@@ -195,7 +216,7 @@ func handleUpdateBoard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get board", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessBoard(existing, userID, orgID) {
+	if !authorizeBoard(ctx, r.Header.Get("Authorization"), "updateBoard", existing, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "board not found", http.StatusNotFound)
 		return
@@ -229,6 +250,20 @@ func handleUpdateBoard(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Position != nil {
 		existing.Position = *req.Position
+	}
+	// Guard like tickets: a partial PUT that omits project must not silently wipe the
+	// stored label. When project is sent, re-resolve membership: if the (possibly new)
+	// slug names a real project the caller may write to, file it there; otherwise it
+	// reverts to a plain label (clear the ids so a moved board never keeps stale scope).
+	if req.Project != nil {
+		existing.Project = *req.Project
+		existing.ProjectID, existing.ProjectNamespace = "", ""
+		bearer := r.Header.Get("Authorization")
+		if p := resolveProjectSlug(ctx, bearer, existing.Project); p != nil &&
+			checkProjectPermission(ctx, bearer, "updateBoard", p.Namespace, "boards", p.Slug, "") {
+			existing.ProjectID = p.ProjectID
+			existing.ProjectNamespace = p.Namespace
+		}
 	}
 
 	if err := existing.Update(ctx); err != nil {
@@ -270,7 +305,7 @@ func handleDeleteBoard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to delete board", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessBoard(b, userID, orgID) {
+	if !authorizeBoard(ctx, r.Header.Get("Authorization"), "deleteBoard", b, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "board not found", http.StatusNotFound)
 		return

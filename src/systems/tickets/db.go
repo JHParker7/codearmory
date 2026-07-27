@@ -214,7 +214,7 @@ func (b Board) Get(ctx context.Context) (db, error) {
 func (b Board) List(ctx context.Context, limit, offset int) ([]db, error) {
 	ctx, span := otel.Tracer("tickets").Start(ctx, "db.board.list")
 	defer span.End()
-	boards, err := listBoards(ctx, b.CreatedBy, b.OrgID)
+	boards, err := listBoards(ctx, b.CreatedBy, b.OrgID, nil)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -250,10 +250,15 @@ func getBoard(ctx context.Context, id string) (Board, error) {
 
 // listBoards returns active boards accessible to the caller (owned or same-org),
 // ordered by position then name, each with its open/total ticket counts.
-func listBoards(ctx context.Context, userID, orgID string) ([]Board, error) {
+func listBoards(ctx context.Context, userID, orgID string, projectIDs []string) ([]Board, error) {
 	var boards []Board
-	if err := connectRead().WithContext(ctx).
-		Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID).
+	q := connectRead().WithContext(ctx)
+	if len(projectIDs) > 0 {
+		q = q.Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?) OR project_id IN ?)", true, userID, orgID, projectIDs)
+	} else {
+		q = q.Where("active = ? AND (created_by = ? OR (org_id != '' AND org_id = ?))", true, userID, orgID)
+	}
+	if err := q.
 		Order("position, name, created_at").
 		Find(&boards).Error; err != nil {
 		return nil, err

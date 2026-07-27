@@ -83,16 +83,22 @@ func (TicketComment) TableName() string { return "ticket_comments" }
 // optionally shared within an org. Tickets reference a board via Ticket.BoardID;
 // the board's columns are the org's configured status field defs.
 type Board struct {
-	BoardID     string    `json:"board_id"     gorm:"column:board_id;primaryKey"`
-	Name        string    `json:"name"         gorm:"column:name"`
-	Description string    `json:"description"  gorm:"column:description;default:''"`
-	Color       string    `json:"color"        gorm:"column:color;default:''"`
-	Position    int       `json:"position"     gorm:"column:position;default:0"`
-	CreatedBy   string    `json:"created_by"   gorm:"column:created_by"`
-	OrgID       string    `json:"org_id"       gorm:"column:org_id;default:''"`
-	Active      bool      `json:"-"            gorm:"column:active;default:true"`
-	CreatedAt   time.Time `json:"created_at"   gorm:"column:created_at"`
-	UpdatedAt   time.Time `json:"updated_at"   gorm:"column:updated_at"`
+	BoardID     string `json:"board_id"     gorm:"column:board_id;primaryKey"`
+	Name        string `json:"name"         gorm:"column:name"`
+	Description string `json:"description"  gorm:"column:description;default:''"`
+	Color       string `json:"color"        gorm:"column:color;default:''"`
+	Position    int    `json:"position"     gorm:"column:position;default:0"`
+	CreatedBy   string `json:"created_by"   gorm:"column:created_by"`
+	OrgID       string `json:"org_id"       gorm:"column:org_id;default:''"`
+	// Project is the free-text project (workspace) slug the board is filed under; when
+	// it resolves to a real gatekeeper project ProjectID/ProjectNamespace are set and
+	// access is additionally granted by a project role (see project.go).
+	Project          string    `json:"project,omitempty"           gorm:"column:project;default:''"`
+	ProjectID        string    `json:"project_id,omitempty"        gorm:"column:project_id;default:''"`
+	ProjectNamespace string    `json:"project_namespace,omitempty" gorm:"column:project_namespace;default:''"`
+	Active           bool      `json:"-"            gorm:"column:active;default:true"`
+	CreatedAt        time.Time `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt        time.Time `json:"updated_at"   gorm:"column:updated_at"`
 	// OpenCount/TotalCount are computed on read (not stored): TotalCount is every
 	// active ticket on the board and OpenCount those still open (not in a terminal
 	// status). They are populated by the list/get board handlers.
