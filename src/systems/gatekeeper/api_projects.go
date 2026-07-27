@@ -193,11 +193,33 @@ func ownedProject(w http.ResponseWriter, ctx context.Context, callerID, projectI
 	return p, true
 }
 
+// handleListAccessibleProjects returns every project the caller can reach (owned +
+// member), each tagged with the caller's tier. Services call this to widen list views;
+// the portal uses it to show "projects shared with me".
+func handleListAccessibleProjects(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	callerID, _ := ctx.Value(userIDKey).(string)
+	projects, err := accessibleProjects(ctx, callerID)
+	if err != nil {
+		internalError(w, ctx, "list accessible projects", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, projects)
+}
+
+// handleGetProject is viewable by owner OR any member — a member must be able to see
+// the project they were added to (mutations below stay owner-only).
 func handleGetProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	callerID, _ := ctx.Value(userIDKey).(string)
-	p, ok := ownedProject(w, ctx, callerID, r.PathValue("id"))
-	if !ok {
+	row, err := (Project{ProjectID: r.PathValue("id")}).Get(ctx)
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	p := row.(Project)
+	if !isProjectMember(ctx, callerID, p) {
+		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
 	writeJSON(w, http.StatusOK, p)

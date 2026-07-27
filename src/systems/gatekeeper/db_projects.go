@@ -106,3 +106,81 @@ func projectsInNamespaces(ctx context.Context, namespaces []string) ([]Project, 
 	}
 	return rows, err
 }
+
+// accessibleProject pairs a project with the caller's highest tier in it, so a service
+// can widen list queries (by ProjectID) and the portal can show role. Owners report
+// tier "owner".
+type accessibleProject struct {
+	Project
+	Tier string `json:"tier"`
+}
+
+// accessibleProjects returns every project the caller can reach: those they own, plus
+// those they hold any tier role in (via RoleMembership). This is what services call to
+// widen list views to include another namespace's project-shared resources.
+func accessibleProjects(ctx context.Context, callerID string) ([]accessibleProject, error) {
+	rd := connectRead().WithContext(ctx)
+
+	var owned []Project
+	if err := rd.Where("active = ? AND owner_id = ?", true, callerID).Find(&owned).Error; err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	out := make([]accessibleProject, 0, len(owned))
+	for _, p := range owned {
+		seen[p.ProjectID] = true
+		out = append(out, accessibleProject{Project: p, Tier: "owner"})
+	}
+
+	// Member projects: the caller's role memberships → tier roles → projects.
+	var roleIDs []string
+	if err := rd.Model(&RoleMembership{}).Where("user_id = ?", callerID).Pluck("role_id", &roleIDs).Error; err != nil {
+		return nil, err
+	}
+	if len(roleIDs) == 0 {
+		return out, nil
+	}
+	var member []Project
+	if err := rd.Where("active = ? AND (viewer_role_id IN ? OR developer_role_id IN ? OR admin_role_id IN ?)",
+		true, roleIDs, roleIDs, roleIDs).Find(&member).Error; err != nil {
+		return nil, err
+	}
+	rset := map[string]bool{}
+	for _, id := range roleIDs {
+		rset[id] = true
+	}
+	for _, p := range member {
+		if seen[p.ProjectID] {
+			continue
+		}
+		seen[p.ProjectID] = true
+		out = append(out, accessibleProject{Project: p, Tier: tierFor(p, rset)})
+	}
+	return out, nil
+}
+
+// tierFor reports the caller's strongest tier in a project given the set of role ids
+// they hold (admin ⊃ developer ⊃ viewer).
+func tierFor(p Project, held map[string]bool) string {
+	switch {
+	case p.AdminRoleID != "" && held[p.AdminRoleID]:
+		return "admin"
+	case p.DeveloperRoleID != "" && held[p.DeveloperRoleID]:
+		return "developer"
+	case p.ViewerRoleID != "" && held[p.ViewerRoleID]:
+		return "viewer"
+	}
+	return ""
+}
+
+// isProjectMember reports whether the caller can VIEW a project (owner or any tier).
+func isProjectMember(ctx context.Context, callerID string, p Project) bool {
+	if p.OwnerID == callerID {
+		return true
+	}
+	var n int64
+	connectRead().WithContext(ctx).Model(&RoleMembership{}).
+		Where("user_id = ? AND role_id IN ?", callerID, []string{p.ViewerRoleID, p.DeveloperRoleID, p.AdminRoleID}).
+		Count(&n)
+	return n > 0
+}

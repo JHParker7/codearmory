@@ -476,6 +476,12 @@
       },
       {
         "method": "GET",
+        "path": "/projects/accessible",
+        "action": "listAccessibleProject",
+        "resource": "{username}/gatekeeper/projects"
+      },
+      {
+        "method": "GET",
         "path": "/projects/{id}",
         "action": "getProject",
         "resource": "{username}/gatekeeper/projects"
@@ -601,6 +607,7 @@
         "actions": [
           "createProject",
           "listProject",
+          "listAccessibleProject",
           "getProject",
           "updateProject",
           "deleteProject",
