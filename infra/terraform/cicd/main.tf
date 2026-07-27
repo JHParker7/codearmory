@@ -170,14 +170,14 @@ resource "codearmory_pipeline" "codearmory" {
 }
 
 resource "codearmory_hook_rule" "codearmory_push" {
-  name = "codearmory-ci-on-main"
+  name = "codearmory-ci-on-dev"
   # Same shared git_factory source; distinguished from the git_factory-cd rule only by
   # the branch. NOTE: the pipeline's checkout clones the Gitea copy
   # (192.168.53.171:3000/jp01/codearmory) — if the monorepo's real pushes land there
   # rather than on git_factory, wire the Gitea webhook path instead of this rule.
   source      = "codearmory_git_factory"
   events      = ["git.push"]
-  ref_filter  = "main"
+  ref_filter  = "dev"
   workflow_id = codearmory_pipeline.codearmory.id
   secret      = var.webhook_secret
 
