@@ -1011,3 +1011,27 @@ func recoverStuckRunsDB() int64 {
 	}
 	return result.RowsAffected
 }
+
+// failTimedOutRunsDB fails any run still 'running' past its workflow's timeout. It is
+// the backstop the in-process run-timeout context cannot be: a worker that died
+// mid-run leaves no goroutine to trip that context, so the run would sit 'running'
+// until the next pod restart (which is how a run reached 18h). Runs are only swept a
+// grace period BEYOND the timeout, so a live worker's own context — which fires at the
+// timeout — remains the primary path and this only catches genuine orphans. The
+// per-workflow timeout is joined in; 0 / NULL reads as the 1800s default.
+func failTimedOutRunsDB() int64 {
+	result := connect().Exec(`
+		UPDATE workflow_runs r
+		SET status='failed', ended_at=CURRENT_TIMESTAMP, token=NULL, run_session_id=NULL
+		FROM workflows w
+		WHERE r.workflow_id = w.workflow_id
+		  AND r.status = 'running'
+		  AND r.started_at IS NOT NULL
+		  AND r.started_at < CURRENT_TIMESTAMP - ((COALESCE(NULLIF(w.run_timeout_secs, 0), 1800) + 120) * interval '1 second')
+	`)
+	if result.Error != nil {
+		slog.Error("run-timeout sweep failed", "error", result.Error)
+		return 0
+	}
+	return result.RowsAffected
+}

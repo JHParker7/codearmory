@@ -342,6 +342,26 @@ func limitBody(next http.Handler) http.Handler {
 // recoverStuckRuns marks any runs left in 'running' state (from a previous pod
 // crash) as 'failed' so they do not block the worker queue indefinitely.
 // Sessions are nulled out; their JWTs expire naturally within the 1-hour TTL.
+// startRunTimeoutSweeper runs a background ticker that fails any run past its workflow's
+// timeout — the backstop for orphaned runs a live worker's timeout context can't catch
+// (see failTimedOutRunsDB). Stops when ctx is cancelled at shutdown.
+func startRunTimeoutSweeper(ctx context.Context) {
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if n := failTimedOutRunsDB(); n > 0 {
+					slog.Warn("run-timeout sweep: reaped runs past their timeout", "count", n)
+				}
+			}
+		}
+	}()
+}
+
 func recoverStuckRuns() {
 	if n := recoverStuckRunsDB(); n > 0 {
 		slog.Warn("startup: recovered stuck runs from previous pod", "count", n)
@@ -497,6 +517,7 @@ func run(ctx context.Context) error {
 
 	initTokenEncryption()
 	recoverStuckRuns()
+	startRunTimeoutSweeper(ctx)
 
 	initServices()
 	gatekeeperClient = newGatekeeperClient()

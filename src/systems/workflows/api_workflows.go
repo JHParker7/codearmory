@@ -329,6 +329,9 @@ type createWorkflowRequest struct {
 	Name        string              `json:"name"`
 	Description string              `json:"description"`
 	Project     string              `json:"project,omitempty"`
+	// TimeoutSecs caps a single run's wall-clock duration (default 1800 / 30 min when
+	// omitted). Prevents a hung run from lingering for hours.
+	TimeoutSecs int64               `json:"timeout_secs,omitempty"`
 	Steps       []WorkflowStepRef   `json:"steps,omitempty"`
 	Inputs      []WorkflowInputDef  `json:"inputs,omitempty"`
 	Outputs     []WorkflowOutputDef `json:"outputs,omitempty"`
@@ -489,6 +492,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		Description: req.Description,
 		Project:     req.Project,
+		TimeoutSecs: req.TimeoutSecs, // 0 → the column default (1800 / 30 min) applies
 		CreatedBy:   userID,
 		OrgID:       orgID,
 		Active:      true,
@@ -777,6 +781,11 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing.Routes = req.Routes
 	existing.Maps = req.Maps
 	existing.Ticket = req.Ticket
+	// A partial PUT that omits the timeout keeps the stored one, so an update never
+	// silently drops a run's cap to the zero value.
+	if req.TimeoutSecs > 0 {
+		existing.TimeoutSecs = req.TimeoutSecs
+	}
 	// Guard like tickets: a partial PUT that omits project must not silently
 	// wipe the stored label (the CLI/TUI update payloads don't send project).
 	if req.Project != "" {

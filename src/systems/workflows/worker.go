@@ -28,6 +28,12 @@ import (
 // matrix/scatter max_concurrent can raise its fan-out to.
 const maxParallelSteps = 10
 
+// defaultRunTimeout bounds a run whose workflow carries no explicit timeout (0 — a row
+// created before the column existed). 30 minutes: long enough for the heaviest CI
+// pipeline, short enough that a wedged run is reaped the same day rather than lingering
+// for hours.
+const defaultRunTimeout = 30 * time.Minute
+
 // defaultFanoutConcurrency is how many legs a matrix or scatter runs at once when it
 // declares no max_concurrent — a conservative default (rather than the full ceiling)
 // so an unthrottled fan-out does not swamp a small cluster. Explicit max_concurrent
@@ -159,21 +165,30 @@ func (p *WorkerPool) tryOne(ctx context.Context) bool {
 // ticketID is the run's already-open ticket, if it has one — a resumed run adopts it
 // rather than opening a second (see ticketReporter.open).
 func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, sessionID, triggeredBy string, inputs map[string]string, depth int, ticketID string) {
-	runCtx, cancel := context.WithCancel(ctx)
+	// The workflow is loaded before the run context so its timeout can bound the run.
+	workflow, err := getWorkflow(ctx, workflowID)
+	if err != nil {
+		slog.ErrorContext(ctx, "worker: fetch workflow", "run_id", runID, "workflow_id", workflowID, "error", err)
+		p.failRun(runID, sessionID)
+		return
+	}
+
+	// Cap the whole run's wall-clock time. A hung step (past its own timeout), a
+	// scheduling loop, or a wedged dependency would otherwise leave the run 'running'
+	// indefinitely — the 18h runs this replaces. 0 (a row predating the column) reads
+	// as the 30-minute default so every run is bounded.
+	timeout := time.Duration(workflow.TimeoutSecs) * time.Second
+	if timeout <= 0 {
+		timeout = defaultRunTimeout
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	p.cancels.Store(runID, cancel)
 	defer func() {
 		cancel()
 		p.cancels.Delete(runID)
 	}()
 
-	slog.InfoContext(ctx, "worker: starting run", "run_id", runID, "workflow_id", workflowID)
-
-	workflow, err := getWorkflow(runCtx, workflowID)
-	if err != nil {
-		slog.ErrorContext(ctx, "worker: fetch workflow", "run_id", runID, "workflow_id", workflowID, "error", err)
-		p.failRun(runID, sessionID)
-		return
-	}
+	slog.InfoContext(ctx, "worker: starting run", "run_id", runID, "workflow_id", workflowID, "timeout", timeout.String())
 
 	store := newTokenStore(token, sessionID)
 	go p.rotateToken(runCtx, store, runID, triggeredBy, workflow.RoleID)
@@ -206,6 +221,14 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	// a frontier of N such nodes would otherwise multiply it.
 	legSem := make(chan struct{}, maxParallelSteps)
 	finalStatus := p.runGraph(runCtx, g, st, store, runID, workflowID, inputs, depth, iterCtx{}, legSem)
+
+	// A run that hit its timeout is a failure, never a pause: the deadline cancels the
+	// graph mid-flight, so force the terminal status here before the pause path below
+	// could mistake a cancelled-at-a-gate run for one parked awaiting approval.
+	if runCtx.Err() == context.DeadlineExceeded {
+		slog.WarnContext(ctx, "worker: run timed out", "run_id", runID, "workflow_id", workflowID, "timeout", timeout.String())
+		finalStatus = StatusFailed
+	}
 
 	// One or more approval gates parked and the rest of the frontier drained, so
 	// every runnable node is finished and recorded. Pause the run: return without

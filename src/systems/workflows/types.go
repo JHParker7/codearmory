@@ -383,6 +383,12 @@ type Workflow struct {
 	// re-provisions on its next trigger — see handleTriggerRun. Default 0 means
 	// "pre-versioning"; AutoMigrate backfills existing rows to 0.
 	RolePermsVersion int       `json:"-"            gorm:"column:role_perms_version;default:0"`
+	// TimeoutSecs caps the wall-clock duration of a single run: a run still in
+	// 'running' past this is failed, both by the run's own timeout context and by the
+	// periodic sweep that catches orphaned runs (a worker that died mid-run). Defaults
+	// to 1800 (30 min); AutoMigrate backfills existing rows to it, and 0 is read as the
+	// default at run time so a row that predates the column is still bounded.
+	TimeoutSecs      int64     `json:"timeout_secs,omitempty" gorm:"column:run_timeout_secs;default:1800"`
 	Active           bool      `json:"active"       gorm:"column:active;default:true"`
 	CreatedAt        time.Time `json:"created_at"   gorm:"column:created_at"`
 	UpdatedAt        time.Time `json:"updated_at"   gorm:"column:updated_at"`
