@@ -133,9 +133,16 @@ func scatterCreateShardStep(c *ScatterConfig, runID, shard string) Step {
 
 // scatterCloneStep copies the whole base workspace into a leg's freshly-created clone
 // volume (mounted workdir), so the leg starts from an exact copy.
+// volumeCopyTimeoutSecs bounds a fan-out clone/gather. The default forge timeout (30s)
+// is fine for a small workspace but far too short to copy a large one (a checked-out
+// monorepo with build caches is gigabytes), which otherwise times out mid-copy. 10
+// minutes covers a multi-GB volume with headroom.
+const volumeCopyTimeoutSecs = 600
+
 func scatterCloneStep(c *ScatterConfig, runID, shard string) Step {
 	return Step{
-		Action: actionForgeVolumeCopy,
+		Action:  actionForgeVolumeCopy,
+		Timeout: volumeCopyTimeoutSecs,
 		With: map[string]any{
 			"volumes": []any{
 				volMount(runID, shard, c.mount(), true, false),
@@ -229,7 +236,8 @@ func scatterGatherStep(c *ScatterConfig, runID string, shards, paths []string) (
 		sources = append(sources, map[string]any{"volume": shard, "paths": owned})
 	}
 	return Step{
-		Action: actionForgeVolumeCopy,
+		Action:  actionForgeVolumeCopy,
+		Timeout: volumeCopyTimeoutSecs,
 		With: map[string]any{
 			"volumes": volumes,
 			"copy":    map[string]any{"disjoint": true, "sources": sources},
