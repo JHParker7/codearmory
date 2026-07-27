@@ -27,6 +27,39 @@ import (
 // does not exist. Used to deactivate stale rules that reference deleted workflows.
 var errWorkflowNotFound = errors.New("workflow not found")
 
+// hookVarName turns a payload field key into the workflow input var that exposes
+// it: uppercased, prefixed HOOK_, with every run of non-alphanumeric characters
+// collapsed to a single underscore ("clone_url" -> "HOOK_CLONE_URL",
+// "default.branch" -> "HOOK_DEFAULT_BRANCH"). Returns "" for a key with no
+// alphanumeric content, so a junk field never yields a bare "HOOK_" var.
+func hookVarName(key string) string {
+	var b strings.Builder
+	b.WriteString("HOOK_")
+	prevUnderscore := true // avoids a leading underscore after the prefix
+	any := false
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r - 32)
+			prevUnderscore = false
+			any = true
+		case (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevUnderscore = false
+			any = true
+		default:
+			if !prevUnderscore {
+				b.WriteByte('_')
+				prevUnderscore = true
+			}
+		}
+	}
+	if !any {
+		return ""
+	}
+	return strings.TrimRight(b.String(), "_")
+}
+
 // genericPayload is the JSON body expected on POST /hooks.
 type genericPayload struct {
 	Source  string            `json:"source"`
@@ -123,11 +156,21 @@ func matchAndDispatch(ctx context.Context, eventID string, source, event, ref st
 			attribute.String("workflow.id", rws.WorkflowID),
 		))
 
-		// Build workflow inputs: generic defaults + adapter-specific + input_mapping overrides.
-		inputs := map[string]string{
-			"HOOK_SOURCE": source,
-			"HOOK_EVENT":  event,
+		// Build workflow inputs in ascending precedence:
+		//  1. every payload field, auto-exposed as HOOK_<UPPER_KEY> so a pipeline can
+		//     read any webhook value (clone_url, default_branch, repo_id, …) by key
+		//     without authoring a per-rule input_mapping;
+		//  2. the canonical HOOK_SOURCE / HOOK_EVENT;
+		//  3. adapter-specific typed defaults (e.g. the git adapter's HOOK_REPO/REF/COMMIT);
+		//  4. the rule's explicit input_mapping overrides — always the last word.
+		inputs := map[string]string{}
+		for k, v := range payloadMap {
+			if hk := hookVarName(k); hk != "" {
+				inputs[hk] = v
+			}
 		}
+		inputs["HOOK_SOURCE"] = source
+		inputs["HOOK_EVENT"] = event
 		for k, v := range baseInputs {
 			inputs[k] = v
 		}
