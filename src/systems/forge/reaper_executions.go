@@ -18,10 +18,19 @@ import (
 //   - pendingMaxAge: an absolute floor before a *pending* row is reaped, well above
 //     any real queue wait, so work merely starved by a busy budget is left alone and
 //     only long-abandoned queue entries are cleared.
+//
+// The defaults are tied to the platform's timeouts so a stuck execution can never
+// outlive the pipeline that spawned it by more than a short grace: a *pending* row is
+// reaped at the default pipeline run timeout (30m) + 10m = 2400s, and a *running* row
+// at its own forge timeout + 5m = 300s of grace. Before this the pending floor was a
+// flat hour, so a permanently-unschedulable execution (e.g. its workspace PVC was
+// deleted by run teardown while the pod still waited) could jam the worker for up to
+// an hour. Override any of these envs when the pipeline timeout is tuned away from
+// its default.
 var (
 	execReaperInterval = time.Duration(envIntOrDefault("FORGE_EXEC_REAPER_INTERVAL_SECS", 60)) * time.Second
-	execReaperGrace    = int64(envIntOrDefault("FORGE_EXEC_REAPER_GRACE_SECS", 600))
-	execPendingMaxAge  = int64(envIntOrDefault("FORGE_EXEC_PENDING_MAX_AGE_SECS", 3600))
+	execReaperGrace    = int64(envIntOrDefault("FORGE_EXEC_REAPER_GRACE_SECS", 300))
+	execPendingMaxAge  = int64(envIntOrDefault("FORGE_EXEC_PENDING_MAX_AGE_SECS", 2400))
 )
 
 // startExecutionReaper periodically fails executions stuck in a non-terminal state
