@@ -43,8 +43,8 @@ variable "ci_registry" {
 
 variable "registry_secret_name" {
   type        = string
-  description = "Name of an existing gatekeeper secret holding a docker config.json for the image push (REGISTRY_AUTH). Leave empty for an anonymous/insecure registry. (Creating the secret needs the createSecret permission, so it is referenced, not managed here.)"
-  default     = ""
+  description = "Name of an existing gatekeeper secret holding a docker config.json for the image push (REGISTRY_AUTH). Defaults to the same secret the monorepo pipeline uses for this registry."
+  default     = "forgejo-registry-auth"
 }
 
 variable "git_factory_clone_url" {
