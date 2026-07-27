@@ -298,8 +298,14 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 			req.Timeout = defaultTimeout
 		}
 	default:
+		// Forge owns the shell wrap: a caller sends a raw `run` script and forge makes
+		// it ["sh","-c",run], so pipelines don't carry the boilerplate (and forge then
+		// KNOWS the command is a shell — see classifyResult's exit-code handling).
+		if req.Run != "" && len(req.Command) == 0 {
+			req.Command = []string{"sh", "-c", req.Run}
+		}
 		if req.Image == "" || len(req.Command) == 0 {
-			http.Error(w, "image and command are required", http.StatusBadRequest)
+			http.Error(w, "image and (run or command) are required", http.StatusBadRequest)
 			return
 		}
 		// allowedImages == nil means ALLOWED_IMAGES was not configured: deny all.

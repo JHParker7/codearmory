@@ -133,7 +133,13 @@ func classifyResult(exec Execution, result RunResult, runErr error) (status stri
 		if result.ExitCode == nil || *result.ExitCode == 0 {
 			return StatusCompleted, result, nil
 		}
-		if diag, ok := systemExitDiagnostic(*result.ExitCode, exec); ok {
+		// The 125–128 "platform could not run the command" diagnostic only holds when
+		// forge execs the command DIRECTLY. For a shell command (["sh","-c",<script>])
+		// the shell always started, so those codes are the script's own — 128 in
+		// particular is git's most common error code — and must surface as a normal
+		// command failure with the real stderr, not the misleading "sh may not be an
+		// executable" message.
+		if diag, ok := systemExitDiagnostic(*result.ExitCode, exec); ok && !isShellCommand(exec.Command) {
 			if result.Stderr == "" {
 				result.Stderr = "forge: " + diag
 			}

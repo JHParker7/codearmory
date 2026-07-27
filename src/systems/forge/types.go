@@ -280,7 +280,12 @@ type ConcurrencyLimit struct {
 }
 
 type submitRequest struct {
-	Image       string            `json:"image"`
+	Image string `json:"image"`
+	// Run is a shell script forge wraps as ["sh","-c",Run] — the ergonomic form, so a
+	// caller writes `run: "cd x && make"` instead of the ["sh","-c",...] boilerplate.
+	// Command is the explicit exec form (a binary + args, run directly). Supply one:
+	// Run wins when both are set only if Command is empty.
+	Run         string            `json:"run"`
 	Command     []string          `json:"command"`
 	Env         map[string]string `json:"env"`
 	Timeout     int64             `json:"timeout"`
