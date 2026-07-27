@@ -288,6 +288,13 @@ func prepareForwardRequest(r *http.Request, userID, normalizedAuth string, svc s
 //  2. Otherwise, try matching the full path against all registered endpoints.
 //     Returns 404 if no match is found.
 func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
+	// Accept an optional "/api" prefix so the SPA can call the API on the same origin
+	// it loads from (/api/gatekeeper/... routes as /gatekeeper/...). Mutating the request
+	// path here means every downstream step — route lookup and the forwarded path —
+	// sees the stripped form.
+	if stripped := stripAPIPrefix(r.URL.Path); stripped != r.URL.Path {
+		r.URL.Path = stripped
+	}
 	path := r.URL.Path
 
 	// All routes require a service-name prefix (e.g. /forge/executions, /gatekeeper/login).
@@ -311,6 +318,13 @@ func handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Not an API route. When conductor fronts the web UI (PORTAL_URL set), hand the
+	// request to the portal so one origin serves both the API and the SPA (its "/",
+	// "/app/...", and "/assets/..." all land here). Otherwise it is a genuine 404.
+	if portalProxy != nil {
+		portalProxy.ServeHTTP(w, r)
+		return
+	}
 	http.NotFound(w, r)
 }
 
