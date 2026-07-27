@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -114,30 +113,21 @@ func listOrgServices(ctx context.Context, orgID string) ([]OrgService, error) {
 	return rows, nil
 }
 
-// orgServiceUpdates builds the explicit column set for an update of an existing row.
-//
-// Config is marshalled HERE rather than handed over as a Go map. GORM applies a
-// field's `serializer:json` only when it writes through the struct; this path
-// deliberately writes a column map instead (so a false Enabled is never dropped as a
-// zero value), which bypasses the serializer entirely. A raw map[string]any therefore
-// reaches the driver unserialized, and pgx has no encode plan for it against a text
-// column — every config update failed with "cannot find encode plan", including one
-// that wrote back a byte-identical value. Only the Create path (a struct write) ever
-// serialized correctly, so a row's config was effectively frozen after creation.
-func orgServiceUpdates(in OrgService, now time.Time) (map[string]any, error) {
-	cfg, err := json.Marshal(in.Config)
-	if err != nil {
-		return nil, fmt.Errorf("encode service config: %w", err)
+// configColumnValue encodes Config the way GORM's `serializer:json` tag would.
+// That tag is honoured for struct writes (Create/Save), but NOT for a column named
+// in the map handed to Updates — the driver then receives a raw map[string]any bound
+// to a text column and rejects the whole statement ("cannot find encode plan"), so
+// every config change on an existing row failed. A nil map becomes SQL NULL, matching
+// what the serializer stores, so reading it back still yields a nil map.
+func configColumnValue(config map[string]any) (any, error) {
+	if config == nil {
+		return nil, nil
 	}
-	return map[string]any{
-		"enabled":     in.Enabled,
-		"kind":        in.Kind,
-		"config":      string(cfg),
-		"image":       in.Image,
-		"port":        in.Port,
-		"description": in.Description,
-		"updated_at":  now,
-	}, nil
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return nil, err
+	}
+	return string(encoded), nil
 }
 
 // upsertOrgService creates or updates the row for a (org, service) scope. The
@@ -151,11 +141,21 @@ func upsertOrgService(ctx context.Context, in OrgService) (OrgService, error) {
 	existing, err := getOrgService(ctx, in.OrgID, in.ServiceName)
 	switch {
 	case err == nil:
-		updates, uerr := orgServiceUpdates(in, time.Now().UTC())
-		if uerr != nil {
-			span.RecordError(uerr)
-			span.SetStatus(codes.Error, uerr.Error())
-			return OrgService{}, uerr
+		now := time.Now().UTC()
+		cfg, err := configColumnValue(in.Config)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return OrgService{}, err
+		}
+		updates := map[string]any{
+			"enabled":     in.Enabled,
+			"kind":        in.Kind,
+			"config":      cfg,
+			"image":       in.Image,
+			"port":        in.Port,
+			"description": in.Description,
+			"updated_at":  now,
 		}
 		// Only overwrite the encrypted DB URL when the caller supplied a new one,
 		// so a plain enable/disable/config change never drops it.

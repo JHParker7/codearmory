@@ -179,6 +179,14 @@ from the chart, applied separately. The cost is that such a service is not exter
 reachable until someone applies it; the benefit is that builder's scope stays "the
 workload", with no annotation-passthrough surface to maintain.
 
+That Ingress ships in the chart for the one service that needs it today: set
+`gitFactory.ingress.enabled=true` to front builder's `<prefix>-git-factory` Service
+with a git-shaped Ingress (`proxy-body-size: 0`, hour-long read/send timeouts,
+request buffering off). Then set the host it lands on as the service's
+`GIT_HTTP_BASE_URL` config key (it is already in the service def's `optionalConfig`,
+so it stays config and never needs a migration) — otherwise the API keeps handing out
+its `http://localhost:<port>` fallback, which nothing outside the pod can clone.
+
 ## Dynamic provisioning (no Helm change)
 
 Builder can bring a non-core service online on a running instance with **no Helm

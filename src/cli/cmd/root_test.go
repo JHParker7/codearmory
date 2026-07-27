@@ -167,17 +167,19 @@ func TestBearerTokenPrecedence(t *testing.T) {
 	}
 }
 
-func TestBearerToken_NoConfigFileFallback(t *testing.T) {
-	// A token sitting in the config file (e.g. written by an older CLI) is ignored —
-	// the token must come from the keychain or CODEARMORY_TOKEN, never plaintext.
+func TestBearerToken_ConfigFileFallback(t *testing.T) {
+	// On a keychain-less host storeToken persists the token to the config file, so
+	// bearerToken reads it back as the lowest-precedence source (after --token, env,
+	// keychain) — no manual export required.
 	keyring.MockInit()
 	isolateHome(t)
 	t.Setenv("CODEARMORY_TOKEN", "")
 	t.Cleanup(func() { flagToken = "" })
+	flagToken = ""
 
-	saveConfig(cliConfig{Token: "stale-plaintext-tok"})
-	if got := bearerToken(); got != "" {
-		t.Errorf("bearerToken read a plaintext config token %q; it must be ignored", got)
+	saveConfig(cliConfig{Token: "persisted-tok"}) //nolint:errcheck
+	if got := bearerToken(); got != "persisted-tok" {
+		t.Errorf("bearerToken must read the persisted config token; got %q", got)
 	}
 }
 
@@ -328,27 +330,31 @@ func TestParseData_StdinInvalidJSON(t *testing.T) {
 
 // ── storeToken keychain-unavailable path ──────────────────────────────────────
 
-func TestStoreToken_KeychainUnavailable_NoDiskWrite(t *testing.T) {
-	// Force keyring to fail. storeToken must NOT persist the token to disk — it
-	// prints an `export CODEARMORY_TOKEN=…` line for the user instead.
+func TestStoreToken_KeychainUnavailable_PersistsToConfig(t *testing.T) {
+	// Force keyring to fail. storeToken must persist the token to the owner-only config
+	// file (so later commands pick it up automatically) and report that location.
 	keyring.MockInitWithError(fmt.Errorf("keyring unavailable"))
 	t.Cleanup(func() { keyring.MockInit() })
 	isolateHome(t)
-	silenceStdout(t) // storeToken prints the export instruction to stderr
+	silenceStdout(t)
 
 	where, err := storeToken("secret-token")
 	if err != nil {
 		t.Fatalf("storeToken: %v", err)
 	}
-	if where != "" {
-		t.Errorf("where = %q, want \"\" (token only printed, not stored)", where)
+	if where == "" {
+		t.Error("where is empty; storeToken must report the config-file location it wrote to")
 	}
-	// The token must not have been written to the config file.
-	if cfg := loadConfig(); cfg.Token != "" {
-		t.Errorf("config token = %q, want empty — the token must never be written to plaintext", cfg.Token)
+	if cfg := loadConfig(); cfg.Token != "secret-token" {
+		t.Errorf("config token = %q, want \"secret-token\" — it must be persisted on the keychain-less path", cfg.Token)
 	}
-	if _, err := os.Stat(configPath()); err == nil {
-		t.Error("config file was written on the keychain-unavailable path; it must not be")
+	// The token is plaintext on disk, so the file must be owner-only (0600).
+	info, err := os.Stat(configPath())
+	if err != nil {
+		t.Fatalf("config file must be written on the keychain-unavailable path: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("config file mode = %o, want 600 (owner-only)", perm)
 	}
 }
 

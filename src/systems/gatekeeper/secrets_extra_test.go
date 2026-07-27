@@ -66,7 +66,7 @@ func TestHandleCreateSecret(t *testing.T) {
 }
 
 // TestHandleCreateSecret_NoOrg verifies an org-less caller creates a *personal*
-// secret (org_id = '', created_by = caller) rather than being rejected — so a solo
+// secret (org_id = ”, created_by = caller) rather than being rejected — so a solo
 // user can hold credentials without an org.
 func TestHandleCreateSecret_NoOrg(t *testing.T) {
 	u := createAuthorizedUser(t, "createSecret", "gatekeeper/secrets") // user has no org

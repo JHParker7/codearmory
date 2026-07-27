@@ -1019,6 +1019,35 @@ builder:
     clientCertSecret: ""
     caBundle: ""
 
+# ── git_factory (builder-deployed; chart supplies only the git-over-HTTP door) ─
+# The git plane is deployed and registered by builder, not by this chart — builder
+# owns its Deployment/Service/PVC and deliberately renders no Ingress. Conductor
+# fronts its JSON API in-cluster, but a git client speaks Smart HTTP to the service
+# directly, so the wire routes need their own way in. Enable the Ingress below to
+# open it, and set the resulting URL as the service's GIT_HTTP_BASE_URL config key
+# (builder → services → codearmory_git_factory) so the http_url the API hands out is
+# the one a client can actually clone.
+gitFactory:
+  ingress:
+    enabled: false
+    className: ""
+    # Defaults sized for git rather than JSON: a push uploads the whole packfile in
+    # one request body (proxy-body-size 0 = unlimited) and both fetch and push are
+    # long-lived streams, so the buffering and short timeouts an API ingress is happy
+    # with truncate clones and reject pushes. Keys are nginx-ingress annotations;
+    # substitute the equivalents when running another controller.
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "0"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    hosts:
+      - host: git.codearmory.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
 # ── Integration tests (helm test) ────────────────────────────────────────────
 # Run with: helm test <release>
 # Each suite maps to a test image built from tests/<suite>/Dockerfile.

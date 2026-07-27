@@ -207,6 +207,12 @@ func authMiddleware(next http.Handler) http.Handler {
 		}
 		if session.ScopedRoleID != nil && *session.ScopedRoleID != "" {
 			authCtx = context.WithValue(authCtx, scopedRoleKey, *session.ScopedRoleID)
+			// Record that a scoped token was used, so its owner can see which of
+			// their tokens are still in service and which are dead weight. Off the
+			// request's critical path and throttled to one write per token per few
+			// minutes — see touchTokenLastUsed. Only scoped sessions are considered,
+			// so an ordinary login costs nothing.
+			go touchTokenLastUsed(context.WithoutCancel(ctx), session.SessionID)
 		}
 		next.ServeHTTP(w, r.WithContext(authCtx))
 	})
@@ -259,10 +265,21 @@ func matchPermission(perm Permissions, service, action, resource string) bool {
 	return false
 }
 
-// scopeResource prepends the username to resource unless the resource is already
-// scoped to that user (starts with "<username>/") or to their org (starts with
-// "org/<orgName>/"). If username is empty the resource is returned unchanged.
-func scopeResource(resource, username, orgName string) string {
+// scopeResource prepends the username to resource unless the resource already names
+// its owner. If username is empty the resource is returned unchanged.
+//
+// A resource is owner-qualified when its FIRST segment is the owning principal:
+// "<username>/<service>/…" or "org/<orgName>/<service>/…". The first two checks below
+// cover the case where that owner is the caller themselves, which is every resource
+// the platform issued before sharing existed.
+//
+// The third check is what makes an owner OTHER than the caller expressible. Unscoped
+// resources look like "<service>/…", so the service name appearing as the SECOND
+// segment is exactly what distinguishes "bob/git/repos/x" (bob's repo, whoever is
+// asking) from "states/alice/prod" (an unscoped resource that merely has segments).
+// Without it, alice asking about bob's repo is evaluated as "alice/bob/git/repos/x",
+// which no grant can ever match — so a repo could never be shared.
+func scopeResource(resource, username, orgName, service string) string {
 	if username == "" {
 		return resource
 	}
@@ -272,7 +289,35 @@ func scopeResource(resource, username, orgName string) string {
 	if orgName != "" && strings.HasPrefix(resource, "org/"+orgName+"/") {
 		return resource
 	}
+	if service != "" && ownerQualified(resource, service) {
+		return resource
+	}
 	return username + "/" + resource
+}
+
+// ownerQualified reports whether resource already names its owner, by checking that
+// the service name follows the owner prefix: "<user>/<service>/…" (owner is one
+// segment) or "org/<orgName>/<service>/…" (owner is two). Anything else — including a
+// multi-segment resource that simply has no owner, like "states/alice/prod" — is
+// unscoped and gets the caller's name.
+func ownerQualified(resource, service string) bool {
+	// A resource that LEADS with the service name is unscoped, full stop. This test
+	// must come first: "tickets/tickets" (the tickets service's own collection) would
+	// otherwise look owner-qualified with an owner named "tickets", and the caller's
+	// name would never be applied — silently denying every user their own tickets.
+	// Any service whose collection shares its name has this shape.
+	if strings.HasPrefix(resource, service+"/") {
+		return false
+	}
+	rest := resource
+	if after, ok := strings.CutPrefix(resource, "org/"); ok {
+		rest = after // drop "org/", leaving "<orgName>/<service>/…"
+	}
+	_, after, found := strings.Cut(rest, "/")
+	if !found {
+		return false
+	}
+	return after == service || strings.HasPrefix(after, service+"/")
 }
 
 // permissionDenial captures the human-readable context of a failed permission
@@ -381,7 +426,7 @@ func evaluatePermissions(ctx context.Context, userID string, service string, act
 			orgName = orgRow.(Org).OrgName
 		}
 	}
-	resource = scopeResource(resource, user.Username, orgName)
+	resource = scopeResource(resource, user.Username, orgName, service)
 	detail.Resource = resource
 
 	// Org-service gate: deny outright if the caller's org has disabled this service
@@ -573,6 +618,31 @@ func evaluatePermissions(ctx context.Context, userID string, service string, act
 	span.AddEvent("evaluation.started", trace.WithAttributes(
 		attribute.Int("permissions.total", len(permissions)),
 	))
+
+	// Roles assigned by a namespace owner (see RoleMembership), unioned on top of the
+	// direct/default/team roles above rather than replacing any of them — being granted
+	// access to someone else's namespace must never cost a user their own permissions.
+	var memberships []RoleMembership
+	if err := connectRead().WithContext(ctx).Where("user_id = ?", userID).Find(&memberships).Error; err != nil {
+		dbLog(err, "checkPermissions: failed to load role memberships", "user_id", userID, "error", err)
+	}
+	for _, m := range memberships {
+		roleRow, err := (Role{RoleID: m.RoleID}).Get(ctx)
+		if err != nil {
+			// A membership pointing at a deleted role is stale, not fatal.
+			slog.DebugContext(ctx, "checkPermissions: assigned role not found, skipping", "user_id", userID, "role_id", m.RoleID)
+			continue
+		}
+		role := roleRow.(Role)
+		detail.Roles = appendRoleLabel(detail.Roles, role)
+		for _, pid := range role.PermissionsIDs {
+			pRow, err := (Permissions{PermissionsID: pid}).Get(ctx)
+			if err != nil {
+				continue
+			}
+			permissions = append(permissions, pRow.(Permissions))
+		}
+	}
 
 	for _, permission := range permissions {
 		if matchPermission(permission, service, action, resource) {

@@ -310,7 +310,7 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 			Name:          "workflow:" + req.WorkflowID + ":" + name,
 			Service:       p.Service,
 			Actions:       []string{p.Action},
-			Resources:     []string{scopeResource(p.Resource, ownerUsername, ownerOrgName)},
+			Resources:     []string{scopeResource(p.Resource, ownerUsername, ownerOrgName, p.Service)},
 			OwnerID:       req.UserID,
 			OrgID:         ownerOrgID,
 			Active:        true,

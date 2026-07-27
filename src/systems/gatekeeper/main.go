@@ -205,7 +205,7 @@ func main() {
 	initSecretsEncryption()
 
 	conn := connect()
-	conn.AutoMigrate(&Org{}, &Role{}, &Team{}, &User{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{})
+	conn.AutoMigrate(&Org{}, &Role{}, &RoleMembership{}, &Team{}, &User{}, &UserOrgMembership{}, &Session{}, &Permissions{}, &Invite{}, &PermissionsCheck{}, &ServiceAccount{}, &ServicePermissionRequest{}, &AuditLog{}, &Secret{}, &OrgSecretProvider{}, &OAuthClient{}, &OAuthCode{}, &TOTPCredential{}, &MFAPending{}, &SignupAllowlistEntry{}, &SignupPolicy{}, &PersonalToken{})
 	applyForeignKeys(conn)
 	applyUniqueIndexes(conn)
 	// Give existing single-org accounts a membership row so they participate in the
@@ -351,10 +351,19 @@ func buildMux() *http.ServeMux {
 	// builder bring a non-core service online with no Helm change.
 	mux.HandleFunc("POST /internal/service-accounts", handleRegisterServiceAccount)
 	mux.HandleFunc("DELETE /internal/service-accounts/{name}", handleDeregisterServiceAccount)
+	// Audit ingest for backend services (auth: the caller's own service key). The
+	// action is prefixed with the authenticated service name, so a service can only
+	// write entries about itself.
+	mux.HandleFunc("POST /internal/audit-logs", handleIngestAuditLog)
 	mux.Handle("POST /check_permissions", authMiddleware(http.HandlerFunc(handleCheckPermissions)))
 	mux.Handle("GET /auth/validate", authMiddleware(http.HandlerFunc(handleAuthValidate)))
 
 	mw := func(h http.HandlerFunc) http.Handler { return authMiddleware(http.HandlerFunc(h)) }
+
+	// Scoped tokens: a user mints a credential that can do less than they can.
+	mux.Handle("POST /tokens", mw(handleCreateToken))
+	mux.Handle("GET /tokens", mw(handleListTokens))
+	mux.Handle("DELETE /tokens/{id}", mw(handleRevokeToken))
 
 	mux.Handle("POST /mfa/totp/enroll", mw(handleTOTPEnroll))
 	mux.Handle("POST /mfa/totp/confirm", mw(handleTOTPConfirm))
@@ -388,6 +397,12 @@ func buildMux() *http.ServeMux {
 	mux.Handle("GET /roles/{id}", mw(handleGetRole))
 	mux.Handle("PUT /roles/{id}", mw(handleUpdateRole))
 	mux.Handle("DELETE /roles/{id}", mw(handleDeleteRole))
+	// Namespace roles: how an ordinary user shares what they own, without an admin.
+	// Confined to the caller's namespace and attenuated to permissions they hold.
+	mux.Handle("POST /roles/namespace", mw(handleCreateNamespaceRole))
+	mux.Handle("GET /roles/{id}/members", mw(handleListRoleMembers))
+	mux.Handle("PUT /roles/{id}/members/{user_id}", mw(handleAssignRole))
+	mux.Handle("DELETE /roles/{id}/members/{user_id}", mw(handleRevokeRole))
 
 	mux.Handle("POST /permissions", mw(handleCreatePermissions))
 	mux.Handle("GET /permissions", mw(handleListPermissions))

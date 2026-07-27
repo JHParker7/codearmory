@@ -11,7 +11,7 @@ import (
 var expectedNonCore = []string{
 	"blueprints", "notifications", "hooks",
 	"outpost-gateway", "chaos", "argo",
-	"gitea_integration",
+	"gitea_integration", "codearmory_git_factory",
 }
 
 func TestEmbeddedDefs_AllParseAndComplete(t *testing.T) {

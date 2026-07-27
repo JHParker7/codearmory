@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"regexp"
 	"testing"
 	"time"
 
@@ -278,6 +279,50 @@ func TestPersistence_ReadWriteManyKeepsTheScalableShape(t *testing.T) {
 	}
 }
 
+// git_factory is the first shipped def to declare persistence. The invariant worth
+// pinning is that its storage-root env and its mount path cannot drift apart — the
+// service would happily write repositories to the container's ephemeral filesystem.
+func TestGitFactoryDef_StorageRootMatchesTheMount(t *testing.T) {
+	def, ok := embeddedServiceDef("codearmory_git_factory")
+	if !ok {
+		t.Fatal("no embedded def for codearmory_git_factory")
+	}
+	p := def.Infra.Persistence
+	if p == nil {
+		t.Fatal("git_factory declares no persistence — repos would live on an ephemeral disk")
+	}
+	if got := def.EnvExtras["GIT_STORAGE_ROOT"]; got != p.MountPath {
+		t.Errorf("GIT_STORAGE_ROOT = %q but the volume is mounted at %q", got, p.MountPath)
+	}
+	// v1 is single-node by design (ARCHITECTURE §5 step 1), so the volume is RWO and
+	// the workload must be pinned to one pod.
+	if !p.singleWriter() {
+		t.Error("git_factory is single-node in v1; RWX needs the step-2 routing table first")
+	}
+	b := &k8sBackend{prefix: "codearmory", namespace: "codearmory", defaultReplicas: 3}
+	if got := b.replicasFor(workloadSpec{Service: "codearmory_git_factory", Replicas: 3}); got != 1 {
+		t.Errorf("replicas = %d, want 1", got)
+	}
+}
+
+// Every name k8s validates as a DNS-1123 label must come from k8sName, never the
+// registry name: the apiserver rejects the whole Deployment over a container named
+// "codearmory_git_factory".
+func TestTemplatePod_ContainerNameIsDNS1123(t *testing.T) {
+	b := &k8sBackend{prefix: "codearmory", namespace: "codearmory", registry: "ghcr.io/x", tag: "v1"}
+	dns1123 := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	defs, err := loadEmbeddedDefs()
+	if err != nil {
+		t.Fatalf("load defs: %v", err)
+	}
+	for name := range defs {
+		got := b.templatePod(workloadSpec{Service: name}).Spec.Containers[0].Name
+		if !dns1123.MatchString(got) {
+			t.Errorf("%s: container name %q is not a DNS-1123 label", name, got)
+		}
+	}
+}
+
 // A service that declares no persistence keeps exactly its previous shape: no volumes,
 // no strategy change, no replica clamp.
 func TestNoPersistence_ShapeUnchanged(t *testing.T) {
@@ -308,5 +353,56 @@ func TestNoPersistence_ShapeUnchanged(t *testing.T) {
 	}
 	if len(list.Items) != 0 {
 		t.Errorf("created %d PVCs for a stateless service", len(list.Items))
+	}
+}
+
+// A "shared" key is only shared if both holders have the same bytes. Builder derives
+// them, but a peer deployed by the Helm chart carries a chart-generated key instead —
+// so the owning service's existing value must win. Getting this wrong is silent: the
+// emitter signs, the receiver 401s, and nothing reports a misconfiguration.
+func TestSharedKeyOwner(t *testing.T) {
+	cases := map[string]string{
+		"hooks-trigger-key":      "hooks",     // builder-catalog service
+		"conductor-forward-key":  "conductor", // core service
+		"encryption-key":         "",          // not a service — derive
+		"gatekeeper-service-key": "gatekeeper",
+		"registry-service-key":   "registry",
+		"nodashes":               "",
+		"":                       "",
+	}
+	for key, want := range cases {
+		if got := sharedKeyOwner(key); got != want {
+			t.Errorf("sharedKeyOwner(%q) = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestProvision_SharedKeyAdoptsTheOwnersValue(t *testing.T) {
+	httpClient = initHTTPClient()
+	enableDerivation(t)
+	ctx := context.Background()
+
+	// hooks already exists with a key builder did not derive (as the Helm chart leaves it).
+	const chartKey = "chart-generated-not-derived"
+	hooksSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "codearmory-hooks", Namespace: "codearmory"},
+		Data:       map[string][]byte{"hooks-trigger-key": []byte(chartKey)},
+	}
+	b := newTestBackend(t, &registerRecorder{}, hooksSecret)
+
+	// A service whose def declares the same shared key must adopt hooks' value.
+	withServiceDef(t, serviceDef{
+		RegistryName: "emitter", K8sName: "emitter", ImageRepo: "emitter", Port: 9000,
+		DerivedSecrets: []derivedSecret{{EnvVar: "HOOKS_TRIGGER_KEY", Kind: "shared", Name: "hooks-trigger-key"}},
+	})
+	if err := b.provision(ctx, "emitter", "", nil); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	sec, err := b.client.CoreV1().Secrets("codearmory").Get(ctx, "codearmory-emitter", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if got := string(sec.Data["hooks-trigger-key"]); got != chartKey {
+		t.Errorf("hooks-trigger-key = %q, want the owner's value %q — a derived value would 401 at hooks", got, chartKey)
 	}
 }

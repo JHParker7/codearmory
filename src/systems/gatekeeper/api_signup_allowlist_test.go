@@ -75,11 +75,11 @@ func TestIsSignupEmailAllowed(t *testing.T) {
 		want  bool
 	}{
 		{"carol@allowed.com", true},
-		{"CAROL@allowed.com", true},   // case-insensitive exact
-		{"dave@company.com", true},    // domain rule
-		{"eve@COMPANY.com", true},     // case-insensitive domain
+		{"CAROL@allowed.com", true}, // case-insensitive exact
+		{"dave@company.com", true},  // domain rule
+		{"eve@COMPANY.com", true},   // case-insensitive domain
 		{"frank@notallowed.com", false},
-		{"carol@company.org", false},  // wrong domain
+		{"carol@company.org", false}, // wrong domain
 		{"noatsign", false},
 	}
 	for _, c := range cases {

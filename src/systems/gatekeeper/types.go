@@ -351,3 +351,40 @@ type MFAPending struct {
 	OAuthState       string    `gorm:"column:oauth_state"`
 	OAuthScope       string    `gorm:"column:oauth_scope"`
 }
+
+// RoleMembership assigns a role to a user in addition to the single role they already
+// carry on User.RoleID.
+//
+// It exists because a namespace owner grants access by ASSIGNING one of their roles,
+// and a user has exactly one direct role, one default role and one team — all single
+// pointers. Without a membership table, being granted access to someone else's
+// repository would mean surrendering your own role. Memberships are additive: the
+// existing three sources are evaluated unchanged, and these are unioned on top.
+type RoleMembership struct {
+	RoleID    string    `json:"role_id"    gorm:"column:role_id;primaryKey"`
+	UserID    string    `json:"user_id"    gorm:"column:user_id;primaryKey;index"`
+	CreatedAt time.Time `json:"created_at" gorm:"column:created_at"`
+	// GrantedBy records who assigned it, so a namespace owner's grants are auditable
+	// and revocable without guessing at intent.
+	GrantedBy string `json:"granted_by" gorm:"column:granted_by;default:''"`
+}
+
+// PersonalToken is the record of a user-minted scoped token. It holds the token's
+// LIFECYCLE, never the credential: the JWT is verified against the session's stored
+// public key, so gatekeeper has no reason to keep the token itself, hashed or
+// otherwise. SessionID is the session the credential is bound to (deactivating it is
+// what makes revocation immediate) and RoleID is the attenuated role that decides
+// what the token may do.
+type PersonalToken struct {
+	TokenID    string     `json:"token_id"     gorm:"column:token_id;primaryKey"`
+	CreatedAt  time.Time  `json:"created_at"   gorm:"column:created_at;autoCreateTime"`
+	UserID     string     `json:"-"            gorm:"column:user_id;index"`
+	Name       string     `json:"name"         gorm:"column:name"`
+	SessionID  string     `json:"-"            gorm:"column:session_id;index"`
+	RoleID     string     `json:"-"            gorm:"column:role_id"`
+	ExpiresAt  time.Time  `json:"expires_at"   gorm:"column:expires_at"`
+	LastUsedAt *time.Time `json:"last_used_at" gorm:"column:last_used_at"`
+	Active     bool       `json:"-"            gorm:"column:active;default:true"`
+}
+
+func (PersonalToken) TableName() string { return "personal_tokens" }

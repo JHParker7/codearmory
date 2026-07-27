@@ -93,8 +93,16 @@ func bearerToken() string {
 		}
 		return t
 	}
-	// No plaintext config-file fallback: on a keychain-less host the token lives in
-	// the CODEARMORY_TOKEN env var (handled above), never on disk.
+	// Config-file fallback: on a keychain-less host storeToken persists the token to
+	// the 0600 config file (see storeToken), so it is picked up automatically by every
+	// later command without a manual `export`. Lowest precedence, so a keychain entry
+	// or an explicit env/flag token still wins.
+	if t := loadConfig().Token; t != "" {
+		if exp, ok := jwtExpiry(t); ok && time.Now().After(exp) {
+			return ""
+		}
+		return t
+	}
 	return ""
 }
 
@@ -104,13 +112,12 @@ func bearerToken() string {
 // list every service.
 func isSignedIn() bool { return bearerToken() != "" }
 
-// storeToken saves the token to the OS keychain. When the keychain is unavailable
-// (e.g. a headless server) it does NOT write the token to disk — the token is a
-// secret and the config file is plaintext. Instead it prints an `export
-// CODEARMORY_TOKEN=…` line so the user can keep the token in their environment (the
-// env var already takes precedence in bearerToken). Returns a human-readable
-// description of where the token was stored, or "" when it was only printed for the
-// user to export.
+// storeToken saves the token to the OS keychain, falling back to the config file
+// when the keychain is unavailable (e.g. a headless server). The config file is
+// written 0600 in a 0700 dir (see saveConfig), so the token stays owner-only, and
+// bearerToken reads it back at lowest precedence — so a fresh login persists globally
+// for every later command without the user manually exporting CODEARMORY_TOKEN.
+// Returns a human-readable description of where the token was stored.
 func storeToken(token string) (string, error) {
 	// A new token means a (possibly different) caller; drop the cached
 	// per-token routing-table probe so the TUI hub re-resolves it after sign-in.
@@ -118,9 +125,14 @@ func storeToken(token string) (string, error) {
 	if err := keyring.Set(keychainService, keychainAccount, token); err == nil {
 		return "the OS keychain", nil
 	}
-	fmt.Fprintf(os.Stderr,
-		"OS keychain unavailable — not writing the token to disk. Export it to authenticate future commands:\n\n    export CODEARMORY_TOKEN=%s\n\n", token)
-	return "", nil
+	// Keychain unavailable: persist to the (owner-only) config file so the token
+	// survives across shells. This is the store bearerToken's config fallback reads.
+	cfg := loadConfig()
+	cfg.Token = token
+	if err := saveConfig(cfg); err != nil {
+		return "", fmt.Errorf("saving token to config file: %w", err)
+	}
+	return "the config file (~/.config/codearmory/config.json)", nil
 }
 
 // clearToken removes the token from the keychain and clears any token left in the
@@ -226,10 +238,11 @@ Token lookup order (highest to lowest precedence):
   1. --token flag
   2. CODEARMORY_TOKEN environment variable
   3. OS keychain (Secret Service on Linux, Keychain on macOS)
+  4. config file (~/.config/codearmory/config.json), on keychain-less hosts
 
-When the OS keychain is unavailable (e.g. a headless server), the token is never
-written to disk: 'armory auth login' prints an 'export CODEARMORY_TOKEN=…' line to
-set in your shell instead.
+When the OS keychain is unavailable (e.g. a headless server), 'armory auth login'
+persists the token to the config file (written 0600, owner-only), which is then read
+back automatically as the lowest-precedence source above — no manual export needed.
 
 The CODEARMORY_URL environment variable and --url flag override the stored URL.`,
 }

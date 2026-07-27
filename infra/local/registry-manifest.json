@@ -425,6 +425,42 @@
         "path": "/mfa/totp",
         "action": "disableTOTP",
         "resource": "gatekeeper/mfa"
+      },
+      {
+        "method": "POST",
+        "path": "/roles/namespace",
+        "action": "createNamespaceRole",
+        "resource": "{username}/gatekeeper/roles"
+      },
+      {
+        "method": "PUT",
+        "path": "/roles/{id}/members/{user_id}",
+        "action": "assignRole",
+        "resource": "{username}/gatekeeper/roles"
+      },
+      {
+        "method": "DELETE",
+        "path": "/roles/{id}/members/{user_id}",
+        "action": "revokeRole",
+        "resource": "{username}/gatekeeper/roles"
+      },
+      {
+        "method": "POST",
+        "path": "/tokens",
+        "action": "createToken",
+        "resource": "{username}/gatekeeper/tokens"
+      },
+      {
+        "method": "GET",
+        "path": "/tokens",
+        "action": "listToken",
+        "resource": "{username}/gatekeeper/tokens"
+      },
+      {
+        "method": "DELETE",
+        "path": "/tokens/{id}",
+        "action": "deleteToken",
+        "resource": "{username}/gatekeeper/tokens"
       }
     ],
     "default_grants": [
@@ -505,6 +541,28 @@
         ],
         "resources": [
           "{username}/gatekeeper/teams/{team_id}"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "createNamespaceRole",
+          "assignRole",
+          "revokeRole"
+        ],
+        "resources": [
+          "{username}/gatekeeper/roles"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "createToken",
+          "listToken",
+          "deleteToken"
+        ],
+        "resources": [
+          "{username}/gatekeeper/tokens"
         ]
       }
     ]

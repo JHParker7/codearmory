@@ -425,6 +425,24 @@
         "path": "/mfa/totp",
         "action": "disableTOTP",
         "resource": "gatekeeper/mfa"
+      },
+      {
+        "method": "POST",
+        "path": "/tokens",
+        "action": "createToken",
+        "resource": "{username}/gatekeeper/tokens"
+      },
+      {
+        "method": "GET",
+        "path": "/tokens",
+        "action": "listToken",
+        "resource": "{username}/gatekeeper/tokens"
+      },
+      {
+        "method": "DELETE",
+        "path": "/tokens/{id}",
+        "action": "deleteToken",
+        "resource": "{username}/gatekeeper/tokens"
       }
     ],
     "default_grants": [
@@ -505,6 +523,17 @@
         ],
         "resources": [
           "{username}/gatekeeper/teams/{team_id}"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "createToken",
+          "listToken",
+          "deleteToken"
+        ],
+        "resources": [
+          "{username}/gatekeeper/tokens"
         ]
       }
     ]

@@ -111,7 +111,14 @@ For a TUI form, use ` + "`armory settings`" + `.`,
 			return err
 		}
 
-		// ── Step 4: shell completions ─────────────────────────────────
+		// ── Step 4: git_factory integration ───────────────────────────
+		// If the platform runs git_factory, offer to wire the local git client up to it.
+		// Best-effort: a failure here must not fail the whole wizard.
+		if err := setupGitFactory(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: git_factory setup skipped: %v\n", err)
+		}
+
+		// ── Step 5: shell completions ─────────────────────────────────
 
 		if shell := detectedShell(); shell != "" && isTerminal() {
 			answer, err := prompt(fmt.Sprintf("Install shell completions for %s? [Y/n]", shell), "y")

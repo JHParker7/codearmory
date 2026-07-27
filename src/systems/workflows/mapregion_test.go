@@ -400,3 +400,51 @@ func TestWorkflowUsesVolumes_MapRegion(t *testing.T) {
 }
 
 func intPtr(i int) *int { return &i }
+
+// A step INSIDE a map region must still see the outputs of steps upstream of the
+// region. This is the property the dogfood CI depends on — the per-service image build
+// is a mapped step whose destination tag is ${steps.commit.output.SHA} — and when it is
+// missing the failure is silent and confusing: the literal ${...} is passed through and
+// rejected far downstream by whatever service receives it ("not a valid image
+// reference"), naming neither the step nor the reference that went unresolved.
+func TestMapRegion_IterationSeesUpstreamOutputs(t *testing.T) {
+	steps, defs, routes := mapPipeline()
+	// An extra step upstream of the region, two hops from the body, so the test
+	// covers a TRANSITIVE ancestor rather than just the immediate predecessor.
+	steps = append([]WorkflowStep{plain("commit")}, steps...)
+	routes = append(routes, WorkflowRoute{From: "commit", To: "discover"})
+
+	if msg := validateGraph(steps, routes, defs); msg != "" {
+		t.Fatalf("graph rejected: %s", msg)
+	}
+	g := newGraph(steps, routes).withMaps(defs)
+	regions := regionsOf(steps, defs)
+	region, ok := regions["m1"]
+	if !ok {
+		t.Fatal("region m1 missing")
+	}
+
+	outputs := map[string]string{
+		"commit":   `{"SHA":"478041f"}`,
+		"discover": `{"IMAGES":"git workflows"}`,
+		"build":    "inside the region",
+	}
+	visible := g.visibleForRegion(region, outputs)
+
+	if got := visible["commit"]; got != outputs["commit"] {
+		t.Errorf("commit output not visible inside the region (got %q) — a mapped step could not resolve ${steps.commit.output.SHA}", got)
+	}
+	if got := visible["discover"]; got != outputs["discover"] {
+		t.Errorf("discover output not visible inside the region (got %q)", got)
+	}
+	// A region member's own output is produced inside the iteration, not inherited.
+	if _, ok := visible["build"]; ok {
+		t.Error("a region member's output leaked into the iteration's starting view")
+	}
+
+	// And the reference actually resolves through the substitution engine.
+	sc := substContext{outputs: visible, mapVars: map[string]string{"dir": "git"}}
+	if got, want := substitute("registry/${map.dir}:${steps.commit.output.SHA}", sc), "registry/git:478041f"; got != want {
+		t.Errorf("substitute = %q, want %q", got, want)
+	}
+}

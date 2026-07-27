@@ -46,7 +46,9 @@ func TestPermissionsCheck_CRUD(t *testing.T) {
 	if err := pc.Add(ctx); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	t.Cleanup(func() { gormDB.Exec(`DELETE FROM permissions_checks WHERE permissions_check_id = ?`, pc.PermissionsCheckID) }) //nolint:errcheck
+	t.Cleanup(func() {
+		gormDB.Exec(`DELETE FROM permissions_checks WHERE permissions_check_id = ?`, pc.PermissionsCheckID)
+	}) //nolint:errcheck
 	if _, err := (PermissionsCheck{PermissionsCheckID: pc.PermissionsCheckID}).Get(ctx); err != nil {
 		t.Fatalf("Get: %v", err)
 	}

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -24,16 +26,43 @@ func (user User) Add(ctx context.Context) error {
 	return nil
 }
 
-// Update saves all user fields. Nil OrgID, TeamID, and RoleID are written as NULL.
-// Callers must pass a fully-populated struct: GORM Save writes every field including
-// zero values, so a partial struct will blank out username, email, and other columns.
-// Always Get() the user first, mutate the desired fields, then call Update().
+// Update saves the user's mutable fields. Nil OrgID, TeamID, and RoleID are written
+// as NULL, so a caller can genuinely clear them.
+//
+// Two columns are deliberately NOT writable here:
+//
+//   - active — deactivating is Remove()'s job. This used to be a Save() of the whole
+//     struct, so a caller who built a User literal rather than Get()ing one wrote
+//     active=false (Go's zero value) and silently deleted the account from every
+//     lookup: the row still existed, but Get filters on active, so the user simply
+//     ceased to exist. Nothing in the call failed.
+//   - created_at — likewise zeroed by a literal, and never a thing an update means.
+//
+// The identity guard below turns the other half of that failure — blanking username
+// and email — into a loud error instead of silent corruption. It is cheap insurance:
+// no legitimate update sets either to empty, and both carry unique indexes, so the
+// blanking only surfaces later as a confusing collision on the NEXT user.
 func (user User) Update(ctx context.Context) error {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.user.update")
 	defer span.End()
 	span.SetAttributes(attribute.String("user.id", user.UserID))
+	if user.UserID == "" {
+		return errors.New("user update: UserID is required")
+	}
+	if user.Username == "" || user.Email == "" {
+		err := fmt.Errorf("user update: refusing to blank username/email for %s — Get() the user, mutate it, then Update()", user.UserID)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
 	user.UpdatedAt = time.Now()
-	if err := connect().WithContext(ctx).Save(&user).Error; err != nil {
+	// Named columns, so a zero value in the struct writes that column (clearing a
+	// pointer works) while anything unnamed — active, created_at — is left untouched.
+	if err := connect().WithContext(ctx).Model(&User{}).
+		Where("user_id = ?", user.UserID).
+		Select("hashed_password", "updated_at", "firstname", "lastname", "email",
+			"org_id", "role_id", "team_id", "default_role_id", "default_grants_version", "username").
+		Updates(user).Error; err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return err
