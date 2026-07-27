@@ -105,8 +105,9 @@ resource "codearmory_pipeline" "git_factory" {
       timeout   = 1800
       with      = { image = var.ci_image }
       with_json = jsonencode({
-        run     = "cd src/control_plane && go build ./... && go test ./..."
-        volumes = [local.workspace]
+        run          = "cd src/control_plane && go build ./... && go test ./..."
+        volumes      = [local.workspace]
+        runner_class = "large" # 2GB — 'standard' (256MB, the default) OOM-kills the Go compiler
       })
     },
     {
@@ -116,7 +117,7 @@ resource "codearmory_pipeline" "git_factory" {
       with_json = jsonencode(merge({
         build        = { context = "/workspace/src/control_plane", dockerfile = "Dockerfile", destinations = ["${var.ci_registry}:dev"] }
         volumes      = [{ workflow_id = "$${run_id}", name = "workspace", mount_path = "/workspace" }]
-        runner_class = "ci"
+        runner_class = "xlarge"
       }, length(local.registry_secret_refs) > 0 ? { secret_refs = local.registry_secret_refs } : {}))
     },
     {
