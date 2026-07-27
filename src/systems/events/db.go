@@ -104,7 +104,7 @@ func listEvents(ctx context.Context, orgID, userID, typ string, limit int) ([]Ev
 		limit = 200
 	}
 	q := connectRead().WithContext(ctx).Model(&eventRow{}).Order("received_at DESC").Limit(limit)
-	q = scopeTenant(q, orgID, userID)
+	q = scopeTenant(q, orgID, userID, "user_id")
 	if typ != "" {
 		q = q.Where("type = ?", typ)
 	}
@@ -119,19 +119,20 @@ func listEvents(ctx context.Context, orgID, userID, typ string, limit int) ([]Ev
 	return out, nil
 }
 
-// scopeTenant restricts a query to the caller's org (when in an org) or their own user id.
-// This is the multi-tenant isolation every read/match honours.
-func scopeTenant(q *gorm.DB, orgID, userID string) *gorm.DB {
+// scopeTenant restricts a query to the caller's org (when in an org) or their own records.
+// The owner column differs by table — events store it as user_id, triggers as created_by —
+// so the caller names it. This is the multi-tenant isolation every read/match honours.
+func scopeTenant(q *gorm.DB, orgID, userID, ownerCol string) *gorm.DB {
 	if orgID != "" {
 		return q.Where("org_id = ?", orgID)
 	}
-	return q.Where("user_id = ? AND (org_id = '' OR org_id IS NULL)", userID)
+	return q.Where(ownerCol+" = ? AND (org_id = '' OR org_id IS NULL)", userID)
 }
 
 // triggersForTenant returns the enabled triggers that could match an event of this tenant.
 func triggersForTenant(ctx context.Context, orgID, userID string) ([]Trigger, error) {
 	q := connectRead().WithContext(ctx).Model(&Trigger{}).Where("enabled = ?", true)
-	q = scopeTenant(q, orgID, userID)
+	q = scopeTenant(q, orgID, userID, "created_by")
 	var ts []Trigger
 	return ts, q.Find(&ts).Error
 }
@@ -143,7 +144,7 @@ func (t *Trigger) Save(ctx context.Context) error {
 }
 func getTrigger(ctx context.Context, id, orgID, userID string) (*Trigger, error) {
 	var t Trigger
-	q := scopeTenant(connectRead().WithContext(ctx).Where("id = ?", id), orgID, userID)
+	q := scopeTenant(connectRead().WithContext(ctx).Where("id = ?", id), orgID, userID, "created_by")
 	if err := q.First(&t).Error; err != nil {
 		return nil, err
 	}
@@ -151,11 +152,11 @@ func getTrigger(ctx context.Context, id, orgID, userID string) (*Trigger, error)
 }
 func listTriggers(ctx context.Context, orgID, userID string) ([]Trigger, error) {
 	var ts []Trigger
-	q := scopeTenant(connectRead().WithContext(ctx).Model(&Trigger{}).Order("created_at DESC"), orgID, userID)
+	q := scopeTenant(connectRead().WithContext(ctx).Model(&Trigger{}).Order("created_at DESC"), orgID, userID, "created_by")
 	return ts, q.Find(&ts).Error
 }
 func removeTrigger(ctx context.Context, id, orgID, userID string) error {
-	q := scopeTenant(connect().WithContext(ctx).Where("id = ?", id), orgID, userID)
+	q := scopeTenant(connect().WithContext(ctx).Where("id = ?", id), orgID, userID, "created_by")
 	return q.Delete(&Trigger{}).Error
 }
 
