@@ -11,6 +11,7 @@ import { Signup } from './pages/Signup';
 import { Setup } from './pages/Setup';
 import { AppLayout } from './pages/app/AppLayout';
 import { Gatekeeper } from './pages/app/Gatekeeper';
+import { Projects } from './pages/app/Projects';
 import { Builder } from './pages/app/Builder';
 import { Workflows } from './pages/app/Workflows';
 import { RunView } from './pages/app/RunView';
@@ -127,6 +128,7 @@ export function App() {
             <Route path="git" element={<Git />} />
             <Route path="outposts" element={<Outposts />} />
             <Route path="gatekeeper" element={<Gatekeeper />} />
+            <Route path="projects" element={<Projects />} />
             <Route path="builder" element={<Builder />} />
             <Route path="audit" element={<Audit />} />
             <Route path="settings" element={<Settings />} />

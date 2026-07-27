@@ -8,7 +8,7 @@
 export type IconName =
   | 'workflows' | 'blueprints' | 'forge' | 'tickets' | 'hooks'
   | 'containers' | 'git' | 'outposts' | 'chaos' | 'argo'
-  | 'builder' | 'audit' | 'gatekeeper' | 'settings';
+  | 'builder' | 'audit' | 'gatekeeper' | 'settings' | 'projects';
 
 /** Inner paths for each glyph, keyed by {@link IconName}; rendered inside a shared 24×24 stroke frame. */
 const PATHS: Record<IconName, JSX.Element> = {
@@ -94,6 +94,13 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M12 3l7 3v5c0 4-3 7-7 9-4-2-7-5-7-9V6l7-3z" />
       <circle cx="12" cy="11" r="1.4" />
       <path d="M12 12.4v2.4" />
+    </>
+  ),
+  // folder tab (a project — a grouping scope)
+  projects: (
+    <>
+      <path d="M3 7a1 1 0 0 1 1-1h5l2 2h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7z" />
+      <path d="M3 11h18" />
     </>
   ),
   // cog

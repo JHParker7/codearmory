@@ -392,6 +392,7 @@ export function AppLayout() {
           <NavSection title="admin" sidebarCollapsed={navCollapsed} defaultCollapsed>
             {permissions?.['builder:configureOrgService'] && <NavItem to="/app/builder" label="builder/" desc="Deploy & configure services" collapsed={navCollapsed} icon="builder" />}
             {permissions?.['gatekeeper:listAuditLog'] && <NavItem to="/app/audit" label="audit/" desc="Who changed what, and when" collapsed={navCollapsed} icon="audit" />}
+            <NavItem to="/app/projects" label="projects/" desc="Group resources & grant access" collapsed={navCollapsed} icon="projects" />
             <NavItem to="/app/gatekeeper" label="gatekeeper/" desc="Access control — users & roles" collapsed={navCollapsed} icon="gatekeeper" />
           </NavSection>
           <div style={{ height: 1, background: T.border, margin: '8px 0' }} />

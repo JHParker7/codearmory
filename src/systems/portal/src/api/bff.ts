@@ -1791,6 +1791,75 @@ export function getArgoSync(token: string, id: string) {
   return req<ArgoSync>('GET', `/argo/syncs/${id}`, token);
 }
 
+// ── Projects (first-class RBAC scope) ─────────────────────────────────────────
+// A gatekeeper Project is a first-class resource-grouping RBAC scope with its own
+// namespace and three tier roles (viewer/developer/admin). Distinct from the
+// free-text project *labels* below (a view filter). Members are managed via the
+// tier roles; a member holds exactly one tier at a time.
+
+export type ProjectTier = 'owner' | 'admin' | 'developer' | 'viewer';
+/** The tiers a member can be assigned (owner is the creator, not an assignable membership). */
+export type ProjectMemberTier = 'viewer' | 'developer' | 'admin';
+
+export interface Project {
+  project_id: string;
+  slug: string;
+  name: string;
+  namespace: string;
+  owner_id: string;
+  viewer_role_id: string;
+  developer_role_id: string;
+  admin_role_id: string;
+  /** The caller's tier on this project — present on the accessible listing, absent on owned/single reads. */
+  tier?: ProjectTier;
+}
+
+/** One role→user grant, as returned by GET /gatekeeper/roles/{id}/members. */
+export interface RoleMember {
+  role_id: string;
+  user_id: string;
+  granted_by: string;
+  created_at: string;
+}
+
+/** Projects the caller can reach (owned or member), each tagged with the caller's tier. */
+export function listAccessibleProjects(token: string) {
+  return req<Project[]>('GET', '/gatekeeper/projects/accessible', token);
+}
+
+/** Projects the caller OWNS (no tier field). */
+export function listOwnedProjects(token: string) {
+  return req<Project[]>('GET', '/gatekeeper/projects', token);
+}
+
+/** Create a project. `slug` must match ^[a-z0-9][a-z0-9-]{0,62}$. */
+export function createProject(token: string, slug: string, name: string) {
+  return req<Project>('POST', '/gatekeeper/projects', token, { slug, name });
+}
+
+export function getProject(token: string, id: string) {
+  return req<Project>('GET', `/gatekeeper/projects/${id}`, token);
+}
+
+export function deleteProject(token: string, id: string) {
+  return req<void>('DELETE', `/gatekeeper/projects/${id}`, token);
+}
+
+/** Assign a user a tier on a project (reassigns if they already hold another tier). */
+export function addProjectMember(token: string, id: string, userId: string, tier: ProjectMemberTier) {
+  return req<void>('POST', `/gatekeeper/projects/${id}/members`, token, { user_id: userId, tier });
+}
+
+/** Revoke all tiers a user holds on a project. */
+export function removeProjectMember(token: string, id: string, userId: string) {
+  return req<void>('DELETE', `/gatekeeper/projects/${id}/members/${userId}`, token);
+}
+
+/** List the users granted a role (used to enumerate a project's members via its tier roles). */
+export function listRoleMembers(token: string, roleId: string) {
+  return req<RoleMember[]>('GET', `/gatekeeper/roles/${roleId}/members`, token);
+}
+
 // ── Projects (workspaces) ─────────────────────────────────────────────────────
 // A project is a free-text label attached to pipelines, executions, tickets and
 // repos — a view filter, not a permission boundary. There is no project registry
