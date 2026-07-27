@@ -47,6 +47,12 @@ variable "registry_secret_name" {
   default     = ""
 }
 
+variable "git_factory_clone_url" {
+  type        = string
+  description = "Full HTTP(S) clone URL of the git_factory repo (git_connector brokers a short-lived token for it)."
+  default     = "http://ca-codearmory-git-factory:9002/jhparker7/codearmory_git_factory.git"
+}
+
 variable "outpost_id" {
   type        = string
   description = "The outpost (with the deploy integration) that rolls out the new image into the cluster. Same outpost the monorepo pipeline uses."
@@ -90,7 +96,7 @@ resource "codearmory_pipeline" "git_factory" {
       with_json = jsonencode({
         run         = "set -eu; git clone --branch dev --depth 1 $GIT_CLONE_URL ."
         volumes     = [local.workspace]
-        secret_refs = { GIT_CLONE_URL = "git:jhparker7/codearmory_git_factory" }
+        secret_refs = { GIT_CLONE_URL = "git:${var.git_factory_clone_url}" }
       })
     },
     {
