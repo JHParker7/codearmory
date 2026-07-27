@@ -97,6 +97,7 @@ type createRuleRequest struct {
 	Source       string            `json:"source"`
 	Events       []string          `json:"events"`
 	RefFilter    string            `json:"ref_filter"`
+	RepoFilter   string            `json:"repo_filter"`
 	WorkflowID   string            `json:"workflow_id"`
 	// Secret is write-only (never returned in responses). Required on create; cannot be cleared on update.
 	// On create: must be a non-empty string — all rules require an HMAC secret.
@@ -194,6 +195,7 @@ func handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		Source:       req.Source,
 		Events:       req.Events,
 		RefFilter:    req.RefFilter,
+		RepoFilter:   req.RepoFilter,
 		WorkflowID:   req.WorkflowID,
 		Secret:       req.Secret,
 		InputMapping: req.InputMapping,
@@ -370,6 +372,7 @@ func handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	existing.Source = req.Source
 	existing.Events = req.Events
 	existing.RefFilter = req.RefFilter
+	existing.RepoFilter = req.RepoFilter
 	existing.WorkflowID = req.WorkflowID
 	existing.InputMapping = req.InputMapping
 	if req.Secret != nil {

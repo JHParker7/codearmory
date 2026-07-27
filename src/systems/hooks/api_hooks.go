@@ -140,6 +140,14 @@ func matchAndDispatch(ctx context.Context, eventID string, source, event, ref st
 			continue
 		}
 
+		// Apply repo_filter: a Source (e.g. a git backend service) hosts many repos,
+		// and matchedRules is keyed only by that Source, so without this every rule on
+		// the backend fires for a push to ANY of its repos. Scope to the payload's
+		// "repo" path (same glob/"/*" semantics as ref_filter); empty matches all.
+		if rws.RepoFilter != "" && !matchesRefFilter(rws.RepoFilter, payloadMap["repo"]) {
+			continue
+		}
+
 		// HMAC verification: if the rule has a secret and skipHMAC is false,
 		// the caller must supply X-Hub-Signature-256: sha256=<hex(HMAC-SHA256(secret, body))>.
 		if !skipHMAC && rws.Secret != nil && *rws.Secret != "" {

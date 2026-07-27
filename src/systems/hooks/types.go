@@ -16,6 +16,13 @@ type PipelineRule struct {
 	Source       string            `json:"source"         gorm:"column:repo"`
 	Events       []string          `json:"events"         gorm:"column:events;serializer:json"`
 	RefFilter    string            `json:"ref_filter"     gorm:"column:ref_filter"`
+	// RepoFilter scopes a rule to a single repository within a Source that hosts
+	// many (e.g. a git backend service): it is matched against the payload's "repo"
+	// path (same glob/"/*"-prefix semantics as RefFilter). Empty matches every repo,
+	// preserving old behaviour. This is what stops one git backend's push from firing
+	// every pipeline subscribed to that backend — a rule for admin/codearmory no
+	// longer triggers on a push to admin/codearmory-git-factory.
+	RepoFilter   string            `json:"repo_filter"    gorm:"column:repo_filter;default:''"`
 	WorkflowID   string            `json:"workflow_id"    gorm:"column:workflow_id"`
 	Secret       *string           `json:"-"              gorm:"column:secret"`
 	InputMapping map[string]string `json:"input_mapping"  gorm:"column:input_mapping;serializer:json"`
