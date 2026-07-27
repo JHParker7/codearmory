@@ -3,15 +3,10 @@
 name: codearmory-ci
 description: 'dogfood CI: checkout -> [build+test per module] -> image builds, with a gocache that persists across runs'
 project: codearmory
-inputs:
-- name: HOOK_REF
-  default: main
-- name: HOOK_COMMIT
-  default: ''
-- name: HOOK_REPO
-  default: ''
-- name: OUTPOST_ID
-  default: b38de6c5-6393-4dd2-aa93-b1ec5cf1bb86
+# No declared inputs: the hooks service injects every webhook payload field at run
+# time as HOOK_<KEY> (HOOK_REF, HOOK_COMMIT, HOOK_REPO, …), so ${inputs.HOOK_*} resolves
+# without needing declarations. The outpost deploy target is a fixed value, hardcoded
+# at its use sites below rather than passed in.
 steps:
 - action: forge/create-volume
   name: workspace
@@ -324,7 +319,7 @@ steps:
   name: redeploy-portal
   timeout: 120
   with:
-    id: ${inputs.OUTPOST_ID}
+    id: b38de6c5-6393-4dd2-aa93-b1ec5cf1bb86
     integration: deploy
     type: set-image
     payload:
@@ -347,7 +342,7 @@ steps:
   name: redeploy
   timeout: 120
   with:
-    id: ${inputs.OUTPOST_ID}
+    id: b38de6c5-6393-4dd2-aa93-b1ec5cf1bb86
     integration: deploy
     type: set-image
     payload:
@@ -362,7 +357,7 @@ steps:
   name: integration-tests
   timeout: 900
   with:
-    id: ${inputs.OUTPOST_ID}
+    id: b38de6c5-6393-4dd2-aa93-b1ec5cf1bb86
     integration: test
     type: run
     payload:
@@ -453,13 +448,10 @@ routes:
   when: steps["test-portal"].status == 'failed'
 - from: image
   to: redeploy
-  when: inputs.OUTPOST_ID != ""
 - from: image-portal
   to: redeploy-portal
-  when: inputs.OUTPOST_ID != ""
 - from: redeploy
   to: integration-tests
-  when: inputs.OUTPOST_ID != ""
 - from: integration-tests
   to: close-ticket
 - from: integration-tests
