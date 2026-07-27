@@ -3,6 +3,9 @@
 name: codearmory-ci
 description: 'dogfood CI: checkout -> [build+test per module] -> image builds, with a gocache that persists across runs'
 project: codearmory
+# Whole-run wall-clock cap (default 1800/30m). Raised to 1h: a cold-cache run that must
+# rebuild every service (e.g. after the reaper clears the gocache) can exceed 30 minutes.
+timeout_secs: 3600
 # No declared inputs: the hooks service injects every webhook payload field at run
 # time as HOOK_<KEY> (HOOK_REF, HOOK_COMMIT, HOOK_REPO, …), so ${inputs.HOOK_*} resolves
 # without needing declarations. The outpost deploy target is a fixed value, hardcoded
@@ -173,16 +176,24 @@ steps:
       set -eu
       git config --global --add safe.directory /workspace
       cd /workspace
-      # Files changed by this push (HEAD~1..HEAD). If there is no parent (first commit or
-      # a shallow clone without one) CHANGED is empty, which the loops below read as
-      # "rebuild everything" — a safe superset for the preview pipeline.
+      # Files changed by this push (HEAD~1..HEAD). HAVE_BASE distinguishes the two
+      # empty-CHANGED cases that must behave OPPOSITELY: no parent (first commit or a
+      # shallow clone without one) means we cannot tell what changed, so rebuild
+      # everything; a real parent with an empty diff (an empty "trigger" commit that
+      # touched no files) means genuinely nothing changed, so build nothing.
       if git rev-parse HEAD~1 >/dev/null 2>&1; then
+        HAVE_BASE=1
         CHANGED=$(git diff --name-only HEAD~1 HEAD)
       else
+        HAVE_BASE=0
         CHANGED=""
       fi
       cd /workspace/src
-      changed_dir() { [ -z "$CHANGED" ] && return 0; printf '%s\n' "$CHANGED" | grep -q "^src/$1/"; }
+      changed_dir() {
+        [ "$HAVE_BASE" = 0 ] && return 0       # no base: cannot tell → rebuild everything
+        [ -z "$CHANGED" ] && return 1          # base + empty diff: nothing changed → build nothing
+        printf '%s\n' "$CHANGED" | grep -q "^src/$1/"
+      }
       # MODULES: changed go modules only (like IMAGES) — test just what this push touched.
       MODULES=""
       for f in systems/*/go.mod cli/go.mod; do [ -f "$f" ] || continue; d=${f%/go.mod}; if changed_dir "$d"; then MODULES="$MODULES $d"; fi; done
