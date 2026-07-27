@@ -64,8 +64,30 @@ func actRunPipeline(ctx context.Context, a Action, e Event, evMap map[string]any
 		"org_id":       e.Actor.OrgID,
 		"inputs":       inputs,
 	})
+	// workflows verifies its internal dispatch with X-Hooks-Token = HMAC(sharedKey,
+	// "hooks:<pipeline>:<triggered_by>:<ts>") — the scheme it has always used for hook→run
+	// dispatch. events shares that key (EVENTS_TRIGGER_KEY == the workflows trigger key).
+	ts := fmt.Sprint(time.Now().UTC().Unix())
+	mac := hmac.New(sha256.New, []byte(eventsTriggerKey))
+	fmt.Fprintf(mac, "hooks:%s:%s:%s", pipelineID, e.Actor.UserID, ts)
 	url := workflowsURL + "/internal/pipelines/" + pipelineID + "/runs"
-	return internalPost(ctx, url, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hooks-Token", hex.EncodeToString(mac.Sum(nil)))
+	req.Header.Set("X-Hooks-Timestamp", ts)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("%s -> %d: %s", url, resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
 }
 
 // ── webhook_out — POST the (templated) event to a customer URL, signed ───────────────────
