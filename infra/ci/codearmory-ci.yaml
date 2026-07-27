@@ -391,7 +391,7 @@ maps:
   mount_path: /workspace
   size_mb: 512
   medium: disk
-  max_concurrent: 4
+  max_concurrent: 1
 - id: per-extra
   var: module
   values_from: ${steps.discover.output.EXTRAS}
@@ -400,7 +400,7 @@ maps:
   mount_path: /workspace
   size_mb: 512
   medium: disk
-  max_concurrent: 4
+  max_concurrent: 1
 routes:
 - from: workspace
   to: checkout
