@@ -50,7 +50,7 @@ variable "registry_secret_name" {
 variable "git_factory_clone_url" {
   type        = string
   description = "Full HTTP(S) clone URL of the git_factory repo (git_connector brokers a short-lived token for it)."
-  default     = "http://ca-codearmory-git-factory:9002/jhparker7/codearmory_git_factory.git"
+  default     = "http://ca-codearmory-git-factory:9002/admin/codearmory-git-factory.git"
 }
 
 variable "outpost_id" {
@@ -78,6 +78,7 @@ locals {
 resource "codearmory_pipeline" "git_factory" {
   name        = "git_factory-cd"
   description = "Test, build and push the git_factory image on push to dev"
+  project     = "codearmory" # files it into project/codearmory so the project's admins/developers control it
 
   step = [
     {

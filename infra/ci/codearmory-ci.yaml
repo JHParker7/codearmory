@@ -2,6 +2,7 @@
 # Converted from codearmory-ci.json; run scripts are block scalars for readability.
 name: codearmory-ci
 description: 'dogfood CI: checkout -> [build+test per module] -> image builds, with a gocache that persists across runs'
+project: codearmory
 inputs:
 - name: HOOK_REF
   default: main
