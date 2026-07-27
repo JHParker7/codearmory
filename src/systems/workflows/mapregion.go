@@ -260,9 +260,13 @@ func (p *WorkerPool) runMapRegion(
 		return nil, p.mapFail(runID, g, region, err.Error()), 0
 	}
 	if len(values) == 0 {
-		// Mirrors the matrix rule: a fan-out that resolved to nothing did no work, so
-		// passing would leave the region absent from the run view while the run showed
-		// green. Fail loudly instead.
+		// A fan-out that resolved to nothing did no work. By default that is a bug (a
+		// mistyped values_from), so fail loudly. But when the region opted into
+		// allow_empty, "no items" is a legitimate outcome — record the region as a
+		// completed no-op (kept visible in the run view) and let the run stay green.
+		if region.def.AllowEmpty {
+			return map[string]string{}, p.mapSkip(runID, g, region, fmt.Sprintf("map %q produced no values — skipped (allow_empty)", region.def.ID)), 0
+		}
 		return nil, p.mapFail(runID, g, region, fmt.Sprintf("map %q produced no values to run", region.def.ID)), 0
 	}
 
@@ -341,6 +345,11 @@ func (p *WorkerPool) runIteration(
 		mapVars: mapVars,
 		label:   func(base string) string { return mapIterName(base, region.def.Var, val) },
 		volume:  iterVolumeMount(region, runID, i),
+		// The body runs against the ISOLATED sub-graph, so upstream outputs must be
+		// carried in explicitly or references like ${steps.commit.output.SHA} resolve
+		// to empty (an unresolved ${...} then reaches forge as a literal — the
+		// "not a valid image reference" failure this fixes).
+		inbound: visible,
 	}, legSem)
 	if status == statusPaused {
 		// An approval gate inside a map region would have to pause N iterations
@@ -441,6 +450,20 @@ func (p *WorkerPool) mapFail(runID string, g *workflowGraph, region *mapRegion, 
 		p.finishStepRun(sid, StatusFailed, strPtr(msg), nil, nil, nil)
 	}
 	return StatusFailed
+}
+
+// mapSkip records an allow_empty region that resolved to no values as a COMPLETED
+// no-op — the same visibility as mapFail (a step run the user can see), but green so
+// the run proceeds. Mirrors mapFail deliberately, so the two stay in step.
+func (p *WorkerPool) mapSkip(runID string, g *workflowGraph, region *mapRegion, msg string) string {
+	if len(region.nodes) == 0 {
+		return StatusCompleted
+	}
+	name := region.nodes[0]
+	if sid := uuid.New().String(); p.startStepRun(runID, sid, g.stepIndex(name), name) == nil {
+		p.finishStepRun(sid, StatusCompleted, strPtr(msg), nil, nil, nil)
+	}
+	return StatusCompleted
 }
 
 // withIterVolume attaches the iteration's clone to a step's volumes, replacing any

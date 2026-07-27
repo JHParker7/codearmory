@@ -336,6 +336,28 @@ type iterCtx struct {
 	mapVars map[string]string
 	label   func(base string) string
 	volume  map[string]any
+	// inbound is the region's inbound output view (steps upstream of the map). A body
+	// step's own visibility is computed against the ISOLATED sub-graph, whose ancestor
+	// set contains only body nodes — so without this, an outer output like
+	// ${steps.commit.output.SHA} silently drops to empty inside the region. Merged into
+	// every body node's visible so references to upstream steps resolve. Empty at the
+	// top level (iterCtx{}), so ordinary runs are unaffected.
+	inbound map[string]string
+}
+
+// withInbound unions the iteration's inbound outputs onto a node's computed visible,
+// without overriding a body node's own output of the same name. A no-op outside a map
+// region (inbound is nil).
+func (ic iterCtx) withInbound(visible map[string]string) map[string]string {
+	if len(ic.inbound) == 0 {
+		return visible
+	}
+	for k, v := range ic.inbound {
+		if _, ok := visible[k]; !ok {
+			visible[k] = v
+		}
+	}
+	return visible
 }
 
 // name applies the iteration's labelling to a step name.
@@ -372,7 +394,7 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 				for _, n := range region.nodes {
 					st.nodes[n] = nodeRunning
 				}
-				visible := g.visibleForRegion(region, st.outputs)
+				visible := ic.withInbound(g.visibleForRegion(region, st.outputs))
 				inFlight++
 				go func(region *mapRegion, visible map[string]string) {
 					agg, status, iters := p.runMapRegion(ctx, store, runID, workflowID, g, region, inputs, visible, depth, legSem)
@@ -389,7 +411,7 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 					continue
 				}
 				st.nodes[n] = nodeRunning
-				visible := g.visibleFor(n, st.outputs)
+				visible := ic.withInbound(g.visibleFor(n, st.outputs))
 				idx := g.stepIndex(n)
 				inFlight++
 				go func(n string, ws WorkflowStep, idx int, visible map[string]string) {

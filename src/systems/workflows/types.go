@@ -309,6 +309,12 @@ type MapDef struct {
 	// Sequential pins it to 1.
 	MaxConcurrent int  `json:"max_concurrent,omitempty"`
 	Sequential    bool `json:"sequential,omitempty"`
+	// AllowEmpty makes a fan-out that resolves to zero values a no-op that completes
+	// the region rather than failing the run. Off by default (an empty fan-out is
+	// usually a bug — a mistyped values_from — so it fails loudly); opt in when "no
+	// items" is a legitimate outcome, e.g. a per-changed-service map on a commit that
+	// touched none.
+	AllowEmpty bool `json:"allow_empty,omitempty"`
 	// Volume names the base workspace to clone per iteration; empty = no clone (the
 	// body then attaches whatever volumes it declares itself). MountPath/SizeMB/
 	// Medium configure the clone, and Outputs are the paths each iteration owns,
