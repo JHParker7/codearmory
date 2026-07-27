@@ -148,9 +148,13 @@ function PipelineBuilderOverlay({
   // Declared run parameters / published outputs, seeded from the edited workflow.
   const [inputs, setInputs] = useState<WorkflowInputDef[]>(initial?.inputs ?? []);
   const [outputs, setOutputs] = useState<WorkflowOutputDef[]>(initial?.outputs ?? []);
-  // The inputs/outputs declaration panel is collapsed by default, opened when the
-  // pipeline already declares any (so an edit surfaces them).
-  const [showDecl, setShowDecl] = useState<boolean>(!!(initial?.inputs?.length || initial?.outputs?.length));
+  // The inputs/outputs declaration panel starts minimised; it opens when a step is
+  // selected on the canvas (see onInspect) or via its header toggle.
+  const [showDecl, setShowDecl] = useState<boolean>(false);
+  // Whole-run wall-clock cap in seconds (the pipeline-level timeout_secs; 0 = leave the
+  // backend default of 30m). Surfaced in the builder header so it is editable here
+  // rather than only via the raw pipeline def.
+  const [runTimeout, setRunTimeout] = useState<number>(initial?.timeout_secs ?? 0);
   // `steps` is the live source of truth (mirrored from the visual builder via
   // onChange and from applying JSON edits); `builderSeed` is what re-seeds the
   // block builder — it changes only on a JSON apply, never on the builder's own
@@ -232,6 +236,10 @@ function PipelineBuilderOverlay({
     return v >= 280 ? v : 480;
   });
   useEffect(() => { localStorage.setItem('ci.builder.rightW', String(rightW)); }, [rightW]);
+  // The right pipeline panel (step editor + JSON/YAML) starts minimised so the builder
+  // opens on a clean, full-width canvas. Selecting a step (onInspect) or picking an
+  // action expands it; the panel header's minimise button toggles it back.
+  const [rightCollapsed, setRightCollapsed] = useState(true);
   const onSplitResize = useCallback((dx: number) => setRightW(w => {
     const total = splitRow.current?.offsetWidth ?? window.innerWidth;
     return Math.max(280, Math.min(w - dx, total - 360));
@@ -267,11 +275,15 @@ function PipelineBuilderOverlay({
     setCreatingAction(null);
     setConvertError(null);
     setRightTab('step');
+    // Selecting a step opens the panels it edits — the right step/pipeline panel and
+    // the inputs/outputs strip — which are minimised by default so the canvas leads.
+    if (selection) { setRightCollapsed(false); setShowDecl(true); }
   }, []);
   // Picking an action from the palette opens the inline create form for it.
   const onPickAction = useCallback((a: WorkflowAction) => {
     setCreatingAction(a);
     setRightTab('step');
+    setRightCollapsed(false);
   }, []);
 
   // Save an inline step's edited definition back onto its block (no API — the step is
@@ -447,6 +459,8 @@ function PipelineBuilderOverlay({
         maps: maps.length > 0 ? maps : undefined,
         inputs: cleanInputs.length > 0 ? cleanInputs : undefined,
         outputs: cleanOutputs.length > 0 ? cleanOutputs : undefined,
+        // Pipeline-level run timeout; 0 leaves the backend default (30m) in force.
+        timeout_secs: runTimeout > 0 ? runTimeout : undefined,
         // Carried through unchanged: this editor cannot set a ticket config, and a PUT
         // that omitted it would turn run mirroring OFF for a pipeline the user only
         // meant to rename. Editing a field you do not render must not delete it.
@@ -471,6 +485,14 @@ function PipelineBuilderOverlay({
           style={{ background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '5px 8px', outline: 'none', width: 200 }} />
         <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="description (optional)"
           style={{ flex: 1, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '5px 8px', outline: 'none' }} />
+        <label title="whole-run timeout in minutes (blank = default 30m); the run fails if it is still running past this"
+          style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: T.mono, fontSize: 11, color: T.dim, whiteSpace: 'nowrap' }}>
+          timeout
+          <input type="number" min={1} placeholder="30" value={runTimeout > 0 ? Math.round(runTimeout / 60) : ''}
+            onChange={e => { const m = Number(e.target.value); setRunTimeout(Number.isFinite(m) && m > 0 ? Math.round(m * 60) : 0); }}
+            style={{ width: 52, background: T.cardHi, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 12, padding: '5px 6px', outline: 'none' }} />
+          min
+        </label>
         <button onClick={() => setShowDecl(s => !s)} title="declare pipeline inputs and outputs"
           style={{ background: showDecl ? T.greenSoft : 'transparent', border: `1px solid ${showDecl ? T.green : T.border}`, color: showDecl ? T.green : T.dim, fontFamily: T.mono, fontSize: 11, padding: '5px 10px', cursor: 'pointer', whiteSpace: 'nowrap' }}>
           {showDecl ? '▾' : '▸'} inputs/outputs{(inputs.length || outputs.length) ? ` (${inputs.length}/${outputs.length})` : ''}
@@ -502,10 +524,20 @@ function PipelineBuilderOverlay({
             onChange={onGraphChange} onInspect={onInspect} onPickAction={onPickAction}
             pendingAdd={pendingAdd} onPendingConsumed={() => setPendingAdd(null)} />
         </div>
-        {/* Drag to rebalance the builder vs. step-editor/JSON panes. */}
-        <ResizeHandle onResize={onSplitResize} />
-        {/* Right panel: the step editor (create a step inline from a chosen action or
-            edit the selected block's step) and the live, editable JSON config, as tabs. */}
+        {/* Drag to rebalance the builder vs. step-editor/JSON panes — only when open. */}
+        {!rightCollapsed && <ResizeHandle onResize={onSplitResize} />}
+        {rightCollapsed ? (
+          // Minimised: a slim rail whose button reopens the panel. The canvas keeps the
+          // full width until a step is selected (auto-opens it) or the user clicks here.
+          <div style={{ flexShrink: 0, padding: '14px 14px 14px 3px' }}>
+            <button onClick={() => setRightCollapsed(false)} title="open the pipeline panel"
+              style={{ writingMode: 'vertical-rl', background: T.bgAlt, border: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 10, letterSpacing: 1, textTransform: 'uppercase', padding: '14px 6px', cursor: 'pointer' }}>
+              ▸ pipeline
+            </button>
+          </div>
+        ) : (
+        /* Right panel: the step editor (create a step inline from a chosen action or
+            edit the selected block's step) and the live, editable JSON config, as tabs. */
         <div style={{ width: rightW, minWidth: 280, flexShrink: 0, padding: '14px 14px 14px 3px', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div style={{ display: 'flex', alignItems: 'stretch', border: `1px solid ${T.border}`, borderBottom: 'none', background: T.bgAlt }}>
             {(['step', 'config'] as const).map(tab => (
@@ -528,6 +560,8 @@ function PipelineBuilderOverlay({
                 <span style={{ alignSelf: 'center', padding: '0 12px', fontFamily: T.mono, fontSize: 9, color: configError ? T.red : T.green }}>{configError ? '✗ invalid' : '✓ in sync'}</span>
               </>
             )}
+            <button onClick={() => setRightCollapsed(true)} title="minimise the pipeline panel"
+              style={{ background: 'transparent', border: 'none', borderLeft: `1px solid ${T.border}`, color: T.faint, fontFamily: T.mono, fontSize: 12, padding: '0 12px', cursor: 'pointer' }}>▾</button>
           </div>
           <div style={{ flex: 1, minHeight: 0, border: `1px solid ${T.border}`, background: T.bg, display: 'flex', flexDirection: 'column' }}>
             {rightTab === 'step' ? (
@@ -592,6 +626,7 @@ function PipelineBuilderOverlay({
             )}
           </div>
         </div>
+        )}
       </div>
       <div style={{ padding: '10px 20px', borderTop: `1px solid ${T.border}`, background: T.bgAlt, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>

@@ -422,6 +422,9 @@ export interface Workflow {
   inputs?: WorkflowInputDef[];
   /** Declared outputs published on completion (resolved into WorkflowRun.outputs). */
   outputs?: WorkflowOutputDef[];
+  /** Whole-run wall-clock cap in seconds; a run still running past it is failed.
+   * Absent/0 leaves the backend default (1800 / 30m). Editable in the builder header. */
+  timeout_secs?: number;
   created_at: string;
   updated_at: string;
   /** Trigger time of the most recent run, or null/absent if it has never run. Computed server-side for the list; powers the "last ran" column. */
@@ -998,7 +1001,7 @@ export function listActions(token: string) {
 
 export function createWorkflow(
   token: string,
-  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; routes?: WorkflowRoute[]; maps?: WorkflowMapDef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[] },
+  payload: { name: string; description?: string; project?: string; steps: WorkflowStepRef[]; routes?: WorkflowRoute[]; maps?: WorkflowMapDef[]; inputs?: WorkflowInputDef[]; outputs?: WorkflowOutputDef[]; timeout_secs?: number },
 ) {
   return req<Workflow>('POST', '/workflows/pipelines', token, payload);
 }
@@ -1006,7 +1009,7 @@ export function createWorkflow(
 export function updateWorkflow(
   token: string,
   id: string,
-  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; routes: WorkflowRoute[]; maps: WorkflowMapDef[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[] }>,
+  payload: Partial<{ name: string; description: string; steps: WorkflowStepRef[]; routes: WorkflowRoute[]; maps: WorkflowMapDef[]; inputs: WorkflowInputDef[]; outputs: WorkflowOutputDef[]; timeout_secs: number }>,
 ) {
   return req<Workflow>('PUT', `/workflows/pipelines/${id}`, token, payload);
 }
