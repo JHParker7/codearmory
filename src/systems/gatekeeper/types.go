@@ -402,8 +402,11 @@ func (PersonalToken) TableName() string { return "personal_tokens" }
 // membership is the ordinary RoleMembership on whichever tier role.
 type Project struct {
 	ProjectID       string    `json:"project_id"        gorm:"column:project_id;primaryKey"`
-	Slug            string    `json:"slug"              gorm:"column:slug;uniqueIndex:ux_project_ns_slug,priority:2"`
-	Namespace       string    `json:"namespace"         gorm:"column:namespace;uniqueIndex:ux_project_ns_slug,priority:1"`
+	Slug            string    `json:"slug"              gorm:"column:slug;uniqueIndex"`
+	// Namespace is "" for an unbound project (its own top-level namespace, addressed as
+	// project/<slug>) or "org/<name>" when an org administers it. It is NEVER a username
+	// — a project is not bound to a user; the creator is simply its first admin member.
+	Namespace       string    `json:"namespace"         gorm:"column:namespace;default:''"`
 	Name            string    `json:"name"              gorm:"column:name;default:''"`
 	OwnerID         string    `json:"owner_id"          gorm:"column:owner_id;index"`
 	ViewerRoleID    string    `json:"viewer_role_id"    gorm:"column:viewer_role_id;default:''"`

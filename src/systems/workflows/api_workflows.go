@@ -510,7 +510,7 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if req.Project != "" {
 		bearer := r.Header.Get("Authorization")
 		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
-			if !checkProjectPermission(ctx, bearer, "createWorkflow", p.Namespace, "pipelines", p.Slug, "") {
+			if !checkProjectPermission(ctx, bearer, "createWorkflow", "pipelines", p.Slug, "") {
 				span.SetStatus(codes.Ok, "")
 				http.Error(w, "you cannot create pipelines in project "+p.Slug, http.StatusForbidden)
 				return
@@ -787,7 +787,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		existing.ProjectID, existing.ProjectNamespace = "", ""
 		bearer := r.Header.Get("Authorization")
 		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil &&
-			checkProjectPermission(ctx, bearer, "updateWorkflow", p.Namespace, "pipelines", p.Slug, "") {
+			checkProjectPermission(ctx, bearer, "updateWorkflow", "pipelines", p.Slug, "") {
 			existing.ProjectID = p.ProjectID
 			existing.ProjectNamespace = p.Namespace
 		}

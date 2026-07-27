@@ -91,20 +91,25 @@ func (p Project) List(ctx context.Context, limit, offset int) ([]db, error) {
 	return result, nil
 }
 
-// projectsInNamespaces lists every active project across the namespaces the caller
-// owns (their username and, when in one, their org). Used by GET /projects.
-func projectsInNamespaces(ctx context.Context, namespaces []string) ([]Project, error) {
+// projectsOwnedBy lists the active projects a user administers (created). Used by
+// GET /projects — the "mine to manage" list.
+func projectsOwnedBy(ctx context.Context, ownerID string) ([]Project, error) {
 	var rows []Project
-	if len(namespaces) == 0 {
-		return []Project{}, nil
-	}
 	err := connectRead().WithContext(ctx).
-		Where("active = ? AND namespace IN ?", true, namespaces).
+		Where("active = ? AND owner_id = ?", true, ownerID).
 		Order("created_at DESC").Find(&rows).Error
 	if rows == nil {
 		rows = []Project{}
 	}
 	return rows, err
+}
+
+// getProjectBySlug looks up a project by its global slug (slugs are unique across the
+// platform now that a project is its own top-level namespace).
+func getProjectBySlug(ctx context.Context, slug string) (Project, error) {
+	var p Project
+	err := connectRead().WithContext(ctx).First(&p, "slug = ? AND active = ?", slug, true).Error
+	return p, err
 }
 
 // accessibleProject pairs a project with the caller's highest tier in it, so a service

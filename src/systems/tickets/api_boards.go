@@ -90,7 +90,7 @@ func handleCreateBoard(w http.ResponseWriter, r *http.Request) {
 	if req.Project != "" {
 		bearer := r.Header.Get("Authorization")
 		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
-			if !checkProjectPermission(ctx, bearer, "createBoard", p.Namespace, "boards", p.Slug, "") {
+			if !checkProjectPermission(ctx, bearer, "createBoard", "boards", p.Slug, "") {
 				span.SetStatus(codes.Ok, "")
 				http.Error(w, "you cannot create boards in project "+p.Slug, http.StatusForbidden)
 				return
@@ -260,7 +260,7 @@ func handleUpdateBoard(w http.ResponseWriter, r *http.Request) {
 		existing.ProjectID, existing.ProjectNamespace = "", ""
 		bearer := r.Header.Get("Authorization")
 		if p := resolveProjectSlug(ctx, bearer, existing.Project); p != nil &&
-			checkProjectPermission(ctx, bearer, "updateBoard", p.Namespace, "boards", p.Slug, "") {
+			checkProjectPermission(ctx, bearer, "updateBoard", "boards", p.Slug, "") {
 			existing.ProjectID = p.ProjectID
 			existing.ProjectNamespace = p.Namespace
 		}

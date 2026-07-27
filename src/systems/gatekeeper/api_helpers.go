@@ -289,6 +289,13 @@ func scopeResource(resource, username, orgName, service string) string {
 	if orgName != "" && strings.HasPrefix(resource, "org/"+orgName+"/") {
 		return resource
 	}
+	// A project is a top-level owner namespace of its own — "project/<slug>/..." — not
+	// bound to any user, exactly like "org/<name>/...". A permission on
+	// "project/core/*" is held by a project role and consulted for any member, so the
+	// resource must never be re-scoped to the caller (that would make it unmatchable).
+	if strings.HasPrefix(resource, "project/") {
+		return resource
+	}
 	if service != "" && ownerQualified(resource, service) {
 		return resource
 	}

@@ -25,8 +25,8 @@ func authorizeBoard(ctx context.Context, bearer, action string, b Board, userID,
 	if canAccessBoard(b, userID, orgID) {
 		return true
 	}
-	if b.ProjectID != "" && b.ProjectNamespace != "" && b.Project != "" {
-		return checkProjectPermission(ctx, bearer, action, b.ProjectNamespace, "boards", b.Project, b.BoardID)
+	if b.ProjectID != "" && b.Project != "" {
+		return checkProjectPermission(ctx, bearer, action, "boards", b.Project, b.BoardID)
 	}
 	return false
 }
@@ -105,11 +105,11 @@ func accessibleProjectIDs(ctx context.Context, bearer string) []string {
 // (an unqualified resource would be scoped to the caller and never match the owner's
 // project role). collection is e.g. "boards"; id may be "" for a collection-wide
 // check (used when filing a new resource into a project).
-func checkProjectPermission(ctx context.Context, bearer, action, ownerNS, collection, slug, id string) bool {
-	if bearer == "" || ownerNS == "" || slug == "" {
+func checkProjectPermission(ctx context.Context, bearer, action, collection, slug, id string) bool {
+	if bearer == "" || slug == "" {
 		return false
 	}
-	resource := ownerNS + "/" + projectService + "/projects/" + slug + "/" + collection
+	resource := "project/" + slug + "/" + projectService + "/" + collection
 	if id != "" {
 		resource += "/" + id
 	} else {

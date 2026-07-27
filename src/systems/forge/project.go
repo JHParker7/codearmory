@@ -25,8 +25,8 @@ func authorizeExecution(ctx context.Context, bearer, action string, e Execution,
 	if e.UserID == userID {
 		return true
 	}
-	if e.ProjectID != "" && e.ProjectNamespace != "" && e.Project != "" {
-		return checkProjectPermission(ctx, bearer, action, e.ProjectNamespace, "executions", e.Project, e.ExecutionID)
+	if e.ProjectID != "" && e.Project != "" {
+		return checkProjectPermission(ctx, bearer, action, "executions", e.Project, e.ExecutionID)
 	}
 	return false
 }
@@ -105,11 +105,11 @@ func accessibleProjectIDs(ctx context.Context, bearer string) []string {
 // (an unqualified resource would be scoped to the caller and never match the owner's
 // project role). collection is e.g. "executions"; id may be "" for a collection-wide
 // check (used when filing a new resource into a project).
-func checkProjectPermission(ctx context.Context, bearer, action, ownerNS, collection, slug, id string) bool {
-	if bearer == "" || ownerNS == "" || slug == "" {
+func checkProjectPermission(ctx context.Context, bearer, action, collection, slug, id string) bool {
+	if bearer == "" || slug == "" {
 		return false
 	}
-	resource := ownerNS + "/" + projectService + "/projects/" + slug + "/" + collection
+	resource := "project/" + slug + "/" + projectService + "/" + collection
 	if id != "" {
 		resource += "/" + id
 	} else {

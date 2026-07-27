@@ -445,7 +445,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if req.Project != "" {
 		bearer := r.Header.Get("Authorization")
 		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
-			if !checkProjectPermission(ctx, bearer, "createExecution", p.Namespace, "executions", p.Slug, "") {
+			if !checkProjectPermission(ctx, bearer, "createExecution", "executions", p.Slug, "") {
 				span.SetStatus(codes.Ok, "")
 				http.Error(w, "you cannot create executions in project "+p.Slug, http.StatusForbidden)
 				return

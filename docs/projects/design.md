@@ -62,27 +62,32 @@ the org that owns a project owns its scope.
 
 ### The project resource segment
 
-Every service that participates embeds the project slug in the RBAC resource string it
-checks:
+A project is its **own top-level namespace** — `project/{slug}/…` — not nested under any
+user, exactly like `org/{name}/…`. `scopeResource` recognises the `project/` prefix and
+leaves it untouched (never re-scoping it to the caller), which is what lets a member in a
+different personal namespace match the grant. Every participating service builds:
 
 ```
-{service}/projects/{slug}/{collection}/{id}
+project/{slug}/{service}/{collection}/{id}
 ```
 
-which gatekeeper scopes to `{namespace}/{service}/projects/{slug}/{collection}/{id}`.
-Examples (namespace `admin`, project `core`):
+Because there is no middle wildcard, a **single** permission `project/{slug}/*` covers the
+whole project across every service (matchPermission's trailing `/*` is a literal prefix).
+Examples (project `core`):
 
-| resource                                             | grants                          |
-|------------------------------------------------------|---------------------------------|
-| `admin/workflows/projects/core/pipelines/42`         | one pipeline                    |
-| `admin/workflows/projects/core/pipelines/*`          | all pipelines in `core`         |
-| `admin/tickets/projects/core/boards/*`               | all boards in `core`            |
-| `admin/codearmory_git_factory/projects/core/repos/*` | all repos in `core`             |
-| `admin/codearmory_git_factory/projects/core/repos/{id}/branches/dev` | one branch of one repo |
-| `admin/*/projects/core/*`                             | the entire project, all services|
+| resource                                              | grants                          |
+|-------------------------------------------------------|---------------------------------|
+| `project/core/workflows/pipelines/42`                 | one pipeline                    |
+| `project/core/workflows/pipelines/*`                  | all pipelines in `core`         |
+| `project/core/tickets/boards/*`                       | all boards in `core`            |
+| `project/core/codearmory_git_factory/repos/*`         | all repos in `core`             |
+| `project/core/codearmory_git_factory/repos/{id}/branches/dev` | one branch of one repo |
+| `project/core/*`                                      | the entire project, all services (one grant) |
 
 A resource **without** a project falls back to today's
-`{namespace}/{service}/{collection}/{id}` — projects are additive, nothing breaks.
+`{namespace}/{service}/{collection}/{id}` — projects are additive, nothing breaks. A
+project is **not bound to a user**: the creator becomes its first admin member, and an
+optional org owns/manages it, but the resource path never contains a username.
 
 ### Branch-level repo access
 

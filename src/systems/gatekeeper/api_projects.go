@@ -14,13 +14,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
-// projectServices are the services whose resources a project scopes. A project role
-// carries one wildcard resource pattern per service (matchPermission's trailing "/*"
-// is a LITERAL prefix, so a single "<ns>/*/projects/<slug>/*" would not match — each
-// service needs its own "<ns>/<service>/projects/<slug>/*" entry, all held under one
-// permission with Service "*").
-var projectServices = []string{"workflows", "tickets", "forge", "codearmory_git_factory"}
-
 // projectTiers maps a tier name to the action wildcards it grants over the project's
 // resources. Ordered viewer ⊂ developer ⊂ admin. matchPermission supports the trailing
 // "*" action wildcard, so "read*" covers readRepo/readBoard/etc.
@@ -33,9 +26,9 @@ var projectTiers = map[string][]string{
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 type createProjectRequest struct {
-	Slug      string `json:"slug"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"` // optional; defaults to the caller's username
+	Slug  string  `json:"slug"`
+	Name  string  `json:"name"`
+	OrgID *string `json:"org_id"` // optional; when set the project is owned/managed by the org
 }
 
 type projectMemberRequest struct {
@@ -43,28 +36,24 @@ type projectMemberRequest struct {
 	Tier   string `json:"tier"` // viewer | developer | admin
 }
 
-// projectResourcePatterns returns the per-service wildcard resource strings that scope
-// a project within a namespace, e.g. "admin/workflows/projects/core/*".
-func projectResourcePatterns(namespace, slug string) []string {
-	pats := make([]string, len(projectServices))
-	for i, svc := range projectServices {
-		pats[i] = namespace + "/" + svc + "/projects/" + slug + "/*"
-	}
-	return pats
-}
+// projectResource is the single wildcard that scopes a whole project: "project/<slug>/*".
+// A project is its OWN top-level namespace (scopeResource treats "project/" like "org/"),
+// so one pattern covers every service's resources — "project/core/workflows/pipelines/42",
+// "project/core/codearmory_git_factory/repos/x", etc. — because matchPermission's trailing
+// "/*" is a literal prefix and there is no middle wildcard to expand.
+func projectResource(slug string) string { return "project/" + slug + "/*" }
 
-// provisionTierRole creates one Permission (Service "*", the tier's action wildcards,
-// every per-service project resource pattern) and a Role holding it, owned by the
-// project owner. Confinement is guaranteed by construction — every pattern begins with
-// the owner's namespace — so this establishes roles over a brand-new scope the owner
-// just created without needing the attenuation the general namespace-role path uses.
-func provisionTierRole(ctx context.Context, ownerID, namespace, slug, tier string) (string, error) {
+// provisionTierRole creates one Permission (Service "*", the tier's action wildcards, the
+// single "project/<slug>/*" pattern) and a Role holding it, owned by the project's first
+// admin. The project namespace is brand-new and belongs to no user, so this establishes
+// the roles directly without the confinement/attenuation the user-namespace path needs.
+func provisionTierRole(ctx context.Context, ownerID, slug, tier string) (string, error) {
 	perm := Permissions{
 		PermissionsID: uuid.New().String(),
-		Name:          "project:" + namespace + ":" + slug + ":" + tier,
+		Name:          "project:" + slug + ":" + tier,
 		Service:       "*",
 		Actions:       projectTiers[tier],
-		Resources:     projectResourcePatterns(namespace, slug),
+		Resources:     []string{projectResource(slug)},
 		OwnerID:       ownerID,
 		Active:        true,
 	}
@@ -92,7 +81,7 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 
 	callerID, _ := ctx.Value(userIDKey).(string)
-	username, orgNS := callerNamespaces(r, callerID)
+	username, _ := callerNamespaces(r, callerID)
 	if username == "" {
 		http.Error(w, "unknown caller", http.StatusUnauthorized)
 		return
@@ -108,40 +97,44 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "slug must be lowercase alphanumeric/dashes, 1–63 chars", http.StatusBadRequest)
 		return
 	}
-	// Namespace defaults to the caller's username; an explicit namespace must be one
-	// the caller owns (their username or their org).
-	ns := req.Namespace
-	if ns == "" {
-		ns = username
-	}
-	if ns != username && ns != orgNS {
-		http.Error(w, "namespace "+ns+" is not yours", http.StatusForbidden)
+	// A project is a top-level namespace of its own, not bound to a user; the slug is
+	// global. An explicit org binds management to that org (its members can administer
+	// it); otherwise the creator alone administers it. The gate is still over the
+	// caller's own gatekeeper/projects, so creating a project is a self-service act.
+	if !requirePermission(w, r, "createProject", username+"/gatekeeper/projects") {
 		return
 	}
-	// Gate over the caller's own namespace, mirroring createNamespaceRole.
-	if !requirePermission(w, r, "createProject", username+"/gatekeeper/projects") {
+	orgNS := "" // "org/<name>" when org-owned, else empty (unbound)
+	if req.OrgID != nil && *req.OrgID != "" {
+		if orgRow, err := (Org{OrgID: *req.OrgID}).Get(ctx); err == nil {
+			orgNS = "org/" + orgRow.(Org).OrgName
+		}
+	}
+	// Slug is global, so a collision is a real conflict, not an overwrite.
+	if _, err := getProjectBySlug(ctx, req.Slug); err == nil {
+		http.Error(w, "a project with slug "+req.Slug+" already exists", http.StatusConflict)
 		return
 	}
 
 	p := Project{
 		ProjectID: uuid.New().String(),
 		Slug:      req.Slug,
-		Namespace: ns,
+		Namespace: orgNS,
 		Name:      req.Name,
 		OwnerID:   callerID,
 		CreatedAt: time.Now().UTC(),
 		Active:    true,
 	}
 	var err error
-	if p.ViewerRoleID, err = provisionTierRole(ctx, callerID, ns, req.Slug, "viewer"); err != nil {
+	if p.ViewerRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "viewer"); err != nil {
 		internalError(w, ctx, "provision viewer role", err)
 		return
 	}
-	if p.DeveloperRoleID, err = provisionTierRole(ctx, callerID, ns, req.Slug, "developer"); err != nil {
+	if p.DeveloperRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "developer"); err != nil {
 		internalError(w, ctx, "provision developer role", err)
 		return
 	}
-	if p.AdminRoleID, err = provisionTierRole(ctx, callerID, ns, req.Slug, "admin"); err != nil {
+	if p.AdminRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "admin"); err != nil {
 		internalError(w, ctx, "provision admin role", err)
 		return
 	}
@@ -152,24 +145,17 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	// The creator is the project's first admin.
 	_ = assignMembership(ctx, p.AdminRoleID, callerID, callerID)
 
-	slog.InfoContext(ctx, "project created", "project_id", p.ProjectID, "namespace", ns, "slug", req.Slug, "owner", callerID)
+	slog.InfoContext(ctx, "project created", "project_id", p.ProjectID, "slug", req.Slug, "org", orgNS, "owner", callerID)
 	span.SetStatus(codes.Ok, "")
 	writeJSON(w, http.StatusCreated, p)
 }
 
+// handleListProjects lists the projects the caller administers (owns). Shared-with-me
+// projects come from /projects/accessible; this is the "mine to manage" list.
 func handleListProjects(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	callerID, _ := ctx.Value(userIDKey).(string)
-	username, orgNS := callerNamespaces(r, callerID)
-	if username == "" {
-		http.Error(w, "unknown caller", http.StatusUnauthorized)
-		return
-	}
-	namespaces := []string{username}
-	if orgNS != "" {
-		namespaces = append(namespaces, orgNS)
-	}
-	projects, err := projectsInNamespaces(ctx, namespaces)
+	projects, err := projectsOwnedBy(ctx, callerID)
 	if err != nil {
 		internalError(w, ctx, "list projects", err)
 		return

@@ -25,8 +25,8 @@ func authorizeWorkflow(ctx context.Context, bearer, action string, wf Workflow, 
 	if canAccessWorkflow(wf, userID, orgID) {
 		return true
 	}
-	if wf.ProjectID != "" && wf.ProjectNamespace != "" && wf.Project != "" {
-		return checkProjectPermission(ctx, bearer, action, wf.ProjectNamespace, "pipelines", wf.Project, wf.WorkflowID)
+	if wf.ProjectID != "" && wf.Project != "" {
+		return checkProjectPermission(ctx, bearer, action, "pipelines", wf.Project, wf.WorkflowID)
 	}
 	return false
 }
@@ -101,15 +101,15 @@ func accessibleProjectIDs(ctx context.Context, bearer string) []string {
 }
 
 // checkProjectPermission asks gatekeeper whether the caller holds (action) on a
-// project-scoped resource, owner-namespace-qualified so a member's grant matches
-// (an unqualified resource would be scoped to the caller and never match the owner's
-// project role). collection is e.g. "pipelines"; id may be "" for a collection-wide
-// check (used when filing a new resource into a project).
-func checkProjectPermission(ctx context.Context, bearer, action, ownerNS, collection, slug, id string) bool {
-	if bearer == "" || ownerNS == "" || slug == "" {
+// project-scoped resource. A project is its own top-level namespace, so the resource is
+// "project/<slug>/<service>/<collection>/<id>" — no owner namespace needed, and a
+// project role's "project/<slug>/*" grant matches it for any member. collection is e.g.
+// "pipelines"; id may be "" for a collection-wide check (filing a new resource).
+func checkProjectPermission(ctx context.Context, bearer, action, collection, slug, id string) bool {
+	if bearer == "" || slug == "" {
 		return false
 	}
-	resource := ownerNS + "/" + projectService + "/projects/" + slug + "/" + collection
+	resource := "project/" + slug + "/" + projectService + "/" + collection
 	if id != "" {
 		resource += "/" + id
 	} else {
