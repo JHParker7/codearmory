@@ -15,22 +15,18 @@ import (
 //   - grace:    slack added on top of an execution's own timeout before a running
 //     row is considered abandoned (covers pod scheduling / image-pull latency that
 //     is not charged against the command timeout).
-//   - pendingMaxAge: an absolute floor before a *pending* row is reaped, well above
-//     any real queue wait, so work merely starved by a busy budget is left alone and
-//     only long-abandoned queue entries are cleared.
-//
-// The defaults are tied to the platform's timeouts so a stuck execution can never
-// outlive the pipeline that spawned it by more than a short grace: a *pending* row is
-// reaped at the default pipeline run timeout (30m) + 10m = 2400s, and a *running* row
-// at its own forge timeout + 5m = 300s of grace. Before this the pending floor was a
-// flat hour, so a permanently-unschedulable execution (e.g. its workspace PVC was
-// deleted by run teardown while the pod still waited) could jam the worker for up to
-// an hour. Override any of these envs when the pipeline timeout is tuned away from
-// its default.
+//   - pendingGrace: slack added on top of a *pending* execution's OWN configured
+//     timeout before it is reaped. Both bounds are relative to the execution's
+//     workflows-configured timeout_secs, never a flat default: a pending row is reaped
+//     at timeout_secs + 10m, a running row at timeout_secs + 5m. Before this the
+//     pending side used a flat one-hour floor, so a permanently-unschedulable
+//     execution (e.g. its workspace PVC was deleted by run teardown while the pod
+//     still waited) could jam the worker for up to an hour regardless of how short its
+//     configured timeout was.
 var (
 	execReaperInterval = time.Duration(envIntOrDefault("FORGE_EXEC_REAPER_INTERVAL_SECS", 60)) * time.Second
 	execReaperGrace    = int64(envIntOrDefault("FORGE_EXEC_REAPER_GRACE_SECS", 300))
-	execPendingMaxAge  = int64(envIntOrDefault("FORGE_EXEC_PENDING_MAX_AGE_SECS", 2400))
+	execPendingGrace   = int64(envIntOrDefault("FORGE_EXEC_PENDING_GRACE_SECS", 600))
 )
 
 // startExecutionReaper periodically fails executions stuck in a non-terminal state
@@ -49,8 +45,8 @@ func startExecutionReaper(ctx context.Context, reg *runtimeRegistry) {
 	}
 	slog.InfoContext(ctx, "execution reaper started",
 		"interval_secs", int(execReaperInterval.Seconds()),
-		"grace_secs", execReaperGrace,
-		"pending_max_age_secs", execPendingMaxAge)
+		"running_grace_secs", execReaperGrace,
+		"pending_grace_secs", execPendingGrace)
 	reapStuckExecutions(ctx, reg)
 	ticker := time.NewTicker(execReaperInterval)
 	defer ticker.Stop()
@@ -70,7 +66,7 @@ func reapStuckExecutions(ctx context.Context, reg *runtimeRegistry) {
 	ctx, span := otel.Tracer("forge").Start(ctx, "reap_stuck_executions")
 	defer span.End()
 
-	stuck, err := findStuckExecutions(ctx, execReaperGrace, execPendingMaxAge)
+	stuck, err := findStuckExecutions(ctx, execReaperGrace, execPendingGrace)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

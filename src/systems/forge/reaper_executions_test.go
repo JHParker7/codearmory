@@ -42,8 +42,8 @@ func statusOf(t *testing.T, execID string) string {
 func TestReaper_FindsAndFailsStuckRunning(t *testing.T) {
 	requireForgeDB(t)
 	ctx := context.Background()
-	grace := int64(600)
-	pendingAge := int64(3600)
+	runGrace := int64(300)
+	pendGrace := int64(600)
 
 	off := func(v int) *int { return &v }
 
@@ -54,7 +54,7 @@ func TestReaper_FindsAndFailsStuckRunning(t *testing.T) {
 	freshID := "reap-fresh-" + uuid.New().String()
 	insertExecutionTimed(t, freshID, StatusRunning, 30, -5, off(-5))
 
-	rows, err := findStuckExecutions(ctx, grace, pendingAge)
+	rows, err := findStuckExecutions(ctx, runGrace, pendGrace)
 	if err != nil {
 		t.Fatalf("findStuckExecutions: %v", err)
 	}
@@ -82,24 +82,25 @@ func TestReaper_FindsAndFailsStuckRunning(t *testing.T) {
 	}
 }
 
-// TestReaper_PendingFloor: a pending execution is reaped only after the absolute
-// pending floor, not merely after timeout — so work starved by a busy budget is
-// left to run while long-abandoned queue entries are cleared.
-func TestReaper_PendingFloor(t *testing.T) {
+// TestReaper_PendingRelativeToTimeout: a pending execution is reaped at its OWN
+// configured timeout + pending grace, not a flat floor — so a short-timeout job that
+// can never schedule is cleared promptly instead of jamming the queue for an hour,
+// while one still within timeout+grace is left alone.
+func TestReaper_PendingRelativeToTimeout(t *testing.T) {
 	requireForgeDB(t)
 	ctx := context.Background()
-	grace := int64(600)
-	pendingAge := int64(3600)
+	runGrace := int64(300)
+	pendGrace := int64(600) // reap threshold = timeout_secs + 600s
 
-	// Starved-but-recent: created 20m ago, timeout 30s. Past timeout+grace, but under
-	// the 1h pending floor → must NOT be reaped.
+	// Within deadline: created 5m ago, timeout 900s → threshold 1500s, 300s in → keep.
 	recentID := "reap-pend-recent-" + uuid.New().String()
-	insertExecutionTimed(t, recentID, StatusPending, 30, -1200, nil)
-	// Abandoned: created 2h ago → past the pending floor → reapable.
+	insertExecutionTimed(t, recentID, StatusPending, 900, -300, nil)
+	// Past deadline: created 20m ago, timeout 30s → threshold 630s, 1200s in → reap.
+	// Under the old flat 1h floor this would have been spared for 40 more minutes.
 	oldID := "reap-pend-old-" + uuid.New().String()
-	insertExecutionTimed(t, oldID, StatusPending, 30, -7200, nil)
+	insertExecutionTimed(t, oldID, StatusPending, 30, -1200, nil)
 
-	rows, err := findStuckExecutions(ctx, grace, pendingAge)
+	rows, err := findStuckExecutions(ctx, runGrace, pendGrace)
 	if err != nil {
 		t.Fatalf("findStuckExecutions: %v", err)
 	}
@@ -108,10 +109,10 @@ func TestReaper_PendingFloor(t *testing.T) {
 		found[r.ExecutionID] = true
 	}
 	if found[recentID] {
-		t.Errorf("recent starved pending execution wrongly flagged (below pending floor)")
+		t.Errorf("pending execution within timeout+grace wrongly flagged for reaping")
 	}
 	if !found[oldID] {
-		t.Errorf("abandoned pending execution not found by reaper")
+		t.Errorf("pending execution past its timeout+grace not found by reaper")
 	}
 }
 

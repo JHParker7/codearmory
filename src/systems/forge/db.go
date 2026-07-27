@@ -268,14 +268,15 @@ type stuckExecution struct {
 }
 
 // findStuckExecutions returns non-terminal executions that have outlived their
-// deadline: a running row past COALESCE(started_at, created_at) + timeout_secs +
-// graceSecs, or a pending row that has waited longer than the larger of that same
-// deadline and pendingMaxAgeSecs. The pending floor is deliberately generous so a
-// job merely starved by a busy budget is left to run, and only long-abandoned queue
-// entries (e.g. from a workflow run that died) are cleared. Running orphans are the
-// urgent case — each holds resource budget in claimPendingExecution and wedges the
-// queue — so they are reaped as soon as their own deadline passes.
-func findStuckExecutions(ctx context.Context, graceSecs, pendingMaxAgeSecs int64) ([]stuckExecution, error) {
+// deadline, both bounds relative to the execution's own workflows-configured
+// timeout_secs: a running row past COALESCE(started_at, created_at) + timeout_secs +
+// runningGraceSecs, or a pending row past created_at + timeout_secs + pendingGraceSecs.
+// The pending grace is larger because a queued job may legitimately wait while the
+// rest of its pipeline runs; the running grace is tighter because a running orphan
+// holds resource budget in claimPendingExecution and wedges the queue. Neither uses a
+// flat floor — a stuck execution can never outlive its configured timeout by more than
+// its grace, so a short-timeout job is not held for an hour.
+func findStuckExecutions(ctx context.Context, runningGraceSecs, pendingGraceSecs int64) ([]stuckExecution, error) {
 	ctx, span := otel.Tracer("forge").Start(ctx, "db.find_stuck_executions")
 	defer span.End()
 	var rows []stuckExecution
@@ -283,12 +284,12 @@ func findStuckExecutions(ctx context.Context, graceSecs, pendingMaxAgeSecs int64
 		SELECT execution_id, backend, status, created_at
 		FROM executions
 		WHERE (status = 'running'
-		         AND COALESCE(started_at, created_at) + make_interval(secs => timeout_secs + @grace) < now())
+		         AND COALESCE(started_at, created_at) + make_interval(secs => timeout_secs + @runGrace) < now())
 		   OR (status = 'pending'
-		         AND created_at + make_interval(secs => GREATEST(timeout_secs + @grace, @pendingAge)) < now())
+		         AND created_at + make_interval(secs => timeout_secs + @pendGrace) < now())
 		ORDER BY created_at
 		LIMIT 200
-	`, sql.Named("grace", graceSecs), sql.Named("pendingAge", pendingMaxAgeSecs)).Scan(&rows).Error
+	`, sql.Named("runGrace", runningGraceSecs), sql.Named("pendGrace", pendingGraceSecs)).Scan(&rows).Error
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
