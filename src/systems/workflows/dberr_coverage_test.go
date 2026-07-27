@@ -75,7 +75,7 @@ func TestDBMethods_UnderBrokenDB(t *testing.T) {
 	if _, err := listSteps(ctx, "u", "o", ""); err == nil {
 		t.Error("listSteps: expected error")
 	}
-	if _, err := listWorkflows(ctx, "u", "o", ""); err == nil {
+	if _, err := listWorkflows(ctx, "u", "o", "", nil); err == nil {
 		t.Error("listWorkflows: expected error")
 	}
 	if _, err := listRuns(ctx, "u", "o", ""); err == nil {

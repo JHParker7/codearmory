@@ -352,12 +352,18 @@ func runRoleID(ctx context.Context, runID string) string {
 	return run.RoleID
 }
 
-// listWorkflows returns active workflows accessible to the caller, with an
-// optional project filter (a view filter, not a security boundary).
-func listWorkflows(ctx context.Context, userID, orgID, projectFilter string) ([]Workflow, error) {
+// listWorkflows returns active workflows accessible to the caller: their own, their
+// org's, and — via projectIDs, the gatekeeper projects they can reach — any pipeline
+// filed into a project they're a member of. projectFilter is a separate optional view
+// filter (a slug), unchanged in meaning.
+func listWorkflows(ctx context.Context, userID, orgID, projectFilter string, projectIDs []string) ([]Workflow, error) {
 	var wfs []Workflow
-	q := connectRead().WithContext(ctx).
-		Where("active=? AND (created_by=? OR (org_id!='' AND org_id=?))", true, userID, orgID)
+	q := connectRead().WithContext(ctx)
+	if len(projectIDs) > 0 {
+		q = q.Where("active=? AND (created_by=? OR (org_id!='' AND org_id=?) OR project_id IN ?)", true, userID, orgID, projectIDs)
+	} else {
+		q = q.Where("active=? AND (created_by=? OR (org_id!='' AND org_id=?))", true, userID, orgID)
+	}
 	if projectFilter != "" {
 		q = q.Where("project=?", projectFilter)
 	}

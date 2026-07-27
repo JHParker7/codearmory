@@ -370,7 +370,13 @@ type Workflow struct {
 	CreatedBy   string `json:"created_by"   gorm:"column:created_by"`
 	OrgID       string `json:"org_id"       gorm:"column:org_id;default:''"`
 	Project     string `json:"project,omitempty" gorm:"column:project;default:''"`
-	RoleID      string `json:"role_id,omitempty" gorm:"column:role_id;default:''"`
+	// ProjectID/ProjectNamespace are set when Project resolves to a real gatekeeper
+	// Project (not just a free-text label): ProjectID lets list views widen to a
+	// project's members cheaply, ProjectNamespace is the owner namespace a member's
+	// project grant must be qualified with. Both empty ⇒ Project is a plain label.
+	ProjectID        string `json:"project_id,omitempty"        gorm:"column:project_id;default:''"`
+	ProjectNamespace string `json:"project_namespace,omitempty" gorm:"column:project_namespace;default:''"`
+	RoleID           string `json:"role_id,omitempty" gorm:"column:role_id;default:''"`
 	// RolePermsVersion records which version of collectWorkflowPermissions built
 	// RoleID. The role is provisioned once and reused across runs, so when the
 	// derivation logic changes (constant bumped) a workflow with an older version

@@ -502,6 +502,24 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:   time.Now().UTC(),
 	}
 
+	// If Project names a real gatekeeper project the caller can reach, file the
+	// pipeline into it — but only if the caller may create within it (developer/admin/
+	// owner). A slug that resolves to nothing stays a free-text label (unchanged
+	// behaviour); a slug the caller may only view is refused rather than silently
+	// downgraded to a label.
+	if req.Project != "" {
+		bearer := r.Header.Get("Authorization")
+		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil {
+			if !checkProjectPermission(ctx, bearer, "createWorkflow", p.Namespace, "pipelines", p.Slug, "") {
+				span.SetStatus(codes.Ok, "")
+				http.Error(w, "you cannot create pipelines in project "+p.Slug, http.StatusForbidden)
+				return
+			}
+			wf.ProjectID = p.ProjectID
+			wf.ProjectNamespace = p.Namespace
+		}
+	}
+
 	steps, err := enrichStepRefs(ctx, refs)
 	if err != nil {
 		span.RecordError(err)
@@ -561,7 +579,7 @@ func handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org.id", orgID),
 	)
 
-	wfs, err := listWorkflows(ctx, userID, orgID, r.URL.Query().Get("project"))
+	wfs, err := listWorkflows(ctx, userID, orgID, r.URL.Query().Get("project"), accessibleProjectIDs(ctx, r.Header.Get("Authorization")))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "db query failed")
@@ -607,7 +625,7 @@ func handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessWorkflow(wf, userID, orgID) {
+	if !authorizeWorkflow(ctx, r.Header.Get("Authorization"), "getWorkflow", wf, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
@@ -667,7 +685,7 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessWorkflow(existing, userID, orgID) {
+	if !authorizeWorkflow(ctx, r.Header.Get("Authorization"), "updateWorkflow", existing, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
@@ -763,6 +781,16 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	// wipe the stored label (the CLI/TUI update payloads don't send project).
 	if req.Project != "" {
 		existing.Project = req.Project
+		// Re-resolve project membership: if the (possibly new) slug names a real
+		// project the caller may write to, file it there; otherwise it reverts to a
+		// plain label (clear the ids so a moved pipeline never keeps stale scope).
+		existing.ProjectID, existing.ProjectNamespace = "", ""
+		bearer := r.Header.Get("Authorization")
+		if p := resolveProjectSlug(ctx, bearer, req.Project); p != nil &&
+			checkProjectPermission(ctx, bearer, "updateWorkflow", p.Namespace, "pipelines", p.Slug, "") {
+			existing.ProjectID = p.ProjectID
+			existing.ProjectNamespace = p.Namespace
+		}
 	}
 	existing.Inputs = req.Inputs
 	existing.Outputs = req.Outputs
@@ -822,7 +850,7 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to delete workflow", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessWorkflow(wf, userID, orgID) {
+	if !authorizeWorkflow(ctx, r.Header.Get("Authorization"), "deleteWorkflow", wf, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return

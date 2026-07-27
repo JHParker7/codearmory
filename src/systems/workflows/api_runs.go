@@ -258,7 +258,7 @@ func handleTriggerRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessWorkflow(wf, userID, orgID) {
+	if !authorizeWorkflow(ctx, r.Header.Get("Authorization"), "triggerRun", wf, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
@@ -362,7 +362,7 @@ func handleTriggerRunByBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessWorkflow(wf, userID, orgID) {
+	if !authorizeWorkflow(ctx, r.Header.Get("Authorization"), "triggerRun", wf, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
