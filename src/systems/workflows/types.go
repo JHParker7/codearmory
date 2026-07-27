@@ -163,6 +163,12 @@ type MatrixConfig struct {
 	// resource, or to avoid overwhelming a small cluster). Takes precedence over
 	// MaxConcurrent when set.
 	Sequential bool `json:"sequential,omitempty"`
+	// AllowEmpty makes a fan-out that resolves to zero values a no-op that completes
+	// the step rather than failing the run — the same opt-in MapDef offers. Off by
+	// default (an empty fan-out is usually a mistyped values_from and should fail
+	// loudly); turn it on when "no items" is legitimate, e.g. a redeploy matrix over
+	// the services a commit changed, which is empty when the commit changed none.
+	AllowEmpty bool `json:"allow_empty,omitempty"`
 }
 
 // ScatterConfig fans a step out over the paths in a shared workspace that match a

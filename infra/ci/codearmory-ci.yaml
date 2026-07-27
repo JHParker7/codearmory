@@ -364,6 +364,9 @@ steps:
     var: svc
     values_from: ${steps.discover.output.IMAGES}
     max_concurrent: 2
+    # A commit that changed no buildable service yields an empty IMAGES; redeploy
+    # nothing rather than failing the run (mirrors the build maps' allow_empty).
+    allow_empty: true
 - action: outpost-gateway/enqueueCommand
   name: integration-tests
   timeout: 900

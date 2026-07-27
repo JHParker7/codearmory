@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -564,9 +565,18 @@ func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, work
 		return nodeResult{name: ws.Name, state: nodeFailed}
 	}
 	if len(tasks) == 0 {
-		// A matrix that fanned out to zero did no work. Failing is deliberate:
-		// silently dropping the step would leave it absent from the run view while
-		// the run still showed as passed.
+		// A matrix that fanned out to zero did no work. With allow_empty this is a
+		// legitimate no-op — record a visible skipped step and keep the run green (the
+		// map-region counterpart of this same opt-in). Without it, fail loudly:
+		// silently dropping the step would leave it absent from the run view while the
+		// run still showed as passed.
+		if ws.Matrix != nil && ws.Matrix.AllowEmpty {
+			if sid := uuid.New().String(); p.startStepRun(runID, sid, idx, ws.Name) == nil {
+				p.finishStepRun(sid, StatusCompleted, strPtr(fmt.Sprintf("matrix %q produced no values — skipped (allow_empty)", ws.Name)), nil, nil, nil)
+			}
+			slog.InfoContext(ctx, "worker: matrix produced no values, skipped (allow_empty)", "run_id", runID, "step", idx)
+			return nodeResult{name: ws.Name, state: statusToNodeState(StatusCompleted)}
+		}
 		if sid := uuid.New().String(); p.startStepRun(runID, sid, idx, ws.Name) == nil {
 			p.finishStepRun(sid, StatusFailed, strPtr("matrix produced no values to run"), nil, nil, nil)
 		}
