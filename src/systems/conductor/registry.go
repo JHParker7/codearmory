@@ -189,12 +189,19 @@ func compilePathPattern(pattern string) *regexp.Regexp {
 func lookupEndpoint(method, path string) (endpointEntry, bool) {
 	routingMu.RLock()
 	defer routingMu.RUnlock()
+	var best endpointEntry
+	bestParams := 1 << 30
+	found := false
 	for _, e := range endpointsList {
 		if e.method == method && e.pattern.MatchString(path) {
-			return e, true
+			// Prefer the most specific route: fewer capture groups = more static
+			// segments, so an exact path beats a parameterised one that also matches.
+			if n := e.pattern.NumSubexp(); !found || n < bestParams {
+				best, bestParams, found = e, n, true
+			}
 		}
 	}
-	return endpointEntry{}, false
+	return best, found
 }
 
 // parseParamNames extracts ordered param names from a path pattern like /users/{id}.
@@ -213,15 +220,23 @@ func parseParamNames(pattern string) []string {
 func lookupEndpointForService(method, path, service string) (endpointEntry, []string, bool) {
 	routingMu.RLock()
 	defer routingMu.RUnlock()
+	var best endpointEntry
+	var bestParams []string
+	found := false
 	for _, e := range endpointsList {
 		if e.serviceName != service || e.method != method {
 			continue
 		}
 		if m := e.pattern.FindStringSubmatch(path); m != nil {
-			return e, m[1:], true
+			// Prefer the most specific route: fewer captured path params means more
+			// static segments, so an exact route like /projects/accessible (0 params)
+			// wins over /projects/{id} (1 param) that also matches "accessible".
+			if params := m[1:]; !found || len(params) < len(bestParams) {
+				best, bestParams, found = e, params, true
+			}
 		}
 	}
-	return endpointEntry{}, nil, false
+	return best, bestParams, found
 }
 
 func newProxy(target, peerService string) *httputil.ReverseProxy {
