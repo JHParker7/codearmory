@@ -111,6 +111,9 @@ func validateMapDef(d MapDef) string {
 	if d.MaxConcurrent < 0 {
 		return fmt.Sprintf("map %q: max_concurrent must not be negative", d.ID)
 	}
+	if d.FailureTolerance < 0 || d.FailureTolerance > 100 {
+		return fmt.Sprintf("map %q: failure_tolerance must be a percentage between 0 and 100", d.ID)
+	}
 	return ""
 }
 
@@ -212,6 +215,20 @@ func mapConcurrency(d MapDef) int {
 	}
 }
 
+// maxToleratedFailures is how many iterations may fail while the map still passes:
+// floor(FailureTolerance/100 * total). The (result+1)th failure trips the map. 0
+// tolerance yields 0 (strict — the first failure trips it); 100 yields total (no
+// failure ever trips it).
+func maxToleratedFailures(d MapDef, total int) int {
+	if d.FailureTolerance <= 0 {
+		return 0
+	}
+	if d.FailureTolerance >= 100 {
+		return total
+	}
+	return d.FailureTolerance * total / 100
+}
+
 // iterVolume is an iteration's clone volume name — scoped to the run so run-end
 // teardown reaps it, and deterministic so the body can mount it by name.
 func iterVolume(base string, i int) string { return fmt.Sprintf("%s-m%d", base, i) }
@@ -277,6 +294,17 @@ func (p *WorkerPool) runMapRegion(
 	}
 	results := make([]iterResult, len(values))
 	sem := make(chan struct{}, mapConcurrency(region.def))
+
+	// Fail-fast tolerance: run under a child context so that once more than the
+	// tolerated number of iterations have failed we can cancel the rest. maxFail is
+	// the count the map can absorb and still pass; the (maxFail+1)th failure trips it.
+	maxFail := maxToleratedFailures(region.def, len(values))
+	mapCtx, cancelMap := context.WithCancel(ctx)
+	defer cancelMap()
+	var mu sync.Mutex
+	failed := 0
+	tripped := false
+
 	var wg sync.WaitGroup
 	for i, val := range values {
 		wg.Add(1)
@@ -285,20 +313,56 @@ func (p *WorkerPool) runMapRegion(
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
-			case <-ctx.Done():
+			case <-mapCtx.Done():
+				results[i] = iterResult{status: StatusCancelled}
+				return
+			}
+			// The tolerance may have been exceeded while this iteration waited for a
+			// concurrency slot — don't start new work once the map has tripped.
+			if mapCtx.Err() != nil {
 				results[i] = iterResult{status: StatusCancelled}
 				return
 			}
 			results[i] = iterResult{}
-			outs, st := p.runIteration(ctx, store, runID, workflowID, sub, region, i, val, inputs, visible, depth, legSem)
+			outs, st := p.runIteration(mapCtx, store, runID, workflowID, sub, region, i, val, inputs, visible, depth, legSem)
 			results[i] = iterResult{outputs: outs, status: st}
+			if st == StatusFailed {
+				mu.Lock()
+				failed++
+				if !tripped && failed > maxFail {
+					tripped = true
+					slog.WarnContext(ctx, "worker: map failure tolerance exceeded — cancelling remaining iterations",
+						"run_id", runID, "map", region.def.ID, "failed", failed, "total", len(values), "tolerance_pct", region.def.FailureTolerance)
+					cancelMap()
+				}
+				mu.Unlock()
+			}
 		}(i, val)
 	}
 	wg.Wait()
 
-	status := StatusCompleted
-	for _, r := range results {
-		status = worstStatus(status, r.status)
+	// Decide the region's status. An OUTER cancellation (run cancel/timeout) always
+	// dominates — never report a timed-out run as a passing map. Otherwise apply the
+	// tolerance: a trip is a hard fail; failures within tolerance pass.
+	var status string
+	switch {
+	case ctx.Err() != nil:
+		status = StatusCompleted
+		for _, r := range results {
+			status = worstStatus(status, r.status)
+		}
+	case tripped:
+		status = StatusFailed
+	default:
+		// failed <= maxFail: tolerated. Still surface any non-failure bad status
+		// (e.g. a paused iteration, which is rejected at validation but guarded here).
+		status = StatusCompleted
+		for _, r := range results {
+			if r.status == StatusFailed || r.status == StatusCancelled {
+				continue
+			}
+			status = worstStatus(status, r.status)
+		}
 	}
 	// Each region node's output is the JSON array of that node's output across
 	// iterations, published under the node's own name — the same shape a matrix step

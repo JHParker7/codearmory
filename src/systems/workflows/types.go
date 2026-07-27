@@ -309,6 +309,16 @@ type MapDef struct {
 	// Sequential pins it to 1.
 	MaxConcurrent int  `json:"max_concurrent,omitempty"`
 	Sequential    bool `json:"sequential,omitempty"`
+	// FailureTolerance is the percentage (0–100) of iterations allowed to fail
+	// before the whole map is failed. It turns a fan-out into "run N, tolerate up
+	// to X% failures": while iterations run, failures are counted, and the instant
+	// the count exceeds floor(FailureTolerance/100 * total) the map fails fast —
+	// still-running iterations are cancelled and the region is marked failed. If the
+	// map finishes with failures within tolerance it is marked completed (passing),
+	// even though some iterations failed. 0 (default) keeps the strict semantics —
+	// any single failure fails the map — but now cancels the rest instead of letting
+	// them run on. 100 tolerates every failure (the map always passes).
+	FailureTolerance int `json:"failure_tolerance,omitempty"`
 	// AllowEmpty makes a fan-out that resolves to zero values a no-op that completes
 	// the region rather than failing the run. Off by default (an empty fan-out is
 	// usually a bug — a mistyped values_from — so it fails loudly); opt in when "no

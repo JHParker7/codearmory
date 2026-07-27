@@ -309,6 +309,43 @@ func TestMapConcurrency(t *testing.T) {
 	}
 }
 
+func TestMaxToleratedFailures(t *testing.T) {
+	cases := []struct {
+		pct, total, want int
+	}{
+		{0, 10, 0},    // strict default: no failures tolerated
+		{100, 10, 10}, // tolerate everything
+		{20, 10, 2},   // floor(0.2*10)
+		{25, 10, 2},   // floor(2.5) = 2
+		{50, 3, 1},    // floor(1.5) = 1
+		{20, 4, 0},    // floor(0.8) = 0 — the first failure trips a small map
+		{100, 0, 0},   // empty map, no divide-by-anything surprise
+	}
+	for _, c := range cases {
+		if got := maxToleratedFailures(MapDef{FailureTolerance: c.pct}, c.total); got != c.want {
+			t.Errorf("maxToleratedFailures(pct=%d,total=%d) = %d, want %d", c.pct, c.total, got, c.want)
+		}
+	}
+}
+
+func TestValidateMapDef_FailureTolerance(t *testing.T) {
+	base := MapDef{ID: "m", Var: "v", Values: []string{"a"}}
+	for _, pct := range []int{0, 1, 50, 100} {
+		d := base
+		d.FailureTolerance = pct
+		if msg := validateMapDef(d); msg != "" {
+			t.Errorf("pct %d should be valid, got %q", pct, msg)
+		}
+	}
+	for _, pct := range []int{-1, 101, 1000} {
+		d := base
+		d.FailureTolerance = pct
+		if msg := validateMapDef(d); msg == "" {
+			t.Errorf("pct %d should be rejected", pct)
+		}
+	}
+}
+
 // ${map.<var>} is its own namespace: a mapped step must be able to read its
 // iteration's binding without colliding with a matrix's.
 func TestSubstitute_MapBinding(t *testing.T) {
