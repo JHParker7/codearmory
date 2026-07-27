@@ -59,7 +59,10 @@ steps:
     env:
       HOOK_REF: ${inputs.HOOK_REF}
     secret_refs:
-      GIT_CLONE_URL: git:http://192.168.53.171:3000/jp01/codearmory.git
+      # Clone the monorepo from git_factory (admin/codearmory), brokered by git_connector,
+      # instead of forgejo — git_factory is now the git host. (The image registry below is
+      # separate: git_factory is not a container registry, so pushes still go to forgejo.)
+      GIT_CLONE_URL: git:http://ca-codearmory-git-factory:9002/admin/codearmory.git
     volumes:
     - workflow_id: codearmory-ci-gitcache
       name: gitcache
