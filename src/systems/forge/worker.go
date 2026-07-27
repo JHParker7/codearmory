@@ -161,6 +161,16 @@ func classifyResult(exec Execution, result RunResult, runErr error) (status stri
 	}
 }
 
+// isSandboxTeardownArtifact reports the kata/gVisor "lost the real exit code"
+// signature: the runtime returned no error (the command completed) yet the shim
+// reported exit 255 with empty stderr. The runner shells run under `set -e`, so a
+// genuine command failure emits stderr; a silent 255 is the sandbox-teardown race,
+// not the user's command. Callers gate the actual retry on the backend being
+// kernel-isolated, where this artifact occurs.
+func isSandboxTeardownArtifact(result RunResult) bool {
+	return result.ExitCode != nil && *result.ExitCode == 255 && strings.TrimSpace(result.Stderr) == ""
+}
+
 func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 	// Each execution is its own trace root: the worker poll loop has no inbound
 	// request span, so without this a runtime failure would have nowhere to be
@@ -226,6 +236,23 @@ func (p *WorkerPool) run(ctx context.Context, exec Execution) {
 				exec.Env = merged // local copy only; Complete() never writes env back
 			}
 			result, runErr = rt.Run(runCtx, exec)
+			// Kata/gVisor sandbox-teardown artifact: when the guest VM/sandbox is torn
+			// down at the end of a run the shim can occasionally not read the real exit
+			// code and reports 255 with no stderr — even though the command succeeded
+			// (downstream steps that reuse the workspace prove it ran). A GENUINE failure
+			// under the runner's `set -e` shell writes to stderr, so an empty-stderr 255
+			// on a kernel-isolated backend is almost always spurious. Retry once: the
+			// sandboxed work (git checkout, kaniko build) is idempotent, so a real
+			// transient recovers and a persistent 255 surfaces on the second attempt. The
+			// retry uses a fresh job name (deleteJob is foreground-but-async, so the first
+			// job may still be terminating) while the DB record keeps the real ID.
+			if runErr == nil && runCtx.Err() == nil && isSandboxTeardownArtifact(result) && isKernelIsolatedBackendType(defaultRuntimeType()) {
+				slog.WarnContext(ctx, "worker: kernel-isolated backend reported exit 255 with empty stderr (sandbox-teardown artifact) — retrying once",
+					"execution_id", exec.ExecutionID)
+				retryExec := exec
+				retryExec.ExecutionID = exec.ExecutionID + "-r1"
+				result, runErr = rt.Run(runCtx, retryExec)
+			}
 			if marker != "" && runErr == nil {
 				result.Stdout, result.Outputs = parseOutputEnv(result.Stdout, exec.OutputEnv, marker)
 			}

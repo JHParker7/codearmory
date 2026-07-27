@@ -165,3 +165,27 @@ func TestWorkerRun_BackendResolutionFailure(t *testing.T) {
 		t.Fatalf("stderr = %v, want it to surface the unresolved runtime backend", row.Stderr)
 	}
 }
+
+func TestIsSandboxTeardownArtifact(t *testing.T) {
+	// The kata "lost the exit code" signature: 255 with empty stderr.
+	if !isSandboxTeardownArtifact(RunResult{ExitCode: ptr(255), Stderr: ""}) {
+		t.Error("255 + empty stderr should be flagged as a teardown artifact")
+	}
+	if !isSandboxTeardownArtifact(RunResult{ExitCode: ptr(255), Stderr: "   \n"}) {
+		t.Error("255 + whitespace-only stderr should be flagged")
+	}
+	// A real 255 failure writes to stderr under `set -e` — never retried.
+	if isSandboxTeardownArtifact(RunResult{ExitCode: ptr(255), Stderr: "fatal: repository not found"}) {
+		t.Error("255 WITH stderr is a real failure, not an artifact")
+	}
+	// Other exit codes and the success case are never artifacts.
+	if isSandboxTeardownArtifact(RunResult{ExitCode: ptr(1), Stderr: ""}) {
+		t.Error("exit 1 is not the teardown sentinel")
+	}
+	if isSandboxTeardownArtifact(RunResult{ExitCode: ptr(0), Stderr: ""}) {
+		t.Error("success is not an artifact")
+	}
+	if isSandboxTeardownArtifact(RunResult{ExitCode: nil, Stderr: ""}) {
+		t.Error("no exit code (cancelled/timed out) is not an artifact")
+	}
+}
