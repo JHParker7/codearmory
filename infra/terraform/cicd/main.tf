@@ -80,12 +80,17 @@ resource "codearmory_pipeline" "git_factory" {
       with_json = jsonencode({ workflow_id = "$${run_id}", name = "workspace", mount_path = "/workspace", medium = "disk", size_mb = 4096 })
     },
     {
+      # Clone dev into the shared workspace. forge/run with a git image (not
+      # forge/git-clone, which requires a command and clones-then-runs); GIT_CLONE_URL is
+      # injected by the secret_ref and resolved to an authenticated URL at dispatch.
       name    = "checkout"
-      action  = "forge/git-clone"
+      action  = "forge/run"
+      timeout = 600
+      with    = { image = var.ci_image }
       with_json = jsonencode({
+        run         = "set -eu; git clone --branch dev --depth 1 $GIT_CLONE_URL ."
         volumes     = [local.workspace]
         secret_refs = { GIT_CLONE_URL = "git:jhparker7/codearmory_git_factory" }
-        checkout    = { ref = "dev" }
       })
     },
     {
