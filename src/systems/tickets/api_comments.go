@@ -23,7 +23,8 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createComment", "tickets/tickets/"+id)
+	ns := r.PathValue("ns")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "createComment", ticketResource(ns, id))
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -47,7 +48,7 @@ func handleAddComment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessTicket(t, userID, orgID) {
+	if !namespaceMatches(t.Namespace, ns) || !canAccessTicket(t, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return
@@ -100,7 +101,8 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 
 	ticketID := r.PathValue("id")
 	commentID := r.PathValue("comment_id")
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteComment", "tickets/tickets/"+ticketID+"/comments/"+commentID)
+	ns := r.PathValue("ns")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteComment", commentResource(ns, ticketID, commentID))
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -124,7 +126,7 @@ func handleDeleteComment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessTicket(t, userID, orgID) {
+	if !namespaceMatches(t.Namespace, ns) || !canAccessTicket(t, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return

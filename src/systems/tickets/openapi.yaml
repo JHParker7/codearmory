@@ -5,6 +5,25 @@ info:
     General-purpose task tracker. Tickets are org-scoped and may reference
     workflow runs, forge executions, and other linked resources.
 
+    ## Owner-first per-record resources
+
+    A per-record endpoint comes in two shapes:
+
+    - `/tickets/{ns}/{id}` — preferred. The permission resource names the OWNER
+      (`{ns}/tickets/tickets/{id}`), so gatekeeper evaluates the check against the
+      namespace that actually holds the record. `{ns}` is the owner's username and
+      is returned as `namespace` on every ticket, so a client that listed a ticket
+      already has what it needs to address it. A namespace that is not the record's
+      own is refused with `404`.
+    - `/tickets/{id}` — legacy, caller-scoped. The resource carries no owner, so
+      gatekeeper scopes it to whoever asked and the check is the same for any id;
+      access rests entirely on this service's own owner filter. Retained so existing
+      clients keep working, and for rows created before `namespace` existed (their
+      `namespace` is empty). It will be removed once the CLI and portal migrate.
+
+    Collection endpoints (`GET`/`POST /tickets`) stay caller-scoped: "show me mine"
+    is a caller-relative question with no single owner to name.
+
     ## Authentication
 
     All endpoints require a Gatekeeper-issued Bearer token:
@@ -120,7 +139,9 @@ paths:
         Returns a ticket with its comments. Returns `404` when the ticket does not
         exist or is outside the caller's org.
 
-        Permission: `getTicket` on `tickets/tickets/{id}`.
+        Permission: `getTicket` on `{ns}/tickets/tickets/{id}` when called as
+        `/tickets/{ns}/{id}`, or `tickets/tickets/{id}` on the legacy `/tickets/{id}`
+        form. See the note on owner-first resources below.
       responses:
         '200':
           description: Ticket with comments
@@ -142,7 +163,9 @@ paths:
         Replaces all mutable ticket fields. Omitting `status` or `priority`
         preserves the current value.
 
-        Permission: `updateTicket` on `tickets/tickets/{id}`.
+        Permission: `updateTicket` on `{ns}/tickets/tickets/{id}` when called as
+        `/tickets/{ns}/{id}`, or `tickets/tickets/{id}` on the legacy `/tickets/{id}`
+        form.
       requestBody:
         required: true
         content:
@@ -171,7 +194,9 @@ paths:
       description: |
         Soft-deletes the ticket. Hidden from all subsequent API responses.
 
-        Permission: `deleteTicket` on `tickets/tickets/{id}`.
+        Permission: `deleteTicket` on `{ns}/tickets/tickets/{id}` when called as
+        `/tickets/{ns}/{id}`, or `tickets/tickets/{id}` on the legacy `/tickets/{id}`
+        form.
       responses:
         '204':
           description: Ticket deleted
@@ -193,7 +218,8 @@ paths:
         Appends a comment to the ticket. The caller must have org-level access to
         the parent ticket.
 
-        Permission: `createComment` on `tickets/tickets/{id}`.
+        Permission: `createComment` on `{ns}/tickets/tickets/{id}` when called as
+        `/tickets/{ns}/{id}/comments`, or `tickets/tickets/{id}` on the legacy form.
       requestBody:
         required: true
         content:
@@ -233,7 +259,8 @@ paths:
         Soft-deletes a comment. The comment author or any user with org-level ticket
         access may delete. Returns `403` when neither condition is met.
 
-        Permission: `deleteComment` on `tickets/tickets/{id}/comments/{comment_id}`.
+        Permission: `deleteComment` on `{ns}/tickets/tickets/{id}/comments/{comment_id}`
+        when called with a namespace, or the `tickets/`-prefixed form on the legacy path.
       responses:
         '204':
           description: Comment deleted

@@ -47,8 +47,18 @@ type Ticket struct {
 	DueDate     *time.Time `json:"due_date,omitempty" gorm:"column:due_date"`
 	CreatedBy   string     `json:"created_by"         gorm:"column:created_by"`
 	OrgID       string     `json:"org_id"             gorm:"column:org_id;default:''"`
-	Project     string     `json:"project,omitempty"  gorm:"column:project;default:''"`
-	BoardID     *string    `json:"board_id,omitempty" gorm:"column:board_id"`
+	// Namespace is the OWNER's gatekeeper namespace — the creator's username —
+	// recorded at creation so a per-record permission check can name the owner
+	// instead of the caller. Without it gatekeeper evaluates an identical resource
+	// whoever asks, and returns authorized for any id.
+	//
+	// Empty on every row created before this field existed. That is deliberate and
+	// load-bearing: an empty namespace means "legacy row", and such a ticket keeps
+	// the old caller-scoped resource (see ticketResource) so it stays reachable
+	// without a backfill that would have to resolve a username per distinct creator.
+	Namespace string  `json:"namespace,omitempty" gorm:"column:namespace;default:''"`
+	Project   string  `json:"project,omitempty"  gorm:"column:project;default:''"`
+	BoardID   *string `json:"board_id,omitempty" gorm:"column:board_id"`
 	// ParentID links this ticket to a parent ticket (sub-ticket hierarchy). nil = a
 	// top-level ticket. Validated to exist, be accessible, and not form a cycle.
 	ParentID         *string         `json:"parent_id,omitempty" gorm:"column:parent_id"`

@@ -242,18 +242,23 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t := Ticket{
-		TicketID:         uuid.New().String(),
-		Title:            req.Title,
-		Description:      req.Description,
-		Status:           status,
-		Priority:         priority,
-		Project:          req.Project,
-		BoardID:          boardID,
-		ParentID:         parentID,
-		Timescale:        req.Timescale,
-		DueDate:          dueDate,
-		CreatedBy:        userID,
-		OrgID:            orgID,
+		TicketID:    uuid.New().String(),
+		Title:       req.Title,
+		Description: req.Description,
+		Status:      status,
+		Priority:    priority,
+		Project:     req.Project,
+		BoardID:     boardID,
+		ParentID:    parentID,
+		Timescale:   req.Timescale,
+		DueDate:     dueDate,
+		CreatedBy:   userID,
+		OrgID:       orgID,
+		// The owner's namespace, so later per-record checks can name the owner rather
+		// than the caller. Best-effort: an empty result leaves the row on the legacy
+		// caller-scoped resource, which is strictly no worse than before this field
+		// existed — and better than failing creation because a lookup hiccuped.
+		Namespace:        callerNamespace(ctx, r.Header.Get("Authorization")),
 		AssigneeID:       req.AssigneeID,
 		WorkflowID:       req.WorkflowID,
 		RunID:            req.RunID,
@@ -340,7 +345,9 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getTicket", "tickets/tickets/"+id)
+	// Empty on the legacy /tickets/{id} route, set on /tickets/{ns}/{id}.
+	ns := r.PathValue("ns")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getTicket", ticketResource(ns, id))
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -364,7 +371,9 @@ func handleGetTicket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessTicket(t, userID, orgID) {
+	// The namespace in the URL must be the record's own, or a caller could name
+	// their OWN namespace against someone else's id and be authorized for it.
+	if !namespaceMatches(t.Namespace, ns) || !canAccessTicket(t, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return
@@ -390,7 +399,8 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateTicket", "tickets/tickets/"+id)
+	ns := r.PathValue("ns")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "updateTicket", ticketResource(ns, id))
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -414,7 +424,7 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get ticket", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessTicket(existing, userID, orgID) {
+	if !namespaceMatches(existing.Namespace, ns) || !canAccessTicket(existing, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return
@@ -594,7 +604,8 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteTicket", "tickets/tickets/"+id)
+	ns := r.PathValue("ns")
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteTicket", ticketResource(ns, id))
 	if !ok {
 		span.SetStatus(codes.Ok, "")
 		return
@@ -618,7 +629,7 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to delete ticket", http.StatusInternalServerError)
 		return
 	}
-	if !canAccessTicket(t, userID, orgID) {
+	if !namespaceMatches(t.Namespace, ns) || !canAccessTicket(t, userID, orgID) {
 		span.SetStatus(codes.Ok, "")
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return

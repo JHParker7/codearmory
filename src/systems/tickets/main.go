@@ -203,12 +203,28 @@ func main() {
 
 	mux.HandleFunc("POST /tickets", handleCreateTicket)
 	mux.HandleFunc("GET /tickets", handleListTickets)
+	// Per-record routes come in two shapes, served by the SAME handlers.
+	//
+	// The namespace-first form is the one that carries the security property: it puts
+	// the OWNER in the resource ("<ns>/tickets/tickets/{id}"), so gatekeeper evaluates
+	// the check against the owner's namespace instead of silently re-scoping it to
+	// whoever asked. The bare form is caller-scoped and is what every row created
+	// before the namespace column has to keep using — r.PathValue("ns") is "" there,
+	// which the handlers read as "legacy row".
+	//
+	// Both are registered so clients can migrate without a flag day. Removing the bare
+	// form is the follow-up, once the CLI and portal address tickets by namespace.
 	mux.HandleFunc("GET /tickets/{id}", handleGetTicket)
 	mux.HandleFunc("PUT /tickets/{id}", handleUpdateTicket)
 	mux.HandleFunc("DELETE /tickets/{id}", handleDeleteTicket)
+	mux.HandleFunc("GET /tickets/{ns}/{id}", handleGetTicket)
+	mux.HandleFunc("PUT /tickets/{ns}/{id}", handleUpdateTicket)
+	mux.HandleFunc("DELETE /tickets/{ns}/{id}", handleDeleteTicket)
 
 	mux.HandleFunc("POST /tickets/{id}/comments", handleAddComment)
 	mux.HandleFunc("DELETE /tickets/{id}/comments/{comment_id}", handleDeleteComment)
+	mux.HandleFunc("POST /tickets/{ns}/{id}/comments", handleAddComment)
+	mux.HandleFunc("DELETE /tickets/{ns}/{id}/comments/{comment_id}", handleDeleteComment)
 
 	mux.HandleFunc("GET /field-defs", handleListFieldDefs)
 	mux.HandleFunc("POST /field-defs", handleCreateFieldDef)
