@@ -1254,13 +1254,7 @@
         "resource": "builder/orgs/default"
       }
     ],
-    "actions": [
-      {
-        "name": "builder/set-image",
-        "method": "PATCH",
-        "path": "/services/{service}/image"
-      }
-    ],
+    "actions": [],
     "default_grants": []
   },
   {
