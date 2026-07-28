@@ -153,6 +153,8 @@ func upsertOrgService(ctx context.Context, in OrgService) (OrgService, error) {
 			"kind":        in.Kind,
 			"config":      cfg,
 			"image":       in.Image,
+			"tag":         in.Tag,
+			"pull_policy": in.PullPolicy,
 			"port":        in.Port,
 			"description": in.Description,
 			"updated_at":  now,

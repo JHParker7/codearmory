@@ -79,6 +79,8 @@ func specHash(v any) string {
 type workloadSpec struct {
 	Service        string
 	Image          string            // explicit image (custom services); "" => clone or template
+	Tag            string            // pin only the tag, registry/repo from platform defaults; "" => backend tag
+	PullPolicy     string            // imagePullPolicy override (Always|IfNotPresent|Never); "" => k8s default
 	Port           int32             // explicit port; 0 => clone or known-port catalog
 	Env            map[string]string // config overrides applied on top of the base env
 	DBUrl          string            // decrypted admin-supplied database URL ("" if none)
@@ -379,6 +381,29 @@ func (b *k8sBackend) ListManaged(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+// imageFor resolves the container image for spec, in descending precedence:
+// an explicit Image, then the platform registry/repo at an explicit Tag, then the
+// platform registry/repo at the backend's default tag.
+//
+// Tag exists separately from Image because "deploy the build CI just pushed" is a
+// tag change, not a new image reference — pinning only the tag keeps the service on
+// whichever registry the platform is configured for.
+func (b *k8sBackend) imageFor(spec workloadSpec) string {
+	if spec.Image != "" {
+		return spec.Image
+	}
+	def, hasDef := embeddedServiceDef(spec.Service)
+	repo := spec.Service
+	if hasDef {
+		repo = def.ImageRepo
+	}
+	tag := spec.Tag
+	if tag == "" {
+		tag = b.tag
+	}
+	return fmt.Sprintf("%s/%s:%s", b.registry, repo, tag)
+}
+
 // buildDeployment renders the desired Deployment: clone the platform base when one
 // exists (preserving env/secrets/probes), else a minimal template from image+port.
 func (b *k8sBackend) buildDeployment(ctx context.Context, spec workloadSpec) (*appsv1.Deployment, error) {
@@ -388,6 +413,12 @@ func (b *k8sBackend) buildDeployment(ctx context.Context, spec workloadSpec) (*a
 	} else {
 		podTemplate = b.templatePod(spec)
 	}
+	// A cloned Helm base carries the image the CHART was rendered with, so a Tag or
+	// PullPolicy override would be silently dropped on exactly the services that have
+	// a base — which is every platform service. Applied to both branches for the same
+	// reason the env overrides are. Strictly a no-op when neither is set, so a service
+	// with no override keeps the chart's image untouched, registry and all.
+	applyImageOverrides(&podTemplate, spec)
 	applyEnvOverrides(&podTemplate, spec.Env)
 	// Volumes are injected here, not in templatePod, for the same reason the env
 	// overrides are: both branches above must get them. A service that clones a Helm
@@ -562,14 +593,7 @@ func (b *k8sBackend) containerPort(ctx context.Context, service string) int32 {
 func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
 	def, hasDef := embeddedServiceDef(spec.Service)
 
-	image := spec.Image
-	if image == "" {
-		repo := spec.Service
-		if hasDef {
-			repo = def.ImageRepo
-		}
-		image = fmt.Sprintf("%s/%s:%s", b.registry, repo, b.tag)
-	}
+	image := b.imageFor(spec)
 	port := spec.Port
 	if port == 0 {
 		switch {
@@ -697,6 +721,50 @@ func optionalSecretRef(name, key string) *corev1.EnvVarSource {
 // applyEnvOverrides upserts each override as an env var on the first container.
 // Config keys are env var names so an admin can tune a service (e.g. ALLOWED_IMAGES)
 // without redefining its whole spec.
+// retag replaces the tag of an image reference, preserving registry and repository.
+// The tag is the text after the LAST colon, but only when that colon comes after the
+// last slash — otherwise the colon belongs to a registry port ("host:5000/repo") and
+// the reference carries no tag at all. A digest pin ("repo@sha256:…") is returned
+// unchanged: retagging a digest is meaningless, and mangling one would deploy
+// something other than what was asked for.
+func retag(image, tag string) string {
+	if image == "" || tag == "" {
+		return image
+	}
+	if strings.Contains(image, "@") {
+		return image
+	}
+	slash := strings.LastIndex(image, "/")
+	colon := strings.LastIndex(image, ":")
+	if colon > slash {
+		return image[:colon] + ":" + tag
+	}
+	return image + ":" + tag
+}
+
+// applyImageOverrides applies the spec's Tag/PullPolicy to the primary container —
+// Containers[0], the same one applyEnvOverrides targets.
+//
+// A no-op unless an override was actually requested. That matters for the cloned
+// Helm base: unconditionally rewriting the image would swap the chart's registry for
+// builder's default even when the caller asked for nothing.
+func applyImageOverrides(pt *corev1.PodTemplateSpec, spec workloadSpec) {
+	if len(pt.Spec.Containers) == 0 {
+		return
+	}
+	c := &pt.Spec.Containers[0]
+	// Image is already honoured by templatePod; re-stating it here covers the cloned
+	// branch, which templatePod never reaches.
+	if spec.Image != "" {
+		c.Image = spec.Image
+	} else if spec.Tag != "" {
+		c.Image = retag(c.Image, spec.Tag)
+	}
+	if spec.PullPolicy != "" {
+		c.ImagePullPolicy = corev1.PullPolicy(spec.PullPolicy)
+	}
+}
+
 func applyEnvOverrides(pt *corev1.PodTemplateSpec, env map[string]string) {
 	if len(env) == 0 || len(pt.Spec.Containers) == 0 {
 		return

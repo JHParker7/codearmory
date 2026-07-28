@@ -171,6 +171,8 @@ func handleSetOrgService(w http.ResponseWriter, r *http.Request) {
 		Kind:        kind,
 		Config:      req.Config,
 		Image:       req.Image,
+		Tag:         req.Tag,
+		PullPolicy:  req.PullPolicy,
 		Port:        req.Port,
 		Description: req.Description,
 	}
@@ -425,6 +427,12 @@ func applyRow(views map[string]*serviceView, row OrgService, source string) {
 	v.Config = row.Config
 	if row.Image != "" {
 		v.Image = row.Image
+	}
+	if row.Tag != "" {
+		v.Tag = row.Tag
+	}
+	if row.PullPolicy != "" {
+		v.PullPolicy = row.PullPolicy
 	}
 	if row.Port != 0 {
 		v.Port = row.Port

@@ -195,6 +195,9 @@ func main() {
 	mux.HandleFunc("GET /services/{service}", handleGetOrgService)
 	mux.HandleFunc("PUT /services/{service}", handleSetOrgService)
 	mux.HandleFunc("DELETE /services/{service}", handleDeleteOrgService)
+	// Narrow retarget for CI: image/tag/pull_policy only, so a pipeline can deploy the
+	// build it just pushed without a whole-object PUT that would blank the rest.
+	mux.HandleFunc("PATCH /services/{service}/image", handleSetOrgServiceImage)
 
 	// Internal: consumed by the gatekeeper disable-gate (shared-key auth).
 	mux.HandleFunc("GET /internal/org-services/effective", handleInternalEffective)

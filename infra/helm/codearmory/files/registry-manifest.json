@@ -1246,9 +1246,21 @@
         "path": "/services/{service}",
         "action": "deleteOrgService",
         "resource": "builder/orgs/default"
+      },
+      {
+        "method": "PATCH",
+        "path": "/services/{service}/image",
+        "action": "setOrgServiceImage",
+        "resource": "builder/orgs/default"
       }
     ],
-    "actions": [],
+    "actions": [
+      {
+        "name": "builder/set-image",
+        "method": "PATCH",
+        "path": "/services/{service}/image"
+      }
+    ],
     "default_grants": []
   },
   {

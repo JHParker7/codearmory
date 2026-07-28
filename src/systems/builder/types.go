@@ -69,8 +69,21 @@ type OrgService struct {
 	Kind         string         `json:"kind"           gorm:"column:kind;default:'platform'"`
 	Config       map[string]any `json:"config"         gorm:"column:config;serializer:json"`
 	Image        string         `json:"image,omitempty"       gorm:"column:image;default:''"`
-	Port         int            `json:"port,omitempty"        gorm:"column:port;default:0"`
-	Description  string         `json:"description,omitempty" gorm:"column:description;default:''"`
+	// Tag pins the image TAG while leaving the registry and repository to the
+	// platform defaults (BUILDER_IMAGE_REGISTRY/BUILDER_IMAGE_TAG). It is the knob a
+	// CI pipeline wants: "deploy the build I just pushed" is a tag change, not a new
+	// image reference, and pinning only the tag keeps the service on the registry the
+	// platform is configured for. Ignored when Image is set, which is fully explicit.
+	Tag string `json:"tag,omitempty" gorm:"column:tag;default:''"`
+	// PullPolicy overrides the container imagePullPolicy (Always|IfNotPresent|Never).
+	// Empty leaves it unset, which is Kubernetes' own default — Always for :latest,
+	// IfNotPresent otherwise. Two cases need it: an image built straight onto the node
+	// (minikube) that must never be pulled, hence Never; and a MUTABLE tag, where
+	// IfNotPresent would keep serving the node's cached copy of a previous build, so
+	// Always is required for a redeploy to mean anything.
+	PullPolicy  string `json:"pull_policy,omitempty" gorm:"column:pull_policy;default:''"`
+	Port        int    `json:"port,omitempty"        gorm:"column:port;default:0"`
+	Description string `json:"description,omitempty" gorm:"column:description;default:''"`
 	// DBURLCiphertext is the admin-supplied per-service database URL, AES-256-GCM
 	// encrypted (AAD = service name) and never serialized. DBHost is a redacted
 	// host:port/db kept only for display.
@@ -92,15 +105,19 @@ func (OrgService) TableName() string { return "org_services" }
 // can list every available service, its effective enabled state, and where that
 // state comes from.
 type serviceView struct {
-	Service     string         `json:"service"`
-	Enabled     bool           `json:"enabled"`
-	Kind        string         `json:"kind"`
-	Source      string         `json:"source"` // "core" | "default" | "override" | "custom" | "registry" | "catalog"
-	Config      map[string]any `json:"config,omitempty"`
-	Image       string         `json:"image,omitempty"`
-	Port        int            `json:"port,omitempty"`
-	Description string         `json:"description,omitempty"`
-	Core        bool           `json:"core,omitempty"`
+	Service string         `json:"service"`
+	Enabled bool           `json:"enabled"`
+	Kind    string         `json:"kind"`
+	Source  string         `json:"source"` // "core" | "default" | "override" | "custom" | "registry" | "catalog"
+	Config  map[string]any `json:"config,omitempty"`
+	Image   string         `json:"image,omitempty"`
+	// Tag/PullPolicy surface the deploy-target overrides so a caller (the portal, or a
+	// pipeline reading back its own write) can see which build is actually targeted.
+	Tag         string `json:"tag,omitempty"`
+	PullPolicy  string `json:"pull_policy,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	Description string `json:"description,omitempty"`
+	Core        bool   `json:"core,omitempty"`
 	// ComingSoon flags a spun-off service (source not in this repo, see
 	// comingSoonServices) that cannot be enabled yet. The view is forced disabled
 	// and every UI shows a "coming soon" badge instead of an enable control.
@@ -114,13 +131,17 @@ type serviceView struct {
 // setServiceRequest is the PUT body for configuring a service for an org. DBUrl is
 // write-only: it is encrypted on receipt and never read back.
 type setServiceRequest struct {
-	Enabled     *bool          `json:"enabled"`
-	Kind        string         `json:"kind"`
-	Config      map[string]any `json:"config"`
-	Image       string         `json:"image"`
-	Port        int            `json:"port"`
-	Description string         `json:"description"`
-	DBUrl       string         `json:"db_url"`
+	Enabled *bool          `json:"enabled"`
+	Kind    string         `json:"kind"`
+	Config  map[string]any `json:"config"`
+	Image   string         `json:"image"`
+	// Tag pins only the image tag, leaving registry/repo to the platform defaults.
+	// PullPolicy overrides imagePullPolicy. See the OrgService fields of the same name.
+	Tag         string `json:"tag"`
+	PullPolicy  string `json:"pull_policy"`
+	Port        int    `json:"port"`
+	Description string `json:"description"`
+	DBUrl       string `json:"db_url"`
 	// MaintenanceDBUrl is used only by the sql db backend: a CREATEDB(/CREATEROLE)
 	// connection builder uses ONCE to provision the per-service database, then discards
 	// (it is never stored). Write-only; never read back. Empty falls back to the
