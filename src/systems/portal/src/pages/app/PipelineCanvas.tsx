@@ -22,6 +22,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { T } from '../../theme';
 import { useResizablePane } from '../../components/ResizeHandle';
+import { CollapsedRail, PaneToggle, useCollapsible } from '../../components/CollapsiblePane';
 import {
   displayGraph, findCycle, nodeName, pruneRoutes, stepsFromNodes, routesFromBlocks, blocksFromSteps, blockDef,
   regionMembers, pruneMaps, mapIssues,
@@ -308,6 +309,9 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
   const [paletteW, paletteHandle] = useResizablePane('split.pipelinecanvas.palette.w', 260, {
     min: 200, max: 460, side: 'left', direction: 'horizontal', containerRef: splitRef, otherMin: 320,
   });
+  /** The palette is the one designer pane that stays open by default — it is where
+   * steps come from — but it can be minimised to a rail to give the graph the width. */
+  const [paletteOpen, , togglePalette] = useCollapsible('ci.builder.paletteOpen', true);
 
   useEffect(() => {
     const bs = blocksFromSteps(initialSteps);
@@ -810,9 +814,16 @@ export const PipelineCanvas = forwardRef<PipelineCanvasHandle, PipelineCanvasPro
 
   return (
     <div ref={splitRef} style={{ display: 'flex', height: '100%', minHeight: 0, border: `1px solid ${T.border}`, background: T.bg }}>
-      {editable && (
+      {editable && !paletteOpen && (
+        <CollapsedRail side="left" label="palette" onExpand={togglePalette} hint="show the step palette" />
+      )}
+      {editable && paletteOpen && (
         <>
           <div style={{ width: paletteW, flexShrink: 0, overflowY: 'auto', borderRight: `1px solid ${T.border}`, background: T.bgAlt, padding: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 1, textTransform: 'uppercase' }}>palette</span>
+              <PaneToggle open onToggle={togglePalette} hint="minimise the palette" />
+            </div>
             {/* Fan-out is a property OF a step, not a step you add — so these apply to
                 the selected step, or arm the next one you add (as the old block
                 palette's modes did). Kept on the palette because that is where they
