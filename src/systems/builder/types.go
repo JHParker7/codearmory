@@ -69,11 +69,20 @@ type OrgService struct {
 	Kind         string         `json:"kind"           gorm:"column:kind;default:'platform'"`
 	Config       map[string]any `json:"config"         gorm:"column:config;serializer:json"`
 	Image        string         `json:"image,omitempty"       gorm:"column:image;default:''"`
-	// Tag pins the image TAG while leaving the registry and repository to the
-	// platform defaults (BUILDER_IMAGE_REGISTRY/BUILDER_IMAGE_TAG). It is the knob a
-	// CI pipeline wants: "deploy the build I just pushed" is a tag change, not a new
-	// image reference, and pinning only the tag keeps the service on the registry the
-	// platform is configured for. Ignored when Image is set, which is fully explicit.
+	// Registry overrides BUILDER_IMAGE_REGISTRY for this service alone.
+	//
+	// Without it, Tag is only usable when the platform-wide registry happens to be
+	// right for the service, because the two are composed. That assumption does not
+	// hold: an install whose BUILDER_IMAGE_REGISTRY points somewhere the service's
+	// images are NOT published resolves every tag to an unpullable reference, and the
+	// only escape is to restate the whole image on every deploy. Registry + Tag make a
+	// service's image fully determined per service, with no dependency on a global
+	// that may not match the cluster it runs on.
+	Registry string `json:"registry,omitempty" gorm:"column:registry;default:''"`
+	// Tag pins the image TAG. Composed with Registry when set, else with
+	// BUILDER_IMAGE_REGISTRY. It is the knob a CI pipeline wants: "deploy the build I
+	// just pushed" is a tag change, not a new image reference. Ignored when Image is
+	// set, which is fully explicit.
 	Tag string `json:"tag,omitempty" gorm:"column:tag;default:''"`
 	// PullPolicy overrides the container imagePullPolicy (Always|IfNotPresent|Never).
 	// Empty leaves it unset, which is Kubernetes' own default — Always for :latest,
@@ -113,6 +122,7 @@ type serviceView struct {
 	Image   string         `json:"image,omitempty"`
 	// Tag/PullPolicy surface the deploy-target overrides so a caller (the portal, or a
 	// pipeline reading back its own write) can see which build is actually targeted.
+	Registry    string `json:"registry,omitempty"`
 	Tag         string `json:"tag,omitempty"`
 	PullPolicy  string `json:"pull_policy,omitempty"`
 	Port        int    `json:"port,omitempty"`
@@ -137,6 +147,7 @@ type setServiceRequest struct {
 	Image   string         `json:"image"`
 	// Tag pins only the image tag, leaving registry/repo to the platform defaults.
 	// PullPolicy overrides imagePullPolicy. See the OrgService fields of the same name.
+	Registry    string `json:"registry"`
 	Tag         string `json:"tag"`
 	PullPolicy  string `json:"pull_policy"`
 	Port        int    `json:"port"`

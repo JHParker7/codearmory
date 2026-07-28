@@ -126,3 +126,56 @@ func TestImageFor_Precedence(t *testing.T) {
 		t.Errorf("default tag: got %q, want ghcr.io/acme/svc:latest", got)
 	}
 }
+
+// The gap that made the per-service knob incomplete: with only a global registry,
+// Tag composes against BUILDER_IMAGE_REGISTRY. On an install whose global points
+// somewhere this service does NOT publish — exactly this cluster, where the global
+// is ghcr.io/code-armory-app but images live on the Forgejo registry — every tag
+// resolved to an unpullable reference, and the only escape was restating the whole
+// image on every deploy. Registry + Tag make the image fully per-service.
+func TestImageFor_PerServiceRegistryMakesTagUsable(t *testing.T) {
+	b := &k8sBackend{registry: "ghcr.io/code-armory-app", tag: "alpha-0.1.0"}
+
+	// Without a per-service registry, a tag composes against the (wrong) global.
+	if got := b.imageFor(workloadSpec{Service: "svc", Tag: "704caa9"}); got != "ghcr.io/code-armory-app/svc:704caa9" {
+		t.Errorf("global registry: got %q", got)
+	}
+	// With one, the service is fully described on its own terms.
+	got := b.imageFor(workloadSpec{Service: "svc", Registry: "192.168.53.171:3000/jp01", Tag: "704caa9"})
+	if got != "192.168.53.171:3000/jp01/svc:704caa9" {
+		t.Errorf("per-service registry: got %q, want 192.168.53.171:3000/jp01/svc:704caa9", got)
+	}
+	// Registry alone still honours the platform tag.
+	if got := b.imageFor(workloadSpec{Service: "svc", Registry: "reg.example/ns"}); got != "reg.example/ns/svc:alpha-0.1.0" {
+		t.Errorf("registry only: got %q", got)
+	}
+	// An explicit image still wins over both.
+	if got := b.imageFor(workloadSpec{Service: "svc", Registry: "reg.example/ns", Tag: "t", Image: "x:1"}); got != "x:1" {
+		t.Errorf("explicit image: got %q", got)
+	}
+}
+
+func TestValidateImageRequest_Registry(t *testing.T) {
+	cases := []struct {
+		name    string
+		reg     string
+		wantErr bool
+	}{
+		{"host and port and path", "192.168.53.171:3000/jp01", false},
+		{"plain host", "ghcr.io/code-armory-app", false},
+		{"clearing it", "", false},
+		// A scheme would compose to "https:/host/repo:tag"; a trailing slash doubles up.
+		{"with scheme", "https://192.168.53.171:3000/jp01", true},
+		{"trailing slash", "192.168.53.171:3000/jp01/", true},
+		{"leading slash", "/jp01", true},
+		{"whitespace", "reg .io/ns", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := c.reg
+			if msg := validateImageRequest(setImageRequest{Registry: &r}); (msg != "") != c.wantErr {
+				t.Errorf("registry %q -> %q, wantErr=%v", c.reg, msg, c.wantErr)
+			}
+		})
+	}
+}

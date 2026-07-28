@@ -260,6 +260,7 @@ func specFromRow(row OrgService) workloadSpec {
 	spec := workloadSpec{
 		Service:        row.ServiceName,
 		Image:          row.Image,
+		Registry:       row.Registry,
 		Tag:            row.Tag,
 		PullPolicy:     row.PullPolicy,
 		Port:           int32(row.Port),

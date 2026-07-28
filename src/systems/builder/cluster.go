@@ -79,7 +79,8 @@ func specHash(v any) string {
 type workloadSpec struct {
 	Service        string
 	Image          string            // explicit image (custom services); "" => clone or template
-	Tag            string            // pin only the tag, registry/repo from platform defaults; "" => backend tag
+	Registry       string            // per-service registry; "" => platform BUILDER_IMAGE_REGISTRY
+	Tag            string            // pin only the tag; composed with Registry (or the platform default)
 	PullPolicy     string            // imagePullPolicy override (Always|IfNotPresent|Never); "" => k8s default
 	Port           int32             // explicit port; 0 => clone or known-port catalog
 	Env            map[string]string // config overrides applied on top of the base env
@@ -401,7 +402,13 @@ func (b *k8sBackend) imageFor(spec workloadSpec) string {
 	if tag == "" {
 		tag = b.tag
 	}
-	return fmt.Sprintf("%s/%s:%s", b.registry, repo, tag)
+	// Per-service registry first: a platform-wide default that does not match where
+	// this service's images are published would otherwise make Tag unusable.
+	registry := spec.Registry
+	if registry == "" {
+		registry = b.registry
+	}
+	return fmt.Sprintf("%s/%s:%s", registry, repo, tag)
 }
 
 // buildDeployment renders the desired Deployment: clone the platform base when one

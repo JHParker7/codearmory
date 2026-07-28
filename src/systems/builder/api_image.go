@@ -40,7 +40,11 @@ var tagPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
 // left as-is, and an explicit empty string CLEARS the override (falling back to the
 // platform default). That distinction is why these are pointers.
 type setImageRequest struct {
-	Image      *string `json:"image"`
+	Image *string `json:"image"`
+	// Registry retargets which registry this service's images come from, so a tag is
+	// usable on an install whose platform-wide registry is not where this service
+	// publishes. Without it, Tag is only meaningful when the global happens to match.
+	Registry   *string `json:"registry"`
 	Tag        *string `json:"tag"`
 	PullPolicy *string `json:"pull_policy"`
 }
@@ -54,6 +58,17 @@ func validateImageRequest(req setImageRequest) string {
 	}
 	if req.Image != nil && strings.ContainsAny(*req.Image, " \t\n") {
 		return "image must not contain whitespace"
+	}
+	if req.Registry != nil && *req.Registry != "" {
+		r := *req.Registry
+		// A scheme would produce "https:/host/repo:tag" once composed; a trailing slash
+		// would double up. Both are silent misconfigurations, so reject them here.
+		if strings.Contains(r, "://") || strings.HasPrefix(r, "/") || strings.HasSuffix(r, "/") {
+			return "registry must be a host[:port][/path] with no scheme and no leading or trailing slash"
+		}
+		if strings.ContainsAny(r, " \t\n") {
+			return "registry must not contain whitespace"
+		}
 	}
 	return ""
 }
@@ -91,8 +106,8 @@ func handleSetOrgServiceImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	if req.Image == nil && req.Tag == nil && req.PullPolicy == nil {
-		http.Error(w, "at least one of image, tag or pull_policy is required", http.StatusBadRequest)
+	if req.Image == nil && req.Registry == nil && req.Tag == nil && req.PullPolicy == nil {
+		http.Error(w, "at least one of image, registry, tag or pull_policy is required", http.StatusBadRequest)
 		return
 	}
 
@@ -113,6 +128,9 @@ func handleSetOrgServiceImage(w http.ResponseWriter, r *http.Request) {
 
 	if req.Image != nil {
 		existing.Image = *req.Image
+	}
+	if req.Registry != nil {
+		existing.Registry = *req.Registry
 	}
 	if req.Tag != nil {
 		existing.Tag = *req.Tag
@@ -136,7 +154,7 @@ func handleSetOrgServiceImage(w http.ResponseWriter, r *http.Request) {
 	)
 	slog.InfoContext(ctx, "service image retargeted",
 		"org_id", orgID, "service", service,
-		"image", existing.Image, "tag", existing.Tag, "pull_policy", existing.PullPolicy,
+		"image", existing.Image, "registry", existing.Registry, "tag", existing.Tag, "pull_policy", existing.PullPolicy,
 		"caller_id", userID)
 
 	// The whole point of the endpoint is that the new build is live when it returns,
