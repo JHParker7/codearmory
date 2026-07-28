@@ -618,6 +618,24 @@ export function Tickets() {
   const [confirm, confirmEl] = useConfirm();
   const [railW, railHandle] = useResizableWidth('rail.tickets.main', 230, { min: 190, max: 420 });
 
+  // Escape clears the selection, closing the detail panel. Until this existed the only
+  // way out was the small × in the panel header — selecting was a click anywhere on a
+  // card, deselecting was one 16px target, so the board could easily feel stuck with a
+  // ticket open. Clicking the selected card again also toggles it off (see the card's
+  // onClick); this covers the same intent from the keyboard.
+  //
+  // Suppressed while any modal or the confirm dialog is up, because those own Escape.
+  // ConfirmDialog listens on window too and calls stopPropagation, which does NOT stop
+  // a sibling listener on the same target — so without this guard, Escape on the delete
+  // prompt would cancel the delete AND close the panel behind it.
+  const anyOverlayOpen = confirmEl != null || editing != null || showCreate || showNewBoard || showColumns;
+  useEffect(() => {
+    if (!selected || anyOverlayOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSelected(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selected, anyOverlayOpen, setSelected]);
+
   const handleDelete = async () => {
     if (!selectedTicket) return;
     if (!(await confirm({ message: `Delete ticket "${selectedTicket.title}"? This cannot be undone.` }))) return;
@@ -777,11 +795,15 @@ export function Tickets() {
                       </div>
                     ) : cards.map(ticket => {
                       const onBoard = boards.find(b => b.board_id === ticket.board_id);
+                      // Re-clicking the open card closes it. Selecting was a click anywhere
+                      // on the card while deselecting was only the × in the detail header,
+                      // so the obvious gesture did nothing at all.
+                      const toggleSelect = () => setSelected(selected === ticket.ticket_id ? null : ticket.ticket_id);
                       return (
                         <div key={ticket.ticket_id} draggable
                           onDragStart={() => setDragId(ticket.ticket_id)}
                           onDragEnd={() => { setDragId(null); setDragOver(null); }}
-                          onClick={() => setSelected(ticket.ticket_id)}
+                          onClick={toggleSelect}
                           style={{ background: T.card, border: `1px solid ${selected === ticket.ticket_id ? T.green : T.border}`, borderLeft: `2px solid ${priorityColor(ticket.priority)}`, padding: '9px 11px', cursor: 'grab', fontFamily: T.mono, opacity: dragId === ticket.ticket_id ? 0.4 : 1, transition: 'border-color .12s, opacity .12s' }}>
                           <div style={{ fontSize: 12.5, fontWeight: 600, color: T.text, lineHeight: 1.35, marginBottom: 5, wordBreak: 'break-word' }}>{ticket.title}</div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: T.faint, flexWrap: 'wrap' }}>
