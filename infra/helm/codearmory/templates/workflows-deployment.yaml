@@ -1,9 +1,17 @@
 {{- if .Values.workflows.enabled }}
 {{- $fullname := include "codearmory.fullname" . }}
-{{- /* Pipeline steps target services by name; forge is the only core step target.
-       Override workflows.env.services to add non-core targets (e.g. blueprints) that
-       builder has deployed and registered. */ -}}
-{{- $services := .Values.workflows.env.services | default (printf "forge=http://%s-forge:%d" $fullname (.Values.forge.port | int)) }}
+{{- /* Pipeline steps target services by name. forge is the obvious one; builder is
+       here because a pipeline that deploys has to tell builder which image to run,
+       and builder's own API is the only way to do that for a service builder owns
+       (patching the Deployment directly drifts and is reconciled back). Both are
+       core, so both are always present — an install does not have to opt in.
+       Override workflows.env.services to add non-core targets (e.g. blueprints)
+       that builder has deployed and registered. */ -}}
+{{- $defaultServices := printf "forge=http://%s-forge:%d" $fullname (.Values.forge.port | int) }}
+{{- if .Values.builder.enabled }}
+{{- $defaultServices = printf "%s,builder=http://%s-builder:%d" $defaultServices $fullname (.Values.builder.port | int) }}
+{{- end }}
+{{- $services := .Values.workflows.env.services | default $defaultServices }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
