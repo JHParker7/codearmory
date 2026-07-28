@@ -1,0 +1,128 @@
+version: 1
+name: git_factory-cd
+description: 'git_factory CD: test -> build a SHA-tagged image -> retarget builder -> verify the rollout'
+
+# Run cap. Deliberately ABOVE build-push's own 2400s: the previous 1800 meant a slow
+# kaniko build could never use the budget its step was given, and the run died mid-build
+# with a bare "context deadline exceeded". Matches codearmory-ci's 1h.
+timeout_secs: 3600
+
+steps:
+- action: forge/create-volume
+  name: workspace
+  with:
+    workflow_id: ${run_id}
+    name: workspace
+    mount_path: /workspace
+    medium: disk
+    size_mb: 4096
+- action: forge/run
+  name: checkout
+  timeout: 600
+  with:
+    image: golang:1.25
+    run: 'set -eu; git clone --branch dev --depth 1 $GIT_CLONE_URL .'
+    secret_refs:
+      GIT_CLONE_URL: git:http://ca-codearmory-git-factory:9002/admin/codearmory-git-factory.git
+    volumes:
+    - workflow_id: ${run_id}
+      name: workspace
+      mount_path: /workspace
+      workdir: true
+# The commit SHA is what makes the deploy real. Tagging every build :dev left
+# set-image a no-op (the image string never changed), so the cluster kept serving an
+# old build while the run reported success.
+- action: forge/run
+  name: commit
+  timeout: 120
+  with:
+    image: golang:1.25
+    output_env:
+    - SHA
+    volumes:
+    - workflow_id: ${run_id}
+      name: workspace
+      mount_path: /workspace
+      workdir: true
+    run: |
+      set -eu
+      git config --global --add safe.directory /workspace
+      SHA=$(git rev-parse --short HEAD)
+      echo "commit: $SHA"
+- action: forge/run
+  name: test
+  timeout: 1800
+  with:
+    image: golang:1.25
+    # 'standard' (256MB) OOM-kills the Go compiler.
+    runner_class: large
+    run: cd src/control_plane && go build ./... && go test ./...
+    volumes:
+    - workflow_id: ${run_id}
+      name: workspace
+      mount_path: /workspace
+      workdir: true
+- action: forge/build-image
+  name: build-push
+  timeout: 2400
+  with:
+    runner_class: xlarge
+    secret_refs:
+      REGISTRY_AUTH: secret:forgejo-registry-auth
+    volumes:
+    - workflow_id: ${run_id}
+      name: workspace
+      mount_path: /workspace
+    build:
+      context: /workspace/src/control_plane
+      dockerfile: Dockerfile
+      destinations:
+      - 192.168.53.171:3000/jp01/git-factory:${steps.commit.output.SHA}
+# git_factory is the one deployment builder OWNS (managed-by=codearmory-builder), so a
+# direct set-image on it drifts from builder's desired state and is reconciled back.
+# Builder has to be told instead. registry+tag rather than a full image reference: the
+# platform-wide BUILDER_IMAGE_REGISTRY points at ghcr.io while these images publish to
+# the Forgejo registry, so a per-service registry is what makes the tag resolvable.
+#
+# action: http, not a registered workflow action — retargeting a service is an admin
+# operation on builder's own API, and publishing it to the global action catalog would
+# offer it to every pipeline. Note the run role needs setOrgServiceImage on
+# builder/orgs/default granted deliberately: collectWorkflowPermissions skips
+# ActionHTTP steps, so nothing is inferred from the step list.
+- action: http
+  name: retarget
+  timeout: 180
+  with:
+    service: builder
+    method: PATCH
+    path: /services/codearmory_git_factory/image
+    body:
+      registry: 192.168.53.171:3000/jp01
+      tag: ${steps.commit.output.SHA}
+      pull_policy: IfNotPresent
+# Proves the rollout actually happened. The bug this pipeline exists to fix was a
+# green run over a cluster still serving a 12-hour-old build, so "deployed" is not
+# claimed until the new pod answers. /healthz is unauthenticated — an earlier version
+# used `git ls-remote`, which needs credentials this step does not carry and so could
+# only ever time out.
+- action: forge/run
+  name: verify-deploy
+  timeout: 600
+  with:
+    image: golang:1.25
+    volumes:
+    - workflow_id: ${run_id}
+      name: workspace
+      mount_path: /workspace
+      workdir: true
+    run: |
+      set -eu
+      echo 'waiting for the retargeted git_factory to serve'
+      for i in $(seq 1 60); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://ca-codearmory-git-factory:9002/healthz || true)
+        if [ "$code" = "200" ]; then echo "git_factory healthy (HTTP $code)"; exit 0; fi
+        echo "  not ready yet (HTTP ${code:-none})"
+        sleep 5
+      done
+      echo 'git_factory did not become healthy after the retarget'
+      exit 1

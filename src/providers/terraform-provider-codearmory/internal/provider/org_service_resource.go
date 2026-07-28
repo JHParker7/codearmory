@@ -35,6 +35,9 @@ type orgServiceModel struct {
 	Kind             types.String `tfsdk:"kind"`
 	Config           types.String `tfsdk:"config"`
 	Image            types.String `tfsdk:"image"`
+	Registry         types.String `tfsdk:"registry"`
+	Tag              types.String `tfsdk:"tag"`
+	PullPolicy       types.String `tfsdk:"pull_policy"`
 	Port             types.Int64  `tfsdk:"port"`
 	Description      types.String `tfsdk:"description"`
 	DBURL            types.String `tfsdk:"db_url"`
@@ -50,6 +53,9 @@ type setServiceRequest struct {
 	Kind             string            `json:"kind,omitempty"`
 	Config           map[string]any    `json:"config,omitempty"`
 	Image            string            `json:"image,omitempty"`
+	Registry         string            `json:"registry,omitempty"`
+	Tag              string            `json:"tag,omitempty"`
+	PullPolicy       string            `json:"pull_policy,omitempty"`
 	Port             int               `json:"port,omitempty"`
 	Description      string            `json:"description,omitempty"`
 	DBURL            string            `json:"db_url,omitempty"`
@@ -63,6 +69,9 @@ type serviceViewResponse struct {
 	Kind         string `json:"kind"`
 	Source       string `json:"source"`
 	Image        string `json:"image"`
+	Registry     string `json:"registry"`
+	Tag          string `json:"tag"`
+	PullPolicy   string `json:"pull_policy"`
 	Port         int    `json:"port"`
 	Description  string `json:"description"`
 	DBConfigured bool   `json:"db_configured"`
@@ -82,7 +91,10 @@ func (r *orgServiceResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"enabled":            schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true), MarkdownDescription: "Whether the service is enabled."},
 			"kind":               schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "`platform` (default) or `custom`."},
 			"config":             schema.StringAttribute{Optional: true, MarkdownDescription: "Service config as a JSON object string (replaced wholesale on each apply)."},
-			"image":              schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "Container image (required when kind=custom)."},
+			"image":              schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "Fully explicit container image. Wins over `registry`/`tag` when set; required when kind=custom."},
+			"registry":           schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "Registry this service's images come from, e.g. `192.168.53.171:3000/jp01`. Composed with `tag`. Overrides the platform-wide BUILDER_IMAGE_REGISTRY for this service alone, so a pinned tag is usable on an install whose global registry is not where this service publishes."},
+			"tag":                schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "Image tag to deploy, e.g. a commit SHA. Composed with `registry` (or the platform default). Ignored when `image` is set."},
+			"pull_policy":        schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "imagePullPolicy override: `Always`, `IfNotPresent` or `Never`. Empty leaves the Kubernetes default. `Never` for an image built onto the node; `Always` for a mutable tag."},
 			"port":               schema.Int64Attribute{Optional: true, Computed: true, MarkdownDescription: "Service port (required when kind=custom)."},
 			"description":        schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "Human-readable description."},
 			"db_url":             schema.StringAttribute{Optional: true, Sensitive: true, MarkdownDescription: "Database URL (write-only; only a redacted host is echoed via db_host)."},
@@ -108,6 +120,9 @@ func (m orgServiceModel) toRequest(ctx context.Context) (setServiceRequest, diag
 		Enabled:          &enabled,
 		Kind:             m.Kind.ValueString(),
 		Image:            m.Image.ValueString(),
+		Registry:         m.Registry.ValueString(),
+		Tag:              m.Tag.ValueString(),
+		PullPolicy:       m.PullPolicy.ValueString(),
 		Port:             int(m.Port.ValueInt64()),
 		Description:      m.Description.ValueString(),
 		DBURL:            m.DBURL.ValueString(),
@@ -137,6 +152,9 @@ func (m *orgServiceModel) fromResponse(out serviceViewResponse) {
 	m.Enabled = types.BoolValue(out.Enabled)
 	m.Kind = types.StringValue(out.Kind)
 	m.Image = types.StringValue(out.Image)
+	m.Registry = types.StringValue(out.Registry)
+	m.Tag = types.StringValue(out.Tag)
+	m.PullPolicy = types.StringValue(out.PullPolicy)
 	m.Port = types.Int64Value(int64(out.Port))
 	m.Description = types.StringValue(out.Description)
 	m.Source = types.StringValue(out.Source)

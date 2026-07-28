@@ -1,14 +1,14 @@
 # Dogfooded CI/CD, managed by the codearmory Terraform provider.
 #
-# git_factory (push to dev): a full pipeline over a shared workspace volume —
-#   create-volume -> git-clone(dev) -> go test -> build & push image (Kaniko).
-# codearmory (push to main): build + test the monorepo.
+# git_factory (push to dev): test -> build a SHA-tagged image -> retarget builder ->
+#   verify the rollout. Defined as pipeline-as-code in infra/ci/git-factory-cd.yaml.
+# codearmory (push to dev): build + test the monorepo, infra/ci/codearmory-ci.yaml.
 #
-# The rollout (kubectl set image in minikube) is NOT wired yet: forge runs under the
-# kata sandbox whose egress NetworkPolicy blocks the private kube API. Loosen egress
-# for CI first (see infra/terraform/cicd/README or the egress patch), then add a
-# deploy step. Likewise the CI registry (192.168.53.171:3000) is a private IP the
-# sandbox blocks until allowlisted, and forge/build-image's push needs it reachable.
+# The rollout IS wired now, and deliberately does not use `set-image`: git_factory is
+# the one deployment builder owns, so patching the Deployment directly drifts from
+# builder's desired state and is reconciled back. The pipeline tells builder instead,
+# and codearmory_org_service.git_factory below is what makes `terraform apply` the
+# thing that owns that service rather than whatever the API was last told.
 #
 # Apply:
 #   export CODEARMORY_URL=http://localhost:8090  CODEARMORY_TOKEN=<token>
@@ -29,117 +29,69 @@ variable "webhook_secret" {
   sensitive   = true
 }
 
-variable "ci_image" {
+variable "git_factory_image_registry" {
   type        = string
-  description = "Go toolchain image for test steps (must be in forge's ALLOWED_IMAGES)."
-  default     = "golang:1.25"
+  description = <<-EOT
+    Registry the git_factory image is published to, WITHOUT the repository segment.
+    Set per-service on builder rather than relying on the chart-wide
+    BUILDER_IMAGE_REGISTRY, which points at ghcr.io — a tag composed against that
+    global resolves to an image that does not exist here, and a reconcile then takes
+    the service down with ErrImagePull.
+  EOT
+  default     = "192.168.53.171:3000/jp01"
 }
 
-variable "ci_registry" {
+variable "git_factory_image_tag" {
   type        = string
-  description = "Image repo the build step pushes to (tag appended per pipeline)."
-  default     = "192.168.53.171:3000/jp01/git-factory"
-}
-
-variable "registry_secret_name" {
-  type        = string
-  description = "Name of an existing gatekeeper secret holding a docker config.json for the image push (REGISTRY_AUTH). Defaults to the same secret the monorepo pipeline uses for this registry."
-  default     = "forgejo-registry-auth"
-}
-
-variable "git_factory_clone_url" {
-  type        = string
-  description = "Full HTTP(S) clone URL of the git_factory repo (git_connector brokers a short-lived token for it)."
-  default     = "http://ca-codearmory-git-factory:9002/admin/codearmory-git-factory.git"
-}
-
-variable "outpost_id" {
-  type        = string
-  description = "The outpost (with the deploy integration) that rolls out the new image into the cluster. Same outpost the monorepo pipeline uses."
-  default     = "b38de6c5-6393-4dd2-aa93-b1ec5cf1bb86"
-}
-
-variable "git_factory_deployment" {
-  type        = string
-  description = "The k8s deployment the git_factory image rolls out to."
-  default     = "ca-codearmory-git-factory"
+  description = <<-EOT
+    Tag builder should deploy. Empty (the default) means Terraform does not pin one,
+    leaving whatever the CD pipeline's retarget step last set — which is the normal
+    steady state, since the pipeline deploys per-commit SHAs. Set it to roll back to
+    a known build, or to pin an environment.
+  EOT
+  default     = ""
 }
 
 provider "codearmory" {} # endpoint/token from CODEARMORY_URL / CODEARMORY_TOKEN
 
-locals {
-  # One shared run-scoped volume attach spec, reused by every step in the git_factory run.
-  workspace = { workflow_id = "$${run_id}", name = "workspace", mount_path = "/workspace", workdir = true }
-  # REGISTRY_AUTH secret_ref, only when a registry secret is supplied.
-  registry_secret_refs = var.registry_secret_name != "" ? { REGISTRY_AUTH = "secret:${var.registry_secret_name}" } : {}
+# ── git_factory: builder's deployment target ─────────────────────────────────────
+# git_factory is the ONE deployment builder owns (app.kubernetes.io/managed-by=
+# codearmory-builder). Everything else on this cluster — events, hooks,
+# outpost-gateway — is Helm-managed, so a direct `set-image` is fine for them and
+# reconciled away for this one. Declaring the row here makes `terraform apply` the
+# thing that updates git_factory, instead of drifting against whatever the API was
+# last told.
+#
+# registry is pinned per-service on purpose: the chart-wide BUILDER_IMAGE_REGISTRY is
+# ghcr.io/code-armory-app while these images publish to the Forgejo registry, so a tag
+# composed against the global resolves to nothing and a reconcile ErrImagePulls.
+#
+# Ownership is split: Terraform owns that the service exists, where its
+# images come from and how they are pulled; the CD pipeline owns WHICH build is live.
+#
+# tag is therefore null unless someone pins it. The attribute is Optional+Computed, so
+# a null config means Terraform reads back whatever the pipeline last set and produces
+# no diff — apply never reverts the running build. Setting var.git_factory_image_tag
+# flips that: the pin becomes desired state and the next apply rolls the service back
+# to it. (lifecycle.ignore_changes would NOT work here — it is unconditional, so it
+# would silently make the variable do nothing.)
+resource "codearmory_org_service" "git_factory" {
+  service     = "codearmory_git_factory"
+  enabled     = true
+  registry    = var.git_factory_image_registry
+  tag         = var.git_factory_image_tag != "" ? var.git_factory_image_tag : null
+  pull_policy = "IfNotPresent"
 }
 
 # ── git_factory: full CD pipeline, triggered on push to dev ──────────────────────
+# Pipeline-as-code, matching how the monorepo pipeline is managed: the source of
+# truth is infra/ci/git-factory-cd.yaml and Terraform just deploys it. Authored as a
+# file rather than inline `step` blocks because the resource has no timeout_secs
+# attribute — and the run cap is load-bearing here (build-push alone may take 2400s,
+# so the old 1800 killed runs mid-build).
 resource "codearmory_pipeline" "git_factory" {
-  name        = "git_factory-cd"
-  description = "Test, build and push the git_factory image on push to dev"
-  project     = "codearmory" # files it into project/codearmory so the project's admins/developers control it
-
-  step = [
-    {
-      name      = "workspace"
-      action    = "forge/create-volume"
-      with_json = jsonencode({ workflow_id = "$${run_id}", name = "workspace", mount_path = "/workspace", medium = "disk", size_mb = 4096 })
-    },
-    {
-      # Clone dev into the shared workspace. forge/run with a git image (not
-      # forge/git-clone, which requires a command and clones-then-runs); GIT_CLONE_URL is
-      # injected by the secret_ref and resolved to an authenticated URL at dispatch.
-      name    = "checkout"
-      action  = "forge/run"
-      timeout = 600
-      with    = { image = var.ci_image }
-      with_json = jsonencode({
-        run         = "set -eu; git clone --branch dev --depth 1 $GIT_CLONE_URL ."
-        volumes     = [local.workspace]
-        secret_refs = { GIT_CLONE_URL = "git:${var.git_factory_clone_url}" }
-      })
-    },
-    {
-      name      = "test"
-      action    = "forge/run"
-      timeout   = 1800
-      with      = { image = var.ci_image }
-      with_json = jsonencode({
-        run          = "cd src/control_plane && go build ./... && go test ./..."
-        volumes      = [local.workspace]
-        runner_class = "large" # 2GB — 'standard' (256MB, the default) OOM-kills the Go compiler
-      })
-    },
-    {
-      name    = "build-push"
-      action  = "forge/build-image"
-      timeout = 2400
-      with_json = jsonencode(merge({
-        build        = { context = "/workspace/src/control_plane", dockerfile = "Dockerfile", destinations = ["${var.ci_registry}:dev"] }
-        volumes      = [{ workflow_id = "$${run_id}", name = "workspace", mount_path = "/workspace" }]
-        runner_class = "xlarge"
-      }, length(local.registry_secret_refs) > 0 ? { secret_refs = local.registry_secret_refs } : {}))
-    },
-    {
-      # Roll the freshly-pushed image into the cluster via the outpost deploy integration —
-      # the platform-correct path (the outpost actuates the cluster; a sandboxed runner can't
-      # reach the kube API). Mirrors the monorepo pipeline's redeploy step.
-      name    = "deploy"
-      action  = "outpost-gateway/enqueueCommand"
-      timeout = 300
-      with_json = jsonencode({
-        id          = var.outpost_id
-        integration = "deploy"
-        type        = "set-image"
-        payload = {
-          deployment     = var.git_factory_deployment
-          image          = "${var.ci_registry}:dev"
-          ignore_missing = true
-        }
-      })
-    },
-  ]
+  definition_json = jsonencode(yamldecode(file("${path.module}/../../ci/git-factory-cd.yaml")))
+  project         = "codearmory" # files it into project/codearmory so the project's admins/developers control it
 }
 
 resource "codearmory_hook_rule" "git_factory_push" {
