@@ -189,7 +189,7 @@ func TestRunTaskGroup_MatrixMaxConcurrent(t *testing.T) {
 	if err := (WorkflowRun{RunID: runID, WorkflowID: uuid.New().String(), Status: StatusRunning}).Add(context.Background()); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
-	results, status := (&WorkerPool{}).runTaskGroup(context.Background(), newTokenStore("", ""), runID, "wf", tasks, nil, nil, 0, groupConcurrency(group), nil)
+	results, status := (&WorkerPool{}).runTaskGroup(context.Background(), newTokenStore("", ""), runID, "wf", tasks, nil, nil, nil, 0, groupConcurrency(group), nil)
 	if status != StatusCompleted {
 		t.Fatalf("group status = %s, want completed", status)
 	}

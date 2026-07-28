@@ -344,6 +344,12 @@ type iterCtx struct {
 	// every body node's visible so references to upstream steps resolve. Empty at the
 	// top level (iterCtx{}), so ordinary runs are unaffected.
 	inbound map[string]string
+	// known is the FULL pipeline's step names, carried in because a region body runs
+	// against the isolated sub-graph — whose own names cover only body nodes, so an
+	// unresolved reference to an upstream step would otherwise be reported as "no such
+	// step" when the real cause is that it is not an ancestor. Nil at the top level,
+	// where runGraph derives it from the graph it was given.
+	known map[string]bool
 }
 
 // withInbound unions the iteration's inbound outputs onto a node's computed visible,
@@ -378,6 +384,13 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 	finalStatus := StatusCompleted
 	resCh := make(chan nodeResult, len(g.steps)+1)
 	inFlight := 0
+
+	// Step names for unresolved-reference diagnostics. A region body is handed the
+	// outer pipeline's names via ic; a top-level run derives them from its own graph.
+	known := ic.known
+	if known == nil {
+		known = g.stepNames()
+	}
 
 	// Seed: a resumed run's already-completed nodes must resolve their outbound
 	// routes before the first launch, so the frontier opens at the resume point.
@@ -416,7 +429,7 @@ func (p *WorkerPool) runGraph(ctx context.Context, g *workflowGraph, st *runStat
 				idx := g.stepIndex(n)
 				inFlight++
 				go func(n string, ws WorkflowStep, idx int, visible map[string]string) {
-					resCh <- p.runNode(ctx, store, runID, workflowID, ws, idx, inputs, visible, depth, ic, legSem)
+					resCh <- p.runNode(ctx, store, runID, workflowID, ws, idx, inputs, visible, known, depth, ic, legSem)
 				}(n, ws, idx, visible)
 			}
 			p.skipSkippedRegions(ctx, g, st, runID, inputs)
@@ -541,7 +554,7 @@ func (p *WorkerPool) publishCurrentStep(ctx context.Context, g *workflowGraph, s
 // legs share the node's step index and re-collapse into one output), so the
 // scheduler never sees legs. Wrapping the node in a single-member stepGroup lets
 // buildGroupTasks, groupConcurrency, and runTaskGroup be reused verbatim.
-func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, workflowID string, ws WorkflowStep, idx int, inputs, visible map[string]string, depth int, ic iterCtx, legSem chan struct{}) nodeResult {
+func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, workflowID string, ws WorkflowStep, idx int, inputs, visible map[string]string, known map[string]bool, depth int, ic iterCtx, legSem chan struct{}) nodeResult {
 	// Inside a map iteration the step runs against that iteration's workspace clone,
 	// and its step run is labelled with the binding so the run view can tell the
 	// iterations apart.
@@ -591,7 +604,7 @@ func (p *WorkerPool) runNode(ctx context.Context, store *tokenStore, runID, work
 		tasks[i].mapVars = ic.mapVars
 	}
 
-	results, status := p.runTaskGroup(ctx, store, runID, workflowID, tasks, inputs, visible, depth, groupConcurrency(group), legSem)
+	results, status := p.runTaskGroup(ctx, store, runID, workflowID, tasks, inputs, visible, known, depth, groupConcurrency(group), legSem)
 	if status != StatusCompleted {
 		return nodeResult{name: ws.Name, state: statusToNodeState(status)}
 	}

@@ -324,7 +324,7 @@ func (p *WorkerPool) runMapRegion(
 				return
 			}
 			results[i] = iterResult{}
-			outs, st := p.runIteration(mapCtx, store, runID, workflowID, sub, region, i, val, inputs, visible, depth, legSem)
+			outs, st := p.runIteration(mapCtx, store, runID, workflowID, sub, region, i, val, inputs, visible, g.stepNames(), depth, legSem)
 			results[i] = iterResult{outputs: outs, status: st}
 			if st == StatusFailed {
 				mu.Lock()
@@ -382,7 +382,7 @@ func (p *WorkerPool) runMapRegion(
 // runIteration runs the region's subgraph once, for one value.
 func (p *WorkerPool) runIteration(
 	ctx context.Context, store *tokenStore, runID, workflowID string, sub *workflowGraph, region *mapRegion,
-	i int, val string, inputs, visible map[string]string, depth int, legSem chan struct{},
+	i int, val string, inputs, visible map[string]string, known map[string]bool, depth int, legSem chan struct{},
 ) (map[string]string, string) {
 	mapVars := map[string]string{region.def.Var: val}
 
@@ -414,6 +414,10 @@ func (p *WorkerPool) runIteration(
 		// to empty (an unresolved ${...} then reaches forge as a literal — the
 		// "not a valid image reference" failure this fixes).
 		inbound: visible,
+		// The outer pipeline's step names, so an unresolved reference to an upstream
+		// step is reported as "not an ancestor" rather than "no such step" — the
+		// sub-graph on its own knows only the body's nodes.
+		known: known,
 	}, legSem)
 	if status == statusPaused {
 		// An approval gate inside a map region would have to pause N iterations

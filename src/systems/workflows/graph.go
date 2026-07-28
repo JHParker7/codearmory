@@ -253,6 +253,18 @@ func (g *workflowGraph) visibleFor(node string, outputs map[string]string) map[s
 	return v
 }
 
+// stepNames is every step name in the graph. It exists so an unresolved reference
+// can say "no step named X" rather than "X is not an ancestor" — a typo and a
+// missing route look identical from the visible-output map alone, but need
+// different fixes.
+func (g *workflowGraph) stepNames() map[string]bool {
+	names := make(map[string]bool, len(g.steps))
+	for _, ws := range g.steps {
+		names[ws.Name] = true
+	}
+	return names
+}
+
 // topoOrder runs Kahn's algorithm over the node set. ok is false when the graph
 // contains a cycle, in which case residual names the nodes that could not be
 // emitted (i.e. those on or downstream of a cycle).

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,7 +20,23 @@ import (
 //
 // Only outputs of steps that completed in a *prior* group are visible, so a step
 // can never reference its own output or a sibling running in the same parallel
-// group. Unresolved references are left untouched (the literal ${...} survives).
+// group.
+//
+// An unresolved reference in a STEP's With map fails that step (see
+// substituteWithStrict): the literal ${...} would otherwise be handed to whatever
+// service the step calls, which either rejects it with a message naming neither the
+// step nor the reference, or — worse, for a service that is not strict — accepts it
+// and produces something quietly wrong.
+//
+// Only references in a recognised namespace (${steps.*}, ${inputs.*}, ${matrix.*},
+// ${map.*}, ${scatter.*}, ${run_id}, ${workflow_id}) can fail a step. A run
+// script's shell expansion — ${f%/go.mod}, ${MODULES# }, a bare ${HOOK_REF} — is
+// not addressed to this engine and passes through as before. A step that must emit
+// a literal reference in one of OUR namespaces opts out with allow_unresolved.
+//
+// Everywhere else (approval messages, ticket titles, matrix value lists) an
+// unresolved reference is still left untouched — those are display or list-shaped
+// values where a stray literal is visible rather than silently consequential.
 
 // substContext carries everything a step's With values can interpolate.
 type substContext struct {
@@ -42,6 +59,14 @@ type substContext struct {
 	// step so the created sub-run is one level deeper (not itself a substitution
 	// value, so it is excluded from empty()).
 	depth int
+	// stepName names the step being substituted, so a failure can say WHICH step's
+	// reference did not resolve. Diagnostic only — excluded from empty().
+	stepName string
+	// known is every step name in the pipeline, used only to tell "no such step" apart
+	// from "that step exists but is not an ancestor of this one" — the two have
+	// completely different fixes (typo vs missing route). Nil outside the step
+	// execution path, where the weaker reason is used instead. Excluded from empty().
+	known map[string]bool
 }
 
 func (sc substContext) empty() bool {
@@ -63,6 +88,126 @@ func substitute(s string, sc substContext) string {
 		}
 		return tok
 	})
+}
+
+// unresolvedRef is one ${...} reference that did not resolve, with the reason.
+type unresolvedRef struct {
+	token  string // the literal ${...} as written
+	reason string
+}
+
+// unresolvedError fails a step whose With map contains references that did not
+// resolve. It names the step and every offending reference, because the message a
+// downstream service produces ("not a valid image reference") names neither.
+type unresolvedError struct {
+	step string
+	refs []unresolvedRef
+}
+
+func (e *unresolvedError) Error() string {
+	where := "step"
+	if e.step != "" {
+		where = "step " + e.step
+	}
+	if len(e.refs) == 1 {
+		return fmt.Sprintf("%s: %s did not resolve; %s", where, e.refs[0].token, e.refs[0].reason)
+	}
+	parts := make([]string, 0, len(e.refs))
+	for _, r := range e.refs {
+		parts = append(parts, fmt.Sprintf("%s (%s)", r.token, r.reason))
+	}
+	return fmt.Sprintf("%s: %d references did not resolve — %s", where, len(e.refs), strings.Join(parts, "; "))
+}
+
+// workflowRefPrefixes are the namespaces that make a ${...} unambiguously a
+// workflow reference rather than some other system's syntax.
+var workflowRefPrefixes = []string{"steps.", "inputs.", "matrix.", "map.", "scatter."}
+
+// looksLikeWorkflowRef reports whether expr is addressed to THIS engine, and is
+// therefore something we may fail a step over.
+//
+// A step's With map is full of ${...} that belongs to other languages — a run
+// script's shell parameter expansion (${f%/go.mod}, ${MODULES# }, ${HOOK_REF})
+// being the common case, and the reason strictness cannot simply apply to every
+// unresolved reference: that would fail nearly every scripted step in every
+// pipeline. Only a recognised namespace counts. A BARE ${NAME} deliberately does
+// not: it is indistinguishable from an ordinary shell variable, so it keeps the
+// lenient behaviour even though the engine would have resolved it as a run input.
+func looksLikeWorkflowRef(expr string) bool {
+	for _, p := range workflowRefPrefixes {
+		if strings.HasPrefix(expr, p) {
+			return true
+		}
+	}
+	return expr == "run_id" || expr == "run.id" || expr == "workflow_id" || expr == "workflow.id"
+}
+
+// substituteStrict is substitute, but it reports every reference addressed to this
+// engine that did not resolve, instead of leaving the literal in place. References
+// belonging to another syntax pass through untouched — see looksLikeWorkflowRef.
+func substituteStrict(s string, sc substContext) (string, []unresolvedRef) {
+	if !strings.Contains(s, "${") {
+		return s, nil
+	}
+	var bad []unresolvedRef
+	out := refPattern.ReplaceAllStringFunc(s, func(tok string) string {
+		expr := strings.TrimSpace(tok[2 : len(tok)-1])
+		if v, ok := sc.resolve(expr); ok {
+			return v
+		}
+		if looksLikeWorkflowRef(expr) {
+			bad = append(bad, unresolvedRef{token: tok, reason: sc.explain(expr)})
+		}
+		return tok
+	})
+	return out, bad
+}
+
+// explain says why expr did not resolve, in the terms the pipeline author needs to
+// fix it. The visibility rule already knows the answer — this just puts it in words.
+func (sc substContext) explain(expr string) string {
+	if rest, ok := strings.CutPrefix(expr, "steps."); ok {
+		idx := strings.Index(rest, ".output")
+		if idx < 0 {
+			return fmt.Sprintf("%q is not a step-output reference — expected ${steps.NAME.output} or ${steps.NAME.output.FIELD}", expr)
+		}
+		name := rest[:idx]
+		out, produced := sc.outputs[name]
+		if !produced {
+			switch {
+			case sc.known == nil:
+				return fmt.Sprintf("%s has not produced an output visible to this step", name)
+			case !sc.known[name]:
+				return fmt.Sprintf("no step named %q in this pipeline", name)
+			default:
+				return fmt.Sprintf("%s is not an ancestor of this step, so its output is not visible here — route this step after %s", name, name)
+			}
+		}
+		field := strings.TrimPrefix(rest[idx+len(".output"):], ".")
+		if !json.Valid([]byte(out)) {
+			return fmt.Sprintf("%s's output is not JSON, so it has no field %q", name, field)
+		}
+		return fmt.Sprintf("%s's output has no field %q", name, field)
+	}
+	if key, ok := strings.CutPrefix(expr, "inputs."); ok {
+		return fmt.Sprintf("no run input named %q — declare it in the pipeline's inputs or pass it at trigger time", key)
+	}
+	if key, ok := strings.CutPrefix(expr, "matrix."); ok {
+		return fmt.Sprintf("no matrix variable %q bound here — this step declares no matrix, or its var has another name", key)
+	}
+	if key, ok := strings.CutPrefix(expr, "map."); ok {
+		return fmt.Sprintf("no map variable %q bound here — this step is not inside a map region, or its var has another name", key)
+	}
+	if key, ok := strings.CutPrefix(expr, "scatter."); ok {
+		if key == "path" {
+			return "this step is not a scatter leg, so it has no ${scatter.path}"
+		}
+		return fmt.Sprintf("%q is not a scatter reference — only ${scatter.path} exists", expr)
+	}
+	if expr == "run_id" || expr == "run.id" || expr == "workflow_id" || expr == "workflow.id" {
+		return fmt.Sprintf("%s is not set in this context", expr)
+	}
+	return fmt.Sprintf("no run input named %q (bare ${NAME} resolves a run input); use ${steps.NAME.output} to reference a step", expr)
 }
 
 // resolve looks up a single reference expression (the text between ${ and }).
@@ -187,6 +332,47 @@ func substituteWith(with map[string]any, sc substContext) map[string]any {
 		result[k] = substituteValue(v, sc)
 	}
 	return result
+}
+
+// substituteWithStrict is substituteWith for a step about to execute: it fails the
+// step when any ${...} reference in its With map did not resolve, rather than
+// handing the literal to the action. Every offending reference is reported at once,
+// so a step wired to three missing outputs does not take three runs to fix.
+func substituteWithStrict(with map[string]any, sc substContext) (map[string]any, error) {
+	if sc.empty() {
+		return with, nil
+	}
+	var bad []unresolvedRef
+	result := substituteValueStrict(with, sc, &bad).(map[string]any)
+	if len(bad) > 0 {
+		return nil, &unresolvedError{step: sc.stepName, refs: bad}
+	}
+	return result, nil
+}
+
+// substituteValueStrict mirrors substituteValue, accumulating unresolved references
+// into bad as it walks nested maps and slices.
+func substituteValueStrict(v any, sc substContext, bad *[]unresolvedRef) any {
+	switch sv := v.(type) {
+	case string:
+		out, refs := substituteStrict(sv, sc)
+		*bad = append(*bad, refs...)
+		return out
+	case map[string]any:
+		result := make(map[string]any, len(sv))
+		for k, item := range sv {
+			result[k] = substituteValueStrict(item, sc, bad)
+		}
+		return result
+	case []any:
+		result := make([]any, len(sv))
+		for i, item := range sv {
+			result[i] = substituteValueStrict(item, sc, bad)
+		}
+		return result
+	default:
+		return v
+	}
 }
 
 func substituteValue(v any, sc substContext) any {

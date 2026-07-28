@@ -572,7 +572,9 @@ func aggregateTaskOutputs(results []taskResult) string {
 // and with scatter; concurrency is this node's own cap within that budget. A task
 // takes legSem first, then the node's own slot, so a task holding a node slot only
 // ever waits on legs that are themselves making progress.
-func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID, workflowID string, tasks []stepTask, inputs, visible map[string]string, depth int, concurrency int, legSem chan struct{}) ([]taskResult, string) {
+// known is every step name in the pipeline, carried only so an unresolved reference
+// can distinguish a typo from a missing route. Nil is safe (the weaker reason).
+func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID, workflowID string, tasks []stepTask, inputs, visible map[string]string, known map[string]bool, depth int, concurrency int, legSem chan struct{}) ([]taskResult, string) {
 	results := make([]taskResult, len(tasks))
 	stepRunIDs := make([]string, len(tasks))
 	for k, t := range tasks {
@@ -607,7 +609,7 @@ func (p *WorkerPool) runTaskGroup(ctx context.Context, store *tokenStore, runID,
 				return
 			}
 			defer func() { <-sem }() // release
-			res, err := p.executeStep(withStepRunID(ctx, stepRunIDs[k]), store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, mapVars: t.mapVars, runID: runID, workflowID: workflowID, depth: depth})
+			res, err := p.executeStep(withStepRunID(ctx, stepRunIDs[k]), store, t.step, substContext{inputs: inputs, outputs: visible, matrix: t.matrix, mapVars: t.mapVars, runID: runID, workflowID: workflowID, depth: depth, stepName: t.name, known: known})
 			resCh <- taskResult{name: t.name, output: res.Output, logs: res.Logs, usedMB: res.MemoryUsedMB, limitMB: res.MemoryLimitMB, err: err, idx: k}
 		}(k, t)
 	}
@@ -735,7 +737,25 @@ func jsonInt64Ptr(v any) *int64 {
 // context.Canceled means the run was cancelled. sc carries the run inputs and
 // prior step outputs interpolated into the step's With values.
 func (p *WorkerPool) executeStep(ctx context.Context, store *tokenStore, step Step, sc substContext) (stepResult, error) {
-	with := substituteWith(step.With, sc)
+	// An unresolved ${...} fails the step here rather than travelling on to the action.
+	// Letting it through is what produced diagnoses like forge's 'destinations[0]
+	// "…/git:${steps.commit.output.SHA}": not a valid image reference' — a message that
+	// names neither the step nor the reference — and a less strict service would have
+	// accepted the literal and built something quietly wrong instead.
+	if !step.AllowUnresolved {
+		substituted, err := substituteWithStrict(step.With, sc)
+		if err != nil {
+			return stepResult{}, err
+		}
+		return p.dispatchStep(ctx, store, step, substituted, sc)
+	}
+	return p.dispatchStep(ctx, store, step, substituteWith(step.With, sc), sc)
+}
+
+// dispatchStep runs the step against its already-substituted With map, via either
+// the http escape-hatch or the registry action catalog. sc is carried only for the
+// run id and nesting depth forwarded to the action — substitution is already done.
+func (p *WorkerPool) dispatchStep(ctx context.Context, store *tokenStore, step Step, with map[string]any, sc substContext) (stepResult, error) {
 	// Clamp to [defaultTimeout, maxTimeout]. Zero means "use default"; negative
 	// is treated the same way since a non-positive duration would fire immediately.
 	timeout := step.Timeout

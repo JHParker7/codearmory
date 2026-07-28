@@ -123,6 +123,11 @@ type Step struct {
 	Action      string         `json:"action"       gorm:"column:action"`
 	With        map[string]any `json:"with"         gorm:"column:config;serializer:json"`
 	Timeout     int64          `json:"timeout"      gorm:"column:timeout_secs;default:30"`
+	// AllowUnresolved opts this step out of the unresolved-reference check, letting a
+	// literal ${...} through to the action for a step that legitimately passes one
+	// (e.g. a script that writes a shell variable of the same shape). Carried on the
+	// per-occurrence WorkflowStepRef, not stored on the step row — hence gorm:"-".
+	AllowUnresolved bool `json:"allow_unresolved,omitempty" gorm:"-"`
 	CreatedBy   string         `json:"created_by"   gorm:"column:created_by"`
 	OrgID       string         `json:"org_id"       gorm:"column:org_id;default:''"`
 	Active      bool           `json:"active"       gorm:"column:active;default:true"`
@@ -274,8 +279,13 @@ type WorkflowStepRef struct {
 	// step's inputs to earlier steps' outputs — e.g. With:{"env":{"TARGET":
 	// "${steps.build.output}"}} — without editing the shared step. The values support
 	// the same ${...} substitution as any With value.
-	With   map[string]any `json:"with,omitempty"`
-	Matrix *MatrixConfig  `json:"matrix,omitempty"`
+	With map[string]any `json:"with,omitempty"`
+	// AllowUnresolved lets this occurrence pass a literal ${...} through to the action
+	// instead of failing on it. Off by default: an unresolved reference is nearly
+	// always a wiring mistake, and letting it through is what made those mistakes
+	// surface as a confusing error from whatever service the step called.
+	AllowUnresolved bool          `json:"allow_unresolved,omitempty"`
+	Matrix          *MatrixConfig `json:"matrix,omitempty"`
 	// Scatter fans this step out over the regex-matched paths of a shared workspace,
 	// each leg on its own clone, gathering owned outputs back afterward. Mutually
 	// exclusive with Matrix — see ScatterConfig.
