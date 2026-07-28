@@ -459,6 +459,7 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 				Step: Step{
 					Name: ref.Name, Action: ref.Action, With: ref.With, Timeout: ref.Timeout,
 					AllowUnresolved: ref.AllowUnresolved,
+					Permissions:     ref.Permissions,
 				},
 				Matrix:  ref.Matrix,
 				Scatter: ref.Scatter,
@@ -488,6 +489,7 @@ func enrichStepRefs(ctx context.Context, refs []WorkflowStepRef) ([]WorkflowStep
 		// The opt-out is a property of THIS occurrence, not of the shared step
 		// definition, so it is copied onto the local step copy like the name override.
 		s.AllowUnresolved = ref.AllowUnresolved
+		s.Permissions = ref.Permissions
 		result = append(result, WorkflowStep{Step: s, Matrix: ref.Matrix, Scatter: ref.Scatter, MapID: ref.MapID})
 	}
 	return result, nil

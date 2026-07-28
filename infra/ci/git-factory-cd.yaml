@@ -86,12 +86,21 @@ steps:
 #
 # action: http, not a registered workflow action — retargeting a service is an admin
 # operation on builder's own API, and publishing it to the global action catalog would
-# offer it to every pipeline. Note the run role needs setOrgServiceImage on
-# builder/orgs/default granted deliberately: collectWorkflowPermissions skips
-# ActionHTTP steps, so nothing is inferred from the step list.
+# offer it to every pipeline.
+#
+# The grant is declared here because an http step has no catalog entry, so nothing can
+# be inferred from its action and the call would otherwise 403. Declaring it is not a
+# way to hand yourself authority: gatekeeper only mints a permission this pipeline's
+# OWNER already holds, and scopes the resource to that owner — so this resolves to
+# <owner>/builder/orgs/default and grants nothing to someone who could not already do
+# it by hand.
 - action: http
   name: retarget
   timeout: 180
+  permissions:
+  - service: builder
+    action: setOrgServiceImage
+    resource: builder/orgs/default
   with:
     service: builder
     method: PATCH

@@ -154,9 +154,32 @@ func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef, ticket *Tic
 		}
 	}
 
+	// addSpec grants a permission the step DECLARED, rather than one derived from the
+	// action catalog. Same dedup and path-param wildcarding as addAction.
+	addSpec := func(p PermissionSpec) {
+		if p.Service == "" || p.Action == "" || p.Resource == "" {
+			return
+		}
+		resource := wildcardPathParams(p.Resource)
+		key := p.Service + ":" + p.Action + ":" + resource
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, PermissionSpec{Service: p.Service, Action: p.Action, Resource: resource})
+	}
+
 	for _, ws := range steps {
+		// A step may declare the grants it needs. This is the ONLY way an http
+		// escape-hatch step gets any: it has no catalog entry, so nothing can be
+		// inferred from its action, and without this its calls are simply 403'd.
+		// Safe to honour verbatim — gatekeeper mints only permissions the pipeline's
+		// owner already holds, and scopes each to that owner.
+		for _, p := range ws.Permissions {
+			addSpec(p)
+		}
 		if ws.Action == ActionHTTP {
-			continue // ActionHTTP permissions are runtime-dynamic; can't enumerate statically
+			continue // no catalog entry to derive from — see the declared grants above
 		}
 		addAction(ws.Action)
 		// A scatter step drives forge itself to resolve paths, clone a volume per leg,
@@ -326,9 +349,9 @@ func bearerToken(r *http.Request) string {
 }
 
 type createWorkflowRequest struct {
-	Name        string              `json:"name"`
-	Description string              `json:"description"`
-	Project     string              `json:"project,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Project     string `json:"project,omitempty"`
 	// TimeoutSecs caps a single run's wall-clock duration (default 1800 / 30 min when
 	// omitted). Prevents a hung run from lingering for hours.
 	TimeoutSecs int64               `json:"timeout_secs,omitempty"`

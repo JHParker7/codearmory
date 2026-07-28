@@ -127,12 +127,15 @@ type Step struct {
 	// literal ${...} through to the action for a step that legitimately passes one
 	// (e.g. a script that writes a shell variable of the same shape). Carried on the
 	// per-occurrence WorkflowStepRef, not stored on the step row — hence gorm:"-".
-	AllowUnresolved bool      `json:"allow_unresolved,omitempty" gorm:"-"`
-	CreatedBy       string    `json:"created_by"   gorm:"column:created_by"`
-	OrgID           string    `json:"org_id"       gorm:"column:org_id;default:''"`
-	Active          bool      `json:"active"       gorm:"column:active;default:true"`
-	CreatedAt       time.Time `json:"created_at"   gorm:"column:created_at"`
-	UpdatedAt       time.Time `json:"updated_at"   gorm:"column:updated_at"`
+	AllowUnresolved bool `json:"allow_unresolved,omitempty" gorm:"-"`
+	// Permissions are gatekeeper grants this step declares it needs. Carried on the
+	// per-occurrence WorkflowStepRef, hence gorm:"-".
+	Permissions []PermissionSpec `json:"permissions,omitempty" gorm:"-"`
+	CreatedBy   string           `json:"created_by"   gorm:"column:created_by"`
+	OrgID       string           `json:"org_id"       gorm:"column:org_id;default:''"`
+	Active      bool             `json:"active"       gorm:"column:active;default:true"`
+	CreatedAt   time.Time        `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt   time.Time        `json:"updated_at"   gorm:"column:updated_at"`
 }
 
 func (Step) TableName() string { return "steps" }
@@ -284,8 +287,16 @@ type WorkflowStepRef struct {
 	// instead of failing on it. Off by default: an unresolved reference is nearly
 	// always a wiring mistake, and letting it through is what made those mistakes
 	// surface as a confusing error from whatever service the step called.
-	AllowUnresolved bool          `json:"allow_unresolved,omitempty"`
-	Matrix          *MatrixConfig `json:"matrix,omitempty"`
+	AllowUnresolved bool `json:"allow_unresolved,omitempty"`
+	// Permissions the run role must hold for this step, for actions whose grant
+	// cannot be inferred from the catalog — in practice the `http` escape hatch,
+	// which has no catalog entry and so contributes nothing on its own.
+	//
+	// Not an escalation vector: gatekeeper only mints a workflow-role permission the
+	// pipeline's OWNER already holds (see handleCreateWorkflowRole), and scopes the
+	// resource to that owner. Declaring more than you have silently grants nothing.
+	Permissions []PermissionSpec `json:"permissions,omitempty"`
+	Matrix      *MatrixConfig    `json:"matrix,omitempty"`
 	// Scatter fans this step out over the regex-matched paths of a shared workspace,
 	// each leg on its own clone, gathering owned outputs back afterward. Mutually
 	// exclusive with Matrix — see ScatterConfig.
