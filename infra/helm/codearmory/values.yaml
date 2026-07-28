@@ -940,6 +940,24 @@ builder:
     # Name prefix for created workloads (Deployment/Service codearmory-<svc>). Empty
     # = the chart fullname, so they slot into the existing Service routing.
     releasePrefix: ""
+    # Registry/tag builder composes images from for the NON-CORE services it deploys,
+    # when the service itself pins neither. Empty = the chart-wide imageRegistry /
+    # imageTag, which is the historical behaviour.
+    #
+    # Set these when builder-deployed services publish somewhere other than this
+    # chart's own images. That is the common case rather than the exception: the
+    # chart-wide registry names the core images the release ships, while a spun-off
+    # service, a fork, or an image built straight onto the node lives wherever its own
+    # pipeline pushes. When the two diverge, every reconcile that falls through to the
+    # composed default produces an unpullable reference — and because a reconcile
+    # applies builder's desired state to a RUNNING workload, that takes the service
+    # down rather than merely failing to start it.
+    #
+    # Per-service registry/tag/image (builder's API, or the codearmory_org_service
+    # Terraform resource) override these and are what a CD pipeline should set; these
+    # are the floor for anything that does not.
+    imageRegistry: ""
+    imageTag: ""
     # Replica floor for every builder-managed (non-core) workload. Builder always sets
     # a surge-first rollout strategy (maxUnavailable:0, maxSurge:1); at ≥2 it also
     # creates a PodDisruptionBudget (minAvailable = replicas-1) so node drains can't

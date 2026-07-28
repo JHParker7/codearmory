@@ -106,10 +106,18 @@ spec:
               value: {{ .Values.builder.reconcile.targetNamespace | default .Release.Namespace | quote }}
             - name: BUILDER_RELEASE_PREFIX
               value: {{ .Values.builder.reconcile.releasePrefix | default $full | quote }}
+            {{- /* Registry/tag for builder-deployed (non-core) workloads. These default
+                   to the chart-wide values but are deliberately separate knobs: the
+                   chart-wide pair names THIS chart's own core images, while these name
+                   images builder pulls for services it deploys. Nothing requires the two
+                   to live in the same registry — a spun-off or locally-built service
+                   commonly publishes elsewhere — and when they diverge, composing a
+                   non-core image against the core registry yields a reference that does
+                   not exist, which a reconcile then applies to a running workload. */}}
             - name: BUILDER_IMAGE_REGISTRY
-              value: {{ .Values.imageRegistry | quote }}
+              value: {{ .Values.builder.reconcile.imageRegistry | default .Values.imageRegistry | quote }}
             - name: BUILDER_IMAGE_TAG
-              value: {{ .Values.imageTag | quote }}
+              value: {{ .Values.builder.reconcile.imageTag | default .Values.imageTag | quote }}
             {{- if .Values.imagePullSecrets }}
             # Attached to every builder-deployed (non-core) workload, for private registries.
             - name: BUILDER_IMAGE_PULL_SECRETS

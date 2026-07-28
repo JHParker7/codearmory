@@ -274,7 +274,17 @@ func paramTypeFor(name string) string {
 	switch name {
 	case "id":
 		return "uuid"
-	case "username", "workspace", "org", "team":
+	// "ns" is the owner namespace in owner-first per-record routes
+	// (/tickets/{ns}/{id} → "{ns}/tickets/tickets/{id}"). It is interpolated straight
+	// into the resource string the RBAC check is evaluated against, so it is validated
+	// for the same reason "id" is normalised: an unconstrained value lets two spellings
+	// of the same namespace produce two different resource strings, and the permission
+	// cache is keyed on that string.
+	//
+	// Deliberately not "namespace", which container routes use for a docker namespace —
+	// those legitimately contain characters the slug pattern rejects, and tightening
+	// them here would start 400ing pulls.
+	case "ns", "username", "workspace", "org", "team":
 		return "slug"
 	}
 	return ""

@@ -68,6 +68,14 @@ steps:
     timeout: 900
     env:
       HOOK_REF: ${inputs.HOOK_REF}
+      # Bare ${HOOK_BEFORE}, deliberately NOT ${inputs.HOOK_BEFORE}. A bare reference is
+      # indistinguishable from shell syntax, so the engine resolves it when the webhook
+      # supplied it and passes the literal through untouched when it did not, instead of
+      # failing the step. That decoupling is the point: git_factory only started sending
+      # this field recently, and this pipeline must keep working against a git_factory
+      # that has not been redeployed yet. The script below treats anything that is not a
+      # hex SHA as absent, which covers the unresolved literal.
+      HOOK_BEFORE: ${HOOK_BEFORE}
     secret_refs:
       # Clone the monorepo from git_factory (admin/codearmory), brokered by git_connector,
       # instead of forgejo — git_factory is now the git host. (The image registry below is
@@ -99,8 +107,8 @@ steps:
       du -sh /gitcache/repo.git
       # 2. Check out from the LOCAL mirror rather than over the network: no pack
       # negotiation and no delta recompression, git just reads objects off the volume.
-      # depth 2 keeps HEAD~1 present, which is exactly what discover's HEAD~1..HEAD diff
-      # needs — same working tree as the old forge/git-clone step produced.
+      # depth 2 keeps HEAD~1 present, which is discover's FALLBACK diff base — see the
+      # base commit step below for the base it actually prefers.
       cd /workspace
       git init -q .
       git remote add origin file:///gitcache/repo.git 2>/dev/null \
@@ -108,6 +116,38 @@ steps:
       git fetch -q --depth 2 origin "+refs/heads/${HOOK_REF}:refs/remotes/origin/${HOOK_REF}"
       git checkout -q -B "${HOOK_REF}" "refs/remotes/origin/${HOOK_REF}"
       git --no-pager log --oneline -1
+      # 3. Make the push's BASE commit resolvable, so discover can diff the whole push
+      # instead of just its last commit. HEAD~1 answers "what did the final commit
+      # change", which for a push of n commits silently hides everything the other n-1
+      # touched — services then never rebuild and the run still reports success.
+      #
+      # Only the base commit's own tree is needed (git diff A B compares two trees and
+      # does not walk the history between them), so this is a depth-1 fetch of one
+      # commit out of the local mirror, not a deepening of the clone. Fetched into a ref
+      # rather than left dangling at FETCH_HEAD so nothing can reclaim it before
+      # discover runs in a later container.
+      #
+      # allowAnySHA1InWant lets the mirror serve a raw SHA that no ref points at, which
+      # is exactly the case here: the base commit is the ref's PREVIOUS tip. The mirror
+      # is our own cache volume, not a published remote.
+      BEFORE=""
+      case "${HOOK_BEFORE:-}" in
+        "" | *[!0-9a-fA-F]*) ;;                      # absent, or the unresolved literal
+        ???????*)            BEFORE="${HOOK_BEFORE}" ;;   # hex and >= 7 chars
+      esac
+      if [ -n "$BEFORE" ]; then
+        git -C /gitcache/repo.git config uploadpack.allowAnySHA1InWant true
+        if git fetch -q --depth 1 origin "+${BEFORE}:refs/ci/before" 2>/dev/null; then
+          echo "=== push base: ${BEFORE} (diffing the whole push) ==="
+        else
+          # The base is genuinely unreachable — a force-push that discarded it, or a
+          # mirror reaped and recloned since. Falling back to HEAD~1 under-builds, so
+          # say so loudly rather than letting it look like a normal run.
+          echo "=== WARNING: push base ${BEFORE} not found in the mirror; discover falls back to HEAD~1 ==="
+        fi
+      else
+        echo '=== no push base supplied; discover falls back to HEAD~1 ==='
+      fi
 - action: forge/run
   name: warm-cache
   timeout: 1800
@@ -188,14 +228,32 @@ steps:
       set -eu
       git config --global --add safe.directory /workspace
       cd /workspace
-      # Files changed by this push (HEAD~1..HEAD). HAVE_BASE distinguishes the two
-      # empty-CHANGED cases that must behave OPPOSITELY: no parent (first commit or a
-      # shallow clone without one) means we cannot tell what changed, so rebuild
-      # everything; a real parent with an empty diff (an empty "trigger" commit that
-      # touched no files) means genuinely nothing changed, so build nothing.
-      if git rev-parse HEAD~1 >/dev/null 2>&1; then
+      # Files changed by this PUSH. The base is refs/ci/before when checkout managed to
+      # resolve it (the SHA the ref pointed at before the push), else HEAD~1.
+      #
+      # The distinction is the whole point: HEAD~1 is the base of the last COMMIT, so a
+      # push of n commits was read as a push of one and everything the other n-1 touched
+      # was skipped — while the run still went green. Preferring the push base is what
+      # makes "changed" mean changed-by-this-push.
+      #
+      # HAVE_BASE still distinguishes the two empty-CHANGED cases that must behave
+      # OPPOSITELY: no base at all (first commit, or a shallow clone without a parent)
+      # means we cannot tell what changed, so rebuild everything; a real base with an
+      # empty diff (an empty "trigger" commit that touched no files) means genuinely
+      # nothing changed, so build nothing.
+      BASE=""
+      if git rev-parse --verify -q refs/ci/before >/dev/null 2>&1; then
+        BASE=refs/ci/before
+        echo "=== diff base: push base $(git rev-parse --short refs/ci/before) ==="
+      elif git rev-parse --verify -q HEAD~1 >/dev/null 2>&1; then
+        BASE=HEAD~1
+        echo '=== diff base: HEAD~1 (last commit only — push base unavailable) ==='
+      else
+        echo '=== diff base: none — rebuilding everything ==='
+      fi
+      if [ -n "$BASE" ]; then
         HAVE_BASE=1
-        CHANGED=$(git diff --name-only HEAD~1 HEAD)
+        CHANGED=$(git diff --name-only "$BASE" HEAD)
       else
         HAVE_BASE=0
         CHANGED=""

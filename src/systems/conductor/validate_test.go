@@ -8,11 +8,11 @@ import (
 )
 
 // paramTypeFor classifies a path param by name: {id} is a UUID, and the slug-typed
-// names (username/workspace/org/team — the blueprints state route) get the slug regex.
-// Any other name is unvalidated (e.g. forge's runner-class {name}), so conductor
-// forwards it and the backend decides.
+// names (username/workspace/org/team — the blueprints state route; ns — owner-first
+// per-record routes) get the slug regex. Any other name is unvalidated (e.g. forge's
+// runner-class {name}), so conductor forwards it and the backend decides.
 func TestParamTypeFor(t *testing.T) {
-	for _, name := range []string{"username", "workspace", "org", "team"} {
+	for _, name := range []string{"ns", "username", "workspace", "org", "team"} {
 		if got := paramTypeFor(name); got != "slug" {
 			t.Errorf("paramTypeFor(%q) = %q, want slug", name, got)
 		}
@@ -20,10 +20,33 @@ func TestParamTypeFor(t *testing.T) {
 	if got := paramTypeFor("id"); got != "uuid" {
 		t.Errorf("paramTypeFor(id) = %q, want uuid", got)
 	}
-	for _, name := range []string{"name", "owner", "index", ""} {
+	// "namespace" must stay unvalidated: the container registry routes use it for a
+	// docker namespace, which legitimately contains characters the slug pattern
+	// rejects. Constraining it here would start 400ing pulls.
+	for _, name := range []string{"name", "owner", "index", "namespace", ""} {
 		if got := paramTypeFor(name); got != "" {
 			t.Errorf("paramTypeFor(%q) = %q, want unvalidated", name, got)
 		}
+	}
+}
+
+// Owner-first per-record resources put the OWNER's namespace at the front of the
+// resource string ("{ns}/tickets/tickets/{id}"), which is what makes gatekeeper
+// evaluate the check against the record's owner instead of silently re-scoping it to
+// whoever asked. That only works if conductor substitutes {ns} as readily as {id} —
+// otherwise the literal "{ns}" reaches gatekeeper and matches no grant.
+func TestResolveResourceOwnerFirst(t *testing.T) {
+	got := resolveResource("{ns}/tickets/tickets/{id}",
+		[]string{"ns", "id"}, []string{"alice", "abc-123"})
+	if want := "alice/tickets/tickets/abc-123"; got != want {
+		t.Errorf("resolveResource = %q, want %q", got, want)
+	}
+
+	// The legacy caller-scoped form has to keep resolving unchanged — both shapes are
+	// served during the migration.
+	got = resolveResource("tickets/tickets/{id}", []string{"id"}, []string{"abc-123"})
+	if want := "tickets/tickets/abc-123"; got != want {
+		t.Errorf("legacy resolveResource = %q, want %q", got, want)
 	}
 }
 

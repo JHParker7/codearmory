@@ -57,6 +57,22 @@ func startReconciler(ctx context.Context) {
 	prefix := envOrDefault("BUILDER_RELEASE_PREFIX", "codearmory")
 	imgRegistry := envOrDefault("BUILDER_IMAGE_REGISTRY", "ghcr.io/code-armory-app")
 	imgTag := envOrDefault("BUILDER_IMAGE_TAG", "latest")
+	// Say so when the built-in registry default is in use. Every service this
+	// reconciler deploys without its own registry gets images composed against this
+	// value, so if it does not match where those images actually publish, the composed
+	// reference does not exist — and because a reconcile applies desired state to a
+	// RUNNING workload, that takes a healthy service down rather than merely failing to
+	// start a new one. That is not hypothetical: it is how git_factory ended up in
+	// ErrImagePull against ghcr.io/code-armory-app/git-factory:dev.
+	//
+	// The failure surfaces far from its cause — a pod dying minutes or hours later, on
+	// an unattended 30s loop — so the fallback is worth one line at startup where it is
+	// still attributable. Set builder.reconcile.imageRegistry (Helm) or a per-service
+	// registry to silence it.
+	if os.Getenv("BUILDER_IMAGE_REGISTRY") == "" {
+		slog.WarnContext(ctx, "reconciler: BUILDER_IMAGE_REGISTRY unset — composing images against the built-in default; services whose images publish elsewhere will not pull",
+			"default_registry", imgRegistry, "default_tag", imgTag)
+	}
 
 	backend, err := newK8sBackend(namespace, prefix, imgRegistry, imgTag)
 	if err != nil {

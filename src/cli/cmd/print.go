@@ -275,7 +275,7 @@ func printRecord(obj map[string]any) {
 }
 
 // tableColumns picks the columns to show in list output.
-// Default: name/label fields and key status/type fields.
+// Default: name/label fields, key status/type fields, and expires_at.
 // Verbose: also includes primary IDs (where no companion name exists), created_at, active.
 // Resolvable foreign key fields (created_by, etc.) are always included.
 func tableColumns(row map[string]any) []string {
@@ -287,7 +287,13 @@ func tableColumns(row map[string]any) []string {
 		}
 		switch {
 		case strings.HasSuffix(k, "_at"):
-			if flagVerbose && k == "created_at" {
+			// expires_at is shown by default, unlike every other timestamp. On the
+			// records that carry it — scoped tokens, invites, brokered git
+			// credentials — it is not metadata about the row, it is the row's
+			// status: it decides whether the thing still works. Hiding it behind
+			// -v meant `auth token list` could show a token that had already
+			// stopped authenticating, with nothing on screen to say so.
+			if k == "expires_at" || (flagVerbose && k == "created_at") {
 				dates = append(dates, k)
 			}
 
