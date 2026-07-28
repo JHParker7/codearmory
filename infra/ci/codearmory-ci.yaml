@@ -367,6 +367,31 @@ steps:
     # A commit that changed no buildable service yields an empty IMAGES; redeploy
     # nothing rather than failing the run (mirrors the build maps' allow_empty).
     allow_empty: true
+- action: forge/run
+  name: prune-images
+  timeout: 600
+  with:
+    image: golang:1.25
+    runner_class: standard
+    timeout: 600
+    secret_refs:
+      # The same docker config.json kaniko pushes with — its credentials also
+      # authenticate the Forgejo packages API, so pruning needs no second secret.
+      REGISTRY_AUTH: secret:forgejo-registry-auth
+    volumes:
+    - workflow_id: ${run_id}
+      name: workspace
+      mount_path: /workspace
+    # Runs AFTER redeploy so a tag can never be reclaimed before the rollout that
+    # uses it, and the SHA just deployed is protected explicitly on top of that.
+    # Housekeeping must not turn a green pipeline red: the tool exits 0 on API
+    # failure unless -strict.
+    run: |
+      set -eu
+      cd /workspace
+      go run ./infra/ci -apply -keep 10 -keep-tags "$PROTECTED_TAGS"
+    env:
+      PROTECTED_TAGS: ${steps.commit.output.SHA}
 - action: outpost-gateway/enqueueCommand
   name: integration-tests
   timeout: 900
@@ -466,6 +491,11 @@ routes:
   to: redeploy-portal
 - from: redeploy
   to: integration-tests
+# Pruning hangs off redeploy in parallel with the integration tests rather than in
+# front of them: it must not delay the run's verdict, but the run still waits for it
+# (the scheduler joins every in-flight node before finishing).
+- from: redeploy
+  to: prune-images
 - from: integration-tests
   to: close-ticket
 - from: integration-tests
