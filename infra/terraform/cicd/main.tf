@@ -96,13 +96,14 @@ resource "codearmory_pipeline" "git_factory" {
 
 resource "codearmory_hook_rule" "git_factory_push" {
   name = "git_factory-cd-on-dev"
-  # git_factory emits every repo's push to hooks' /internal/events with a SHARED
-  # source constant ("codearmory_git_factory") and event "git.push"; the ref is the
-  # short branch name. Repos are NOT distinguishable by source — only by ref_filter —
-  # so this fires on any git_factory repo pushed to `dev`.
+  # git_factory emits EVERY repo's push under one shared source constant
+  # ("codearmory_git_factory"), so source alone cannot tell the repos apart. repo_filter
+  # is what scopes the rule to this one — without it a push to the monorepo would also
+  # fire this pipeline, and vice versa.
   source      = "codearmory_git_factory"
   events      = ["git.push"]
   ref_filter  = "dev"
+  repo_filter = "admin/codearmory-git-factory"
   workflow_id = codearmory_pipeline.git_factory.id
   secret      = var.webhook_secret # unused for internal events (HMAC-verified), required by the API
 
@@ -123,13 +124,12 @@ resource "codearmory_pipeline" "codearmory" {
 
 resource "codearmory_hook_rule" "codearmory_push" {
   name = "codearmory-ci-on-dev"
-  # Same shared git_factory source; distinguished from the git_factory-cd rule only by
-  # the branch. NOTE: the pipeline's checkout clones the Gitea copy
-  # (192.168.53.171:3000/jp01/codearmory) — if the monorepo's real pushes land there
-  # rather than on git_factory, wire the Gitea webhook path instead of this rule.
+  # Same shared git_factory source as the rule above; the two are told apart by
+  # repo_filter, not by branch (both watch `dev`).
   source      = "codearmory_git_factory"
   events      = ["git.push"]
   ref_filter  = "dev"
+  repo_filter = "admin/codearmory"
   workflow_id = codearmory_pipeline.codearmory.id
   secret      = var.webhook_secret
 

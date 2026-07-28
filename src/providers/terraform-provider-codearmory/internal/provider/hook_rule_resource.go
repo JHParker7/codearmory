@@ -35,6 +35,7 @@ type hookRuleModel struct {
 	Source       types.String `tfsdk:"source"`
 	Events       types.List   `tfsdk:"events"`
 	RefFilter    types.String `tfsdk:"ref_filter"`
+	RepoFilter   types.String `tfsdk:"repo_filter"`
 	WorkflowID   types.String `tfsdk:"workflow_id"`
 	Secret       types.String `tfsdk:"secret"`
 	InputMapping types.Map    `tfsdk:"input_mapping"`
@@ -51,6 +52,7 @@ type hookRuleRequest struct {
 	Source       string            `json:"source"`
 	Events       []string          `json:"events"`
 	RefFilter    string            `json:"ref_filter"`
+	RepoFilter   string            `json:"repo_filter"`
 	WorkflowID   string            `json:"workflow_id"`
 	Secret       *string           `json:"secret,omitempty"`
 	InputMapping map[string]string `json:"input_mapping"`
@@ -63,6 +65,7 @@ type hookRuleResponse struct {
 	Source       string            `json:"source"`
 	Events       []string          `json:"events"`
 	RefFilter    string            `json:"ref_filter"`
+	RepoFilter   string            `json:"repo_filter"`
 	WorkflowID   string            `json:"workflow_id"`
 	InputMapping map[string]string `json:"input_mapping"`
 	CreatedBy    string            `json:"created_by"`
@@ -102,6 +105,12 @@ func (r *hookRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Computed:            true,
 				Default:             stringdefault.StaticString(""),
 				MarkdownDescription: "Optional git ref filter (e.g. `refs/heads/main` or `refs/heads/*`). Empty matches all.",
+			},
+			"repo_filter": schema.StringAttribute{
+				Optional:            true,
+				Computed:            true,
+				Default:             stringdefault.StaticString(""),
+				MarkdownDescription: "Optional repository filter, matched against the payload's `repo` path with the same glob semantics as `ref_filter` (e.g. `admin/codearmory`). Empty matches EVERY repo, which is rarely what you want for a source that hosts many: a git backend emits every repo's push under one shared source, so without this a push to one repo fires every pipeline subscribed to that backend.",
 			},
 			"workflow_id": schema.StringAttribute{
 				Required:            true,
@@ -166,6 +175,7 @@ func (m hookRuleModel) toRequest(ctx context.Context) (hookRuleRequest, diag.Dia
 		Source:       m.Source.ValueString(),
 		Events:       events,
 		RefFilter:    m.RefFilter.ValueString(),
+		RepoFilter:   m.RepoFilter.ValueString(),
 		WorkflowID:   m.WorkflowID.ValueString(),
 		Secret:       &secret,
 		InputMapping: mapping,
@@ -185,6 +195,7 @@ func (m *hookRuleModel) fromResponse(ctx context.Context, out hookRuleResponse) 
 	m.Events = events
 
 	m.RefFilter = types.StringValue(out.RefFilter)
+	m.RepoFilter = types.StringValue(out.RepoFilter)
 	m.WorkflowID = types.StringValue(out.WorkflowID)
 
 	mapping := out.InputMapping
