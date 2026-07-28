@@ -231,7 +231,28 @@ func maxToleratedFailures(d MapDef, total int) int {
 
 // iterVolume is an iteration's clone volume name — scoped to the run so run-end
 // teardown reaps it, and deterministic so the body can mount it by name.
-func iterVolume(base string, i int) string { return fmt.Sprintf("%s-m%d", base, i) }
+//
+// regionKey disambiguates the REGION. Without it the name was "<base>-m<i>", keyed
+// only on the iteration index within one region, so two regions declaring the same
+// base volume — which is the normal thing to do, since both usually clone "workspace"
+// — collided on their first iterations: per-service leg 0 and per-extra leg 0 were
+// both "workspace-m0". They do not merely share the volume, they destroy it: each
+// iteration DELETES its clone when it ends (see the defer in runIteration), so
+// whichever region finished first pulled the volume out from under a leg of the other
+// still using it. That surfaced as "volume workspace-m0 not found ... (create it
+// first)" from a build step whose own volume had been correct moments earlier.
+//
+// The collision needs both regions non-empty to appear at all, so a pipeline can run
+// green for a long time and then break on the first push that happens to change a
+// service AND a non-service module.
+//
+// firstIndex (the region's first step's workflow-level index) is the key: unique per
+// region because a step belongs to at most one region, and small, which matters —
+// forge caps a volume name at 40 chars as a DNS-1123 label, so the region's author-
+// chosen id is not safe to interpolate here.
+func iterVolume(base string, regionKey, i int) string {
+	return fmt.Sprintf("%s-r%d-m%d", base, regionKey, i)
+}
 
 // subGraph builds the graph of one region: its own nodes, and only the routes whose
 // BOTH ends are inside it. Routes crossing the boundary are the region's inbound and
@@ -401,7 +422,7 @@ func (p *WorkerPool) runIteration(
 		if st := p.prepareIterVolume(ctx, store, runID, region, i, val, depth); st != StatusCompleted {
 			return nil, st
 		}
-		defer p.deleteRunVolumes(context.Background(), store, runID, iterVolume(region.def.Volume, i))
+		defer p.deleteRunVolumes(context.Background(), store, runID, iterVolume(region.def.Volume, region.firstIndex, i))
 	}
 
 	// The iteration runs on its own state: its nodes start pending, and its visible
@@ -449,7 +470,7 @@ func iterVolumeMount(region *mapRegion, runID string, i int) map[string]any {
 	if mount == "" {
 		mount = defaultScatterMountPath
 	}
-	return volMount(runID, iterVolume(region.def.Volume, i), mount, true, false)
+	return volMount(runID, iterVolume(region.def.Volume, region.firstIndex, i), mount, true, false)
 }
 
 // prepareIterVolume provisions and fills one iteration's clone, reusing scatter's
@@ -465,7 +486,7 @@ func (p *WorkerPool) prepareIterVolume(ctx context.Context, store *tokenStore, r
 		SizeMB:    region.def.SizeMB,
 		Medium:    region.def.Medium,
 	}
-	shard := iterVolume(region.def.Volume, i)
+	shard := iterVolume(region.def.Volume, region.firstIndex, i)
 	for _, step := range []Step{scatterCreateShardStep(cfg, runID, shard), scatterCloneStep(cfg, runID, shard)} {
 		if _, err := p.executeStep(ctx, store, step, substContext{runID: runID, depth: depth}); err != nil {
 			slog.WarnContext(ctx, "worker: map iteration volume prepare failed", "run_id", runID, "map", region.def.ID, "iter", i, "error", err)
@@ -492,7 +513,7 @@ func (p *WorkerPool) iterFail(runID string, region *mapRegion, val, msg string) 
 // gatherIter unions an iteration's owned outputs back into the base workspace.
 func (p *WorkerPool) gatherIter(ctx context.Context, store *tokenStore, runID string, region *mapRegion, i int, mapVars map[string]string, depth int) string {
 	cfg := &ScatterConfig{Volume: region.def.Volume, MountPath: region.def.MountPath, Outputs: region.def.Outputs}
-	shard := iterVolume(region.def.Volume, i)
+	shard := iterVolume(region.def.Volume, region.firstIndex, i)
 	sc := substContext{runID: runID, mapVars: mapVars, depth: depth}
 	paths := make([]string, 0, len(cfg.Outputs))
 	for _, o := range cfg.Outputs {

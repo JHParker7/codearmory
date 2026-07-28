@@ -285,10 +285,14 @@ func TestRegionsOf_FirstIndexIsWorkflowScoped(t *testing.T) {
 // release its own clone the moment it finishes — so the concurrent volume footprint
 // tracks max_concurrent rather than the value count.
 func TestIterVolume_IsPerIterationAndDeterministic(t *testing.T) {
-	if a, b := iterVolume("workspace", 0), iterVolume("workspace", 1); a == b {
+	// The leading argument after the base is the region key (a region's first step
+	// index), held constant here so this stays a statement about iterations alone —
+	// TestIterVolumeDistinctPerRegion covers the across-region case.
+	const region = 0
+	if a, b := iterVolume("workspace", region, 0), iterVolume("workspace", region, 1); a == b {
 		t.Fatal("iterations must not share a clone name")
 	}
-	if iterVolume("workspace", 3) != iterVolume("workspace", 3) {
+	if iterVolume("workspace", region, 3) != iterVolume("workspace", region, 3) {
 		t.Fatal("clone name must be stable for a given iteration")
 	}
 }
