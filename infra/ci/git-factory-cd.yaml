@@ -23,7 +23,10 @@ steps:
     image: golang:1.25
     run: 'set -eu; git clone --branch dev --depth 1 $GIT_CLONE_URL .'
     secret_refs:
-      GIT_CLONE_URL: git:http://ca-codearmory-git-factory:9002/admin/codearmory-git-factory.git
+      # External URL via nginx, for the same reason as codearmory-ci: a sandbox under the
+      # kata egress policy can reach public IPs but no private range, so the in-cluster
+      # ClusterIP is unreachable from a runner. Needs 192.168.53.171:443 allowlisted.
+      GIT_CLONE_URL: git:https://exp.codearmory.app/git/admin/codearmory-git-factory.git
     volumes:
     - workflow_id: ${run_id}
       name: workspace

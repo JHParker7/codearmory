@@ -13,9 +13,18 @@ variable "git_factory_token" {
 }
 
 resource "codearmory_git_backend" "git_factory" {
-  name     = "git-factory"
-  type     = "generic"
-  base_url = "http://ca-codearmory-git-factory:9002"
+  name = "git-factory"
+  type = "generic"
+  # The ingress URL, not the in-cluster service address. git_connector resolves a
+  # brokered clone URL against this base and hands it to a forge sandbox, and a sandbox
+  # under the kata egress policy can reach public IPs but no private range — so a
+  # ClusterIP base produces a credential for an address the runner can never connect
+  # to. The failure is a silent 134s connect timeout, not an auth error, which reads
+  # like a broken credential rather than a network policy.
+  #
+  # /git is the ingress path prefix for git_factory on this host; the rewrite strips it
+  # before the service sees the request.
+  base_url = "https://exp.codearmory.app/git"
   auth = {
     mode     = "basic"
     username = "token"

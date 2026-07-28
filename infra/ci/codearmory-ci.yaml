@@ -80,7 +80,17 @@ steps:
       # Clone the monorepo from git_factory (admin/codearmory), brokered by git_connector,
       # instead of forgejo — git_factory is now the git host. (The image registry below is
       # separate: git_factory is not a container registry, so pushes still go to forgejo.)
-      GIT_CLONE_URL: git:http://ca-codearmory-git-factory:9002/admin/codearmory.git
+      # The EXTERNAL URL, through nginx, not the in-cluster service address. A sandbox
+      # runs under the kata egress policy, which permits public IPs and denies every
+      # private range — so ca-codearmory-git-factory:9002 (a 10.x ClusterIP) is not
+      # reachable from a runner at all, and a clone against it hangs until it times out
+      # rather than failing fast. The ingress host is what the runner can actually
+      # reach, and is also the Host header nginx routes on.
+      #
+      # Requires 192.168.53.171:443 in forge.kata.egress.allowHosts — exp.codearmory.app
+      # resolves there, and the allowlist is per host AND port, so the existing :3000
+      # entry for the image registry does not cover it.
+      GIT_CLONE_URL: git:https://exp.codearmory.app/git/admin/codearmory.git
     volumes:
     - workflow_id: codearmory-ci-gitcache
       name: gitcache
