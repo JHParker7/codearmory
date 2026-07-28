@@ -75,7 +75,7 @@ type AsyncConfig struct {
 	// execution) when an async action does not declare it, so existing manifests get
 	// the behaviour with no change.
 	QueuedStates []string `json:"queued_states,omitempty"`
-	OutputField      string   `json:"output_field"`
+	OutputField  string   `json:"output_field"`
 	// OutputMapField names a response field holding an object (e.g. forge's captured
 	// output_env map). When set, it is the ONLY source of the SUCCESS step output:
 	// that object — JSON-encoded — becomes the output (so a later step can reference a
@@ -127,12 +127,12 @@ type Step struct {
 	// literal ${...} through to the action for a step that legitimately passes one
 	// (e.g. a script that writes a shell variable of the same shape). Carried on the
 	// per-occurrence WorkflowStepRef, not stored on the step row — hence gorm:"-".
-	AllowUnresolved bool `json:"allow_unresolved,omitempty" gorm:"-"`
-	CreatedBy   string         `json:"created_by"   gorm:"column:created_by"`
-	OrgID       string         `json:"org_id"       gorm:"column:org_id;default:''"`
-	Active      bool           `json:"active"       gorm:"column:active;default:true"`
-	CreatedAt   time.Time      `json:"created_at"   gorm:"column:created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"   gorm:"column:updated_at"`
+	AllowUnresolved bool      `json:"allow_unresolved,omitempty" gorm:"-"`
+	CreatedBy       string    `json:"created_by"   gorm:"column:created_by"`
+	OrgID           string    `json:"org_id"       gorm:"column:org_id;default:''"`
+	Active          bool      `json:"active"       gorm:"column:active;default:true"`
+	CreatedAt       time.Time `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt       time.Time `json:"updated_at"   gorm:"column:updated_at"`
 }
 
 func (Step) TableName() string { return "steps" }
@@ -414,16 +414,16 @@ type Workflow struct {
 	// derivation logic changes (constant bumped) a workflow with an older version
 	// re-provisions on its next trigger — see handleTriggerRun. Default 0 means
 	// "pre-versioning"; AutoMigrate backfills existing rows to 0.
-	RolePermsVersion int       `json:"-"            gorm:"column:role_perms_version;default:0"`
+	RolePermsVersion int `json:"-"            gorm:"column:role_perms_version;default:0"`
 	// TimeoutSecs caps the wall-clock duration of a single run: a run still in
 	// 'running' past this is failed, both by the run's own timeout context and by the
 	// periodic sweep that catches orphaned runs (a worker that died mid-run). Defaults
 	// to 1800 (30 min); AutoMigrate backfills existing rows to it, and 0 is read as the
 	// default at run time so a row that predates the column is still bounded.
-	TimeoutSecs      int64     `json:"timeout_secs,omitempty" gorm:"column:run_timeout_secs;default:1800"`
-	Active           bool      `json:"active"       gorm:"column:active;default:true"`
-	CreatedAt        time.Time `json:"created_at"   gorm:"column:created_at"`
-	UpdatedAt        time.Time `json:"updated_at"   gorm:"column:updated_at"`
+	TimeoutSecs int64     `json:"timeout_secs,omitempty" gorm:"column:run_timeout_secs;default:1800"`
+	Active      bool      `json:"active"       gorm:"column:active;default:true"`
+	CreatedAt   time.Time `json:"created_at"   gorm:"column:created_at"`
+	UpdatedAt   time.Time `json:"updated_at"   gorm:"column:updated_at"`
 	// Inputs/Outputs declare the pipeline's interface — JSON columns, so AutoMigrate
 	// adds them with no manual migration and existing rows read back as empty.
 	Inputs  []WorkflowInputDef  `json:"inputs,omitempty"  gorm:"column:inputs;serializer:json"`

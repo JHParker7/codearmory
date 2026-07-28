@@ -288,6 +288,9 @@ func (p *WorkerPool) runMapRegion(
 	}
 
 	sub := g.subGraph(region)
+	// Built once for the whole region, not per iteration: it is the same set for every
+	// value, and a wide fan-out would otherwise rebuild an identical map N times.
+	known := g.stepNames()
 	type iterResult struct {
 		outputs map[string]string
 		status  string
@@ -324,7 +327,7 @@ func (p *WorkerPool) runMapRegion(
 				return
 			}
 			results[i] = iterResult{}
-			outs, st := p.runIteration(mapCtx, store, runID, workflowID, sub, region, i, val, inputs, visible, g.stepNames(), depth, legSem)
+			outs, st := p.runIteration(mapCtx, store, runID, workflowID, sub, region, i, val, inputs, visible, known, depth, legSem)
 			results[i] = iterResult{outputs: outs, status: st}
 			if st == StatusFailed {
 				mu.Lock()
