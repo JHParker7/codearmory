@@ -175,6 +175,27 @@ func main() {
 	if err := connect().Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ticket_boards_user_name ON ticket_boards (created_by, name) WHERE active AND org_id = ''`).Error; err != nil {
 		slog.Warn("failed to create ticket_boards user unique index (existing duplicate names?)", "error", err)
 	}
+	// Read indexes for the tickets table itself. ticket_boards and ticket_field_defs
+	// were indexed above, but the table every list query actually scans was not — so
+	// listing, the board tallies and the assignee view were all sequential scans over
+	// every ticket ever created.
+	//
+	// Partial (WHERE active) because no read path ever wants soft-deleted rows, which
+	// keeps the indexes off the dead weight. Shaped to match the real predicates:
+	// the list is "mine or my org's, newest first" and the tallies group by board.
+	// Same raw-SQL/IF NOT EXISTS style as the indexes above and forge's, so this is
+	// idempotent on every boot.
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS tickets_creator ON tickets (created_by, created_at DESC) WHERE active`,
+		`CREATE INDEX IF NOT EXISTS tickets_org ON tickets (org_id, created_at DESC) WHERE active AND org_id <> ''`,
+		`CREATE INDEX IF NOT EXISTS tickets_board ON tickets (board_id) WHERE active AND board_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS tickets_assignee ON tickets (assignee_id) WHERE active AND assignee_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS tickets_parent ON tickets (parent_id) WHERE active AND parent_id IS NOT NULL`,
+	} {
+		if err := connect().Exec(stmt).Error; err != nil {
+			slog.Warn("failed to create tickets index", "error", err, "stmt", stmt)
+		}
+	}
 	if err := seedDefaultFieldDefs(ctx); err != nil {
 		slog.Error("failed to seed field defs", "error", err)
 		os.Exit(1)
