@@ -1,0 +1,25 @@
+# CI fast-path image — built by forge/build-image (kaniko) in the codearmory-ci pipeline.
+#
+# Unlike ./Dockerfile (self-contained multi-stage, used by local `docker build`), this image
+# compiles NOTHING. Both artefacts are prebuilt by the pipeline and already sit in the build
+# context:
+#   - portal-bff/portal-bff  — built by the `build-portal-bff` step on the warm Go build cache
+#   - portal/dist            — built by `test-portal` (npm run build) on the warm npm cache
+#
+# This was the last service still building inside kaniko. Doing so meant every portal commit
+# paid `npm ci` over ~254 packages, a Vite build, `go mod download` and a full Go compile with
+# no cache of any kind — kaniko cannot share Go's build cache or npm's across a source change.
+# The npm install in particular ran TWICE per pipeline: once in `test-portal`, once here.
+#
+# Build context is src/systems (not portal-bff/), because the image needs the SPA's dist from
+# its sibling portal/ directory — same context the multi-stage Dockerfile uses.
+FROM public.ecr.aws/docker/library/alpine:3.23.3
+RUN apk --no-cache add ca-certificates && addgroup -S -g 101 svc && adduser -S -u 100 -G svc svc
+WORKDIR /home/svc/
+COPY portal-bff/portal-bff ./portal-bff
+COPY portal/dist ./public
+RUN chown -R svc:svc /home/svc
+USER 100:101
+ENV PUBLIC_DIR=/home/svc/public
+EXPOSE 3001
+CMD ["./portal-bff"]

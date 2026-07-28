@@ -47,6 +47,18 @@ steps:
     name: gitcache
     size_mb: 4096
     medium: disk
+- action: forge/create-volume
+  name: npmcache
+  with:
+    # The npm counterpart of gocache, and a fixed workflow_id for the same reason: it
+    # must outlive the run. `npm ci` deletes node_modules and reinstalls ~254 packages
+    # every time; with npm_config_cache pointed here the tarballs come off disk instead
+    # of the network. Same reaper caveat as gocache — if the volume is reaped the next
+    # run simply repopulates it, so a cold cache costs time, never a failure.
+    workflow_id: codearmory-ci-npmcache
+    name: npmcache
+    size_mb: 2048
+    medium: disk
 - action: forge/run
   name: checkout
   timeout: 900
@@ -281,15 +293,57 @@ steps:
     image: node:22-alpine
     runner_class: large
     timeout: 1200
+    env:
+      # Point npm's package cache at the persistent volume, so `npm ci` resolves its
+      # ~254 packages from disk instead of re-fetching the lot on every run.
+      npm_config_cache: /npmcache
     volumes:
     - workflow_id: ${run_id}
       name: workspace
       mount_path: /workspace
+    - workflow_id: codearmory-ci-npmcache
+      name: npmcache
+      mount_path: /npmcache
     run: |
       set -eu
       cd /workspace/src/systems/portal
       npm ci
       npm test
+      # Build the SPA in the SAME pod, on the node_modules `npm ci` just installed —
+      # nearly free. dist/ lands in the workspace, so the image step only COPYs it and
+      # kaniko never runs npm. This is what stops the portal's npm install happening
+      # twice per pipeline.
+      echo "=== build portal SPA ==="
+      npm run build
+- action: forge/run
+  name: build-portal-bff
+  timeout: 1200
+  with:
+    image: golang:1.25
+    runner_class: ci
+    timeout: 1200
+    env:
+      GOCACHE: /gocache/build
+      GOFLAGS: -p=2
+      GOMODCACHE: /gocache/mod
+    volumes:
+    - workflow_id: ${run_id}
+      name: workspace
+      mount_path: /workspace
+    - workflow_id: codearmory-ci-gocache
+      name: gocache
+      mount_path: /gocache
+    # Its own step rather than folding into test-portal, which runs a node image with no
+    # Go toolchain. Sequenced after test-portal (not parallel with it) because both mount
+    # the run's workspace volume, which is RWO.
+    #
+    # portal-bff is a go.work member here, so an ordinary build works — the GOWORK=off in
+    # ./Dockerfile is only needed there, where the module is copied out of the workspace.
+    run: |
+      set -eu
+      cd /workspace/src/systems/portal-bff
+      echo "=== build portal-bff ==="
+      CGO_ENABLED=0 go build -o portal-bff .
 - action: forge/build-image
   name: image
   map_id: per-service
@@ -322,7 +376,10 @@ steps:
       mount_path: /workspace
     build:
       context: /workspace/src/systems
-      dockerfile: portal-bff/Dockerfile
+      # COPY-only image over the SPA dist and portal-bff binary the two steps above
+      # built into this workspace — see portal-bff/Dockerfile.ci. The self-contained
+      # multi-stage ./Dockerfile stays for local `docker build`.
+      dockerfile: portal-bff/Dockerfile.ci
       destinations:
       - 192.168.53.171:3000/jp01/portal:${steps.commit.output.SHA}
       no_push: false
@@ -442,6 +499,12 @@ routes:
   to: checkout
 - from: gocache
   to: warm-cache
+# Ordered against checkout, NOT test-portal. Readiness is allResolved && anyTaken, so
+# an unconditional edge into test-portal would satisfy anyTaken by itself and defeat
+# the PORTAL=="1" gate — running npm on every commit. checkout is unconditional and
+# runs long before the portal steps, so the volume is provisioned in time regardless.
+- from: npmcache
+  to: checkout
 - from: checkout
   to: commit
 - from: commit
@@ -481,10 +544,15 @@ routes:
   to: test-portal
   when: steps.discover.json.PORTAL == "1"
 - from: test-portal
+  to: build-portal-bff
+- from: build-portal-bff
   to: image-portal
 - from: test-portal
   to: fail-ticket
   when: steps["test-portal"].status == 'failed'
+- from: build-portal-bff
+  to: fail-ticket
+  when: steps["build-portal-bff"].status == 'failed'
 - from: image
   to: redeploy
 - from: image-portal
