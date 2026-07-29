@@ -40,18 +40,30 @@ type serviceDef struct {
 	// RegistryAccount: the service also needs a registry READ account to pull from the
 	// registry (e.g. workflows → GET /actions). Builder ensures the account + a derived
 	// REGISTRY_SERVICE_KEY when true.
-	RegistryAccount bool              `json:"registryAccount"`
-	Infra           svcInfra          `json:"infra"`
-	DerivedSecrets  []derivedSecret   `json:"derivedSecrets"`
-	RequiredConfig  []string          `json:"requiredConfig"` // env keys the admin must supply before enable
-	OptionalConfig  []string          `json:"optionalConfig"`
-	SecretConfig    []string          `json:"secretConfig"` // config keys that are sensitive (stored in the Secret)
-	EnvExtras       map[string]string `json:"envExtras"`    // static env; values may contain ${PREFIX}
-	Endpoints       []svcEndpoint     `json:"endpoints"`
+	RegistryAccount bool `json:"registryAccount"`
+	// GitConnectorBackend, when set, declares that this service is a git host whose
+	// repos pipelines should be able to clone. Builder registers it with git_connector
+	// as a platform-owned backend once it is deployed, so the link exists without an
+	// operator linking it by hand. No credential is involved: git_connector mints a
+	// per-clone, per-user gatekeeper token for these backends (see gitconnector.go).
+	GitConnectorBackend *svcGitBackend    `json:"gitConnectorBackend,omitempty"`
+	Infra               svcInfra          `json:"infra"`
+	DerivedSecrets      []derivedSecret   `json:"derivedSecrets"`
+	RequiredConfig      []string          `json:"requiredConfig"` // env keys the admin must supply before enable
+	OptionalConfig      []string          `json:"optionalConfig"`
+	SecretConfig        []string          `json:"secretConfig"` // config keys that are sensitive (stored in the Secret)
+	EnvExtras           map[string]string `json:"envExtras"`    // static env; values may contain ${PREFIX}
+	Endpoints           []svcEndpoint     `json:"endpoints"`
 	// Actions are carried verbatim (json.RawMessage) so body_transforms/async pass
 	// through to the registry untouched.
 	Actions       []json.RawMessage `json:"actions"`
 	DefaultGrants []svcDefaultGrant `json:"default_grants"`
+}
+
+// svcGitBackend is a service's registration as a clone source in git_connector.
+// Name is the backend's display name there; it defaults to the service's k8s name.
+type svcGitBackend struct {
+	Name string `json:"name"`
 }
 
 type svcInfra struct {

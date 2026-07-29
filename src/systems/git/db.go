@@ -148,6 +148,11 @@ func getBackendByID(ctx context.Context, owner, id string) (GitBackend, error) {
 }
 
 // getBackendByHost resolves the backend a clone host belongs to, for a given owner.
+//
+// A user's own link always wins. Only when they have none for the host does it fall
+// back to a platform-owned backend (see platformOwner) — the in-cluster git-factory
+// builder registers — so cloning the platform's own git host needs no per-user setup
+// while a user who has deliberately linked that host keeps their own credential.
 func getBackendByHost(ctx context.Context, owner, host string) (GitBackend, error) {
 	ctx, span := otel.Tracer("git").Start(ctx, "db.backend.get_by_host")
 	defer span.End()
@@ -155,6 +160,11 @@ func getBackendByHost(ctx context.Context, owner, host string) (GitBackend, erro
 	err := connectRead().WithContext(ctx).
 		Where("owner = ? AND host = ?", owner, host).
 		First(&b).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) && owner != platformOwner {
+		err = connectRead().WithContext(ctx).
+			Where("owner = ? AND host = ?", platformOwner, host).
+			First(&b).Error
+	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return GitBackend{}, errBackendNotFound
 	}
@@ -164,6 +174,48 @@ func getBackendByHost(ctx context.Context, owner, host string) (GitBackend, erro
 		return GitBackend{}, err
 	}
 	return b, nil
+}
+
+// upsertPlatformBackend registers (or refreshes) a platform-owned backend, keyed by
+// host so repeated calls converge instead of piling up rows. Builder calls this on
+// every reconcile pass, so it must be idempotent and must not churn the row's ID —
+// nothing references it, but a stable ID keeps logs and traces readable across passes.
+func upsertPlatformBackend(ctx context.Context, b GitBackend) (GitBackend, error) {
+	ctx, span := otel.Tracer("git").Start(ctx, "db.backend.upsert_platform")
+	defer span.End()
+
+	var existing GitBackend
+	err := connect().WithContext(ctx).
+		Where("owner = ? AND host = ?", platformOwner, b.Host).
+		First(&existing).Error
+	switch {
+	case err == nil:
+		existing.Name = b.Name
+		existing.Type = b.Type
+		existing.BaseURL = b.BaseURL
+		existing.AuthMode = b.AuthMode
+		existing.AuthEnc = b.AuthEnc
+		existing.UpdatedAt = time.Now().UTC()
+		if err := connect().WithContext(ctx).Save(&existing).Error; err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return GitBackend{}, err
+		}
+		span.SetStatus(codes.Ok, "")
+		return existing, nil
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		if err := b.Add(ctx); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return GitBackend{}, err
+		}
+		span.SetStatus(codes.Ok, "")
+		return b, nil
+	default:
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return GitBackend{}, err
+	}
 }
 
 // Add inserts a new manual repo.

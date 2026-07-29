@@ -21,7 +21,7 @@ func enumerateRepos(ctx context.Context, b GitBackend) ([]repoView, error) {
 	if b.Type == backendGeneric {
 		return nil, nil // no standard enumeration API; pin generic repos manually
 	}
-	cred, updated, err := mintForBackend(ctx, b, "")
+	cred, updated, err := mintForBackend(ctx, b, b.Owner, "")
 	if err != nil {
 		return nil, err
 	}

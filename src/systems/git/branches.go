@@ -28,7 +28,7 @@ func enumerateBranches(ctx context.Context, b GitBackend, repoURL string) ([]bra
 	if b.Type == backendGeneric {
 		return nil, nil // no standard branch API; users type the ref directly
 	}
-	cred, updated, err := mintForBackend(ctx, b, "")
+	cred, updated, err := mintForBackend(ctx, b, b.Owner, "")
 	if err != nil {
 		return nil, err
 	}

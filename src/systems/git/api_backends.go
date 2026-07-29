@@ -68,6 +68,15 @@ func handleCreateBackend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "type must be one of github, gitlab, forgejo, generic", http.StatusBadRequest)
 		return
 	}
+	// A git_factory backend stores no credential — it makes git_connector mint a
+	// gatekeeper token for the requesting user and send it to the backend's base_url.
+	// Letting a user create one would turn "I can link a backend" into "I can have a
+	// bearer for myself delivered to any host I name", so only the platform registers
+	// these (see handleInternalPlatformBackend).
+	if req.Type == backendGitFactory {
+		http.Error(w, "git_factory backends are registered by the platform, not by users", http.StatusForbidden)
+		return
+	}
 	if !validModeForType(req.Type, req.Auth.Mode) {
 		http.Error(w, "auth.mode is not valid for the backend type", http.StatusBadRequest)
 		return
@@ -242,7 +251,7 @@ func handleTestBackend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	cred, updated, err := mintForBackend(ctx, b, "")
+	cred, updated, err := mintForBackend(ctx, b, b.Owner, "")
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return

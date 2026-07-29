@@ -25,7 +25,7 @@ func resolveAndMint(ctx context.Context, owner, repoURL string) (credential, err
 	if err != nil {
 		return credential{}, err
 	}
-	cred, updated, err := mintForBackend(ctx, b, repoURL)
+	cred, updated, err := mintForBackend(ctx, b, owner, repoURL)
 	if err != nil {
 		return credential{}, err
 	}

@@ -127,7 +127,7 @@ func TestMintForBackendPassthrough(t *testing.T) {
 				t.Fatal(err)
 			}
 			b := GitBackend{Type: c.typ, Host: "example.com", BaseURL: "https://example.com", AuthMode: c.auth.Mode, AuthEnc: enc}
-			cred, updated, err := mintForBackend(context.Background(), b, "https://example.com/a/b.git")
+			cred, updated, err := mintForBackend(context.Background(), b, b.Owner, "https://example.com/a/b.git")
 			if err != nil {
 				t.Fatalf("mintForBackend: %v", err)
 			}
@@ -161,7 +161,7 @@ func TestMintForBackendGitlabOAuth(t *testing.T) {
 	auth := authConfig{Mode: modeOAuth, RefreshToken: "old_refresh", ClientID: "cid", ClientSecret: "csec"}
 	enc, _ := sealAuth(auth)
 	b := GitBackend{Type: backendGitLab, Host: "gl.example.com", BaseURL: srv.URL, AuthMode: modeOAuth, AuthEnc: enc}
-	cred, updated, err := mintForBackend(context.Background(), b, "https://gl.example.com/g/p.git")
+	cred, updated, err := mintForBackend(context.Background(), b, b.Owner, "https://gl.example.com/g/p.git")
 	if err != nil {
 		t.Fatalf("mintForBackend: %v", err)
 	}
