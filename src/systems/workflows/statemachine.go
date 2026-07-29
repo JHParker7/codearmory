@@ -63,6 +63,13 @@ type smState struct {
 	Timeout int64          `json:"timeout,omitempty"`
 	Matrix  *MatrixConfig  `json:"matrix,omitempty"`
 	Scatter *ScatterConfig `json:"scatter,omitempty"`
+	// Permissions the run role needs for this state — carried so the state-machine
+	// shape is a LOSSLESS view of the step. Omitting it was not cosmetic: every GET
+	// returns a computed state_machine, so a client that read a pipeline and wrote it
+	// back had its declared grants silently dropped, the run role was re-minted
+	// without them, and the next run failed with a 403 that pointed at permissions
+	// nobody had changed.
+	Permissions []PermissionSpec `json:"permissions,omitempty"`
 	// Transition for the non-Choice kinds:
 	Next smNext `json:"next,omitempty"`
 	End  bool   `json:"end,omitempty"`
@@ -184,7 +191,7 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 		if len(st.Choice) > 0 {
 			return WorkflowStepRef{}, fmt.Errorf("state %q sets choice but also a step kind", name)
 		}
-		ref := WorkflowStepRef{Name: name, With: st.With, MapID: mapID}
+		ref := WorkflowStepRef{Name: name, With: st.With, MapID: mapID, Permissions: st.Permissions}
 		switch {
 		case st.Approval != nil:
 			ref.Approval = st.Approval
@@ -612,7 +619,7 @@ func modelToSM(name, description string, steps []WorkflowStep, routes []Workflow
 	}
 
 	taskState := func(s WorkflowStep) *smState {
-		st := &smState{With: s.With, Matrix: s.Matrix, Scatter: s.Scatter, Approval: s.Approval}
+		st := &smState{With: s.With, Matrix: s.Matrix, Scatter: s.Scatter, Approval: s.Approval, Permissions: s.Permissions}
 		switch {
 		case s.Approval != nil:
 			// gate: no run/use

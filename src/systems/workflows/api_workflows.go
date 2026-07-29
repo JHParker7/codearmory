@@ -385,6 +385,17 @@ func applyStateMachine(req *createWorkflowRequest) string {
 	if req.StateMachine == nil {
 		return ""
 	}
+	// Explicit steps WIN over the document, matching what this function already does
+	// for name/description/inputs/outputs. Without this the rule held for every field
+	// except the one that matters: every GET returns a computed state_machine, so the
+	// natural read-edit-write round-trip silently discarded the caller's edited steps
+	// — the request returned 200 and echoed the OLD steps back, so nothing indicated
+	// the write had been thrown away. Worse, the steps it substituted lost anything the
+	// document cannot express, which re-minted the run role without the step's declared
+	// permissions and failed later as an unexplained 403.
+	if len(req.Steps) > 0 {
+		return ""
+	}
 	steps, routes, maps, err := smToModel(req.StateMachine)
 	if err != nil {
 		return err.Error()

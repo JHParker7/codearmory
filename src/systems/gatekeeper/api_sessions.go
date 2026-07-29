@@ -297,8 +297,19 @@ func handleCreateWorkflowRole(w http.ResponseWriter, r *http.Request) {
 		// Only include permissions the owner actually holds (no privilege escalation).
 		granted, err := checkPermissions(ctx, req.UserID, p.Service, p.Action, p.Resource)
 		if err != nil || !granted {
-			slog.DebugContext(ctx, "workflow role: owner lacks permission, skipping",
-				"workflow_id", req.WorkflowID, "service", p.Service, "action", p.Action)
+			// WARN, not DEBUG. Dropping a permission silently is the worst possible
+			// outcome here: the pipeline is created successfully and then fails at run
+			// time as a 403 from some other service, with nothing linking the two. At
+			// the default LOG_LEVEL=info a Debug line does not exist, so the only
+			// evidence of the decision was invisible in every real deployment.
+			//
+			// Still a skip rather than a rejection — unlike attenuatedPermissions,
+			// which refuses — because this runs on every create AND update, so failing
+			// closed would make a pipeline uneditable the moment one declared grant
+			// stopped resolving. The log line is what makes the skip traceable.
+			slog.WarnContext(ctx, "workflow role: owner lacks declared permission, dropping it from the run role",
+				"workflow_id", req.WorkflowID, "service", p.Service, "action", p.Action,
+				"resource", p.Resource, "error", err)
 			continue
 		}
 		name := p.Name
