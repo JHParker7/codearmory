@@ -73,6 +73,36 @@ func validateImageRequest(req setImageRequest) string {
 	return ""
 }
 
+// applyImageRequest folds a retarget request into the stored row. Split out from the
+// handler so the precedence rule below is testable without a database.
+func applyImageRequest(existing *OrgService, req setImageRequest) {
+	if req.Image != nil {
+		existing.Image = *req.Image
+	}
+	if req.Registry != nil {
+		existing.Registry = *req.Registry
+	}
+	if req.Tag != nil {
+		existing.Tag = *req.Tag
+	}
+	if req.PullPolicy != nil {
+		existing.PullPolicy = *req.PullPolicy
+	}
+	// Retargeting by registry/tag must DROP any stored explicit image. imageFor gives
+	// Image strict precedence over Registry+Tag, so leaving a previously-pinned full
+	// reference in place makes a tag-only retarget a silent no-op: the row records the
+	// new tag, the API returns 200, and the reconciler goes on deploying the old
+	// reference. That is precisely the "green pipeline over a stale cluster" this
+	// endpoint exists to prevent — and it is invisible, because the failure is a deploy
+	// that never happened rather than one that errored.
+	//
+	// Only when the caller did NOT supply an image: an explicit image alongside a tag
+	// is a deliberate full-reference pin and is left exactly as asked.
+	if req.Image == nil && (req.Registry != nil || req.Tag != nil) {
+		existing.Image = ""
+	}
+}
+
 func handleSetOrgServiceImage(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleSetOrgServiceImage")
 	defer span.End()
@@ -126,18 +156,7 @@ func handleSetOrgServiceImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Image != nil {
-		existing.Image = *req.Image
-	}
-	if req.Registry != nil {
-		existing.Registry = *req.Registry
-	}
-	if req.Tag != nil {
-		existing.Tag = *req.Tag
-	}
-	if req.PullPolicy != nil {
-		existing.PullPolicy = *req.PullPolicy
-	}
+	applyImageRequest(&existing, req)
 
 	if _, err := upsertOrgService(ctx, existing); err != nil {
 		span.RecordError(err)
