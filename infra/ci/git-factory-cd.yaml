@@ -21,6 +21,14 @@ steps:
   timeout: 600
   with:
     image: golang:1.25
+    # NOT the default 'standard' (256MB/500m). On that class this clone intermittently
+    # failed to reach git_factory at all — a 134s TCP connect timeout, not a git or auth
+    # error — while the identical clone in codearmory-ci, which runs on 'ci', has never
+    # missed. A kata microVM this small appears not to bring its network up reliably
+    # when the node is busy, and the symptom (connect timeout) looks like a network
+    # policy or a wrong address rather than a starved sandbox, which is what makes it
+    # expensive to diagnose. 'test' below already documents standard being too small.
+    runner_class: ci
     run: |
       set -eu
       # Never block on a credential prompt — see codearmory-ci.yaml's checkout for why:
@@ -93,31 +101,53 @@ steps:
 # platform-wide BUILDER_IMAGE_REGISTRY points at ghcr.io while these images publish to
 # the Forgejo registry, so a per-service registry is what makes the tag resolvable.
 #
-# action: http, not a registered workflow action — retargeting a service is an admin
-# operation on builder's own API, and publishing it to the global action catalog would
-# offer it to every pipeline.
+# A forge/run curling conductor, NOT the `http` action with a declared permission.
+# The http action runs under the pipeline's minted run role, and that mint files the
+# declared permission against a resource the endpoint does not check, so the call
+# always 403s. Carrying an explicit bearer for a dedicated service identity avoids the
+# whole mint path, and keeps retargeting off the global action catalog (which would
+# offer it to every pipeline).
 #
-# The grant is declared here because an http step has no catalog entry, so nothing can
-# be inferred from its action and the call would otherwise 403. Declaring it is not a
-# way to hand yourself authority: gatekeeper only mints a permission this pipeline's
-# OWNER already holds, and scopes the resource to that owner — so this resolves to
-# <owner>/builder/orgs/default and grants nothing to someone who could not already do
-# it by hand.
-- action: http
+# This is not self-granted authority: the token belongs to a separate identity holding
+# exactly one permission, the request still goes through conductor, and gatekeeper
+# still authorises it — so it can do nothing its holder could not already do by hand.
+- action: forge/run
   name: retarget
   timeout: 180
-  permissions:
-  - service: builder
-    action: setOrgServiceImage
-    resource: builder/orgs/default
   with:
-    service: builder
-    method: PATCH
-    path: /services/codearmory_git_factory/image
-    body:
-      registry: 192.168.53.171:3000/jp01
-      tag: ${steps.commit.output.SHA}
-      pull_policy: IfNotPresent
+    # golang:1.25 purely because it is on forge's ALLOWED_IMAGES and ships curl — a
+    # dedicated curl image is rejected with "image not allowed". Nothing here needs Go.
+    image: golang:1.25
+    env:
+      SHA: ${steps.commit.output.SHA}
+    secret_refs:
+      # A dedicated service identity holding exactly ONE permission —
+      # setOrgServiceImage on <that identity>/builder/orgs/default. Not the submitter's
+      # own credential: this token reaches a sandbox, so it must be able to do nothing
+      # else if it leaks.
+      #
+      # Why a token at all, rather than the `http` action's declared `permissions`:
+      # an http step runs under the pipeline's minted run role, and the mint stores the
+      # permission against a resource the endpoint never checks, so it always 403s (see
+      # the retarget ticket). A forge/run step carries its own bearer and sidesteps that
+      # entirely. It also means this call is subject to the same RBAC as any other
+      # client — conductor still authorises it.
+      CA_TOKEN: secret:ci-retarget-token
+    run: |
+      set -eu
+      # Through conductor, exactly like any external client — not straight at builder.
+      # -o/-w rather than -f so a rejection prints the body that says WHY; a bare
+      # "exit 22" here was previously indistinguishable from the service being down.
+      code=$(curl -s -o /tmp/resp -w '%{http_code}' -X PATCH \
+        -H "Authorization: Bearer $CA_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -d "{\"registry\":\"192.168.53.171:3000/jp01\",\"tag\":\"$SHA\",\"pull_policy\":\"IfNotPresent\"}" \
+        http://ca-codearmory-conductor:8080/builder/services/codearmory_git_factory/image)
+      echo "retarget -> HTTP $code"
+      cat /tmp/resp; echo
+      # curl exits 0 on a 4xx/5xx, so the status has to be checked explicitly or a
+      # failed retarget would report success and the rollout would silently not happen.
+      [ "$code" = "200" ] || exit 1
 # Proves the rollout actually happened. The bug this pipeline exists to fix was a
 # green run over a cluster still serving a 12-hour-old build, so "deployed" is not
 # claimed until the new pod answers. /healthz is unauthenticated — an earlier version
