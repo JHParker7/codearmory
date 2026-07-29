@@ -1,6 +1,0 @@
-# Local Terraform state and provider cache — never commit (state holds secrets).
-.terraform/
-.terraform.lock.hcl
-*.tfstate
-*.tfstate.*
-*.tfvars
