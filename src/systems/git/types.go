@@ -11,7 +11,18 @@ const (
 	backendGitLab  = "gitlab"
 	backendForgejo = "forgejo"
 	backendGeneric = "generic"
+	// backendGitFactory is the platform's own in-cluster git host. It stores no
+	// credential at all: git_connector mints a short-lived gatekeeper token per
+	// clone, as the user the clone is for (see modeService).
+	backendGitFactory = "git_factory"
 )
+
+// platformOwner owns backends the platform registered rather than a user — today
+// only the git-factory backend builder writes when it deploys git-factory. A clone
+// falls back to these when the user has linked no backend of their own for the host,
+// so an in-cluster git host works for every user with no per-user setup. It is not a
+// real user id, so it can never collide with one.
+const platformOwner = "__platform__"
 
 // Per-type auth modes (authConfig.Mode).
 const (
@@ -25,6 +36,18 @@ const (
 	modeAdmin = "admin" // admin token mints a per-user scoped, revoke-on-reuse token
 	// Generic
 	modeBasic = "basic" // username + password/token over HTTPS basic auth
+	// git_factory
+	//
+	// modeService holds NO credential material. On every clone git_connector asks
+	// gatekeeper — authenticating with its own service account — for a short-lived
+	// session token minted for the user the clone is for, and hands that back as the
+	// basic-auth password. git-factory already accepts a gatekeeper token in the
+	// password field, so nothing changes on its side.
+	//
+	// This is what makes the link safe to establish automatically: there is no durable
+	// east-west secret to provision, store, rotate or leak, and the credential a runner
+	// receives carries exactly the permissions of the run's owner and expires on its own.
+	modeService = "service"
 )
 
 // GitBackend is a user-linked git host. The credential material lives in AuthEnc,
@@ -32,14 +55,14 @@ const (
 // At most one backend per (owner, host) so a clone URL resolves unambiguously, and
 // names are unique per owner.
 type GitBackend struct {
-	ID        string    `gorm:"primaryKey" json:"id"`
-	Owner     string    `gorm:"uniqueIndex:ux_git_owner_host;uniqueIndex:ux_git_owner_name;index" json:"owner"`
-	Name      string    `gorm:"uniqueIndex:ux_git_owner_name" json:"name"`
-	Type      string    `json:"type"`
-	BaseURL   string    `json:"base_url"`
-	Host      string    `gorm:"uniqueIndex:ux_git_owner_host" json:"host"`
-	AuthMode  string    `json:"auth_mode"`
-	AuthEnc   []byte    `json:"-"`
+	ID       string `gorm:"primaryKey" json:"id"`
+	Owner    string `gorm:"uniqueIndex:ux_git_owner_host;uniqueIndex:ux_git_owner_name;index" json:"owner"`
+	Name     string `gorm:"uniqueIndex:ux_git_owner_name" json:"name"`
+	Type     string `json:"type"`
+	BaseURL  string `json:"base_url"`
+	Host     string `gorm:"uniqueIndex:ux_git_owner_host" json:"host"`
+	AuthMode string `json:"auth_mode"`
+	AuthEnc  []byte `json:"-"`
 	// PreferMirror opts this backend into git-factory's pull-through cache: on the
 	// INTERNAL clone-token path (Forge/Workflows), the broker asks git-factory to keep a
 	// warm mirror of the repo and returns git-factory's clone URL instead of upstream's,

@@ -86,6 +86,17 @@ func (b *k8sBackend) ensureInfra(ctx context.Context, spec workloadSpec) error {
 			return fmt.Errorf("persistence: %w", err)
 		}
 	}
+	// Register the service as a clone source in git_connector. Unlike the steps above,
+	// a failure here is logged and dropped rather than returned: the link is not
+	// something the pod needs in order to start, and git_connector is frequently not
+	// reachable yet on the pass that first brings a git host up. The next reconcile
+	// retries, and the endpoint is an upsert, so converging late costs nothing.
+	if link := def.GitConnectorBackend; link != nil {
+		if err := b.ensureGitConnectorBackend(ctx, spec.Service, *link); err != nil {
+			slog.WarnContext(ctx, "git connector link deferred to next reconcile",
+				"service", spec.Service, "error", err)
+		}
+	}
 	return nil
 }
 

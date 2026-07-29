@@ -7,6 +7,9 @@
   "description": "The git plane of the codearmory platform (repos + Smart-HTTP)",
   "ui_path": "/ui",
   "registryAccount": false,
+  "gitConnectorBackend": {
+    "name": "git-factory"
+  },
   "infra": {
     "managedRedis": false,
     "persistence": {

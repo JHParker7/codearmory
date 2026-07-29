@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -130,6 +131,44 @@ func configColumnValue(config map[string]any) (any, error) {
 	return string(encoded), nil
 }
 
+// orgServiceUpdates builds the explicit column set for an update of an existing row.
+//
+// Config is encoded HERE rather than handed over as a Go map. GORM applies a
+// field's `serializer:json` only when it writes through the struct; this path
+// deliberately writes a column map instead (so a false Enabled is never dropped as a
+// zero value), which bypasses the serializer entirely. A raw map[string]any therefore
+// reaches the driver unserialized, and pgx has no encode plan for it against a text
+// column — every config update failed with "cannot find encode plan", including one
+// that wrote back a byte-identical value. Only the Create path (a struct write) ever
+// serialized correctly, so a row's config was effectively frozen after creation.
+//
+// The encoding goes through configColumnValue so this path agrees with the Create
+// path exactly, including on a nil map: GORM's JSONSerializer stores SQL NULL for
+// one, so marshalling it to the literal text "null" here would leave the same
+// cleared config represented two different ways depending on how it was written.
+func orgServiceUpdates(in OrgService, now time.Time) (map[string]any, error) {
+	cfg, err := configColumnValue(in.Config)
+	if err != nil {
+		return nil, fmt.Errorf("encode service config: %w", err)
+	}
+	return map[string]any{
+		"enabled": in.Enabled,
+		"kind":    in.Kind,
+		"config":  cfg,
+		"image":   in.Image,
+		// registry/tag/pull_policy are what make a pinned image resolvable: CI
+		// retargets a service by PATCHing them, so omitting them here would silently
+		// drop the pin on the next upsert and the reconciler would go back to the
+		// platform-wide registry.
+		"registry":    in.Registry,
+		"tag":         in.Tag,
+		"pull_policy": in.PullPolicy,
+		"port":        in.Port,
+		"description": in.Description,
+		"updated_at":  now,
+	}, nil
+}
+
 // upsertOrgService creates or updates the row for a (org, service) scope. The
 // caller is responsible for setting Enabled/Kind/Config explicitly; we update the
 // mutable columns by hand so a false Enabled is never dropped by a GORM default.
@@ -141,24 +180,11 @@ func upsertOrgService(ctx context.Context, in OrgService) (OrgService, error) {
 	existing, err := getOrgService(ctx, in.OrgID, in.ServiceName)
 	switch {
 	case err == nil:
-		now := time.Now().UTC()
-		cfg, err := configColumnValue(in.Config)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			return OrgService{}, err
-		}
-		updates := map[string]any{
-			"enabled":     in.Enabled,
-			"kind":        in.Kind,
-			"config":      cfg,
-			"image":       in.Image,
-			"registry":    in.Registry,
-			"tag":         in.Tag,
-			"pull_policy": in.PullPolicy,
-			"port":        in.Port,
-			"description": in.Description,
-			"updated_at":  now,
+		updates, uerr := orgServiceUpdates(in, time.Now().UTC())
+		if uerr != nil {
+			span.RecordError(uerr)
+			span.SetStatus(codes.Error, uerr.Error())
+			return OrgService{}, uerr
 		}
 		// Only overwrite the encrypted DB URL when the caller supplied a new one,
 		// so a plain enable/disable/config change never drops it.

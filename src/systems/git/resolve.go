@@ -14,7 +14,7 @@ import (
 // validBackendType reports whether t is a supported backend type.
 func validBackendType(t string) bool {
 	switch t {
-	case backendGitHub, backendGitLab, backendForgejo, backendGeneric:
+	case backendGitHub, backendGitLab, backendForgejo, backendGeneric, backendGitFactory:
 		return true
 	}
 	return false
@@ -31,6 +31,8 @@ func validModeForType(t, mode string) bool {
 		return mode == modeToken || mode == modeAdmin
 	case backendGeneric:
 		return mode == modeBasic
+	case backendGitFactory:
+		return mode == modeService
 	}
 	return false
 }
@@ -68,7 +70,11 @@ func injectCloneCreds(repoURL, username, secret string) (string, error) {
 // backend's stored auth must be updated as a side effect (e.g. a rotated GitLab
 // OAuth refresh token), it is returned as the non-nil second value for the caller
 // to persist.
-func mintForBackend(ctx context.Context, b GitBackend, repoURL string) (credential, *authConfig, error) {
+// asUser is the user the credential is being minted FOR. For a user's own backend
+// that is just b.Owner, but a platform backend (backendGitFactory) is shared by
+// every user, so the identity to mint as must be passed in rather than read off the
+// row — minting as "__platform__" would be both wrong and a privilege boundary.
+func mintForBackend(ctx context.Context, b GitBackend, asUser, repoURL string) (credential, *authConfig, error) {
 	auth, err := openAuth(b.AuthEnc)
 	if err != nil {
 		return credential{}, nil, err
@@ -139,6 +145,21 @@ func mintForBackend(ctx context.Context, b GitBackend, repoURL string) (credenti
 			return credential{}, nil, fmt.Errorf("unsupported generic auth mode %q", auth.Mode)
 		}
 		cred.Username, cred.Secret = auth.Username, auth.Password
+
+	case backendGitFactory:
+		if auth.Mode != modeService {
+			return credential{}, nil, fmt.Errorf("unsupported git_factory auth mode %q", auth.Mode)
+		}
+		if asUser == "" {
+			return credential{}, nil, fmt.Errorf("git_factory backend requires a user to mint as")
+		}
+		tok, exp, err := mintGitFactoryToken(ctx, asUser)
+		if err != nil {
+			return credential{}, nil, err
+		}
+		// git-factory reads the token from the basic-auth PASSWORD field and ignores
+		// the username (api_git_http.go), so "token" is a label, not an identity.
+		cred.Username, cred.Secret, cred.ExpiresAt = "token", tok, exp
 
 	default:
 		return credential{}, nil, fmt.Errorf("unsupported backend type %q", b.Type)

@@ -165,7 +165,10 @@ func main() {
 		slog.Warn("GIT_INTERNAL_KEY not set — /internal/clone-token will reject all forge/workflows requests")
 	}
 
-	registry.StartKeyRotation(ctx, gatekeeperURL, "git_connector",
+	// Keep the accessor: besides authenticating our own calls, git_connector uses this
+	// service key to have gatekeeper mint per-user clone tokens for git-factory
+	// (see gitfactory.go).
+	gatekeeperServiceKey = registry.StartKeyRotation(ctx, gatekeeperURL, "git_connector",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	mux := telemetry.NewMux()
@@ -195,6 +198,9 @@ func main() {
 	// Internal: the workflows service asks whether a repo's `.armory/workflows` should
 	// sync and from which branches. Same GIT_INTERNAL_KEY auth.
 	mux.HandleFunc("POST /internal/repos/sync-config", handleInternalSyncConfig)
+	// Internal: builder registers the in-cluster git host it deployed, so clones of
+	// git-factory repos resolve for every user with no per-user link. Same auth.
+	mux.HandleFunc("POST /internal/backends/platform", handleInternalPlatformBackend)
 
 	port := envOrDefault("PORT", "8096")
 	wrapped := otelhttp.NewHandler(limitBody(&requestLogger{mux}), "git",
