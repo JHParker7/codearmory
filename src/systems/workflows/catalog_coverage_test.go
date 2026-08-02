@@ -159,3 +159,41 @@ func TestExecuteAction_AsyncPoll(t *testing.T) {
 		t.Errorf("output = %q, want async-output", res.Output)
 	}
 }
+
+// A {param} spliced into an action's path comes from an already-substituted With value,
+// so it can be a previous step's OUTPUT — untrusted with respect to the URL. Spliced
+// raw, a value carrying '/', '?' or '#' rewrote the request path or appended a query,
+// on a request that still carries the run's bearer token. executeHTTP has always
+// rejected ".."; executeAction must not disagree with it about what a safe path is.
+func TestExecuteAction_PathParamIsEscapedAndTraversalRejected(t *testing.T) {
+	pool := &WorkerPool{}
+	var gotEscapedPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscapedPath, gotQuery = r.URL.EscapedPath(), r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+	def := ActionDef{Name: "tickets/update", ServiceURL: srv.URL, Method: http.MethodPut, Path: "/tickets/{id}"}
+
+	// Traversal is refused outright, and the request is never sent.
+	if _, err := pool.executeAction(context.Background(), newTokenStore("tok", "s"), def,
+		map[string]any{"id": "../../internal/admin"}, "", 0); err == nil {
+		t.Fatal("expected traversal in a path parameter to be rejected")
+	}
+	if gotEscapedPath != "" {
+		t.Fatalf("a traversing request was still sent, to %q", gotEscapedPath)
+	}
+
+	// A value carrying URL syntax stays ONE path segment: no extra path, no query.
+	if _, err := pool.executeAction(context.Background(), newTokenStore("tok", "s"), def,
+		map[string]any{"id": "abc/close?force=true"}, "", 0); err != nil {
+		t.Fatalf("executeAction: %v", err)
+	}
+	if gotEscapedPath != "/tickets/abc%2Fclose%3Fforce=true" {
+		t.Errorf("path parameter was not escaped: got %q", gotEscapedPath)
+	}
+	if gotQuery != "" {
+		t.Errorf("path parameter injected a query string: %q", gotQuery)
+	}
+}

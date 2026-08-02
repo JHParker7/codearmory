@@ -12,20 +12,21 @@ func hasPerm(ps []PermissionSpec, svc, action, resource string) bool {
 }
 
 // An http step has no catalog entry, so nothing can be derived from its action —
-// without a declared grant the run role gets nothing and the call 403s. This is the
-// exact shape git-factory-cd's retarget step uses.
+// without a declared grant the run role gets nothing and the call 403s. This was the
+// exact shape the old git-factory-cd retarget step used (that pipeline is gone, but
+// any hand-written http step has the same problem).
 func TestCollectWorkflowPermissions_HTTPStepGrantsDeclared(t *testing.T) {
 	steps := []WorkflowStep{{
 		Step: Step{
 			Name:   "retarget",
 			Action: ActionHTTP,
 			Permissions: []PermissionSpec{
-				{Service: "builder", Action: "setOrgServiceImage", Resource: "builder/orgs/default"},
+				{Service: "builder", Action: "setOrgServiceImage", Resource: "codearmory/builder/orgs/default"},
 			},
 		},
 	}}
 	got := collectWorkflowPermissions(steps, nil, nil)
-	if !hasPerm(got, "builder", "setOrgServiceImage", "builder/orgs/default") {
+	if !hasPerm(got, "builder", "setOrgServiceImage", "codearmory/builder/orgs/default") {
 		t.Errorf("declared grant missing from %v", got)
 	}
 }
@@ -61,7 +62,7 @@ func TestCollectWorkflowPermissions_IncompleteDeclarationIgnored(t *testing.T) {
 		Step: Step{
 			Name: "x", Action: ActionHTTP,
 			Permissions: []PermissionSpec{
-				{Service: "builder", Action: "", Resource: "builder/orgs/default"},
+				{Service: "builder", Action: "", Resource: "codearmory/builder/orgs/default"},
 				{Service: "", Action: "a", Resource: "r"},
 				{Service: "s", Action: "a", Resource: ""},
 			},
@@ -74,7 +75,7 @@ func TestCollectWorkflowPermissions_IncompleteDeclarationIgnored(t *testing.T) {
 
 // Declaring the same grant on two steps must not emit it twice.
 func TestCollectWorkflowPermissions_DeclaredGrantsDeduped(t *testing.T) {
-	p := []PermissionSpec{{Service: "builder", Action: "setOrgServiceImage", Resource: "builder/orgs/default"}}
+	p := []PermissionSpec{{Service: "builder", Action: "setOrgServiceImage", Resource: "codearmory/builder/orgs/default"}}
 	steps := []WorkflowStep{
 		{Step: Step{Name: "a", Action: ActionHTTP, Permissions: p}},
 		{Step: Step{Name: "b", Action: ActionHTTP, Permissions: p}},

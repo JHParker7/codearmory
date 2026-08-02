@@ -840,12 +840,22 @@ func (p *WorkerPool) executeAction(ctx context.Context, store *tokenStore, def A
 
 	// Substitute {param} placeholders in the action path from the with map,
 	// removing those keys from the body so they aren't double-sent.
+	//
+	// The values are already ${...}-substituted, so they can be a step's OUTPUT — which
+	// means they are untrusted with respect to the URL. Spliced raw, a value carrying
+	// '/', '?' or '#' rewrites the request path or appends a query, and the request
+	// still carries the run's bearer token. Each value is therefore path-escaped, and
+	// traversal is rejected outright with the same rule (and message) executeHTTP
+	// applies to its own path — the two must not disagree on what a safe path is.
 	resolvedPath := def.Path
 	for k, v := range body {
 		placeholder := "{" + k + "}"
 		if strings.Contains(resolvedPath, placeholder) {
 			if sv, ok := v.(string); ok {
-				resolvedPath = strings.ReplaceAll(resolvedPath, placeholder, sv)
+				if strings.Contains(sv, "..") {
+					return stepResult{}, fmt.Errorf("%s: invalid value for path parameter %q: traversal sequences are not allowed", def.Name, k)
+				}
+				resolvedPath = strings.ReplaceAll(resolvedPath, placeholder, neturl.PathEscape(sv))
 				delete(body, k)
 			}
 		}
