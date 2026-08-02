@@ -25,9 +25,13 @@ var (
 	// internalKey authenticates forge/workflows → /internal/clone-token calls
 	// (sent as X-Internal-Key). Empty disables the internal endpoint.
 	internalKey = secret("GIT_INTERNAL_KEY")
-	// gitFactoryURL/gitFactoryKey reach git-factory's internal mirror surface. Both must
-	// be set for a PreferMirror backend to be served from the cache; otherwise the broker
-	// silently returns the upstream URL (the feature degrades to today's behaviour).
+	// gitFactoryURL is git-factory's in-cluster base URL, set by the Helm chart. It serves
+	// two purposes: it is the base_url of the platform backend git_connector seeds at
+	// startup (platform_backend.go), and — together with gitFactoryKey — it reaches
+	// git-factory's internal mirror surface. Seeding needs only the URL, since the platform
+	// row holds no credential; the mirror path needs BOTH, and a PreferMirror backend is
+	// only served from the cache when both are set (otherwise the broker silently returns
+	// the upstream URL and the feature degrades to today's behaviour).
 	gitFactoryURL = strings.TrimRight(envOrDefault("GIT_FACTORY_URL", ""), "/")
 	gitFactoryKey = secret("GIT_FACTORY_INTERNAL_KEY")
 )
@@ -171,6 +175,12 @@ func main() {
 	gatekeeperServiceKey = registry.StartKeyRotation(ctx, gatekeeperURL, "git_connector",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
+	// git-factory is a core, Helm-deployed service, so its in-cluster address is known at
+	// deploy time (GIT_FACTORY_URL). Register it as the platform backend ourselves rather
+	// than waiting for builder to POST /internal/backends/platform. Best-effort and
+	// level-triggered: it retries in the background and never blocks startup.
+	startPlatformBackendSeeder(ctx)
+
 	mux := telemetry.NewMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
@@ -198,8 +208,10 @@ func main() {
 	// Internal: the workflows service asks whether a repo's `.armory/workflows` should
 	// sync and from which branches. Same GIT_INTERNAL_KEY auth.
 	mux.HandleFunc("POST /internal/repos/sync-config", handleInternalSyncConfig)
-	// Internal: builder registers the in-cluster git host it deployed, so clones of
-	// git-factory repos resolve for every user with no per-user link. Same auth.
+	// Internal: register an in-cluster git host as a platform backend, so clones of its
+	// repos resolve for every user with no per-user link. Same auth. The platform's own
+	// git-factory is seeded from GIT_FACTORY_URL at startup instead; this stays for a
+	// not-yet-upgraded builder and any other platform-deployed host.
 	mux.HandleFunc("POST /internal/backends/platform", handleInternalPlatformBackend)
 
 	port := envOrDefault("PORT", "8096")

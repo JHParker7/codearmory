@@ -151,7 +151,7 @@ func getBackendByID(ctx context.Context, owner, id string) (GitBackend, error) {
 //
 // A user's own link always wins. Only when they have none for the host does it fall
 // back to a platform-owned backend (see platformOwner) — the in-cluster git-factory
-// builder registers — so cloning the platform's own git host needs no per-user setup
+// seeded from GIT_FACTORY_URL — so cloning the platform's own git host needs no per-user setup
 // while a user who has deliberately linked that host keeps their own credential.
 func getBackendByHost(ctx context.Context, owner, host string) (GitBackend, error) {
 	ctx, span := otel.Tracer("git").Start(ctx, "db.backend.get_by_host")
@@ -177,9 +177,10 @@ func getBackendByHost(ctx context.Context, owner, host string) (GitBackend, erro
 }
 
 // upsertPlatformBackend registers (or refreshes) a platform-owned backend, keyed by
-// host so repeated calls converge instead of piling up rows. Builder calls this on
-// every reconcile pass, so it must be idempotent and must not churn the row's ID —
-// nothing references it, but a stable ID keeps logs and traces readable across passes.
+// host so repeated calls converge instead of piling up rows. Both the startup seeder and
+// the internal endpoint re-run it on a level-triggered loop, so it must be idempotent and
+// must not churn the row's ID — nothing references it, but a stable ID keeps logs and
+// traces readable across passes.
 func upsertPlatformBackend(ctx context.Context, b GitBackend) (GitBackend, error) {
 	ctx, span := otel.Tracer("git").Start(ctx, "db.backend.upsert_platform")
 	defer span.End()
@@ -252,28 +253,55 @@ func (rp GitRepo) Remove(ctx context.Context) error {
 	return nil
 }
 
-// UpdateSync sets the GitOps workflow-sync settings on a manual repo owned by the
-// caller. Select forces the zero values (disabled / empty allowlist) to persist, and
-// the []string branch allowlist round-trips through the field's json serializer.
-func (rp GitRepo) UpdateSync(ctx context.Context) error {
+// UpdateSync writes the GitOps workflow-sync settings a caller actually supplied on a
+// manual repo owned by them, and returns the row as it now stands.
+//
+// cols names the columns to write — that is what keeps PUT /repos/{id} a PARTIAL
+// update. A field the request omitted is absent from cols and keeps its stored value;
+// a field it did supply is written EVEN WHEN ZERO, since Select forces GORM to persist
+// `false` / an empty allowlist rather than skip them as unset. Writing both columns
+// unconditionally (the previous behaviour) silently disabled sync on a branches-only
+// PUT and wiped the allowlist — falling back to "main" — on an enabled-only one, which
+// would sync from a branch the user had deliberately excluded.
+//
+// The []string branch allowlist round-trips through the field's json serializer.
+func (rp GitRepo) UpdateSync(ctx context.Context, cols []string) (GitRepo, error) {
 	ctx, span := otel.Tracer("git").Start(ctx, "db.repo.update_sync")
 	defer span.End()
 	span.SetAttributes(attribute.String("repo.id", rp.ID))
-	res := connect().WithContext(ctx).
-		Model(&GitRepo{}).
-		Where("id = ? AND owner = ?", rp.ID, rp.Owner).
-		Select("workflow_sync_enabled", "workflow_sync_branches").
-		Updates(GitRepo{WorkflowSyncEnabled: rp.WorkflowSyncEnabled, WorkflowSyncBranches: rp.WorkflowSyncBranches})
-	if res.Error != nil {
-		span.RecordError(res.Error)
-		span.SetStatus(codes.Error, res.Error.Error())
-		return res.Error
+	db := connect().WithContext(ctx)
+	if len(cols) > 0 {
+		res := db.
+			Model(&GitRepo{}).
+			Where("id = ? AND owner = ?", rp.ID, rp.Owner).
+			Select(cols).
+			Updates(GitRepo{WorkflowSyncEnabled: rp.WorkflowSyncEnabled, WorkflowSyncBranches: rp.WorkflowSyncBranches})
+		if res.Error != nil {
+			span.RecordError(res.Error)
+			span.SetStatus(codes.Error, res.Error.Error())
+			return GitRepo{}, res.Error
+		}
+		if res.RowsAffected == 0 {
+			return GitRepo{}, errRepoNotFound
+		}
 	}
-	if res.RowsAffected == 0 {
-		return errRepoNotFound
+	// Read the row back so the response reflects what is STORED rather than only the
+	// fields this request carried — an omitted field keeps its old value and the caller
+	// has to see it. It also makes a request that changes nothing still 404 a repo that
+	// does not exist (or is not the caller's). Read via the primary connection: a
+	// replica could still be behind the write above.
+	var stored GitRepo
+	err := db.Where("id = ? AND owner = ?", rp.ID, rp.Owner).First(&stored).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return GitRepo{}, errRepoNotFound
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return GitRepo{}, err
 	}
 	span.SetStatus(codes.Ok, "")
-	return nil
+	return stored, nil
 }
 
 // reposByURL returns every pinned repo (across all owners) with the given clone URL.

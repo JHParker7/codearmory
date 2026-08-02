@@ -18,7 +18,7 @@ const (
 )
 
 // platformOwner owns backends the platform registered rather than a user — today
-// only the git-factory backend builder writes when it deploys git-factory. A clone
+// only the git-factory backend git_connector seeds from GIT_FACTORY_URL. A clone
 // falls back to these when the user has linked no backend of their own for the host,
 // so an in-cluster git host works for every user with no per-user setup. It is not a
 // real user id, so it can never collide with one.

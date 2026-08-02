@@ -3,20 +3,24 @@ package main
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
-	"time"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 )
 
-// handleInternalPlatformBackend registers the in-cluster git host as a platform-owned
-// backend. Builder calls it every reconcile pass after it deploys git-factory, which is
-// what makes the git-factory ↔ git_connector link self-establishing: no operator has to
-// create a backend or mint a durable token for one.
+// handleInternalPlatformBackend registers an in-cluster git host as a platform-owned
+// backend, over the wire.
+//
+// The platform's own git host no longer needs this: git-factory is a core, Helm-deployed
+// service, so git_connector seeds that row itself from GIT_FACTORY_URL at startup (see
+// platform_backend.go) and the link establishes with no caller at all. The endpoint stays
+// for the other ways a platform backend can arrive — a builder that has not yet been
+// upgraded and still POSTs here on every reconcile pass, and any future platform-deployed
+// git host whose address is not known at deploy time. Both paths share
+// registerPlatformBackend, so they cannot drift apart in what they write.
 //
 // Auth is the same shared GIT_INTERNAL_KEY that guards /internal/clone-token — the
 // east-west key builder reads straight from git's own Secret. The endpoint is
@@ -40,39 +44,14 @@ func handleInternalPlatformBackend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" || strings.TrimSpace(req.BaseURL) == "" {
-		http.Error(w, "name and base_url are required", http.StatusBadRequest)
-		return
-	}
-	host, err := deriveHost(req.BaseURL)
+	b, err := registerPlatformBackend(ctx, req.Name, req.BaseURL)
 	if err != nil {
-		http.Error(w, "base_url: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	// modeService carries no secret, but the row still goes through sealAuth so every
-	// backend is stored in one shape and openAuth has something well-formed to read.
-	enc, err := sealAuth(authConfig{Mode: modeService})
-	if err != nil {
-		slog.ErrorContext(ctx, "seal platform auth", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	now := time.Now().UTC()
-	b, err := upsertPlatformBackend(ctx, GitBackend{
-		ID:        uuid.New().String(),
-		Owner:     platformOwner,
-		Name:      req.Name,
-		Type:      backendGitFactory,
-		BaseURL:   strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
-		Host:      host,
-		AuthMode:  modeService,
-		AuthEnc:   enc,
-		CreatedAt: now,
-		UpdatedAt: now,
-	})
-	if err != nil {
-		slog.ErrorContext(ctx, "upsert platform backend", "host", host, "error", err)
+		var badInput platformBackendInputError
+		if errors.As(err, &badInput) {
+			http.Error(w, badInput.Error(), http.StatusBadRequest)
+			return
+		}
+		slog.ErrorContext(ctx, "register platform backend", "name", req.Name, "base_url", req.BaseURL, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}

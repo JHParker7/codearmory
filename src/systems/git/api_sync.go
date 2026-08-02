@@ -29,11 +29,15 @@ func effectiveSyncBranches(r GitRepo) []string {
 	return []string{"main"}
 }
 
-// updateRepoRequest is the body of PUT /repos/{id}. WorkflowSyncEnabled is a pointer so
-// omitting it leaves the current value; branches are replaced wholesale when present.
+// updateRepoRequest is the body of PUT /repos/{id}. BOTH fields are pointers so an
+// omitted one leaves the current value: this is a partial update, and the difference
+// matters — sending only branches must not turn sync off, and sending only the enabled
+// flag must not wipe the allowlist (which would fall back to "main" and sync from a
+// branch the user deliberately excluded). Branches are replaced wholesale when present,
+// and an explicit `[]` clears the allowlist.
 type updateRepoRequest struct {
-	WorkflowSyncEnabled  *bool    `json:"workflow_sync_enabled"`
-	WorkflowSyncBranches []string `json:"workflow_sync_branches"`
+	WorkflowSyncEnabled  *bool     `json:"workflow_sync_enabled"`
+	WorkflowSyncBranches *[]string `json:"workflow_sync_branches"`
 }
 
 // handleUpdateRepo sets the GitOps sync settings on a pinned repo the caller owns.
@@ -51,16 +55,29 @@ func handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+	// Only the fields the body actually carried are written; cols is what tells the
+	// store which those are, so an omitted field keeps its stored value instead of
+	// being force-written back as its zero value.
 	rp := GitRepo{ID: id, Owner: userID}
+	var cols []string
 	if req.WorkflowSyncEnabled != nil {
 		rp.WorkflowSyncEnabled = *req.WorkflowSyncEnabled
+		cols = append(cols, "workflow_sync_enabled")
 	}
-	for _, b := range req.WorkflowSyncBranches {
-		if b = strings.TrimSpace(b); b != "" {
-			rp.WorkflowSyncBranches = append(rp.WorkflowSyncBranches, b)
+	if req.WorkflowSyncBranches != nil {
+		// Non-nil even when every entry is filtered out: an explicit empty (or
+		// all-blank) list is a deliberate "clear the allowlist", not an omission.
+		branches := make([]string, 0, len(*req.WorkflowSyncBranches))
+		for _, b := range *req.WorkflowSyncBranches {
+			if b = strings.TrimSpace(b); b != "" {
+				branches = append(branches, b)
+			}
 		}
+		rp.WorkflowSyncBranches = branches
+		cols = append(cols, "workflow_sync_branches")
 	}
-	if err := rp.UpdateSync(ctx); err != nil {
+	stored, err := rp.UpdateSync(ctx, cols)
+	if err != nil {
 		if errors.Is(err, errRepoNotFound) {
 			http.Error(w, "repo not found", http.StatusNotFound)
 			return
@@ -70,11 +87,11 @@ func handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.SetStatus(codes.Ok, "")
-	slog.InfoContext(ctx, "repo sync settings updated", "user_id", userID, "repo_id", id, "enabled", rp.WorkflowSyncEnabled)
+	slog.InfoContext(ctx, "repo sync settings updated", "user_id", userID, "repo_id", id, "enabled", stored.WorkflowSyncEnabled)
 	writeJSON(w, http.StatusOK, repoView{
 		ID: id, Source: repoSourceManual,
-		WorkflowSyncEnabled:  rp.WorkflowSyncEnabled,
-		WorkflowSyncBranches: rp.WorkflowSyncBranches,
+		WorkflowSyncEnabled:  stored.WorkflowSyncEnabled,
+		WorkflowSyncBranches: stored.WorkflowSyncBranches,
 	})
 }
 

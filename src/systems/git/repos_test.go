@@ -275,3 +275,108 @@ func TestListBranchesGenericEmpty(t *testing.T) {
 		t.Fatalf("expected empty array, got %s", rec.Body.String())
 	}
 }
+
+// TestUpdateRepoSyncPartial pins the partial-update contract of PUT /repos/{id}: a
+// field the body omits keeps its stored value. Force-writing both columns on every
+// request (the old behaviour) meant a branches-only PUT silently turned sync OFF, and
+// an enabled-only PUT wiped the allowlist — so sync fell back to "main" and would run
+// configs from a branch the user had deliberately excluded, which is the whole point
+// of the allowlist.
+func TestUpdateRepoSyncPartial(t *testing.T) {
+	rec := httptest.NewRecorder()
+	handleCreateBackend(rec, req("POST", "/backends", "nora", createBackendRequest{
+		Name: "internal", Type: backendGeneric, BaseURL: "https://scm.nora",
+		Auth: authConfig{Mode: modeBasic, Username: "nora", Password: "pw"},
+	}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create backend: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	handleCreateRepo(rec, req("POST", "/repos", "nora", createRepoRequest{URL: "https://scm.nora/team/app.git"}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create repo: %d %s", rec.Code, rec.Body.String())
+	}
+	var created repoView
+	json.Unmarshal(rec.Body.Bytes(), &created) //nolint:errcheck
+
+	put := func(t *testing.T, owner, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest("PUT", "/repos/"+created.ID, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+owner)
+		r.SetPathValue("id", created.ID)
+		handleUpdateRepo(rec, r)
+		return rec
+	}
+	stored := func(t *testing.T) GitRepo {
+		t.Helper()
+		var got GitRepo
+		if err := gormDB.Where("id = ?", created.ID).First(&got).Error; err != nil {
+			t.Fatalf("read back repo: %v", err)
+		}
+		return got
+	}
+
+	// Both fields supplied: both are written.
+	if rec := put(t, "nora", `{"workflow_sync_enabled":true,"workflow_sync_branches":["release","main"]}`); rec.Code != http.StatusOK {
+		t.Fatalf("enable: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := stored(t); !got.WorkflowSyncEnabled || len(got.WorkflowSyncBranches) != 2 {
+		t.Fatalf("after enable: %+v", got)
+	}
+
+	// Branches only: sync must STAY enabled.
+	if rec := put(t, "nora", `{"workflow_sync_branches":["release"]}`); rec.Code != http.StatusOK {
+		t.Fatalf("branches only: %d %s", rec.Code, rec.Body.String())
+	}
+	got := stored(t)
+	if !got.WorkflowSyncEnabled {
+		t.Error("a branches-only update disabled sync")
+	}
+	if len(got.WorkflowSyncBranches) != 1 || got.WorkflowSyncBranches[0] != "release" {
+		t.Errorf("branches = %v, want [release]", got.WorkflowSyncBranches)
+	}
+
+	// Enabled only: the allowlist must survive untouched.
+	if rec := put(t, "nora", `{"workflow_sync_enabled":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("enabled only: %d %s", rec.Code, rec.Body.String())
+	}
+	got = stored(t)
+	if len(got.WorkflowSyncBranches) != 1 || got.WorkflowSyncBranches[0] != "release" {
+		t.Errorf("an enabled-only update wiped the allowlist: %v", got.WorkflowSyncBranches)
+	}
+	if want := []string{"release"}; effectiveSyncBranches(got)[0] != want[0] {
+		t.Errorf("effective branches = %v, want %v", effectiveSyncBranches(got), want)
+	}
+
+	// An EXPLICIT empty list still clears it — absent and empty are different.
+	if rec := put(t, "nora", `{"workflow_sync_branches":[]}`); rec.Code != http.StatusOK {
+		t.Fatalf("clear branches: %d %s", rec.Code, rec.Body.String())
+	}
+	got = stored(t)
+	if len(got.WorkflowSyncBranches) != 0 {
+		t.Errorf("explicit [] did not clear the allowlist: %v", got.WorkflowSyncBranches)
+	}
+	if !got.WorkflowSyncEnabled {
+		t.Error("clearing branches also disabled sync")
+	}
+
+	// An explicit false is still written (Select forces the zero value through).
+	if rec := put(t, "nora", `{"workflow_sync_enabled":false}`); rec.Code != http.StatusOK {
+		t.Fatalf("disable: %d %s", rec.Code, rec.Body.String())
+	}
+	if stored(t).WorkflowSyncEnabled {
+		t.Error("explicit false did not disable sync")
+	}
+
+	// Another user cannot touch it, and an empty body still 404s a repo that is not theirs.
+	if rec := put(t, "oscar", `{"workflow_sync_enabled":true}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-user update: expected 404, got %d", rec.Code)
+	}
+	if rec := put(t, "oscar", `{}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-user empty update: expected 404, got %d", rec.Code)
+	}
+	if stored(t).WorkflowSyncEnabled {
+		t.Error("another user's update took effect")
+	}
+}
