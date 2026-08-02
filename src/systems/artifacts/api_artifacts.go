@@ -120,8 +120,10 @@ func handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
 	// minus everything EXCEPT the one being overwritten. Without this, re-saving a
 	// cache that already fills most of the quota would always fail.
 	var prevSize int64
+	replacing := false
 	if prev, err := getArtifact(ctx, userID, name); err == nil {
 		prevSize = prev.SizeBytes
+		replacing = true
 	}
 	headroom := maxBytes - (used - prevSize)
 	if headroom <= 0 {
@@ -156,10 +158,29 @@ func handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
 		Name: name, SizeBytes: size, ContentType: ct, SHA256: digest,
 	}
 	if err := upsertArtifact(ctx, a); err != nil {
-		// The blob landed but the row did not: remove it rather than leaking bytes
-		// that count against nothing and can never be listed or deleted.
-		store.Remove(ctx, userID, name) //nolint:errcheck
-		slog.ErrorContext(ctx, "record artifact", "user_id", userID, "name", name, "error", err)
+		// The blob landed but the row did not. What to do about it depends on whether
+		// this was a first save or a REPLACE, and the difference is the whole point:
+		//
+		//   - First save (no row existed): the blob is orphaned — nothing can list,
+		//     download or delete it, and it counts against nothing. Remove it.
+		//   - Replace: store.Write already renamed the new blob over the old one, so
+		//     the old bytes are gone. The pre-existing ROW survived, and removing the
+		//     blob would leave it pointing at nothing — destroying a previously-good
+		//     artifact for good, permanently 500ing GET .../content, and charging its
+		//     size against the quota forever. Keep the blob: the row's size/digest lag
+		//     by one save until the client retries (which is exactly what a failed
+		//     step does), and until then the artifact still downloads.
+		//
+		// Ordering note: the row cannot simply be committed first — a failed write
+		// would then leave a row advertising a size and digest no blob has. Holding a
+		// transaction open across the upload instead would pin a connection (and a row
+		// lock) for the length of a multi-gigabyte transfer. So the blob write stays
+		// first and the compensation is scoped to the case where it is safe.
+		if !replacing {
+			store.Remove(ctx, userID, name) //nolint:errcheck
+		}
+		slog.ErrorContext(ctx, "record artifact", "user_id", userID, "name", name,
+			"replacing", replacing, "orphan_blob_removed", !replacing, "error", err)
 		http.Error(w, "failed to store artifact", http.StatusInternalServerError)
 		return
 	}
