@@ -53,6 +53,20 @@ Each goroutine runs a tight poll loop: `tryOne()` → short sleep → repeat. On
 
 The worker's final UPDATE guards on `WHERE status='running'` so a race between a completing worker and a cancellation request always produces a consistent terminal state.
 
+### Run leases (surviving a rolling deploy)
+
+A claimed run is owned by exactly one pod, and that ownership has to stay decidable when the pod disappears mid-run. The claiming worker stamps a **lease** as it dequeues the run — not from its own heartbeat loop, so a run can never sit `running` with a NULL lease for a peer to misread — then refreshes it every `runLeaseHeartbeat` (30s) for as long as it holds the run. A peer may reclaim a run only once its lease has gone unrefreshed for `runLeaseStaleAfter` (5m).
+
+The order-of-magnitude gap between the two is deliberate: a worker blocked on a slow step, a stop-the-world GC pause or a brief database blip must not be mistaken for a dead one. The cost of erring long is only that a genuinely crashed run is reclaimed a few minutes later. The staleness cutoff is evaluated by the **database's** clock, not the pod's, so skew between replicas cannot make one pod steal another's live run.
+
+### Cancelling abandoned remote jobs
+
+A step that submits an **async job** owns a resource on the target service for as long as that job lives, and abandoning the step does not release it. Forge admits new work against the *reservation* of everything it still considers running, so a single stranded execution can hold enough CPU and memory to freeze a whole cluster's pipelines.
+
+The normal path is per-step: `pollAction`'s exit cancels the job it was polling. What that misses is a run whose worker died — nothing is left in memory to run that exit. So when the **lease sweep** reaps a run whose worker stopped heartbeating, and when **startup recovery** reclaims runs abandoned by a worker that is definitely gone, workflows calls the action's cancel endpoint for every job those runs still have outstanding (`cancelAbandonedRunJobs` in `jobcancel.go`). A reaper has no in-memory job ids at all, only what the step runs recorded, and the credential it uses is the token stored on the run row — a reaped run's session is left to expire rather than revoked, precisely so it is still good for the cancel.
+
+It is best-effort and time-boxed (`asyncCancelTimeout`, 5s per job), and each run is handled independently with failures logged and skipped: the sweep must reclaim the rest of its batch regardless, and a failed cancel must never block reclaiming a run.
+
 ## Step execution
 
 ### Service URL resolution

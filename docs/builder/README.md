@@ -85,12 +85,23 @@ never locks the platform.
 
 ## Reconciler (deploy on enable)
 
-**The Helm chart deploys only the core services** — gatekeeper, conductor, registry,
-builder and portal. Every other service is `enabled: true` but `deploy: false`, so the
-chart still provisions its **Secret, gatekeeper identity and registry route** (the
-"slot") but not its workload. Builder fills the slot on demand: an instance admin
-enables a non-core service and the reconciler deploys it; disabling tears it down.
-This keeps a fresh install minimal and lets each instance run only what it uses.
+**The Helm chart deploys the core services** — gatekeeper, conductor, registry,
+builder, portal, forge (plus its egress proxy), workflows, hooks, events, tickets,
+containers, artifacts, git_connector and git_factory — each gated on its own
+`<service>.enabled` value, all defaulting to true. (`outpostGateway.enabled` is the
+one that defaults to false.)
+
+Builder's reconciler covers the **non-core** services, which live in their own
+`codearmory-*` repos and have no chart templates: argo, blueprints, chaos,
+notifications and gitea_integration. An instance admin enables one and the reconciler
+deploys and registers it at runtime; disabling tears it down. That is what keeps a
+capability addable without a chart edit.
+
+Anything in builder's `coreServices` set (`types.go`) is excluded from the catalog,
+never reconciled, and rejected by the set-service API — the chart owns those
+workloads. `codearmory_git_factory` is in that set: it was builder-deployed until its
+source moved into this monorepo, and the entry is what stops builder from ever
+reconciling it again now that its def is gone.
 
 The reconciler turns the instance admin's desired state into running workloads:
 enabling a non-core service in the **default/admin scope** makes builder deploy it
@@ -196,9 +207,11 @@ workload", with no annotation-passthrough surface to maintain.
 
 No builder-deployed service needs that Ingress today. git_factory used to be the one
 that did, but it is now an in-repo **core** service: the chart owns its Deployment,
-Service and Ingress outright (`gitFactory.ingress.enabled=true`), so none of it routes
-through builder any more. The escape hatch above still stands for a future service that
-needs to be reachable from outside the cluster.
+Service and Ingress outright, so none of it routes through builder any more. (The
+Ingress itself is opt-in — `gitFactory.ingress.enabled` defaults to `false`, since
+whether git is reachable from outside the cluster is a deployment choice. Set it, with
+`gitFactory.ingress.hosts`, to expose Smart-HTTP externally.) The escape hatch above
+still stands for a future service that needs to be reachable from outside the cluster.
 
 ## Dynamic provisioning (no Helm change)
 

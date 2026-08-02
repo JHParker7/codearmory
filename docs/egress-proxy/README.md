@@ -106,6 +106,13 @@ Adjust `PROXY_ALLOWED_DOMAINS` to match your workload's requirements.
 
 - The proxy only implements HTTP CONNECT tunnelling — it cannot inspect TLS traffic.
 - Connections to disallowed hosts are refused with `403 Forbidden` before any data is exchanged.
+- **A dial-time IP guard runs on every request, whatever the allowlist says.** The hostname check and the address check are separate: a name that passes the allowlist (including the default `*`) is still refused if it *resolves* to an address the proxy must not reach. That covers what Go's own `net.IP` predicates already know — loopback, RFC1918 private, link-local (incl. the `169.254.169.254` cloud-metadata address), multicast, unspecified — plus four ranges they miss and a cluster genuinely lands in:
+  - `100.64.0.0/10` (CGNAT) — where EKS, GKE and OKE commonly place the pod/node network, and where Alibaba Cloud serves instance metadata (`100.100.100.200`).
+  - `0.0.0.0/8` ("this network") — non-routable, and treated as the local host by many stacks even though only `0.0.0.0` itself is `IsUnspecified`.
+  - `240.0.0.0/4` (reserved/future use), which includes the `255.255.255.255` broadcast address.
+  - `fec0::/10`, deprecated IPv6 site-local. (Its replacement, unique-local `fc00::/7`, is already covered by `IsPrivate`.)
+- **The IPv4 ranges cannot be dodged by writing the address as IPv6.** An IPv4-mapped form like `::ffff:10.0.0.1` is normalised to its 4-byte address before any of the checks run.
+- **NAT64 addresses are judged by the IPv4 they embed, not blocked outright.** An address in the well-known `64:ff9b::/96` prefix (RFC 6052) carries an IPv4 address in its low 32 bits, and an IPv6-only cluster reaches the public IPv4 internet through exactly that prefix. The proxy extracts the embedded address and applies the same rules to it — so NAT64 to a public host works, and NAT64 to `10.0.0.1` does not.
 - The proxy does not authenticate clients. It relies on network-level isolation (execution containers on an `--internal` Docker network) to restrict which processes can reach it.
 - In Kubernetes, use a `NetworkPolicy` to restrict egress from Forge job pods to only the egress proxy pod.
 

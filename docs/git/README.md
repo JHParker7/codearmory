@@ -66,6 +66,8 @@ Backend reads (`GET /backends`, `GET /backends/{id}`) return a secret-free proje
 | `GATEKEEPER_SERVICE_KEY` | — | Shared service key registered with Gatekeeper. Required for service-to-service authentication in production. |
 | `GIT_ENCRYPTION_KEY` | — | **Required.** Passphrase used to derive the AES-256 key that encrypts credential material at rest. The service exits on startup if unset. |
 | `GIT_INTERNAL_KEY` | — | Shared key (`X-Internal-Key`) that authenticates Forge/Workflows calls to `POST /internal/clone-token`. When unset, the internal endpoint rejects all requests. |
+| `GIT_FACTORY_URL` | — | git-factory's in-cluster base URL, set by the Helm chart. On its own it is what the **platform backend** row is seeded from at startup, so repos hosted on git-factory are clonable for every user with no per-user link and without waiting on builder. Combined with `GIT_FACTORY_INTERNAL_KEY` it also reaches git-factory's internal mirror surface. |
+| `GIT_FACTORY_INTERNAL_KEY` | — | Shared secret for git-factory's `/internal/mirrors` surface — the same value git-factory itself holds. **Both** this and `GIT_FACTORY_URL` must be set for a `prefer_mirror` backend to be served from the cache; otherwise the broker silently returns the upstream URL. |
 | `PORT` | `8096` | Port the server listens on |
 | `OTEL_SERVICE_NAME` | `git` | Service name reported in traces and metrics |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTel Collector HTTP endpoint. Omit to disable telemetry. |
@@ -116,6 +118,8 @@ The branch list feeds a `checkout.ref` (see [Auto-checkout](#auto-checkout-check
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `POST` | `/git/internal/clone-token` | `X-Internal-Key: $GIT_INTERNAL_KEY` | Mint an authenticated clone URL for a named user + repo. Not routed through Conductor's RBAC — authenticated by the shared internal key. |
+| `POST` | `/git/internal/repos/sync-config` | `X-Internal-Key: $GIT_INTERNAL_KEY` | Asks whether a repo's `.armory/workflows` should sync, and from which branches. Called by Workflows. |
+| `POST` | `/git/internal/backends/platform` | `X-Internal-Key: $GIT_INTERNAL_KEY` | Register an in-cluster git host as a **platform backend**, so clones of its repos resolve for every user with no per-user link. The platform's own git-factory is seeded from `GIT_FACTORY_URL` at startup instead; this remains for a not-yet-upgraded builder and any other platform-deployed host. |
 
 ### Link a backend
 

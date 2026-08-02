@@ -38,6 +38,12 @@ multi-node topology; a single node ignores placement entirely (empty table = all
 | `GIT_FACTORY_URL` | git-factory base URL (e.g. `http://ca-codearmory-git-factory:9002`) |
 | `GIT_FACTORY_INTERNAL_KEY` | same secret as git-factory's |
 
+`GIT_FACTORY_URL` now carries two jobs. On its own it is what git_connector seeds the
+**platform backend** row from at startup (`platform_backend.go`), so a repo hosted on
+git-factory is clonable without builder ever having POSTed
+`/internal/backends/platform` — the link no longer depends on builder running at all.
+Together with `GIT_FACTORY_INTERNAL_KEY` it also reaches the internal mirror surface.
+
 Both unset → `prefer_mirror` degrades to today's behaviour (upstream URL returned).
 
 ## Rollout order
@@ -111,7 +117,9 @@ kubectl -n codearmory set image deployment/ca-codearmory-git-factory \
 
 ## Field notes from the first local rollout
 
-Four things bit on the way in. Read these before repeating the exercise.
+These were written while git-factory was still builder-deployed. Only the first still
+applies; the rest were settled by the move to a core, chart-deployed service and are
+summarised below so a reader of the original list knows not to chase them.
 
 1. **`shard_nodes` keeps a single-column primary key on upgrade.** GORM's AutoMigrate
    adds columns but never alters a PRIMARY KEY, so an install that ran a pre-replica
@@ -119,31 +127,20 @@ Four things bit on the way in. Read these before repeating the exercise.
    primary *and* its replicas, silently breaking replication while a fresh install works
    fine. `widenShardNodePK` (runs at boot, Postgres-only, idempotent) repairs it.
 
-2. **git-factory's Deployment is builder-managed, so patch the source of truth.** The
-   image/config live in builder's `org_services` row, not the Deployment; builder
-   reconciles every 30s (`BUILDER_RECONCILE_INTERVAL`). A raw `kubectl set image` is
-   normally reverted.
+2. **The Deployment is chart-owned, so change the chart.** git-factory ships as a core
+   service: `templates/git-factory-deployment.yaml` renders it and the `gitFactory.*`
+   block in `values.yaml` is the source of truth. Builder does not touch it —
+   `codearmory_git_factory` is in builder's `coreServices` set and the
+   `files/services/git_factory.json` def is gone — so a `kubectl set image` now sticks
+   until the next `helm upgrade` reverts it. Set the value and upgrade.
 
-3. **…except builder currently never reaches the Deployment for this service.** The
-   deployed builder image predates `files/services/git_factory.json`, so it finds no def,
-   derives the Secret name from the registry name (`ca-codearmory-codearmory_git_factory`,
-   underscores → invalid RFC-1123), and `provision` fails. `EnsureService` returns before
-   `applyDeployment`, so git-factory's workload is effectively frozen and a manual patch
-   *does* stick. That is a broken-reconciler side effect, not a supported mechanism: once
-   builder ships a git_factory def, it will start overwriting manual patches — set the
-   `org_services` row instead.
-
-4. **Config cannot currently be changed through builder's API.** `PUT /builder/services/
-   {service}` 500s on any config edit (even writing the identical value back):
-   `upsertOrgService` passes a raw `map[string]any` to `Updates`, which bypasses the
-   `serializer:json` binding on the `config` column, and pgx has no encode plan for a Go
-   map → `text`. Only the `Create` path (first write of a row) serializes correctly. Until
-   builder marshals config explicitly in the updates map, new config keys have to be set
-   when the row is first created, or written directly to the `org_services` row.
-
-Unrelated but visible in the logs: git-factory reports `key rotation: unexpected status
-401` because gatekeeper's `PERMITTED_SERVICES` does not list `codearmory_git_factory`.
-That predates this work and is not caused by the rollout.
+**Settled since this was written:** the builder `org_services` route into this service
+(original notes 2–3) no longer exists. Builder's "config cannot be changed through the
+API" 500 (original note 4) is fixed — `orgServiceUpdates` encodes `config` explicitly
+before it reaches `Updates`. And the `key rotation: unexpected status 401` visible in
+the old logs is gone: `gatekeeper-secret.yaml` seeds `codearmory_git_factory` into
+`GATEKEEPER_SERVICES`, and `PERMITTED_SERVICES` was only ever a fast path — an
+unlisted service still resolves against its `ServiceAccount` row.
 
 ## Rollback
 
