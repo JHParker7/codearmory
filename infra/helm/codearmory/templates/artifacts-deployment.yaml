@@ -8,7 +8,8 @@ metadata:
     {{- include "codearmory.labels" . | nindent 4 }}
     app.kubernetes.io/component: artifacts
 spec:
-  replicas: {{ .Values.artifacts.replicaCount }}
+  {{- /* replicas is omitted when this service has an HPA — see codearmory.replicas */}}
+  {{- include "codearmory.replicas" .Values.artifacts }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "codearmory.name" . }}
@@ -28,6 +29,17 @@ spec:
         runAsNonRoot: true
         runAsUser: 100
         runAsGroup: 101
+        {{- if not .Values.artifacts.s3.enabled }}
+        # On the PVC blob-store path this container writes to a volume it did not
+        # create the root of, and a freshly provisioned volume is owned by root while
+        # this runs as uid 100 — without fsGroup the very first artifact save fails
+        # with permission denied. Not needed on the S3 path, where the only local
+        # volume is an emptyDir the kubelet already creates with the pod's group.
+        # OnRootMismatch keeps startup fast once the store is large: the recursive
+        # chown runs only when the root's group is actually wrong.
+        fsGroup: 101
+        fsGroupChangePolicy: OnRootMismatch
+        {{- end }}
         seccompProfile:
           type: RuntimeDefault
       initContainers:
@@ -72,9 +84,17 @@ spec:
               value: {{ .Values.artifacts.s3.region | quote }}
             - name: ARTIFACTS_S3_FORCE_PATH_STYLE
               value: {{ .Values.artifacts.s3.forcePathStyle | quote }}
+            {{- /* Both halves of a static credential or neither: gating the pair on
+                   accessKeySecret alone renders `name: ""` on the secret key ref when
+                   only one is filled in, which the API server rejects at install time
+                   with an error naming no values key at all. values-prod ships the two
+                   as separate empty TODOs, so filling in one is easy to do. */ -}}
+            {{- if and (or .Values.artifacts.s3.accessKeySecret .Values.artifacts.s3.secretKeySecret) (not (and .Values.artifacts.s3.accessKeySecret .Values.artifacts.s3.secretKeySecret)) }}
+            {{- fail "artifacts.s3: set BOTH artifacts.s3.accessKeySecret and artifacts.s3.secretKeySecret, or neither (to use the default AWS credential chain)" }}
+            {{- end }}
             {{- if .Values.artifacts.s3.accessKeySecret }}
-            # Static credentials from a Secret. Omit the secret to fall back to the
-            # default AWS credential chain (IRSA / instance profile) on real AWS.
+            # Static credentials from a Secret. Omit BOTH secret names to fall back to
+            # the default AWS credential chain (IRSA / instance profile) on real AWS.
             - name: ARTIFACTS_S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
