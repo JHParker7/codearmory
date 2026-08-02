@@ -20,6 +20,7 @@ import { Tickets } from './pages/app/Tickets';
 import { Hooks } from './pages/app/Hooks';
 import { Containers } from './pages/app/Containers';
 import { Git } from './pages/app/Git';
+import { Repos } from './pages/app/Repos';
 import { Outposts } from './pages/app/Outposts';
 import { ServiceFrame } from './pages/app/ServiceFrame';
 import { Audit } from './pages/app/Audit';
@@ -126,6 +127,10 @@ export function App() {
             <Route path="hooks" element={<Hooks />} />
             <Route path="containers" element={<Containers />} />
             <Route path="git" element={<Git />} />
+            {/* The git host keeps its registry-name path: /app/codearmory_git_factory
+                is what the sidebar, existing links and bookmarks already point at —
+                only what renders there changed (bundled page, no longer an iframe). */}
+            <Route path="codearmory_git_factory" element={<Repos />} />
             <Route path="outposts" element={<Outposts />} />
             <Route path="gatekeeper" element={<Gatekeeper />} />
             <Route path="projects" element={<Projects />} />

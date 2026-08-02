@@ -5,7 +5,7 @@
  * per-org scope). Enabling a service deploys it; disabling tears it down. Core
  * control-plane services can never be configured. Access is enforced server-side —
  * the sidebar only links here for the system admin (builder:configureOrgService on
- * builder/orgs/default, which only the wildcard admin matches).
+ * codearmory/builder/orgs/default, which only the wildcard admin matches).
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useUrlParam } from '../../hooks/useUrlState';

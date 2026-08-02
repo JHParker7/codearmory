@@ -31,6 +31,7 @@ const ROUTE_SERVICE: Record<string, string> = {
   hooks: 'hooks',
   containers: 'containers',
   git: 'git_connector',
+  codearmory_git_factory: 'codearmory_git_factory',
   outposts: 'outpost-gateway',
 };
 
@@ -42,6 +43,7 @@ const ROUTE_SERVICE: Record<string, string> = {
 const BUNDLED_SERVICES = new Set<string>([
   'forge', 'workflows', 'hooks', 'gatekeeper', 'builder',
   'tickets', 'git_connector', 'containers', 'outpost-gateway',
+  'codearmory_git_factory',
 ]);
 
 /**
@@ -63,16 +65,20 @@ const SERVICE_DESC: Record<string, string> = {
 
 /**
  * Iframe-hosted services pinned to a chosen nav slot under a friendlier label than
- * their registry name — `codearmory_git_factory/` reads as plumbing, `repos/` reads
- * as the thing the user came for. Pinned services are rendered explicitly below and
- * excluded from the generic list, so they appear exactly once.
+ * their registry name, rather than being listed among the discovered modules.
+ * Pinned services are rendered explicitly below and excluded from the generic
+ * list, so they appear exactly once.
  *
  * The key stays the registry name because that is what the route, the ui_path lookup
  * and the availability check all key on; only the presentation changes.
+ *
+ * Currently EMPTY: its only entry was codearmory_git_factory, which is now a
+ * bundled page (repos/, rendered explicitly in the tools section below and routed
+ * in App.tsx) rather than an iframe. The mechanism is kept because it is the way
+ * to give any future iframe-hosted service a friendly label and a chosen slot —
+ * nothing about it was specific to the git host.
  */
-const PINNED_SERVICES: Record<string, { label: string; desc: string }> = {
-  codearmory_git_factory: { label: 'repos/', desc: 'Host & browse git repositories' },
-};
+const PINNED_SERVICES: Record<string, { label: string; desc: string }> = {};
 
 /**
  * isUnavailable reports whether a service-backed module should be hidden/blocked:
@@ -366,8 +372,11 @@ export function AppLayout() {
           <NavSection title="tools" sidebarCollapsed={navCollapsed}>
             <NavItem to="/app/workflows" label="workflows/" desc="Automate builds & deploys" service="workflows" collapsed={navCollapsed} icon="workflows" />
             <NavItem to="/app/tickets" label="tickets/" desc="Track issues on kanban boards" service="tickets" collapsed={navCollapsed} icon="tickets" />
-            {/* Pinned iframe services (repos/) sit alongside the bundled tools rather
-                than in the discovered-modules list — they are day-to-day surfaces. */}
+            {/* The git host, under the name people came for. Its route stays the
+                registry name so existing links keep working. */}
+            <NavItem to="/app/codearmory_git_factory" label="repos/" desc="Host & browse git repositories" service="codearmory_git_factory" collapsed={navCollapsed} icon="git" />
+            {/* Pinned iframe services sit alongside the bundled tools rather than in
+                the discovered-modules list — they are day-to-day surfaces. */}
             {Object.entries(PINNED_SERVICES).map(([svc, { label, desc }]) => (
               <NavItem key={svc} to={`/app/${svc}`} label={label} desc={desc} service={svc} collapsed={navCollapsed} icon="git" />
             ))}

@@ -1379,6 +1379,322 @@ export function listGitBranches(token: string, cloneURL: string) {
   return req<GitBranch[]>('GET', `/git_connector/repos/branches?url=${encodeURIComponent(cloneURL)}`, token);
 }
 
+// ── git_factory — the platform's own git host ─────────────────────────────────
+// Registered as `codearmory_git_factory`, so every route below is conductor's
+// `/codearmory_git_factory/repos/...`. Distinct from git_connector above: this
+// service HOSTS repositories (Smart-HTTP + a management API), it does not broker
+// credentials for repos hosted elsewhere. Names are prefixed `GitFactory…` /
+// `…GitFactory…` so they never collide with the connector's or gitea's.
+
+/** A hosted repository. `http_url` is the clone URL (derived per read, never stored). */
+export interface GitFactoryRepo {
+  id: string;
+  namespace: string;
+  name: string;
+  description: string;
+  default_branch: string;
+  visibility: string;
+  /** Free-text project (workspace) label, as the project switcher filters on. */
+  project?: string;
+  project_id?: string;
+  project_namespace?: string;
+  /** Size at the last push/gc; 0 means never measured, not empty. */
+  size_bytes: number;
+  /** "native" (pushed here) or "mirror" (a read-only cache of upstream_url). */
+  kind: string;
+  upstream_url?: string;
+  mirror_at?: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  http_url: string;
+}
+
+/** A branch or tag: the ref plus the commit it points at. */
+export interface GitFactoryRef {
+  name: string;
+  sha: string;
+  date: string;
+  subject: string;
+  default?: boolean;
+}
+
+export interface GitFactoryCommit {
+  sha: string;
+  short: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+
+/** One page of history. `total` is computed with the SAME filters, so the pager never over-promises. */
+export interface GitFactoryCommitPage {
+  commits: GitFactoryCommit[] | null;
+  total: number;
+  skip: number;
+  limit: number;
+}
+
+/** Per-file summary of a diff (git numstat). */
+export interface GitFactoryFileChange {
+  path: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
+/** One commit with its file summary and full unified diff. */
+export interface GitFactoryCommitDetail extends GitFactoryCommit {
+  body: string;
+  parent: string;
+  files: GitFactoryFileChange[] | null;
+  diff: string;
+}
+
+/** base…head preview: how many commits, and the changes, a pull request would carry. */
+export interface GitFactoryCompare {
+  commits: number;
+  files?: GitFactoryFileChange[] | null;
+  diff?: string;
+}
+
+export interface GitFactoryTreeEntry {
+  name: string;
+  path: string;
+  /** "file" | "dir" | "symlink" | "submodule" */
+  type: string;
+  size: number;
+  mode: string;
+}
+
+export interface GitFactoryTree {
+  ref: string;
+  path: string;
+  entries: GitFactoryTreeEntry[] | null;
+}
+
+/** A file's contents. `binary` and `truncated` mean the text is not the whole file. */
+export interface GitFactoryBlob {
+  path: string;
+  size: number;
+  binary: boolean;
+  truncated: boolean;
+  content: string;
+}
+
+/** The repo's root README, or found:false when it has none (or no commits yet). */
+export interface GitFactoryReadme {
+  found: boolean;
+  path: string;
+  content: string;
+}
+
+export interface GitFactoryPull {
+  id: string;
+  repo_id: string;
+  /** Per-repo, human-facing number — what the merge/close routes key on. */
+  number: number;
+  title: string;
+  body: string;
+  source_ref: string;
+  target_ref: string;
+  /** open | merged | closed */
+  state: string;
+  author: string;
+  merge_commit?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Whether an open pull request can merge cleanly, and why not when it cannot. */
+export interface GitFactoryMergeCheck {
+  mergeable: boolean;
+  conflicts?: string[];
+  already_merged: boolean;
+  reason?: string;
+}
+
+/** A pull request plus its review payload — present only while the PR is open. */
+export interface GitFactoryPullDetail {
+  pull_request: GitFactoryPull;
+  files?: GitFactoryFileChange[] | null;
+  files_error?: string;
+  diff?: string;
+  commits?: number;
+  merge?: GitFactoryMergeCheck;
+}
+
+/** Who a repo is shared with: the owner's user id plus one row per (user, level). */
+export interface GitFactoryCollaborators {
+  owner: string;
+  collaborators: { user_id: string; level: string }[];
+}
+
+/** A branch-protection rule; `pattern` is a branch name or glob (e.g. `release/*`). */
+export interface GitFactoryProtection {
+  repo_id: string;
+  pattern: string;
+  block_force_push: boolean;
+  block_deletion: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export function listGitFactoryRepos(token: string) {
+  return req<GitFactoryRepo[]>('GET', '/codearmory_git_factory/repos', token);
+}
+
+export function getGitFactoryRepo(token: string, id: string) {
+  return req<GitFactoryRepo>('GET', `/codearmory_git_factory/repos/${id}`, token);
+}
+
+export function createGitFactoryRepo(
+  token: string,
+  payload: { name: string; description?: string; visibility?: string; org_repo?: boolean; project?: string },
+) {
+  return req<GitFactoryRepo>('POST', '/codearmory_git_factory/repos', token, payload);
+}
+
+/** Update a repo's metadata (description/visibility/project). Empty fields are left unchanged. */
+export function updateGitFactoryRepo(
+  token: string,
+  id: string,
+  payload: Partial<{ name: string; description: string; visibility: string; project: string }>,
+) {
+  return req<GitFactoryRepo>('PATCH', `/codearmory_git_factory/repos/${id}`, token, payload);
+}
+
+export function deleteGitFactoryRepo(token: string, id: string) {
+  return req<void>('DELETE', `/codearmory_git_factory/repos/${id}`, token);
+}
+
+/** Branch list plus the name HEAD currently points at. */
+export function listGitFactoryBranches(token: string, id: string) {
+  return req<{ branches: GitFactoryRef[] | null; default: string }>('GET', `/codearmory_git_factory/repos/${id}/branches`, token);
+}
+
+export function listGitFactoryTags(token: string, id: string) {
+  return req<GitFactoryRef[] | null>('GET', `/codearmory_git_factory/repos/${id}/tags`, token);
+}
+
+/** Point HEAD (and the repo record) at another branch. */
+export function setGitFactoryDefaultBranch(token: string, id: string, branch: string) {
+  return req<GitFactoryRepo>('PUT', `/codearmory_git_factory/repos/${id}/default-branch`, token, { default_branch: branch });
+}
+
+/** One page of history, filtered by ref/message/author. */
+export function listGitFactoryCommits(
+  token: string,
+  id: string,
+  opts: { ref?: string; limit?: number; skip?: number; q?: string; author?: string } = {},
+) {
+  const p = new URLSearchParams();
+  if (opts.ref) p.set('ref', opts.ref);
+  if (opts.limit !== undefined) p.set('limit', String(opts.limit));
+  if (opts.skip) p.set('skip', String(opts.skip));
+  if (opts.q) p.set('q', opts.q);
+  if (opts.author) p.set('author', opts.author);
+  return req<GitFactoryCommitPage>('GET', `/codearmory_git_factory/repos/${id}/commits?${p}`, token);
+}
+
+// One commit's changes. Served from ?sha= on the history route (rather than the
+// service's /commits/{sha}) because that is the route registered in the gateway.
+export function getGitFactoryCommit(token: string, id: string, sha: string) {
+  return req<GitFactoryCommitDetail>('GET', `/codearmory_git_factory/repos/${id}/commits?sha=${encodeURIComponent(sha)}`, token);
+}
+
+/** Preview what a pull request from `head` into `base` would contain — same route, ?base=&head=. */
+export function compareGitFactoryRefs(token: string, id: string, base: string, head: string) {
+  return req<GitFactoryCompare>(
+    'GET',
+    `/codearmory_git_factory/repos/${id}/commits?base=${encodeURIComponent(base)}&head=${encodeURIComponent(head)}`,
+    token,
+  );
+}
+
+export function getGitFactoryReadme(token: string, id: string) {
+  return req<GitFactoryReadme>('GET', `/codearmory_git_factory/repos/${id}/readme`, token);
+}
+
+export function getGitFactoryTree(token: string, id: string, path: string, ref: string) {
+  return req<GitFactoryTree>(
+    'GET',
+    `/codearmory_git_factory/repos/${id}/tree?path=${encodeURIComponent(path)}&ref=${encodeURIComponent(ref)}`,
+    token,
+  );
+}
+
+export function getGitFactoryBlob(token: string, id: string, path: string, ref: string) {
+  return req<GitFactoryBlob>(
+    'GET',
+    `/codearmory_git_factory/repos/${id}/blob?path=${encodeURIComponent(path)}&ref=${encodeURIComponent(ref)}`,
+    token,
+  );
+}
+
+// Commit an edited file. This rides on PATCH /repos/{id} (a registered route) with a
+// `file` payload rather than PUT /repos/{id}/blob, so the edit works through conductor.
+export function writeGitFactoryBlob(
+  token: string,
+  id: string,
+  file: { ref: string; path: string; content: string; message?: string },
+) {
+  return req<GitFactoryRepo>('PATCH', `/codearmory_git_factory/repos/${id}`, token, { file });
+}
+
+export function listGitFactoryPulls(token: string, id: string) {
+  return req<GitFactoryPull[] | null>('GET', `/codearmory_git_factory/repos/${id}/pulls`, token);
+}
+
+export function createGitFactoryPull(
+  token: string,
+  id: string,
+  payload: { title: string; source_ref: string; target_ref: string; body?: string },
+) {
+  return req<GitFactoryPull>('POST', `/codearmory_git_factory/repos/${id}/pulls`, token, payload);
+}
+
+export function getGitFactoryPull(token: string, id: string, number: number | string) {
+  return req<GitFactoryPullDetail>('GET', `/codearmory_git_factory/repos/${id}/pulls/${number}`, token);
+}
+
+export function mergeGitFactoryPull(token: string, id: string, number: number | string, message?: string) {
+  return req<GitFactoryPull>('POST', `/codearmory_git_factory/repos/${id}/pulls/${number}/merge`, token, message ? { message } : undefined);
+}
+
+export function closeGitFactoryPull(token: string, id: string, number: number | string) {
+  return req<GitFactoryPull>('POST', `/codearmory_git_factory/repos/${id}/pulls/${number}/close`, token);
+}
+
+export function listGitFactoryCollaborators(token: string, id: string) {
+  return req<GitFactoryCollaborators>('GET', `/codearmory_git_factory/repos/${id}/collaborators`, token);
+}
+
+/** Share a repo with a user at read or write level (`user` is a gatekeeper user id). */
+export function addGitFactoryCollaborator(token: string, id: string, user: string, level: string) {
+  return req<{ repo_id: string; user: string; level: string }>('PUT', `/codearmory_git_factory/repos/${id}/collaborators`, token, { user, level });
+}
+
+export function removeGitFactoryCollaborator(token: string, id: string, user: string) {
+  return req<void>('DELETE', `/codearmory_git_factory/repos/${id}/collaborators/${user}`, token);
+}
+
+export function listGitFactoryProtections(token: string, id: string) {
+  return req<GitFactoryProtection[] | null>('GET', `/codearmory_git_factory/repos/${id}/protections`, token);
+}
+
+export function setGitFactoryProtection(
+  token: string,
+  id: string,
+  payload: { pattern: string; block_force_push?: boolean; block_deletion?: boolean },
+) {
+  return req<GitFactoryProtection>('PUT', `/codearmory_git_factory/repos/${id}/protections`, token, payload);
+}
+
+export function deleteGitFactoryProtection(token: string, id: string, pattern: string) {
+  return req<void>('DELETE', `/codearmory_git_factory/repos/${id}/protections/${encodeURIComponent(pattern)}`, token);
+}
+
 // ── Invites ───────────────────────────────────────────────────────────────────
 
 export interface Invite {

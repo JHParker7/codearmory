@@ -1,0 +1,1421 @@
+/**
+ * Repos page — `codearmory_git_factory`, the platform's own git host. Left is the
+ * repository list (with a create form); right is the selected repo as a real git
+ * host page: a code tab (branch switcher, file tree, file reader/editor, README),
+ * a commits tab (filterable, paged history and per-commit diffs), a pulls tab
+ * (open/review/merge/close, with a compare preview before the PR exists) and a
+ * settings tab (default branch, tags, branch protections, collaborators).
+ *
+ * This replaces the sandboxed iframe the service used to be surfaced through: the
+ * frame lost `allow-same-origin`, so a framed mini-portal can no longer read the
+ * session token, and a bundled page is the honest answer for a core service. All
+ * calls go through the BFF (`/api/codearmory_git_factory/repos/...`) via the typed
+ * `…GitFactory…` helpers in api/bff.
+ *
+ * Everything the page renders from repository contents (README, files, diffs) is
+ * untrusted — whoever can push writes it — so it is parsed into token trees by
+ * repoContent.ts and rendered as React text nodes; no markup is ever injected.
+ */
+import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
+import { useUrlParam, useUrlState } from '../../hooks/useUrlState';
+import { T } from '../../theme';
+import { useResizableWidth } from '../../components/ResizeHandle';
+import { Pill } from '../../components/Pill';
+import { useConfirm } from '../../components/ConfirmDialog';
+import { useAppSelector } from '../../store/hooks';
+import {
+  listGitFactoryRepos, createGitFactoryRepo, deleteGitFactoryRepo,
+  listGitFactoryBranches, listGitFactoryTags, setGitFactoryDefaultBranch,
+  listGitFactoryCommits, getGitFactoryCommit, compareGitFactoryRefs,
+  getGitFactoryReadme, getGitFactoryTree, getGitFactoryBlob, writeGitFactoryBlob,
+  listGitFactoryPulls, createGitFactoryPull, getGitFactoryPull, mergeGitFactoryPull, closeGitFactoryPull,
+  listGitFactoryCollaborators, addGitFactoryCollaborator, removeGitFactoryCollaborator,
+  listGitFactoryProtections, setGitFactoryProtection, deleteGitFactoryProtection,
+} from '../../api/bff';
+import type {
+  GitFactoryRepo, GitFactoryRef, GitFactoryCommit, GitFactoryCommitDetail,
+  GitFactoryFileChange, GitFactoryTreeEntry, GitFactoryBlob, GitFactoryPull,
+  GitFactoryPullDetail, GitFactoryProtection,
+} from '../../api/bff';
+import { timeAgo, shortId } from '../../utils';
+import {
+  parseMarkdown, highlight, extOf, splitDiffByFile, diffLineKind, formatBytes,
+  type MdBlock, type MdInline, type TokenClass,
+} from './repoContent';
+
+type RepoTab = 'code' | 'commits' | 'pulls' | 'settings';
+
+/** Commits per page — the history pager's stride. */
+const PAGE = 50;
+/** Diff lines rendered per file, so one enormous commit cannot lock up the DOM. */
+const MAX_DIFF_LINES = 4000;
+
+// ── shared styling ───────────────────────────────────────────────────────────
+
+const input: CSSProperties = {
+  width: '100%', background: T.cardHi, border: `1px solid ${T.border}`, color: T.text,
+  fontFamily: T.mono, fontSize: 12, padding: '6px 8px', outline: 'none', boxSizing: 'border-box',
+};
+const primaryBtn: CSSProperties = {
+  background: T.greenSoft, border: `1px solid ${T.green}`, color: T.green,
+  fontFamily: T.mono, fontSize: 11, padding: '5px 12px', cursor: 'pointer',
+};
+const ghostBtn: CSSProperties = {
+  background: 'transparent', border: `1px solid ${T.border}`, color: T.dim,
+  fontFamily: T.mono, fontSize: 10, padding: '3px 8px', cursor: 'pointer',
+};
+const linkBtn: CSSProperties = {
+  background: 'transparent', border: 'none', color: T.green,
+  fontFamily: T.mono, fontSize: 11, padding: 0, cursor: 'pointer',
+};
+const sectionLabel: CSSProperties = {
+  fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: 0.6,
+  textTransform: 'uppercase', marginBottom: 6,
+};
+
+/** Loading/empty line, in the app's terminal idiom. */
+function Hint({ children, busy }: { children: ReactNode; busy?: boolean }) {
+  return (
+    <div style={{ fontFamily: T.mono, fontSize: 11, color: T.faint, padding: '10px 0', animation: busy ? 'pulse 1s ease-in-out infinite' : undefined }}>
+      {children}
+    </div>
+  );
+}
+
+/** Inline error banner. */
+function ErrorBox({ children }: { children: ReactNode }) {
+  return (
+    <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '8px 12px', fontFamily: T.mono, fontSize: 11, color: T.red, marginBottom: 12 }}>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Turn a BFF error into something worth reading. A 403 is an ordinary outcome
+ * here — repository access is scoped per repo, so a user can legitimately see a
+ * repo in one list and be refused a tab of it — and reads as a permission
+ * statement rather than a failure.
+ */
+function errorMessage(e: unknown): string {
+  const err = e as (Error & { status?: number }) | undefined;
+  if (err?.status === 403) return 'not permitted — ask an owner to share this repository with you';
+  if (err?.status === 401) return 'session expired — sign in again';
+  if (err?.status === 404) return 'not found — it may have been deleted';
+  return err?.message?.trim() || 'request failed';
+}
+
+/** Relative time that tolerates a missing/unparsable timestamp. */
+function ago(iso?: string | null): string {
+  if (!iso) return 'never';
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return 'never';
+  return `${timeAgo(iso)} ago`;
+}
+
+/** Tone for a pull request state (open=green, merged=blue, closed=red). */
+function pullTone(state: string): 'green' | 'blue' | 'red' | 'dim' {
+  if (state === 'open') return 'green';
+  if (state === 'merged') return 'blue';
+  if (state === 'closed') return 'red';
+  return 'dim';
+}
+
+// ── content rendering ────────────────────────────────────────────────────────
+
+const TOKEN_COLOR: Record<TokenClass, string | undefined> = {
+  '': undefined,
+  comment: T.faint,
+  string: T.green,
+  number: T.amber,
+  keyword: T.blue,
+  literal: T.amber,
+};
+
+/** Syntax-coloured spans for one chunk of source. */
+function Tokens({ text, ext }: { text: string; ext: string }) {
+  const tokens = useMemo(() => highlight(text, ext), [text, ext]);
+  return (
+    <>
+      {tokens.map((t, i) => (
+        t.cls
+          ? <span key={i} style={{ color: TOKEN_COLOR[t.cls], fontStyle: t.cls === 'comment' ? 'italic' : undefined }}>{t.text}</span>
+          : <Fragment key={i}>{t.text}</Fragment>
+      ))}
+    </>
+  );
+}
+
+/** Inline markdown nodes → React. Links are already restricted to http(s) by the parser. */
+function Inline({ nodes }: { nodes: MdInline[] }) {
+  return (
+    <>
+      {nodes.map((n, i) => {
+        switch (n.kind) {
+          case 'text': return <Fragment key={i}>{n.text}</Fragment>;
+          case 'code': return <code key={i} style={{ background: T.bgAlt, border: `1px solid ${T.border}`, padding: '1px 4px', fontSize: 11.5, color: T.dim }}>{n.text}</code>;
+          case 'strong': return <strong key={i} style={{ color: T.textHi }}><Inline nodes={n.children} /></strong>;
+          case 'em': return <em key={i}><Inline nodes={n.children} /></em>;
+          case 'del': return <del key={i} style={{ color: T.faint }}><Inline nodes={n.children} /></del>;
+          case 'link': return <a key={i} href={n.href} target="_blank" rel="noopener noreferrer" style={{ color: T.green }}><Inline nodes={n.children} /></a>;
+        }
+      })}
+    </>
+  );
+}
+
+/** Rendered markdown — the README, and any .md file opened in the reader. */
+function Markdown({ source }: { source: string }) {
+  const blocks = useMemo(() => parseMarkdown(source), [source]);
+  const heading = (level: number, children: ReactNode, key: number) => {
+    const size = [19, 16, 14, 13][level - 1] ?? 13;
+    const style: CSSProperties = {
+      color: T.textHi, fontWeight: 600, fontSize: size, lineHeight: 1.3, margin: '18px 0 8px',
+      borderBottom: level <= 2 ? `1px solid ${T.border}` : undefined, paddingBottom: level <= 2 ? 6 : undefined,
+    };
+    return <div key={key} style={style}>{children}</div>;
+  };
+  return (
+    <div style={{ fontFamily: T.mono, fontSize: 12.5, lineHeight: 1.62, color: T.text }}>
+      {blocks.map((b: MdBlock, i) => {
+        switch (b.kind) {
+          case 'heading': return heading(b.level, <Inline nodes={b.children} />, i);
+          case 'paragraph': return <p key={i} style={{ margin: '0 0 10px' }}><Inline nodes={b.children} /></p>;
+          case 'rule': return <hr key={i} style={{ border: 0, borderTop: `1px solid ${T.border}`, margin: '16px 0' }} />;
+          case 'quote': return (
+            <blockquote key={i} style={{ margin: '0 0 10px', padding: '2px 0 2px 12px', borderLeft: `2px solid ${T.border}`, color: T.dim }}>
+              <Inline nodes={b.children} />
+            </blockquote>
+          );
+          case 'code': return (
+            <pre key={i} style={{ background: T.bgAlt, border: `1px solid ${T.border}`, padding: '10px 12px', overflow: 'auto', margin: '0 0 12px', fontSize: 11.5, lineHeight: 1.5 }}>
+              <code><Tokens text={b.text} ext={b.lang} /></code>
+            </pre>
+          );
+          case 'list': {
+            const items = b.items.map((it, j) => <li key={j} style={{ margin: '2px 0' }}><Inline nodes={it} /></li>);
+            return b.ordered
+              ? <ol key={i} style={{ margin: '0 0 10px', paddingLeft: 22 }}>{items}</ol>
+              : <ul key={i} style={{ margin: '0 0 10px', paddingLeft: 22 }}>{items}</ul>;
+          }
+          case 'table': {
+            const cell: CSSProperties = { border: `1px solid ${T.border}`, padding: '4px 9px', textAlign: 'left' };
+            return (
+              <div key={i} style={{ overflowX: 'auto', marginBottom: 12 }}>
+                <table style={{ borderCollapse: 'collapse', fontSize: 11.5 }}>
+                  <thead>
+                    <tr>{b.head.map((h, j) => <th key={j} style={{ ...cell, color: T.textHi, background: T.bgAlt }}><Inline nodes={h} /></th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {b.rows.map((r, j) => <tr key={j}>{r.map((c, k) => <td key={k} style={cell}><Inline nodes={c} /></td>)}</tr>)}
+                  </tbody>
+                </table>
+              </div>
+            );
+          }
+        }
+      })}
+    </div>
+  );
+}
+
+/** A file's contents with a line-number gutter, like a real git host. */
+function CodeView({ text, path }: { text: string; path: string }) {
+  // Drop a single trailing newline so the gutter has no phantom final line.
+  const body = text.endsWith('\n') ? text.slice(0, -1) : text;
+  const count = body === '' ? 1 : body.split('\n').length;
+  const gutter = Array.from({ length: count }, (_, i) => i + 1).join('\n');
+  return (
+    <div style={{ display: 'flex', border: `1px solid ${T.border}`, overflow: 'auto', maxHeight: 'calc(100vh - 250px)', background: T.bgAlt }}>
+      <pre style={{ margin: 0, padding: '10px 8px 10px 12px', color: T.faint, textAlign: 'right', fontSize: 12, lineHeight: 1.55, whiteSpace: 'pre', userSelect: 'none', borderRight: `1px solid ${T.border}`, flex: 'none', fontFamily: T.mono }}>
+        {gutter}
+      </pre>
+      <pre style={{ margin: 0, padding: '10px 14px', fontSize: 12, lineHeight: 1.55, flex: 1, fontFamily: T.mono, color: T.text }}>
+        <code><Tokens text={body} ext={extOf(path)} /></code>
+      </pre>
+    </div>
+  );
+}
+
+/** One file's unified diff, tinted per line and syntax-coloured after the marker. */
+function DiffLines({ patch, path }: { patch: string; path: string }) {
+  const ext = extOf(path);
+  const lines = useMemo(() => patch.split('\n'), [patch]);
+  if (!patch.trim()) return <Hint>no textual changes</Hint>;
+  const shown = lines.slice(0, MAX_DIFF_LINES);
+  return (
+    <div style={{ border: `1px solid ${T.border}`, overflow: 'auto', maxHeight: 'calc(100vh - 320px)', background: T.bgAlt, fontFamily: T.mono, fontSize: 12, lineHeight: 1.55 }}>
+      {shown.map((l, i) => {
+        const kind = diffLineKind(l);
+        const style: CSSProperties = {
+          whiteSpace: 'pre', padding: '0 12px',
+          color: kind === 'hunk' ? T.green : kind === 'head' ? T.dim : T.text,
+          fontWeight: kind === 'head' ? 600 : undefined,
+          background: kind === 'add' ? 'rgba(46,160,67,.16)'
+            : kind === 'del' ? 'rgba(248,81,73,.16)'
+              : kind === 'hunk' || kind === 'head' ? T.cardHi : undefined,
+        };
+        // Keep the +/-/space marker literal, syntax-colour the code after it.
+        return (
+          <div key={i} style={style}>
+            {kind === 'add' || kind === 'del' || kind === 'context'
+              ? <>{l.slice(0, 1)}<Tokens text={l.slice(1)} ext={ext} /></>
+              : (l || ' ')}
+          </div>
+        );
+      })}
+      {lines.length > MAX_DIFF_LINES && <Hint>diff truncated — {lines.length - MAX_DIFF_LINES} more lines</Hint>}
+    </div>
+  );
+}
+
+/**
+ * The changed-file list of a commit/PR plus ONE file's diff at a time — a whole
+ * commit's patch at once is unreadable and, on a big merge, unrenderable.
+ */
+function DiffPanel({ files, diff }: { files?: GitFactoryFileChange[] | null; diff?: string }) {
+  const sections = useMemo(() => splitDiffByFile(diff ?? ''), [diff]);
+  const [active, setActive] = useState(0);
+  useEffect(() => { setActive(0); }, [diff]);
+
+  const stat = (path: string) => {
+    const f = (files ?? []).find((x) => x.path === path);
+    if (!f) return null;
+    return f.binary
+      ? <span style={{ color: T.faint, fontSize: 10.5 }}>binary</span>
+      : <span style={{ fontSize: 10.5 }}><span style={{ color: T.green }}>+{f.additions}</span> <span style={{ color: T.red }}>−{f.deletions}</span></span>;
+  };
+
+  if (!sections.length) {
+    const rows = files ?? [];
+    if (!rows.length) return <Hint>no changes</Hint>;
+    return (
+      <>
+        <div style={{ border: `1px solid ${T.border}`, marginBottom: 14 }}>
+          {rows.map((f) => (
+            <div key={f.path} style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '6px 11px', borderBottom: `1px solid ${T.border}`, fontSize: 11.5 }}>
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: T.text }}>{f.path}</span>
+              {stat(f.path)}
+            </div>
+          ))}
+        </div>
+        <Hint>no textual diff to show</Hint>
+      </>
+    );
+  }
+
+  const current = sections[Math.min(active, sections.length - 1)];
+  return (
+    <>
+      <div style={{ border: `1px solid ${T.border}`, marginBottom: 14 }}>
+        {sections.map((s, i) => {
+          const on = i === Math.min(active, sections.length - 1);
+          return (
+            <button key={s.path + i} onClick={() => setActive(i)}
+              style={{ display: 'flex', width: '100%', textAlign: 'left', gap: 12, alignItems: 'center', padding: '6px 11px', borderBottom: `1px solid ${T.border}`, border: 0, background: on ? T.greenSoft : 'transparent', fontFamily: T.mono, fontSize: 11.5, cursor: 'pointer' }}>
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: on ? T.green : T.text }}>{s.path}</span>
+              {stat(s.path)}
+            </button>
+          );
+        })}
+      </div>
+      <DiffLines patch={current.patch} path={current.path} />
+    </>
+  );
+}
+
+// ── create repository ────────────────────────────────────────────────────────
+
+/** Rail create form: name + description (+ visibility/org), filed into the active project. */
+function CreateRepo({ onCreated, onCancel }: { onCreated: (r: GitFactoryRepo) => void; onCancel: () => void }) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const project = useAppSelector(s => s.project.current);
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [visibility, setVisibility] = useState('private');
+  const [orgRepo, setOrgRepo] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (!name.trim() || creating) return;
+    setCreating(true);
+    setError(null);
+    try {
+      onCreated(await createGitFactoryRepo(token, {
+        name: name.trim(),
+        description: description.trim(),
+        visibility,
+        org_repo: orgRepo,
+        ...(project ? { project } : {}),
+      }));
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, background: T.card }}>
+      {error && <div style={{ background: T.redSoft, border: `1px solid ${T.red}`, padding: '6px 8px', fontFamily: T.mono, fontSize: 10, color: T.red, marginBottom: 8 }}>{error}</div>}
+      <input value={name} onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+        placeholder="repository name" autoFocus spellCheck={false} style={{ ...input, marginBottom: 8 }} />
+      <input value={description} onChange={e => setDescription(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+        placeholder="what lives in here (optional)" style={{ ...input, marginBottom: 8 }} />
+      <div style={sectionLabel}>visibility</div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+        {['private', 'public'].map(v => (
+          <button key={v} onClick={() => setVisibility(v)}
+            style={{ background: visibility === v ? T.greenSoft : 'transparent', border: `1px solid ${visibility === v ? T.green : T.border}`, color: visibility === v ? T.green : T.dim, fontFamily: T.mono, fontSize: 10, padding: '3px 9px', cursor: 'pointer' }}>
+            {v}
+          </button>
+        ))}
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: T.mono, fontSize: 10.5, color: T.dim, marginBottom: 8, cursor: 'pointer' }}>
+        <input type="checkbox" checked={orgRepo} onChange={e => setOrgRepo(e.target.checked)} style={{ width: 'auto' }} />
+        own it as the org (clone URL uses the org name)
+      </label>
+      {project && <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, marginBottom: 8 }}>filed into project {project}</div>}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <button onClick={submit} disabled={!name.trim() || creating}
+          style={{ flex: 1, background: T.green, color: T.bg, border: 'none', fontFamily: T.mono, fontSize: 11, fontWeight: 600, padding: '6px 0', cursor: 'pointer', opacity: (!name.trim() || creating) ? 0.6 : 1 }}>
+          {creating ? '[ · · · ]' : '[ create ]'}
+        </button>
+        <button onClick={onCancel} style={{ ...ghostBtn, padding: '6px 8px' }}>✕</button>
+      </div>
+    </div>
+  );
+}
+
+// ── code tab ─────────────────────────────────────────────────────────────────
+
+/** Icon glyph for a tree entry type. */
+function entryIcon(type: string): string {
+  if (type === 'dir') return '▸';
+  if (type === 'symlink') return '↳';
+  if (type === 'submodule') return '⊟';
+  return '·';
+}
+
+const parentPath = (p: string) => p.split('/').slice(0, -1).join('/');
+
+/**
+ * Code tab: the file tree at the current directory (or the open file's contents,
+ * with an editor), plus the README below and a details sidebar beside it. Opening
+ * a file hands the whole width to the reader, as a git host does.
+ */
+function CodeTab({ repo, refName }: { repo: GitFactoryRepo; refName: string }) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [path, setPath] = useUrlParam('path');
+  const [file, setFile] = useUrlParam('file');
+
+  const [entries, setEntries] = useState<GitFactoryTreeEntry[] | null>(null);
+  const [treeError, setTreeError] = useState<string | null>(null);
+  const [blob, setBlob] = useState<GitFactoryBlob | null>(null);
+  const [blobError, setBlobError] = useState<string | null>(null);
+  const [readme, setReadme] = useState<{ found: boolean; path: string; content: string } | null>(null);
+  const [readmeError, setReadmeError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
+  // Bumped after a commit so the tree/blob/readme are refetched from the new tip.
+  const [version, setVersion] = useState(0);
+
+  // Editing state for the open file.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [message, setMessage] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const dir = path ?? '';
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setTreeError(null);
+    setBlobError(null);
+    if (file) {
+      setEntries(null);
+      getGitFactoryBlob(token, repo.id, file, refName)
+        .then(b => { if (!cancelled) { setBlob(b); setDraft(b.content); } })
+        .catch(e => { if (!cancelled) { setBlob(null); setBlobError(errorMessage(e)); } })
+        .finally(() => { if (!cancelled) setLoading(false); });
+    } else {
+      setBlob(null);
+      setEditing(false);
+      getGitFactoryTree(token, repo.id, dir, refName)
+        .then(t => { if (!cancelled) setEntries(t.entries ?? []); })
+        .catch(e => { if (!cancelled) { setEntries(null); setTreeError(errorMessage(e)); } })
+        .finally(() => { if (!cancelled) setLoading(false); });
+    }
+    return () => { cancelled = true; };
+  }, [token, repo.id, refName, dir, file, version]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setReadmeError(null);
+    getGitFactoryReadme(token, repo.id)
+      .then(r => { if (!cancelled) setReadme(r); })
+      .catch(e => { if (!cancelled) { setReadme(null); setReadmeError(errorMessage(e)); } });
+    return () => { cancelled = true; };
+  }, [token, repo.id, version]);
+
+  const copyClone = async () => {
+    try { await navigator.clipboard.writeText(repo.http_url); } catch { /* clipboard may be blocked */ }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+
+  const save = async () => {
+    if (!blob || saving) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await writeGitFactoryBlob(token, repo.id, { ref: refName, path: blob.path, content: draft, message: message.trim() });
+      setEditing(false);
+      setMessage('');
+      setVersion(v => v + 1); // the branch tip moved — refetch everything derived from it
+    } catch (e: unknown) {
+      setSaveError(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ── open file ──
+  if (file) {
+    const ext = extOf(file);
+    const isMarkdown = ext === 'md' || ext === 'markdown';
+    return (
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+          <button onClick={() => { setFile(null); setEditing(false); setPath(parentPath(file) || null); }} style={linkBtn}>← files</button>
+          <span style={{ fontFamily: T.mono, fontSize: 11.5, color: T.dim, wordBreak: 'break-all' }}>{file}</span>
+          <span style={{ flex: 1 }} />
+          {blob && !blob.binary && !blob.truncated && !editing && (
+            <button onClick={() => { setDraft(blob.content); setEditing(true); }} style={ghostBtn}>edit</button>
+          )}
+        </div>
+        {blobError && <ErrorBox>could not load file — {blobError}</ErrorBox>}
+        {saveError && <ErrorBox>could not save — {saveError}</ErrorBox>}
+        {loading && !blob && <Hint busy>→ loading {file} · · ·</Hint>}
+        {blob && blob.binary && <Hint>binary file ({formatBytes(blob.size)}) — not shown</Hint>}
+        {blob && !blob.binary && editing && (
+          <>
+            <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.faint, marginBottom: 8 }}>editing on {refName}</div>
+            <input value={message} onChange={e => setMessage(e.target.value)} placeholder={`commit message — default: Update ${blob.path}`}
+              style={{ ...input, marginBottom: 8 }} />
+            <textarea value={draft} onChange={e => setDraft(e.target.value)} spellCheck={false}
+              style={{ ...input, minHeight: 'calc(100vh - 380px)', fontSize: 12.5, lineHeight: 1.55, whiteSpace: 'pre', resize: 'vertical', background: T.bgAlt }} />
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button onClick={save} disabled={saving} style={{ ...primaryBtn, opacity: saving ? 0.6 : 1 }}>
+                {saving ? '[ · · · ]' : '[ commit changes ]'}
+              </button>
+              <button onClick={() => { setEditing(false); setDraft(blob.content); }} style={{ ...ghostBtn, padding: '5px 10px', fontSize: 11 }}>cancel</button>
+            </div>
+          </>
+        )}
+        {blob && !blob.binary && !editing && (
+          <>
+            {blob.truncated && <Hint>file is large — showing the first part only</Hint>}
+            {isMarkdown ? <Markdown source={blob.content} /> : <CodeView text={blob.content} path={blob.path} />}
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // ── directory listing + readme + details ──
+  const crumbs = dir ? dir.split('/') : [];
+  let acc = '';
+  return (
+    <div style={{ display: 'flex', gap: 28, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <div style={{ flex: 1, minWidth: 320 }}>
+        {repo.description && <div style={{ fontFamily: T.mono, fontSize: 11.5, color: T.dim, marginBottom: 12 }}>{repo.description}</div>}
+
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', background: T.bgAlt, border: `1px solid ${T.border}`, padding: '7px 9px', marginBottom: 16 }}>
+          <code style={{ flex: 1, color: T.dim, fontSize: 11, overflow: 'auto', whiteSpace: 'nowrap' }}>{repo.http_url}</code>
+          <button onClick={copyClone} style={ghostBtn}>{copied ? 'copied' : 'copy'}</button>
+        </div>
+
+        <div style={{ fontFamily: T.mono, fontSize: 11.5, color: T.dim, marginBottom: 8, wordBreak: 'break-all' }}>
+          <button onClick={() => setPath(null)} style={linkBtn}>root</button>
+          {crumbs.map((c, i) => {
+            acc = acc ? `${acc}/${c}` : c;
+            const target = acc;
+            return (
+              <Fragment key={target}>
+                {' / '}
+                {i === crumbs.length - 1
+                  ? <span>{c}</span>
+                  : <button onClick={() => setPath(target)} style={linkBtn}>{c}</button>}
+              </Fragment>
+            );
+          })}
+        </div>
+
+        {treeError && <ErrorBox>could not load files — {treeError}</ErrorBox>}
+        {loading && entries === null && !treeError && <Hint busy>→ loading files · · ·</Hint>}
+        {entries !== null && entries.length === 0 && !dir && (
+          <Hint>no files yet — push a commit to the clone URL to populate this repository</Hint>
+        )}
+        {entries !== null && (entries.length > 0 || !!dir) && (
+          <div style={{ border: `1px solid ${T.border}` }}>
+            {dir && (
+              <button onClick={() => setPath(parentPath(dir) || null)}
+                style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: `1px solid ${T.border}`, color: T.dim, fontFamily: T.mono, fontSize: 11.5, padding: '6px 10px', cursor: 'pointer' }}>
+                <span style={{ width: 14, textAlign: 'center' }}>↩</span><span>..</span>
+              </button>
+            )}
+            {(entries ?? []).map(e => (
+              <button key={e.path}
+                onClick={() => { if (e.type === 'dir') setPath(e.path); else setFile(e.path); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', background: 'transparent', border: 0, borderBottom: `1px solid ${T.border}`, color: T.text, fontFamily: T.mono, fontSize: 11.5, padding: '6px 10px', cursor: 'pointer' }}>
+                <span style={{ width: 14, textAlign: 'center', color: e.type === 'dir' ? T.green : T.faint }}>{entryIcon(e.type)}</span>
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</span>
+                {e.type !== 'dir' && <span style={{ color: T.faint, fontSize: 10.5 }}>{formatBytes(e.size)}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div style={{ marginTop: 22 }}>
+          {readmeError && <ErrorBox>could not load readme — {readmeError}</ErrorBox>}
+          {readme && !readme.found && <Hint>no README at the repository root — add one and push to see it here</Hint>}
+          {readme && readme.found && (
+            <>
+              <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.faint, marginBottom: 8 }}>{readme.path}</div>
+              <Markdown source={readme.content} />
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Details sidebar */}
+      <aside style={{ width: 230, flexShrink: 0, fontFamily: T.mono, fontSize: 11.5 }}>
+        <div style={sectionLabel}>details</div>
+        {([
+          ['default branch', repo.default_branch || 'main'],
+          ['visibility', repo.visibility || 'private'],
+          ['size', formatBytes(repo.size_bytes)],
+          ...(repo.project ? [['project', repo.project]] as [string, string][] : []),
+          ...(repo.kind === 'mirror' ? [['mirror of', repo.upstream_url ?? '—']] as [string, string][] : []),
+          ['last updated', ago(repo.updated_at)],
+          ['created', (repo.created_at || '').slice(0, 10) || '—'],
+          ['id', repo.id],
+        ] as [string, string][]).map(([k, v]) => (
+          <div key={k} style={{ marginBottom: 8 }}>
+            <div style={{ color: T.faint, fontSize: 10.5 }}>{k}</div>
+            <div style={{ color: k === 'id' ? T.faint : T.text, fontSize: k === 'id' ? 10.5 : 11.5, wordBreak: 'break-all' }}>{v}</div>
+          </div>
+        ))}
+      </aside>
+    </div>
+  );
+}
+
+// ── commits tab ──────────────────────────────────────────────────────────────
+
+/** Commits tab: filterable, paged history; clicking a commit shows its diff. */
+function CommitsTab({ repo, refName }: { repo: GitFactoryRepo; refName: string }) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [sha, setSha] = useUrlParam('commit');
+  const [page, setPage] = useState(0);
+  const [q, setQ] = useState('');
+  const [author, setAuthor] = useState('');
+  // Debounced copies — a keystroke should not fire a request per character.
+  const [filters, setFilters] = useState({ q: '', author: '' });
+  const [commits, setCommits] = useState<GitFactoryCommit[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [listError, setListError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<GitFactoryCommitDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Applied filters, so the debounce fires a request only when the values really
+  // changed — not once on mount, and not again when a keystroke is undone.
+  const applied = useRef({ q: '', author: '' });
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const next = { q: q.trim(), author: author.trim() };
+      if (applied.current.q === next.q && applied.current.author === next.author) return;
+      applied.current = next;
+      setFilters(next);
+      setPage(0); // a new filter means a new result set; staying on page 7 would show nothing
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [q, author]);
+
+  // Reset the pager when the branch changes: page 7 of another branch is meaningless.
+  useEffect(() => { setPage(0); }, [refName]);
+
+  useEffect(() => {
+    if (sha) return; // the detail view drives its own fetch
+    let cancelled = false;
+    setLoading(true);
+    setListError(null);
+    listGitFactoryCommits(token, repo.id, { ref: refName, limit: PAGE, skip: page * PAGE, q: filters.q, author: filters.author })
+      .then(res => { if (!cancelled) { setCommits(res.commits ?? []); setTotal(res.total); } })
+      .catch(e => { if (!cancelled) { setCommits(null); setListError(errorMessage(e)); } })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [token, repo.id, refName, page, filters, sha]);
+
+  useEffect(() => {
+    if (!sha) { setDetail(null); return; }
+    let cancelled = false;
+    setDetail(null);
+    setDetailError(null);
+    getGitFactoryCommit(token, repo.id, sha)
+      .then(d => { if (!cancelled) setDetail(d); })
+      .catch(e => { if (!cancelled) setDetailError(errorMessage(e)); });
+    return () => { cancelled = true; };
+  }, [token, repo.id, sha]);
+
+  if (sha) {
+    return (
+      <div>
+        <button onClick={() => setSha(null)} style={{ ...linkBtn, marginBottom: 12 }}>← commits</button>
+        {detailError && <ErrorBox>could not load commit — {detailError}</ErrorBox>}
+        {!detail && !detailError && <Hint busy>→ loading changes · · ·</Hint>}
+        {detail && (
+          <>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontFamily: T.mono, fontSize: 14, color: T.textHi, fontWeight: 600, marginBottom: 5 }}>{detail.subject}</div>
+              <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.faint }}>
+                <span style={{ color: T.green }}>{detail.short}</span> · {detail.author} · {ago(detail.date)}
+                {detail.parent && <> · parent <span style={{ color: T.green }}>{detail.parent.slice(0, 8)}</span></>}
+              </div>
+              {detail.body && (
+                <pre style={{ margin: '10px 0 0', padding: '9px 11px', background: T.bgAlt, border: `1px solid ${T.border}`, fontSize: 11.5, color: T.dim, whiteSpace: 'pre-wrap', fontFamily: T.mono }}>{detail.body}</pre>
+              )}
+            </div>
+            <DiffPanel files={detail.files} diff={detail.diff} />
+          </>
+        )}
+      </div>
+    );
+  }
+
+  const shown = commits?.length ?? 0;
+  const from = page * PAGE + 1;
+  const to = page * PAGE + shown;
+  const pages = Math.max(1, Math.ceil(total / PAGE));
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="search commit messages" spellCheck={false} style={{ ...input, flex: 1, minWidth: 160 }} />
+        <input value={author} onChange={e => setAuthor(e.target.value)} placeholder="author" spellCheck={false} style={{ ...input, flex: 1, minWidth: 120 }} />
+      </div>
+      {listError && <ErrorBox>could not load history — {listError}</ErrorBox>}
+      {loading && commits === null && !listError && <Hint busy>→ loading history · · ·</Hint>}
+      {commits !== null && commits.length === 0 && (
+        <Hint>{filters.q || filters.author ? 'no commits match those filters' : 'no commits yet — push to the clone URL to see history here'}</Hint>
+      )}
+      {(commits ?? []).map(c => (
+        <button key={c.sha} onClick={() => setSha(c.sha)} title="view changes"
+          style={{ display: 'flex', gap: 12, alignItems: 'baseline', width: '100%', textAlign: 'left', padding: '6px 6px', background: 'transparent', border: 0, borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 11.5, color: T.text, cursor: 'pointer' }}>
+          <span style={{ color: T.green, fontSize: 10.5, flex: 'none' }}>{c.short}</span>
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.subject}</span>
+          <span style={{ color: T.faint, fontSize: 10.5, flex: 'none' }}>{c.author} · {ago(c.date)}</span>
+        </button>
+      ))}
+      {total > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}` }}>
+          <span style={{ flex: 1, fontFamily: T.mono, fontSize: 10.5, color: T.faint }}>
+            {from}–{to} of {total} commit{total === 1 ? '' : 's'} · page {page + 1} of {pages}
+          </span>
+          <button onClick={() => setPage(0)} disabled={page === 0} style={{ ...ghostBtn, opacity: page === 0 ? 0.4 : 1 }}>« first</button>
+          <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0} style={{ ...ghostBtn, opacity: page === 0 ? 0.4 : 1 }}>‹ newer</button>
+          <button onClick={() => setPage(p => p + 1)} disabled={to >= total} style={{ ...ghostBtn, opacity: to >= total ? 0.4 : 1 }}>older ›</button>
+          <button onClick={() => setPage(pages - 1)} disabled={to >= total} style={{ ...ghostBtn, opacity: to >= total ? 0.4 : 1 }}>last »</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── pulls tab ────────────────────────────────────────────────────────────────
+
+/** New-pull form with a live compare preview of what the PR would contain. */
+function NewPull({ repo, branches, onCreated, onCancel }: {
+  repo: GitFactoryRepo;
+  branches: string[];
+  onCreated: (p: GitFactoryPull) => void;
+  onCancel: () => void;
+}) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const def = repo.default_branch || 'main';
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [target, setTarget] = useState(def);
+  const [source, setSource] = useState(() => branches.find(b => b !== def) ?? def);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{ commits: number; files?: GitFactoryFileChange[] | null; diff?: string } | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  // Seed the source branch once the branch list arrives (the form can open first).
+  useEffect(() => {
+    if (source === def) {
+      const other = branches.find(b => b !== def);
+      if (other) setSource(other);
+    }
+  }, [branches]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!source || !target || source === target) { setPreview(null); return; }
+    let cancelled = false;
+    setPreview(null);
+    setPreviewError(null);
+    compareGitFactoryRefs(token, repo.id, target, source)
+      .then(res => { if (!cancelled) setPreview(res); })
+      .catch(e => { if (!cancelled) setPreviewError(errorMessage(e)); });
+    return () => { cancelled = true; };
+  }, [token, repo.id, source, target]);
+
+  const submit = async () => {
+    if (!title.trim() || creating) return;
+    if (source === target) { setError('source and target must differ'); return; }
+    setCreating(true);
+    setError(null);
+    try {
+      onCreated(await createGitFactoryPull(token, repo.id, { title: title.trim(), source_ref: source, target_ref: target, body: body.trim() }));
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const options = branches.length ? branches : [def];
+  const select = (value: string, onChange: (v: string) => void) => (
+    <select value={value} onChange={e => onChange(e.target.value)} style={{ ...input, cursor: 'pointer', maxWidth: 320 }}>
+      {options.map(b => <option key={b} value={b}>{b}</option>)}
+    </select>
+  );
+
+  return (
+    <div>
+      <button onClick={onCancel} style={{ ...linkBtn, marginBottom: 12 }}>← pull requests</button>
+      {error && <ErrorBox>{error}</ErrorBox>}
+      <div style={{ maxWidth: 540, marginBottom: 18 }}>
+        <div style={sectionLabel}>title</div>
+        <input value={title} onChange={e => setTitle(e.target.value)} placeholder="what does this change" autoFocus style={{ ...input, marginBottom: 10 }} />
+        <div style={sectionLabel}>description (optional)</div>
+        <textarea value={body} onChange={e => setBody(e.target.value)} rows={3} style={{ ...input, resize: 'vertical', marginBottom: 10 }} />
+        <div style={sectionLabel}>merge from (source)</div>
+        <div style={{ marginBottom: 10 }}>{select(source, setSource)}</div>
+        <div style={sectionLabel}>into (target)</div>
+        <div style={{ marginBottom: 12 }}>{select(target, setTarget)}</div>
+        <button onClick={submit} disabled={!title.trim() || creating} style={{ ...primaryBtn, opacity: (!title.trim() || creating) ? 0.6 : 1 }}>
+          {creating ? '[ · · · ]' : '[ create ]'}
+        </button>
+      </div>
+
+      {source === target
+        ? <Hint>pick two different branches to see the changes</Hint>
+        : previewError
+          ? <ErrorBox>could not compare — {previewError}</ErrorBox>
+          : !preview
+            ? <Hint busy>→ comparing · · ·</Hint>
+            : (
+              <>
+                <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.faint, marginBottom: 10 }}>
+                  {source} → {target} · {preview.commits} commit{preview.commits === 1 ? '' : 's'}
+                </div>
+                {preview.diff
+                  ? <DiffPanel files={preview.files} diff={preview.diff} />
+                  : <Hint>these branches are identical — nothing to merge</Hint>}
+              </>
+            )}
+    </div>
+  );
+}
+
+/** One pull request: metadata, merge state, review diff, and merge/close actions. */
+function PullDetail({ repo, number, onBack, onChanged }: {
+  repo: GitFactoryRepo;
+  number: string;
+  onBack: () => void;
+  onChanged: () => void;
+}) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [detail, setDetail] = useState<GitFactoryPullDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<'merge' | 'close' | null>(null);
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDetail(null);
+    setError(null);
+    getGitFactoryPull(token, repo.id, number)
+      .then(d => { if (!cancelled) setDetail(d); })
+      .catch(e => { if (!cancelled) setError(errorMessage(e)); });
+    return () => { cancelled = true; };
+  }, [token, repo.id, number, version]);
+
+  const act = async (verb: 'merge' | 'close') => {
+    setBusy(verb);
+    setActionError(null);
+    try {
+      if (verb === 'merge') await mergeGitFactoryPull(token, repo.id, number);
+      else await closeGitFactoryPull(token, repo.id, number);
+      setVersion(v => v + 1);
+      onChanged();
+    } catch (e: unknown) {
+      setActionError(`${verb} failed — ${errorMessage(e)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (error) {
+    return (
+      <div>
+        <button onClick={onBack} style={{ ...linkBtn, marginBottom: 12 }}>← pull requests</button>
+        <ErrorBox>could not load pull request — {error}</ErrorBox>
+      </div>
+    );
+  }
+  if (!detail) {
+    return (
+      <div>
+        <button onClick={onBack} style={{ ...linkBtn, marginBottom: 12 }}>← pull requests</button>
+        <Hint busy>→ loading pull request · · ·</Hint>
+      </div>
+    );
+  }
+
+  const pr = detail.pull_request;
+  const open = pr.state === 'open';
+  const blocked = open && detail.merge?.mergeable === false;
+
+  return (
+    <div>
+      <button onClick={onBack} style={{ ...linkBtn, marginBottom: 12 }}>← pull requests</button>
+      {actionError && <ErrorBox>{actionError}</ErrorBox>}
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
+          <Pill tone={pullTone(pr.state)}>{pr.state}</Pill>
+          <span style={{ fontFamily: T.mono, fontSize: 14, color: T.textHi, fontWeight: 600 }}>#{pr.number} {pr.title}</span>
+        </div>
+        <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.faint }}>
+          {pr.source_ref} → {pr.target_ref}
+          {detail.commits !== undefined && <> · {detail.commits} commit{detail.commits === 1 ? '' : 's'}</>}
+          {pr.merge_commit && <> · merged as <span style={{ color: T.green }}>{pr.merge_commit.slice(0, 8)}</span></>}
+          {' · opened '}{ago(pr.created_at)}
+        </div>
+        {blocked && (
+          <div style={{ fontFamily: T.mono, fontSize: 11, color: T.red, marginTop: 6 }}>
+            cannot merge: {detail.merge?.reason || (detail.merge?.conflicts?.length ? `conflicts in ${detail.merge.conflicts.join(', ')}` : 'conflicts')}
+          </div>
+        )}
+        {pr.body && (
+          <pre style={{ margin: '10px 0 0', padding: '9px 11px', background: T.bgAlt, border: `1px solid ${T.border}`, fontSize: 11.5, color: T.dim, whiteSpace: 'pre-wrap', fontFamily: T.mono }}>{pr.body}</pre>
+        )}
+        {open && (
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button onClick={() => act('merge')} disabled={!!busy || blocked} title={blocked ? (detail.merge?.reason || 'not mergeable') : undefined}
+              style={{ ...primaryBtn, opacity: (busy || blocked) ? 0.5 : 1 }}>
+              {busy === 'merge' ? '[ · · · ]' : '[ merge ]'}
+            </button>
+            <button onClick={() => act('close')} disabled={!!busy}
+              style={{ ...ghostBtn, padding: '5px 12px', fontSize: 11, opacity: busy ? 0.5 : 1 }}>
+              {busy === 'close' ? '[ · · · ]' : 'close'}
+            </button>
+          </div>
+        )}
+      </div>
+      {detail.files_error && <ErrorBox>could not summarise the changes — {detail.files_error}</ErrorBox>}
+      {detail.diff !== undefined
+        ? <DiffPanel files={detail.files} diff={detail.diff} />
+        : <Hint>the review diff is shown while a pull request is open</Hint>}
+    </div>
+  );
+}
+
+/** Pulls tab: the list, the new-pull form, or one pull's review view. */
+function PullsTab({ repo, branches }: { repo: GitFactoryRepo; branches: string[] }) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [pr, setPr] = useUrlParam('pr');
+  const [pulls, setPulls] = useState<GitFactoryPull[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    if (pr) return;
+    let cancelled = false;
+    setError(null);
+    listGitFactoryPulls(token, repo.id)
+      .then(list => { if (!cancelled) setPulls(list ?? []); })
+      .catch(e => { if (!cancelled) { setPulls(null); setError(errorMessage(e)); } });
+    return () => { cancelled = true; };
+  }, [token, repo.id, pr, version]);
+
+  if (pr === 'new') {
+    return <NewPull repo={repo} branches={branches} onCancel={() => setPr(null)}
+      onCreated={(created) => { setVersion(v => v + 1); setPr(String(created.number)); }} />;
+  }
+  if (pr) {
+    return <PullDetail repo={repo} number={pr} onBack={() => setPr(null)} onChanged={() => setVersion(v => v + 1)} />;
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: 14 }}>
+        <button onClick={() => setPr('new')} style={{ ...primaryBtn, fontWeight: 600, padding: '6px 14px' }}>[ + new pull request ]</button>
+      </div>
+      {error && <ErrorBox>could not load pull requests — {error}</ErrorBox>}
+      {!pulls && !error && <Hint busy>→ loading pull requests · · ·</Hint>}
+      {pulls && pulls.length === 0 && <Hint>no pull requests yet — open one to propose merging a branch</Hint>}
+      {(pulls ?? []).map(p => (
+        <button key={p.id} onClick={() => setPr(String(p.number))} title="review"
+          style={{ display: 'flex', gap: 12, alignItems: 'center', width: '100%', textAlign: 'left', padding: '7px 6px', background: 'transparent', border: 0, borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 11.5, color: T.text, cursor: 'pointer' }}>
+          <Pill tone={pullTone(p.state)}>{p.state}</Pill>
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>#{p.number} {p.title}</span>
+          <span style={{ color: T.faint, fontSize: 10.5, flex: 'none' }}>{p.source_ref} → {p.target_ref} · {ago(p.created_at)}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── settings tab ─────────────────────────────────────────────────────────────
+
+/**
+ * Settings tab: the repo-administration surface the mini-portal never exposed —
+ * default branch, tags, branch protections and collaborators. Each block loads
+ * and fails independently, so a user permitted to see one and not another gets
+ * the part they hold rather than a blanked page.
+ */
+function SettingsTab({ repo, branches, onChanged }: { repo: GitFactoryRepo; branches: string[]; onChanged: () => void }) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [confirm, confirmEl] = useConfirm();
+
+  const [defBranch, setDefBranch] = useState(repo.default_branch || 'main');
+  const [savingDef, setSavingDef] = useState(false);
+  const [defError, setDefError] = useState<string | null>(null);
+
+  const [tags, setTags] = useState<GitFactoryRef[] | null>(null);
+  const [tagsError, setTagsError] = useState<string | null>(null);
+
+  const [protections, setProtections] = useState<GitFactoryProtection[] | null>(null);
+  const [protError, setProtError] = useState<string | null>(null);
+  const [pattern, setPattern] = useState('');
+
+  const [collabs, setCollabs] = useState<{ owner: string; collaborators: { user_id: string; level: string }[] } | null>(null);
+  const [collabError, setCollabError] = useState<string | null>(null);
+  const [newCollab, setNewCollab] = useState('');
+  const [newLevel, setNewLevel] = useState('read');
+
+  useEffect(() => { setDefBranch(repo.default_branch || 'main'); }, [repo.default_branch]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listGitFactoryTags(token, repo.id)
+      .then(t => { if (!cancelled) setTags(t ?? []); })
+      .catch(e => { if (!cancelled) setTagsError(errorMessage(e)); });
+    return () => { cancelled = true; };
+  }, [token, repo.id]);
+
+  const loadProtections = useCallback(() => {
+    listGitFactoryProtections(token, repo.id)
+      .then(p => { setProtections(p ?? []); setProtError(null); })
+      .catch(e => { setProtections(null); setProtError(errorMessage(e)); });
+  }, [token, repo.id]);
+
+  const loadCollabs = useCallback(() => {
+    listGitFactoryCollaborators(token, repo.id)
+      .then(c => { setCollabs(c); setCollabError(null); })
+      .catch(e => { setCollabs(null); setCollabError(errorMessage(e)); });
+  }, [token, repo.id]);
+
+  useEffect(() => { loadProtections(); }, [loadProtections]);
+  useEffect(() => { loadCollabs(); }, [loadCollabs]);
+
+  const applyDefault = async () => {
+    if (savingDef || defBranch === repo.default_branch) return;
+    setSavingDef(true);
+    setDefError(null);
+    try {
+      await setGitFactoryDefaultBranch(token, repo.id, defBranch);
+      onChanged();
+    } catch (e: unknown) {
+      setDefError(errorMessage(e));
+    } finally {
+      setSavingDef(false);
+    }
+  };
+
+  const addProtection = async () => {
+    if (!pattern.trim()) return;
+    try {
+      await setGitFactoryProtection(token, repo.id, { pattern: pattern.trim(), block_force_push: true, block_deletion: true });
+      setPattern('');
+      loadProtections();
+    } catch (e: unknown) {
+      setProtError(errorMessage(e));
+    }
+  };
+
+  const removeProtection = async (p: GitFactoryProtection) => {
+    if (!(await confirm({ message: `Remove branch protection for ${p.pattern}? Force pushes and deletions will be allowed again.`, confirmLabel: 'remove' }))) return;
+    try {
+      await deleteGitFactoryProtection(token, repo.id, p.pattern);
+      loadProtections();
+    } catch (e: unknown) {
+      setProtError(errorMessage(e));
+    }
+  };
+
+  const addCollaborator = async () => {
+    if (!newCollab.trim()) return;
+    try {
+      await addGitFactoryCollaborator(token, repo.id, newCollab.trim(), newLevel);
+      setNewCollab('');
+      loadCollabs();
+    } catch (e: unknown) {
+      setCollabError(errorMessage(e));
+    }
+  };
+
+  const removeCollaborator = async (userId: string) => {
+    if (!(await confirm({ message: `Revoke ${shortId(userId)}'s access to ${repo.name}?`, confirmLabel: 'revoke' }))) return;
+    try {
+      await removeGitFactoryCollaborator(token, repo.id, userId);
+      loadCollabs();
+    } catch (e: unknown) {
+      setCollabError(errorMessage(e));
+    }
+  };
+
+  const options = branches.length ? branches : [repo.default_branch || 'main'];
+
+  return (
+    <div style={{ maxWidth: 620 }}>
+      {confirmEl}
+
+      <div style={{ marginBottom: 26 }}>
+        <div style={sectionLabel}>default branch</div>
+        {defError && <ErrorBox>{defError}</ErrorBox>}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <select value={defBranch} onChange={e => setDefBranch(e.target.value)} style={{ ...input, cursor: 'pointer', maxWidth: 260 }}>
+            {options.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+          <button onClick={applyDefault} disabled={savingDef || defBranch === repo.default_branch}
+            style={{ ...primaryBtn, opacity: (savingDef || defBranch === repo.default_branch) ? 0.5 : 1 }}>
+            {savingDef ? '[ · · · ]' : '[ set ]'}
+          </button>
+        </div>
+        <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.faint, marginTop: 6 }}>
+          where HEAD points — what a fresh clone checks out.
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 26 }}>
+        <div style={sectionLabel}>branch protections</div>
+        {protError && <ErrorBox>{protError}</ErrorBox>}
+        {protections === null && !protError && <Hint busy>→ loading · · ·</Hint>}
+        {protections?.length === 0 && <Hint>no protected branches — force pushes and deletions are allowed everywhere</Hint>}
+        {(protections ?? []).map(p => (
+          <div key={p.pattern} style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '6px 0', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 11.5 }}>
+            <span style={{ flex: 1, color: T.text }}>{p.pattern}</span>
+            <span style={{ color: T.faint, fontSize: 10.5 }}>
+              {[p.block_force_push && 'no force-push', p.block_deletion && 'no delete'].filter(Boolean).join(' · ') || 'no rules'}
+            </span>
+            <button onClick={() => removeProtection(p)} style={ghostBtn}>remove</button>
+          </div>
+        ))}
+        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <input value={pattern} onChange={e => setPattern(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addProtection(); }}
+            placeholder="branch name or glob (e.g. main, release/*)" style={{ ...input, flex: 1 }} />
+          <button onClick={addProtection} disabled={!pattern.trim()} style={{ ...primaryBtn, opacity: pattern.trim() ? 1 : 0.5 }}>[ protect ]</button>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 26 }}>
+        <div style={sectionLabel}>collaborators</div>
+        {collabError && <ErrorBox>{collabError}</ErrorBox>}
+        {collabs === null && !collabError && <Hint busy>→ loading · · ·</Hint>}
+        {collabs && (
+          <>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '6px 0', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 11.5 }}>
+              <span style={{ flex: 1, color: T.text }}>{shortId(collabs.owner)}</span>
+              <Pill tone="dim">owner</Pill>
+            </div>
+            {collabs.collaborators.length === 0 && <Hint>not shared with anyone else</Hint>}
+            {collabs.collaborators.map(c => (
+              <div key={`${c.user_id}:${c.level}`} style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '6px 0', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 11.5 }}>
+                <span style={{ flex: 1, color: T.text }} title={c.user_id}>{shortId(c.user_id)}</span>
+                <Pill tone={c.level === 'write' ? 'amber' : 'dim'}>{c.level}</Pill>
+                <button onClick={() => removeCollaborator(c.user_id)} style={ghostBtn}>revoke</button>
+              </div>
+            ))}
+          </>
+        )}
+        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <input value={newCollab} onChange={e => setNewCollab(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addCollaborator(); }}
+            placeholder="user id to share with" style={{ ...input, flex: 1 }} />
+          <select value={newLevel} onChange={e => setNewLevel(e.target.value)} style={{ ...input, cursor: 'pointer', width: 100 }}>
+            <option value="read">read</option>
+            <option value="write">write</option>
+          </select>
+          <button onClick={addCollaborator} disabled={!newCollab.trim()} style={{ ...primaryBtn, opacity: newCollab.trim() ? 1 : 0.5 }}>[ share ]</button>
+        </div>
+      </div>
+
+      <div>
+        <div style={sectionLabel}>tags</div>
+        {tagsError && <ErrorBox>{tagsError}</ErrorBox>}
+        {tags === null && !tagsError && <Hint busy>→ loading · · ·</Hint>}
+        {tags?.length === 0 && <Hint>no tags — push one to see it here</Hint>}
+        {(tags ?? []).map(t => (
+          <div key={t.name} style={{ display: 'flex', gap: 12, alignItems: 'baseline', padding: '5px 0', borderBottom: `1px solid ${T.border}`, fontFamily: T.mono, fontSize: 11.5 }}>
+            <span style={{ color: T.text, flex: 'none' }}>{t.name}</span>
+            <span style={{ color: T.green, fontSize: 10.5, flex: 'none' }}>{(t.sha || '').slice(0, 8)}</span>
+            <span style={{ flex: 1, color: T.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.subject}</span>
+            <span style={{ color: T.faint, fontSize: 10.5, flex: 'none' }}>{ago(t.date)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── repo detail ──────────────────────────────────────────────────────────────
+
+/** The selected repository: header, branch switcher, tabs, and the active tab's view. */
+function RepoDetail({ repo, onDeleted, onChanged }: {
+  repo: GitFactoryRepo;
+  onDeleted: (id: string) => void;
+  onChanged: () => void;
+}) {
+  const token = useAppSelector(s => s.auth.token)!;
+  const [tab, setTab] = useUrlState<RepoTab>('tab', 'code');
+  const [refName, setRefName] = useUrlParam('ref');
+  const [, setPath] = useUrlParam('path');
+  const [, setFile] = useUrlParam('file');
+  const [, setCommit] = useUrlParam('commit');
+  const [branches, setBranches] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [confirm, confirmEl] = useConfirm();
+
+  // The empty ref means "the repo's default branch"; resolving it here keeps the
+  // tree, blob, history and the switcher agreeing on which branch is in view.
+  const effRef = refName || repo.default_branch || 'main';
+
+  useEffect(() => {
+    let cancelled = false;
+    listGitFactoryBranches(token, repo.id)
+      .then(res => { if (!cancelled) setBranches((res.branches ?? []).map(b => b.name)); })
+      .catch(() => { /* a branch list failing is not worth a banner — the picker just shows the current ref */ });
+    return () => { cancelled = true; };
+  }, [token, repo.id]);
+
+  const switchBranch = (name: string) => {
+    setRefName(name === (repo.default_branch || 'main') ? null : name);
+    // A new branch starts at its root, not wherever the last one was.
+    setPath(null);
+    setFile(null);
+    setCommit(null);
+  };
+
+  const handleDelete = async () => {
+    if (!(await confirm({
+      message: `Delete ${repo.namespace}/${repo.name}? The repository and all of its history are removed from disk — this cannot be undone.`,
+      requireText: repo.name,
+    }))) return;
+    try {
+      await deleteGitFactoryRepo(token, repo.id);
+      onDeleted(repo.id);
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    }
+  };
+
+  const options = branches.length ? branches : [effRef];
+  const tabs: RepoTab[] = ['code', 'commits', 'pulls', 'settings'];
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {confirmEl}
+      <div style={{ padding: '12px 20px 0', borderBottom: `1px solid ${T.border}`, background: T.bgAlt, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <span style={{ fontFamily: T.mono, fontSize: 15, fontWeight: 700, color: T.textHi, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <span style={{ color: T.dim, fontWeight: 400 }}>{repo.namespace}/</span>{repo.name}
+            </span>
+            {repo.visibility === 'public' && <Pill tone="blue">public</Pill>}
+            {repo.kind === 'mirror' && <Pill tone="dim">mirror</Pill>}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {(tab === 'code' || tab === 'commits') && (
+              <select value={effRef} onChange={e => switchBranch(e.target.value)} title="switch branch"
+                style={{ background: T.greenSoft, border: `1px solid ${T.green}`, color: T.green, fontFamily: T.mono, fontSize: 11.5, fontWeight: 600, padding: '4px 8px', cursor: 'pointer', outline: 'none', maxWidth: 220 }}>
+                {options.map(b => <option key={b} value={b} style={{ background: T.bgAlt, color: T.text, fontWeight: 400 }}>{b}</option>)}
+              </select>
+            )}
+            <button onClick={handleDelete}
+              style={{ ...ghostBtn, fontSize: 11, padding: '5px 12px' }}
+              onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.red; (e.currentTarget as HTMLButtonElement).style.color = T.red; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = T.border; (e.currentTarget as HTMLButtonElement).style.color = T.dim; }}>
+              [ delete ]
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 2, marginTop: 10 }}>
+          {tabs.map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              style={{ background: 'transparent', border: 0, borderBottom: `2px solid ${tab === t ? T.green : 'transparent'}`, color: tab === t ? T.textHi : T.dim, fontFamily: T.mono, fontSize: 12, padding: '6px 12px', cursor: 'pointer' }}>
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflow: 'auto', padding: '18px 20px 32px' }}>
+        {error && <ErrorBox>{error}</ErrorBox>}
+        {tab === 'code' && <CodeTab repo={repo} refName={effRef} />}
+        {tab === 'commits' && <CommitsTab repo={repo} refName={effRef} />}
+        {tab === 'pulls' && <PullsTab repo={repo} branches={branches} />}
+        {tab === 'settings' && <SettingsTab repo={repo} branches={branches} onChanged={onChanged} />}
+      </div>
+    </div>
+  );
+}
+
+// ── page ─────────────────────────────────────────────────────────────────────
+
+/** Repos route: the repository rail (list + create) beside the selected repo's detail. */
+export function Repos() {
+  const token = useAppSelector(s => s.auth.token)!;
+  const project = useAppSelector(s => s.project.current);
+  const [repos, setRepos] = useState<GitFactoryRepo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selId, setSelId] = useUrlParam('repo');
+  const [showCreate, setShowCreate] = useState(false);
+  const [railW, railHandle] = useResizableWidth('rail.repos.main', 260, { min: 200, max: 480 });
+  const [, setTab] = useUrlState<RepoTab>('tab', 'code');
+  const [, setRefName] = useUrlParam('ref');
+  const [, setPath] = useUrlParam('path');
+  const [, setFile] = useUrlParam('file');
+  const [, setPr] = useUrlParam('pr');
+  const [, setCommit] = useUrlParam('commit');
+  // Guards the auto-select below so it only runs on the first load, leaving a
+  // deliberate "nothing selected" alone afterwards.
+  const seeded = useRef(false);
+
+  const fetchRepos = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setRepos(await listGitFactoryRepos(token));
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => { fetchRepos(); }, [fetchRepos]);
+
+  // The project switcher is a view filter across the portal; repos carry the same
+  // label, so an active project narrows this list too.
+  const visible = useMemo(
+    () => (project ? repos.filter(r => r.project === project) : repos),
+    [repos, project],
+  );
+
+  const selected = visible.find(r => r.id === selId) ?? null;
+
+  // Land on the first repo when nothing is selected, so the page opens on content
+  // rather than an empty pane.
+  useEffect(() => {
+    if (seeded.current || loading) return;
+    seeded.current = true;
+    if (!selId && visible.length) setSelId(visible[0].id);
+  }, [loading, visible, selId, setSelId]);
+
+  /** Open a repo, resetting the per-repo view state the URL carries. */
+  const open = (r: GitFactoryRepo) => {
+    setSelId(r.id);
+    setTab('code');
+    setRefName(null);
+    setPath(null);
+    setFile(null);
+    setPr(null);
+    setCommit(null);
+  };
+
+  return (
+    <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
+      {/* Repo list */}
+      <div style={{ width: railW, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', background: T.bgAlt }}>
+        <div style={{ padding: '14px 14px 10px', borderBottom: `1px solid ${T.border}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+            <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.textHi }}>repos/</span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button onClick={() => setShowCreate(v => !v)} title="new repository"
+                style={{ ...ghostBtn, background: showCreate ? T.greenSoft : 'transparent', borderColor: showCreate ? T.green : T.border, color: showCreate ? T.green : T.dim, padding: '3px 7px' }}>+</button>
+              <button onClick={fetchRepos} title="refresh" style={{ ...ghostBtn, padding: '3px 7px' }}>↻</button>
+            </div>
+          </div>
+          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>
+            {visible.length > 0 && `${visible.length} repositor${visible.length === 1 ? 'y' : 'ies'}${project ? ` in ${project}` : ''}`}
+          </div>
+        </div>
+
+        {showCreate && (
+          <CreateRepo onCancel={() => setShowCreate(false)}
+            onCreated={(r) => { setShowCreate(false); setRepos(prev => [r, ...prev]); open(r); }} />
+        )}
+
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          {loading ? (
+            <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, animation: 'pulse 1s ease-in-out infinite' }}>→ loading · · ·</div>
+          ) : error ? (
+            <div style={{ padding: '14px', fontFamily: T.mono, fontSize: 11, color: T.red }}>{error}</div>
+          ) : visible.length === 0 ? (
+            <div style={{ padding: '20px 14px', fontFamily: T.mono, fontSize: 11, color: T.faint, lineHeight: 1.7 }}>
+              → no repositories{project ? ` in ${project}` : ''}<br />press + to create one
+            </div>
+          ) : visible.map(r => {
+            const isActive = selected?.id === r.id;
+            return (
+              <button key={r.id} onClick={() => open(r)}
+                style={{ width: '100%', textAlign: 'left', padding: '10px 14px', background: isActive ? T.greenSoft : 'transparent', border: 0, borderLeft: `2px solid ${isActive ? T.green : 'transparent'}`, fontFamily: T.mono, cursor: 'pointer', color: T.text, display: 'block', transition: 'background .12s' }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: isActive ? T.textHi : T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</div>
+                <div style={{ fontSize: 10, color: T.faint, marginTop: 3 }}>
+                  {r.namespace} · <span style={{ color: T.dim }}>{r.default_branch || 'main'}</span>
+                </div>
+                <div style={{ fontSize: 10, color: T.faint, marginTop: 1 }}>updated {ago(r.updated_at)}</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {railHandle}
+
+      {/* Detail */}
+      {selected ? (
+        <RepoDetail key={selected.id} repo={selected}
+          onDeleted={(id) => { setRepos(prev => prev.filter(r => r.id !== id)); setSelId(null); }}
+          onChanged={fetchRepos} />
+      ) : (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint, textAlign: 'center', lineHeight: 1.8 }}>
+            → select a repository<br />or press + to create one
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

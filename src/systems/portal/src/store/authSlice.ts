@@ -160,11 +160,11 @@ export const hydratePermissions = createAsyncThunk(
     if (!token) return {};
     // Builder is a system-admin-only global control plane: the configure grant is
     // checked against the single "default" baseline, never the caller's org. Only
-    // the wildcard admin matches builder/orgs/default, so this gate alone surfaces
+    // the wildcard admin matches codearmory/builder/orgs/default, so this gate alone surfaces
     // builder/ for the system admin and hides it for everyone else.
     const gates: { service: string; action: string; resource: string }[] = [
       ...PERMISSION_GATES,
-      { service: 'builder', action: 'configureOrgService', resource: 'builder/orgs/default' },
+      { service: 'builder', action: 'configureOrgService', resource: 'codearmory/builder/orgs/default' },
     ];
     const results = await Promise.all(
       gates.map(async g => {
