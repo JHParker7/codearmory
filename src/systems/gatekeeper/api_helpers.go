@@ -723,7 +723,8 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Ok, "")
 		meterPermissionChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", isAllowed)))
 		slog.DebugContext(ctx, "check_permissions result (client)", "client_id", clientID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
-		json.NewEncoder(w).Encode(denialResponse(isAllowed, clientID, orgID, detail)) //nolint:errcheck
+		// No username: an OAuth client is not a user and owns no namespace.
+		json.NewEncoder(w).Encode(denialResponse(isAllowed, clientID, "", orgID, detail)) //nolint:errcheck
 		return
 	}
 
@@ -746,18 +747,36 @@ func handleCheckPermissions(w http.ResponseWriter, r *http.Request) {
 	meterPermissionChecks.Add(ctx, 1, metric.WithAttributes(attribute.Bool("authorized", isAllowed)))
 	slog.DebugContext(ctx, "check_permissions result", "user_id", userID, "service", req.Service, "action", req.Action, "resource", req.Resource, "authorized", isAllowed)
 
-	var orgID *string
+	// One lookup serves both fields. The username matters as much as the org: gatekeeper
+	// keys resources by USERNAME (see scopeResource), while the caller only learns their
+	// user_id from this response — so without it a service cannot build an owner-first
+	// resource naming the caller without a second round trip.
+	var (
+		orgID    *string
+		username string
+	)
 	if userRow, err := (User{UserID: userID}).Get(r.Context()); err == nil {
-		orgID = userRow.(User).OrgID
+		u := userRow.(User)
+		orgID, username = u.OrgID, u.Username
 	}
-	json.NewEncoder(w).Encode(denialResponse(isAllowed, userID, orgID, detail)) //nolint:errcheck
+	json.NewEncoder(w).Encode(denialResponse(isAllowed, userID, username, orgID, detail)) //nolint:errcheck
 }
 
 // denialResponse builds the /check_permissions JSON body, attaching the role,
 // resource, service, action, and a human-readable reason when the request was
 // not authorized so conductor (and every downstream interface) can surface why.
-func denialResponse(authorized bool, subjectID string, orgID *string, detail permissionDenial) map[string]any {
+//
+// username is OMITTED when empty rather than sent blank, so its presence means "this
+// subject has a namespace you can name". It is empty for a client-credentials subject
+// (an OAuth client is not a user and owns no namespace) and if the user lookup failed.
+// A caller must therefore treat an absent username as "cannot build an owner-first
+// resource for this subject" — never as an empty namespace, which would produce the
+// resource "/service/collection" and match nothing.
+func denialResponse(authorized bool, subjectID, username string, orgID *string, detail permissionDenial) map[string]any {
 	out := map[string]any{"authorized": authorized, "user_id": subjectID, "org_id": orgID}
+	if username != "" {
+		out["username"] = username
+	}
 	if !authorized {
 		out["role"] = detail.rolesLabel()
 		out["service"] = detail.Service
