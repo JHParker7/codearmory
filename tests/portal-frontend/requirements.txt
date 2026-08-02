@@ -1,6 +1,6 @@
 pytest>=8.0
 pytest-playwright>=0.5
-playwright>=1.45
+playwright>=1.61.0
 selenium>=4.21
 pytest-selenium>=4.1
 webdriver-manager>=4.0
