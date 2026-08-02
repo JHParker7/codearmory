@@ -1,0 +1,225 @@
+{{- if .Values.gitFactory.enabled }}
+{{- $fullname := include "codearmory.fullname" . }}
+{{- $p := .Values.gitFactory.persistence }}
+{{- /* Shared storage (ARCHITECTURE §5 Step 2) is what turns git pods into stateless
+       compute. It is signalled by ReadWriteMany, and it changes three things below:
+       replicas may exceed 1, the rollout no longer has to be Recreate, and the fsGroup
+       ownership pass becomes a hazard rather than a fix. */}}
+{{- $shared := eq $p.accessMode "ReadWriteMany" }}
+{{- /* Guardrail, not a nicety: with ReadWriteOnce a second replica either sits Pending
+       forever (most CSI drivers) or — worse, on a driver that permits multi-attach —
+       gets a second writer onto a store with no cross-node locking, which corrupts
+       objects. Neither failure names its cause at the time it happens, so refuse the
+       combination at render time where the reason can be stated. */}}
+{{- if and (gt (int .Values.gitFactory.replicaCount) 1) (not $shared) }}
+{{- fail (printf "gitFactory.replicaCount is %d but persistence.accessMode is %q. More than one git_factory replica requires shared storage (ReadWriteMany, e.g. a JuiceFS StorageClass) — with ReadWriteOnce a second pod either never schedules or becomes a second writer to a store that has no cross-node locking. See ARCHITECTURE §5 Step 2." (int .Values.gitFactory.replicaCount) $p.accessMode) }}
+{{- end }}
+{{- /* Running several pods against one shared store REQUIRES the stale ref-lock janitor:
+       a lock left by a pod that was OOM-killed blocks that ref from every pod, and
+       nothing can distinguish it from a push in flight. Only "0" is unsafe here — empty
+       means the service's own default, which is on. */}}
+{{- if and (gt (int .Values.gitFactory.replicaCount) 1) (eq (toString .Values.gitFactory.env.refLockMaxAge) "0") }}
+{{- fail "gitFactory.env.refLockMaxAge is \"0\" (janitor disabled) with more than one replica. Shared storage does not fix stale ref locks, it widens them from one host to all pods: a lock left by a killed pod blocks that ref everywhere, indefinitely. Leave refLockMaxAge empty for the default, or set a duration." }}
+{{- end }}
+{{- /* GIT_HTTP_BASE_URL is what git_factory hands back as a repo's clone URL, so it has
+       to be the address a git client outside the cluster can reach — not the in-cluster
+       Service. An explicit value wins; otherwise the ingress host below is exactly that
+       address, so derive it instead of defaulting to localhost:9002 (which no clone can
+       use). https when the ingress terminates TLS, http when it does not. */}}
+{{- $baseURL := .Values.gitFactory.env.gitHttpBaseUrl }}
+{{- if and (not $baseURL) .Values.gitFactory.ingress.enabled .Values.gitFactory.ingress.hosts }}
+{{- $host := (first .Values.gitFactory.ingress.hosts).host }}
+{{- $baseURL = printf "%s://%s" (ternary "https" "http" (gt (len .Values.gitFactory.ingress.tls) 0)) $host }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-git-factory
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git-factory
+spec:
+  {{- /* On ReadWriteOnce this is always exactly one: the repo store has a single owner
+         and git has no cross-node write locking. On shared storage (ReadWriteMany) the
+         constraint is gone — one copy of each repo means nothing can diverge, and git's
+         own on-disk locking serialises concurrent writers exactly as it would on one
+         machine. The guardrails at the top of this file enforce that pairing. */}}
+  {{- include "codearmory.replicas" .Values.gitFactory }}
+  {{- if $shared }}
+  {{- /* Surge-first: with a shared volume the new pod can mount alongside the old one,
+         so an upgrade need not take the git plane down. maxUnavailable 0 keeps clones
+         and pushes served throughout. */}}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  {{- else }}
+  {{- /* Recreate, not RollingUpdate: a rolling upgrade would start the new pod while the
+         old one still holds the RWO volume, so it would stay Pending until the rollout
+         times out. */}}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "codearmory.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: git-factory
+  template:
+    metadata:
+      labels:
+        {{- include "codearmory.labels" . | nindent 8 }}
+        app.kubernetes.io/component: git-factory
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        {{- if $p.fsGroup }}
+        # fsGroup: a freshly provisioned volume is owned by root, and this container runs
+        # as uid 100 — without it `git init --bare` fails on the very first repo. Every
+        # core service that WRITES to a PVC it did not create the root of needs this;
+        # artifacts sets it too, on its non-S3 path. OnRootMismatch keeps startup fast
+        # once the repo store is large: the recursive chown runs only when the root's
+        # group is actually wrong.
+        #
+        # Turn it off (persistence.fsGroup: false) for a JuiceFS or other shared mount,
+        # where the CSI driver already owns the volume correctly and the ownership pass
+        # is a recursive chown whose every operation is a metadata transaction.
+        fsGroup: 101
+        fsGroupChangePolicy: OnRootMismatch
+        {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        {{- include "codearmory.initContainer.waitForGatekeeper" . | nindent 8 }}
+      containers:
+        - name: git-factory
+          image: "{{ include "codearmory.image" (list . .Values.gitFactory) }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.gitFactory.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.gitFactory.port | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.gitFactory.env.logLevel | quote }}
+            - name: GATEKEEPER_URL
+              value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
+            # Where the bare repos live. Must equal the PVC mount path below.
+            - name: GIT_STORAGE_ROOT
+              value: {{ .Values.gitFactory.persistence.mountPath | quote }}
+            {{- with $baseURL }}
+            - name: GIT_HTTP_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gitFactory.env.repoQuotaMB }}
+            # Per-repo size ceiling in MB; a push that would exceed it is rejected.
+            - name: GIT_REPO_QUOTA_MB
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gitFactory.env.maintenanceInterval }}
+            # How often the in-process repack loop runs (Go duration, e.g. "6h").
+            - name: GIT_MAINTENANCE_INTERVAL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gitFactory.env.refLockMaxAge }}
+            # How long an abandoned git .lock file may sit before the janitor clears it.
+            - name: GIT_REF_LOCK_MAX_AGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gitFactory.env.storagePreflight }}
+            # enforce (default) / warn / off — startup verification that the repo store
+            # provides the properties git's correctness depends on.
+            - name: GIT_STORAGE_PREFLIGHT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.hooks.enabled }}
+            # Push events are posted here (POST /internal/events), signed with
+            # HOOKS_TRIGGER_KEY below. Unset when hooks is disabled, which simply turns
+            # the integration off — git_factory runs fine without it.
+            - name: HOOKS_URL
+              value: "http://{{ $fullname }}-hooks:{{ .Values.hooks.port }}"
+            {{- end }}
+            {{- include "codearmory.otel.envs" (list . .Values.gitFactory.env) | nindent 12 }}
+            {{- include "codearmory.postgresql.env" (list . "git-factory" "git_factory" $fullname) | nindent 12 }}
+            {{- if .Values.gitFactory.secret.databaseReadUrl }}
+            # Optional read-replica DSN; read-only queries go here when set.
+            - name: DATABASE_READ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-git-factory
+                  key: database-read-url
+            {{- end }}
+            - name: GATEKEEPER_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-git-factory
+                  key: gatekeeper-service-key
+            # Shared secret on the X-Internal-Key header, authenticating git_connector →
+            # /internal/mirrors and /internal/clone-token. git-deployment wires the same
+            # value (see git-secret, bootstrap arg "git-factory-internal").
+            - name: GIT_FACTORY_INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-git-factory
+                  key: git-factory-internal-key
+            # HMAC key for the short-lived read-only clone tokens handed to runners.
+            # Signed and verified only here, so it is shared with nothing.
+            - name: GIT_FACTORY_CLONE_TOKEN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-git-factory
+                  key: git-factory-clone-token-key
+            # Shared HMAC with hooks/workflows/events; every one of the four carries the
+            # identical value or push-triggered pipelines 401.
+            - name: HOOKS_TRIGGER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-git-factory
+                  key: hooks-trigger-key
+            {{- include "codearmory.tls.envs" .Values.gitFactory.tls | nindent 12 }}
+          volumeMounts:
+            - name: repos
+              mountPath: {{ .Values.gitFactory.persistence.mountPath }}
+            {{- with (include "codearmory.tls.volumeMounts" .Values.gitFactory.tls) }}
+            {{- . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.gitFactory.resources | nindent 12 }}
+      volumes:
+        - name: repos
+          {{- if .Values.gitFactory.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $p.existingClaim | default (printf "%s-git-factory" $fullname) }}
+          {{- else }}
+          # No PVC: every repo lives only as long as the pod. Acceptable ONLY for a
+          # throwaway test install — a restart destroys all pushed history.
+          emptyDir: {}
+          {{- end }}
+        {{- with (include "codearmory.tls.volumes" .Values.gitFactory.tls) }}
+        {{- . | nindent 8 }}
+        {{- end }}
+{{- end }}

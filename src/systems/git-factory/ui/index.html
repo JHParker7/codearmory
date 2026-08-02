@@ -1,0 +1,1259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>git_factory</title>
+<style>
+  /* Palette mirrors the portal shell's themes so the frame does not look foreign.
+     ?theme= is passed by the shell on first paint; unknown names fall back to cyber. */
+  :root {
+    --bg:#070907; --bgAlt:#0a0d0a; --card:#0c100c; --cardHi:#10150f;
+    --border:#1a2018; --borderHi:#2a3328;
+    --text:#d6dcd2; --textHi:#eef1eb; --dim:#7d8a78; --faint:#4a5346;
+    --accent:oklch(78% 0.16 145); --accentSoft:oklch(78% 0.16 145 / 0.12);
+    --red:oklch(70% 0.20 22); --redSoft:oklch(70% 0.20 22 / 0.12);
+    --mono:"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  html[data-theme="tokyo-night"]{--bg:#1a1b26;--bgAlt:#16161e;--card:#1f2335;--cardHi:#24283b;--border:#2a2e42;--borderHi:#3b4261;--text:#c0caf5;--textHi:#fff;--dim:#787c99;--faint:#565f89;--accent:oklch(75% .13 250);--accentSoft:oklch(75% .13 250/.12)}
+  html[data-theme="light-cyber"]{--bg:#f5f7f3;--bgAlt:#ebeee8;--card:#fff;--cardHi:#f0f3ec;--border:#d2d9c9;--borderHi:#b9c2ad;--text:#1c241a;--textHi:#0c120a;--dim:#55604f;--faint:#8a937f;--accent:oklch(60% .17 145);--accentSoft:oklch(60% .17 145/.12)}
+  html[data-theme="dracula"]{--bg:#282a36;--bgAlt:#21222c;--card:#2a2c3a;--cardHi:#343746;--border:#343746;--borderHi:#44475a;--text:#f8f8f2;--textHi:#fff;--dim:#a0a3b1;--faint:#6272a4;--accent:oklch(78% .15 330);--accentSoft:oklch(78% .15 330/.12)}
+  html[data-theme="nord"]{--bg:#2e3440;--bgAlt:#292e39;--card:#333b48;--cardHi:#3b4252;--border:#3b4252;--borderHi:#4c566a;--text:#d8dee9;--textHi:#eceff4;--dim:#9aa5b6;--faint:#6b7688;--accent:oklch(78% .10 210);--accentSoft:oklch(78% .10 210/.12)}
+
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;line-height:1.5;overflow:hidden}
+  /* Themed scrollbars — rounded, tinted thumb on Chrome/Safari that highlights to the
+     accent on hover; thin tinted bar on Firefox. Firefox rules are scoped behind an
+     @supports so they don't disable the richer ::-webkit thumb on Chromium. */
+  ::-webkit-scrollbar{width:11px;height:11px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:var(--borderHi);border-radius:6px;border:2px solid transparent;background-clip:padding-box}
+  ::-webkit-scrollbar-thumb:hover{background:var(--accent);background-clip:padding-box}
+  ::-webkit-scrollbar-corner{background:transparent}
+  @supports not selector(::-webkit-scrollbar){*{scrollbar-width:thin;scrollbar-color:var(--borderHi) transparent}}
+  .app{display:flex;height:100%}
+
+  /* ── left rail: the repo list ─────────────────────────────────────────── */
+  .rail{width:260px;flex-shrink:0;border-right:1px solid var(--border);background:var(--bgAlt);display:flex;flex-direction:column}
+  .rail-head{padding:14px 14px 10px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  .rail-head .title{font-size:12px;font-weight:700;color:var(--textHi)}
+  .rail-head .acts{display:flex;gap:6px}
+  .rail-list{flex:1;overflow:auto}
+  .item{width:100%;text-align:left;padding:10px 14px;background:transparent;border:0;border-left:2px solid transparent;font-family:var(--mono);cursor:pointer;color:var(--text);display:block;transition:background .12s}
+  .item:hover{background:var(--cardHi)}
+  .item.active{background:var(--accentSoft);border-left-color:var(--accent)}
+  .item .n{font-size:13px;font-weight:600}
+  .item.active .n{color:var(--textHi)}
+  .item .m{font-size:11px;color:var(--faint);margin-top:3px}
+  .item .m .br{color:var(--dim)}
+
+  /* ── right pane: the selected repo ───────────────────────────────────── */
+  .pane{flex:1;display:flex;flex-direction:column;overflow:hidden}
+  .pane-head{padding:12px 20px 0;border-bottom:1px solid var(--border);background:var(--bgAlt)}
+  /* One centred column, shared by the header and the body, so the breadcrumb, the
+     tabs and the content all sit on the same left edge in the middle of the pane. */
+  .col{max-width:900px;margin:0 auto;width:100%}
+  .head-top{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .tabs{display:flex;gap:2px;margin-top:10px}
+  .tab{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--dim);font-family:var(--mono);font-size:12px;padding:6px 12px;cursor:pointer;border-radius:0}
+  .tab:hover{color:var(--textHi);background:var(--cardHi)}
+  .tab.active{color:var(--textHi);border-bottom-color:var(--accent);background:transparent}
+  .tab .count{color:var(--faint);font-size:10px;margin-left:5px}
+  .branchpick{display:flex;width:100%;align-items:center;gap:7px;background:var(--accentSoft);border:1px solid var(--accent);border-radius:6px;padding:6px 9px 6px 11px;color:var(--accent)}
+  .branchpick .bpi{font-size:14px;line-height:1;flex:none}
+  .branchpick select{flex:1;min-width:0;background:transparent;border:0;color:var(--accent);font-family:var(--mono);font-size:12.5px;font-weight:600;cursor:pointer;outline:none;padding:0}
+  .branchpick select option{background:var(--bgAlt);color:var(--text);font-weight:400}
+  .crumb{font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crumb .p{color:var(--accent)}
+  .pane-body{flex:1;overflow:auto;padding:18px 20px 32px}
+  .sect{margin-bottom:20px}
+  .sect h2{font-size:11px;font-weight:500;color:var(--faint);text-transform:uppercase;letter-spacing:.6px;margin:0 0 8px}
+  .kv{display:grid;grid-template-columns:120px 1fr;gap:4px 12px;font-size:12px}
+  .kv dt{color:var(--faint)}
+  .kv dd{margin:0;color:var(--text)}
+  /* Repo detail: main content on the left, the details panel as a right sidebar. */
+  .detail-grid{display:flex;gap:28px;align-items:flex-start}
+  .detail-main{flex:1;min-width:0}
+  .detail-side{width:250px;flex-shrink:0}
+  .detail-side .kv{grid-template-columns:1fr;gap:3px 0}
+  .detail-side .kv dt{margin-top:10px}
+  .detail-side .kv dt:first-of-type{margin-top:0}
+  .detail-side .kv dd{word-break:break-word}
+  @media (max-width:760px){.detail-grid{flex-direction:column}.detail-side{width:100%}.detail-side .kv{grid-template-columns:120px 1fr;gap:4px 12px}.detail-side .kv dt{margin-top:0}}
+  .clone{background:var(--bgAlt);border:1px solid var(--border);border-radius:4px;padding:7px 9px;display:flex;gap:8px;align-items:center}
+  .clone code{color:var(--dim);font-size:11px;overflow:auto;white-space:nowrap;flex:1;scrollbar-width:thin}
+
+  .md{font-size:13px;line-height:1.62;color:var(--text)}
+  .md h1,.md h2,.md h3,.md h4{color:var(--textHi);font-weight:600;line-height:1.3;margin:18px 0 8px}
+  .md h1{font-size:19px;border-bottom:1px solid var(--border);padding-bottom:6px}
+  .md h2{font-size:16px;border-bottom:1px solid var(--border);padding-bottom:5px}
+  .md h3{font-size:14px}
+  .md h4{font-size:13px;color:var(--dim)}
+  .md p{margin:0 0 10px}
+  .md ul,.md ol{margin:0 0 10px;padding-left:22px}
+  .md li{margin:2px 0}
+  .md a{color:var(--accent);text-decoration:none}
+  .md a:hover{text-decoration:underline}
+  .md code{background:var(--bgAlt);border:1px solid var(--border);border-radius:3px;padding:1px 4px;font-size:12px;color:var(--dim)}
+  .md pre{background:var(--bgAlt);border:1px solid var(--border);border-radius:5px;padding:10px 12px;overflow:auto;margin:0 0 12px}
+  .md pre code{background:none;border:0;padding:0;color:var(--text);font-size:12px;line-height:1.5}
+  .md blockquote{margin:0 0 10px;padding:2px 0 2px 12px;border-left:2px solid var(--border);color:var(--dim)}
+  .md hr{border:0;border-top:1px solid var(--border);margin:16px 0}
+  .md table{border-collapse:collapse;margin:0 0 12px;font-size:12px}
+  .md th,.md td{border:1px solid var(--border);padding:4px 9px;text-align:left}
+  .md th{color:var(--textHi);background:var(--bgAlt)}
+  .readme-path{font-size:11px;color:var(--faint);margin-bottom:8px}
+  /* File tree (code tab): a directory listing above the readme. */
+  .fpath{font-size:12px;color:var(--dim);margin-bottom:8px;word-break:break-all}
+  .fcrumb{background:transparent;border:0;color:var(--accent);font-family:var(--mono);font-size:12px;padding:0;cursor:pointer}
+  .fcrumb:hover{text-decoration:underline}
+  .ftree{border:1px solid var(--border);border-radius:5px;overflow:hidden}
+  .frow{display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:transparent;border:0;border-bottom:1px solid var(--border);border-radius:0;color:var(--text);font-family:var(--mono);font-size:12px;padding:6px 10px;cursor:pointer}
+  .frow:last-child{border-bottom:0}
+  .frow:hover{background:var(--cardHi);color:var(--textHi)}
+  .frow .fic{width:16px;flex:none;text-align:center}
+  .frow .fname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .frow .fsize{color:var(--faint);font-size:11px;flex:none}
+  /* When a file is open the reader breaks out of the centred column to fill the pane. */
+  .pane.fileview .col{max-width:none}
+  /* File view: a numbered gutter beside the code, like a real git host. The viewer is
+     darkened below the page background for extra contrast (white on the light theme). */
+  .fcode{display:flex;border:1px solid var(--border);border-radius:5px;overflow:auto;max-height:calc(100vh - 200px);background:color-mix(in srgb, var(--bg) 74%, #000)}
+  html[data-theme="light-cyber"] .fcode{background:#fff}
+  .fgutter{margin:0;padding:10px 8px 10px 12px;color:var(--faint);text-align:right;font-size:18px;line-height:1.55;white-space:pre;user-select:none;border-right:1px solid var(--border);flex:none;font-family:var(--mono)}
+  .fblob{margin:0;padding:10px 14px;font-size:18px;line-height:1.55;flex:1;background:transparent;border:0;border-radius:0;overflow:visible;max-height:none}
+  .fblob code{white-space:pre;font-family:var(--mono);color:var(--text);font-size:18px}
+  .fedit{float:right}
+  .edit-msg{width:100%;margin-bottom:8px}
+  .edit-area{width:100%;min-height:calc(100vh - 320px);background:color-mix(in srgb, var(--bg) 74%, #000);border:1px solid var(--border);border-radius:5px;color:var(--text);font-family:var(--mono);font-size:14px;line-height:1.55;padding:10px 12px;resize:vertical;white-space:pre;overflow:auto;tab-size:4}
+  .edit-area:focus{outline:none;border-color:var(--accent)}
+  html[data-theme="light-cyber"] .edit-area{background:#fff}
+  /* Generic syntax tokens (theme-aware; overridden for the light theme below). */
+  .tok-c{color:var(--faint);font-style:italic}
+  .tok-s{color:#9ece6a}
+  .tok-n{color:#e0af68}
+  .tok-k{color:#7aa2f7}
+  .tok-l{color:#bb9af7}
+  html[data-theme="light-cyber"] .tok-s{color:#2e7d32}
+  html[data-theme="light-cyber"] .tok-n{color:#a35b00}
+  html[data-theme="light-cyber"] .tok-k{color:#1a56c4}
+  html[data-theme="light-cyber"] .tok-l{color:#7b3fbf}
+  .filters{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+  .filters input{width:auto;flex:1;min-width:150px;font-size:12px;padding:6px 9px}
+  .pager{display:flex;align-items:center;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
+  .pager .range{font-size:11px;color:var(--faint);flex:1}
+  .c{display:flex;gap:12px;align-items:baseline;padding:5px 0;font-size:12px;border-bottom:1px solid var(--border)}
+  .c:last-child{border-bottom:0}
+  .c .sha{color:var(--accent);font-size:11px;flex:none}
+  .c .subj{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .c .who{color:var(--faint);font-size:11px;flex:none}
+  .c[data-commit]{cursor:pointer;border-radius:4px;margin:0 -6px;padding-left:6px;padding-right:6px}
+  .c[data-commit]:hover{background:var(--cardHi)}
+  /* Commit diff view */
+  .cmeta{margin-bottom:14px}
+  .csubj{font-size:15px;color:var(--textHi);font-weight:600;margin-bottom:5px}
+  .cinfo{font-size:11px;color:var(--faint)}
+  .cbody{margin:10px 0 0;padding:9px 11px;background:var(--bgAlt);border:1px solid var(--border);border-radius:4px;font-size:12px;color:var(--dim);white-space:pre-wrap;font-family:var(--mono)}
+  .dfiles{margin-bottom:14px;border:1px solid var(--border);border-radius:5px;overflow:hidden}
+  .dfile{display:flex;gap:12px;align-items:center;padding:6px 11px;border-bottom:1px solid var(--border);font-size:12px}
+  .dfile:last-child{border-bottom:0}
+  .dfile[data-difffile]{cursor:pointer}
+  .dfile[data-difffile]:hover{background:var(--cardHi)}
+  .dfile.active{background:var(--accentSoft)}
+  .dfile.active .dfp{color:var(--accent)}
+  .dfp{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+  .dadd{color:#6cc644;font-size:11px}
+  .ddel{color:#f7768e;font-size:11px}
+  .dbin{color:var(--faint);font-size:11px}
+  /* Pull requests */
+  .prbar{display:flex;gap:8px;margin:0 0 14px}
+  .prnew{background:var(--accentSoft);border:1px solid var(--accent);color:var(--accent);font-weight:600;padding:7px 14px}
+  .prnew:hover{background:var(--accent);color:var(--bg)}
+  .prstate{font-size:10px;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:10px;border:1px solid var(--border);flex:none}
+  .pr-open{color:#6cc644;border-color:#6cc64455;background:#6cc6441a}
+  .pr-merged{color:#bb9af7;border-color:#bb9af755;background:#bb9af71a}
+  .pr-closed{color:#f7768e;border-color:#f7768e55;background:#f7768e1a}
+  .pr-conflict{color:var(--red)}
+  .diff{border:1px solid var(--border);border-radius:5px;overflow:auto;max-height:calc(100vh - 300px);background:color-mix(in srgb, var(--bg) 74%, #000);font-family:var(--mono);font-size:18px;line-height:1.55}
+  .diff .di{white-space:pre;padding:0 12px;color:var(--text);font-size:18px;line-height:1.55}
+  /* Add/del keep only a background tint so the syntax token colours show through. */
+  .diff .di-add{background:rgba(46,160,67,.16)}
+  .diff .di-del{background:rgba(248,81,73,.16)}
+  .diff .di-hunk{color:var(--accent);background:var(--bgAlt)}
+  .diff .di-head{color:var(--dim);font-weight:600;background:var(--bgAlt)}
+  html[data-theme="light-cyber"] .diff{background:#fff}
+  html[data-theme="light-cyber"] .diff .di-add{background:#e6ffec}
+  html[data-theme="light-cyber"] .diff .di-del{background:#ffebe9}
+
+  input,button{font-family:var(--mono);font-size:12px}
+  input{background:var(--bgAlt);border:1px solid var(--border);color:var(--text);padding:7px 9px;border-radius:4px;min-width:0;width:100%}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{background:var(--accentSoft);border:1px solid var(--accent);color:var(--accent);padding:6px 12px;border-radius:4px;cursor:pointer}
+  button:hover{background:var(--accent);color:var(--bg)}
+  button.ghost{background:transparent;border-color:var(--border);color:var(--dim);font-size:10px;padding:3px 7px}
+  button.ghost:hover{border-color:var(--borderHi);color:var(--textHi);background:var(--cardHi)}
+  button.danger{background:transparent;border-color:var(--border);color:var(--faint)}
+  button.danger:hover{background:var(--redSoft);border-color:var(--red);color:var(--red)}
+  button:disabled{opacity:.5;cursor:default}
+  select{background:var(--bgAlt);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:7px 9px;border-radius:4px;cursor:pointer;width:100%}
+  select:focus{outline:none;border-color:var(--accent)}
+  select option{background:var(--bgAlt);color:var(--text)}
+
+  .hint,.err{font-size:12px;color:var(--faint)}
+  .rail-list .hint{padding:20px 14px}
+  .err{color:var(--red);border:1px solid var(--redSoft);background:var(--redSoft);border-radius:6px;padding:10px 12px;margin-bottom:12px}
+  .center{height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px}
+  .note{margin-top:24px;border-top:1px solid var(--border);padding-top:12px;color:var(--faint);font-size:11px}
+  .note b{color:var(--dim);font-weight:500}
+  form .row{display:flex;flex-direction:column;gap:8px;max-width:420px}
+  form label{font-size:11px;color:var(--faint)}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="rail-head">
+      <span class="title">repos</span>
+      <span class="acts">
+        <button class="ghost" id="new" title="new repository">+</button>
+        <button class="ghost" id="refresh" title="refresh">↻</button>
+      </span>
+    </div>
+    <div class="rail-list" id="list"><div class="hint">→ loading · · ·</div></div>
+  </aside>
+  <main class="pane">
+    <div class="pane-head">
+      <div class="col">
+        <div class="head-top">
+          <div class="crumb" id="crumb"><span class="p">$</span> armory repos</div>
+          <div id="pane-acts"></div>
+        </div>
+        <div class="tabs" id="tabs"></div>
+      </div>
+    </div>
+    <div class="pane-body"><div class="col" id="pane"></div></div>
+  </main>
+</div>
+
+<script>
+// The shell loads this frame at /api/<service>/ui/, same-origin, and the BFF RELAYS an
+// Authorization header rather than injecting one — so a bare fetch from here arrives at
+// conductor with no credential and is answered 401. The token the shell mirrored to
+// localStorage under 'ca_token' is readable because the frame is same-origin (the
+// sandbox keeps allow-same-origin for exactly this). Outside the shell there is no
+// token and the calls 401, which is the correct answer for a direct visit.
+const TOKEN_KEY = 'ca_token';
+function authHeader() {
+  let tok = null;
+  try {
+    tok = localStorage.getItem(TOKEN_KEY) || window.parent?.localStorage?.getItem(TOKEN_KEY);
+  } catch { /* cross-origin parent — nothing readable, fall through unauthenticated */ }
+  return tok ? { Authorization: `Bearer ${tok}` } : {};
+}
+
+const API = '../repos';
+const $ = (id) => document.getElementById(id);
+const theme = new URLSearchParams(location.search).get('theme');
+if (theme) document.documentElement.setAttribute('data-theme', theme);
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// Relative time, because an absolute timestamp answers "when" but not "is this repo
+// still alive" — which is what a last-updated column is read for.
+function ago(iso) {
+  if (!iso) return 'never';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return 'never';
+  const s = Math.max(0, (Date.now() - then) / 1000);
+  for (const [secs, label] of [[31536000,'y'],[2592000,'mo'],[604800,'w'],[86400,'d'],[3600,'h'],[60,'m']]) {
+    if (s >= secs) return `${Math.floor(s / secs)}${label} ago`;
+  }
+  return 'just now';
+}
+
+// Repo size, as reported by the API (measured at the last push or repack). 0 means
+// never measured rather than empty, so it reads as "—" instead of a confident "0 B".
+function bytes(n) {
+  if (!n || n < 0) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
+// A deliberately small Markdown subset — headings, emphasis, code, links, lists,
+// quotes, rules and pipe tables. README content is UNTRUSTED (anyone who can push can
+// write it), so the order here is load-bearing: escape every HTML character FIRST, then
+// apply markup to the escaped text. Nothing downstream can reintroduce a tag, because
+// no raw '<' survives the first step. Raw inline HTML in a readme therefore renders as
+// visible text rather than being executed — the safe failure mode.
+function md(src) {
+  const codeBlocks = [];
+  let t = esc(src).replace(/\r\n/g, '\n');
+
+  // Stash fenced blocks before any inline rule can touch their contents.
+  t = t.replace(/```([\w+-]*)\n([\s\S]*?)```/g, (_, lang, body) => {
+    codeBlocks.push(`<pre><code data-lang="${esc(lang)}">${body.replace(/\n$/, '')}</code></pre>`);
+    return `\u0000CODE${codeBlocks.length - 1}\u0000`;
+  });
+
+  // Only http(s) links survive; anything else (javascript:, data:) keeps its text and
+  // loses the href. Relative links can't resolve inside the frame, so they are dropped
+  // to plain text too rather than pointing somewhere wrong.
+  const link = (text, url) =>
+    /^https?:\/\//i.test(url)
+      ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`
+      : text;
+
+  const lines = t.split('\n');
+  const out = [];
+  let para = [], list = null, quote = [];
+
+  const flushPara = () => { if (para.length) { out.push(`<p>${inline(para.join(' '))}</p>`); para = []; } };
+  const flushList = () => { if (list) { out.push(`<${list.tag}>${list.items.map(i => `<li>${inline(i)}</li>`).join('')}</${list.tag}>`); list = null; } };
+  const flushQuote = () => { if (quote.length) { out.push(`<blockquote>${inline(quote.join(' '))}</blockquote>`); quote = []; } };
+  const flushAll = () => { flushPara(); flushList(); flushQuote(); };
+
+  function inline(s) {
+    return s
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g, '$1')            // images → alt text; no remote loads
+      .replace(/\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g, (_, x, u) => link(x, u))
+      // Emphasis. Asterisks emphasise anywhere; underscores ONLY at word boundaries —
+      // GitHub-flavoured behaviour, so an identifier like codearmory_git_factory keeps
+      // its underscores instead of rendering as codearmory<em>git</em>factory. The
+      // underscore forms carry their leading boundary char through ($1).
+      .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^\w])__(?=\S)([\s\S]*?\S)__(?!\w)/g, '$1<strong>$2</strong>')
+      .replace(/\*(?=\S)([^*]*?\S)\*/g, '<em>$1</em>')
+      .replace(/(^|[^\w])_(?=\S)([^_]*?\S)_(?!\w)/g, '$1<em>$2</em>')
+      .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<del>$1</del>');
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\u0000CODE\d+\u0000$/.test(line.trim())) { flushAll(); out.push(line.trim()); continue; }
+    if (!line.trim()) { flushAll(); continue; }
+
+    let m;
+    if ((m = line.match(/^(#{1,4})\s+(.*)$/))) { flushAll(); out.push(`<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`); continue; }
+    if (/^\s*([-*_])\s*\1\s*\1[\s\S]*$/.test(line) && line.trim().length >= 3) { flushAll(); out.push('<hr>'); continue; }
+    if ((m = line.match(/^&gt;\s?(.*)$/))) { flushPara(); flushList(); quote.push(m[1]); continue; }
+
+    // Pipe table: a header row followed by a |---|---| separator.
+    if (line.includes('|') && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1] || '')) {
+      flushAll();
+      const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+      const head = cells(line);
+      const rows = [];
+      i += 2;
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) { rows.push(cells(lines[i])); i++; }
+      i--;
+      out.push(`<table><thead><tr>${head.map(h => `<th>${inline(h)}</th>`).join('')}</tr></thead><tbody>` +
+        rows.map(r => `<tr>${r.map(c => `<td>${inline(c)}</td>`).join('')}</tr>`).join('') + '</tbody></table>');
+      continue;
+    }
+
+    if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
+      flushPara(); flushQuote();
+      if (!list || list.tag !== 'ul') { flushList(); list = { tag: 'ul', items: [] }; }
+      list.items.push(m[1]); continue;
+    }
+    if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+      flushPara(); flushQuote();
+      if (!list || list.tag !== 'ol') { flushList(); list = { tag: 'ol', items: [] }; }
+      list.items.push(m[1]); continue;
+    }
+
+    flushList(); flushQuote();
+    para.push(line.trim());
+  }
+  flushAll();
+
+  return out.join('\n').replace(/\u0000CODE(\d+)\u0000/g, (_, n) => codeBlocks[Number(n)]);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', ...authHeader(), ...(opts.headers || {}) },
+  });
+  if (res.status === 401) throw new Error('401 — session expired; reload the portal to sign in again');
+  if (!res.ok) throw new Error(`${res.status} ${(await res.text()).trim() || res.statusText}`);
+  return res.status === 204 ? null : res.json();
+}
+
+// ── state ────────────────────────────────────────────────────────────────────
+let repos = [];
+let selectedId = null;
+let mode = 'detail';           // 'detail' | 'new'
+let tab = 'code';              // 'code' | 'commits' — the traditional repo tabs
+let treePath = '';             // code tab: the directory currently browsed in the file tree
+let filePath = null;           // code tab: open file path, or null for the directory listing
+let ref = '';                  // the branch currently being viewed (tree/blob/commits)
+let prNumber = null;           // pulls tab: open PR number, 'new' for the form, or null for the list
+let commitSha = null;          // commits tab: open commit sha, or null for the history list
+let page = 0;                  // commits tab: current page (0-based)
+let filters = { q: '', author: '' };
+const PAGE = 50;
+const commitCache = new Map(); // repo id → commits, so re-selecting is instant
+const readmeCache = new Map(); // repo id → readme response, same reason
+const branchCache = new Map(); // repo id → [branch names], for the branch switcher
+let pageToken = 0;             // guards against out-of-order filter responses
+let focusField = null;         // which filter input to restore focus to after a render
+
+const selected = () => repos.find((r) => r.id === selectedId) || null;
+
+// ── rail ─────────────────────────────────────────────────────────────────────
+function renderRail() {
+  const list = $('list');
+  if (!repos.length) {
+    list.innerHTML = '<div class="hint">→ no repositories<br><br>press + to create one</div>';
+    return;
+  }
+  list.innerHTML = repos.map((r) => `
+    <button class="item ${r.id === selectedId ? 'active' : ''}" data-sel="${esc(r.id)}">
+      <div class="n">${esc(r.name)}</div>
+      <div class="m">${esc(r.namespace)} · <span class="br">${esc(r.default_branch || 'main')}</span></div>
+      <div class="m">updated ${esc(ago(r.updated_at))}</div>
+    </button>`).join('');
+}
+
+// ── right pane ───────────────────────────────────────────────────────────────
+function renderPane() {
+  const crumb = $('crumb'), acts = $('pane-acts'), pane = $('pane');
+  document.querySelector('.pane').classList.remove('fileview'); // reset; blob view re-adds it
+  syncHash();
+
+  if (mode === 'new') {
+    crumb.innerHTML = '<span class="p">$</span> armory repos · new';
+    acts.innerHTML = '';
+    $('tabs').innerHTML = '';
+    pane.innerHTML = `
+      <form id="create-form" class="sect">
+        <h2>new repository</h2>
+        <div class="row">
+          <label for="f-name">name</label>
+          <input id="f-name" name="name" placeholder="my-service" required autocomplete="off" spellcheck="false">
+          <label for="f-desc">description <span style="opacity:.6">(optional)</span></label>
+          <input id="f-desc" name="description" placeholder="what lives in here" autocomplete="off">
+          <div style="display:flex;gap:8px;margin-top:4px">
+            <button type="submit" id="create-btn">create</button>
+            <button type="button" class="danger" id="cancel-new">cancel</button>
+          </div>
+        </div>
+      </form>`;
+    $('f-name').focus();
+    return;
+  }
+
+  const r = selected();
+  if (!r) {
+    crumb.innerHTML = '<span class="p">$</span> armory repos';
+    acts.innerHTML = '';
+    $('tabs').innerHTML = '';
+    pane.innerHTML = '<div class="center"><div class="hint">select a repository on the left<br><br>or press + to create one</div></div>';
+    return;
+  }
+
+  crumb.innerHTML = `<span class="p">$</span> armory repos · ${esc(r.namespace)}/${esc(r.name)}`;
+  acts.innerHTML = `<button class="danger" data-del="${esc(r.id)}" data-name="${esc(r.name)}">delete</button>`;
+
+  // Repo tabs, as every git platform does it: the code view is the landing page and
+  // history is one click away, rather than a section buried under it.
+  const n = commitCache.get(r.id);
+  $('tabs').innerHTML = `
+    <button class="tab ${tab === 'code' ? 'active' : ''}" data-tab="code">code</button>
+    <button class="tab ${tab === 'commits' ? 'active' : ''}" data-tab="commits">commits${
+      n === undefined ? '' : `<span class="count">${n}</span>`}</button>
+    <button class="tab ${tab === 'pulls' ? 'active' : ''}" data-tab="pulls">pulls</button>`;
+  loadBranches(r.id);
+
+  if (tab === 'commits') {
+    pane.innerHTML = `
+      <div class="filters">
+        <input id="f-q" placeholder="search commit messages" value="${esc(filters.q)}" autocomplete="off" spellcheck="false">
+        <input id="f-author" placeholder="author" value="${esc(filters.author)}" autocomplete="off" spellcheck="false">
+      </div>
+      <div id="log"><div class="hint">→ loading history · · ·</div></div>
+      <div id="pager"></div>`;
+    // Restore focus and caret after the re-render, so typing in a filter is not
+    // interrupted by the reload it triggers.
+    if (focusField) {
+      const el = $(focusField);
+      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    }
+    if (commitSha) loadCommit(r.id, commitSha); else loadCommitPage(r.id);
+    return;
+  }
+
+  if (tab === 'pulls') {
+    pane.innerHTML = '<div id="pulls"><div class="hint">→ loading pull requests · · ·</div></div>';
+    loadBranches(r.id);
+    if (prNumber === 'new') paintNewPull($('pulls'), r);
+    else if (prNumber) loadPull(r.id, prNumber);
+    else loadPulls(r.id);
+    return;
+  }
+
+  pane.innerHTML = `
+    <div class="detail-grid">
+      <div class="detail-main">
+        ${r.description ? `<div class="sect" style="color:var(--dim);font-size:12px">${esc(r.description)}</div>` : ''}
+        <div class="sect">
+          <div class="clone">
+            <code>${esc(r.http_url)}</code>
+            <button class="ghost" data-copy="${esc(r.http_url)}">copy</button>
+          </div>
+        </div>
+        <div class="sect" id="files-sect">
+          <div id="filetree"><div class="hint">→ loading files · · ·</div></div>
+        </div>
+        <div class="sect" id="readme-sect">
+          <div id="readme"><div class="hint">→ loading readme · · ·</div></div>
+        </div>
+      </div>
+      <aside class="detail-side">
+        <div class="sect">
+          <h2>branch</h2>
+          <span class="branchpick" title="switch branch"><span class="bpi">⎇</span><select id="branchsel">${branchOptions(r)}</select></span>
+        </div>
+        <div class="sect">
+          <h2>details</h2>
+          <dl class="kv">
+            <dt>default branch</dt><dd>${esc(r.default_branch || 'main')}</dd>
+            <dt>visibility</dt><dd>${esc(r.visibility || 'private')}</dd>
+            <dt>last updated</dt><dd title="${esc(r.updated_at || '')}">${esc(ago(r.updated_at))}</dd>
+            <dt>created</dt><dd>${esc((r.created_at || '').slice(0, 10))}</dd>
+            <dt>id</dt><dd style="color:var(--faint);font-size:11px">${esc(r.id)}</dd>
+          </dl>
+        </div>
+      </aside>
+    </div>`;
+  if (filePath) loadBlob(r.id, filePath); else loadTree(r.id, treePath);
+  loadReadme(r.id);
+  loadCommitCount(r.id);
+}
+
+async function loadReadme(id) {
+  const target = () => (selectedId === id ? $('readme') : null); // ignore a stale response
+  if (readmeCache.has(id)) { paintReadme(target(), readmeCache.get(id)); return; }
+  try {
+    const res = await api(`${API}/${id}/readme`);
+    readmeCache.set(id, res);
+    paintReadme(target(), res);
+  } catch (e) {
+    const el = target();
+    if (el) el.innerHTML = `<div class="err">could not load readme — ${esc(e.message)}</div>`;
+  }
+}
+
+function paintReadme(el, res) {
+  if (!el) return;
+  if (!res || !res.found) {
+    // Not an error: a repo with no readme (or no commits yet) is ordinary. Say what
+    // would make one appear rather than leaving a blank panel.
+    el.innerHTML = '<div class="hint">no README at the repository root — add one and push to see it here</div>';
+    return;
+  }
+  el.innerHTML = `<div class="readme-path">${esc(res.path)}</div><div class="md">${md(res.content)}</div>`;
+}
+
+// ── branches (switcher) ───────────────────────────────────────────────────────
+// The empty ref means "the repo's default branch"; effRef resolves it so the tree,
+// blob, commits and the switcher all agree on which branch is being viewed.
+const effRef = (r) => ref || (r && r.default_branch) || 'main';
+const curRef = () => effRef(selected());
+
+function branchOptions(r) {
+  const cur = effRef(r);
+  const names = branchCache.get(r.id) || [cur];
+  return names.map((n) => `<option value="${esc(n)}" ${n === cur ? 'selected' : ''}>${esc(n)}</option>`).join('');
+}
+
+async function loadBranches(id) {
+  if (branchCache.has(id)) return;
+  try {
+    const res = await api(`${API}/${id}/branches`);
+    branchCache.set(id, (res.branches || []).map((b) => b.name));
+    if (selectedId === id) { const sel = $('branchsel'); if (sel) sel.innerHTML = branchOptions(selected()); }
+  } catch { /* a branch list failing is not worth a banner */ }
+}
+
+// ── file tree (code tab) ──────────────────────────────────────────────────────
+// A repo browser like every other git host: list the current directory, click a
+// folder to descend, click a file to view it, and a breadcrumb to jump back up.
+const parentPath = (p) => p.split('/').slice(0, -1).join('/');
+
+// When a file is open the reader takes over the whole section: the readme below and
+// the details sidebar are hidden so the code fills the pane. Restored on the tree view.
+function setFileView(on) {
+  const rd = $('readme-sect');
+  if (rd) rd.style.display = on ? 'none' : '';
+  const side = document.querySelector('.detail-side');
+  if (side) side.style.display = on ? 'none' : '';
+  const pane = document.querySelector('.pane');
+  if (pane) pane.classList.toggle('fileview', on); // let the reader span the full width
+}
+
+async function loadTree(id, path) {
+  syncHash(); // persist the current directory so a refresh restores it
+  const target = () => (selectedId === id ? $('filetree') : null); // ignore a stale response
+  const busy = target();
+  if (busy) busy.innerHTML = '<div class="hint">→ loading files · · ·</div>';
+  try {
+    const res = await api(`${API}/${id}/tree?path=${encodeURIComponent(path || '')}&ref=${encodeURIComponent(curRef())}`);
+    paintTree(target(), res);
+  } catch (e) {
+    const el = target();
+    if (el) el.innerHTML = `<div class="err">could not load files — ${esc(e.message)}</div>`;
+  }
+}
+
+// fileCrumb renders the current path as clickable segments back to the repo root.
+function fileCrumb(path) {
+  let acc = '';
+  const segs = (path ? path.split('/') : []).map((p, i, a) => {
+    acc = acc ? `${acc}/${p}` : p;
+    return i === a.length - 1
+      ? `<span>${esc(p)}</span>`
+      : `<button class="fcrumb" data-tree="${esc(acc)}">${esc(p)}</button>`;
+  });
+  return `<div class="fpath"><button class="fcrumb" data-tree="">root</button>${segs.map((s) => ` / ${s}`).join('')}</div>`;
+}
+
+function paintTree(el, res) {
+  if (!el) return;
+  setFileView(false); // back on the directory listing — bring the readme/sidebar back
+  const path = (res && res.path) || '';
+  const entries = (res && res.entries) || [];
+  if (!entries.length && !path) {
+    el.innerHTML = `${fileCrumb(path)}<div class="hint">no files yet — push a commit to populate this repository</div>`;
+    return;
+  }
+  const icon = (t) => (t === 'dir' ? '📁' : t === 'symlink' ? '↳' : t === 'submodule' ? '⊟' : '📄');
+  const up = path ? `<button class="frow" data-tree="${esc(parentPath(path))}"><span class="fic">↩</span><span class="fname">..</span></button>` : '';
+  const rows = entries.map((e) => {
+    const isDir = e.type === 'dir';
+    const nav = isDir ? `data-tree="${esc(e.path)}"` : `data-blob="${esc(e.path)}"`;
+    const size = isDir ? '' : `<span class="fsize">${esc(bytes(e.size))}</span>`;
+    return `<button class="frow" ${nav}><span class="fic">${icon(e.type)}</span><span class="fname">${esc(e.name)}</span>${size}</button>`;
+  }).join('');
+  el.innerHTML = `${fileCrumb(path)}<div class="ftree">${up}${rows}</div>`;
+}
+
+async function loadBlob(id, path) {
+  filePath = path; syncHash(); // persist the open file so a refresh reopens it
+  const target = () => (selectedId === id ? $('filetree') : null);
+  const busy = target();
+  if (busy) { setFileView(true); busy.innerHTML = `<div class="hint">→ loading ${esc(path)} · · ·</div>`; }
+  try {
+    const res = await api(`${API}/${id}/blob?path=${encodeURIComponent(path)}&ref=${encodeURIComponent(curRef())}`);
+    paintBlob(target(), path, res);
+  } catch (e) {
+    const el = target();
+    if (el) el.innerHTML = `<div class="err">could not load file — ${esc(e.message)}</div>`;
+  }
+}
+
+let lastBlob = null; // the open file, so the editor can seed its textarea with the raw content
+
+function paintBlob(el, path, res) {
+  if (!el) return;
+  setFileView(true); // a file is open — hand the whole section to the reader
+  lastBlob = { path, content: (res && res.content) || '', binary: !!(res && res.binary), truncated: !!(res && res.truncated) };
+  // Editing needs the whole file; a binary or truncated blob is not safe to save.
+  const editBtn = res && !res.binary && !res.truncated ? '<button class="ghost fedit" data-edit="1">edit</button>' : '';
+  const back = `<div class="fpath"><button class="fcrumb" data-tree="${esc(parentPath(path))}">← files</button> · <span>${esc(path)}</span>${editBtn}</div>`;
+  if (res && res.binary) {
+    el.innerHTML = `${back}<div class="hint">binary file (${esc(bytes(res.size))}) — not shown</div>`;
+    return;
+  }
+  const trunc = res && res.truncated ? '<div class="hint" style="margin-bottom:8px">file is large — showing the first part only</div>' : '';
+  const content = lastBlob.content;
+  const fn = path.split('/').pop();
+  const ext = fn.includes('.') ? fn.split('.').pop().toLowerCase() : fn.toLowerCase();
+  // Markdown renders as markdown, not as source — same renderer the readme uses.
+  if (ext === 'md' || ext === 'markdown') {
+    el.innerHTML = `${back}${trunc}<div class="md">${md(content)}</div>`;
+    return;
+  }
+  // Drop a single trailing newline so the gutter has no phantom final line.
+  const body = content.endsWith('\n') ? content.slice(0, -1) : content;
+  const n = body === '' ? 1 : body.split('\n').length;
+  let gutter = '';
+  for (let i = 1; i <= n; i++) gutter += i + (i < n ? '\n' : '');
+  el.innerHTML = `${back}${trunc}<div class="fcode"><pre class="fgutter">${gutter}</pre><pre class="fblob"><code>${highlight(body, ext)}</code></pre></div>`;
+}
+
+// editBlob swaps the reader for an editable textarea + commit message; saveBlob commits
+// it via PUT and re-opens the file. Edits go to the branch currently being viewed.
+function editBlob() {
+  const el = $('filetree');
+  if (!el || !lastBlob) return;
+  setFileView(true);
+  el.innerHTML = `
+    <div class="fpath"><button class="fcrumb" data-edit-cancel="1">← cancel</button> · editing <span>${esc(lastBlob.path)}</span> on <b>${esc(curRef())}</b></div>
+    <input id="edit-msg" class="edit-msg" placeholder="commit message — default: Update ${esc(lastBlob.path)}" autocomplete="off" spellcheck="false">
+    <textarea id="edit-area" class="edit-area" spellcheck="false"></textarea>
+    <div class="prbar"><button id="edit-save" data-edit-save="1">commit changes</button><button class="danger" data-edit-cancel="1">cancel</button></div>`;
+  const ta = $('edit-area');
+  if (ta) { ta.value = lastBlob.content; ta.focus(); }
+}
+
+async function saveBlob() {
+  const ta = $('edit-area');
+  if (!ta || !lastBlob) return;
+  const btn = $('edit-save');
+  if (btn) { btn.disabled = true; btn.textContent = 'committing…'; }
+  // Ride on PATCH /repos/{id} (a registered route) so the editor works through the gateway.
+  const body = { file: { ref: curRef(), path: lastBlob.path, content: ta.value, message: ($('edit-msg').value || '').trim() } };
+  try {
+    await api(`${API}/${selectedId}`, { method: 'PATCH', body: JSON.stringify(body) });
+    // The branch tip moved: drop caches that depend on it, then re-open the file.
+    commitCache.delete(selectedId); readmeCache.delete(selectedId); branchCache.delete(selectedId);
+    loadBlob(selectedId, lastBlob.path);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'commit changes'; }
+    const el = $('filetree');
+    if (el) el.insertAdjacentHTML('afterbegin', `<div class="err">could not save — ${esc(e.message)}</div>`);
+  }
+}
+
+// ── syntax highlighting ───────────────────────────────────────────────────────
+// A compact, dependency-free highlighter (the portal ships no external library).
+// It is not a per-language grammar: one pass colours comments, strings, numbers and
+// a broad keyword/literal set — enough to make code readable across most languages.
+const HL_KEYWORDS = new Set(('abstract as async await break case catch chan class const continue def ' +
+  'defer del delete do elif else end enum export extends fallthrough final finally fn for from func ' +
+  'function go goto if impl implements import in include inline interface is lambda let loop map match ' +
+  'mod module move mut namespace new not or override package private protected pub public raise range ' +
+  'readonly record ref require return select self sizeof static struct super switch template then this ' +
+  'throw trait try type typedef typeof union unless until use using var virtual void volatile when ' +
+  'where while with yield and').split(' '));
+const HL_LITERALS = new Set(['true', 'false', 'null', 'nil', 'none', 'undefined', 'True', 'False', 'None', 'NULL', 'NaN']);
+const HL_HASH = new Set(['py', 'rb', 'sh', 'bash', 'zsh', 'yml', 'yaml', 'toml', 'ini', 'cfg', 'conf', 'pl', 'r', 'ex', 'exs', 'tf', 'dockerfile', 'makefile', 'mk', 'gitignore', 'env']);
+const HL_DASH = new Set(['sql', 'lua', 'hs', 'elm', 'adb', 'ads', 'vhd', 'vhdl']);
+const HL_BLOCK = new Set(['js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'go', 'c', 'cc', 'cpp', 'cxx', 'h', 'hpp', 'java', 'rs', 'cs', 'css', 'scss', 'less', 'php', 'swift', 'kt', 'kts', 'scala', 'proto', 'json5', 'glsl', 'dart', 'm', 'mm']);
+
+function highlight(src, ext) {
+  ext = (ext || '').toLowerCase();
+  const line = HL_HASH.has(ext) ? '#' : HL_DASH.has(ext) ? '--' : '//';
+  const lc = line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Each spec is [class, pattern]; every pattern contributes exactly one capture group
+  // (no inner captures) so a matched group index maps straight back to its class.
+  const specs = [];
+  if (HL_BLOCK.has(ext)) specs.push(['tok-c', '/\\*[\\s\\S]*?\\*/']);
+  specs.push(['tok-c', lc + '[^\\n]*']);
+  specs.push(['tok-s', '"(?:\\\\.|[^"\\\\\\n])*"|\'(?:\\\\.|[^\'\\\\\\n])*\'|`(?:\\\\.|[^`\\\\])*`']);
+  specs.push(['tok-n', '\\b0[xXbBoO][0-9a-fA-F_]+\\b|\\b\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b']);
+  specs.push(['word', '[A-Za-z_$][\\w$]*']);
+  const re = new RegExp(specs.map((s) => '(' + s[1] + ')').join('|'), 'g');
+  let out = '', last = 0, m;
+  while ((m = re.exec(src))) {
+    out += esc(src.slice(last, m.index));
+    last = re.lastIndex;
+    let cls = '';
+    for (let i = 0; i < specs.length; i++) { if (m[i + 1] !== undefined) { cls = specs[i][0]; break; } }
+    if (cls === 'word') cls = HL_LITERALS.has(m[0]) ? 'tok-l' : HL_KEYWORDS.has(m[0]) ? 'tok-k' : '';
+    out += cls ? `<span class="${cls}">${esc(m[0])}</span>` : esc(m[0]);
+    if (re.lastIndex === m.index) re.lastIndex++; // guard against a zero-width match
+  }
+  out += esc(src.slice(last));
+  return out;
+}
+
+// Commit pages are fetched per (repo, filters, page) — caching them would mean
+// invalidating on every keystroke, and the request is cheap.
+async function loadCommitPage(id) {
+  const el = () => (selectedId === id && tab === 'commits' ? $('log') : null);
+  const params = new URLSearchParams({ limit: String(PAGE), skip: String(page * PAGE), ref: curRef() });
+  if (filters.q) params.set('q', filters.q);
+  if (filters.author) params.set('author', filters.author);
+  const token = ++pageToken;                       // ignore responses from stale keystrokes
+  try {
+    const res = await api(`${API}/${id}/commits?${params}`);
+    if (token !== pageToken) return;
+    const target = el();
+    if (!target) return;
+    paintCommits(target, res.commits);
+    paintPager(res);
+  } catch (e) {
+    if (token !== pageToken) return;
+    const target = el();
+    if (target) target.innerHTML = `<div class="err">could not load history — ${esc(e.message)}</div>`;
+  }
+}
+
+function paintPager({ total, skip, commits }) {
+  const el = $('pager');
+  if (!el) return;
+  const shown = commits.length;
+  if (!total) { el.innerHTML = ''; return; }
+  const from = skip + 1, to = skip + shown;
+  const pages = Math.max(1, Math.ceil(total / PAGE));
+  el.innerHTML = `
+    <div class="pager">
+      <span class="range">${from}–${to} of ${total} commit${total === 1 ? '' : 's'} · page ${page + 1} of ${pages}</span>
+      <button class="ghost" data-page="first" ${page === 0 ? 'disabled' : ''}>« first</button>
+      <button class="ghost" data-page="prev" ${page === 0 ? 'disabled' : ''}>‹ newer</button>
+      <button class="ghost" data-page="next" ${to >= total ? 'disabled' : ''}>older ›</button>
+      <button class="ghost" data-page="last" ${to >= total ? 'disabled' : ''}>last »</button>
+    </div>`;
+}
+
+// The tab's count comes from a cheap head request rather than the page itself, so it is
+// the TOTAL history size and not "how many fit on one page".
+async function loadCommitCount(id) {
+  if (commitCache.has(id)) return;
+  try {
+    const res = await api(`${API}/${id}/commits?limit=1&ref=${encodeURIComponent(curRef())}`);
+    commitCache.set(id, res.total);
+    if (selectedId === id) renderPane();
+  } catch { /* a count failing is not worth a banner */ }
+}
+
+function paintCommits(el, commits) {
+  if (!el) return;
+  el.innerHTML = commits.length
+    ? commits.map((c) => `
+        <div class="c" data-commit="${esc(c.sha)}" title="view changes">
+          <span class="sha">${esc(c.short)}</span>
+          <span class="subj" title="${esc(c.subject)}">${esc(c.subject)}</span>
+          <span class="who">${esc(c.author)} · ${esc(ago(c.date))}</span>
+        </div>`).join('')
+    : `<div class="hint">${filters.q || filters.author
+        ? 'no commits match those filters'
+        : 'no commits yet — push to the clone URL to see history here'}</div>`;
+}
+
+// ── commit diff (view the changes of a commit) ────────────────────────────────
+async function loadCommit(id, sha) {
+  commitSha = sha; syncHash(); // persist the open commit so a refresh reopens it
+  const log = $('log');
+  if (log) log.innerHTML = '<div class="hint">→ loading changes · · ·</div>';
+  const pager = $('pager');
+  if (pager) pager.innerHTML = '';
+  try {
+    const res = await api(`${API}/${id}/commits?sha=${encodeURIComponent(sha)}`);
+    if (selectedId === id && tab === 'commits') paintCommit($('log'), res);
+  } catch (e) {
+    if ($('log')) $('log').innerHTML = `<div class="err">could not load commit — ${esc(e.message)}</div>`;
+  }
+}
+
+function paintCommit(el, d) {
+  if (!el) return;
+  const parent = d.parent ? ` · parent <span class="sha">${esc(d.parent.slice(0, 8))}</span>` : '';
+  el.innerHTML = `
+    <div class="fpath"><button class="fcrumb" data-back="1">← commits</button></div>
+    <div class="cmeta">
+      <div class="csubj">${esc(d.subject)}</div>
+      <div class="cinfo"><span class="sha">${esc(d.short)}</span> · ${esc(d.author)} · ${esc(ago(d.date))}${parent}</div>
+      ${d.body ? `<pre class="cbody">${esc(d.body)}</pre>` : ''}
+    </div>
+    ${fileDiffView(d.files, d.diff)}`;
+}
+
+// renderDiff colours a unified diff by line: additions, deletions, hunk headers and the
+// per-file headers. Big diffs are capped so a huge commit can't lock up the DOM.
+// extOf pulls a lowercase file extension (or the bare filename) from a path, for
+// picking the highlighter's language.
+const extOf = (path) => {
+  const fn = (path || '').split('/').pop();
+  return fn.includes('.') ? fn.split('.').pop().toLowerCase() : fn.toLowerCase();
+};
+
+function renderDiff(diff, ext) {
+  if (!diff.trim()) return '<div class="hint" style="padding:10px">no textual changes</div>';
+  const lines = diff.split('\n');
+  const MAX = 4000;
+  let html = lines.slice(0, MAX).map((l) => {
+    if (l.startsWith('@@')) return `<div class="di di-hunk">${esc(l) || '&nbsp;'}</div>`;
+    if (l.startsWith('diff --git') || l.startsWith('index ') || l.startsWith('--- ') || l.startsWith('+++ ')
+      || l.startsWith('new file') || l.startsWith('deleted file') || l.startsWith('rename ') || l.startsWith('similarity '))
+      return `<div class="di di-head">${esc(l) || '&nbsp;'}</div>`;
+    let cls = 'di';
+    if (l.startsWith('+')) cls = 'di di-add';
+    else if (l.startsWith('-')) cls = 'di di-del';
+    // Keep the +/-/space diff marker, syntax-highlight the code after it.
+    const inner = (esc(l.slice(0, 1)) + highlight(l.slice(1), ext)) || '&nbsp;';
+    return `<div class="${cls}">${inner}</div>`;
+  }).join('');
+  if (lines.length > MAX) html += `<div class="hint" style="padding:8px 10px">diff truncated — ${lines.length - MAX} more lines</div>`;
+  return html;
+}
+
+// splitDiffByFile carves a unified diff into one section per file (split on the
+// `diff --git` markers), so the UI can show a single file at a time instead of the
+// whole thing at once.
+let diffSections = []; // {path, patch} for the open commit/PR — read by the file click
+function splitDiffByFile(diff) {
+  const out = [];
+  let cur = null;
+  for (const l of (diff || '').split('\n')) {
+    if (l.startsWith('diff --git ')) {
+      if (cur) out.push(cur);
+      const m = l.match(/ b\/(.+)$/);
+      cur = { path: m ? m[1] : l.slice(11), lines: [l] };
+    } else if (cur) {
+      cur.lines.push(l);
+    }
+  }
+  if (cur) out.push(cur);
+  return out.map((s) => ({ path: s.path, patch: s.lines.join('\n') }));
+}
+
+// fileDiffView renders a clickable file list plus a pane showing ONE file's diff (the
+// first by default). `files` is the numstat summary, `diff` the full unified diff.
+function fileDiffView(files, diff) {
+  diffSections = splitDiffByFile(diff);
+  if (!diffSections.length) {
+    const rows = (files || []).map((f) => `<div class="dfile"><span class="dfp">${esc(f.path)}</span>${
+      f.binary ? '<span class="dbin">binary</span>' : `<span class="dadd">+${f.additions}</span><span class="ddel">−${f.deletions}</span>`}</div>`).join('');
+    return rows ? `<div class="dfiles">${rows}</div><div class="hint" style="padding:6px 2px">no textual diff to show</div>` : '<div class="hint">no changes</div>';
+  }
+  const stat = (path) => {
+    const f = (files || []).find((x) => x.path === path);
+    if (!f) return '';
+    return f.binary ? '<span class="dbin">binary</span>' : `<span class="dadd">+${f.additions}</span><span class="ddel">−${f.deletions}</span>`;
+  };
+  const list = diffSections.map((s, i) => `
+    <div class="dfile${i === 0 ? ' active' : ''}" data-difffile="${i}"><span class="dfp">${esc(s.path)}</span>${stat(s.path)}</div>`).join('');
+  return `<div class="dfiles">${list}</div><div class="diff" id="filediff">${renderDiff(diffSections[0].patch, extOf(diffSections[0].path))}</div>`;
+}
+
+// ── pull requests (review PRs in the portal) ──────────────────────────────────
+const pullsEl = (id) => (selectedId === id && tab === 'pulls' ? $('pulls') : null);
+
+async function loadPulls(id) {
+  try {
+    const list = await api(`${API}/${id}/pulls`);
+    paintPulls(pullsEl(id), list || []);
+  } catch (e) { const el = pullsEl(id); if (el) el.innerHTML = `<div class="err">could not load pull requests — ${esc(e.message)}</div>`; }
+}
+
+function paintPulls(el, list) {
+  if (!el) return;
+  const rows = list.map((p) => `
+    <div class="c" data-pull="${p.number}" title="review">
+      <span class="prstate pr-${esc(p.state)}">${esc(p.state)}</span>
+      <span class="subj" title="${esc(p.title)}">#${p.number} ${esc(p.title)}</span>
+      <span class="who">${esc(p.source_ref)} → ${esc(p.target_ref)} · ${esc(ago(p.created_at))}</span>
+    </div>`).join('');
+  el.innerHTML = `
+    <div class="prbar"><button class="prnew" data-pr-new="1">+ new pull request</button></div>
+    ${list.length ? rows : '<div class="hint">no pull requests yet — open one to propose merging a branch</div>'}`;
+}
+
+async function loadPull(id, number) {
+  const busy = pullsEl(id);
+  if (busy) busy.innerHTML = '<div class="hint">→ loading pull request · · ·</div>';
+  try {
+    const res = await api(`${API}/${id}/pulls/${encodeURIComponent(number)}`);
+    paintPull(pullsEl(id), res);
+  } catch (e) { const el = pullsEl(id); if (el) el.innerHTML = `<div class="err">could not load pull request — ${esc(e.message)}</div>`; }
+}
+
+function paintPull(el, res) {
+  if (!el) return;
+  const p = res.pull_request || res;
+  const open = p.state === 'open';
+  const merge = res.merge || {};
+  const blocked = open && merge.mergeable === false;
+  const actions = open ? `<div class="prbar">
+      <button data-pr-merge="${p.number}" ${blocked ? `disabled title="${esc(merge.reason || 'not mergeable')}"` : ''}>merge</button>
+      <button class="danger" data-pr-close="${p.number}">close</button>
+    </div>` : '';
+  const meta = [
+    `${esc(p.source_ref)} → ${esc(p.target_ref)}`,
+    res.commits !== undefined ? `${res.commits} commit${res.commits === 1 ? '' : 's'}` : '',
+    blocked ? `<span class="pr-conflict">cannot merge: ${esc(merge.reason || 'conflicts')}</span>` : '',
+    p.merge_commit ? `merged as <span class="sha">${esc(p.merge_commit.slice(0, 8))}</span>` : '',
+  ].filter(Boolean).join(' · ');
+  el.innerHTML = `
+    <div class="fpath"><button class="fcrumb" data-back-pulls="1">← pull requests</button></div>
+    <div class="cmeta">
+      <div class="csubj"><span class="prstate pr-${esc(p.state)}">${esc(p.state)}</span> #${p.number} ${esc(p.title)}</div>
+      <div class="cinfo">${meta}</div>
+      ${p.body ? `<pre class="cbody">${esc(p.body)}</pre>` : ''}
+      ${actions}
+    </div>
+    ${res.diff !== undefined ? fileDiffView(res.files, res.diff)
+      : (open ? '' : '<div class="hint">the review diff is shown while a pull request is open</div>')}`;
+}
+
+function paintNewPull(el, r) {
+  if (!el) return;
+  // Make sure the source/target dropdowns are populated even if the form is opened
+  // before the branch list has loaded.
+  if (!branchCache.has(r.id)) {
+    loadBranches(r.id).then(() => {
+      if (selectedId === r.id && tab === 'pulls' && prNumber === 'new') paintNewPull($('pulls'), r);
+    });
+  }
+  const names = branchCache.get(r.id) || [effRef(r)];
+  const opts = (sel) => names.map((n) => `<option value="${esc(n)}" ${n === sel ? 'selected' : ''}>${esc(n)}</option>`).join('');
+  const def = r.default_branch || 'main';
+  const src = names.find((n) => n !== def) || def;
+  el.innerHTML = `
+    <div class="fpath"><button class="fcrumb" data-back-pulls="1">← pull requests</button></div>
+    <form id="pr-form" class="row" style="max-width:540px">
+      <h2>new pull request</h2>
+      <label for="pr-title">title</label>
+      <input id="pr-title" placeholder="what does this change" autocomplete="off" spellcheck="false">
+      <label for="pr-source">merge from (source)</label>
+      <select id="pr-source" class="branchsel" style="max-width:none;margin:0">${opts(src)}</select>
+      <label for="pr-target">into (target)</label>
+      <select id="pr-target" class="branchsel" style="max-width:none;margin:0">${opts(def)}</select>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <button type="submit" id="pr-create">create</button>
+        <button type="button" class="danger" data-back-pulls="1">cancel</button>
+      </div>
+    </form>
+    <div id="pr-preview" style="margin-top:18px"></div>`;
+  const t = $('pr-title'); if (t) t.focus();
+  loadComparePreview();
+}
+
+// loadComparePreview shows the changes (commit count, files, diff) that a PR from the
+// selected source into target would contain — the same compare the review view shows,
+// but before the PR exists.
+async function loadComparePreview() {
+  const box = $('pr-preview');
+  if (!box) return;
+  const source = $('pr-source') && $('pr-source').value;
+  const target = $('pr-target') && $('pr-target').value;
+  if (!source || !target) return;
+  if (source === target) { box.innerHTML = '<div class="hint">pick two different branches to see the changes</div>'; return; }
+  box.innerHTML = '<div class="hint">→ comparing · · ·</div>';
+  try {
+    const res = await api(`${API}/${selectedId}/commits?base=${encodeURIComponent(target)}&head=${encodeURIComponent(source)}`);
+    if (!(prNumber === 'new' && tab === 'pulls')) return; // navigated away
+    const n = res.commits || 0;
+    const head = `<div class="cinfo" style="margin-bottom:10px">${esc(source)} → ${esc(target)} · ${n} commit${n === 1 ? '' : 's'}</div>`;
+    box.innerHTML = head + (res.diff ? fileDiffView(res.files, res.diff) : '<div class="hint">these branches are identical — nothing to merge</div>');
+  } catch (e) {
+    box.innerHTML = `<div class="err">could not compare — ${esc(e.message)}</div>`;
+  }
+}
+
+// prAction posts a merge/close and re-renders the pull once it settles.
+async function prAction(number, verb) {
+  try {
+    await api(`${API}/${selectedId}/pulls/${number}/${verb}`, { method: 'POST' });
+    prNumber = number;
+    renderPane();
+  } catch (e) {
+    const el = $('pulls');
+    if (el) el.insertAdjacentHTML('afterbegin', `<div class="err">${verb} failed — ${esc(e.message)}</div>`);
+  }
+}
+
+// ── data ─────────────────────────────────────────────────────────────────────
+async function load(keepSelection = true) {
+  try {
+    repos = (await api(API)) || [];
+    if (!keepSelection || !repos.some((r) => r.id === selectedId)) {
+      selectedId = repos.length ? repos[0].id : null;
+    }
+    renderRail();
+    renderPane();
+  } catch (e) {
+    $('list').innerHTML = `<div class="hint">→ error</div>`;
+    $('pane').innerHTML = `<div class="err">could not load repositories — ${esc(e.message)}</div>`;
+  }
+}
+
+// ── events (delegated: both panes re-render wholesale) ───────────────────────
+// Branch switcher: a native <select> emits change, not click.
+document.addEventListener('change', (ev) => {
+  if (ev.target.id === 'pr-source' || ev.target.id === 'pr-target') { loadComparePreview(); return; }
+  if (!ev.target.closest('#branchsel')) return;
+  ref = ev.target.value;
+  treePath = ''; filePath = null; commitSha = null;  // start the newly selected branch at its root
+  commitCache.delete(selectedId);  // the commit count is per-branch
+  focusField = null;
+  renderPane();
+});
+
+document.addEventListener('click', async (ev) => {
+  const sel = ev.target.closest('[data-sel]');
+  if (sel) {
+    selectedId = sel.dataset.sel;
+    mode = 'detail';
+    tab = 'code';   // a newly opened repo lands on its code view, not wherever you were
+    treePath = ''; filePath = null; commitSha = null;  // start the file browser at the repo root
+    ref = '';       // and on its default branch
+    prNumber = null;
+    page = 0; filters = { q: '', author: '' }; focusField = null;
+    renderRail();
+    renderPane();
+    return;
+  }
+
+  const t = ev.target.closest('[data-tab]');
+  if (t) { tab = t.dataset.tab; page = 0; prNumber = null; focusField = null; renderPane(); return; }
+
+  // File tree: descend into a folder (or breadcrumb hop), or open a file.
+  const dir = ev.target.closest('[data-tree]');
+  if (dir) { treePath = dir.dataset.tree; filePath = null; loadTree(selectedId, treePath); return; }
+  const file = ev.target.closest('[data-blob]');
+  if (file) { loadBlob(selectedId, file.dataset.blob); return; }
+
+  // File editing.
+  if (ev.target.closest('[data-edit]')) { editBlob(); return; }
+  if (ev.target.closest('[data-edit-cancel]')) { if (lastBlob) loadBlob(selectedId, lastBlob.path); return; }
+  if (ev.target.closest('[data-edit-save]')) { saveBlob(); return; }
+
+  // A changed file in a commit/PR → show just that file's diff.
+  const df = ev.target.closest('[data-difffile]');
+  if (df) {
+    const s = diffSections[+df.dataset.difffile];
+    const box = $('filediff');
+    if (box && s) { box.innerHTML = renderDiff(s.patch, extOf(s.path)); box.scrollIntoView({ block: 'nearest' }); }
+    document.querySelectorAll('.dfile.active').forEach((e) => e.classList.remove('active'));
+    df.classList.add('active');
+    return;
+  }
+
+  // Commit → its diff, and back to the history list.
+  const cm = ev.target.closest('[data-commit]');
+  if (cm) { loadCommit(selectedId, cm.dataset.commit); return; }
+  if (ev.target.closest('[data-back]')) { commitSha = null; renderPane(); return; }
+
+  // Pull requests: open one, start a new one, go back, merge or close.
+  const pull = ev.target.closest('[data-pull]');
+  if (pull) { prNumber = pull.dataset.pull; renderPane(); return; }
+  if (ev.target.closest('[data-pr-new]')) { prNumber = 'new'; renderPane(); return; }
+  if (ev.target.closest('[data-back-pulls]')) { prNumber = null; renderPane(); return; }
+  const mg = ev.target.closest('[data-pr-merge]');
+  if (mg && !mg.disabled) { prAction(mg.dataset.prMerge, 'merge'); return; }
+  const cl = ev.target.closest('[data-pr-close]');
+  if (cl) { prAction(cl.dataset.prClose, 'close'); return; }
+
+  const pg = ev.target.closest('[data-page]');
+  if (pg && !pg.disabled) {
+    const total = commitCache.get(selectedId) ?? 0;
+    const last = Math.max(0, Math.ceil(total / PAGE) - 1);
+    page = { first: 0, prev: Math.max(0, page - 1), next: page + 1, last }[pg.dataset.page] ?? page;
+    focusField = null;
+    renderPane();
+    return;
+  }
+
+  if (ev.target.closest('#new')) { mode = 'new'; renderPane(); return; }
+  if (ev.target.closest('#cancel-new')) { mode = 'detail'; renderPane(); return; }
+  if (ev.target.closest('#refresh')) { commitCache.clear(); readmeCache.clear(); branchCache.clear(); await load(); return; }
+
+  const copy = ev.target.closest('[data-copy]');
+  if (copy) {
+    try { await navigator.clipboard.writeText(copy.dataset.copy); } catch { /* clipboard may be blocked in a sandboxed frame */ }
+    const was = copy.textContent; copy.textContent = 'copied';
+    setTimeout(() => { copy.textContent = was; }, 1200);
+    return;
+  }
+
+  const del = ev.target.closest('[data-del]');
+  if (del) {
+    // Deleting a repo destroys its bytes on disk, so confirm by name rather than
+    // making it a single misclick.
+    if (!confirm(`delete ${del.dataset.name}? the repository and all its history are removed.`)) return;
+    del.disabled = true;
+    try {
+      await api(`${API}/${del.dataset.del}`, { method: 'DELETE' });
+      commitCache.delete(del.dataset.del);
+      readmeCache.delete(del.dataset.del);
+      selectedId = null;
+      await load(false);
+    } catch (e) {
+      del.disabled = false;
+      $('pane').insertAdjacentHTML('afterbegin', `<div class="err">delete failed — ${esc(e.message)}</div>`);
+    }
+  }
+});
+
+let filterTimer = null;
+document.addEventListener('input', (ev) => {
+  const id = ev.target.id;
+  if (id !== 'f-q' && id !== 'f-author') return;
+  filters[id === 'f-q' ? 'q' : 'author'] = ev.target.value.trim();
+  focusField = id;
+  page = 0;   // a new filter means a new result set; staying on page 7 would show nothing
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => { if (selectedId) loadCommitPage(selectedId); }, 250);
+});
+
+document.addEventListener('submit', async (ev) => {
+  if (ev.target.id === 'pr-form') {
+    ev.preventDefault();
+    const btn = $('pr-create');
+    const body = {
+      title: $('pr-title').value.trim(),
+      source_ref: $('pr-source').value,
+      target_ref: $('pr-target').value,
+    };
+    if (!body.title) { $('pr-title').focus(); return; }
+    if (body.source_ref === body.target_ref) { $('pulls').insertAdjacentHTML('afterbegin', '<div class="err">source and target must differ</div>'); return; }
+    btn.disabled = true; btn.textContent = 'creating…';
+    try {
+      const created = await api(`${API}/${selectedId}/pulls`, { method: 'POST', body: JSON.stringify(body) });
+      prNumber = created.number;
+      renderPane();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = 'create';
+      $('pulls').insertAdjacentHTML('afterbegin', `<div class="err">could not create — ${esc(e.message)}</div>`);
+    }
+    return;
+  }
+  if (ev.target.id !== 'create-form') return;
+  ev.preventDefault();
+  const btn = $('create-btn');
+  const body = { name: $('f-name').value.trim(), description: $('f-desc').value.trim() };
+  if (!body.name) return;
+  btn.disabled = true; btn.textContent = 'creating…';
+  try {
+    const created = await api(API, { method: 'POST', body: JSON.stringify(body) });
+    mode = 'detail';
+    selectedId = created?.id ?? null; // land on the new repo, ready to copy its clone URL
+    await load();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'create';
+    $('pane').insertAdjacentHTML('afterbegin', `<div class="err">create failed — ${esc(e.message)}</div>`);
+  }
+});
+
+// ── URL state ─────────────────────────────────────────────────────────────────
+// The current place (repo, tab, branch, directory, open PR) lives in the URL hash so a
+// refresh restores it instead of dumping you back on the first repo's code view.
+function syncHash() {
+  const p = new URLSearchParams();
+  if (selectedId) p.set('repo', selectedId);
+  if (tab !== 'code') p.set('tab', tab);
+  if (ref) p.set('ref', ref);
+  if (treePath) p.set('path', treePath);
+  if (filePath) p.set('file', filePath);
+  if (prNumber) p.set('pr', String(prNumber));
+  if (commitSha) p.set('commit', commitSha);
+  const h = p.toString();
+  try { history.replaceState(null, '', h ? '#' + h : location.pathname + location.search); } catch { /* ignore */ }
+}
+
+function restoreHash() {
+  const p = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+  if (p.get('repo')) selectedId = p.get('repo');
+  tab = p.get('tab') || 'code';
+  ref = p.get('ref') || '';
+  treePath = p.get('path') || '';
+  filePath = p.get('file') || null;
+  prNumber = p.get('pr') || null;
+  commitSha = p.get('commit') || null;
+}
+
+restoreHash();
+load();
+</script>
+</body>
+</html>

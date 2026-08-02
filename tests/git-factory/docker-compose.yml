@@ -1,0 +1,72 @@
+# Dependencies for the codearmory_git_factory integration tests: postgres +
+# registry + gatekeeper. The service under test is NOT run here — `./run.sh up`
+# starts it on the host with `go run .` (see run.sh), which is why postgres is
+# published to localhost:5432 so that host-run service can reach it.
+#
+# gatekeeper/registry build straight out of this monorepo (git_factory lives in it
+# now, so there is no sibling checkout to point at): ../.. from this tests/git-factory
+# dir is the repo root.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"          # published so the host-run service (go run .) can connect
+    volumes:
+      - ./stack/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 3s
+      timeout: 5s
+      retries: 15
+
+  registry:
+    build:
+      context: ../../src/systems
+      dockerfile: registry/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/registry
+      REGISTRY_SERVICE_ACCOUNTS: gatekeeper=gatekeeper-registry-read-local-secret
+      MANIFEST_FILE: /etc/registry/manifest.json
+      PORT: "8084"
+    volumes:
+      - ./stack/registry-manifest.json:/etc/registry/manifest.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/healthz"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  gatekeeper:
+    build:
+      context: ../../src/systems
+      dockerfile: gatekeeper/Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/gatekeeper
+      REGISTRY_URL: http://registry:8084
+      REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
+      GATEKEEPER_SERVICES: codearmory_git_factory=codearmory_git_factory-local-secret
+      SIGNUP_RATE_LIMIT: "10000"
+      SIGNUP_RATE_WINDOW: 1h
+      LOGIN_RATE_LIMIT: "10000"
+      LOGIN_RATE_WINDOW: 1h
+      OIDC_ISSUER: http://localhost:8081
+      PORT: "8081"
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      registry:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/healthz"]
+      interval: 3s
+      timeout: 5s
+      retries: 20

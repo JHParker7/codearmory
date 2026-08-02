@@ -1,0 +1,76 @@
+[
+  {
+    "name": "codearmory_git_factory",
+    "url": "http://codearmory_git_factory:9002",
+    "description": "The git plane of the codearmory platform (repos + Smart-HTTP)",
+    "forward_auth": true,
+    "service_key": "codearmory_git_factory-registry-local-secret",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/repos",
+        "action": "listRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos",
+        "action": "createRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}",
+        "action": "getRepo",
+        "resource": "codearmory_git_factory/repos/{id}"
+      },
+      {
+        "method": "PATCH",
+        "path": "/repos/{id}",
+        "action": "updateRepo",
+        "resource": "codearmory_git_factory/repos/{id}"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repos/{id}",
+        "action": "deleteRepo",
+        "resource": "codearmory_git_factory/repos/{id}"
+      }
+    ],
+    "actions": [
+      {
+        "action": "readRepo",
+        "description": "Fetch/clone a repo (git-upload-pack). Checked in-process by the Smart-HTTP handler."
+      },
+      {
+        "action": "writeRepo",
+        "description": "Push to a repo (git-receive-pack). Checked in-process by the Smart-HTTP handler."
+      }
+    ],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": [
+          "createRepo",
+          "listRepo"
+        ],
+        "resources": [
+          "{username}/codearmory_git_factory/repos"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "getRepo",
+          "updateRepo",
+          "deleteRepo",
+          "readRepo",
+          "writeRepo"
+        ],
+        "resources": [
+          "{username}/codearmory_git_factory/repos/*"
+        ]
+      }
+    ]
+  }
+]

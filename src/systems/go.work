@@ -10,6 +10,7 @@ use (
 	./forge
 	./gatekeeper
 	./git
+	./git-factory
 	./hooks
 	./outpost
 	./outpost-gateway

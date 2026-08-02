@@ -1,0 +1,37 @@
+{{- if and .Values.gitFactory.enabled .Values.gitFactory.persistence.enabled (not .Values.gitFactory.persistence.existingClaim) }}
+{{- $fullname := include "codearmory.fullname" . }}
+# Repo storage for the git plane: every bare repository git_factory serves lives here.
+# This is the ONLY copy of a user's pushed history, so unlike a cache it is never
+# reclaimed and the claim is retained on uninstall by default.
+#
+# ReadWriteOnce (the default): one pod owns the bytes. That is not an oversight — the
+# in-process maintenance loop repacks these repos, and git has no cross-node locking for
+# concurrent writers, so a second replica sharing the volume would corrupt objects. This
+# is why git_factory is pinned to one replica and given no HPA (see values.yaml).
+#
+# Not rendered at all when persistence.existingClaim names a volume provisioned outside
+# the release — the usual arrangement for shared storage, where the JuiceFS CSI driver,
+# its metadata engine and its object-storage backend outlive any single release.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $fullname }}-git-factory
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git-factory
+  {{- if .Values.gitFactory.persistence.retain }}
+  # Keep the claim (and the repos in it) when the release is removed: losing a build
+  # cache is an inconvenience, losing pushed source is not recoverable.
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.gitFactory.persistence.accessMode }}
+  {{- with .Values.gitFactory.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.gitFactory.persistence.size | quote }}
+{{- end }}

@@ -1,16 +1,17 @@
-{{- if .Values.gitFactory.ingress.enabled }}
+{{- if and .Values.gitFactory.enabled .Values.gitFactory.ingress.enabled }}
 {{- /*
-git_factory is a builder-deployed service: builder owns its Deployment/Service/PVC and
-the registry route, and deliberately renders no Ingress (docs/builder/README.md). That is
-fine for a JSON API — conductor fronts it in-cluster — but a git client talks to the git
-plane directly, so the wire routes (/{ns}/{repo}.git/...) need a way in from outside the
-cluster. The chart supplies it here, pointing at the Service builder created.
+Every other core service is reached only through conductor, so the chart gives it no
+Ingress. git_factory is the exception: a git client talks to the git plane DIRECTLY over
+Smart-HTTP (/{ns}/{repo}.git/info/refs and friends), which is not a JSON API conductor can
+front. So the wire routes need their own way in from outside the cluster, and this is it.
 
-The Service name follows builder's own naming: <releasePrefix>-<k8sName>, where the prefix
-defaults to the chart fullname (builder.reconcile.releasePrefix) and k8sName is
-"git-factory" (the registry name codearmory_git_factory is not a DNS-1123 label).
+The backend is the Service this chart creates in git-factory-service.yaml —
+<fullname>-git-factory, the usual chart naming. (It used to point at a Service builder
+created, back when git_factory was deployed at runtime by builder rather than by the
+chart.) The annotations in values.yaml matter as much as the route: an ingress tuned for
+JSON truncates clones and rejects pushes.
 */}}
-{{- $prefix := default (include "codearmory.fullname" .) .Values.builder.reconcile.releasePrefix -}}
+{{- $fullname := include "codearmory.fullname" . -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -40,7 +41,7 @@ spec:
             pathType: {{ .pathType }}
             backend:
               service:
-                name: {{ $prefix }}-git-factory
+                name: {{ $fullname }}-git-factory
                 port:
                   name: http
           {{- end }}
