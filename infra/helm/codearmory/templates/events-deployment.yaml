@@ -68,6 +68,15 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-events
                   key: events-trigger-key
+            # Secret the git provider's webhook is configured with; events verifies the
+            # provider HMAC on the public POST /hooks/git against it. Optional because an
+            # unset value keeps that endpoint closed rather than open.
+            - name: EVENTS_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-events
+                  key: events-webhook-secret
+                  optional: true
             {{- include "codearmory.tls.envs" .Values.events.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.events.tls) }}
           volumeMounts:
