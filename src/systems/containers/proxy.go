@@ -66,22 +66,36 @@ func isOCIPath(path string) bool {
 	return path == "/v2" || strings.HasPrefix(path, "/v2/")
 }
 
-// v2ActionResource maps an OCI request to a gatekeeper action + resource pair.
-func v2ActionResource(method, path string) (action, resource string) {
-	rest, _ := strings.CutPrefix(path, "/v2/")
-
-	// Catalog and top-level discovery
-	if rest == "" || rest == "_catalog" {
-		return "listRepository", "containers/repositories"
+// v2RepoName extracts the repository name ("<namespace>/<image>") from an OCI
+// distribution path. Returns "" for paths that are not scoped to a repository:
+// the discovery ping (/v2, /v2/) and the catalog (/v2/_catalog).
+func v2RepoName(path string) string {
+	rest, ok := strings.CutPrefix(path, "/v2/")
+	if !ok || rest == "" || rest == "_catalog" {
+		return ""
 	}
-
-	// Extract repo name — everything before the first known OCI segment marker
-	repo := rest
+	// Everything before the first known OCI segment marker is the repo name.
 	for _, marker := range []string{"/manifests/", "/tags/list", "/blobs/uploads", "/blobs/"} {
 		if idx := strings.Index(rest, marker); idx >= 0 {
-			repo = rest[:idx]
-			break
+			return rest[:idx]
 		}
+	}
+	return rest
+}
+
+// v2Namespace returns the registry namespace owning an OCI request — the first
+// segment of the repository name — or "" when the path is not repository-scoped.
+func v2Namespace(path string) string {
+	ns, _, _ := strings.Cut(v2RepoName(path), "/")
+	return ns
+}
+
+// v2ActionResource maps an OCI request to a gatekeeper action + resource pair.
+func v2ActionResource(method, path string) (action, resource string) {
+	repo := v2RepoName(path)
+	// Catalog and top-level discovery — no repository in the path.
+	if repo == "" {
+		return "listRepository", "containers/repositories"
 	}
 
 	resource = "containers/repositories/" + repo
@@ -108,7 +122,8 @@ func v2ActionResource(method, path string) (action, resource string) {
 // (/v2 and /v2/*). It:
 //  1. Returns 401 with a Bearer challenge for unauthenticated requests.
 //  2. Validates the codearmory token via gatekeeper.
-//  3. Streams the request to the upstream registry with service credentials.
+//  3. Enforces that the caller owns the namespace the request addresses.
+//  4. Streams the request to the upstream registry with service credentials.
 func handleV2(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("containers").Start(r.Context(), "handleV2")
 	defer span.End()
@@ -141,6 +156,37 @@ func handleV2(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		span.SetStatus(codes.Ok, "")
 		return
+	}
+
+	// RBAC alone is not a tenant boundary on these routes: the default grant
+	// {username}/containers/repositories/* wildcards across every namespace (see
+	// namespaceAllowed), and when no per-user credentials resolve the Director
+	// falls back to the global service account, so the upstream registry does not
+	// scope the request either. Enforce namespace ownership for every verb — pull,
+	// push and delete alike — before anything is proxied. The discovery ping
+	// returned above carries no namespace, and /v2/_catalog is not
+	// repository-scoped either: it stays governed by the listRepository action,
+	// exactly like handleListRepositories.
+	deny := func(namespace string) {
+		span.SetStatus(codes.Ok, "")
+		slog.WarnContext(ctx, "v2 request: namespace not owned by caller",
+			"user_id", userID, "namespace", namespace, "method", r.Method, "path", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"errors":[{"code":"DENIED","message":"requested access to the resource is denied"}]}`)) //nolint:errcheck
+	}
+	if namespace := v2Namespace(r.URL.Path); namespace != "" && !namespaceAllowed(ctx, r, userID, orgID, namespace) {
+		deny(namespace)
+		return
+	}
+	// A cross-repository blob mount (?from=<other-repo>) reads from a second
+	// repository, so that namespace must be owned by the caller as well.
+	if from := r.URL.Query().Get("from"); from != "" {
+		fromNS, _, _ := strings.Cut(from, "/")
+		if !namespaceAllowed(ctx, r, userID, orgID, fromNS) {
+			deny(fromNS)
+			return
+		}
 	}
 
 	// Resolve the upstream (default) registry. The service may boot with none

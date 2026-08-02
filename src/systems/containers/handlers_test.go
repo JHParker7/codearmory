@@ -44,8 +44,10 @@ func fakeGatekeeper(t *testing.T, status int, body string) {
 
 // fakeGatekeeperMulti sets up a fake that dispatches to different handlers
 // based on request path: checkPermissions for /check_permissions,
-// secretValue (or 404 if empty) for /internal/secrets/lookup.
-func fakeGatekeeperMulti(t *testing.T, permBody string, secretValue string) {
+// secretValue (or 404 if empty) for /internal/secrets/lookup, and orgName
+// (or 404 if empty) for /orgs/{id} — the lookup namespaceAllowed uses to decide
+// whether the caller owns the namespace they are addressing.
+func fakeGatekeeperMulti(t *testing.T, permBody, secretValue, orgName string) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -60,6 +62,14 @@ func fakeGatekeeperMulti(t *testing.T, permBody string, secretValue string) {
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]string{"value": secretValue}) //nolint:errcheck
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/orgs/") {
+			if orgName == "" {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"org_name": orgName}) //nolint:errcheck
 			return
 		}
 		http.NotFound(w, r)
@@ -202,6 +212,45 @@ func TestV2ActionResource_BlobPut(t *testing.T) {
 	action, _ := v2ActionResource(http.MethodPut, "/v2/myns/myimage/blobs/sha256:abc")
 	if action != "pushImage" {
 		t.Fatalf("action = %q, want pushImage", action)
+	}
+}
+
+// ── v2RepoName / v2Namespace ─────────────────────────────────────────────────
+
+func TestV2RepoName(t *testing.T) {
+	cases := []struct{ path, want string }{
+		{"/v2", ""},          // discovery ping — not repository-scoped
+		{"/v2/", ""},         // discovery ping
+		{"/v2/_catalog", ""}, // catalog — not repository-scoped
+		{"/v2/myns/myimage/tags/list", "myns/myimage"},
+		{"/v2/myns/myimage/manifests/latest", "myns/myimage"},
+		{"/v2/myns/myimage/blobs/sha256:abc", "myns/myimage"},
+		{"/v2/myns/myimage/blobs/uploads/some-uuid", "myns/myimage"},
+		{"/v2/myns/sub/myimage/manifests/latest", "myns/sub/myimage"},
+	}
+	for _, tc := range cases {
+		if got := v2RepoName(tc.path); got != tc.want {
+			t.Errorf("v2RepoName(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestV2Namespace(t *testing.T) {
+	cases := []struct{ path, want string }{
+		{"/v2", ""},
+		{"/v2/", ""},
+		{"/v2/_catalog", ""},
+		{"/v2/myns/myimage/tags/list", "myns"},
+		{"/v2/myns/myimage/manifests/latest", "myns"},
+		{"/v2/myns/sub/myimage/blobs/sha256:abc", "myns"},
+		// A bare repo name with no image segment still yields a namespace, so the
+		// ownership check has something to fail closed on.
+		{"/v2/myns", "myns"},
+	}
+	for _, tc := range cases {
+		if got := v2Namespace(tc.path); got != tc.want {
+			t.Errorf("v2Namespace(%q) = %q, want %q", tc.path, got, tc.want)
+		}
 	}
 }
 
@@ -480,7 +529,10 @@ func TestResolveOrgCreds_EmptyOrg(t *testing.T) {
 // proxied requests (not discovery pings). This exercises the Director code path.
 func TestHandleV2_InjectsOrgCredsToProxy(t *testing.T) {
 	orgID := "org-director-test"
-	t.Cleanup(func() { orgCredsCache.Delete(orgID) })
+	t.Cleanup(func() {
+		orgCredsCache.Delete(orgID)
+		orgNameCache.Delete(orgID)
+	})
 
 	// Fake upstream registry records the Authorization header it receives.
 	var gotAuth string
@@ -496,6 +548,7 @@ func TestHandleV2_InjectsOrgCredsToProxy(t *testing.T) {
 	fakeGatekeeperMulti(t,
 		`{"authorized":true,"user_id":"u1","org_id":"org-director-test"}`,
 		"forgejo-bot:tok-xyz",
+		"myorg", // caller's org owns the "myorg" namespace below
 	)
 
 	origName := orgSecretName
@@ -587,7 +640,10 @@ func TestHandleV2_FallsBackWhenSecretMissing(t *testing.T) {
 	// When the org secret doesn't exist, proxied requests must still succeed using
 	// global credentials.
 	orgID := "org-nosecret"
-	t.Cleanup(func() { orgCredsCache.Delete(orgID) })
+	t.Cleanup(func() {
+		orgCredsCache.Delete(orgID)
+		orgNameCache.Delete(orgID)
+	})
 
 	var gotAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -600,7 +656,8 @@ func TestHandleV2_FallsBackWhenSecretMissing(t *testing.T) {
 
 	fakeGatekeeperMulti(t,
 		`{"authorized":true,"user_id":"u1","org_id":"org-nosecret"}`,
-		"", // 404 from secrets endpoint
+		"",    // 404 from secrets endpoint
+		"org", // caller's org owns the "org" namespace below
 	)
 
 	origName := orgSecretName
@@ -615,6 +672,175 @@ func TestHandleV2_FallsBackWhenSecretMissing(t *testing.T) {
 	user, pass, ok := parseBasicAuth(gotAuth)
 	if !ok || user != "global-user" || pass != "global-pass" {
 		t.Fatalf("expected global creds fallback; got auth %q (user=%q, pass=%q, ok=%v)", gotAuth, user, pass, ok)
+	}
+}
+
+// ── handleV2 namespace ownership ─────────────────────────────────────────────
+
+// v2OwnershipFixture wires up a fake upstream registry and a gatekeeper that
+// authorizes every action while reporting the caller's org name as
+// ownedNamespace — i.e. RBAC always passes, so only namespaceAllowed can deny.
+// The returned counter records how many requests reached the upstream registry.
+func v2OwnershipFixture(t *testing.T, ownedNamespace string) *int {
+	t.Helper()
+	orgID := "org-" + t.Name()
+	t.Cleanup(func() { orgNameCache.Delete(orgID) })
+
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	useTestRegistry(t, &registryClient{baseURL: upstream.URL, http: httpClient, username: "global-user", password: "global-pass"})
+
+	fakeGatekeeperMulti(t, `{"authorized":true,"user_id":"u1","org_id":"`+orgID+`"}`, "", ownedNamespace)
+	return &upstreamHits
+}
+
+// The default grant wildcards over every namespace, so RBAC alone lets "bob" ask
+// for "alice"'s repositories. Every OCI verb must be refused before it is proxied.
+func TestHandleV2_DeniesForeignNamespace(t *testing.T) {
+	cases := []struct{ method, path string }{
+		{http.MethodGet, "/v2/alice/private-app/tags/list"},
+		{http.MethodGet, "/v2/alice/private-app/manifests/latest"},
+		{http.MethodHead, "/v2/alice/private-app/manifests/latest"},
+		{http.MethodGet, "/v2/alice/private-app/blobs/sha256:abc"},
+		{http.MethodPost, "/v2/alice/private-app/blobs/uploads/"},
+		{http.MethodPatch, "/v2/alice/private-app/blobs/uploads/some-uuid"},
+		{http.MethodPut, "/v2/alice/private-app/blobs/uploads/some-uuid"},
+		{http.MethodPut, "/v2/alice/private-app/manifests/latest"},
+		{http.MethodDelete, "/v2/alice/private-app/manifests/sha256:abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+"_"+tc.path, func(t *testing.T) {
+			hits := v2OwnershipFixture(t, "bob")
+
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			r.Header.Set("Authorization", "Bearer sometoken")
+			w := httptest.NewRecorder()
+			handleV2(w, r)
+
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("got %d, want 403", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), `"DENIED"`) {
+				t.Errorf("body = %q, want an OCI DENIED error", w.Body.String())
+			}
+			if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+			if *hits != 0 {
+				t.Errorf("upstream registry received %d requests, want 0", *hits)
+			}
+		})
+	}
+}
+
+func TestHandleV2_AllowsOwnNamespace(t *testing.T) {
+	cases := []struct{ method, path string }{
+		{http.MethodGet, "/v2/bob/app/tags/list"},
+		{http.MethodGet, "/v2/bob/app/manifests/latest"},
+		{http.MethodPut, "/v2/bob/app/manifests/latest"},
+		{http.MethodDelete, "/v2/bob/app/manifests/sha256:abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+"_"+tc.path, func(t *testing.T) {
+			hits := v2OwnershipFixture(t, "bob")
+
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			r.Header.Set("Authorization", "Bearer sometoken")
+			w := httptest.NewRecorder()
+			handleV2(w, r)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("got %d, want 200", w.Code)
+			}
+			if *hits != 1 {
+				t.Errorf("upstream registry received %d requests, want 1", *hits)
+			}
+		})
+	}
+}
+
+// A cross-repository blob mount reads from the repo named by ?from=, so that
+// namespace is checked too — otherwise a known digest would pull another
+// tenant's layer into a repo the caller does own.
+func TestHandleV2_DeniesForeignCrossRepoBlobMount(t *testing.T) {
+	hits := v2OwnershipFixture(t, "bob")
+
+	r := httptest.NewRequest(http.MethodPost,
+		"/v2/bob/app/blobs/uploads/?mount=sha256:abc&from=alice/private-app", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	handleV2(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403", w.Code)
+	}
+	if *hits != 0 {
+		t.Errorf("upstream registry received %d requests, want 0", *hits)
+	}
+}
+
+func TestHandleV2_AllowsOwnCrossRepoBlobMount(t *testing.T) {
+	hits := v2OwnershipFixture(t, "bob")
+
+	r := httptest.NewRequest(http.MethodPost,
+		"/v2/bob/app/blobs/uploads/?mount=sha256:abc&from=bob/base", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	handleV2(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+	if *hits != 1 {
+		t.Errorf("upstream registry received %d requests, want 1", *hits)
+	}
+}
+
+// /v2/_catalog is not repository-scoped — like GET /repositories it stays
+// governed by the listRepository action alone and must keep proxying.
+func TestHandleV2_CatalogNotNamespaceScoped(t *testing.T) {
+	hits := v2OwnershipFixture(t, "bob")
+
+	r := httptest.NewRequest(http.MethodGet, "/v2/_catalog", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	handleV2(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+	if *hits != 1 {
+		t.Errorf("upstream registry received %d requests, want 1", *hits)
+	}
+}
+
+// With no org and no linked Gitea account nothing identifies the caller as the
+// namespace owner, so the check must fail closed rather than default to allow.
+func TestHandleV2_DeniesWhenNoIdentityResolves(t *testing.T) {
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	useTestRegistry(t, &registryClient{baseURL: upstream.URL, http: httpClient})
+
+	fakeGatekeeperMulti(t, `{"authorized":true,"user_id":"u1","org_id":""}`, "", "")
+
+	r := httptest.NewRequest(http.MethodGet, "/v2/alice/private-app/tags/list", nil)
+	r.Header.Set("Authorization", "Bearer sometoken")
+	w := httptest.NewRecorder()
+	handleV2(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403", w.Code)
+	}
+	if upstreamHits != 0 {
+		t.Errorf("upstream registry received %d requests, want 0", upstreamHits)
 	}
 }
 
