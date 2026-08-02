@@ -31,6 +31,26 @@ func authorizeBoard(ctx context.Context, bearer, action string, b Board, userID,
 	return false
 }
 
+// platformNamespace is the owner of instance-level configuration — the same namespace
+// forge's runner classes and containers' registries already declare. Resources under it
+// are NOT caller-prefixed by gatekeeper (the first segment already names an owner), so
+// an ordinary user's "{username}/tickets/..." grants can never match one and only a
+// wildcard (i.e. an admin) does.
+const platformNamespace = "codearmory"
+
+// checkPlatformPermission asks gatekeeper whether the caller holds (action) over a
+// platform-owned collection.
+//
+// It exists because one route can serve two ownership classes. PUT /field-defs/{id}
+// addresses both a board's own status column, owned by a user, and a global seeded
+// default, owned by the instance. Conductor templates its resource from path params
+// alone and so cannot tell them apart — only the loaded row can. Same forward-the-bearer
+// shape as checkProjectPermission, and fails closed for the same reason.
+func checkPlatformPermission(ctx context.Context, bearer, action, collection string) bool {
+	return gatekeeperAuthorizes(ctx, bearer, action,
+		platformNamespace+"/"+projectService+"/"+collection)
+}
+
 // accessibleProject mirrors gatekeeper's GET /projects/accessible entries.
 type accessibleProject struct {
 	ProjectID string `json:"project_id"`
@@ -114,6 +134,17 @@ func checkProjectPermission(ctx context.Context, bearer, action, collection, slu
 		resource += "/" + id
 	} else {
 		resource += "/*"
+	}
+	return gatekeeperAuthorizes(ctx, bearer, action, resource)
+}
+
+// gatekeeperAuthorizes puts one (action, resource) question to gatekeeper with the
+// caller's own bearer. Every failure — no credential, malformed request, transport
+// error, non-200, undecodable body — answers NO, so a gatekeeper that is unreachable
+// or unhappy narrows access rather than widening it.
+func gatekeeperAuthorizes(ctx context.Context, bearer, action, resource string) bool {
+	if bearer == "" {
+		return false
 	}
 	body, _ := json.Marshal(map[string]string{"service": projectService, "action": action, "resource": resource})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatekeeperURL+"/check_permissions", bytes.NewReader(body))

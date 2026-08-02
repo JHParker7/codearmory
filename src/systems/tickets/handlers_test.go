@@ -7,6 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 func fakeGatekeeper(t *testing.T, status int, body string) {
@@ -24,9 +28,40 @@ func fakeGatekeeper(t *testing.T, status int, body string) {
 	})
 }
 
+// testDBReady is set in TestMain when the in-memory test DB is migrated. Every model
+// here is plain scalars, so the schema is dialect-portable and the suite runs on
+// hermetic sqlite rather than needing a Postgres.
+var testDBReady bool
+
+// requireDB skips a test when the test database failed to initialise.
+func requireDB(t *testing.T) {
+	t.Helper()
+	if !testDBReady {
+		t.Skip("tickets test database not available")
+	}
+}
+
 func TestMain(m *testing.M) {
 	initMetrics()
+	httpClient = initHTTPClient()
 	gatekeeperClient = newGatekeeperClient()
+
+	// Hermetic in-memory sqlite (mirrors workflows and gatekeeper) — no external
+	// Postgres. Assigned straight to the singletons so connect() never runs its
+	// Postgres path, which exits the process on a failed dial.
+	conn, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	if err == nil {
+		if migrateErr := conn.AutoMigrate(&Ticket{}, &TicketComment{}, &Board{}, &TicketFieldDef{}); migrateErr == nil {
+			dbInitMu.Lock()
+			gormDB = conn
+			gormDBRead = conn
+			dbInitMu.Unlock()
+			testDBReady = true
+		}
+	}
+
 	os.Exit(m.Run())
 }
 

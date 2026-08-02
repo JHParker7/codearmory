@@ -18,17 +18,34 @@ import (
 
 var validFieldKinds = []string{FieldKindStatus, FieldKindPriority, FieldKindTimescale}
 
-// canModifyFieldDef reports whether the caller may update or delete f. A
-// board-scoped status column is owned by anyone who can access its board; an
-// org/global def is owned by its org (which also protects global seeded defs,
-// OrgID="", from being deleted by any real org).
-func canModifyFieldDef(ctx context.Context, f TicketFieldDef, userID, orgID string) bool {
+// canModifyFieldDef reports whether the caller may update or delete f.
+//
+// Three ownership classes reach this through ONE route, which is why the decision
+// cannot live in conductor — it templates a resource from path params alone and so
+// cannot see which class an id belongs to.
+//
+//   - A board-scoped status column belongs to whoever can access its board.
+//   - An org def belongs to its org.
+//   - A global seeded def (OrgID == "") belongs to the PLATFORM. Nobody's own grants
+//     reach it; it takes a permission on codearmory/tickets/field-defs, i.e. an admin.
+//
+// That last case used to be `f.OrgID == orgID` for everything non-board-scoped, which
+// held for a real org — "" never equals a real org id — but not for a caller with NO
+// org, where "" == "" authorized them. Since the global defs ARE the instance-wide
+// status and priority catalogs, any org-less user could delete the default statuses and
+// break ticket creation platform-wide. The empty string was doing duty both as "the
+// platform" and as "this caller has no org", and comparing the two was never a
+// statement about ownership.
+func canModifyFieldDef(ctx context.Context, bearer, action string, f TicketFieldDef, userID, orgID string) bool {
 	if f.BoardID != "" {
 		b, err := getBoard(ctx, f.BoardID)
 		if err != nil {
 			return false
 		}
 		return canAccessBoard(b, userID, orgID)
+	}
+	if f.OrgID == "" {
+		return checkPlatformPermission(ctx, bearer, action, "field-defs")
 	}
 	return f.OrgID == orgID
 }
@@ -197,7 +214,7 @@ func handleUpdateFieldDef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := row.(TicketFieldDef)
-	if !canModifyFieldDef(ctx, f, userID, orgID) {
+	if !canModifyFieldDef(ctx, r.Header.Get("Authorization"), "updateFieldDef", f, userID, orgID) {
 		http.Error(w, "field def not found", http.StatusNotFound)
 		return
 	}
@@ -254,11 +271,11 @@ func handleDeleteFieldDef(w http.ResponseWriter, r *http.Request) {
 	}
 	f := row.(TicketFieldDef)
 	// Ownership check (mirrors handleUpdateFieldDef): board-scoped columns require
-	// board access; org/global defs require an org match. Global seeded defs
-	// (OrgID="") are never org-owned, so this also prevents any real org from
-	// deleting them — which would break ticket creation platform-wide by removing
-	// the default statuses.
-	if !canModifyFieldDef(ctx, f, userID, orgID) {
+	// board access, an org def requires an org match, and a global seeded def
+	// (OrgID="") requires a platform grant. Deleting one of those removes a default
+	// status instance-wide, so it must not be reachable by an ordinary caller — see
+	// canModifyFieldDef for why an org comparison alone did not achieve that.
+	if !canModifyFieldDef(ctx, r.Header.Get("Authorization"), "deleteFieldDef", f, userID, orgID) {
 		http.Error(w, "field def not found", http.StatusNotFound)
 		return
 	}
