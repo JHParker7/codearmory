@@ -68,9 +68,48 @@ func provisionTierRole(ctx context.Context, ownerID, slug, tier string) (string,
 		Active:         true,
 	}
 	if err := role.Add(ctx); err != nil {
+		// The permission is a Service "*" / Actions ["*"] wildcard over the project
+		// namespace and is reachable only through the role that was meant to carry it.
+		// Leaving it behind would accumulate an unattached wildcard grant per attempt.
+		if e := perm.Remove(ctx); e != nil {
+			slog.ErrorContext(ctx, "provision tier role: orphaned permission left behind", "permission_id", perm.PermissionsID, "error", e)
+		}
 		return "", err
 	}
 	return role.RoleID, nil
+}
+
+// discardTierRoles deactivates the tier roles and their permissions provisioned for a
+// project that is being abandoned mid-creation. A soft delete is enough to make the
+// grants inert (every lookup filters active=true) and matches how the rest of gatekeeper
+// retires RBAC objects.
+func discardTierRoles(ctx context.Context, roleIDs ...string) {
+	for _, rid := range roleIDs {
+		if rid == "" {
+			continue
+		}
+		row, err := (Role{RoleID: rid}).Get(ctx)
+		if err == nil {
+			for _, pid := range row.(Role).PermissionsIDs {
+				if e := (Permissions{PermissionsID: pid}).Remove(ctx); e != nil {
+					slog.ErrorContext(ctx, "discard tier roles: remove permission", "permission_id", pid, "error", e)
+				}
+			}
+		}
+		if e := (Role{RoleID: rid}).Remove(ctx); e != nil {
+			slog.ErrorContext(ctx, "discard tier roles: remove role", "role_id", rid, "error", e)
+		}
+	}
+}
+
+// releaseProjectRow HARD-deletes a project row. It is only used to undo a creation that
+// failed after the row claimed the slug: a soft delete there would burn the slug forever
+// (getProjectBySlug counts inactive rows) over what may be a transient error, for a
+// project the caller was told was never created.
+func releaseProjectRow(ctx context.Context, projectID string) {
+	if err := connect().WithContext(ctx).Where("project_id = ?", projectID).Delete(&Project{}).Error; err != nil {
+		slog.ErrorContext(ctx, "release project row", "project_id", projectID, "error", err)
+	}
 }
 
 // handleCreateProject creates a project in the caller's namespace and provisions its
@@ -110,9 +149,17 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 			orgNS = "org/" + orgRow.(Org).OrgName
 		}
 	}
-	// Slug is global, so a collision is a real conflict, not an overwrite.
-	if _, err := getProjectBySlug(ctx, req.Slug); err == nil {
-		http.Error(w, "a project with slug "+req.Slug+" already exists", http.StatusConflict)
+	// Slug is global, so a collision is a real conflict, not an overwrite — and it is a
+	// conflict against a DELETED project too. The slug names a permission namespace
+	// ("project/<slug>/*") that resources in other services still reference by string,
+	// so handing it to a new project would silently expose the old project's records to
+	// the new one's members. It is retired, not recycled.
+	if existing, err := getProjectBySlug(ctx, req.Slug); err == nil {
+		msg := "a project with slug " + req.Slug + " already exists"
+		if !existing.Active {
+			msg = "slug " + req.Slug + " belonged to a deleted project and cannot be reused"
+		}
+		http.Error(w, msg, http.StatusConflict)
 		return
 	}
 
@@ -125,21 +172,49 @@ func handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().UTC(),
 		Active:    true,
 	}
+	// Claim the slug with the INSERT before provisioning anything. The unique index is
+	// the only check that cannot race the read above (which also runs on the read
+	// replica), and provisioning first meant a losing race created three Permissions and
+	// three Roles — one of them Service "*" / Actions ["*"] over project/<slug>/* — and
+	// only then hit the constraint, orphaning all six with no rollback on every retry.
+	if err := p.Add(ctx); err != nil {
+		// Resolve the cause against the PRIMARY: the row that won the race may not have
+		// replicated yet, and reading the replica here would turn a plain conflict into
+		// a 500.
+		var clash Project
+		if e := connect().WithContext(ctx).First(&clash, "slug = ?", req.Slug).Error; e == nil && clash.ProjectID != p.ProjectID {
+			http.Error(w, "a project with slug "+req.Slug+" already exists", http.StatusConflict)
+			return
+		}
+		internalError(w, ctx, "create project", err)
+		return
+	}
+	// The namespace is ours now, so the tier roles can be built. Anything that fails from
+	// here rolls the whole creation back: the caller is told the project was not created,
+	// so no grant over its namespace — and no row holding its slug — may outlive the call.
 	var err error
 	if p.ViewerRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "viewer"); err != nil {
+		releaseProjectRow(ctx, p.ProjectID)
 		internalError(w, ctx, "provision viewer role", err)
 		return
 	}
 	if p.DeveloperRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "developer"); err != nil {
+		discardTierRoles(ctx, p.ViewerRoleID)
+		releaseProjectRow(ctx, p.ProjectID)
 		internalError(w, ctx, "provision developer role", err)
 		return
 	}
 	if p.AdminRoleID, err = provisionTierRole(ctx, callerID, req.Slug, "admin"); err != nil {
+		discardTierRoles(ctx, p.ViewerRoleID, p.DeveloperRoleID)
+		releaseProjectRow(ctx, p.ProjectID)
 		internalError(w, ctx, "provision admin role", err)
 		return
 	}
-	if err = p.Add(ctx); err != nil {
-		internalError(w, ctx, "create project", err)
+	// Attach the tier roles to the row that already holds the slug.
+	if err = p.Update(ctx); err != nil {
+		discardTierRoles(ctx, p.ViewerRoleID, p.DeveloperRoleID, p.AdminRoleID)
+		releaseProjectRow(ctx, p.ProjectID)
+		internalError(w, ctx, "attach project roles", err)
 		return
 	}
 	// The creator is the project's first admin.

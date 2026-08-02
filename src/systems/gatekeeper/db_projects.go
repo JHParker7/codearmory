@@ -105,10 +105,14 @@ func projectsOwnedBy(ctx context.Context, ownerID string) ([]Project, error) {
 }
 
 // getProjectBySlug looks up a project by its global slug (slugs are unique across the
-// platform now that a project is its own top-level namespace).
+// platform now that a project is its own top-level namespace). It deliberately spans
+// INACTIVE rows: the unique index on slug covers every row, so a soft-deleted project
+// still holds its slug, and an active-only lookup would report a name as free that the
+// insert then rejects. Callers read Active to tell "taken" from "taken by a deleted
+// project".
 func getProjectBySlug(ctx context.Context, slug string) (Project, error) {
 	var p Project
-	err := connectRead().WithContext(ctx).First(&p, "slug = ? AND active = ?", slug, true).Error
+	err := connectRead().WithContext(ctx).First(&p, "slug = ?", slug).Error
 	return p, err
 }
 
