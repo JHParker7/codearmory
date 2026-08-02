@@ -21,6 +21,16 @@ var (
 	// workflows) with. Formerly HOOKS_TRIGGER_KEY.
 	eventsTriggerKey = secret("EVENTS_TRIGGER_KEY")
 
+	// eventsWebhookSecret is the secret configured on the git provider's webhook. It keys the
+	// provider HMAC verified on POST /hooks/git, the one endpoint reachable from the public
+	// internet. Unset closes that endpoint: an unsigned webhook is never trusted.
+	eventsWebhookSecret = secret("EVENTS_WEBHOOK_SECRET")
+
+	// eventsServiceKey returns the current rotated gatekeeper service key. It is wired in
+	// main() from registry.StartKeyRotation's accessor so secret lookups authenticate with
+	// the live key rather than the bootstrap value.
+	eventsServiceKey func() string
+
 	httpClient = &http.Client{Timeout: 20 * time.Second}
 )
 

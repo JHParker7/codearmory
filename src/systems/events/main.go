@@ -40,7 +40,10 @@ func main() {
 	if eventsTriggerKey == "" {
 		slog.Warn("EVENTS_TRIGGER_KEY not set — /internal/events will reject all emitters")
 	}
-	registry.StartKeyRotation(ctx, gatekeeperURL, serviceName, secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
+	if eventsWebhookSecret == "" {
+		slog.Warn("EVENTS_WEBHOOK_SECRET not set — /hooks/git will reject all provider webhooks")
+	}
+	eventsServiceKey = registry.StartKeyRotation(ctx, gatekeeperURL, serviceName, secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
 	startRetryLoop(ctx)
 

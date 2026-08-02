@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,17 +18,43 @@ import (
 
 const maxBodyBytes = 1 << 20 // 1 MiB
 
-// signEvent produces the HMAC an emitter signs an event with. It binds the identifying
-// fields + timestamp under the shared key, proving the caller is a trusted internal service
-// (the same role HOOKS_TRIGGER_KEY played). Emitters use the identical function via the SDK.
+// eventTokenWindow is how far the emitter's timestamp may be from ours before the token is
+// stale. 30s is the window every internal HMAC in the platform uses (see workflows'
+// verifyHooksTrigger), and it is what stops a captured token from being replayed later.
+const eventTokenWindow = 30 * time.Second
+
+// signEvent produces the HMAC an emitter signs an event with. It binds every field that
+// decides what the event does — identity, tenant (actor), subject and payload digest — plus
+// the timestamp, so a captured token cannot be reused to attribute a different tenant or
+// swap the payload a trigger reacts to. Emitters use the identical function via the SDK.
 func signEvent(e Event, ts string) string {
 	mac := hmac.New(sha256.New, []byte(eventsTriggerKey))
-	fmt.Fprintf(mac, "event:%s:%s:%s:%s", e.ID, e.Type, e.Source, ts)
+	fmt.Fprintf(mac, "event:%s:%s:%s:%s:%s:%s:%s:%s",
+		e.ID, e.Type, e.Source, e.Subject, e.Actor.OrgID, e.Actor.UserID, dataDigest(e.Data), ts)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// dataDigest binds the free-form payload into the MAC without depending on the exact bytes
+// on the wire: both sides hash the canonical JSON encoding of the map, and encoding/json
+// emits object keys in sorted order, so an emitter and events agree on the digest for the
+// same data. A non-Go emitter must therefore hash compact, sorted-key JSON.
+func dataDigest(d map[string]any) string {
+	b, _ := json.Marshal(d) // a map decoded from JSON always re-marshals
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// verifyEventToken checks the emitter's token and that its timestamp is inside the freshness
+// window. Both must hold: the MAC alone would otherwise replay forever.
 func verifyEventToken(e Event, token, ts string) bool {
 	if eventsTriggerKey == "" || token == "" {
+		return false
+	}
+	secs, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return false
+	}
+	if skew := time.Since(time.Unix(secs, 0)); skew > eventTokenWindow || skew < -eventTokenWindow {
 		return false
 	}
 	return hmac.Equal([]byte(token), []byte(signEvent(e, ts)))

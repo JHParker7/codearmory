@@ -23,19 +23,19 @@ func runActions(ctx context.Context, t Trigger, e Event) error {
 		return err
 	}
 	for i, a := range t.Actions {
-		if err := runAction(ctx, a, e, evMap); err != nil {
+		if err := runAction(ctx, t, a, e, evMap); err != nil {
 			return fmt.Errorf("action[%d] %s: %w", i, a.Kind, err)
 		}
 	}
 	return nil
 }
 
-func runAction(ctx context.Context, a Action, e Event, evMap map[string]any) error {
+func runAction(ctx context.Context, t Trigger, a Action, e Event, evMap map[string]any) error {
 	switch a.Kind {
 	case "run_pipeline":
 		return actRunPipeline(ctx, a, e, evMap)
 	case "webhook_out":
-		return actWebhookOut(ctx, a, e, evMap)
+		return actWebhookOut(ctx, t, a, e, evMap)
 	case "create_ticket":
 		return actInternalPost(ctx, ticketsURL+"/internal/tickets", a, e, evMap)
 	case "notify":
@@ -91,7 +91,7 @@ func actRunPipeline(ctx context.Context, a Action, e Event, evMap map[string]any
 }
 
 // ── webhook_out — POST the (templated) event to a customer URL, signed ───────────────────
-func actWebhookOut(ctx context.Context, a Action, e Event, evMap map[string]any) error {
+func actWebhookOut(ctx context.Context, t Trigger, a Action, e Event, evMap map[string]any) error {
 	url, _ := a.Config["url"].(string)
 	if url == "" {
 		return fmt.Errorf("webhook_out: url is required")
@@ -102,8 +102,12 @@ func actWebhookOut(ctx context.Context, a Action, e Event, evMap map[string]any)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if secretName, ok := a.Config["sign_secret"].(string); ok && secretName != "" {
-		mac := hmac.New(sha256.New, []byte(secretName))
+	if ref, ok := a.Config["sign_secret"].(string); ok && ref != "" {
+		key, err := resolveSignSecret(ctx, t, ref)
+		if err != nil {
+			return fmt.Errorf("webhook_out: %w", err)
+		}
+		mac := hmac.New(sha256.New, []byte(key))
 		mac.Write(payload)
 		req.Header.Set("X-Events-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	}
@@ -117,6 +121,23 @@ func actWebhookOut(ctx context.Context, a Action, e Event, evMap map[string]any)
 		return fmt.Errorf("webhook_out %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
+}
+
+// resolveSignSecret turns a trigger's sign_secret config into the signing key. The platform
+// convention is the `secret:<name>` indirection: the value lives in gatekeeper under the
+// trigger owner's scope, so the trigger document never holds a key and a config string is
+// never used as one. Anything else is a configuration error, not a fallback — the action
+// fails rather than sign with something the recipient cannot have.
+func resolveSignSecret(ctx context.Context, t Trigger, ref string) (string, error) {
+	scheme, name, ok := strings.Cut(ref, ":")
+	if !ok || scheme != "secret" || name == "" {
+		return "", fmt.Errorf("sign_secret must be a %q reference", "secret:<name>")
+	}
+	value, err := lookupScopedSecret(ctx, t.OrgID, t.CreatedBy, name)
+	if err != nil {
+		return "", fmt.Errorf("resolve sign_secret %q: %w", ref, err)
+	}
+	return value, nil
 }
 
 // actInternalPost sends a templated action body to an internal service endpoint (tickets,
