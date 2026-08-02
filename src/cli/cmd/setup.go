@@ -74,7 +74,8 @@ For a TUI form, use ` + "`armory settings`" + `.`,
 				return fmt.Errorf("reading URL: %w", err)
 			}
 		}
-		urlVal = strings.TrimRight(urlVal, "/")
+		// Normalise before saving so the stored value is a real URL, not just before use.
+		urlVal = normalizeConductorURL(urlVal)
 		if urlVal == "" {
 			return fmt.Errorf("conductor URL is required")
 		}

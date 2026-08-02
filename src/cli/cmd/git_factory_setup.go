@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
@@ -16,10 +17,74 @@ import (
 // local `git` client up to git_factory's own HTTP wire so clone/push authenticate with
 // the CodeArmory session token — no PAT, no manual credential entry.
 
+// gitFactoryServiceName is git_factory's REGISTERED identity — not "git_factory",
+// which is only its directory and Go module name. Every RBAC resource it declares is
+// prefixed with this, and it is what GET /services reports, so it is the only spelling
+// a client may match on.
+const gitFactoryServiceName = "codearmory_git_factory"
+
+// gitFactoryBaseURL resolves the clone base to offer as the prompt default, preferring
+// what git_factory itself ADVERTISES over any guess made from conductor's address.
+//
+// The guess below assumes git_factory sits on conductor's host at port 9002, which is
+// only true when it is reached in-cluster. Once it is fronted by its own ingress — which
+// the chart now does, at its own hostname — the guess names an address that is not
+// reachable from where the CLI runs, and the user has to know to correct it. git_factory
+// composes every repo's http_url from GIT_HTTP_BASE_URL, which is precisely the
+// externally-usable clone base an operator configured, so asking for it beats deriving it.
+//
+// Falls back to the guess when the platform cannot answer — not signed in, git_factory
+// not deployed, or no repo exists yet to advertise a URL. The result is a prompt default
+// either way, so a wrong answer costs a keystroke rather than a broken setup.
+func gitFactoryBaseURL() string {
+	if base, ok := gitFactoryAdvertisedBaseURL(); ok {
+		return base
+	}
+	return gitFactoryDefaultBaseURL()
+}
+
+// gitFactoryAdvertisedBaseURL reads the clone base out of any repo's http_url.
+func gitFactoryAdvertisedBaseURL() (string, bool) {
+	raw, err := doRequest("GET", "/"+gitFactoryServiceName+"/repos", nil)
+	if err != nil {
+		return "", false
+	}
+	var repos []struct {
+		HTTPURL string `json:"http_url"`
+	}
+	if err := json.Unmarshal(raw, &repos); err != nil {
+		return "", false
+	}
+	for _, r := range repos {
+		if base, ok := baseFromCloneURL(r.HTTPURL); ok {
+			return base, true
+		}
+	}
+	return "", false
+}
+
+// baseFromCloneURL strips the "/<namespace>/<name>.git" that git_factory appends to its
+// configured base, recovering the base itself. Both segments are dropped rather than
+// just the last, since the namespace is part of the repo path and not of the base.
+func baseFromCloneURL(clone string) (string, bool) {
+	if !strings.HasSuffix(clone, ".git") {
+		return "", false
+	}
+	u, err := url.Parse(clone)
+	if err != nil || u.Host == "" {
+		return "", false
+	}
+	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(segs) < 2 {
+		return "", false
+	}
+	u.Path = "/" + strings.Join(segs[:len(segs)-2], "/")
+	return strings.TrimRight(u.String(), "/"), true
+}
+
 // gitFactoryDefaultBaseURL guesses git_factory's git base URL from the conductor URL:
-// same scheme/host, port 9002 (git_factory's service port). It is only a prompt default
-// — the user confirms or overrides it, and an operator who exposes git_factory elsewhere
-// just types that URL instead.
+// same scheme/host, port 9002 (git_factory's service port). Used only when the platform
+// cannot be asked — see gitFactoryBaseURL.
 func gitFactoryDefaultBaseURL() string {
 	u, err := url.Parse(conductorURL())
 	if err != nil || u.Hostname() == "" {
@@ -68,7 +133,12 @@ func setupGitFactory() error {
 	if !isSignedIn() {
 		return nil // service list needs auth; auth step handles its own errors
 	}
-	if !registeredServices()["git_factory"] {
+	// The REGISTERED name, not the directory or module name. git_factory registers
+	// itself as "codearmory_git_factory" — that string is its service identity, the
+	// prefix of every one of its RBAC resources, and what GET /services returns.
+	// Checking "git_factory" here matched nothing, so this whole step silently did
+	// nothing on every install: no error, no prompt, just no git configuration.
+	if !registeredServices()[gitFactoryServiceName] {
 		return nil // git_factory not enabled on this platform — nothing to wire up
 	}
 	if !isTerminal() {
@@ -81,7 +151,7 @@ func setupGitFactory() error {
 	if strings.EqualFold(answer, "n") || strings.EqualFold(answer, "no") {
 		return nil
 	}
-	base, err := prompt("git_factory base URL", gitFactoryDefaultBaseURL())
+	base, err := prompt("git_factory base URL", gitFactoryBaseURL())
 	if err != nil {
 		return fmt.Errorf("reading URL: %w", err)
 	}
@@ -117,11 +187,11 @@ to (re)configure it, e.g. after the base URL changes.`,
 		if base == "" {
 			if isTerminal() {
 				var err error
-				if base, err = prompt("git_factory base URL", gitFactoryDefaultBaseURL()); err != nil {
+				if base, err = prompt("git_factory base URL", gitFactoryBaseURL()); err != nil {
 					return fmt.Errorf("reading URL: %w", err)
 				}
 			} else {
-				base = gitFactoryDefaultBaseURL()
+				base = gitFactoryBaseURL()
 			}
 		}
 		base = strings.TrimRight(base, "/")

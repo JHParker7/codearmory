@@ -10,6 +10,10 @@ import (
 )
 
 func TestGitFactoryDefaultBaseURL(t *testing.T) {
+	// isolateHome, or the "" case reads the DEVELOPER'S real config: conductorURL()
+	// falls through flag -> env -> config, so on any machine that has run `armory
+	// setup` the fallback assertion fails against whatever URL happens to be saved.
+	isolateHome(t)
 	t.Cleanup(func() { flagURL = "" })
 	cases := map[string]string{
 		"http://localhost:8090":  "http://localhost:9002",
@@ -84,5 +88,38 @@ func TestGitCredentialHelper_NoTokenSilent(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("with no token the helper must stay silent, got %q", out.String())
+	}
+}
+
+// TestBaseFromCloneURL pins the inverse of git_factory's cloneURL composition
+// (base + "/<namespace>/<name>.git"). Both trailing segments come off: the namespace
+// belongs to the repo path, not the base, so dropping only the last one would leave a
+// base ending in someone's username.
+func TestBaseFromCloneURL(t *testing.T) {
+	ok := map[string]string{
+		"https://git.example.com/admin/codearmory.git": "https://git.example.com",
+		"http://localhost:9002/alice/proj.git":         "http://localhost:9002",
+		// A base that itself carries a path prefix keeps it.
+		"https://example.com/git/admin/codearmory.git": "https://example.com/git",
+	}
+	for in, want := range ok {
+		got, found := baseFromCloneURL(in)
+		if !found || got != want {
+			t.Errorf("baseFromCloneURL(%q) = (%q, %v), want (%q, true)", in, got, found, want)
+		}
+	}
+	// Anything that is not a clone URL must be rejected rather than half-parsed into a
+	// plausible-looking base — the caller falls back to its guess, which is safer than
+	// configuring a credential helper for the wrong host.
+	for _, bad := range []string{
+		"",
+		"https://git.example.com",         // no repo path
+		"https://git.example.com/one.git", // only one segment
+		"not-a-url",
+		"/admin/codearmory.git", // no host
+	} {
+		if got, found := baseFromCloneURL(bad); found {
+			t.Errorf("baseFromCloneURL(%q) = (%q, true), want rejected", bad, got)
+		}
 	}
 }

@@ -64,14 +64,49 @@ func saveConfig(cfg cliConfig) error {
 	return os.WriteFile(path, data, 0600)
 }
 
+// normalizeConductorURL gives a bare "host[:port][/path]" a scheme. Without one it is
+// not a URL to Go's http client at all — the request fails with an error naming the
+// missing protocol rather than anything about the address — so `--url localhost:8080`
+// or a pasted `exp.example.com/api` failed in a way that read as the server being down.
+//
+// The scheme is inferred rather than fixed, because both defaults are wrong half the
+// time: https for a dotted, routable-looking host, http for loopback and for a
+// single-label name (`conductor`, `gatekeeper`), which is an in-cluster service address
+// and never has a public certificate. A guess is safe here because every caller of this
+// is about to make a request against it — setup probes /healthz immediately — so a wrong
+// scheme surfaces at once rather than silently.
+//
+// An explicit scheme is always left alone: this only fills in what the user omitted.
+func normalizeConductorURL(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" || strings.Contains(raw, "://") {
+		return raw
+	}
+	host, _, _ := strings.Cut(raw, "/") // drop any path before inspecting the host
+	if h, _, ok := strings.Cut(host, "]"); ok && strings.HasPrefix(h, "[") {
+		host = h + "]" // bracketed IPv6 literal; the port (if any) is after the bracket
+	} else if i := strings.LastIndex(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	scheme := "https"
+	switch {
+	case host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1":
+		scheme = "http"
+	case !strings.Contains(host, "."):
+		// A single label is a Kubernetes/compose service name, not a public host.
+		scheme = "http"
+	}
+	return scheme + "://" + raw
+}
+
 func conductorURL() string {
 	if flagURL != "" {
-		return flagURL
+		return normalizeConductorURL(flagURL)
 	}
 	if u := os.Getenv("CODEARMORY_URL"); u != "" {
-		return u
+		return normalizeConductorURL(u)
 	}
-	return loadConfig().URL
+	return normalizeConductorURL(loadConfig().URL)
 }
 
 func bearerToken() string {

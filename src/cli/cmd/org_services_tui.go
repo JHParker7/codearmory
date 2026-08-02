@@ -20,7 +20,7 @@ import (
 // every available service, whether it is on, and where that state comes from.
 //
 // Permission enforcement stays server-side: only the system admin holds the write
-// grant on builder/orgs/default, so a non-admin still sees the action but gets a
+// grant on codearmory/builder/orgs/default, so a non-admin still sees the action but gets a
 // clear 403 in the status line, matching the other admin TUIs.
 
 // ── Records ─────────────────────────────────────────────────────────────────
