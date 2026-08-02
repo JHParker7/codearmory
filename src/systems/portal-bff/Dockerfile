@@ -17,6 +17,11 @@ FROM public.ecr.aws/docker/library/golang:1.26.0-alpine3.23 AS build-bff
 RUN apk add --no-cache git
 ENV GONOSUMDB=github.com/code-armory-app
 ENV GOWORK=off
+# go.mod replaces the SDK with the in-repo copy at ../sdk, so it has to be staged
+# before the module cache warm-up. The context is already src/systems for the SPA,
+# so this costs nothing extra.
+WORKDIR /src
+COPY sdk/ ./sdk/
 WORKDIR /src/portal-bff
 COPY portal-bff/go.mod portal-bff/go.sum ./
 RUN go mod download

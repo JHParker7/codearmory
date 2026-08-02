@@ -6,15 +6,16 @@ use (
 	./conductor
 	./containers
 	./egress-proxy
+	./events
 	./forge
 	./gatekeeper
 	./git
-	./events
 	./hooks
 	./outpost
 	./outpost-gateway
 	./portal-bff
 	./registry
+	./sdk
 	./tickets
 	./workflows
 )

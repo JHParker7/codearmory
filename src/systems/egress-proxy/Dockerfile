@@ -1,11 +1,18 @@
 FROM public.ecr.aws/docker/library/golang:1.26.0-alpine3.23 AS builder
 RUN apk add --no-cache git
 ENV GONOSUMDB=github.com/code-armory-app
+# Build context is src/systems, NOT this service directory: go.mod carries a
+# replace pointing at the in-repo SDK (../sdk), so the build needs both trees.
+# GOWORK=off because go.work is deliberately not copied — workspace mode would
+# demand every member module be present, and only this service and the SDK are.
+ENV GOWORK=off
+WORKDIR /src
+COPY sdk/ ./sdk/
 WORKDIR /src/egress-proxy
-COPY go.mod go.sum ./
+COPY egress-proxy/go.mod egress-proxy/go.sum ./
 RUN go mod download
 
-COPY . .
+COPY egress-proxy/ .
 RUN CGO_ENABLED=0 go build -o egress-proxy .
 
 FROM public.ecr.aws/docker/library/alpine:3.23.3
