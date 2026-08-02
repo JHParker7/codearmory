@@ -1037,3 +1037,47 @@ func swapInt64(p *int64, v int64) func() {
 	*p = v
 	return func() { *p = old }
 }
+
+// TestNoProxyHosts covers the other half of the artifact/mirror egress path: the
+// egress proxy refuses to DIAL any private address, so traffic forge points at an
+// in-cluster ClusterIP (the artifact store, the base-image mirror, the kaniko layer
+// cache) must bypass the proxy or it can never connect — save/restore-artifact would
+// fail on a default install. Ports are stripped so the entry matches on any port,
+// which is how both curl and Go read NO_PROXY.
+func TestNoProxyHosts(t *testing.T) {
+	t.Setenv("FORGE_ARTIFACTS_URL", "http://ca-artifacts:8097")
+	t.Setenv("FORGE_REGISTRY_MAP", "public.ecr.aws=ca-registry-mirror:5000;docker.io=ca-registry-mirror:5000")
+	t.Setenv("FORGE_BUILD_CACHE_REPO", "ca-registry-mirror:5000/kaniko-cache")
+	t.Setenv("FORGE_INSECURE_REGISTRIES", "ca-registry-mirror:5000,192.168.53.171:3000")
+
+	got := noProxyHosts()
+	want := []string{"localhost", "127.0.0.1", "ca-artifacts", "ca-registry-mirror", "192.168.53.171"}
+	if len(got) != len(want) {
+		t.Fatalf("noProxyHosts() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("noProxyHosts() = %v, want %v", got, want)
+		}
+	}
+
+	// The same list reaches the sandbox, in both cases, via NO_PROXY/no_proxy.
+	env := map[string]string{}
+	for _, p := range proxyEnvPairs("http://egress-proxy:3128") {
+		env[p[0]] = p[1]
+	}
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		if !strings.Contains(env[k], "ca-artifacts") || !strings.Contains(env[k], "ca-registry-mirror") {
+			t.Errorf("%s = %q, want the artifact store and the mirror bypassed", k, env[k])
+		}
+	}
+
+	// Nothing configured beyond the default artifact store → loopback plus that host.
+	t.Setenv("FORGE_REGISTRY_MAP", "")
+	t.Setenv("FORGE_BUILD_CACHE_REPO", "")
+	t.Setenv("FORGE_INSECURE_REGISTRIES", "")
+	t.Setenv("FORGE_ARTIFACTS_URL", "")
+	if got := noProxyHosts(); len(got) != 3 || got[2] != "artifacts" {
+		t.Errorf("noProxyHosts() with defaults = %v, want the default artifacts host", got)
+	}
+}

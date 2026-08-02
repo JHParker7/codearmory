@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"net"
+	"net/url"
 	"os"
+	"strings"
 )
 
 // Runtime is the interface for running sandboxed container commands. Concrete
@@ -32,17 +35,83 @@ func defaultRuntimeType() string {
 }
 
 // proxyEnvPairs is the set of egress-proxy environment variables forge injects
-// into a sandboxed job (upper- and lower-case forms, plus NO_PROXY for loopback).
+// into a sandboxed job (upper- and lower-case forms, plus NO_PROXY for loopback and
+// the in-cluster endpoints a sandbox must reach directly).
 // Used by the docker runtime; the kubernetes runtime injects the same set separately.
 func proxyEnvPairs(proxy string) [][2]string {
+	noProxy := strings.Join(noProxyHosts(), ",")
 	return [][2]string{
 		{"HTTP_PROXY", proxy},
 		{"HTTPS_PROXY", proxy},
-		{"NO_PROXY", "localhost,127.0.0.1"},
+		{"NO_PROXY", noProxy},
 		{"http_proxy", proxy},
 		{"https_proxy", proxy},
-		{"no_proxy", "localhost,127.0.0.1"},
+		{"no_proxy", noProxy},
 	}
+}
+
+// noProxyHosts is the NO_PROXY list injected alongside HTTP(S)_PROXY: loopback, plus
+// every in-cluster endpoint forge itself points a sandbox at.
+//
+// Why those have to bypass the proxy: the egress proxy refuses to DIAL a private
+// address unconditionally (its IP guard blocks loopback/RFC1918/link-local so an
+// allowlisted — or attacker-controlled — name cannot resolve to a cluster service).
+// The artifact store and the base-image mirror are exactly such addresses: forge hands
+// them to the sandbox as in-cluster ClusterIP URLs, so routing them through the proxy
+// means save/restore-artifact and every mirrored base-image pull fail with "egress to
+// non-public address blocked". Naming them in NO_PROXY sends that traffic straight to
+// the service instead, which is what the sandbox NetworkPolicy opens a scoped hole for
+// (forge-egress-networkpolicy.yaml) — nothing else internal becomes reachable.
+//
+// These are derived from forge's OWN config, never from a request, so a sandbox cannot
+// add a host to its own bypass list.
+func noProxyHosts() []string {
+	hosts := []string{"localhost", "127.0.0.1"}
+	seen := map[string]bool{"localhost": true, "127.0.0.1": true}
+	add := func(raw string) {
+		h := hostOnly(raw)
+		if h == "" || seen[h] {
+			return
+		}
+		seen[h] = true
+		hosts = append(hosts, h)
+	}
+
+	// The artifact store the save/restore helper curls.
+	if u, err := url.Parse(artifactsURL()); err == nil {
+		add(u.Host)
+	}
+	// The base-image mirror kaniko is remapped to ("origin=mirror;origin2=mirror2"),
+	// the layer-cache repo on it ("host:port/repo"), and any operator-listed private
+	// registry — all of which a build reaches over the pod network, not the internet.
+	for _, m := range strings.Split(registryMirrors(), ";") {
+		if _, mirror, ok := strings.Cut(m, "="); ok {
+			add(mirror)
+		}
+	}
+	if repo := buildCacheRepo(); repo != "" {
+		add(strings.SplitN(repo, "/", 2)[0])
+	}
+	for _, r := range insecureRegistries() {
+		add(r)
+	}
+	return hosts
+}
+
+// hostOnly strips a port (and any surrounding whitespace) from a "host[:port]" or
+// "scheme://host[:port]" authority. A NO_PROXY entry without a port matches the host
+// on every port, which is what we want — and is how both curl and Go's own proxy
+// resolution read it.
+func hostOnly(raw string) string {
+	h := strings.TrimSpace(raw)
+	h = strings.TrimPrefix(strings.TrimPrefix(h, "https://"), "http://")
+	if h == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		return host
+	}
+	return h
 }
 
 func ptr[T any](v T) *T { return &v }
