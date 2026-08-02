@@ -13,7 +13,7 @@
 
 - **CI/CD pipelines** — sequence steps into runs as sequential/parallel batches; run inputs and prior-step outputs are substituted at execution time, and stuck runs are recovered on restart (Workflows).
 - **Sandboxed runners** — run commands in isolated containers (Docker or Kubernetes Jobs) with dropped capabilities, configurable resource tiers (runner classes), and pluggable runtime backends — including kata/Cloud-Hypervisor VMs and gVisor userspace-kernel sandboxes (no `/dev/kvm` needed) — with optional egress allowlisting (Forge).
-- **Self-hosted git** — host your repositories on the platform itself: bare repos over Smart HTTP with gatekeeper-backed auth, collaborators, branch protection, pull requests, and pull-through mirrors of upstream repos so CI clones stay in-cluster (git_factory). Repos on GitHub, GitLab or Forgejo keep working through the credential broker (git_connector), so this is an option rather than a migration.
+- **Self-hosted git, built in** — host your repositories on the platform itself: bare repos over Smart HTTP with gatekeeper-backed auth, collaborators, branch protection, pull requests, and pull-through mirrors of upstream repos so CI clones stay in-cluster (git_factory). It is a **core service** — the chart deploys it and the registry manifest registers it, so there is nothing to enable. Repos on GitHub, GitLab or Forgejo keep working through the credential broker (git_connector), so this is an option rather than a migration.
 - **Issue tracking** — boards, tickets, comments and custom fields, linkable to pipeline runs and sandboxed executions, so work items and the builds that address them live in one place (Tickets).
 - **Container registry** — per-tenant image repositories fronted by a registry proxy (Containers), plus a build-artifact store (Artifacts).
 - **Git webhook triggers** — receive pushes and PRs from GitHub, GitLab, or Forgejo/Gitea and map them to pipeline runs with at-least-once delivery (Hooks).
@@ -59,6 +59,12 @@ Every request enters through Conductor, which polls Registry for service manifes
     │   :8085     │   │   :8083     │   │   :8087     │
     │  pipelines  │   │   runners   │   │  webhooks   │
     └─────────────┘   └─────────────┘   └─────────────┘
+
+    ┌─────────────┐   ┌─────────────┐
+    │ git_factory │   │git_connector│
+    │   :9002     │   │   :8096     │
+    │  git host   │   │ clone creds │
+    └─────────────┘   └─────────────┘
 
     ┌─────────────┐   ┌───────────────────────────────┐
     │   Builder   │   │  Portal — React SPA + BFF      │
@@ -196,13 +202,13 @@ Binaries for Linux, macOS, and Windows are attached to each [GitHub release](../
 | Builder | 8095 | [Org control plane + runtime service deployer](docs/builder/README.md) |
 | git_connector | 8096 | [Git credential broker](docs/git/README.md) |
 | Artifacts | 8097 | Build artifact store |
-| git_factory | 9002 | [The platform's own git host](docs/git-factory/README.md) |
+| git_factory | 9002 | [The platform's own git host](docs/git-factory/README.md) — registers and routes as `codearmory_git_factory` |
 | Outpost Gateway | 8092 | [Cluster integration backbone](docs/outpost-gateway/README.md) |
 | Outpost | — | [User-deployed cluster agent](docs/outpost/README.md) |
 | Portal | — | Web UI (React SPA + Express BFF) |
 | Armory CLI | — | [Command reference](docs/cli/README.md) |
 
-Additional capabilities ship as **modules** in their own `codearmory-*` repos and are deployed at runtime by Builder. Full platform guide: [docs/platform-guide.md](docs/platform-guide.md).
+Everything above is **core** — it lives in this repo and none of it is enabled through Builder. The services are deployed by the Helm chart and registered from the registry manifest; the two exceptions are the Outpost, which ships in its own chart for the cluster you point it at, and the CLI, which is a binary you install. Additional capabilities ship as **modules** in their own `codearmory-*` repos and are deployed at runtime by Builder. Full platform guide: [docs/platform-guide.md](docs/platform-guide.md).
 
 ---
 
