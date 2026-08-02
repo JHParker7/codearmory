@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"os"
@@ -664,7 +665,10 @@ func (WorkflowRun) Dequeue(ctx context.Context) (*WorkflowRun, error) {
 		return nil, nil
 	}
 
-	r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=CURRENT_TIMESTAMP WHERE run_id=?", run.RunID)
+	// The lease is stamped as the run is claimed, not first written by the worker's own
+	// heartbeat loop: a run must never sit 'running' with a NULL lease, or a peer's
+	// startup recovery would fall back to started_at and could reclaim it.
+	r := tx.Exec("UPDATE workflow_runs SET status='running', started_at=CURRENT_TIMESTAMP, heartbeat_at=CURRENT_TIMESTAMP WHERE run_id=?", run.RunID)
 	if r.Error != nil {
 		span.RecordError(r.Error)
 		span.SetStatus(codes.Error, r.Error.Error())
@@ -1008,16 +1012,153 @@ func (sr WorkflowStepRun) SetStatus(_ context.Context, status string) {
 		status, status, StatusRunning, sr.StepRunID)
 }
 
-// recoverStuckRunsDB marks any runs left in 'running' state as 'failed' on startup.
-func recoverStuckRunsDB() int64 {
-	result := connect().Exec(
-		"UPDATE workflow_runs SET status='failed', ended_at=CURRENT_TIMESTAMP, token=NULL, run_session_id=NULL WHERE status='running'",
-	)
+// stepJob is one async job a step run is still waiting on: the catalog action that
+// submitted it (which resolves to the service and the cancel endpoint) and the id the
+// service returned.
+type stepJob struct {
+	StepRunID string `gorm:"column:step_run_id"`
+	Action    string `gorm:"column:job_action"`
+	JobID     string `gorm:"column:job_id"`
+}
+
+// SetJob records the async job this step run submitted, so a later abandonment can
+// cancel it — including from another process, which is the whole point of persisting
+// it (see jobcancel.go). Guarded on ended_at IS NULL like SetStatus: a submission
+// racing a step that has already been completed must not attach a job to a finished
+// row, where nothing would ever clear it.
+//
+// Best-effort: failing to record the id costs the fast cancellation path, not the
+// step, and the target service's own reaper remains the backstop.
+func (sr WorkflowStepRun) SetJob(_ context.Context, action, jobID string) {
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — bookkeeping for cancellation; the step itself is unaffected
+		`UPDATE workflow_step_runs SET job_action=?, job_id=? WHERE step_run_id=? AND ended_at IS NULL`,
+		action, jobID, sr.StepRunID)
+}
+
+// ClearJob forgets the recorded job, called the moment the step stops owning one —
+// either because it reached a terminal state (so cancelling it afterwards would be
+// cancelling work that legitimately completed) or because it has just been cancelled.
+func (sr WorkflowStepRun) ClearJob(_ context.Context) {
+	connect().WithContext(context.Background()).Exec( //nolint:errcheck — see SetJob
+		`UPDATE workflow_step_runs SET job_action='', job_id='' WHERE step_run_id=?`,
+		sr.StepRunID)
+}
+
+// liveStepJobs returns the async jobs a run still has outstanding: recorded against a
+// step run that has not finished. ended_at is the terminal marker Complete() always
+// stamps, so this cannot return a job whose step already reported an outcome.
+func liveStepJobs(ctx context.Context, runID string) ([]stepJob, error) {
+	var jobs []stepJob
+	err := connectRead().WithContext(ctx).Raw(
+		`SELECT step_run_id, job_action, job_id FROM workflow_step_runs
+		  WHERE run_id=? AND job_id IS NOT NULL AND job_id<>'' AND ended_at IS NULL`,
+		runID).Scan(&jobs).Error
+	if err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+// runLeaseHeartbeat is how often the worker executing a run refreshes its lease;
+// runLeaseStaleAfter is how long a lease may go unrefreshed before another pod may
+// treat the run as orphaned. The gap between them is deliberately an order of
+// magnitude: a worker blocked on a slow step, a stop-the-world GC pause, or a brief
+// database blip must never be mistaken for a dead one, and the cost of waiting is only
+// that a genuinely crashed run is reclaimed a few minutes later.
+const (
+	runLeaseHeartbeat  = 30 * time.Second
+	runLeaseStaleAfter = 5 * time.Minute
+)
+
+// leaseCutoffExpr renders the SQL instant a lease must predate to count as stale.
+//
+// It is evaluated by the DATABASE's clock, not this pod's: a lease is written by
+// whichever pod owns the run and read by every other, so judging it against a local
+// clock would make the answer depend on inter-pod skew. Interval arithmetic is not
+// portable, so the dialect is switched here exactly as skipLocked does (the unit
+// suite runs on sqlite, where CURRENT_TIMESTAMP and datetime() share one
+// 'YYYY-MM-DD HH:MM:SS' UTC text format and the comparison is a text compare).
+func leaseCutoffExpr(tx *gorm.DB, staleAfter time.Duration) string {
+	secs := int64(staleAfter.Seconds())
+	if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		return fmt.Sprintf("CURRENT_TIMESTAMP - (%d * interval '1 second')", secs)
+	}
+	return fmt.Sprintf("datetime('now', '-%d seconds')", secs)
+}
+
+// Heartbeat refreshes this run's lease so peer pods do not mistake it for orphaned.
+// Guarded on status='running' so a beat racing a terminal transition can never revive
+// a finished run's lease. Best-effort: one missed beat is harmless as long as the next
+// lands well inside runLeaseStaleAfter, and a lease that stops moving is exactly the
+// signal recovery is looking for.
+func (run WorkflowRun) Heartbeat(ctx context.Context) {
+	connect().WithContext(ctx).Exec( //nolint:errcheck — best-effort; the next beat covers a miss
+		"UPDATE workflow_runs SET heartbeat_at=CURRENT_TIMESTAMP WHERE run_id=? AND status='running'", run.RunID)
+}
+
+// recoverStuckRunsDB fails runs left 'running' by a worker that died — and ONLY those.
+//
+// It cannot sweep every 'running' run. The service scales out (the prod chart enables
+// the HPA at minReplicas 2) and a rolling deploy surges a new pod while the old one is
+// still executing, so an unscoped sweep at startup failed runs that a PEER was actively
+// running: that worker keeps going — its in-memory token is still valid, so the side
+// effects still land — but its Complete() is guarded on status='running' and silently
+// no-ops, permanently recording a successful run as failed.
+//
+// The lease is what makes ownership decidable without knowing anything about peers: a
+// live worker refreshes heartbeat_at every runLeaseHeartbeat (keepRunLease), so a run
+// whose lease has not moved for runLeaseStaleAfter has no worker behind it. This is the
+// same shape failTimedOutRunsDB already uses for orphans — act only past a grace period,
+// so the live path always wins the race and this only catches genuine casualties.
+//
+// The COALESCE chain covers rows written before the column existed (lease NULL): they
+// age out on started_at instead, and the epoch literal is the last resort so a row
+// missing both timestamps is still recoverable rather than stuck 'running' forever.
+// abandonedRun is a run a sweep reclaimed, carrying exactly what is needed to release
+// the remote work it left behind: the id, to look up its outstanding jobs, and its
+// still-encrypted token, to authorise cancelling them.
+//
+// Both are captured BEFORE the sweep runs, because the sweep nulls the token — after it
+// there is no credential left to cancel with, and the jobs would be forge's reaper's
+// problem for as long as the step's timeout allowed.
+type abandonedRun struct {
+	RunID string `gorm:"column:run_id"`
+	Token string `gorm:"column:token"`
+}
+
+// recoverStuckRunsWithJobs is recoverStuckRunsDB plus the rows it reclaimed, so the
+// caller can cancel the async jobs those runs abandoned.
+//
+// The SELECT and the UPDATE are separate statements rather than one RETURNING, because
+// this runs on both Postgres and the sqlite used by tests. The window between them is
+// harmless: a run that finishes in it is simply not swept, and liveStepJobs re-checks
+// ended_at, so the worst case is cancelling nothing. Cancellation itself tolerates a
+// job that is already gone (404/409 are treated as success).
+func recoverStuckRunsWithJobs() ([]abandonedRun, int64) {
+	conn := connect()
+	stale := `status='running' AND COALESCE(heartbeat_at, started_at, '1970-01-01') < ` +
+		leaseCutoffExpr(conn, runLeaseStaleAfter)
+
+	var runs []abandonedRun
+	if err := conn.Raw(`SELECT run_id, token FROM workflow_runs WHERE ` + stale).Scan(&runs).Error; err != nil {
+		// Not fatal: the sweep's job is to unwedge the queue, and it can still do that
+		// without the job-cancellation half.
+		slog.Warn("sweep: could not read runs pending recovery for job cancellation", "error", err)
+	}
+	result := conn.Exec(`
+		UPDATE workflow_runs
+		SET status='failed', ended_at=CURRENT_TIMESTAMP, token=NULL, run_session_id=NULL
+		WHERE ` + stale)
 	if result.Error != nil {
 		slog.Error("startup: failed to recover stuck runs", "error", result.Error)
-		return 0
+		return nil, 0
 	}
-	return result.RowsAffected
+	return runs, result.RowsAffected
+}
+
+func recoverStuckRunsDB() int64 {
+	_, n := recoverStuckRunsWithJobs()
+	return n
 }
 
 // failTimedOutRunsDB fails any run still 'running' past its workflow's timeout. It is

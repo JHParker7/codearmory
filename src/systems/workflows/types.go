@@ -508,11 +508,18 @@ type WorkflowRun struct {
 	// with, so that role must not be deleted while the run is still active, and it is
 	// garbage-collected once the last run using it finishes. AutoMigrate backfills
 	// existing rows to '' (harmless — those runs are already terminal).
-	RoleID    string            `json:"-"            gorm:"column:role_id;default:''"`
-	StepRuns  []WorkflowStepRun `json:"step_runs"    gorm:"-"`
-	CreatedAt time.Time         `json:"created_at"   gorm:"column:created_at"`
-	StartedAt *time.Time        `json:"started_at,omitempty" gorm:"column:started_at"`
-	EndedAt   *time.Time        `json:"ended_at,omitempty"   gorm:"column:ended_at"`
+	RoleID   string            `json:"-"            gorm:"column:role_id;default:''"`
+	StepRuns []WorkflowStepRun `json:"step_runs"    gorm:"-"`
+	// HeartbeatAt is the run's LEASE: the worker executing it refreshes this column
+	// every runLeaseHeartbeat, and it is stamped when Dequeue claims the run. It is what
+	// makes "orphaned" decidable across pods — startup recovery reclaims a 'running' run
+	// only once its lease has gone stale, so a new replica can no longer fail runs that
+	// a peer is actively executing. NULL on a row written before the column existed;
+	// recoverStuckRunsDB falls back to started_at for those. Added by AutoMigrate.
+	HeartbeatAt *time.Time `json:"-"            gorm:"column:heartbeat_at"`
+	CreatedAt   time.Time  `json:"created_at"   gorm:"column:created_at"`
+	StartedAt   *time.Time `json:"started_at,omitempty" gorm:"column:started_at"`
+	EndedAt     *time.Time `json:"ended_at,omitempty"   gorm:"column:ended_at"`
 }
 
 func (WorkflowRun) TableName() string { return "workflow_runs" }
@@ -535,10 +542,21 @@ type WorkflowStepRun struct {
 	// MemoryUsedMB/MemoryLimitMB are carried through from the forge execution a
 	// forge-backed step ran (NULL for non-forge steps and when forge could not
 	// measure usage). See forge's Execution for how they are captured.
-	MemoryUsedMB  *int64     `json:"memory_used_mb,omitempty"  gorm:"column:memory_used_mb"`
-	MemoryLimitMB *int64     `json:"memory_limit_mb,omitempty" gorm:"column:memory_limit_mb"`
-	StartedAt     *time.Time `json:"started_at,omitempty"   gorm:"column:started_at"`
-	EndedAt       *time.Time `json:"ended_at,omitempty"     gorm:"column:ended_at"`
+	MemoryUsedMB  *int64 `json:"memory_used_mb,omitempty"  gorm:"column:memory_used_mb"`
+	MemoryLimitMB *int64 `json:"memory_limit_mb,omitempty" gorm:"column:memory_limit_mb"`
+	// JobAction/JobID identify the async job this step submitted and is still waiting
+	// on — the catalog action (so the cancel endpoint can be resolved) and the id the
+	// target service returned (forge: the execution id). They are the ONLY record of
+	// what a step owns remotely that survives the process: a worker that dies takes its
+	// in-memory ids with it, and the sweep that reaps its runs would otherwise have no
+	// way to release the forge admission slots those executions still hold. Cleared the
+	// moment the job reaches a terminal state, so nothing can cancel work that
+	// legitimately completed. Empty for synchronous steps. Internal bookkeeping, so
+	// json:"-" — the step run's API shape is unchanged. Added by AutoMigrate.
+	JobAction string     `json:"-" gorm:"column:job_action;default:''"`
+	JobID     string     `json:"-" gorm:"column:job_id;default:''"`
+	StartedAt *time.Time `json:"started_at,omitempty"   gorm:"column:started_at"`
+	EndedAt   *time.Time `json:"ended_at,omitempty"     gorm:"column:ended_at"`
 }
 
 func (WorkflowStepRun) TableName() string { return "workflow_step_runs" }

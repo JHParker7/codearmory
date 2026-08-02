@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"gorm.io/gorm"
 )
 
 // maxParallelSteps caps concurrent step goroutines within a single parallel group
@@ -76,13 +77,36 @@ func (ts *tokenStore) swap(token, sessionID string) (oldSessionID string) {
 }
 
 // rotationIntervalFn yields the run-token rotation period; a package var so tests
-// can shorten it. Default: a random duration in [30 min, 60 min).
-var rotationIntervalFn = func() time.Duration {
-	return 30*time.Minute + time.Duration(rand.Int63n(int64(30*time.Minute)))
+// can shorten it (via setRotationIntervalFn). Default: a random duration in
+// [30 min, 60 min).
+//
+// Guarded by a mutex because a rotation goroutine reads it concurrently with any test
+// that swaps it: the goroutine belongs to a run, not to the test that swapped, and it
+// can be scheduled after that test has moved on.
+var (
+	rotationIntervalMu sync.RWMutex
+	rotationIntervalFn = func() time.Duration {
+		return 30*time.Minute + time.Duration(rand.Int63n(int64(30*time.Minute)))
+	}
+)
+
+// setRotationIntervalFn replaces the rotation period source and returns the previous
+// one, so a caller can restore it.
+func setRotationIntervalFn(fn func() time.Duration) func() time.Duration {
+	rotationIntervalMu.Lock()
+	defer rotationIntervalMu.Unlock()
+	prev := rotationIntervalFn
+	rotationIntervalFn = fn
+	return prev
 }
 
 // rotationInterval returns a random duration in [30 min, 60 min).
-func rotationInterval() time.Duration { return rotationIntervalFn() }
+func rotationInterval() time.Duration {
+	rotationIntervalMu.RLock()
+	fn := rotationIntervalFn
+	rotationIntervalMu.RUnlock()
+	return fn()
+}
 
 // stepGroup is ONE node's unit of work, plus the index it occupies in the workflow's
 // step array. It holds a slice rather than a single step only because a matrix/scatter
@@ -192,6 +216,9 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 
 	store := newTokenStore(token, sessionID)
 	go p.rotateToken(runCtx, store, runID, triggeredBy, workflow.RoleID)
+	// Hold the run's lease for as long as this worker owns it, so another replica's
+	// startup recovery leaves it alone.
+	go p.keepRunLease(runCtx, runID)
 
 	// stepOutputs accumulates each completed step's output by name so later steps
 	// can interpolate ${steps.NAME.output...} into their With values. A step sees
@@ -284,8 +311,15 @@ func (p *WorkerPool) executeRun(ctx context.Context, runID, workflowID, token, s
 	// at run start (which a mid-run update would have left stale). Best-effort.
 	bg := context.Background()
 	if roleID := runRoleID(bg, runID); roleID != "" {
-		if cur, err := getWorkflow(bg, workflowID); err == nil {
+		cur, err := getWorkflow(bg, workflowID)
+		switch {
+		case err == nil:
 			deleteWorkflowRoleIfUnused(bg, roleID, cur.RoleID)
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			// The workflow was deleted while this run was in flight. The delete handler
+			// deliberately left the role alive for exactly this run, so there is no
+			// current role to keep ("") and this is the point it can be reclaimed.
+			deleteWorkflowRoleIfUnused(bg, roleID, "")
 		}
 	}
 }
@@ -650,12 +684,45 @@ func derefStr(s *string) string {
 	return *s
 }
 
+// keepRunLease refreshes the run's lease every runLeaseHeartbeat until ctx is
+// cancelled, which is the whole of this worker's ownership of the run. It is what
+// distinguishes this run from an orphan: a peer pod's startup recovery reclaims only
+// runs whose lease has gone stale, so without these beats a rolling deploy would fail
+// a run out from under the worker still executing it (see recoverStuckRunsDB).
+//
+// The first beat is immediate rather than one tick in: Dequeue stamps the lease as it
+// claims the run, but a run that then spent time loading its workflow should not depend
+// on that stamp still being recent.
+func (p *WorkerPool) keepRunLease(ctx context.Context, runID string) {
+	if ctx.Err() != nil {
+		return // the run ended before this goroutine was scheduled
+	}
+	run := WorkflowRun{RunID: runID}
+	run.Heartbeat(ctx)
+	t := time.NewTicker(runLeaseHeartbeat)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			run.Heartbeat(ctx)
+		}
+	}
+}
+
 // rotateToken runs until ctx is cancelled, rotating the run credential every
 // 30–60 minutes so no single token stays live for the full run duration.
 // The outgoing session is revoked after a 60 s grace period to avoid
 // invalidating any in-flight step requests that still carry the old token.
 func (p *WorkerPool) rotateToken(ctx context.Context, store *tokenStore, runID, triggeredBy, roleID string) {
 	for {
+		// Checked before scheduling the next rotation, not only inside the select: the
+		// interval is evaluated as an argument to time.After, so a goroutine that first
+		// runs after its run already finished would otherwise still do that work.
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return

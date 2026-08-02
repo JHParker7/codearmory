@@ -15,9 +15,10 @@ func TestRotateToken(t *testing.T) {
 	run.Add(context.Background())                                                                 //nolint:errcheck
 	t.Cleanup(func() { connect().Exec(`DELETE FROM workflow_runs WHERE run_id = ?`, run.RunID) }) //nolint:errcheck
 
-	orig := rotationIntervalFn
-	rotationIntervalFn = func() time.Duration { return 5 * time.Millisecond }
-	t.Cleanup(func() { rotationIntervalFn = orig })
+	// Swapped through the setter: a rotation goroutine from an earlier test's run may
+	// still be reading it, so the assignment must take the same lock.
+	orig := setRotationIntervalFn(func() time.Duration { return 5 * time.Millisecond })
+	t.Cleanup(func() { setRotationIntervalFn(orig) })
 
 	store := newTokenStore("old", "oldsess")
 	ctx, cancel := context.WithCancel(context.Background())

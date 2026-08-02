@@ -339,12 +339,13 @@ func limitBody(next http.Handler) http.Handler {
 	})
 }
 
-// recoverStuckRuns marks any runs left in 'running' state (from a previous pod
-// crash) as 'failed' so they do not block the worker queue indefinitely.
-// Sessions are nulled out; their JWTs expire naturally within the 1-hour TTL.
 // startRunTimeoutSweeper runs a background ticker that fails any run past its workflow's
 // timeout — the backstop for orphaned runs a live worker's timeout context can't catch
-// (see failTimedOutRunsDB). Stops when ctx is cancelled at shutdown.
+// (see failTimedOutRunsDB) — and, on the same tick, reclaims runs whose lease has gone
+// stale. The lease sweep is not startup-only because a crashed worker's run is only
+// reclaimable once its lease ages out (runLeaseStaleAfter), which is minutes after the
+// replacement pod has already booted; without this it would wait for the run timeout.
+// Stops when ctx is cancelled at shutdown.
 func startRunTimeoutSweeper(ctx context.Context) {
 	go func() {
 		t := time.NewTicker(time.Minute)
@@ -357,14 +358,31 @@ func startRunTimeoutSweeper(ctx context.Context) {
 				if n := failTimedOutRunsDB(); n > 0 {
 					slog.Warn("run-timeout sweep: reaped runs past their timeout", "count", n)
 				}
+				if runs, n := recoverStuckRunsWithJobs(); n > 0 {
+					slog.Warn("lease sweep: reaped runs whose worker stopped heartbeating", "count", n)
+					// Release the remote work those runs abandoned. Without this the
+					// run row is failed while its forge executions keep their admission
+					// reservation until the step's own timeout elapses, which is what
+					// froze the queue in run 479d25fe.
+					cancelAbandonedRunJobs(ctx, runs)
+				}
 			}
 		}
 	}()
 }
 
+// recoverStuckRuns fails runs abandoned mid-flight by a worker that died, so they do
+// not sit 'running' forever. Sessions are nulled out; their JWTs expire naturally
+// within the 1-hour TTL. Only runs whose LEASE has gone stale are reclaimed — this pod
+// shares the queue with peers that may be executing runs right now, and a new replica
+// starting up during a rolling deploy must not fail theirs (see recoverStuckRunsDB).
 func recoverStuckRuns() {
-	if n := recoverStuckRunsDB(); n > 0 {
-		slog.Warn("startup: recovered stuck runs from previous pod", "count", n)
+	runs, n := recoverStuckRunsWithJobs()
+	if n > 0 {
+		slog.Warn("startup: recovered stuck runs abandoned by a dead worker", "count", n)
+		// A run reclaimed at startup was abandoned by a worker that is definitely gone,
+		// so nothing else will ever release its jobs — this is the only chance to.
+		cancelAbandonedRunJobs(context.Background(), runs)
 	}
 }
 
