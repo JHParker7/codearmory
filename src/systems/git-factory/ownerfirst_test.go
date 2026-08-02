@@ -46,6 +46,13 @@ type gatekeeperGrants struct {
 	userID   string
 	username string
 	shares   map[string][]string // resource → actions granted by an explicit share
+	// perRecordOnly models a manifest whose per-record verbs are granted on
+	// "{username}/<service>/repos/*" and NOT on the bare collection — the natural way
+	// to model getRepo/updateRepo/readRepo, and what a pre-upgrade deployment has.
+	// gatekeeper's two forms are disjoint (matchPermission's "/*" prefix requires the
+	// slash), so this is a real configuration, not a contrived one: with the default
+	// (false) the stub grants the whole subtree and cannot tell the two apart.
+	perRecordOnly bool
 }
 
 // ownerQualifiedResource mirrors gatekeeper's ownerQualified: a resource names its owner
@@ -70,6 +77,9 @@ func (g gatekeeperGrants) allows(action, resource string) bool {
 		scoped = g.username + "/" + resource
 	}
 	own := g.username + "/" + resRepos
+	if g.perRecordOnly {
+		return strings.HasPrefix(scoped, own+"/")
+	}
 	return scoped == own || strings.HasPrefix(scoped, own+"/")
 }
 
@@ -297,6 +307,40 @@ func TestPerRecord_OrgNamespaceRepoReachableByItsOwnerOnly(t *testing.T) {
 	}
 	if rec := infoRefs(t, "/acme/org-repo.git", string(svcUploadPack), "Bearer tok"); rec.Code != http.StatusNotFound {
 		t.Errorf("stranger clone = %d, want 404", rec.Code)
+	}
+}
+
+// The owner fallback must not depend on the caller holding the verb on the bare
+// COLLECTION resource.
+//
+// gatekeeper's two grant forms are disjoint — matchPermission treats "…/repos/*" as a
+// prefix requiring the slash, so it never covers "…/repos", and a plain "…/repos" is an
+// exact string that never covers "…/repos/<id>". A manifest that grants the per-record
+// verbs only on "{username}/<service>/repos/*" is therefore a normal configuration, and
+// under it an ORG repo's own creator was refused: the per-record check cannot match (no
+// grant can name the org's NAME) and the fallback asked about the collection, which that
+// manifest does not grant. The caller saw a 404 for a repo they had just created, with
+// nothing in the logs naming a grant shape.
+//
+// Observed on a real cluster: the current binary against a registry manifest predating
+// it lost every org repo this way, so the regression is pinned with the grant shape that
+// produced it.
+func TestPerRecord_OwnerFallbackWorksWithPerRecordOnlyGrants(t *testing.T) {
+	setupTestDB(t)
+	initMetrics()
+
+	re := seedRepo(t, uuid.New().String(), "user-alice", "acme", "org-repo", "")
+
+	newGatekeeperStubGrants(t, gatekeeperGrants{userID: "user-alice", username: "alice", perRecordOnly: true})
+	if rec := (recordRoute{name: "getRepo", handler: handleGetRepo, method: http.MethodGet}).call(t, re.ID); rec.Code != http.StatusOK {
+		t.Fatalf("owner status = %d, want 200 — the fallback must not require a grant on the bare collection (body %q)", rec.Code, rec.Body.String())
+	}
+
+	// The fallback still turns on ownership, not on holding the verb: a stranger with
+	// the identical per-record rights in their own namespace gets nothing.
+	newGatekeeperStubGrants(t, gatekeeperGrants{userID: "user-bob", username: "bob", perRecordOnly: true})
+	if rec := (recordRoute{name: "getRepo", handler: handleGetRepo, method: http.MethodGet}).call(t, re.ID); rec.Code != http.StatusNotFound {
+		t.Fatalf("stranger status = %d, want 404 — per-record grants must not authorize a non-owner", rec.Code)
 	}
 }
 

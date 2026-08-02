@@ -185,18 +185,37 @@ func callerOwnsRepo(ctx context.Context, bearer, action string, re Repo) (string
 	if bearer == "" || re.Owner == "" {
 		return "", false
 	}
-	body := map[string]string{"service": serviceName, "action": action, "resource": resRepos}
-	var res struct {
-		Authorized bool   `json:"authorized"`
-		UserID     string `json:"user_id"`
+	// Both grant shapes are tried, because gatekeeper's two forms are DISJOINT and
+	// which one a deployment uses is its own choice. matchPermission treats "…/repos/*"
+	// as a prefix that requires the slash, so it never covers the bare "…/repos"; and a
+	// plain "…/repos" is an exact string that never covers "…/repos/<id>". A manifest
+	// that models per-record verbs the natural way — getRepo/updateRepo/readRepo on
+	// "{username}/<service>/repos/*", leaving only createRepo/listRepo on the
+	// collection — is therefore entirely reasonable, and asking solely about the
+	// collection would refuse the owner of an ORG repo under it. The failure is silent:
+	// the caller sees the 404 this fallback exists to prevent, so a control-plane
+	// upgrade that ships ahead of its registry manifest loses org repos with nothing
+	// in the logs pointing at a grant shape.
+	//
+	// Neither form decides anything on its own. Both are caller-scoped ("do you hold
+	// this verb over your OWN repos at all"), and a caller holding a wildcard passes
+	// either one for any id — which is precisely why the id is not the authorization.
+	// The decision below is the equality against the loaded record's Owner.
+	for _, resource := range []string{serviceName + "/repos/" + re.ID, resRepos} {
+		body := map[string]string{"service": serviceName, "action": action, "resource": resource}
+		var res struct {
+			Authorized bool   `json:"authorized"`
+			UserID     string `json:"user_id"`
+		}
+		if err := gatekeeperCall(ctx, bearer, http.MethodPost, "/check_permissions", body, &res); err != nil || !res.Authorized {
+			continue
+		}
+		if res.UserID == "" || res.UserID != re.Owner {
+			return "", false
+		}
+		return res.UserID, true
 	}
-	if err := gatekeeperCall(ctx, bearer, http.MethodPost, "/check_permissions", body, &res); err != nil || !res.Authorized {
-		return "", false
-	}
-	if res.UserID == "" || res.UserID != re.Owner {
-		return "", false
-	}
-	return res.UserID, true
+	return "", false
 }
 
 // notFoundOnDeny swallows a 403 written by the gatekeeper SDK so the caller can answer
