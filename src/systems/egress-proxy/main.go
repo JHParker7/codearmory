@@ -92,20 +92,74 @@ var fwdClient = &http.Client{
 	Transport: &http.Transport{DialContext: safeDialContext},
 }
 
+// mustCIDR parses a CIDR literal, panicking on a malformed one. Only used for the
+// fixed table below, so a bad entry is a programming error caught at startup.
+func mustCIDR(s string) *net.IPNet {
+	_, n, err := net.ParseCIDR(s)
+	if err != nil {
+		panic("egress-proxy: invalid CIDR " + s + ": " + err.Error())
+	}
+	return n
+}
+
+// nat64Prefix is the well-known NAT64 translation prefix (RFC 6052). Addresses in
+// it embed an IPv4 address in their low 32 bits, so they are judged by that
+// address rather than blocked outright — an IPv6-only cluster reaches the public
+// IPv4 internet through exactly this prefix.
+var nat64Prefix = mustCIDR("64:ff9b::/96")
+
+// disallowedCIDRs holds the internal ranges Go's net.IP predicates do not already
+// cover. Together with those predicates this mirrors the deny list of the chart's
+// kata egress NetworkPolicy (infra/helm/codearmory/templates/forge-egress-networkpolicy-kata.yaml)
+// so the platform's two egress boundaries agree on what "public" means.
+var disallowedCIDRs = []*net.IPNet{
+	// CGNAT. Clusters commonly place the pod/node network here (EKS, GKE, OKE),
+	// and Alibaba Cloud serves instance metadata from 100.100.100.200.
+	mustCIDR("100.64.0.0/10"),
+	// "This network" — only 0.0.0.0 itself is IsUnspecified, but the whole /8 is
+	// non-routable and is treated as the local host by many stacks.
+	mustCIDR("0.0.0.0/8"),
+	// Reserved / future use, including the 255.255.255.255 broadcast address.
+	mustCIDR("240.0.0.0/4"),
+	// Deprecated IPv6 site-local. (Its replacement, unique-local fc00::/7, is
+	// already covered by IsPrivate.)
+	mustCIDR("fec0::/10"),
+}
+
 // isDisallowedIP reports whether ip is one the proxy must never dial: loopback,
-// private, link-local (covers the 169.254.169.254 cloud-metadata endpoint),
-// multicast, or unspecified. The domain allowlist only matches on hostname, so
-// without this an allowlisted (or attacker-DNS-controlled) name resolving to an
-// internal address would let sandboxed code reach metadata / cluster services.
+// private (RFC1918 and IPv6 unique-local fc00::/7), link-local (covers the
+// 169.254.169.254 cloud-metadata endpoint), multicast, unspecified, or any range
+// in disallowedCIDRs. The domain allowlist only matches on hostname, so without
+// this an allowlisted (or attacker-DNS-controlled) name resolving to an internal
+// address would let sandboxed code reach metadata / cluster services.
 func isDisallowedIP(ip net.IP) bool {
-	return ip == nil ||
-		ip.IsLoopback() ||
+	if ip == nil {
+		return true
+	}
+	// Normalize an IPv4-mapped IPv6 address (::ffff:10.0.0.1) to its 4-byte form
+	// so the IPv4 ranges cannot be evaded by expressing the address as IPv6.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	} else if ip16 := ip.To16(); ip16 != nil && nat64Prefix.Contains(ip16) {
+		// A NAT64 address reaches the IPv4 address in its low 32 bits, so judge it
+		// by that: 64:ff9b::a00:1 must be blocked exactly like 10.0.0.1.
+		return isDisallowedIP(net.IP(ip16[12:16]))
+	}
+	if ip.IsLoopback() ||
 		ip.IsPrivate() ||
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
 		ip.IsInterfaceLocalMulticast() ||
 		ip.IsMulticast() ||
-		ip.IsUnspecified()
+		ip.IsUnspecified() {
+		return true
+	}
+	for _, n := range disallowedCIDRs {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // allowDialIP reports whether the proxy may dial ip. Overridable in tests that

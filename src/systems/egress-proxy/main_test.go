@@ -246,18 +246,74 @@ func TestIsDisallowedIP(t *testing.T) {
 		ip   string
 		want bool
 	}{
-		{"169.254.169.254", true}, // cloud metadata (link-local)
-		{"127.0.0.1", true},       // loopback
-		{"10.0.0.5", true},        // private
-		{"192.168.1.1", true},     // private
-		{"::1", true},             // loopback (v6)
-		{"0.0.0.0", true},         // unspecified
-		{"8.8.8.8", false},        // public
-		{"1.1.1.1", false},        // public
+		{"169.254.169.254", true},       // cloud metadata (link-local)
+		{"127.0.0.1", true},             // loopback
+		{"10.0.0.5", true},              // private
+		{"192.168.1.1", true},           // private
+		{"172.16.0.1", true},            // private
+		{"::1", true},                   // loopback (v6)
+		{"0.0.0.0", true},               // unspecified
+		{"8.8.8.8", false},              // public
+		{"1.1.1.1", false},              // public
+		{"2606:4700:4700::1111", false}, // public (v6)
 	}
 	for _, tc := range cases {
 		if got := isDisallowedIP(net.ParseIP(tc.ip)); got != tc.want {
 			t.Errorf("isDisallowedIP(%s) = %v, want %v", tc.ip, got, tc.want)
 		}
+	}
+}
+
+// Ranges the dial-time guard must deny to match the chart's kata egress
+// NetworkPolicy. In public-only mode ("*") this guard is the only egress boundary
+// for the docker/kubernetes/gvisor backends, so a gap here is reachable
+// internal-network access from a sandbox.
+func TestIsDisallowedIP_InternalRanges(t *testing.T) {
+	cases := []struct {
+		ip     string
+		want   bool
+		reason string
+	}{
+		// CGNAT 100.64.0.0/10 — pod/node network on EKS/GKE/OKE, and Alibaba metadata.
+		{"100.64.0.1", true, "CGNAT low edge"},
+		{"100.100.100.200", true, "Alibaba Cloud metadata"},
+		{"100.127.255.255", true, "CGNAT high edge"},
+		{"100.63.255.255", false, "just below CGNAT — public"},
+		{"100.128.0.0", false, "just above CGNAT — public"},
+		// 0.0.0.0/8 — "this network", non-routable beyond the unspecified address.
+		{"0.1.2.3", true, "0.0.0.0/8"},
+		// Reserved / broadcast.
+		{"255.255.255.255", true, "broadcast"},
+		{"240.0.0.1", true, "reserved 240.0.0.0/4"},
+		// IPv6 unique-local and the deprecated site-local range.
+		{"fd00::1", true, "IPv6 unique-local fc00::/7"},
+		{"fc00::1", true, "IPv6 unique-local fc00::/7"},
+		{"fec0::1", true, "deprecated IPv6 site-local"},
+		{"fe80::1", true, "IPv6 link-local"},
+		// IPv4-mapped IPv6 must not bypass the IPv4 checks.
+		{"::ffff:10.0.0.1", true, "IPv4-mapped private"},
+		{"::ffff:127.0.0.1", true, "IPv4-mapped loopback"},
+		{"::ffff:169.254.169.254", true, "IPv4-mapped metadata"},
+		{"::ffff:100.64.0.1", true, "IPv4-mapped CGNAT"},
+		{"::ffff:8.8.8.8", false, "IPv4-mapped public"},
+		// NAT64 addresses are judged by the IPv4 address they embed.
+		{"64:ff9b::a00:1", true, "NAT64-embedded 10.0.0.1"},
+		{"64:ff9b::a9fe:a9fe", true, "NAT64-embedded 169.254.169.254"},
+		{"64:ff9b::808:808", false, "NAT64-embedded public 8.8.8.8"},
+	}
+	for _, tc := range cases {
+		ip := net.ParseIP(tc.ip)
+		if ip == nil {
+			t.Fatalf("test case %q is not a valid IP", tc.ip)
+		}
+		if got := isDisallowedIP(ip); got != tc.want {
+			t.Errorf("isDisallowedIP(%s) = %v, want %v (%s)", tc.ip, got, tc.want, tc.reason)
+		}
+	}
+}
+
+func TestIsDisallowedIP_Nil(t *testing.T) {
+	if !isDisallowedIP(nil) {
+		t.Fatal("a nil IP must fail closed")
 	}
 }
