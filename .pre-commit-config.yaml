@@ -9,3 +9,17 @@ repos:
     rev: v8.30.1
     hooks:
       - id: gitleaks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # The backstop against committing build output. .gitignore lists the service
+      # binaries by path, but a list only covers services someone remembered to add,
+      # which is how ~400MB of compiled binaries reached this repo's history. This
+      # catches any oversized file whatever it is called.
+      #
+      # 512KB: the largest thing legitimately tracked is a 120KB package-lock.json,
+      # so this leaves generous headroom while still stopping a 20MB Go binary. If a
+      # genuinely large asset ever needs committing, raise this deliberately rather
+      # than passing --no-verify.
+      - id: check-added-large-files
+        args: ['--maxkb=512']

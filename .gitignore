@@ -1,26 +1,29 @@
-# Go build output
+# Go build output. `go build` in a service directory drops a 20-80MB binary next to
+# its go.mod, named after the directory. Keep one line per service, and ADD A LINE
+# WHEN YOU ADD A SERVICE — a list is only as good as its last update, and every entry
+# missing from it is how ~400MB of compiled binaries reached this repo's history
+# (forge alone twice, at 72MB each). The real backstop is the check-added-large-files
+# pre-commit hook, which catches any large file regardless of its name; this list is
+# what keeps `git status` readable day to day.
 src/systems/artifacts/artifacts
-src/systems/git/git
-src/systems/gatekeeper/gatekeeper
-src/systems/egress-proxy/egress-proxy
-src/systems/blueprints/blueprints
-src/systems/conductor/conductor
-src/systems/workflows/workflows
-src/systems/tickets/tickets
-src/systems/hooks/hooks
-src/systems/forge/forge
-src/systems/mcp/codearmory-mcp
-src/systems/registry/registry
-src/systems/notifications/notifications
-src/systems/gitea_integration/gitea_integration
-src/systems/containers/containers
-src/systems/outpost-gateway/outpost-gateway
-src/systems/chaos/chaos
-src/systems/argo/argo
-src/systems/outpost/outpost
 src/systems/builder/builder
+src/systems/conductor/conductor
+src/systems/containers/containers
+src/systems/egress-proxy/egress-proxy
+src/systems/events/events
+src/systems/forge/forge
+src/systems/gatekeeper/gatekeeper
+src/systems/git/git
+src/systems/git-factory/git-factory
+src/systems/hooks/hooks
+src/systems/outpost/outpost
+src/systems/outpost-gateway/outpost-gateway
 src/systems/portal-bff/portal-bff
+src/systems/registry/registry
+src/systems/tickets/tickets
+src/systems/workflows/workflows
 src/cli/armory
+infra/ci/ci
 
 # SQLite databases
 *.db
