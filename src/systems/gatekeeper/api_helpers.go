@@ -94,6 +94,26 @@ func requirePermission(w http.ResponseWriter, r *http.Request, action, resource 
 	return true
 }
 
+// writeBearerError rejects a request with a 401 that says WHY, in the form RFC 6750
+// defines: a WWW-Authenticate challenge carrying a machine-readable error code and a
+// human-readable description.
+//
+// The distinction is the point. A bare 401 reads identically whether the credential
+// expired, was revoked, or never had the permission — so the caller's first guess is
+// usually "permissions", which is the one thing it never is. An expired token is
+// recoverable by logging in again; an invalid one is not; neither is a scope problem.
+// Callers should not have to decode a JWT by hand to tell them apart.
+//
+// code is an RFC 6750 error code: "invalid_request" when no usable credential was
+// presented at all, "invalid_token" when one was presented but is expired, revoked or
+// malformed. Scope failures are 403 and do not come through here.
+func writeBearerError(w http.ResponseWriter, code, description string) {
+	// Quoted with %q so a description containing a quote or backslash cannot break out
+	// of the header value and inject a second auth-param.
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf("Bearer error=%q, error_description=%q", code, description))
+	http.Error(w, description, http.StatusUnauthorized)
+}
+
 // authMiddleware verifies the Bearer JWT in the Authorization header.
 // On success it adds the authenticated user's ID to the request context under userIDKey.
 func authMiddleware(next http.Handler) http.Handler {
@@ -115,7 +135,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			span.SetStatus(codes.Error, "missing or malformed Authorization header")
 			slog.WarnContext(ctx, "auth rejected: missing or malformed Authorization header", "method", r.Method, "path", r.URL.Path)
 			meterAuthMiddleware.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "rejected")))
-			http.Error(w, "missing or invalid authorization header", http.StatusUnauthorized)
+			writeBearerError(w, "invalid_request", "no bearer token was supplied")
 			return
 		}
 		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
@@ -126,14 +146,14 @@ func authMiddleware(next http.Handler) http.Handler {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "token parse failed")
 			slog.WarnContext(ctx, "auth rejected: could not parse token", "method", r.Method, "path", r.URL.Path, "error", err)
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			writeBearerError(w, "invalid_token", "the access token is invalid or has been revoked")
 			return
 		}
 		c, ok := unverified.Claims.(*authClaims)
 		if !ok || c.ID == "" {
 			span.SetStatus(codes.Error, "token missing jti claim")
 			slog.WarnContext(ctx, "auth rejected: token missing jti claim", "method", r.Method, "path", r.URL.Path)
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			writeBearerError(w, "invalid_token", "the access token is invalid or has been revoked")
 			return
 		}
 		span.SetAttributes(attribute.String("session.id", c.ID))
@@ -144,7 +164,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "session not found")
 			slog.WarnContext(ctx, "auth rejected: session not found or inactive", "session_id", c.ID, "method", r.Method, "path", r.URL.Path)
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			writeBearerError(w, "invalid_token", "the access token is invalid or has been revoked")
 			return
 		}
 		session := row.(Session)
@@ -157,7 +177,9 @@ func authMiddleware(next http.Handler) http.Handler {
 		if time.Now().After(session.ExpiresAt) {
 			span.SetStatus(codes.Error, "token expired")
 			slog.WarnContext(ctx, "auth rejected: token expired", "session_id", session.SessionID, "user_id", session.UserID, "expired_at", session.ExpiresAt)
-			http.Error(w, "token expired", http.StatusUnauthorized)
+			// The expiry instant is the caller's own — they hold the credential — and
+			// naming it turns "401, no idea why" into "it lapsed at 09:14, log in again".
+			writeBearerError(w, "invalid_token", "the access token expired at "+session.ExpiresAt.UTC().Format(time.RFC3339))
 			return
 		}
 
@@ -181,7 +203,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "token signature invalid")
 			slog.WarnContext(ctx, "auth rejected: token signature invalid", "session_id", c.ID, "error", err)
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			writeBearerError(w, "invalid_token", "the access token is invalid or has been revoked")
 			return
 		}
 
@@ -189,7 +211,7 @@ func authMiddleware(next http.Handler) http.Handler {
 		if !ok || claims.Subject == "" {
 			span.SetStatus(codes.Error, "verified token missing subject")
 			slog.WarnContext(ctx, "auth rejected: verified token missing subject", "session_id", c.ID)
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			writeBearerError(w, "invalid_token", "the access token is invalid or has been revoked")
 			return
 		}
 

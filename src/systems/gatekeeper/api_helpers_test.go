@@ -1200,3 +1200,68 @@ func TestRateLimitMiddleware_RespectsTrustedProxy(t *testing.T) {
 		t.Fatalf("A req3: want 429, got %d", c)
 	}
 }
+
+// TestAuthMiddleware_ExpiredTokenIsDistinguishable is the point of the RFC 6750
+// challenge: an expired credential and an invalid one must not look identical. Before
+// this, both returned a bare 401, so the natural reading was "permissions" — the one
+// thing it never is — and telling them apart meant decoding the JWT by hand.
+func TestAuthMiddleware_ExpiredTokenIsDistinguishable(t *testing.T) {
+	u := createTestUser(t)
+	expiredAt := time.Now().Add(-3 * time.Hour)
+	tokenStr, _ := makeSession(t, u.UserID, expiredAt)
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tokenStr)
+	w := httptest.NewRecorder()
+	authMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("next must not be called for an expired token")
+	})).ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	challenge := w.Header().Get("WWW-Authenticate")
+	if !strings.Contains(challenge, `error="invalid_token"`) {
+		t.Errorf("WWW-Authenticate = %q, want an invalid_token error code", challenge)
+	}
+	if !strings.Contains(challenge, "expired") {
+		t.Errorf("WWW-Authenticate = %q, must say the token expired — that is what tells a caller to log in again", challenge)
+	}
+	// The expiry instant is named so the caller does not have to decode the token.
+	if !strings.Contains(challenge, expiredAt.UTC().Format(time.RFC3339)) {
+		t.Errorf("WWW-Authenticate = %q, want it to name the expiry instant %s", challenge, expiredAt.UTC().Format(time.RFC3339))
+	}
+}
+
+// TestAuthMiddleware_InvalidTokenIsNotReportedAsExpired is the other half: a garbage or
+// revoked token must NOT claim expiry, or "log in again" becomes the wrong advice.
+func TestAuthMiddleware_InvalidTokenIsNotReportedAsExpired(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("Authorization", "Bearer not-a-jwt")
+	w := httptest.NewRecorder()
+	authMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("next must not be called for a malformed token")
+	})).ServeHTTP(w, r)
+
+	challenge := w.Header().Get("WWW-Authenticate")
+	if !strings.Contains(challenge, `error="invalid_token"`) {
+		t.Errorf("WWW-Authenticate = %q, want an invalid_token error code", challenge)
+	}
+	if strings.Contains(challenge, "expired") {
+		t.Errorf("WWW-Authenticate = %q must not claim expiry for a malformed token", challenge)
+	}
+}
+
+// TestAuthMiddleware_NoCredentialIsInvalidRequest — presenting nothing is a different
+// error from presenting something broken, and RFC 6750 gives it its own code.
+func TestAuthMiddleware_NoCredentialIsInvalidRequest(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	authMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("next must not be called without a credential")
+	})).ServeHTTP(w, r)
+
+	if challenge := w.Header().Get("WWW-Authenticate"); !strings.Contains(challenge, `error="invalid_request"`) {
+		t.Errorf("WWW-Authenticate = %q, want an invalid_request error code", challenge)
+	}
+}
