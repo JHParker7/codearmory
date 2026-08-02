@@ -87,9 +87,9 @@ func TestProvisionAndDeleteWorkflowRole_Success(t *testing.T) {
 	gatekeeperKey = func() string { return "k" }
 	t.Cleanup(func() { gatekeeperURL = origURL; gatekeeperKey = origKey })
 
-	rid := provisionWorkflowRole(context.Background(), "wf1", "u1", "o1", []WorkflowStep{{Step: Step{Action: "forge/run"}}}, nil, nil)
-	if rid != "role-9" {
-		t.Fatalf("role id = %q, want role-9", rid)
+	rid, err := provisionWorkflowRole(context.Background(), "wf1", "u1", "o1", []WorkflowStep{{Step: Step{Action: "forge/run"}}}, nil, nil)
+	if err != nil || rid != "role-9" {
+		t.Fatalf("provisionWorkflowRole = (%q, %v), want (role-9, nil)", rid, err)
 	}
 	deleteWorkflowRole(context.Background(), rid)
 	if !deleted {
@@ -99,9 +99,11 @@ func TestProvisionAndDeleteWorkflowRole_Success(t *testing.T) {
 
 func TestProvisionWorkflowRole_EmptyPerms(t *testing.T) {
 	withCatalog(t, map[string]ActionDef{})
-	// No catalog permissions → returns "" without calling gatekeeper.
-	if rid := provisionWorkflowRole(context.Background(), "wf", "u", "o", []WorkflowStep{{Step: Step{Action: ActionHTTP}}}, nil, nil); rid != "" {
-		t.Errorf("expected empty role id, got %q", rid)
+	// No catalog permissions → ("", nil) without calling gatekeeper. This is the ONLY
+	// case in which an empty role id is a valid answer the callers may persist.
+	rid, err := provisionWorkflowRole(context.Background(), "wf", "u", "o", []WorkflowStep{{Step: Step{Action: ActionHTTP}}}, nil, nil)
+	if rid != "" || err != nil {
+		t.Errorf("provisionWorkflowRole = (%q, %v), want (\"\", nil)", rid, err)
 	}
 }
 

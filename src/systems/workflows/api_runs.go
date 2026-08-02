@@ -165,8 +165,14 @@ func startWorkflowRun(ctx context.Context, wf *Workflow, userID, orgID string, i
 	// committing the bump when we have a usable role or the workflow needs none.
 	if wf.RolePermsVersion < workflowRolePermsVersion {
 		oldRole := wf.RoleID
-		newRole := provisionWorkflowRole(ctx, wf.WorkflowID, wf.CreatedBy, wf.OrgID, wf.Steps, wf.Maps, wf.Ticket)
-		if newRole != "" || len(collectWorkflowPermissions(wf.Steps, wf.Maps, wf.Ticket)) == 0 {
+		newRole, err := provisionWorkflowRole(ctx, wf.WorkflowID, wf.CreatedBy, wf.OrgID, wf.Steps, wf.Maps, wf.Ticket)
+		if err != nil {
+			// Keep the existing role and leave the version STALE so the next trigger
+			// retries the heal. Stamping it here would freeze the workflow on whatever
+			// role it has — or on none at all, which is the owner's full session
+			// permissions — with nothing left to trigger another attempt.
+			slog.WarnContext(ctx, "trigger run: role re-provision failed, keeping existing role", "workflow_id", wf.WorkflowID, "error", err)
+		} else {
 			wf.RoleID = newRole
 			wf.RolePermsVersion = workflowRolePermsVersion
 			if err := wf.Update(ctx); err != nil {
@@ -178,8 +184,6 @@ func startWorkflowRun(ctx context.Context, wf *Workflow, userID, orgID string, i
 				// never revokes an in-flight run's permissions.
 				deleteWorkflowRoleIfUnused(ctx, oldRole, newRole)
 			}
-		} else {
-			slog.WarnContext(ctx, "trigger run: role re-provision returned empty, using existing role", "workflow_id", wf.WorkflowID)
 		}
 	}
 

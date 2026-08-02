@@ -214,16 +214,26 @@ func collectWorkflowPermissions(steps []WorkflowStep, maps []MapDef, ticket *Tic
 	}
 	return out
 } // provisionWorkflowRole asks gatekeeper to create a minimal-permission role for
-// workflowID. Returns the new role_id, or "" when the key is unconfigured or the
-// permission list is empty (runs will use the user's full session permissions).
-func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string, steps []WorkflowStep, maps []MapDef, ticket *TicketConfig) string {
+// workflowID.
+//
+// ("", nil) means the workflow declares NO permissions and legitimately needs no
+// role — the ONLY case in which an empty role id is a final answer. Every failure
+// to provision one returns a non-nil error, and the two must never be conflated:
+// createRunToken omits role_id when the role is empty, so a run whose workflow
+// stored "" carries the OWNER'S FULL SESSION PERMISSIONS instead of the minimal
+// step set. Persisting that alongside a stamped-current RolePermsVersion also stops
+// the trigger-time heal from ever retrying (it only compares versions), which made
+// the downgrade permanent and invisible.
+func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string, steps []WorkflowStep, maps []MapDef, ticket *TicketConfig) (string, error) {
 	perms := collectWorkflowPermissions(steps, maps, ticket)
 	if len(perms) == 0 {
-		return ""
+		return "", nil
 	}
 	key := gatekeeperKey()
 	if key == "" {
-		return ""
+		// Not "no role needed": without a service key no run token can be minted either
+		// (see createRunToken), so this is a misconfiguration to surface, not absorb.
+		return "", errors.New("gatekeeper service key not available")
 	}
 
 	payload, _ := json.Marshal(map[string]any{
@@ -236,32 +246,32 @@ func provisionWorkflowRole(ctx context.Context, workflowID, userID, orgID string
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		gatekeeperURL+"/internal/workflow-roles", bytes.NewReader(payload))
 	if err != nil {
-		slog.WarnContext(ctx, "provisionWorkflowRole: build request", "workflow_id", workflowID, "error", err)
-		return ""
+		return "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Service-Key", "workflows:"+key)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.WarnContext(ctx, "provisionWorkflowRole: request failed", "workflow_id", workflowID, "error", err)
-		return ""
+		return "", fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		slog.WarnContext(ctx, "provisionWorkflowRole: unexpected status", "workflow_id", workflowID,
-			"status", resp.StatusCode, "body", strings.TrimSpace(string(raw)))
-		return ""
+		return "", fmt.Errorf("gatekeeper returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	var result struct {
 		RoleID string `json:"role_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		slog.WarnContext(ctx, "provisionWorkflowRole: decode response", "workflow_id", workflowID, "error", err)
-		return ""
+		return "", fmt.Errorf("decode response: %w", err)
 	}
-	return result.RoleID
+	if result.RoleID == "" {
+		// A 201 that names no role is as unusable as a failure — the permissions were
+		// requested, so an empty id here would silently mean "no role needed".
+		return "", errors.New("gatekeeper returned an empty role_id")
+	}
+	return result.RoleID, nil
 }
 
 // deleteWorkflowRole removes the role that was provisioned at workflow creation.
@@ -582,7 +592,18 @@ func handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Provision a scoped service role before persisting so the role_id is stored atomically.
-	wf.RoleID = provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps, wf.Maps, wf.Ticket)
+	// A provisioning failure fails the whole request rather than storing an empty role:
+	// that would silently hand every run of this workflow the owner's full session
+	// permissions, with the stamped version stopping the heal from ever retrying.
+	roleID, perr := provisionWorkflowRole(ctx, wf.WorkflowID, userID, orgID, wf.Steps, wf.Maps, wf.Ticket)
+	if perr != nil {
+		span.RecordError(perr)
+		span.SetStatus(codes.Error, "role provisioning failed")
+		slog.ErrorContext(ctx, "create workflow: provision run role", "workflow_id", wf.WorkflowID, "error", perr)
+		http.Error(w, "failed to provision the workflow's run permissions", http.StatusInternalServerError)
+		return
+	}
+	wf.RoleID = roleID
 	wf.RolePermsVersion = workflowRolePermsVersion
 
 	if err := wf.Add(ctx); err != nil {
@@ -814,7 +835,15 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing.Description = req.Description
 	existing.Routes = req.Routes
 	existing.Maps = req.Maps
-	existing.Ticket = req.Ticket
+	// Guard like the timeout and project below: the state_machine document carries no
+	// ticket field, and a state_machine PUT is the round-trippable edit shape (the
+	// enriched steps array fails validateStepRefShape), so an unguarded assignment made
+	// every such edit silently delete the workflow's ticket-mirroring config — and
+	// re-provision the role without the ticket permissions. Disabling mirroring is still
+	// expressible by sending the config with enabled=false.
+	if req.Ticket != nil {
+		existing.Ticket = req.Ticket
+	}
 	// A partial PUT that omits the timeout keeps the stored one, so an update never
 	// silently drops a run's cap to the zero value.
 	if req.TimeoutSecs > 0 {
@@ -841,8 +870,21 @@ func handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	existing.Steps = newSteps
 	existing.UpdatedAt = time.Now().UTC()
 
-	// Re-provision the role with the updated step set.
-	existing.RoleID = provisionWorkflowRole(ctx, existing.WorkflowID, userID, orgID, newSteps, req.Maps, req.Ticket)
+	// Re-provision the role with the updated step set — against the EFFECTIVE ticket
+	// config (which a partial PUT may have preserved), not the request's, so the role
+	// keeps the ticket grants the workflow still uses. On failure keep the stored role
+	// and version and fail the request: persisting an empty role id would downgrade
+	// every future run to the owner's full session permissions, and deleting the old
+	// role below would revoke the scoped one that is still correct.
+	newRoleID, perr := provisionWorkflowRole(ctx, existing.WorkflowID, userID, orgID, newSteps, existing.Maps, existing.Ticket)
+	if perr != nil {
+		span.RecordError(perr)
+		span.SetStatus(codes.Error, "role provisioning failed")
+		slog.ErrorContext(ctx, "update workflow: provision run role", "workflow_id", existing.WorkflowID, "error", perr)
+		http.Error(w, "failed to provision the workflow's run permissions", http.StatusInternalServerError)
+		return
+	}
+	existing.RoleID = newRoleID
 	existing.RolePermsVersion = workflowRolePermsVersion
 
 	if err := existing.Update(ctx); err != nil {
@@ -907,7 +949,12 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to delete workflow", http.StatusInternalServerError)
 		return
 	}
-	deleteWorkflowRole(ctx, roleID)
+	// Deleting the role outright would revoke it out from under any run still in flight:
+	// its remaining steps would 403 and leave a half-applied deploy. Take the same
+	// active-run-aware path the update flow uses — keepRoleID is "" because a deleted
+	// workflow has no current role to preserve — and let the run-completion GC in the
+	// worker reclaim the role once the last run using it finishes.
+	deleteWorkflowRoleIfUnused(ctx, roleID, "")
 
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "workflow deleted", "workflow_id", wf.WorkflowID, "user_id", userID)
