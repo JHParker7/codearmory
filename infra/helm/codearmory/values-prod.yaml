@@ -9,6 +9,27 @@
 #
 # See values-staging.yaml for a lighter version of the same shape.
 
+# ── builder: where it composes images for the services IT deploys ────────────
+# Left blank ON PURPOSE, as a decision you have to make rather than inherit.
+#
+# When these are empty builder falls back to the chart-wide imageRegistry/imageTag —
+# and those name the CORE images this release ships, which is rarely where a
+# builder-deployed service publishes. When the two diverge, every reconcile that falls
+# through to the composed default produces an unpullable reference, and because a
+# reconcile applies builder's desired state to a RUNNING workload it takes a healthy
+# service DOWN rather than merely failing to start a new one. That is not theoretical:
+# it is how git_factory went to ErrImagePull.
+#
+# Set these to wherever your builder-deployed services actually publish. Check the
+# value against what exists in that registry before rolling out — it applies to every
+# builder-managed workload, so a wrong value here has the same blast radius as the
+# incident above. Per-service pins (builder's API, or the codearmory_org_service
+# Terraform resource) override these and are what a CD pipeline should set.
+builder:
+  reconcile:
+    imageRegistry: ""          # TODO e.g. registry.example.com/team
+    imageTag: ""               # TODO e.g. main
+
 # ── forge: percent-of-capacity admission + exec-pod placement ─────────────────
 forge:
   admission:
@@ -100,3 +121,28 @@ tickets:
   resources:
     requests: {cpu: 100m, memory: 64Mi}
     limits:   {cpu: 500m, memory: 256Mi}
+
+# ── git_factory: the one service that must NOT scale out ──────────────────────
+# Deliberately no replicaCount and no autoscaling block here. The repo store is a
+# ReadWriteOnce PVC and git has no cross-node write locking, so a second replica either
+# cannot schedule at all or races the repack loop and corrupts objects. It stays at one
+# replica; only its resources and volume grow. Size the volume for the real repo
+# corpus — this is the only copy of pushed history — and give it a fast SSD class,
+# since clone/push latency is dominated by the filesystem.
+gitFactory:
+  persistence:
+    size: 200Gi                # TODO size for your repo corpus
+    storageClass: ""           # TODO an SSD-backed class
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits:   {cpu: "2",  memory: 2Gi}
+  ingress:
+    # Clones and pushes come from developer machines, so the git plane needs a real
+    # public hostname (unlike every other service, which conductor fronts).
+    enabled: true
+    className: ""              # TODO e.g. nginx
+    hosts:
+      - host: git.example.com  # TODO
+        paths:
+          - path: /
+            pathType: Prefix

@@ -54,8 +54,9 @@ gatekeeper:
     # Comma-separated services allowed to resolve org secrets via the internal
     # lookup endpoint (deny-all when empty). Defaults to "forge" so forge can resolve
     # "secret:<name>" job secret_refs; add "containers" to let the container registry
-    # resolve per-org creds. Requires the secrets feature (gatekeeperSecretsKey).
-    secretsLookupAllowedCallers: "forge,containers"
+    # resolve per-org creds, and "events" so a trigger's webhook_out "secret:<name>"
+    # sign_secret resolves. Requires the secrets feature (gatekeeperSecretsKey).
+    secretsLookupAllowedCallers: "forge,containers,events"
     # Comma-separated CIDRs of trusted reverse proxies (optional).
     trustedProxyCIDRs: ""
     # OpenTelemetry collector OTLP/HTTP endpoint (optional, e.g. http://otel:4318).
@@ -410,6 +411,19 @@ forge:
     # NetworkPolicy-aware CNI; inert otherwise.
     networkPolicy:
       enabled: true
+      # Allow sandboxes to reach the artifact store DIRECTLY (that service's pods, on
+      # its port only) so forge/save-artifact and forge/restore-artifact work. It has to
+      # be direct: the proxy refuses to dial any private address and the store is a
+      # ClusterIP, so forge puts it in the sandbox's NO_PROXY. This is the one internal
+      # service a sandbox may talk to; set false to deny it and give up artifact
+      # caching. Access is still authenticated per user by the token forge mints.
+      allowArtifacts: true
+      # Allow sandboxes to reach the base-image mirror directly (that pod, on its port
+      # only) so image builds pull their base — and their kaniko layer cache — from
+      # in-cluster instead of the public internet. Same narrow shape and same reason it
+      # cannot go through the proxy. Set false to deny it: builds then fall back to the
+      # origin registry, which still works but re-exposes them to its rate limits.
+      allowRegistryMirror: true
   # Run sandbox jobs in hardware-isolated kata (Cloud Hypervisor) microVMs. When true:
   #   - forge runs RUNTIME=kata (env.k8sRuntimeClass MUST be set to the VM-isolating
   #     RuntimeClass, e.g. "kata", or the chart fails to render);
@@ -428,8 +442,24 @@ forge:
     # endpoint. This NetworkPolicy closes that: it allows egress to ALL public IPs and
     # blocks every private/internal range (RFC1918 10/8·172.16/12·192.168/16, loopback
     # 127/8, link-local/metadata 169.254/16, CGNAT 100.64/10) plus anything in `blocklist`,
-    # while still permitting DNS. IPv4 only — IPv6 egress is denied. Requires a
-    # NetworkPolicy-aware CNI; inert otherwise.
+    # while still permitting DNS. IPv4 only — IPv6 egress is denied.
+    #
+    # ⚠ REQUIRES A NETWORKPOLICY-AWARE CNI, AND FAILS SILENTLY WITHOUT ONE. A
+    # NetworkPolicy is only a request to the CNI: if the cluster's CNI does not implement
+    # NetworkPolicy — kindnet (kind's default), flannel, and some managed "basic" network
+    # add-ons do not — Kubernetes still accepts and displays the object, `kubectl get
+    # networkpolicy` shows it looking entirely correct, and NOTHING is enforced. Under
+    # kata this policy is the ONLY thing between a sandbox and your internal network
+    # (the microVM is a kernel boundary, not a network one), so on such a cluster
+    # untrusted sandbox code reaches every in-cluster service — Services, ClusterIPs and
+    # pod IPs alike — with no signal that the control is doing nothing.
+    #
+    # DO NOT ASSUME — VERIFY: `helm test <release>` runs a probe (tests.forgeExecEgress)
+    # that is selected by this very policy and tries a connection the policy claims to
+    # deny; it fails the test if the connection succeeds. Run it on every cluster you
+    # deploy to, and after any CNI change. The same caveat applies to any FUTURE
+    # tightening of sandbox egress: on a non-enforcing CNI a stricter policy is exactly
+    # as inert as this one.
     egress:
       networkPolicy:
         enabled: true
@@ -774,9 +804,15 @@ events:
     databaseUrl: ""
     gatekeeperServiceKey: ""
     # Shared HMAC authenticating emitters posting to /internal/events and signing
-    # events' internal calls. Must match what emitters sign with (the former hooks
-    # trigger key during cutover). Leave empty for auto-generation.
+    # events' internal calls. Must match what emitters sign with AND what workflows
+    # verifies trigger calls with (workflows.secret.hooksTriggerKey). Leave empty to
+    # derive the same value workflows uses.
     eventsTriggerKey: ""
+    # Secret configured on the git provider's webhook (GitHub/Gitea/Forgejo). events
+    # verifies the provider HMAC on the public POST /hooks/git against it. Leave empty
+    # to keep that endpoint closed — it is never auto-generated, since the provider must
+    # be configured with the same value.
+    webhookSecret: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -860,6 +896,170 @@ git:
     caSecret: ""
     clientCertSecret: ""
     caBundle: ""
+
+# ── git_factory ───────────────────────────────────────────────────────────────
+# The git plane: it stores the bare repositories themselves and serves them over
+# Smart HTTP, so it is the one core service that holds user data on disk rather than
+# only in Postgres. A CORE service deployed by this chart (it used to be deployed at
+# runtime by builder). The git_connector broker above talks to it over the internal
+# key; conductor fronts its JSON API; git clients hit the Ingress at the bottom of
+# this block directly, because Smart HTTP is not something conductor can proxy.
+gitFactory:
+  enabled: true
+  image:
+    repository: git-factory
+    tag: ""
+  # PINNED AT 1 — do not raise, and do not give this service an HPA. The repo store is
+  # a ReadWriteOnce volume and git has no cross-node write locking, so a second replica
+  # either cannot schedule (RWO) or would corrupt objects against the repack loop.
+  # Scaling reads is a sharding/replica-node concern inside the service, not a replica
+  # count here.
+  replicaCount: 1
+  port: 9002
+  persistence:
+    # The bare repos. Disable ONLY for a throwaway install: without a PVC the store is
+    # an emptyDir and a restart destroys every pushed commit.
+    enabled: true
+    size: 20Gi
+    # Empty uses the cluster default StorageClass. To put the repo store on SHARED
+    # storage (ARCHITECTURE §5 Step 2), name a StorageClass backed by JuiceFS here and
+    # set accessMode to ReadWriteMany — see the notes on both fields below.
+    storageClass: ""
+    # Use a PVC that already exists instead of letting the chart create one. This is the
+    # normal way to attach a JuiceFS volume: the JuiceFS CSI driver, its metadata engine
+    # (CloudNativePG) and its object-storage backend are cluster-wide infrastructure with
+    # their own lifecycle, and binding their deletion to a `helm uninstall` of this
+    # release is not a trade anyone wants to make. When set, no PVC is rendered and
+    # size/storageClass/retain are ignored.
+    existingClaim: ""
+    # ReadWriteOnce (the default) means one pod owns the bytes, which is why
+    # replicaCount is pinned to 1 and the rollout strategy is Recreate.
+    #
+    # ReadWriteMany is what makes replicaCount > 1 legal, and it is ONLY safe on a
+    # filesystem that genuinely provides atomic O_CREAT|O_EXCL, atomic rename and working
+    # flock across clients — that is git's entire safety model. JuiceFS provides them;
+    # object storage mounted through FUSE (s3fs, gcsfuse, Mountpoint, rclone) does not,
+    # and corrupts repositories rather than merely being slow. The service runs a startup
+    # preflight for exactly this (env.storagePreflight below), but it can only verify the
+    # properties locally — confirming they hold ACROSS pods is a deployment check.
+    #
+    # Before running more than one replica, also make sure the stale ref-lock janitor is
+    # on (env.refLockMaxAge). Shared storage does not fix an abandoned lock file; it
+    # widens it from one host to all of them.
+    accessMode: ReadWriteOnce
+    # Mount path, exported to the service as GIT_STORAGE_ROOT.
+    mountPath: /var/lib/git-factory
+    # Keep the PVC (and the repos) when the release is uninstalled. Pushed source is not
+    # recoverable from anywhere else.
+    retain: true
+    # fsGroup makes kubelet fix ownership of the volume so the non-root container can
+    # write to it — required on a freshly provisioned block PVC, where the root is owned
+    # by root and `git init --bare` would otherwise fail on the very first repo.
+    #
+    # Set this to false for a JuiceFS (or any shared/FUSE) mount. The volume there is
+    # already owned correctly by the CSI driver, and the ownership pass is a RECURSIVE
+    # chown over the whole repo store: on a metadata-engine filesystem each chown is a
+    # transaction, so on a large store it turns pod startup into a long outage — and
+    # every replica repeats it. OnRootMismatch limits it to the case where the root's
+    # group is wrong, which is exactly the case a shared mount can hit.
+    fsGroup: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  env:
+    logLevel: info
+    otelEndpoint: ""
+    # Public base URL of the git plane — what the API reports as a repo's clone URL, so
+    # it must be an address a git client OUTSIDE the cluster can reach. Left empty it is
+    # derived from the first ingress host below (https when ingress.tls is set), which is
+    # normally what you want; set it explicitly when something else (an external LB, a
+    # different path prefix) fronts the service.
+    gitHttpBaseUrl: ""
+    # Per-repo size ceiling in MB; a push that would exceed it is rejected.
+    # Empty/0 leaves repos unlimited.
+    repoQuotaMB: ""
+    # How often the in-process repack (git maintenance) loop runs, as a Go duration
+    # e.g. "6h". Empty uses the service's own default.
+    maintenanceInterval: ""
+    # How long a git .lock file may sit untouched before the janitor treats it as
+    # abandoned and clears it, as a Go duration. A lock left by a pod that was killed
+    # mid-push blocks that ref from every pod until it is removed, and nothing can
+    # distinguish it from a push in flight — only its age.
+    #
+    # Raise it, never lower it casually. Too long leaves a ref unpushable until the
+    # next sweep and the error names the file; too short silently loses a write,
+    # because unlinking a live lock does not fail the holder. Must exceed the longest
+    # a single git process can hold a lock, which is a repack of your largest repo (or
+    # a slow pre-receive hook), not the time a push spends on the wire.
+    #
+    # Empty uses the service's own default of 1h. "0" disables the janitor.
+    refLockMaxAge: ""
+    # Startup verification of the repo store (ARCHITECTURE §5). git's correctness rests
+    # on atomic O_CREAT|O_EXCL, atomic rename and working flock; a filesystem missing
+    # them corrupts repositories instead of returning errors, so the service checks
+    # before it can accept a push.
+    #
+    #   "" / enforce — refuse to start if a property is missing (default, and correct:
+    #                  a false negative is one loud error, continuing is silent corruption)
+    #   warn         — log the failures and start anyway
+    #   off          — skip the checks
+    #
+    # Leave it alone unless a check is wrong about your storage. It matters most on the
+    # shared-storage path, where the whole point is that the service cannot tell from
+    # the inside that GIT_STORAGE_ROOT now means something entirely different.
+    storagePreflight: ""
+  secret:
+    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
+    databaseUrl: ""
+    # Optional read-replica DSN. Read-only queries use it when set.
+    databaseReadUrl: ""
+    # Must match the codearmory_git_factory entry in gatekeeper.secret.gatekeeperServices.
+    # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
+    gatekeeperServiceKey: ""
+    # Shared secret authenticating git_connector → git_factory /internal/mirrors and
+    # /internal/clone-token (the X-Internal-Key header). git derives the same key;
+    # leave empty for auto-generation (both sides agree).
+    gitFactoryInternalKey: ""
+    # HMAC key for the short-lived read-only clone tokens handed to runners. Signed and
+    # verified only inside git_factory, so it is shared with nothing. Leave empty for
+    # auto-generation.
+    cloneTokenKey: ""
+    # Shared HMAC that signs git_factory's push events to hooks; hooks, workflows and
+    # events must all carry the identical value or push-triggered pipelines 401.
+    # Auto-derived from the hooks/workflows secrets. Leave empty for auto-generation.
+    hooksTriggerKey: ""
+  tls:
+    certSecret: ""
+    clientAuth: ""
+    caSecret: ""
+    clientCertSecret: ""
+    caBundle: ""
+  # A git client speaks Smart HTTP to this service directly — conductor fronts the JSON
+  # API but cannot carry the wire protocol — so cloning/pushing from outside the cluster
+  # needs this Ingress. Without it the git plane is reachable only in-cluster.
+  ingress:
+    enabled: false
+    className: ""
+    # Defaults sized for git rather than JSON: a push uploads the whole packfile in
+    # one request body (proxy-body-size 0 = unlimited) and both fetch and push are
+    # long-lived streams, so the buffering and short timeouts an API ingress is happy
+    # with truncate clones and reject pushes. Keys are nginx-ingress annotations;
+    # substitute the equivalents when running another controller.
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "0"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    hosts:
+      - host: git.codearmory.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
 
 # ── Containers ──────────────────────────────────────────────────────────────
 # Container image registry management. Stateless (no DB). Source lives in the
@@ -1037,35 +1237,6 @@ builder:
     clientCertSecret: ""
     caBundle: ""
 
-# ── git_factory (builder-deployed; chart supplies only the git-over-HTTP door) ─
-# The git plane is deployed and registered by builder, not by this chart — builder
-# owns its Deployment/Service/PVC and deliberately renders no Ingress. Conductor
-# fronts its JSON API in-cluster, but a git client speaks Smart HTTP to the service
-# directly, so the wire routes need their own way in. Enable the Ingress below to
-# open it, and set the resulting URL as the service's GIT_HTTP_BASE_URL config key
-# (builder → services → codearmory_git_factory) so the http_url the API hands out is
-# the one a client can actually clone.
-gitFactory:
-  ingress:
-    enabled: false
-    className: ""
-    # Defaults sized for git rather than JSON: a push uploads the whole packfile in
-    # one request body (proxy-body-size 0 = unlimited) and both fetch and push are
-    # long-lived streams, so the buffering and short timeouts an API ingress is happy
-    # with truncate clones and reject pushes. Keys are nginx-ingress annotations;
-    # substitute the equivalents when running another controller.
-    annotations:
-      nginx.ingress.kubernetes.io/proxy-body-size: "0"
-      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-      nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
-    hosts:
-      - host: git.codearmory.example.com
-        paths:
-          - path: /
-            pathType: Prefix
-    tls: []
-
 # ── Integration tests (helm test) ────────────────────────────────────────────
 # Run with: helm test <release>
 # Each suite maps to a test image built from tests/<suite>/Dockerfile.
@@ -1091,6 +1262,46 @@ tests:
     image:
       repository: test-registry
       tag: ""
+  # Verifies that the forge-exec egress NetworkPolicy is actually ENFORCED by this
+  # cluster's CNI, rather than merely present in the API. Runs a probe Pod labelled
+  # app=forge in the exec namespace — so the policy selects it exactly as it selects a
+  # sandbox — and tries to reach an in-cluster address the policy denies. Reaching it
+  # fails the test: the control is inert (see forge.kata.egress). Rendered whenever
+  # either forge-exec egress policy is (kata mode, or the proxy-confining policy).
+  #
+  # The probe reports FAILURE for anything it could not positively establish, so it
+  # never passes for the wrong reason: it first proves it can reach an address the
+  # policy ALLOWS, resolves the target by name, and requires the denied connection to be
+  # silently dropped rather than refused. See the template for the full reasoning:
+  # templates/tests/forge-exec-egress-test.yaml
+  forgeExecEgress:
+    enabled: true
+    # Any image with busybox's nc, nslookup and date. Pulled as written (NOT prefixed
+    # with imageRegistry) — override for an air-gapped cluster or a private mirror.
+    image: busybox:1.36
+    # Address the policy must deny. Empty = the gatekeeper Service, which is always
+    # deployed, is always up (forge will not start without it), and is denied by both
+    # policies. Override only if you have a better always-on internal target; it must be
+    # an in-cluster address the policy genuinely denies (under kata: a private IP).
+    target: ""
+    targetPort: ""
+    # Address the policy must ALLOW, used as the probe's positive control. Empty = the
+    # first nameserver in /etc/resolv.conf on port 53 (both policies allow DNS). Point
+    # it elsewhere (e.g. the egress proxy on 3128) if your resolver refuses TCP.
+    controlHost: ""
+    controlPort: 53
+    # Seconds to wait on the denied connection. A dropping CNI makes it hang this long.
+    connectTimeoutSeconds: 6
+    # A denied connection must take at least this long to fail. A faster failure is a
+    # refusal (RST) — a dead target or a CNI that rejects instead of dropping — which
+    # proves nothing, and is reported as inconclusive (a failure). Set 0 to accept any
+    # failure as a pass, only after verifying enforcement by hand.
+    minDropSeconds: 3
+    # Run the probe under the sandbox RuntimeClass and on the sandbox nodes
+    # (forge.env.k8sRuntimeClass, forge.execScheduling), so it measures the path
+    # sandboxes actually take. Set false if those nodes cannot admit the probe — the
+    # answer is then a little weaker but still worth having.
+    useSandboxRuntime: true
 # ── PostgreSQL (Bitnami subchart) ─────────────────────────────────────────────
 postgresql:
   enabled: true
@@ -1107,7 +1318,7 @@ postgresql:
     initdb:
       scripts:
         # Only the CORE service databases (incl. the forge + workflows CI/CD pair and the
-        # DB-backed tickets + git core members; containers is stateless).
+        # DB-backed tickets + git + git_factory core members; containers is stateless).
         # Non-core services (incl. gitea_integration, now builder-deployed) are deployed
         # by builder with an admin-supplied db_url (HA Postgres / Neon / managed), so the
         # bundled subchart never provisions theirs.
@@ -1119,6 +1330,7 @@ postgresql:
           CREATE DATABASE workflows;
           CREATE DATABASE tickets;
           CREATE DATABASE git;
+          CREATE DATABASE git_factory;
           CREATE DATABASE artifacts;
           CREATE DATABASE hooks;
           CREATE DATABASE events;

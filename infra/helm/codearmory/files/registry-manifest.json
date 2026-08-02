@@ -10,42 +10,42 @@
         "method": "GET",
         "path": "/.well-known/openid-configuration",
         "action": "oidcDiscovery",
-        "resource": "gatekeeper/oidc",
+        "resource": "codearmory/gatekeeper/oidc",
         "public": true
       },
       {
         "method": "GET",
         "path": "/oauth/jwks",
         "action": "oidcJWKS",
-        "resource": "gatekeeper/oidc",
+        "resource": "codearmory/gatekeeper/oidc",
         "public": true
       },
       {
         "method": "GET",
         "path": "/oauth/authorize",
         "action": "oidcAuthorize",
-        "resource": "gatekeeper/oidc",
+        "resource": "codearmory/gatekeeper/oidc",
         "public": true
       },
       {
         "method": "POST",
         "path": "/oauth/authorize",
         "action": "oidcAuthorize",
-        "resource": "gatekeeper/oidc",
+        "resource": "codearmory/gatekeeper/oidc",
         "public": true
       },
       {
         "method": "POST",
         "path": "/oauth/token",
         "action": "oidcToken",
-        "resource": "gatekeeper/oidc",
+        "resource": "codearmory/gatekeeper/oidc",
         "public": true
       },
       {
         "method": "GET",
         "path": "/oauth/userinfo",
         "action": "oidcUserinfo",
-        "resource": "gatekeeper/oidc",
+        "resource": "codearmory/gatekeeper/oidc",
         "public": true
       },
       {
@@ -191,6 +191,72 @@
       },
       {
         "method": "POST",
+        "path": "/roles/namespace",
+        "action": "createNamespaceRole",
+        "resource": "gatekeeper/roles"
+      },
+      {
+        "method": "PUT",
+        "path": "/roles/{id}/members/{user_id}",
+        "action": "assignRole",
+        "resource": "gatekeeper/roles"
+      },
+      {
+        "method": "DELETE",
+        "path": "/roles/{id}/members/{user_id}",
+        "action": "revokeRole",
+        "resource": "gatekeeper/roles"
+      },
+      {
+        "method": "POST",
+        "path": "/projects",
+        "action": "createProject",
+        "resource": "gatekeeper/projects"
+      },
+      {
+        "method": "GET",
+        "path": "/projects",
+        "action": "listProject",
+        "resource": "gatekeeper/projects"
+      },
+      {
+        "method": "GET",
+        "path": "/projects/accessible",
+        "action": "listAccessibleProject",
+        "resource": "gatekeeper/projects"
+      },
+      {
+        "method": "GET",
+        "path": "/projects/{id}",
+        "action": "getProject",
+        "resource": "gatekeeper/projects"
+      },
+      {
+        "method": "PUT",
+        "path": "/projects/{id}",
+        "action": "updateProject",
+        "resource": "gatekeeper/projects"
+      },
+      {
+        "method": "DELETE",
+        "path": "/projects/{id}",
+        "action": "deleteProject",
+        "resource": "gatekeeper/projects"
+      },
+      {
+        "method": "POST",
+        "path": "/projects/{id}/members",
+        "action": "manageProjectMembers",
+        "resource": "gatekeeper/projects"
+      },
+      {
+        "method": "DELETE",
+        "path": "/projects/{id}/members/{user_id}",
+        "action": "manageProjectMembers",
+        "resource": "gatekeeper/projects"
+      },
+      {
+        "method": "POST",
         "path": "/permissions",
         "action": "createPermission",
         "resource": "gatekeeper/permissions"
@@ -319,13 +385,13 @@
         "method": "GET",
         "path": "/audit-logs",
         "action": "listAuditLog",
-        "resource": "gatekeeper/audit-logs"
+        "resource": "codearmory/gatekeeper/audit-logs"
       },
       {
         "method": "GET",
         "path": "/permission-checks",
         "action": "listPermissionCheck",
-        "resource": "gatekeeper/permission-checks"
+        "resource": "codearmory/gatekeeper/permission-checks"
       },
       {
         "method": "POST",
@@ -430,19 +496,19 @@
         "method": "POST",
         "path": "/tokens",
         "action": "createToken",
-        "resource": "{username}/gatekeeper/tokens"
+        "resource": "gatekeeper/tokens"
       },
       {
         "method": "GET",
         "path": "/tokens",
         "action": "listToken",
-        "resource": "{username}/gatekeeper/tokens"
+        "resource": "gatekeeper/tokens"
       },
       {
         "method": "DELETE",
         "path": "/tokens/{id}",
         "action": "deleteToken",
-        "resource": "{username}/gatekeeper/tokens"
+        "resource": "gatekeeper/tokens"
       }
     ],
     "default_grants": [
@@ -528,6 +594,32 @@
       {
         "grant_on": "user",
         "actions": [
+          "createNamespaceRole",
+          "assignRole",
+          "revokeRole"
+        ],
+        "resources": [
+          "{username}/gatekeeper/roles"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
+          "createProject",
+          "listProject",
+          "listAccessibleProject",
+          "getProject",
+          "updateProject",
+          "deleteProject",
+          "manageProjectMembers"
+        ],
+        "resources": [
+          "{username}/gatekeeper/projects"
+        ]
+      },
+      {
+        "grant_on": "user",
+        "actions": [
           "createToken",
           "listToken",
           "deleteToken"
@@ -573,91 +665,91 @@
         "method": "GET",
         "path": "/images",
         "action": "listImage",
-        "resource": "forge/images"
+        "resource": "codearmory/forge/images"
       },
       {
         "method": "GET",
         "path": "/runner-classes",
         "action": "listRunnerClass",
-        "resource": "forge/runner-classes"
+        "resource": "codearmory/forge/runner-classes"
       },
       {
         "method": "POST",
         "path": "/runner-classes",
         "action": "createRunnerClass",
-        "resource": "forge/runner-classes"
+        "resource": "codearmory/forge/runner-classes"
       },
       {
         "method": "GET",
         "path": "/runner-classes/{name}",
         "action": "getRunnerClass",
-        "resource": "forge/runner-classes/{name}"
+        "resource": "codearmory/forge/runner-classes/{name}"
       },
       {
         "method": "PUT",
         "path": "/runner-classes/{name}",
         "action": "updateRunnerClass",
-        "resource": "forge/runner-classes/{name}"
+        "resource": "codearmory/forge/runner-classes/{name}"
       },
       {
         "method": "DELETE",
         "path": "/runner-classes/{name}",
         "action": "deleteRunnerClass",
-        "resource": "forge/runner-classes/{name}"
+        "resource": "codearmory/forge/runner-classes/{name}"
       },
       {
         "method": "GET",
         "path": "/runtime-backends",
         "action": "listRuntimeBackend",
-        "resource": "forge/runtime-backends"
+        "resource": "codearmory/forge/runtime-backends"
       },
       {
         "method": "POST",
         "path": "/runtime-backends",
         "action": "createRuntimeBackend",
-        "resource": "forge/runtime-backends"
+        "resource": "codearmory/forge/runtime-backends"
       },
       {
         "method": "GET",
         "path": "/runtime-backends/{name}",
         "action": "getRuntimeBackend",
-        "resource": "forge/runtime-backends/{name}"
+        "resource": "codearmory/forge/runtime-backends/{name}"
       },
       {
         "method": "PUT",
         "path": "/runtime-backends/{name}",
         "action": "updateRuntimeBackend",
-        "resource": "forge/runtime-backends/{name}"
+        "resource": "codearmory/forge/runtime-backends/{name}"
       },
       {
         "method": "DELETE",
         "path": "/runtime-backends/{name}",
         "action": "deleteRuntimeBackend",
-        "resource": "forge/runtime-backends/{name}"
+        "resource": "codearmory/forge/runtime-backends/{name}"
       },
       {
         "method": "GET",
         "path": "/concurrency-limits",
         "action": "listConcurrencyLimit",
-        "resource": "forge/concurrency-limits"
+        "resource": "codearmory/forge/concurrency-limits"
       },
       {
         "method": "GET",
         "path": "/concurrency-limits/{scope}/{scope_id}",
         "action": "getConcurrencyLimit",
-        "resource": "forge/concurrency-limits/{scope}/{scope_id}"
+        "resource": "codearmory/forge/concurrency-limits/{scope}/{scope_id}"
       },
       {
         "method": "PUT",
         "path": "/concurrency-limits/{scope}/{scope_id}",
         "action": "setConcurrencyLimit",
-        "resource": "forge/concurrency-limits/{scope}/{scope_id}"
+        "resource": "codearmory/forge/concurrency-limits/{scope}/{scope_id}"
       },
       {
         "method": "DELETE",
         "path": "/concurrency-limits/{scope}/{scope_id}",
         "action": "deleteConcurrencyLimit",
-        "resource": "forge/concurrency-limits/{scope}/{scope_id}"
+        "resource": "codearmory/forge/concurrency-limits/{scope}/{scope_id}"
       },
       {
         "method": "POST",
@@ -980,8 +1072,8 @@
           "getRunnerClass"
         ],
         "resources": [
-          "{username}/forge/runner-classes",
-          "{username}/forge/runner-classes/*"
+          "codearmory/forge/runner-classes",
+          "codearmory/forge/runner-classes/*"
         ]
       },
       {
@@ -991,8 +1083,8 @@
           "getRuntimeBackend"
         ],
         "resources": [
-          "{username}/forge/runtime-backends",
-          "{username}/forge/runtime-backends/*"
+          "codearmory/forge/runtime-backends",
+          "codearmory/forge/runtime-backends/*"
         ]
       },
       {
@@ -1001,7 +1093,7 @@
           "listImage"
         ],
         "resources": [
-          "{username}/forge/images"
+          "codearmory/forge/images"
         ]
       }
     ]
@@ -1227,31 +1319,31 @@
         "method": "GET",
         "path": "/services",
         "action": "listOrgServices",
-        "resource": "builder/orgs/default"
+        "resource": "codearmory/builder/orgs/default"
       },
       {
         "method": "GET",
         "path": "/services/{service}",
         "action": "getOrgService",
-        "resource": "builder/orgs/default"
+        "resource": "codearmory/builder/orgs/default"
       },
       {
         "method": "PUT",
         "path": "/services/{service}",
         "action": "configureOrgService",
-        "resource": "builder/orgs/default"
+        "resource": "codearmory/builder/orgs/default"
       },
       {
         "method": "DELETE",
         "path": "/services/{service}",
         "action": "deleteOrgService",
-        "resource": "builder/orgs/default"
+        "resource": "codearmory/builder/orgs/default"
       },
       {
         "method": "PATCH",
         "path": "/services/{service}/image",
         "action": "setOrgServiceImage",
-        "resource": "builder/orgs/default"
+        "resource": "codearmory/builder/orgs/default"
       }
     ],
     "actions": [],
@@ -1583,6 +1675,208 @@
     ]
   },
   {
+    "name": "codearmory_git_factory",
+    "url": "http://git-factory:9002",
+    "description": "The git plane of the codearmory platform (repos + Smart-HTTP)",
+    "forward_auth": true,
+    "service_key": "git-factory-registry-local-secret",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/ui",
+        "action": "serveUI",
+        "resource": "codearmory_git_factory/ui",
+        "public": true
+      },
+      {
+        "method": "GET",
+        "path": "/ui/",
+        "action": "serveUI",
+        "resource": "codearmory_git_factory/ui",
+        "public": true
+      },
+      {
+        "method": "GET",
+        "path": "/repos",
+        "action": "listRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos",
+        "action": "createRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}",
+        "action": "getRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/commits",
+        "action": "listCommit",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/readme",
+        "action": "getReadme",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "PATCH",
+        "path": "/repos/{id}",
+        "action": "updateRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repos/{id}",
+        "action": "deleteRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/branches",
+        "action": "listBranch",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/tags",
+        "action": "listTag",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "PUT",
+        "path": "/repos/{id}/default-branch",
+        "action": "setDefaultBranch",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/tree",
+        "action": "getTree",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/blob",
+        "action": "getBlob",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/archive",
+        "action": "getArchive",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/collaborators",
+        "action": "shareRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "PUT",
+        "path": "/repos/{id}/collaborators",
+        "action": "shareRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repos/{id}/collaborators/{user}",
+        "action": "shareRepo",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/pulls",
+        "action": "listPull",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/pulls",
+        "action": "createPull",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/pulls/{number}",
+        "action": "getPull",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/pulls/{number}/merge",
+        "action": "mergePull",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "POST",
+        "path": "/repos/{id}/pulls/{number}/close",
+        "action": "updatePull",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "GET",
+        "path": "/repos/{id}/protections",
+        "action": "listProtection",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "PUT",
+        "path": "/repos/{id}/protections",
+        "action": "setProtection",
+        "resource": "codearmory_git_factory/repos"
+      },
+      {
+        "method": "DELETE",
+        "path": "/repos/{id}/protections/{pattern}",
+        "action": "setProtection",
+        "resource": "codearmory_git_factory/repos"
+      }
+    ],
+    "actions": [],
+    "default_grants": [
+      {
+        "grant_on": "user",
+        "actions": [
+          "createRepo",
+          "listRepo",
+          "getRepo",
+          "listCommit",
+          "getReadme",
+          "updateRepo",
+          "deleteRepo",
+          "readRepo",
+          "writeRepo",
+          "listBranch",
+          "listTag",
+          "setDefaultBranch",
+          "getTree",
+          "getBlob",
+          "getArchive",
+          "shareRepo",
+          "listPull",
+          "createPull",
+          "getPull",
+          "mergePull",
+          "updatePull",
+          "listProtection",
+          "setProtection"
+        ],
+        "resources": [
+          "{username}/codearmory_git_factory/repos",
+          "{username}/codearmory_git_factory/repos/*"
+        ]
+      }
+    ]
+  },
+  {
     "name": "containers",
     "url": "http://containers:8089",
     "description": "Container image registry management",
@@ -1617,31 +1911,31 @@
         "method": "GET",
         "path": "/registries",
         "action": "listRegistry",
-        "resource": "containers/registries"
+        "resource": "codearmory/containers/registries"
       },
       {
         "method": "POST",
         "path": "/registries",
         "action": "createRegistry",
-        "resource": "containers/registries"
+        "resource": "codearmory/containers/registries"
       },
       {
         "method": "GET",
         "path": "/registries/{name}",
         "action": "getRegistry",
-        "resource": "containers/registries/{name}"
+        "resource": "codearmory/containers/registries/{name}"
       },
       {
         "method": "PATCH",
         "path": "/registries/{name}",
         "action": "updateRegistry",
-        "resource": "containers/registries/{name}"
+        "resource": "codearmory/containers/registries/{name}"
       },
       {
         "method": "DELETE",
         "path": "/registries/{name}",
         "action": "deleteRegistry",
-        "resource": "containers/registries/{name}"
+        "resource": "codearmory/containers/registries/{name}"
       }
     ],
     "actions": [],

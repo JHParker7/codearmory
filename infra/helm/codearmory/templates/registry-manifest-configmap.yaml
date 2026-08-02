@@ -33,6 +33,14 @@
 {{- if .Values.containers.enabled -}}
 {{- $manifest = replace "http://containers:"        (printf "http://%s-containers:" $fullname)        $manifest -}}
 {{- end -}}
+{{- /* git_factory: its compose hostname may be spelled either way (the registry name is
+       codearmory_git_factory, the k8s Service is git-factory), so rewrite both — a missed
+       spelling leaves conductor routing at a host that does not resolve in-cluster. Both
+       replaces are no-ops when the manifest does not contain them. */ -}}
+{{- if .Values.gitFactory.enabled -}}
+{{- $manifest = replace "http://git-factory:"       (printf "http://%s-git-factory:" $fullname)       $manifest -}}
+{{- $manifest = replace "http://git_factory:"       (printf "http://%s-git-factory:" $fullname)       $manifest -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

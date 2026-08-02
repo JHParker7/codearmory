@@ -17,6 +17,19 @@ Conductor is the public-facing API gateway.
     kubectl port-forward svc/{{ include "codearmory.fullname" . }}-conductor {{ .Values.conductor.port }}:{{ .Values.conductor.port }} -n {{ .Release.Namespace }}
 {{- end }}
 
+{{- if .Values.gitFactory.enabled }}
+{{- if .Values.gitFactory.ingress.enabled }}
+
+The git plane (git_factory) is cloned from and pushed to DIRECTLY — conductor fronts its
+API but not the git wire protocol:
+  http{{ if .Values.gitFactory.ingress.tls }}s{{ end }}://{{ (first .Values.gitFactory.ingress.hosts).host }}
+{{- else }}
+
+The git plane (git_factory) has no Ingress, so its repos can only be cloned from inside
+the cluster. Set gitFactory.ingress.enabled (and a host) to let developers clone and push.
+{{- end }}
+{{- end }}
+
 This chart deploys the CORE services (gatekeeper, registry, conductor, builder, portal,
 and the forge + workflows CI/CD pair — the minimal set needed to run pipelines out of the
 box). Every other service (blueprints, tickets, hooks, containers, notifications,

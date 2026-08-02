@@ -73,6 +73,20 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-git
                   key: git-internal-key
+            {{- if .Values.gitFactory.enabled }}
+            # git_factory is the platform's own git backend (a core service since it moved
+            # into this chart). The broker calls its /internal/mirrors and
+            # /internal/clone-token surfaces to pull-through-mirror an upstream repo and to
+            # mint clone credentials; both are authenticated by the shared X-Internal-Key
+            # below, NOT through conductor. Unset both and the mirror path stays inert.
+            - name: GIT_FACTORY_URL
+              value: "http://{{ $fullname }}-git-factory:{{ .Values.gitFactory.port }}"
+            - name: GIT_FACTORY_INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-git
+                  key: git-factory-internal-key
+            {{- end }}
             {{- include "codearmory.tls.envs" .Values.git.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.git.tls) }}
           volumeMounts:
