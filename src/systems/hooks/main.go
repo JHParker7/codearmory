@@ -31,6 +31,33 @@ var (
 	httpClient       *http.Client
 )
 
+// migrateEventsToJSONB converts a legacy TEXT[] pipeline_rules.events column to JSONB.
+//
+// Everything is inside one DO block so the ALTER runs only when the column is actually
+// a text array: ALTER TABLE accepts no WHERE clause, so the type test has to be
+// procedural. to_regclass resolves the table through the connection's search_path and
+// yields NULL on a fresh database where the table does not exist yet (AutoMigrate
+// creates it right after, already JSONB), making this a no-op there rather than an
+// error. Re-running it once the column is jsonb is also a no-op — the format_type test
+// no longer matches — so it is safe on every start.
+const migrateEventsToJSONB = `
+DO $$
+DECLARE
+  tbl regclass := to_regclass('pipeline_rules');
+BEGIN
+  IF tbl IS NOT NULL AND EXISTS (
+    SELECT 1 FROM pg_attribute a
+    WHERE a.attrelid = tbl
+      AND a.attname = 'events'
+      AND a.attnum > 0
+      AND NOT a.attisdropped
+      AND format_type(a.atttypid, a.atttypmod) = 'text[]'
+  ) THEN
+    EXECUTE format('ALTER TABLE %s ALTER COLUMN events TYPE jsonb USING to_jsonb(events)', tbl);
+  END IF;
+END
+$$;`
+
 // initHTTPClient builds an instrumented HTTP client with optional TLS client cert.
 // Set TLS_CLIENT_CERT_FILE + TLS_CLIENT_KEY_FILE to present a cert on outbound calls.
 // Set TLS_CA_FILE to trust a custom CA for server certificate verification.
@@ -212,11 +239,19 @@ func main() {
 	initMetrics()
 	httpClient = initHTTPClient()
 
-	// Safely migrate existing TEXT[] events column to JSONB.
-	func() {
-		defer func() { recover() }() //nolint:errcheck
-		connect().Exec("ALTER TABLE pipeline_rules ALTER COLUMN events TYPE jsonb USING to_jsonb(events) WHERE pg_typeof(events)::text = 'text[]'")
-	}()
+	// Convert a pre-existing TEXT[] pipeline_rules.events column to JSONB, which is
+	// what the PipelineRule model now serializes to. AutoMigrate will not change the
+	// type itself, so a deployment that predates the change keeps a text[] column and
+	// fails on every rule read/write until this runs.
+	//
+	// It has to be conditional (a bare ALTER on an already-JSONB column errors), and
+	// ALTER TABLE takes no WHERE clause — the earlier one-liner was invalid SQL that
+	// Postgres rejected outright, and the error went into a bare recover(), so on the
+	// very deployments it was written for the column was silently never converted. A
+	// DO block does the type test properly, and the error is logged rather than eaten.
+	if err := connect().Exec(migrateEventsToJSONB).Error; err != nil {
+		slog.Error("events column migration (text[] → jsonb) failed; rule reads/writes will fail if the column is still text[]", "error", err)
+	}
 
 	if err := connect().AutoMigrate(&PipelineRule{}, &HookEvent{}, &HookTrigger{}, &HookTriggerRetry{}); err != nil {
 		slog.Error("failed to migrate database", "error", err)
