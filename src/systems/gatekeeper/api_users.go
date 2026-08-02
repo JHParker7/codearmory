@@ -588,6 +588,20 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	span.AddEvent("user.found", trace.WithAttributes(attribute.String("user.id", user.UserID)))
 
+	// The platform account owns instance configuration; it is a subject for audit
+	// attribution, never a login. Answered exactly like an unknown email — same status,
+	// same dummy comparison to hold the timing — so its existence cannot be probed for.
+	// Its stored hash is already unusable (see lockedPasswordHash); this is the explicit
+	// rule, so the account stays locked even if that ever changed.
+	if isPlatformAccount(user) {
+		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(req.Password)) //nolint:errcheck
+		span.SetStatus(codes.Error, "login attempt on the platform account")
+		slog.WarnContext(ctx, "login failed: the platform account cannot be logged into", "user_id", user.UserID)
+		meterLogins.Add(ctx, 1, metric.WithAttributes(attribute.String("status", "failure")))
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
 	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(req.Password)); err != nil {
 		span.SetStatus(codes.Error, "password mismatch")
 		slog.WarnContext(ctx, "login failed: password mismatch", "user_id", user.UserID)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -11,11 +12,53 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
+// reservedUsernames are names no user may hold, because each is already a NAMESPACE
+// PREFIX in the RBAC resource grammar. A resource reads "<owner>/<service>/…", and the
+// owner is either a username, or one of these literals:
+//
+//	codearmory/…        the instance itself — platform-owned config (runner classes,
+//	                    allowed images, OIDC settings, the audit log)
+//	org/<name>/…        an organisation
+//	project/<slug>/…    a project
+//
+// A user holding one of these names would own that namespace. Registering as
+// "codearmory" would make every platform resource evaluate inside that user's space,
+// which is a privilege-escalation route, not a cosmetic clash.
+//
+// Enforced HERE rather than in the signup handler on purpose: users are created by
+// signup, by invite acceptance, by the OIDC/OAuth identity path, and by the env-seeded
+// bootstrap admin. A check per handler is a check someone adds a fourth path without —
+// which is the same "one missed filter" shape as the cross-tenant leaks this codebase
+// has already had. Add and Update are the only ways a username reaches a row, so this
+// is the narrowest point that covers all of them, rename included.
+//
+// Matched case-insensitively. "CodeArmory" would not collide in the resource string
+// (matching is exact), but it is an impersonation of the platform owner and there is no
+// legitimate reason to allow it.
+var reservedUsernames = map[string]bool{
+	"codearmory": true,
+	"org":        true,
+	"project":    true,
+}
+
+// checkReservedUsername rejects a username that would claim a reserved namespace.
+func checkReservedUsername(username string) error {
+	if reservedUsernames[strings.ToLower(strings.TrimSpace(username))] {
+		return fmt.Errorf("username %q is reserved: it names an RBAC namespace prefix", username)
+	}
+	return nil
+}
+
 // Add inserts the user. Nil OrgID, TeamID, and RoleID are written as NULL.
 func (user User) Add(ctx context.Context) error {
 	ctx, span := otel.Tracer("gatekeeper").Start(ctx, "db.user.add")
 	defer span.End()
 	span.SetAttributes(attribute.String("user.id", user.UserID))
+	if err := checkReservedUsername(user.Username); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
 	user.Active = true
 	if err := connect().WithContext(ctx).Create(&user).Error; err != nil {
 		span.RecordError(err)
@@ -51,6 +94,13 @@ func (user User) Update(ctx context.Context) error {
 	}
 	if user.Username == "" || user.Email == "" {
 		err := fmt.Errorf("user update: refusing to blank username/email for %s — Get() the user, mutate it, then Update()", user.UserID)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	// Rename is the other way into a reserved namespace, and the easier one to forget:
+	// signup is the path everyone thinks to guard.
+	if err := checkReservedUsername(user.Username); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return err

@@ -215,6 +215,7 @@ func main() {
 		slog.Warn("membership backfill failed; existing users may not appear in their org memberships until re-run", "error", err)
 	}
 	seedServiceAccounts(ctx)
+	seedPlatformAccount(ctx)
 	seedAdminUser(ctx)
 	seedSignupPolicy(ctx)
 	seedSignupAllowlist(ctx)

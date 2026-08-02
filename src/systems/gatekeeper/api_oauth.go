@@ -345,6 +345,15 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		renderError("Invalid email or password.")
 		return
 	}
+	// The platform account owns instance configuration; it is a subject for audit
+	// attribution, never a login. Answered exactly like an unknown email — same message,
+	// same dummy comparison — so its existence cannot be probed for here.
+	if isPlatformAccount(user) {
+		bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password)) //nolint:errcheck
+		slog.WarnContext(r.Context(), "oauth authorize: login attempt on the platform account refused")
+		renderError("Invalid email or password.")
+		return
+	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(password)); err != nil {
 		slog.WarnContext(r.Context(), "oauth authorize: bad password", "user_id", user.UserID)
 		renderError("Invalid email or password.")
