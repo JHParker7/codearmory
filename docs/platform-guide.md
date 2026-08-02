@@ -12,12 +12,15 @@ This guide explains what each CodeArmory service does, how they fit together, an
 4. [Service Discovery — Registry](#service-discovery--registry)
 5. [Sandboxed Execution — Forge](#sandboxed-execution--forge)
 6. [Git Credentials — Git](#git-credentials--git)
-7. [Pipeline Orchestration — Workflows](#pipeline-orchestration--workflows)
-8. [Git Webhooks — Hooks](#git-webhooks--hooks)
-9. [Cluster Integrations — Outposts](#cluster-integrations--outposts)
-10. [CLI — Armory](#cli--armory)
-11. [Observability](#observability)
-12. [Running the stack](#running-the-stack)
+7. [Git Hosting — git_factory](#git-hosting--git_factory)
+8. [Pipeline Orchestration — Workflows](#pipeline-orchestration--workflows)
+9. [Git Webhooks — Hooks](#git-webhooks--hooks)
+10. [Issue Tracking — Tickets](#issue-tracking--tickets)
+11. [Images and Artifacts — Containers and Artifacts](#images-and-artifacts--containers-and-artifacts)
+12. [Cluster Integrations — Outposts](#cluster-integrations--outposts)
+13. [CLI — Armory](#cli--armory)
+14. [Observability](#observability)
+15. [Running the stack](#running-the-stack)
 
 ---
 
@@ -243,6 +246,65 @@ A Forge job's `secret_ref` of the form `git:<https-repo-url>` makes Forge call t
 
 ---
 
+## Git Hosting — git_factory
+
+**Port:** 9002 · **Service identity:** `codearmory_git_factory`
+
+Where [git_connector](#git-credentials--git) brokers access to *someone else's* git server,
+**git_factory is a git server**. It stores bare repositories and serves them over Smart
+HTTP, so the platform can host the code it builds. It is also one of git_connector's
+backends, so hosting here is an option rather than a migration — repos on GitHub, GitLab
+or Forgejo keep working exactly as before.
+
+> **Naming.** The directory and Go module are `git-factory`, but the service registers as
+> `codearmory_git_factory`, which is also the first segment of every RBAC resource. The
+> module name is not the service identity.
+
+### What it does
+
+- **Repositories** over `git clone` / `git push`, authorised by Gatekeeper. Repos belong
+  to a user or an org namespace and are addressed on the wire as `/{ns}/{repo}.git`.
+- **Collaborators** — share a repo with another user at a read or write level, expressed
+  as gatekeeper namespace roles rather than a private ACL.
+- **Visibility** — a public repo authorises reads with no grant at all.
+- **Branch protection** and **pull requests** (open, close, merge).
+- **Pull-through mirrors** — hold a warm copy of an upstream repo so CI clones stay
+  in-cluster instead of paying a full clone against the upstream every run. Opt in per
+  backend with git_connector's `prefer_mirror`; nothing in Forge changes, only the URL
+  the broker hands back.
+- **Clone tokens** — short-lived HMAC tokens so a runner can clone without a user
+  credential.
+
+### Storage
+
+Repositories live under `GIT_STORAGE_ROOT`, and **this is the only copy of pushed
+source** — unlike a cache, nothing else can reconstruct it. The on-disk path derives from
+a repo's stable id, never its name, so renaming a repo is a metadata-only change.
+
+Because that root is "just a path", pointing it at the wrong kind of filesystem is a
+silent catastrophe rather than an error: git's correctness depends on atomic
+`O_CREAT|O_EXCL`, atomic `rename()` and enforced advisory locking, and object storage
+mounted through FUSE (s3fs, gcsfuse, Mountpoint, rclone) provides none of them and
+corrupts repositories instead of failing. The service therefore **verifies all three at
+startup and refuses to start** when one is missing (`GIT_STORAGE_PREFLIGHT`).
+
+The service runs as a **single replica** by default: one pod owns the bytes and git has
+no cross-node write locking. Scaling out requires shared storage — see
+[ARCHITECTURE §5](git-factory/ARCHITECTURE.md) — and the chart refuses at render time to
+produce a configuration that scales without it.
+
+### Per-record authorisation
+
+git_factory is the reference implementation of the platform's **owner-first** resource
+convention. A per-record resource names the repo's *owner* —
+`<namespace>/codearmory_git_factory/repos/<id>` — rather than being scoped to whoever
+asked, so a permission check is a real statement about that repo. Handlers load the repo
+*before* checking, and a denial is rewritten to **404** so existence does not leak.
+
+See [git_factory docs](git-factory/README.md).
+
+---
+
 ## Pipeline Orchestration — Workflows
 
 **Port:** 8085
@@ -345,6 +407,48 @@ Configure your Git provider to send webhook payloads to `http://conductor:8080/h
 ### Supported event types
 
 Hooks processes any webhook payload format that includes repository and branch information. Standard events include `push`, `pull_request`, `tag`, and `release`. Multiple pipeline rules can match the same event.
+
+---
+
+## Issue Tracking — Tickets
+
+**Port:** 8086
+
+Tickets is the platform's issue tracker: **boards**, **tickets**, **comments**, and
+**custom fields**. It exists so work items and the builds that address them live in one
+system — a ticket can carry a linked pipeline (`workflow_id`), a specific run (`run_id`),
+and a sandboxed execution (`forge_execution_id`), which is what lets a pipeline open,
+update or close a ticket as a step rather than through an external integration.
+
+### Boards and field definitions
+
+A board groups tickets and owns its own **status columns** and **priority options** —
+they are not merged across boards, so one team's workflow states do not leak into
+another's. A board with none configured falls back to the instance-wide defaults.
+
+Those instance-wide defaults are **platform-owned** (`codearmory/tickets/field-defs`),
+not owned by any user or org: deleting them would remove the default statuses for
+everyone and break ticket creation platform-wide, so changing them requires an admin
+grant rather than an ordinary user's own permissions.
+
+### Projects
+
+A board may be filed into a gatekeeper **Project**, in which case access is granted by a
+project role as well as by ownership — the "owner OR project" gate. That is how a board
+is shared with a team without handing over the owner's namespace.
+
+---
+
+## Images and Artifacts — Containers and Artifacts
+
+**Containers — port 8089.** A Docker **registry proxy** giving each tenant its own image
+repositories, so images built by a pipeline have somewhere to live inside the platform.
+Registry configuration itself is platform-owned (`codearmory/containers/registries`), so
+only an admin can add or retarget a registry, while ordinary users work within their own
+namespace.
+
+**Artifacts — port 8097.** Stores build artifacts produced by runs — the non-image
+outputs a pipeline needs to keep or hand to a later step.
 
 ---
 

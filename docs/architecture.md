@@ -10,13 +10,28 @@
 | Builder                                              | 8095 | Org control plane + runtime deployer/registrar of optional service modules |
 | Portal                                               | —    | Web UI — React SPA + Express BFF proxying to Conductor |
 | [Forge](forge/architecture.md)                       | 8083 | Sandboxed container execution |
+| [Egress Proxy](egress-proxy/README.md)               | 3128 | Allowlist-enforcing proxy governing Forge sandbox egress |
 | [git_connector](git/README.md)                       | 8096 | Git credential broker — mints/brokers clone credentials for linked backends |
+| [git_factory](git-factory/README.md)                 | 9002 | The platform's own git host — bare repos + Smart HTTP. Registered as `codearmory_git_factory` |
 | [Workflows](workflows/architecture.md)               | 8085 | CI/CD pipeline orchestrator |
 | [Hooks](hooks/architecture.md)                       | 8087 | Webhook receiver and pipeline trigger |
+| [Events](events/design.md)                           | 8093 | Event bus — triggers, actions, HMAC intake |
+| Tickets                                              | 8086 | Issue tracker — boards, tickets, comments, custom fields |
+| Containers                                           | 8089 | Docker registry proxy — per-tenant image repositories |
+| Artifacts                                            | 8097 | Build artifact store |
 | [Outpost Gateway](outpost-gateway/README.md)         | 8092 | Outpost-facing connection point + event backbone |
 | [Outpost](outpost/README.md)                         | —    | User-deployed in-cluster agent (pluggable integration modules) |
 
 The platform is modular. The services above are the core that ships in this repo; additional capabilities are deployed and registered at runtime as **modules by Builder**.
+
+**Two git services, easily confused.** *git_connector* (directory `src/systems/git`) is
+the backend-agnostic **credential broker**: it mints short-lived clone credentials for
+whatever backend a repo lives on — GitHub, GitLab, Forgejo, generic. *git_factory*
+(`src/systems/git-factory`) is the **git plane itself**: it stores the repositories and
+serves them over Smart HTTP, and is one of git_connector's backends. Note that
+git_factory's directory and Go module are `git-factory`, but its service identity —
+what it registers under and the first segment of every RBAC resource — is
+`codearmory_git_factory`.
 
 ## Service topology
 

@@ -2,8 +2,9 @@
 
 `builder` (`:8095`) lets org admins **enable, disable, configure, register and
 remove** services for their org in a user-friendly way. It is the declarative
-desired-state store that a reconciling controller (Phase 2) will turn into actual
-per-org workloads.
+desired-state store, and its **reconciler** (`reconciler.go`, started from `main`)
+turns that desired state into actual per-org workloads: enabling a non-core service
+deploys it and registers it with the registry at runtime, with no chart edit.
 
 ## Model
 
@@ -16,8 +17,8 @@ Each `(org, service)` row carries:
 
 - `enabled` — on/off for that org;
 - `kind` — `platform` (a toggle/override of a registered service) or `custom`
-  (an org-declared service, to be reconciled in Phase 2);
-- `config` — free-form JSON the service (or the Phase 2 controller) consumes;
+  (an org-declared service, deployed by the reconciler);
+- `config` — free-form JSON the service (or the reconciler) consumes;
 - `image` / `port` — for `custom` services.
 
 The control-plane core (`gatekeeper`, `conductor`, `registry`, `builder`) is
@@ -26,17 +27,31 @@ always enabled and cannot be toggled off.
 ## API
 
 All routes are reached through conductor (`/builder/...`) and are authorised by
-gatekeeper against `builder/orgs/{id}`. Use the literal id `default` to manage the
-baseline (platform admins only).
+gatekeeper against the single platform-owned resource
+**`codearmory/builder/orgs/default`**.
+
+That resource names the **platform** as owner rather than templating an org id, and
+that is deliberate. Conductor can only template a resource from path parameters, so an
+`{id}`-shaped resource would have been rewritten to the *caller's* namespace and
+matched identically for every org — a per-org gate in appearance only. Builder
+administers the instance, so the honest resource is one platform-owned string that only
+an admin's grant matches. `builder/api_org_services.go` re-checks the same constant, and
+a test guards the two against drifting apart (if they diverge, conductor lets a request
+through and builder refuses it, or the manifest loosens and only builder's check still
+holds).
 
 | Method | Path | Action |
 |---|---|---|
-| GET | `/orgs/{id}/services` | `listOrgServices` |
-| GET | `/orgs/{id}/services/{service}` | `getOrgService` |
-| PUT | `/orgs/{id}/services/{service}` | `configureOrgService` |
-| DELETE | `/orgs/{id}/services/{service}` | `deleteOrgService` |
+| GET | `/services` | `listOrgServices` |
+| GET | `/services/{service}` | `getOrgService` |
+| PUT | `/services/{service}` | `configureOrgService` |
+| DELETE | `/services/{service}` | `deleteOrgService` |
+| PATCH | `/services/{service}/image` | `setOrgServiceImage` |
 
-`GET /orgs/{id}/services` returns the live registry catalog overlaid with the
+`PATCH /services/{service}/image` retargets a service at a new image — the endpoint CI
+uses to roll out a freshly built tag.
+
+`GET /services` returns the live registry catalog overlaid with the
 default baseline and the org's overrides, so the admin UI lists every available
 service with its effective state and `source` (`catalog`/`default`/`override`/
 `custom`). `DELETE` removes an override (reverting to the baseline) or deletes a
@@ -120,7 +135,7 @@ replaceable. A service that keeps state **on disk** declares it in its def:
 ```json
 "infra": {
   "persistence": {
-    "mountPath": "/var/lib/git-factory",
+    "mountPath": "/var/lib/<service>",
     "size": "20Gi",
     "storageClass": "",
     "accessMode": "ReadWriteOnce"
@@ -179,13 +194,11 @@ from the chart, applied separately. The cost is that such a service is not exter
 reachable until someone applies it; the benefit is that builder's scope stays "the
 workload", with no annotation-passthrough surface to maintain.
 
-That Ingress ships in the chart for the one service that needs it today: set
-`gitFactory.ingress.enabled=true` to front builder's `<prefix>-git-factory` Service
-with a git-shaped Ingress (`proxy-body-size: 0`, hour-long read/send timeouts,
-request buffering off). Then set the host it lands on as the service's
-`GIT_HTTP_BASE_URL` config key (it is already in the service def's `optionalConfig`,
-so it stays config and never needs a migration) — otherwise the API keeps handing out
-its `http://localhost:<port>` fallback, which nothing outside the pod can clone.
+No builder-deployed service needs that Ingress today. git_factory used to be the one
+that did, but it is now an in-repo **core** service: the chart owns its Deployment,
+Service and Ingress outright (`gitFactory.ingress.enabled=true`), so none of it routes
+through builder any more. The escape hatch above still stands for a future service that
+needs to be reachable from outside the cluster.
 
 ## Dynamic provisioning (no Helm change)
 

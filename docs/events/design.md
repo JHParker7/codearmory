@@ -105,8 +105,20 @@ Rules:
 ## 6. Emission
 
 - SDK helper: `events.Emit(ctx, envelope)` — POSTs to `EVENTS_URL/internal/events` with
-  `X-Events-Token` (HMAC-SHA256 over `id:type:source:subject:org:user:ts`) using the shared
-  `EVENTS_TRIGGER_KEY`, mirroring the current hooks/outpost HMAC scheme.
+  `X-Events-Token` (HMAC-SHA256 over
+  `event:id:type:source:subject:org:user:sha256(data):ts`) and `X-Events-Timestamp`, using
+  the shared `EVENTS_TRIGGER_KEY`, mirroring the current hooks/outpost HMAC scheme. The MAC
+  covers the tenant, subject and a digest of `data` — everything that decides what the event
+  does — and the timestamp must be within ±30s, the window every internal HMAC on the
+  platform uses. The `data` digest is over its canonical JSON (compact, keys sorted), which
+  is what Go's `encoding/json` emits.
+- External git webhooks (`POST /hooks/git`) are the one public intake and carry no internal
+  token: they are authenticated by the provider HMAC over the raw body
+  (`X-Hub-Signature-256: sha256=<hex>` or `X-Gitea-Signature: <hex>`) keyed on
+  `EVENTS_WEBHOOK_SECRET`. Unset, the endpoint rejects everything — an unsigned webhook is
+  never dispatched. The secret is deployment-wide, so it attests the payload (including the
+  tenant it names) came from the operator-configured webhook, not that a given repo belongs
+  to that tenant; per-repo secrets are what would make that binding tenant-specific.
 - **Reliable emit via the transactional outbox**: the producer writes the event to its own
   `outbox` table in the same DB transaction as the state change, and a background flusher
   ships it to events and marks it sent. This guarantees "state changed ⇒ event emitted"
@@ -173,7 +185,7 @@ actor — without new code per use case. `ref_filter` becomes sugar for
 | `run_pipeline` | start a workflow run with templated inputs | workflows |
 | `create_ticket` / `comment` / `update_ticket` | lightweight ticket ops without a whole pipeline | tickets |
 | `notify` | send a notification | notifications |
-| `webhook_out` | POST the (templated) event to a customer URL, signed | events itself |
+| `webhook_out` | POST the (templated) event to a customer URL, signed with the key its `sign_secret: "secret:<name>"` resolves to under the trigger owner's scope | events itself |
 | `enqueue_outpost_command` | drive a cluster op (deploy, chaos) | outpost-gateway |
 
 Pipelines remain the heavy executor for anything multi-step; the built-in lightweight

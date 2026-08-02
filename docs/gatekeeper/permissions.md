@@ -32,6 +32,77 @@ Records are assigned to a `Role` via its `permissions_ids` array. A `Role` is as
 
 The `service` field is always `"gatekeeper"` for built-in endpoints. External services may use any string that appears in `PERMITTED_SERVICES`.
 
+### Owner namespaces — read this before writing a resource string
+
+Before matching, gatekeeper **rewrites** the requested resource: an *unscoped* resource
+gets the **caller's username** prefixed to it (`scopeResource`). `forge/executions`
+asked for by `alice` is matched as `alice/forge/executions`. That is what makes
+"my things" work without every service filtering by hand, and it is why default grants
+are templated `{username}/…`.
+
+A resource is left **alone** when it already names an owner:
+
+| Form | Owner | Example |
+|---|---|---|
+| `<username>/<service>/…` | a user | `alice/forge/executions` |
+| `org/<orgName>/<service>/…` | an org | `org/acme/tickets/boards` |
+| `project/<slug>/<service>/…` | a project (its own top-level namespace, not bound to a user) | `project/core/workflows/pipelines/*` |
+| `codearmory/<service>/…` | **the platform** | `codearmory/forge/runner-classes` |
+
+`codearmory` is the platform namespace: instance-level configuration that belongs to no
+user, org or project — runner classes, allowed images, runtime backends, concurrency
+limits, OIDC settings, the audit log, registry config, the default-org baseline, and the
+global ticket field definitions. It is a real, non-loginable account so those changes
+attribute to a principal that resolves.
+
+**Why `codearmory`, `org` and `project` are reserved usernames.** None of them is
+special-cased in the matcher — there is no branch for `codearmory` in `scopeResource` or
+`ownerQualified`. `codearmory/forge/runner-classes` is left alone purely because it has
+the shape `<owner>/<service>/…`, which is indistinguishable from an ordinary
+user-owned resource. So if someone could register the username `codearmory`, their own
+default grants would be templated straight into the platform namespace
+(`{username}/forge/runner-classes` → `codearmory/forge/runner-classes`) and they would
+hold instance configuration by construction. `org` and `project` would collide with the
+other two exempt prefixes the same way. The guard in `User.Add`/`User.Update` is the only
+thing standing between a signup form and platform config — it is load-bearing, not
+cosmetic.
+
+Two consequences worth internalising:
+
+- **Declaring a platform resource unscoped is a bug that hides.** Before this convention,
+  `forge/runner-classes` was caller-prefixed on *both* sides — grant and check — so it
+  matched by symmetry rather than by ownership: global data modelled as though everyone
+  had a private copy. Admin-only resources merely looked fine because the admin wildcard
+  matches anything.
+- **A resource leading with the service name is always unscoped.** `tickets/tickets` would
+  otherwise parse as owner `tickets`, and the caller's name would never be applied —
+  silently denying every user their own tickets. Any service whose collection shares its
+  name has this shape.
+
+Ordinary users get read-only defaults on the platform catalogs they need
+(`listRunnerClass`/`getRunnerClass` on `codearmory/forge/runner-classes`); writes are not
+in any default grant, so only a wildcard — i.e. an admin — can make them.
+
+### Naming an owner from a service
+
+`POST /check_permissions` returns the caller's **`username`** alongside `user_id`:
+
+```json
+{ "authorized": true, "user_id": "3f2a…", "username": "alice", "org_id": null }
+```
+
+That field exists because resources are keyed by **username** while a service only ever
+learned the **user id** — so a service could not build an owner-first resource naming its
+own caller without a second round trip to `/oauth/userinfo`. In the SDK, use `Check`
+(which returns a `Subject`) rather than `CheckPermissions` when the handler needs it.
+
+`username` is **omitted when empty**, so its presence means "this subject has a namespace
+you can name". It is absent for a client-credentials subject — an OAuth client is not a
+user and owns no namespace. Treat an absent username as *cannot build an owner-first
+resource*, never as an empty namespace: `"" + "/tickets/tickets/x"` yields
+`/tickets/tickets/x`, which matches no grant and turns a missing namespace into an
+unexplainable 403.
+
 ## Matching Rules
 
 `checkPermissions` returns `true` on the first `Permissions` record where all three conditions hold:

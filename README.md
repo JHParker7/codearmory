@@ -13,6 +13,9 @@
 
 - **CI/CD pipelines** — sequence steps into runs as sequential/parallel batches; run inputs and prior-step outputs are substituted at execution time, and stuck runs are recovered on restart (Workflows).
 - **Sandboxed runners** — run commands in isolated containers (Docker or Kubernetes Jobs) with dropped capabilities, configurable resource tiers (runner classes), and pluggable runtime backends — including kata/Cloud-Hypervisor VMs and gVisor userspace-kernel sandboxes (no `/dev/kvm` needed) — with optional egress allowlisting (Forge).
+- **Self-hosted git** — host your repositories on the platform itself: bare repos over Smart HTTP with gatekeeper-backed auth, collaborators, branch protection, pull requests, and pull-through mirrors of upstream repos so CI clones stay in-cluster (git_factory). Repos on GitHub, GitLab or Forgejo keep working through the credential broker (git_connector), so this is an option rather than a migration.
+- **Issue tracking** — boards, tickets, comments and custom fields, linkable to pipeline runs and sandboxed executions, so work items and the builds that address them live in one place (Tickets).
+- **Container registry** — per-tenant image repositories fronted by a registry proxy (Containers), plus a build-artifact store (Artifacts).
 - **Git webhook triggers** — receive pushes and PRs from GitHub, GitLab, or Forgejo/Gitea and map them to pipeline runs with at-least-once delivery (Hooks).
 - **Auth + RBAC + SSO** — ES256 JWT sessions, orgs, teams, and roles covering every service. Gatekeeper is also an OIDC provider, so it can be your SSO identity source.
 - **Unified API gateway** — every request enters through Conductor, which routes by service prefix and verifies permissions with Gatekeeper before forwarding. Services declare their routes, actions, and RBAC in the Registry.
@@ -184,9 +187,16 @@ Binaries for Linux, macOS, and Windows are attached to each [GitHub release](../
 | Gatekeeper | 8081 | [Auth + RBAC + OIDC](docs/gatekeeper/README.md) |
 | Registry | 8082 | [Service discovery](docs/registry/README.md) |
 | Forge | 8083 | [Sandboxed execution](docs/forge/README.md) |
+| Egress Proxy | 3128 | [Sandbox egress control](docs/egress-proxy/README.md) |
 | Workflows | 8085 | [Pipeline orchestration](docs/workflows/README.md) |
+| Tickets | 8086 | Issue tracker — boards, tickets, comments, custom fields |
 | Hooks | 8087 | [Webhook receiver](docs/hooks/README.md) |
+| Containers | 8089 | Docker registry proxy — per-tenant image repositories |
+| Events | 8093 | [Event bus — triggers and actions](docs/events/design.md) |
 | Builder | 8095 | [Org control plane + runtime service deployer](docs/builder/README.md) |
+| git_connector | 8096 | [Git credential broker](docs/git/README.md) |
+| Artifacts | 8097 | Build artifact store |
+| git_factory | 9002 | [The platform's own git host](docs/git-factory/README.md) |
 | Outpost Gateway | 8092 | [Cluster integration backbone](docs/outpost-gateway/README.md) |
 | Outpost | — | [User-deployed cluster agent](docs/outpost/README.md) |
 | Portal | — | Web UI (React SPA + Express BFF) |
@@ -205,9 +215,16 @@ ghcr.io/code-armory-app/conductor:alpha-latest
 ghcr.io/code-armory-app/gatekeeper:alpha-latest
 ghcr.io/code-armory-app/registry:alpha-latest
 ghcr.io/code-armory-app/forge:alpha-latest
+ghcr.io/code-armory-app/egress-proxy:alpha-latest
 ghcr.io/code-armory-app/workflows:alpha-latest
+ghcr.io/code-armory-app/tickets:alpha-latest
 ghcr.io/code-armory-app/hooks:alpha-latest
+ghcr.io/code-armory-app/containers:alpha-latest
+ghcr.io/code-armory-app/events:alpha-latest
 ghcr.io/code-armory-app/builder:alpha-latest
+ghcr.io/code-armory-app/git:alpha-latest
+ghcr.io/code-armory-app/artifacts:alpha-latest
+ghcr.io/code-armory-app/git-factory:alpha-latest
 ghcr.io/code-armory-app/outpost-gateway:alpha-latest
 ghcr.io/code-armory-app/outpost:alpha-latest
 ghcr.io/code-armory-app/portal:alpha-latest
