@@ -6,7 +6,8 @@ metadata:
     {{- include "codearmory.labels" . | nindent 4 }}
     app.kubernetes.io/component: conductor
 spec:
-  replicas: {{ .Values.conductor.replicaCount }}
+  {{- /* replicas is omitted when this service has an HPA — see codearmory.replicas */}}
+  {{- include "codearmory.replicas" .Values.conductor }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "codearmory.name" . }}

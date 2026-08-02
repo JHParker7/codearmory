@@ -8,7 +8,8 @@ metadata:
     {{- include "codearmory.labels" . | nindent 4 }}
     app.kubernetes.io/component: hooks
 spec:
-  replicas: {{ .Values.hooks.replicaCount }}
+  {{- /* replicas is omitted when this service has an HPA — see codearmory.replicas */}}
+  {{- include "codearmory.replicas" .Values.hooks }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "codearmory.name" . }}

@@ -20,7 +20,8 @@ metadata:
     {{- include "codearmory.labels" . | nindent 4 }}
     app.kubernetes.io/component: workflows
 spec:
-  replicas: {{ .Values.workflows.replicaCount }}
+  {{- /* replicas is omitted when this service has an HPA — see codearmory.replicas */}}
+  {{- include "codearmory.replicas" .Values.workflows }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "codearmory.name" . }}

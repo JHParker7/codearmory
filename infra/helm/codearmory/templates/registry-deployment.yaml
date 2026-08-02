@@ -10,7 +10,8 @@ metadata:
     {{- include "codearmory.labels" . | nindent 4 }}
     app.kubernetes.io/component: registry
 spec:
-  replicas: {{ .Values.registry.replicaCount }}
+  {{- /* replicas is omitted when this service has an HPA — see codearmory.replicas */}}
+  {{- include "codearmory.replicas" .Values.registry }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "codearmory.name" . }}

@@ -290,6 +290,28 @@ Usage: {{- include "codearmory.initContainer.waitForRegistry" . | nindent 8 }}
 {{- end }}
 
 {{/*
+Emit a Deployment's `replicas:` line — UNLESS that service has an HPA (hpa.yaml),
+in which case the field is omitted entirely.
+
+Why omit rather than set it: replicas and an HPA are two writers of the same field.
+A chart that keeps sending replicaCount hands every `helm upgrade` a stale count,
+so an upgrade scales the service back down to it and the HPA has to climb again from
+scratch — dropping capacity (and timing out queued work) mid-rollout, for no reason
+anyone asked for. Omitting the field leaves the running replica count untouched on
+upgrade and lets the HPA own it, which is the standard Helm pattern. On the FIRST
+install the Deployment defaults to 1 and the HPA immediately scales it to minReplicas.
+
+Takes the service's values block and emits the line already indented for a
+Deployment `spec:`, so it renders nothing at all when autoscaling is on.
+Usage (directly under `spec:`): {{- include "codearmory.replicas" .Values.forge }}
+*/}}
+{{- define "codearmory.replicas" -}}
+{{- if not (and .autoscaling .autoscaling.enabled) }}
+  replicas: {{ .replicaCount }}
+{{- end }}
+{{- end }}
+
+{{/*
 Forge service account name (used by the kubernetes runtime to manage sandbox Jobs).
 */}}
 {{- define "codearmory.forge.serviceAccountName" -}}
