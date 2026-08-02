@@ -99,14 +99,20 @@ func applyGrantsForResource(ctx context.Context, service, userID, name string, a
 }
 
 // upsertServiceAccountDB upserts a gatekeeper service account by name.
-// If the account already exists only HashedBootstrapKey is refreshed;
-// HashedKey is preserved so keys rotated at runtime survive restarts.
+// If the account already exists HashedBootstrapKey is refreshed and the row is
+// reactivated; HashedKey is preserved so keys rotated at runtime survive restarts.
+//
+// active is restored deliberately: registering is how a torn-down service comes
+// BACK, and the lookup here is the only one that sees inactive rows (ServiceAccount.Get
+// filters active=true). Without it a deregistered account would be updated in place,
+// stay invisible to every caller, and never revive — not on re-registration and not on
+// a gatekeeper restart, since seeding takes this same path.
 func upsertServiceAccountDB(ctx context.Context, name, hash string) {
 	var existing ServiceAccount
 	err := connect().WithContext(ctx).Where("service_name = ?", name).First(&existing).Error
 	if err == nil {
 		if err2 := connect().WithContext(ctx).Model(&ServiceAccount{}).Where("service_name = ?", name).
-			Update("hashed_bootstrap_key", hash).Error; err2 != nil {
+			Updates(map[string]any{"hashed_bootstrap_key": hash, "active": true}).Error; err2 != nil {
 			slog.ErrorContext(ctx, "seedServiceAccounts: update bootstrap key failed", "name", name, "error", err2)
 		} else {
 			slog.DebugContext(ctx, "seedServiceAccounts: account exists, bootstrap key refreshed", "name", name)

@@ -91,6 +91,52 @@ func TestDeregisterServiceAccount(t *testing.T) {
 	}
 }
 
+// Tearing a service down and bringing it back is the ordinary lifecycle, and
+// re-registration is the only way back: ServiceAccount.Get returns active rows only, so
+// an upsert that refreshes the key without clearing active=false leaves the account
+// invisible to every caller — while the endpoint still answers 204 — and a gatekeeper
+// restart cannot heal it either, because seeding takes the same path.
+func TestRegisterServiceAccount_ReregisterRevivesDeregistered(t *testing.T) {
+	withBuilderInternalKey(t, "internal-key")
+	const name = "revived-svc"
+
+	register := func(key string) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/internal/service-accounts", strings.NewReader(`{"service_name":"`+name+`","key":"`+key+`"}`))
+		r.Header.Set("Authorization", "Bearer internal-key")
+		w := httptest.NewRecorder()
+		handleRegisterServiceAccount(w, r)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("register: got %d, want 204", w.Code)
+		}
+	}
+	register("first-key")
+
+	dr := httptest.NewRequest(http.MethodDelete, "/internal/service-accounts/"+name, nil)
+	dr.Header.Set("Authorization", "Bearer internal-key")
+	dr.SetPathValue("name", name)
+	dw := httptest.NewRecorder()
+	handleDeregisterServiceAccount(dw, dr)
+	if dw.Code != http.StatusNoContent {
+		t.Fatalf("deregister: got %d, want 204", dw.Code)
+	}
+	if _, err := (ServiceAccount{ServiceName: name}).Get(context.Background()); err == nil {
+		t.Fatal("account should be inactive after deregistration")
+	}
+
+	// Redeployed with a fresh key, exactly as builder does it.
+	register("second-key")
+	if _, err := (ServiceAccount{ServiceName: name}).Get(context.Background()); err != nil {
+		t.Fatalf("re-registration did not revive the account: %v", err)
+	}
+	ar := httptest.NewRequest(http.MethodPost, "/x", nil)
+	ar.Header.Set("X-Service-Key", name+":second-key")
+	aw := httptest.NewRecorder()
+	if _, ok := requireServiceAuth(aw, ar); !ok {
+		t.Fatalf("revived service failed to authenticate (status %d)", aw.Code)
+	}
+}
+
 // builder re-registers every managed service on every reconcile tick, so an
 // unchanged registration must write nothing: no row, and above all no audit entry.
 // Otherwise the trail becomes a log of polling and buries the entries someone is
