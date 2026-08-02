@@ -97,8 +97,20 @@ func volMount(runID, name, mountPath string, workdir, readOnly bool) map[string]
 
 // scatterShardName is the deterministic per-leg clone volume name, scoped to the run so
 // run-end teardown (DELETE /volumes?workflow_id=runID) reaps it.
-func scatterShardName(base string, i int) string {
-	return fmt.Sprintf("%s-s%d", base, i)
+//
+// stepIndex disambiguates the SCATTER STEP, for the same reason iterVolume carries a
+// region key. Without it the name was "<base>-s<i>", keyed only on the leg index within
+// one step, so two scatter steps sitting in the same frontier — they run concurrently,
+// share the run id that scopes the volume namespace, and normally both scatter over the
+// same base volume ("workspace") — collided on every leg: both steps' leg 0 was
+// "workspace-s0". The legs do not merely share a clone, they corrupt each other's, and
+// a shared ReadWriteOnce PVC is the Multi-Attach failure scatter exists to avoid.
+//
+// The step's workflow-level index is the key: unique per step and small, which matters —
+// forge caps a volume name at 40 chars as a DNS-1123 label, so the step's author-chosen
+// name is not safe to interpolate here.
+func scatterShardName(base string, stepIndex, i int) string {
+	return fmt.Sprintf("%s-n%d-s%d", base, stepIndex, i)
 }
 
 // scatterResolveStep lists the base workspace paths matching the regex, capturing them
@@ -298,7 +310,7 @@ func (p *WorkerPool) runScatterGroup(ctx context.Context, store *tokenStore, run
 	results := make([]taskResult, len(paths))
 	stepRunIDs := make([]string, len(paths))
 	for i := range paths {
-		shards[i] = scatterShardName(cfg.baseVolume(), i)
+		shards[i] = scatterShardName(cfg.baseVolume(), stepIndex, i)
 		sid := uuid.New().String()
 		stepRunIDs[i] = sid
 		if serr := p.startStepRun(runID, sid, stepIndex, scatterLegName(ws.Name, paths[i])); serr != nil {

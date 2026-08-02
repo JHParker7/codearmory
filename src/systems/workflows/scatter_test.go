@@ -179,3 +179,28 @@ func TestScatterPathSubstitution(t *testing.T) {
 		t.Errorf("unset scatter.path = %q, want literal", got)
 	}
 }
+
+// Two scatter steps in one run share the run id that scopes forge's volume namespace,
+// and normally both scatter over the same base volume ("workspace"). Keyed only on the
+// leg index, both steps' leg 0 was "workspace-s0": concurrent legs on one ReadWriteOnce
+// clone, which is the Multi-Attach failure scatter exists to avoid. The step's index
+// disambiguates them, exactly as iterVolume's region key does for map regions.
+func TestScatterShardName_DisambiguatesConcurrentSteps(t *testing.T) {
+	a := scatterShardName("workspace", 3, 0)
+	b := scatterShardName("workspace", 7, 0)
+	if a == b {
+		t.Fatalf("two scatter steps collide on the same clone volume: %q", a)
+	}
+	// Legs of the SAME step must still differ, and a name must stay a short DNS-1123
+	// label (forge caps a volume name at 40 chars).
+	if scatterShardName("workspace", 3, 0) == scatterShardName("workspace", 3, 1) {
+		t.Error("legs of one scatter step share a clone volume")
+	}
+	if len(a) > 40 {
+		t.Errorf("shard name %q is %d chars, over forge's 40-char volume-name cap", a, len(a))
+	}
+	// Deterministic: the gather step rebuilds the same names.
+	if scatterShardName("workspace", 3, 0) != a {
+		t.Error("shard name is not deterministic")
+	}
+}
