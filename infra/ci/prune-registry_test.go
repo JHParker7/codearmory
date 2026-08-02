@@ -66,6 +66,11 @@ func TestCredentials_RejectsGarbage(t *testing.T) {
 	}
 }
 
+// countOnly is the pre-age-rule policy: keep the newest n, nothing else prunes.
+func countOnly(n int, protected map[string]bool) retention {
+	return retention{keep: n, keepMin: 1, protected: protected}
+}
+
 func TestPrunable_KeepsNewestNPerImage(t *testing.T) {
 	versions := []packageVersion{
 		{Name: "portal", Version: "v1", CreatedAt: at("2026-07-01T00:00:00Z")},
@@ -74,7 +79,7 @@ func TestPrunable_KeepsNewestNPerImage(t *testing.T) {
 		{Name: "portal", Version: "v4", CreatedAt: at("2026-07-04T00:00:00Z")},
 		{Name: "forge", Version: "f1", CreatedAt: at("2026-07-01T00:00:00Z")},
 	}
-	got := prunable(versions, 2, map[string]bool{})
+	got := prunable(versions, countOnly(2, map[string]bool{}))
 
 	if len(got["forge"]) != 0 {
 		t.Errorf("forge has fewer versions than the keep count; want nothing pruned, got %v", got["forge"])
@@ -98,7 +103,7 @@ func TestPrunable_NeverTouchesProtectedTags(t *testing.T) {
 	}
 	// 'latest' is the oldest here, and the running SHA older than the keep window —
 	// exactly the case where a naive newest-N would delete something still in use.
-	got := prunable(versions, 1, map[string]bool{"latest": true, "deadbee": true})
+	got := prunable(versions, countOnly(1, map[string]bool{"latest": true, "deadbee": true}))
 	for _, v := range got["ci-e2e"] {
 		if v.Version == "latest" || v.Version == "deadbee" {
 			t.Errorf("protected tag %q was selected for deletion", v.Version)
@@ -115,9 +120,9 @@ func TestPrunable_DeterministicOnEqualTimestamps(t *testing.T) {
 		{Name: "portal", Version: "bbb", CreatedAt: ts},
 		{Name: "portal", Version: "ccc", CreatedAt: ts},
 	}
-	first := prunable(versions, 1, map[string]bool{})["portal"]
+	first := prunable(versions, countOnly(1, map[string]bool{}))["portal"]
 	for i := 0; i < 20; i++ {
-		again := prunable(versions, 1, map[string]bool{})["portal"]
+		again := prunable(versions, countOnly(1, map[string]bool{}))["portal"]
 		if len(again) != len(first) {
 			t.Fatalf("unstable count: %d then %d", len(first), len(again))
 		}
@@ -125,6 +130,118 @@ func TestPrunable_DeterministicOnEqualTimestamps(t *testing.T) {
 			if first[j].Version != again[j].Version {
 				t.Fatalf("unstable selection: %v then %v", first[j].Version, again[j].Version)
 			}
+		}
+	}
+}
+
+// The count rule alone leaves a service that stopped being rebuilt sitting on a full
+// keep-window of stale images forever. The age rule is what reclaims those.
+func TestPrunable_AgeRuleDeletesInsideTheKeepWindow(t *testing.T) {
+	now := at("2026-07-31T00:00:00Z")
+	versions := []packageVersion{
+		{Name: "hooks", Version: "recent", CreatedAt: at("2026-07-30T00:00:00Z")},
+		{Name: "hooks", Version: "stale1", CreatedAt: at("2026-05-01T00:00:00Z")},
+		{Name: "hooks", Version: "stale2", CreatedAt: at("2026-04-01T00:00:00Z")},
+		{Name: "hooks", Version: "stale3", CreatedAt: at("2026-03-01T00:00:00Z")},
+	}
+	// keep 10 means the count rule prunes nothing at all here.
+	got := prunable(versions, retention{keep: 10, keepMin: 1, maxAge: 168 * time.Hour, now: now})
+
+	var pruned []string
+	for _, v := range got["hooks"] {
+		pruned = append(pruned, v.Version)
+	}
+	sort.Strings(pruned)
+	if strings.Join(pruned, ",") != "stale1,stale2,stale3" {
+		t.Errorf("pruned %v, want all three stale tags — the count rule alone would free nothing", pruned)
+	}
+}
+
+// keepMin is the guard that stops the age rule deleting the tag the running
+// deployment references when a service has not been rebuilt in a long time.
+func TestPrunable_AgeRuleStopsAtKeepMin(t *testing.T) {
+	now := at("2026-07-31T00:00:00Z")
+	versions := []packageVersion{
+		{Name: "forge", Version: "n1", CreatedAt: at("2026-01-03T00:00:00Z")},
+		{Name: "forge", Version: "n2", CreatedAt: at("2026-01-02T00:00:00Z")},
+		{Name: "forge", Version: "n3", CreatedAt: at("2026-01-01T00:00:00Z")},
+	}
+	// Every tag is months past max-age; only the oldest may go.
+	got := prunable(versions, retention{keep: 10, keepMin: 2, maxAge: time.Hour, now: now})
+
+	if len(got["forge"]) != 1 || got["forge"][0].Version != "n3" {
+		t.Fatalf("pruned %v, want only n3 — the newest %d must survive the age rule", got["forge"], 2)
+	}
+}
+
+// The age rule must never override an explicit protection: the SHA this run just
+// deployed is protected even though a skewed registry clock could date it old.
+func TestPrunable_AgeRuleRespectsProtectedTags(t *testing.T) {
+	now := at("2026-07-31T00:00:00Z")
+	versions := []packageVersion{
+		{Name: "ci-e2e", Version: "latest", CreatedAt: at("2025-01-01T00:00:00Z")},
+		{Name: "ci-e2e", Version: "deadbee", CreatedAt: at("2025-01-01T00:00:00Z")},
+		{Name: "ci-e2e", Version: "old", CreatedAt: at("2025-01-01T00:00:00Z")},
+	}
+	got := prunable(versions, retention{
+		keep: 10, keepMin: 1, maxAge: time.Hour, now: now,
+		protected: map[string]bool{"latest": true, "deadbee": true},
+	})
+	for _, v := range got["ci-e2e"] {
+		if v.Version != "old" {
+			t.Errorf("protected tag %q was selected for deletion by the age rule", v.Version)
+		}
+	}
+}
+
+// A zero maxAge must behave exactly like the count-only policy, so the flag being
+// unset cannot start deleting things.
+func TestPrunable_ZeroMaxAgeDisablesTheAgeRule(t *testing.T) {
+	versions := []packageVersion{
+		{Name: "git", Version: "ancient1", CreatedAt: at("2020-01-01T00:00:00Z")},
+		{Name: "git", Version: "ancient2", CreatedAt: at("2020-01-02T00:00:00Z")},
+	}
+	got := prunable(versions, retention{keep: 10, keepMin: 1, maxAge: 0, now: at("2026-07-31T00:00:00Z")})
+	if len(got) != 0 {
+		t.Errorf("max-age 0 must disable age pruning entirely, got %v", got)
+	}
+}
+
+// A version must not be reported twice when both rules select it.
+func TestPrunable_RulesDoNotDoubleCount(t *testing.T) {
+	now := at("2026-07-31T00:00:00Z")
+	versions := []packageVersion{
+		{Name: "portal", Version: "a", CreatedAt: at("2026-07-30T00:00:00Z")},
+		{Name: "portal", Version: "b", CreatedAt: at("2020-01-02T00:00:00Z")},
+		{Name: "portal", Version: "c", CreatedAt: at("2020-01-01T00:00:00Z")},
+	}
+	got := prunable(versions, retention{keep: 1, keepMin: 1, maxAge: time.Hour, now: now})
+	if len(got["portal"]) != 2 {
+		t.Errorf("got %d doomed versions, want 2 — b and c each qualify under BOTH rules but are one version each", len(got["portal"]))
+	}
+}
+
+// reportDisk is the pipeline's only window onto node disk pressure, so it must
+// return a usable percentage for a real path and degrade quietly for a bad one.
+func TestReportDisk(t *testing.T) {
+	if pct := reportDisk([]string{"/"}, 85); pct < 0 || pct > 100 {
+		t.Errorf("got %d%% for /, want a percentage in 0..100", pct)
+	}
+	if pct := reportDisk([]string{"/definitely/not/a/path"}, 85); pct != -1 {
+		t.Errorf("got %d for an unmeasurable path, want -1 (nothing measured)", pct)
+	}
+	if pct := reportDisk([]string{"", "  "}, 85); pct != -1 {
+		t.Errorf("got %d for empty paths, want -1", pct)
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	for _, tc := range []struct {
+		in   uint64
+		want string
+	}{{512, "512B"}, {2048, "2.0KB"}, {5 * 1024 * 1024 * 1024, "5.0GB"}} {
+		if got := humanBytes(tc.in); got != tc.want {
+			t.Errorf("humanBytes(%d) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -214,7 +331,7 @@ func TestPrune_EndToEndDeletesOnlyTheOldest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	for name, vs := range prunable(got, 2, map[string]bool{"latest": true}) {
+	for name, vs := range prunable(got, countOnly(2, map[string]bool{"latest": true})) {
 		for _, v := range vs {
 			if err := c.deleteVersion(name, v.Version); err != nil {
 				t.Fatalf("delete: %v", err)

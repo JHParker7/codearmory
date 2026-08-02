@@ -98,6 +98,25 @@ steps:
       workdir: true
     run: |
       set -eu
+      # Loud, early disk check, in the FIRST step of the run. A full node does not
+      # fail a build cleanly, it makes kaniko crawl: one build-push took 27 minutes
+      # against a normal 90 seconds and then died on "context deadline exceeded",
+      # which reads as a registry or network fault and sends you looking in the wrong
+      # place. Printing the number here attaches the explanation to the run BEFORE the
+      # confusing failure, instead of after an hour of debugging.
+      #
+      # `df /` inside a sandbox is the NODE's filesystem (the pod's writable layer
+      # lives on it), so this really is the disk that image builds compete for.
+      df -h / || true
+      DISK_USED=$(df -P / 2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
+      if [ "${DISK_USED:-0}" -ge 85 ]; then
+        echo "=== WARNING: node disk is ${DISK_USED}% full ==="
+        echo '=== Image builds will be slow or time out with "context deadline exceeded". ==='
+        echo '=== prune-images reclaims the REGISTRY only. The node containerd cache, the  ==='
+        echo '=== forge volume PVCs and the host docker images/volumes need cleanup on the ==='
+        echo '=== host — none of them are reachable from inside a sandbox. See the         ==='
+        echo '=== prune-images step output for the full list and the commands.             ==='
+      fi
       # Never block on a credential prompt: without this a clone whose credential was
       # rejected waits for a username on a TTY that does not exist, and the step burns
       # its whole timeout instead of failing immediately with the auth error that
@@ -143,12 +162,26 @@ steps:
       # allowAnySHA1InWant lets the mirror serve a raw SHA that no ref points at, which
       # is exactly the case here: the base commit is the ref's PREVIOUS tip. The mirror
       # is our own cache volume, not a published remote.
+      #
+      # A branch CREATION reports an all-zero base. That is hex and long enough to look
+      # like a real SHA, so it must be excluded explicitly: fetching it fails, and the
+      # HEAD~1 fallback would then build only the last commit's services on a push where
+      # every file is new — the first push to a fresh remote would ship a near-empty
+      # image set. Creation means "no base", which discover reads as rebuild-everything.
       BEFORE=""
-      case "${HOOK_BEFORE:-}" in
-        "" | *[!0-9a-fA-F]*) ;;                      # absent, or the unresolved literal
-        ???????*)            BEFORE="${HOOK_BEFORE}" ;;   # hex and >= 7 chars
-      esac
-      if [ -n "$BEFORE" ]; then
+      CREATED=""
+      if [ -n "${HOOK_BEFORE:-}" ] && [ -z "$(printf '%s' "${HOOK_BEFORE}" | tr -d '0')" ]; then
+        CREATED=1
+      else
+        case "${HOOK_BEFORE:-}" in
+          "" | *[!0-9a-fA-F]*) ;;                      # absent, or the unresolved literal
+          ???????*)            BEFORE="${HOOK_BEFORE}" ;;   # hex and >= 7 chars
+        esac
+      fi
+      if [ -n "$CREATED" ]; then
+        git update-ref refs/ci/created HEAD
+        echo '=== branch creation (all-zero base): rebuilding every service ==='
+      elif [ -n "$BEFORE" ]; then
         git -C /gitcache/repo.git config uploadpack.allowAnySHA1InWant true
         if git fetch -q --depth 1 origin "+${BEFORE}:refs/ci/before" 2>/dev/null; then
           echo "=== push base: ${BEFORE} (diffing the whole push) ==="
@@ -255,7 +288,11 @@ steps:
       # empty diff (an empty "trigger" commit that touched no files) means genuinely
       # nothing changed, so build nothing.
       BASE=""
-      if git rev-parse --verify -q refs/ci/before >/dev/null 2>&1; then
+      if git rev-parse --verify -q refs/ci/created >/dev/null 2>&1; then
+        # checkout saw a branch creation: there is no base to diff against and every
+        # file is new, so build every service rather than diffing HEAD~1.
+        echo '=== diff base: none (branch creation) — rebuilding everything ==='
+      elif git rev-parse --verify -q refs/ci/before >/dev/null 2>&1; then
         BASE=refs/ci/before
         echo "=== diff base: push base $(git rev-parse --short refs/ci/before) ==="
       elif git rev-parse --verify -q HEAD~1 >/dev/null 2>&1; then
@@ -310,11 +347,18 @@ steps:
 - action: forge/run
   name: test
   map_id: per-service
-  timeout: 2400
+  # 1800, not 2400. No single step here exceeds the 3600s run cap, but `test` and
+  # `image` run SEQUENTIALLY within the per-service map region, so at their old
+  # 2400+2400 that chain alone budgeted 4800s against a 3600s cap: the run could be
+  # killed mid-image with every individual step still nominally within its own
+  # timeout, which is a confusing way to fail. 1800+1200 keeps the pair under the cap.
+  # These are backstops against a hung step, not target durations — a warm-cache test
+  # step is seconds and the image build is ~90s, so the headroom is still large.
+  timeout: 1800
   with:
     image: golang:1.25
     runner_class: ci
-    timeout: 2400
+    timeout: 1800
     env:
       GOCACHE: /gocache/build
       GOFLAGS: -p=2
@@ -418,10 +462,15 @@ steps:
 - action: forge/build-image
   name: image
   map_id: per-service
-  timeout: 2400
+  # 1200: the second half of the per-service chain budget described on `test` above.
+  # A COPY-only kaniko build is ~90s; the one time it took 27 minutes it was crawling
+  # on a full disk and produced nothing useful, so capping here converts "run dies at
+  # the cap with a confusing error" into "this step timed out", and the prune-images
+  # step still runs on that failure edge to try to fix the cause.
+  timeout: 1200
   with:
     runner_class: xlarge
-    timeout: 2400
+    timeout: 1200
     secret_refs:
       REGISTRY_AUTH: secret:forgejo-registry-auth
     build:
@@ -512,12 +561,28 @@ steps:
       mount_path: /workspace
     # Runs AFTER redeploy so a tag can never be reclaimed before the rollout that
     # uses it, and the SHA just deployed is protected explicitly on top of that.
+    # It ALSO runs when the build or the tests failed, and when there was nothing to
+    # build at all (see the unconditional discover edge in routes): a run that died
+    # because the disk was full is exactly the run whose housekeeping must not be
+    # skipped, or the pipeline never recovers on its own — the next run hits the same
+    # full disk and dies the same way.
     # Housekeeping must not turn a green pipeline red: the tool exits 0 on API
     # failure unless -strict.
+    #
+    # keep 5, not 10: ~16 images x 10 tags is the ~190-image, ~52GB state that filled
+    # the disk in the first place. max-age trims further, down to a floor of 2, so a
+    # service that stopped being rebuilt does not sit on a full keep-window of stale
+    # images for good. The floor is what guarantees the tag its running deployment
+    # references survives however long it goes without a rebuild.
+    #
+    # -disk reports the space it can measure and, above the threshold, lists what it
+    # canNOT reclaim from inside a sandbox. / is the node filesystem; /workspace is
+    # the hostpath PVC backing this run's volume.
     run: |
       set -eu
       cd /workspace
-      go run ./infra/ci -apply -keep 10 -keep-tags "$PROTECTED_TAGS"
+      go run ./infra/ci -apply -keep 5 -keep-min 2 -max-age 168h \
+        -keep-tags "$PROTECTED_TAGS" -disk /,/workspace -disk-warn-pct 85
     env:
       PROTECTED_TAGS: ${steps.commit.output.SHA}
 - action: outpost-gateway/enqueueCommand
@@ -634,6 +699,24 @@ routes:
 # front of them: it must not delay the run's verdict, but the run still waits for it
 # (the scheduler joins every in-flight node before finishing).
 - from: redeploy
+  to: prune-images
+# The second edge is what makes housekeeping actually happen. With only the redeploy
+# edge above, prune ran on the happy path and NOWHERE else: a build-push that timed
+# out under disk pressure skipped it entirely (test/image/redeploy all skipped or
+# failed, so nothing was taken), which meant the run that most needed disk reclaimed
+# was the one run that reclaimed none — and the next run met the same full disk and
+# died identically. The failure compounded, because past a certain point even
+# `crictl rmi --prune` on the node fails with DeadlineExceeded: the deletions
+# themselves need free space. Reclaiming has to be unconditional to be self-healing.
+# It also covers the empty-IMAGES case (a docs-only push), where every downstream
+# node is skipped but old tags are still sitting there.
+#
+# The two edges do different jobs and both are needed. Readiness is
+# ALL-INBOUND-RESOLVED + AT-LEAST-ONE-TAKEN: the discover edge supplies "taken" in
+# every case, while the redeploy edge supplies the ORDERING — prune cannot start
+# until redeploy has resolved one way or another, so a tag is still never reclaimed
+# before the rollout that uses it. The step runs exactly once regardless.
+- from: discover
   to: prune-images
 - from: integration-tests
   to: close-ticket
