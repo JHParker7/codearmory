@@ -18,21 +18,28 @@ const defaultOrgID = "default"
 // forge + workflows are the CI/CD pair: the chart deploys them and registers them via
 // the registry manifest, so builder treats them as core like the rest. tickets and
 // containers were likewise promoted to core: the chart deploys their published images
-// and registers them via the registry manifest. The core git service is the
-// backend-agnostic credential broker (src/systems/git); gitea_integration (Forgejo
-// repo management) is NOT core — most users do not run Forgejo, so builder deploys it
-// on demand from files/services/gitea_integration.json.
+// and registers them via the registry manifest. The two git services are both core and
+// both in-repo: git_connector is the backend-agnostic credential broker
+// (src/systems/git), and codearmory_git_factory is the platform's own git host
+// (src/systems/git-factory — the Go module is named git-factory, but the service
+// identity every grant and RBAC resource keys on stays codearmory_git_factory).
+// git_factory was builder-deployed until its source moved into this monorepo; it now
+// ships with the chart and registers via the registry manifest, so its builder def is
+// gone and this entry keeps builder from ever reconciling it again.
+// gitea_integration (Forgejo repo management) is NOT core — most users do not run
+// Forgejo, so builder deploys it on demand from files/services/gitea_integration.json.
 var coreServices = map[string]bool{
-	"artifacts":     true,
-	"gatekeeper":    true,
-	"conductor":     true,
-	"registry":      true,
-	"builder":       true,
-	"forge":         true,
-	"workflows":     true,
-	"tickets":       true,
-	"git_connector": true,
-	"containers":    true,
+	"artifacts":              true,
+	"gatekeeper":             true,
+	"conductor":              true,
+	"registry":               true,
+	"builder":                true,
+	"forge":                  true,
+	"workflows":              true,
+	"tickets":                true,
+	"git_connector":          true,
+	"codearmory_git_factory": true,
+	"containers":             true,
 }
 
 // comingSoonServices are the platform services whose source was spun out into its

@@ -40,9 +40,9 @@ func podWith(image string) *corev1.PodTemplateSpec {
 // chart's image must be left exactly as rendered. Rewriting it unconditionally
 // would swap the chart's registry for builder's default on every platform service.
 func TestApplyImageOverrides_NoOverrideLeavesChartImageAlone(t *testing.T) {
-	pt := podWith("ghcr.io/code-armory-app/git-factory:1.2.3")
-	applyImageOverrides(pt, workloadSpec{Service: "codearmory_git_factory"})
-	if got := pt.Spec.Containers[0].Image; got != "ghcr.io/code-armory-app/git-factory:1.2.3" {
+	pt := podWith("ghcr.io/code-armory-app/blueprints:1.2.3")
+	applyImageOverrides(pt, workloadSpec{Service: "blueprints"})
+	if got := pt.Spec.Containers[0].Image; got != "ghcr.io/code-armory-app/blueprints:1.2.3" {
 		t.Errorf("image = %q, want the chart's image untouched", got)
 	}
 	if pt.Spec.Containers[0].ImagePullPolicy != "" {

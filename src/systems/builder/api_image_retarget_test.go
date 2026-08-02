@@ -6,7 +6,8 @@ import "testing"
 // explicit image. imageFor gives Image strict precedence over Registry+Tag, so a
 // leftover full reference silently pins the service to the OLD build: the row records
 // the new tag and the API returns 200, but the reconciler keeps deploying the old
-// image. Observed live — git_factory sat on :704caa9 while its row said tag=b42dff7.
+// image. Observed live on git_factory (back when builder still deployed it, before it
+// moved in-repo as a core service): it sat on :704caa9 while its row said tag=b42dff7.
 func TestRetargetByTagClearsExplicitImage(t *testing.T) {
 	tag := "b42dff7"
 	registry := "192.168.53.171:3000/jp01"

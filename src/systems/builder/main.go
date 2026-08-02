@@ -172,10 +172,6 @@ func main() {
 	// Register as a registry read account so we can fetch the live service catalog
 	// (GET /services) to present the toggle-able list. Optional: if unset, the admin
 	// view degrades to the configured rows only.
-	// Optional override for where git_connector lives; empty derives it from the
-	// release prefix, which is correct for every normal install.
-	gitConnectorURL = strings.TrimRight(envOrDefault("GIT_CONNECTOR_URL", ""), "/")
-
 	registryURL = strings.TrimRight(envOrDefault("REGISTRY_URL", ""), "/")
 	if rk := secret("REGISTRY_SERVICE_KEY"); rk != "" && registryURL != "" {
 		getRegistryKey = registry.StartKeyRotation(ctx, registryURL, "builder", rk, 25*time.Minute)

@@ -11,7 +11,7 @@ import (
 var expectedNonCore = []string{
 	"blueprints", "notifications", "hooks",
 	"outpost-gateway", "chaos", "argo",
-	"gitea_integration", "codearmory_git_factory",
+	"gitea_integration",
 }
 
 func TestEmbeddedDefs_AllParseAndComplete(t *testing.T) {
@@ -56,6 +56,19 @@ func TestEmbeddedDefs_NoCoreServices(t *testing.T) {
 		if coreServices[name] {
 			t.Errorf("core service %q must not be in the builder catalog", name)
 		}
+	}
+}
+
+// git_factory moved into this monorepo and became core: the chart deploys it and the
+// registry manifest registers it. Both halves of that demotion have to hold together —
+// a def left behind would have builder reconcile a workload the chart already owns,
+// and a missing coreServices entry would let the set-service API toggle it off.
+func TestGitFactoryIsCoreAndNotInTheCatalog(t *testing.T) {
+	if !coreServices["codearmory_git_factory"] {
+		t.Error("codearmory_git_factory must be core — it ships with the chart")
+	}
+	if _, ok := embeddedServiceDef("codearmory_git_factory"); ok {
+		t.Error("codearmory_git_factory must have no builder def")
 	}
 }
 

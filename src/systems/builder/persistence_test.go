@@ -279,35 +279,39 @@ func TestPersistence_ReadWriteManyKeepsTheScalableShape(t *testing.T) {
 	}
 }
 
-// git_factory is the first shipped def to declare persistence. The invariant worth
-// pinning is that its storage-root env and its mount path cannot drift apart — the
-// service would happily write repositories to the container's ephemeral filesystem.
-func TestGitFactoryDef_StorageRootMatchesTheMount(t *testing.T) {
-	def, ok := embeddedServiceDef("codearmory_git_factory")
-	if !ok {
-		t.Fatal("no embedded def for codearmory_git_factory")
+// Declaring a volume is only half the job: the service also has to be TOLD where it
+// is, via an env var in the def's envExtras. git_factory (the original persistent def,
+// now a core in-repo service with no builder def) paired GIT_STORAGE_ROOT with its
+// mountPath; a def that declares storage and points nothing at it would happily write
+// its state to the container's ephemeral filesystem. Vacuous while no shipped def
+// declares persistence — it starts biting the moment one does.
+func TestPersistentDefs_SomeEnvPointsAtTheMount(t *testing.T) {
+	defs, err := loadEmbeddedDefs()
+	if err != nil {
+		t.Fatalf("load defs: %v", err)
 	}
-	p := def.Infra.Persistence
-	if p == nil {
-		t.Fatal("git_factory declares no persistence — repos would live on an ephemeral disk")
-	}
-	if got := def.EnvExtras["GIT_STORAGE_ROOT"]; got != p.MountPath {
-		t.Errorf("GIT_STORAGE_ROOT = %q but the volume is mounted at %q", got, p.MountPath)
-	}
-	// v1 is single-node by design (ARCHITECTURE §5 step 1), so the volume is RWO and
-	// the workload must be pinned to one pod.
-	if !p.singleWriter() {
-		t.Error("git_factory is single-node in v1; RWX needs the step-2 routing table first")
-	}
-	b := &k8sBackend{prefix: "codearmory", namespace: "codearmory", defaultReplicas: 3}
-	if got := b.replicasFor(workloadSpec{Service: "codearmory_git_factory", Replicas: 3}); got != 1 {
-		t.Errorf("replicas = %d, want 1", got)
+	for name, def := range defs {
+		p := def.Infra.Persistence
+		if p == nil {
+			continue
+		}
+		found := false
+		for _, v := range def.EnvExtras {
+			if v == p.MountPath {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s: volume is mounted at %q but no envExtras value points at it — the service would write to ephemeral disk",
+				name, p.MountPath)
+		}
 	}
 }
 
 // Every name k8s validates as a DNS-1123 label must come from k8sName, never the
 // registry name: the apiserver rejects the whole Deployment over a container named
-// "codearmory_git_factory".
+// "gitea_integration".
 func TestTemplatePod_ContainerNameIsDNS1123(t *testing.T) {
 	b := &k8sBackend{prefix: "codearmory", namespace: "codearmory", registry: "ghcr.io/x", tag: "v1"}
 	dns1123 := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
