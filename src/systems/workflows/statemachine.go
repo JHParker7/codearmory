@@ -70,6 +70,12 @@ type smState struct {
 	// without them, and the next run failed with a 403 that pointed at permissions
 	// nobody had changed.
 	Permissions []PermissionSpec `json:"permissions,omitempty"`
+	// AllowUnresolved is the step's unresolved-reference opt-out, carried for exactly
+	// the reason Permissions is: the state-machine shape must be a LOSSLESS view of the
+	// step. Dropped, a GET-edit-PUT round-trip silently re-armed the strict check on a
+	// step that legitimately passes a literal ${...} through to its action, and the next
+	// run failed the step with an unresolved-reference error on config nobody touched.
+	AllowUnresolved bool `json:"allow_unresolved,omitempty"`
 	// Transition for the non-Choice kinds:
 	Next smNext `json:"next,omitempty"`
 	End  bool   `json:"end,omitempty"`
@@ -191,7 +197,7 @@ func smToModel(doc *smDoc) (steps []WorkflowStepRef, routes []WorkflowRoute, map
 		if len(st.Choice) > 0 {
 			return WorkflowStepRef{}, fmt.Errorf("state %q sets choice but also a step kind", name)
 		}
-		ref := WorkflowStepRef{Name: name, With: st.With, MapID: mapID, Permissions: st.Permissions}
+		ref := WorkflowStepRef{Name: name, With: st.With, MapID: mapID, Permissions: st.Permissions, AllowUnresolved: st.AllowUnresolved}
 		switch {
 		case st.Approval != nil:
 			ref.Approval = st.Approval
@@ -619,7 +625,7 @@ func modelToSM(name, description string, steps []WorkflowStep, routes []Workflow
 	}
 
 	taskState := func(s WorkflowStep) *smState {
-		st := &smState{With: s.With, Matrix: s.Matrix, Scatter: s.Scatter, Approval: s.Approval, Permissions: s.Permissions}
+		st := &smState{With: s.With, Matrix: s.Matrix, Scatter: s.Scatter, Approval: s.Approval, Permissions: s.Permissions, AllowUnresolved: s.AllowUnresolved}
 		switch {
 		case s.Approval != nil:
 			// gate: no run/use

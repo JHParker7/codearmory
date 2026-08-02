@@ -11,7 +11,7 @@ import "testing"
 // re-minted without them, and the next run failed with a 403 naming a permission the
 // pipeline still visibly declared. Observed on git_factory-cd's retarget step.
 func TestStateMachineRoundTripsStepPermissions(t *testing.T) {
-	perms := []PermissionSpec{{Service: "builder", Action: "setOrgServiceImage", Resource: "builder/orgs/default"}}
+	perms := []PermissionSpec{{Service: "builder", Action: "setOrgServiceImage", Resource: "codearmory/builder/orgs/default"}}
 	steps := []WorkflowStep{{
 		Step:        Step{Name: "retarget", Action: ActionHTTP, Permissions: perms},
 		}}
@@ -40,7 +40,7 @@ func TestStateMachineRoundTripsStepPermissions(t *testing.T) {
 			t.Fatalf("state machine -> model dropped permissions: got %v — the run role would be re-minted without them", ref.Permissions)
 		}
 		got := ref.Permissions[0]
-		if got.Service != "builder" || got.Action != "setOrgServiceImage" || got.Resource != "builder/orgs/default" {
+		if got.Service != "builder" || got.Action != "setOrgServiceImage" || got.Resource != "codearmory/builder/orgs/default" {
 			t.Errorf("permission mangled in round-trip: %+v", got)
 		}
 	}
@@ -87,4 +87,41 @@ func keysOf(m map[string]*smState) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// The same fidelity loss as permissions, for the unresolved-reference opt-out.
+//
+// A GET returns a computed state_machine and handleUpdateWorkflow expands that document
+// over the request, so a document that cannot express allow_unresolved silently strips
+// it on a read-edit-write round-trip — and the next run fails the step with an
+// unresolved-reference error on config nobody changed.
+func TestStateMachineRoundTripsAllowUnresolved(t *testing.T) {
+	steps := []WorkflowStep{
+		{Step: Step{Name: "render", Action: "forge/run", AllowUnresolved: true}},
+		{Step: Step{Name: "strict", Action: "forge/run"}},
+	}
+
+	doc := modelToSM("p", "", steps, nil, nil, nil, nil)
+	if st := doc.States["render"]; st == nil || !st.AllowUnresolved {
+		t.Fatalf("model -> state machine dropped allow_unresolved: %+v", st)
+	}
+	if st := doc.States["strict"]; st == nil || st.AllowUnresolved {
+		t.Fatalf("allow_unresolved invented on a step that never opted out: %+v", st)
+	}
+
+	// ...and back, which is the direction handleUpdateWorkflow actually takes.
+	back, _, _, err := smToModel(doc)
+	if err != nil {
+		t.Fatalf("smToModel: %v", err)
+	}
+	byName := map[string]WorkflowStepRef{}
+	for _, ref := range back {
+		byName[ref.Name] = ref
+	}
+	if ref, ok := byName["render"]; !ok || !ref.AllowUnresolved {
+		t.Errorf("state machine -> model dropped allow_unresolved: %+v", ref)
+	}
+	if ref, ok := byName["strict"]; !ok || ref.AllowUnresolved {
+		t.Errorf("state machine -> model invented allow_unresolved: %+v", ref)
+	}
 }
