@@ -110,6 +110,14 @@ spec:
             # http endpoints (in-cluster MinIO/Ceph) need secure=false.
             - name: REGISTRY_STORAGE_S3_SECURE
               value: {{ .Values.registryMirror.s3.secure | quote }}
+            {{- /* Both halves of a static credential or neither. Gating the pair on
+                   accessKeySecret alone renders `name: ""` on the secret key ref when
+                   only one is filled in, which the API server rejects at install time
+                   with an error naming no values key at all. Fail here instead, where
+                   we can say which one is missing. */ -}}
+            {{- if and (or .Values.registryMirror.s3.accessKeySecret .Values.registryMirror.s3.secretKeySecret) (not (and .Values.registryMirror.s3.accessKeySecret .Values.registryMirror.s3.secretKeySecret)) }}
+            {{- fail "registryMirror.s3: set BOTH registryMirror.s3.accessKeySecret and registryMirror.s3.secretKeySecret, or neither (to use the default AWS credential chain)" }}
+            {{- end }}
             {{- if .Values.registryMirror.s3.accessKeySecret }}
             - name: REGISTRY_STORAGE_S3_ACCESSKEY
               valueFrom:
