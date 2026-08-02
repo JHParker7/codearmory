@@ -5,10 +5,26 @@
 # endpoint included. This policy allows egress to every PUBLIC IPv4 address and denies
 # all private/internal ranges (RFC1918, loopback, link-local/metadata, CGNAT) plus any
 # configured blocklist, while still permitting DNS. IPv4 only: IPv6 egress is not listed
-# and so is denied. Requires a NetworkPolicy-aware CNI; inert otherwise. Created in the
-# exec namespace (forge.env.k8sNamespace, default the release namespace). This replaces
+# and so is denied. Created in the exec namespace (forge.env.k8sNamespace, default the
+# release namespace). This replaces
 # the proxy-confining policy (forge-egress-networkpolicy.yaml), which is skipped under
 # kata — the two are mutually exclusive and share one name.
+#
+# ⚠ THIS ONLY WORKS ON A NETWORKPOLICY-AWARE CNI, AND FAILS SILENTLY WITHOUT ONE. A
+# NetworkPolicy is a request to the CNI, not an enforcement mechanism: where the CNI does
+# not implement NetworkPolicy (kindnet, flannel, some managed "basic" add-ons), the API
+# server still accepts this object, `kubectl get networkpolicy` still shows it in full,
+# and it confines nothing. Under kata that means NO egress control at all — the microVM
+# is a kernel boundary, not a network one — so every sandbox reaches every internal
+# service, and nothing anywhere says so. It has also actively misled debugging: a
+# checkout failure was once blamed on this policy "blocking 10.x" on a cluster where the
+# policy was never in play.
+#
+# Do not assume it works — `helm test <release>` proves it: templates/tests/
+# forge-exec-egress-test.yaml runs a probe that this policy selects (app=forge) and
+# fails if a connection this policy denies actually succeeds. Run it per cluster, and
+# after any CNI change. The same holds for any future tightening of this policy (e.g.
+# conductor-only egress): on a non-enforcing CNI, a stricter policy is equally inert.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

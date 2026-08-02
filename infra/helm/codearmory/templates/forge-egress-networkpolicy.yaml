@@ -1,9 +1,17 @@
 {{- if and .Values.forge.enabled .Values.forge.egressProxy.enabled .Values.forge.egressProxy.networkPolicy.enabled (or (eq .Values.forge.env.runtime "kubernetes") .Values.forge.gvisor.enabled) (not .Values.forge.kata.enabled) }}
 # Confines forge's sandbox Job pods (labelled app=forge) to DNS and the egress proxy
 # only, so untrusted user code cannot bypass the domain allowlist by connecting out
-# directly. Mirrors builder's forge-exec NetworkPolicy. Requires a NetworkPolicy-aware
-# CNI; inert otherwise. Created in the exec namespace (forge.env.k8sNamespace, default
-# the release namespace).
+# directly. Mirrors builder's forge-exec NetworkPolicy. Created in the exec namespace
+# (forge.env.k8sNamespace, default the release namespace).
+#
+# ⚠ Requires a NetworkPolicy-aware CNI and fails SILENTLY without one: where the CNI does
+# not implement NetworkPolicy (kindnet, flannel, some managed "basic" add-ons) this object
+# is still accepted and displayed by the API while confining nothing, so sandboxes can
+# bypass the proxy and reach any internal service with no signal that they can. Verify
+# with `helm test <release>` — templates/tests/forge-exec-egress-test.yaml runs a probe
+# this policy selects (app=forge) and fails if a denied connection succeeds. This is less
+# catastrophic here than under kata (forge still points sandboxes at the proxy via env,
+# so honest traffic is filtered) but it is exactly what stops deliberate bypass.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -25,7 +33,7 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # The egress proxy in the release namespace — the only permitted egress path.
+    # The egress proxy in the release namespace — the only permitted path OUT.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -36,4 +44,45 @@ spec:
       ports:
         - protocol: TCP
           port: 3128
+    # The artifact store — a deliberate, NARROW hole for the one internal service a
+    # sandbox legitimately talks to, so forge/save-artifact and forge/restore-artifact
+    # work. It cannot go through the proxy: the proxy refuses to dial any private
+    # address, and the store is a ClusterIP. Forge therefore names it in the sandbox's
+    # NO_PROXY (see noProxyHosts in src/systems/forge/runtime.go) and this rule is what
+    # lets that direct connection through. Scoped to that one service's pods on its one
+    # port — every other internal address stays denied — and access is still
+    # authenticated per user by the short-lived token forge mints for the step.
+    # Mirrors the kata policy's rule of the same shape (forge-egress-networkpolicy-kata.yaml).
+    {{- if and .Values.artifacts.enabled .Values.forge.egressProxy.networkPolicy.allowArtifacts }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: artifacts
+      ports:
+        - protocol: TCP
+          port: {{ .Values.artifacts.port }}
+    {{- end }}
+    # The base-image mirror — the same narrow hole, for the same reason: forge remaps
+    # kaniko's base-image pulls (FORGE_REGISTRY_MAP) and its layer cache
+    # (FORGE_BUILD_CACHE_REPO) to this in-cluster registry, which the proxy likewise
+    # cannot dial, so it is in NO_PROXY too. Without this rule an image build cannot
+    # reach the mirror at all and falls back to the public origin on every leg —
+    # working, but re-exposing the rate-limit burst the mirror exists to prevent. The
+    # mirror serves only public base images and accepts no credentials, so reaching it
+    # grants a sandbox nothing it could not get from the internet it may already reach.
+    {{- if and .Values.registryMirror.enabled .Values.forge.egressProxy.networkPolicy.allowRegistryMirror }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: registry-mirror
+      ports:
+        - protocol: TCP
+          port: {{ .Values.registryMirror.port }}
+    {{- end }}
 {{- end }}

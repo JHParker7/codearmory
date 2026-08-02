@@ -1,0 +1,214 @@
+{{- $kata := .Values.forge.kata.enabled -}}
+{{- $kataPolicy := and .Values.forge.enabled $kata .Values.forge.kata.egress.networkPolicy.enabled -}}
+{{- $proxyPolicy := and .Values.forge.enabled .Values.forge.egressProxy.enabled .Values.forge.egressProxy.networkPolicy.enabled (or (eq .Values.forge.env.runtime "kubernetes") .Values.forge.gvisor.enabled) (not $kata) -}}
+{{- if and .Values.tests.forgeExecEgress.enabled (or $kataPolicy $proxyPolicy) }}
+{{- $t := .Values.tests.forgeExecEgress }}
+{{- $host := $t.target -}}
+{{- $port := $t.targetPort -}}
+{{- if not $host -}}
+{{- $host = printf "%s-gatekeeper.%s.svc.cluster.local" (include "codearmory.fullname" .) .Release.Namespace -}}
+{{- $port = .Values.gatekeeper.port -}}
+{{- end }}
+# Proves the forge-exec egress NetworkPolicy is actually ENFORCED, instead of assuming it.
+#
+# WHY THIS EXISTS
+# A NetworkPolicy is only a request: it does nothing at all unless the cluster's CNI
+# implements NetworkPolicy. kindnet (kind's default), flannel, and several managed
+# "basic" CNIs do NOT. On such a cluster the policy object is created, `kubectl get
+# networkpolicy` shows it in full, and it confines nothing — sandboxes keep the pod
+# network's full reach to every internal service. Nothing anywhere signals this, and
+# under kata the policy is the ONLY control (a microVM is a kernel boundary, not a
+# network one), so the failure is silent and total. It has also actively misled
+# debugging: an unrelated connection failure was once blamed on "the policy blocking
+# 10.x" on a cluster where the policy was never in play.
+#
+# So: `helm test <release>` runs this Pod, which is selected by the very same policy
+# (app=forge, in the exec namespace) and tries a connection the policy claims to deny.
+# Connection succeeds -> the control is INERT -> the test fails, loudly.
+#
+# HOW IT AVOIDS PASSING FOR THE WRONG REASON
+# A connection can fail for reasons that have nothing to do with the policy — a wrong
+# service name, DNS down, a dead target, a broken image — and "connection failed" would
+# then be reported as "policy enforced". That false PASS would be worse than no test at
+# all, so the probe treats every unproven outcome as a FAILURE ("INCONCLUSIVE", exit 1)
+# and only ever passes on one narrow, positively-established path:
+#
+#   1. Positive control. The probe first connects to something the policy explicitly
+#      ALLOWS (the cluster DNS resolver on TCP 53, from /etc/resolv.conf — an unrestricted
+#      port-53 rule exists in both policies). This uses the exact same mechanism (busybox
+#      nc, TCP, a private address) as the assertion below, so if it succeeds we know the
+#      pod has working egress, nc works, and the image is sane. If it fails, nothing
+#      below can be trusted -> INCONCLUSIVE, not PASS.
+#   2. Name -> IP. The target is resolved to an address before it is dialled. A typo'd or
+#      nonexistent service does not resolve, which is caught here (INCONCLUSIVE) rather
+#      than silently producing an unreachable address that "proves" enforcement.
+#   3. The target is denied ON PURPOSE and is guaranteed to be up. It defaults to the
+#      gatekeeper Service, chosen deliberately: gatekeeper is unconditionally deployed by
+#      this chart, forge cannot start without it (its init container blocks until
+#      gatekeeper answers), it listens on a plain TCP port, and neither policy grants any
+#      access to it. Two tempting alternatives are worse: the Kubernetes API
+#      (kubernetes.default) is host-networked, so after kube-proxy DNAT the destination is
+#      the NODE ip — which is public on some clouds and therefore ALLOWED by the kata
+#      policy's public-egress rule, producing a false "unenforced"; and kube-dns is
+#      explicitly allowed by both policies, so it can never be denied. Under kata only,
+#      the resolved IP is additionally checked to fall inside one of the private ranges
+#      the policy excepts — if a cluster somehow numbers its Services publicly, the policy
+#      genuinely permits the connection and this test must not claim otherwise.
+#   4. Dropped, not refused. A denying CNI silently DROPS the packets, so the dial hangs
+#      until its timeout. An immediate failure means something answered — an RST from
+#      kube-proxy for a Service with no ready endpoints (target down: proves nothing), or
+#      a CNI that REJECTs rather than drops. The probe times the dial and treats a fast
+#      failure as INCONCLUSIVE rather than banking a pass on it. If your CNI rejects
+#      instead of dropping, confirm enforcement by hand and lower
+#      tests.forgeExecEgress.minDropSeconds to 0.
+#
+# THE SAME APPLIES TO ANY FUTURE TIGHTENING. Restricting sandbox egress further (say, to
+# conductor only) buys exactly nothing on a CNI that does not enforce NetworkPolicy — the
+# new policy would be just as inert as this one. Point that work at this test first.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "codearmory.fullname" . }}-test-forge-exec-egress
+  # The exec namespace, not necessarily the release namespace: the policy is created
+  # there and selects pods there.
+  namespace: {{ .Values.forge.env.k8sNamespace | default .Release.Namespace }}
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test-forge-exec-egress
+    # REQUIRED: this is the label both egress policies select on. Without it the probe
+    # is not subject to the policy and the test is meaningless.
+    app: forge
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "40"
+spec:
+  restartPolicy: Never
+  # A probe that is not scheduled where sandboxes run, under the runtime sandboxes use,
+  # is a weaker answer than it looks — policy enforcement can differ per node (a CNI
+  # rolled out unevenly) and, in principle, for VM-backed pods whose traffic is bridged
+  # out of a microVM. Mirror the sandbox placement by default; set useSandboxRuntime to
+  # false if the RuntimeClass nodes cannot admit this probe and you accept the weaker
+  # (still useful: the CNI either enforces or it does not) answer.
+  {{- if and $t.useSandboxRuntime .Values.forge.env.k8sRuntimeClass }}
+  runtimeClassName: {{ .Values.forge.env.k8sRuntimeClass | quote }}
+  {{- end }}
+  {{- if $t.useSandboxRuntime }}
+  {{- with .Values.forge.execScheduling.nodeSelector }}
+  nodeSelector:
+    {{- range splitList "," . }}
+    {{- $kv := splitn "=" 2 (trim .) }}
+    {{ $kv._0 }}: {{ $kv._1 | quote }}
+    {{- end }}
+  {{- end }}
+  {{- with .Values.forge.execScheduling.tolerateKeys }}
+  tolerations:
+    {{- range splitList "," . }}
+    - key: {{ trim . | quote }}
+      operator: Exists
+    {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: probe
+      # A plain busybox (nc + nslookup + date is all the probe needs). It is NOT pulled
+      # from imageRegistry: this must work before/without the platform's own images.
+      # Override for an air-gapped cluster or a private mirror.
+      image: {{ $t.image | quote }}
+      imagePullPolicy: {{ .Values.imagePullPolicy }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      env:
+        - name: TARGET_HOST
+          value: {{ $host | quote }}
+        - name: TARGET_PORT
+          value: {{ $port | quote }}
+        - name: POLICY_MODE
+          value: {{ if $kata }}"kata"{{ else }}"proxy"{{ end }}
+        - name: CONNECT_TIMEOUT
+          value: {{ $t.connectTimeoutSeconds | quote }}
+        - name: MIN_DROP_SECONDS
+          value: {{ $t.minDropSeconds | quote }}
+        - name: CONTROL_HOST
+          value: {{ $t.controlHost | quote }}
+        - name: CONTROL_PORT
+          value: {{ $t.controlPort | default 53 | quote }}
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -u
+
+          pass()         { echo "PASS: $*"; exit 0; }
+          fail()         { echo "FAIL: $*"; exit 1; }
+          # Anything we could not establish is a failure. Never a pass.
+          inconclusive() { echo "INCONCLUSIVE (reported as failure): $*"; exit 1; }
+
+          echo "forge-exec egress policy probe"
+          echo "  policy mode : $POLICY_MODE"
+          echo "  target      : $TARGET_HOST:$TARGET_PORT (the policy claims to DENY this)"
+
+          command -v nc > /dev/null 2>&1 || inconclusive "no 'nc' in this image; set tests.forgeExecEgress.image to one that has it"
+
+          # 1. Positive control: reach something the policy ALLOWS, the same way we are
+          #    about to reach something it denies.
+          ctrl_host="$CONTROL_HOST"
+          if [ -z "$ctrl_host" ]; then
+            ctrl_host=$(sed -n 's/^nameserver[[:space:]]*\([0-9][0-9.]*\).*/\1/p' /etc/resolv.conf | head -n1)
+          fi
+          [ -n "$ctrl_host" ] || inconclusive "no nameserver in /etc/resolv.conf and tests.forgeExecEgress.controlHost is unset; cannot establish that this pod has any working egress"
+          if nc -w "$CONNECT_TIMEOUT" "$ctrl_host" "$CONTROL_PORT" < /dev/null > /dev/null 2>&1; then
+            echo "  control     : reached $ctrl_host:$CONTROL_PORT (allowed by the policy) — egress works from this pod"
+          else
+            inconclusive "could not reach $ctrl_host:$CONTROL_PORT, which the policy ALLOWS. This pod's egress, DNS, or nc is broken, so a failed connection to $TARGET_HOST would prove nothing about the policy. Fix this first (or point tests.forgeExecEgress.controlHost/controlPort at another allowed endpoint, e.g. the egress proxy)."
+          fi
+
+          # 2. Resolve the target. busybox nslookup prints the resolver itself first
+          #    ("Server:"/"Address:", the latter with a ":53" suffix) and the answer last,
+          #    so the last Address line is the answer.
+          [ -n "$TARGET_HOST" ] || inconclusive "no target configured; set tests.forgeExecEgress.target/targetPort"
+          ip=$(nslookup "$TARGET_HOST" 2>/dev/null | sed -n 's/^Address[ 0-9]*:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' | tail -n1)
+          [ -n "$ip" ] || inconclusive "$TARGET_HOST does not resolve. Either the name is wrong (nothing to deny) or DNS is broken — a failed connection would not mean the policy worked."
+          echo "  resolved    : $TARGET_HOST -> $ip"
+
+          # 3. Under kata the policy denies by private-range exception, so the target must
+          #    actually fall in one of those ranges for the denial to be claimed at all.
+          if [ "$POLICY_MODE" = "kata" ]; then
+            set -- $(echo "$ip" | tr '.' ' ')
+            o1=$1; o2=$2
+            denied=1
+            case "$o1" in
+              10|127) denied=0 ;;
+              169) [ "$o2" = "254" ] && denied=0 ;;
+              192) [ "$o2" = "168" ] && denied=0 ;;
+              172) [ "$o2" -ge 16 ] 2>/dev/null && [ "$o2" -le 31 ] && denied=0 ;;
+              100) [ "$o2" -ge 64 ] 2>/dev/null && [ "$o2" -le 127 ] && denied=0 ;;
+            esac
+            [ "$denied" -eq 0 ] || inconclusive "$ip is not inside any private range the kata policy excepts (10/8, 172.16/12, 192.168/16, 169.254/16, 127/8, 100.64/10). The policy ALLOWS this address, so reaching it would be correct and failing to reach it would prove nothing. Pick a target on the cluster network via tests.forgeExecEgress.target."
+          fi
+
+          # 4. The assertion.
+          start=$(date +%s)
+          nc -w "$CONNECT_TIMEOUT" "$ip" "$TARGET_PORT" < /dev/null > /dev/null 2>&1
+          rc=$?
+          elapsed=$(( $(date +%s) - start ))
+
+          if [ "$rc" -eq 0 ]; then
+            fail "sandbox egress is UNENFORCED. Connected to $TARGET_HOST ($ip:$TARGET_PORT) from a pod the forge-exec egress NetworkPolicy selects (app=forge). The policy exists in the API and denies this address, so the CNI is not implementing NetworkPolicy (kindnet and flannel do not) or is not enforcing it on this node. Every sandbox on this cluster can currently reach every internal service. Install a policy-enforcing CNI (Calico, Cilium, Antrea, Weave) or stop treating this control as a boundary."
+          fi
+
+          if [ "$elapsed" -lt "$MIN_DROP_SECONDS" ]; then
+            inconclusive "the connection to $ip:$TARGET_PORT failed after only ${elapsed}s, which is a refusal (RST), not the silent drop a denying CNI produces. Most likely $TARGET_HOST has no ready endpoints — in which case this says nothing about the policy. Check the target is up; if your CNI rejects rather than drops, verify by hand and set tests.forgeExecEgress.minDropSeconds=0."
+          fi
+
+          pass "the connection to $TARGET_HOST ($ip:$TARGET_PORT) was dropped after ${elapsed}s while $ctrl_host:$CONTROL_PORT (allowed) succeeded — the CNI is enforcing the forge-exec egress NetworkPolicy."
+{{- end }}
