@@ -13,6 +13,11 @@ type fakeBackend struct {
 	ensured   []string
 	removed   []string
 	ensureErr error
+	// rollouts is the state RolloutState reports per service; absent => unmanaged.
+	rollouts   map[string]rolloutState
+	rolloutErr error
+	// checked records every service RolloutState was asked about, in order.
+	checked []string
 }
 
 func (f *fakeBackend) EnsureService(_ context.Context, spec workloadSpec) error {
@@ -25,10 +30,31 @@ func (f *fakeBackend) RemoveService(_ context.Context, service string) error {
 }
 func (f *fakeBackend) ListManaged(context.Context) ([]string, error) { return f.managed, nil }
 
+func (f *fakeBackend) RolloutState(_ context.Context, service string, _ time.Duration) (rolloutState, error) {
+	f.checked = append(f.checked, service)
+	if f.rolloutErr != nil {
+		return rolloutState{}, f.rolloutErr
+	}
+	return f.rollouts[service], nil
+}
+
+// newTestReconciler builds a reconciler whose status writes land in a map instead of
+// the database, with rollout observation on.
+func newTestReconciler(fb *fakeBackend) (*reconciler, map[string][]rolloutState) {
+	written := map[string][]rolloutState{}
+	rec := newReconciler(fb, time.Minute)
+	rec.rolloutDeadline = time.Minute
+	rec.writeStatus = func(_ context.Context, service string, st rolloutState) error {
+		written[service] = append(written[service], st)
+		return nil
+	}
+	return rec, written
+}
+
 func TestApplyDesired_EnsuresAndTearsDown(t *testing.T) {
 	// forge+workflows desired; cluster currently runs forge+tickets.
 	fb := &fakeBackend{managed: []string{"forge", "tickets"}}
-	rec := newReconciler(fb, time.Minute)
+	rec, _ := newTestReconciler(fb)
 	desired := map[string]workloadSpec{
 		"forge":     {Service: "forge"},
 		"workflows": {Service: "workflows"},
@@ -48,7 +74,7 @@ func TestApplyDesired_EnsuresAndTearsDown(t *testing.T) {
 
 func TestApplyDesired_NoDesiredTearsDownAll(t *testing.T) {
 	fb := &fakeBackend{managed: []string{"forge", "workflows"}}
-	rec := newReconciler(fb, time.Minute)
+	rec, _ := newTestReconciler(fb)
 	if err := rec.applyDesired(context.Background(), map[string]workloadSpec{}); err != nil {
 		t.Fatalf("applyDesired: %v", err)
 	}
@@ -124,5 +150,8 @@ func TestNoopBackend(t *testing.T) {
 	}
 	if m, err := b.ListManaged(context.Background()); err != nil || m != nil {
 		t.Errorf("ListManaged = (%v,%v), want (nil,nil)", m, err)
+	}
+	if st, err := b.RolloutState(context.Background(), "x", time.Minute); err != nil || st.Status != rolloutUnmanaged {
+		t.Errorf("RolloutState = (%v,%v), want unmanaged", st, err)
 	}
 }

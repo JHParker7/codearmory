@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,12 +25,30 @@ type reconciler struct {
 	backend  clusterBackend
 	interval time.Duration
 
+	// rolloutDeadline is how long a workload may stay un-converged before the reconcile
+	// calls it failed. 0 disables rollout observation entirely.
+	rolloutDeadline time.Duration
+	// writeStatus persists an observed rollout state onto the service's row. A seam for
+	// tests; nil means the database writer.
+	writeStatus func(ctx context.Context, service string, st rolloutState) error
+	// lastStatus is the last state successfully persisted per service, so a steady state
+	// is written once rather than on every 30s pass. In-memory only: after a restart the
+	// first pass rewrites what it observes, which is idempotent. A failed write is not
+	// recorded here, so it retries next pass.
+	lastStatus map[string]rolloutState
+
 	mu     sync.Mutex
 	wakeCh chan struct{}
 }
 
 func newReconciler(backend clusterBackend, interval time.Duration) *reconciler {
-	return &reconciler{backend: backend, interval: interval, wakeCh: make(chan struct{}, 1)}
+	return &reconciler{
+		backend:         backend,
+		interval:        interval,
+		rolloutDeadline: rolloutDeadline(),
+		lastStatus:      map[string]rolloutState{},
+		wakeCh:          make(chan struct{}, 1),
+	}
 }
 
 // globalReconciler is set by startReconciler when reconciliation is enabled, so a
@@ -62,8 +81,9 @@ func startReconciler(ctx context.Context) {
 	// value, so if it does not match where those images actually publish, the composed
 	// reference does not exist — and because a reconcile applies desired state to a
 	// RUNNING workload, that takes a healthy service down rather than merely failing to
-	// start a new one. That is not hypothetical: it is how git_factory ended up in
-	// ErrImagePull against ghcr.io/code-armory-app/git-factory:dev.
+	// start a new one. That is not hypothetical: it is how git_factory (back when it
+	// was still builder-deployed, before it moved in-repo as a core service) ended up
+	// in ErrImagePull against ghcr.io/code-armory-app/git-factory:dev.
 	//
 	// The failure surfaces far from its cause — a pod dying minutes or hours later, on
 	// an unattended 30s loop — so the fallback is worth one line at startup where it is
@@ -110,6 +130,11 @@ func startReconciler(ctx context.Context) {
 	}
 	interval := reconcileInterval()
 	globalReconciler = newReconciler(backend, interval)
+	if globalReconciler.rolloutDeadline > 0 {
+		slog.InfoContext(ctx, "rollout observation enabled", "deadline", globalReconciler.rolloutDeadline)
+	} else {
+		slog.WarnContext(ctx, "rollout observation disabled (BUILDER_ROLLOUT_DEADLINE<=0) — a workload wedged on an unpullable image will not be reported")
+	}
 	go globalReconciler.run(ctx)
 }
 
@@ -247,9 +272,95 @@ func (r *reconciler) applyDesired(ctx context.Context, desired map[string]worklo
 			}
 		} else {
 			slog.InfoContext(ctx, "torn down service no longer enabled", "service", service)
+			r.forgetRollout(ctx, service)
 		}
 	}
+
+	// Applying desired state succeeds the moment the apiserver accepts the spec, which
+	// says nothing about whether the workload came up. Observe the outcome and report a
+	// wedged one; a rollout failure is returned so the pass is not logged as a success,
+	// but only after every ensure/teardown above has had its turn, and never in place of
+	// a real apply error.
+	if err := r.checkRollouts(ctx, desired); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	return firstErr
+}
+
+// checkRollouts observes each desired workload and records the result. It takes no
+// corrective action of any kind: this loop runs unattended against live workloads, so a
+// wrong automatic fix (rolling back to an image that is also wrong, scaling something
+// down) is worse than a problem that is merely reported. Returns an error naming the
+// wedged services so the pass is logged as failed.
+func (r *reconciler) checkRollouts(ctx context.Context, desired map[string]workloadSpec) error {
+	if r.rolloutDeadline <= 0 {
+		return nil // observation disabled (BUILDER_ROLLOUT_DEADLINE<=0)
+	}
+	var wedged []string
+	for _, service := range sortedKeys(desired) {
+		st, err := r.backend.RolloutState(ctx, service, r.rolloutDeadline)
+		if err != nil {
+			slog.WarnContext(ctx, "rollout check failed", "service", service, "error", err)
+			continue
+		}
+		if st.Status == rolloutUnmanaged {
+			continue
+		}
+		if st.failed() {
+			// The whole point of this work: say so, loudly, at the moment it is still
+			// attributable to the desired image that caused it.
+			slog.ErrorContext(ctx, "managed workload rollout is wedged — pods are not coming up",
+				"service", service, "reason", st.Reason, "detail", st.Message,
+				"stuck_since", st.Since, "deadline", r.rolloutDeadline)
+			recordRolloutFailure(ctx, service, st.Reason)
+			wedged = append(wedged, service)
+		}
+		r.recordRollout(ctx, service, st)
+	}
+	if len(wedged) > 0 {
+		return fmt.Errorf("rollout wedged for %s", strings.Join(wedged, ", "))
+	}
+	return nil
+}
+
+// recordRollout persists a changed state onto the service's row. Unchanged states are
+// skipped so a healthy instance does not write to the database every interval.
+func (r *reconciler) recordRollout(ctx context.Context, service string, st rolloutState) {
+	prev, seen := r.lastStatus[service]
+	if seen && prev.Status == st.Status && prev.Reason == st.Reason && prev.Message == st.Message {
+		return
+	}
+	write := r.writeStatus
+	if write == nil {
+		write = writeRolloutStatus
+	}
+	if err := write(ctx, service, st); err != nil {
+		slog.WarnContext(ctx, "failed to record rollout status", "service", service, "error", err)
+		return
+	}
+	r.lastStatus[service] = st
+}
+
+// forgetRollout clears the recorded state for a service that was just torn down, so a
+// stale "failed" does not outlive the workload it described.
+func (r *reconciler) forgetRollout(ctx context.Context, service string) {
+	delete(r.lastStatus, service)
+	write := r.writeStatus
+	if write == nil {
+		write = writeRolloutStatus
+	}
+	if err := write(ctx, service, rolloutState{}); err != nil {
+		slog.WarnContext(ctx, "failed to clear rollout status", "service", service, "error", err)
+	}
+}
+
+func sortedKeys(m map[string]workloadSpec) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // desiredWorkloads reads the default-scope rows and returns the workload spec for

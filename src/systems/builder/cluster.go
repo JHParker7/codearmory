@@ -99,6 +99,10 @@ type clusterBackend interface {
 	EnsureService(ctx context.Context, spec workloadSpec) error
 	RemoveService(ctx context.Context, service string) error
 	ListManaged(ctx context.Context) ([]string, error)
+	// RolloutState reports whether the workload builder last applied actually came up.
+	// Read-only — applying desired state and observing its outcome are separate steps
+	// on purpose, so observation can never itself change the cluster. See rollout.go.
+	RolloutState(ctx context.Context, service string, deadline time.Duration) (rolloutState, error)
 }
 
 // noopBackend is the inert default: it records nothing in the cluster. Used when
@@ -347,7 +351,7 @@ func (b *k8sBackend) RemoveService(ctx context.Context, service string) error {
 	}
 	// Infra teardown reclaims the ephemeral pieces (a managed Redis) and deliberately
 	// leaves a persistence PVC in place: disabling a service must not destroy the state
-	// it was keeping — repositories, in git_factory's case. Re-enabling the service
+	// it was keeping — a repository or artifact store, say. Re-enabling the service
 	// re-attaches the same volume; reclaiming it is an admin action (and builder holds no
 	// delete on PVCs to do it with).
 	b.teardownInfra(ctx, service)
@@ -664,7 +668,7 @@ func (b *k8sBackend) templatePod(spec workloadSpec) corev1.PodTemplateSpec {
 		SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: &runAsNonRoot},
 		Containers: []corev1.Container{{
 			// The container name is a DNS-1123 label, so it must come from k8sName —
-			// a registry name with '_' (codearmory_git_factory) is rejected outright by
+			// a registry name with '_' (gitea_integration) is rejected outright by
 			// the apiserver, taking the whole Deployment with it.
 			Name:  k8sNameFor(spec.Service),
 			Image: image,

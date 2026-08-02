@@ -221,6 +221,39 @@ func upsertOrgService(ctx context.Context, in OrgService) (OrgService, error) {
 	}
 }
 
+// writeRolloutStatus records the reconciler's OBSERVATION of a workload on its
+// default-scope row. A zero state clears the columns (the service was torn down).
+//
+// Two deliberate choices:
+//   - updated_at is omitted. It means "when did an admin last change desired state",
+//     and a background observation is not that; letting the sweep bump it would make
+//     every wedged service look freshly edited.
+//   - a missing row is not an error. The reconciler only ever observes services it
+//     read from the table, but a concurrent delete between the two is ordinary, and a
+//     status write is never worth failing a reconcile pass over.
+func writeRolloutStatus(ctx context.Context, service string, st rolloutState) error {
+	ctx, span := otel.Tracer("builder").Start(ctx, "db.org_service.rollout_status")
+	defer span.End()
+	span.SetAttributes(attribute.String("service", service), attribute.String("rollout.status", st.Status))
+	at := time.Now().UTC()
+	if st.Status == "" {
+		at = time.Time{}
+	}
+	err := connect().WithContext(ctx).Model(&OrgService{}).
+		Where("org_id = ? AND service_name = ?", defaultOrgID, service).
+		Omit("UpdatedAt").
+		Updates(map[string]any{
+			"rollout_status":  st.Status,
+			"rollout_message": st.Message,
+			"rollout_at":      at,
+		}).Error
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
+}
+
 // deleteOrgService hard-deletes the override/custom row for a scope. Hard delete
 // (not soft) so the (org_id, service_name) unique slot frees up and effective
 // resolution falls back through to the default-scope baseline.

@@ -19,7 +19,19 @@ import (
 // builderResource is the fixed RBAC resource every builder endpoint checks. It is
 // org-independent — builder manages one global baseline, and only the system admin
 // (whose wildcard grant matches anything) holds access; no per-org grant exists.
-const builderResource = "builder/orgs/default"
+//
+// Owned by the INSTANCE, hence the codearmory/ prefix: the default-org baseline every
+// org inherits belongs to the deployment, not to any user. That prefix is not
+// decoration — gatekeeper prepends the CALLER's username to any resource that does not
+// already name an owner, so the bare "builder/orgs/default" evaluated as
+// "<caller>/builder/orgs/default", a different string per caller for what is one
+// global object. It worked only because the admin's wildcard matches anything; the
+// moment a non-wildcard grant was written against it, it would have been per-user.
+//
+// Must stay byte-identical to the resource the registry manifests declare for these
+// endpoints, and to what any pipeline declares when it grants itself setOrgServiceImage
+// — conductor checks the manifest's string, builder re-checks with this one.
+const builderResource = "codearmory/builder/orgs/default"
 
 func handleListOrgServices(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer("builder").Start(r.Context(), "handleListOrgServices")
@@ -443,6 +455,14 @@ func applyRow(views map[string]*serviceView, row OrgService, source string) {
 	}
 	if row.Description != "" {
 		v.Description = row.Description
+	}
+	if row.RolloutStatus != "" {
+		v.RolloutStatus = row.RolloutStatus
+		v.RolloutMessage = row.RolloutMessage
+		if !row.RolloutAt.IsZero() {
+			at := row.RolloutAt
+			v.RolloutAt = &at
+		}
 	}
 	if len(row.DBURLCiphertext) > 0 {
 		v.DBConfigured = true

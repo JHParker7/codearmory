@@ -109,9 +109,19 @@ type OrgService struct {
 	// GITEA_ADMIN_TOKEN, REGISTRY_PASSWORD, …) as an AES-256-GCM-encrypted JSON map
 	// (AAD = service name), never serialized. Builder writes each entry into the
 	// service's Secret under its conventional key on provision.
-	SecretsCiphertext []byte    `json:"-"                 gorm:"column:secrets_ct"`
-	CreatedAt         time.Time `json:"created_at"        gorm:"column:created_at"`
-	UpdatedAt         time.Time `json:"updated_at"        gorm:"column:updated_at"`
+	SecretsCiphertext []byte `json:"-"                 gorm:"column:secrets_ct"`
+	// RolloutStatus/RolloutMessage/RolloutAt are OBSERVED state, not desired state: the
+	// reconciler records what the workload actually did with the image above. They exist
+	// because the failure mode they guard against is silent — an image reference that
+	// does not resolve is accepted by the apiserver, the reconcile reports success, and
+	// the new pods sit in ImagePullBackOff with nothing anywhere saying so. RolloutAt is
+	// when the status last CHANGED (a steady state is not rewritten on every 30s pass),
+	// so it dates the problem rather than the last poll. See rollout.go.
+	RolloutStatus  string    `json:"rollout_status,omitempty"  gorm:"column:rollout_status;default:''"`
+	RolloutMessage string    `json:"rollout_message,omitempty" gorm:"column:rollout_message;default:''"`
+	RolloutAt      time.Time `json:"rollout_at,omitempty"      gorm:"column:rollout_at"`
+	CreatedAt      time.Time `json:"created_at"        gorm:"column:created_at"`
+	UpdatedAt      time.Time `json:"updated_at"        gorm:"column:updated_at"`
 }
 
 func (OrgService) TableName() string { return "org_services" }
@@ -143,6 +153,13 @@ type serviceView struct {
 	// the redacted host for display. The URL itself is never returned.
 	DBConfigured bool   `json:"db_configured"`
 	DBHost       string `json:"db_host,omitempty"`
+	// RolloutStatus/RolloutMessage/RolloutAt surface what the reconciler last OBSERVED
+	// of the workload (ok|progressing|failed) so an operator can see a wedged rollout —
+	// an image that will not pull, pods that will not schedule — in the same place they
+	// set the image that caused it.
+	RolloutStatus  string     `json:"rollout_status,omitempty"`
+	RolloutMessage string     `json:"rollout_message,omitempty"`
+	RolloutAt      *time.Time `json:"rollout_at,omitempty"`
 }
 
 // setServiceRequest is the PUT body for configuring a service for an org. DBUrl is
