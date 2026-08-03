@@ -92,7 +92,7 @@ armory state unlock alice dev --data '{"ID":"abc123"}'
 ## Interactive hub
 
 Running `armory` with no command opens the **home hub** — a registry-driven TUI
-listing every active module (Workflows, Tickets, Notifications, Forge, Hooks,
+listing every active module (Workflows, Tickets, Notifications, Forge, Events,
 Chaos, Argo, Secrets, Repos, Containers, Settings). Most command groups below
 also open their own TUI screen when run with no subcommand (e.g. `armory secrets`,
 `armory forge`, `armory repos`). All screens auto-refresh every 5s; navigate with
@@ -198,28 +198,41 @@ Submit and manage sandboxed code executions. `armory forge` with no subcommand o
 
 When `--wait` is set, forge prints a `memory: <used>/<limit>` line on completion. Runner-class and runtime-backend management is an admin control under [`admin forge-runtimes`](#admin-forge-runtimes).
 
-### `hooks`
+### `events`
 
-Manage webhook pipeline rules and event history. `armory hooks` opens the Hooks TUI.
+Manage event triggers and browse the event log. `armory events` opens the Events TUI.
 
-**Rules**
+A trigger is a filter over any field of any event, dispatching any action — replacing the
+former `hooks rules`, which could only match a git-shaped tuple and only trigger a workflow.
 
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `hooks rules create` | `--name`, `--repo`, `--events` (repeatable), `--ref-filter`, `--workflow <id>`, `--secret`, `--input KEY=VAL` (repeatable, `-i`) | Create a webhook pipeline rule |
-| `hooks rules list` | | List rules |
-| `hooks rules get <id>` | | Get a rule |
-| `hooks rules update <id>` | `--name`, `--repo`, `--events` (repeatable), `--ref-filter`, `--workflow <id>`, `--secret`, `--clear-secret`, `--input KEY=VAL` (repeatable, `-i`) | Update a rule (all fields replaced) |
-| `hooks rules delete <id>` | | Delete a rule |
-
-On `rules update`, omit `--secret` to leave the existing secret unchanged, pass `--clear-secret` to remove it, or pass `--secret <value>` to replace it.
-
-**Events**
+**Triggers**
 
 | Command | Flags | Description |
 |---------|-------|-------------|
-| `hooks events list` | `--repo` | List received webhook events, optionally filtered by repo |
-| `hooks events get <id>` | | Get an event with its trigger details |
+| `events triggers create` | `--name`, `--match field=value` / `--match field~glob` (repeatable, ANDed), `--match-json`, `--run-pipeline <id>`, `--input KEY=VAL` (repeatable, `-i`), `--action-json` | Create a trigger |
+| `events triggers list` | | List triggers |
+| `events triggers get <id>` | | Get a trigger |
+| `events triggers update <id>` | same as create, plus `--disabled` | Update a trigger (all fields replaced) |
+| `events triggers delete <id>` | | Delete a trigger |
+| `events triggers test` | `--match` / `--match-json`, `--event <json>` | Dry-run a filter against an event without saving |
+
+`--match` covers the common case (equality, or `~` for a glob), ANDed together. Anything
+richer — `any`, `not`, regex, set membership — is passed as a filter document with
+`--match-json`. `--input` values may template event fields: `-i IMAGE_TAG='{{ data.commit }}'`.
+
+```bash
+# Run a pipeline on every push to main in one repo
+armory events triggers create --name ci-main \
+  --match type=repo.push --match subject=myorg/myapp --match data.ref=main \
+  --run-pipeline <pipeline-id> -i IMAGE_TAG='{{ data.commit }}'
+```
+
+**Event log**
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `events log list` | `--type` | List recent events, optionally filtered by event type |
+| `events log get <id>` | | Get one event envelope |
 
 ### `tickets`
 
@@ -317,7 +330,7 @@ Browse the OCI registry. `armory containers` opens the Containers TUI.
 ### `theme`
 
 Choose the color theme for the interactive TUIs (`armory` home screen,
-`pipelines`, `hooks`, `tickets`, forge/audit views). See
+`pipelines`, `events`, `tickets`, forge/audit views). See
 [Configuration](#configuration) for the resolution order.
 
 | Command | Flags | Description |

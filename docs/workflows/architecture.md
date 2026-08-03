@@ -97,10 +97,10 @@ Any other outcome fails the step (and the run). The response body (up to 1 MB) i
 
 ## Internal trigger endpoint
 
-`POST /internal/workflows/{id}/runs` is used exclusively by the Hooks service. It bypasses the Gatekeeper JWT check and instead verifies an HMAC-SHA256 token:
+`POST /internal/workflows/{id}/runs` is used exclusively by the Events service. It bypasses the Gatekeeper JWT check and instead verifies an HMAC-SHA256 token:
 
 ```
-X-Hooks-Token: hex(HMAC-SHA256(HOOKS_TRIGGER_KEY,
+X-Hooks-Token: hex(HMAC-SHA256(EVENTS_TRIGGER_KEY,
                    "hooks:{workflow_id}:{triggered_by}:{timestamp}"))
 X-Hooks-Timestamp: {unix_seconds}
 ```

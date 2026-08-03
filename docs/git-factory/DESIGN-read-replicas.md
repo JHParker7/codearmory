@@ -189,7 +189,7 @@ This is the piece that makes workflow clones fast **without** Step 3/4, so it sh
 3. **Refresh policy:** (a) on connection; (b) on demand right before a CI run — a
    `POST /internal/mirrors/{id}/refresh?ref=<sha|branch>` that fetches upstream and only returns
    once `ref` is present (guarantees the CI clone sees the commit it wants); (c) optionally on an
-   upstream webhook (Forgejo push → hooks → refresh). Start with (a)+(b); (b) is what makes it
+   upstream webhook (Forgejo push → events → refresh). Start with (a)+(b); (b) is what makes it
    *correct* for CI, not just fast.
 4. **Workflows clone from the mirror.** git-connector, when asked for a clone token for a repo it
    has mirrored, returns git-factory's URL (`{GIT_HTTP_BASE_URL}/{ns}/{name}.git` with a git-factory

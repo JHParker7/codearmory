@@ -135,7 +135,7 @@ On signup every user automatically receives a `Permissions` record and a `Role` 
 | `getState`, `updateState`, `deleteState`, `lockState`, `unlockState` | `blueprints` | `states/{username}/*` |
 | `createWorkflow`, `listWorkflow`, `getWorkflow`, `updateWorkflow`, `deleteWorkflow`, `triggerRun`, `listRun`, `getRun`, `cancelRun` | `workflows` | `workflows/workflows`, `workflows/workflows/*`, `workflows/runs`, `workflows/runs/*` |
 | `createTicket`, `listTicket`, `getTicket`, `updateTicket`, `deleteTicket`, `createComment`, `deleteComment` | `tickets` | `tickets/tickets`, `tickets/tickets/*` |
-| `createRule`, `listRule`, `getRule`, `updateRule`, `deleteRule`, `listEvent`, `getEvent` | `hooks` | `hooks/rules`, `hooks/rules/*`, `hooks/events`, `hooks/events/*` |
+| `createTrigger`, `listTrigger`, `getTrigger`, `updateTrigger`, `deleteTrigger`, `listEvent`, `getEvent` | `events` | `events/triggers`, `events/triggers/*`, `events` |
 
 All other permissions must be explicitly granted by a user who already holds them.
 
@@ -146,7 +146,7 @@ The `service` field in a `Permissions` record must be listed in the `PERMITTED_S
 To register a new service:
 
 ```bash
-PERMITTED_SERVICES=gatekeeper,blueprints,forge,workflows,tickets,hooks,my-service
+PERMITTED_SERVICES=gatekeeper,blueprints,forge,workflows,tickets,events,my-service
 ```
 
 ## Org-Scoped Permissions

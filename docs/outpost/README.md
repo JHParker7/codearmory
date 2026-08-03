@@ -29,7 +29,7 @@ Reaching into a user's cluster from the control plane would mean the control pla
  └─────────────────────────────────┘            outpost_commands (queue, SKIP LOCKED)
                                                  outpost_events  (outbox + dead-letter retry)
                                                           │ dispatch by integration (HTTP, HMAC)
-                              user ─conductor─►  chaos svc · argo svc · …  ─► workflows / hooks / portal
+                              user ─conductor─►  chaos svc · argo svc · …  ─► workflows / events / portal
 ```
 
 - **Commands** (control → outpost): a control service enqueues `{outpost_id, integration, type, payload}` via the gateway's internal API; the outpost long-polls, and the matching module handles it.
@@ -67,7 +67,7 @@ type Module interface {
 
 - Commands and events both carry IDs; consumers dedupe (at-least-once, idempotent).
 - The command queue is claimed with `FOR UPDATE SKIP LOCKED` (any gateway replica serves any outpost).
-- The event outbox is delivered by a poller with dead-letter retry and exponential backoff (the hooks/workflows idiom — no message broker).
+- The event outbox is delivered by a poller with dead-letter retry and exponential backoff (the events/workflows idiom — no message broker).
 - Consumers correlate by a stable key: chaos by `experiment_id`, argo by `outpost_id` + `app_name`.
 
 ## Authentication

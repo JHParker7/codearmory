@@ -151,7 +151,7 @@ Examples:
 | `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/workflows` | PostgreSQL connection string |
 | `GATEKEEPER_URL` | `http://localhost:8080` | Gatekeeper base URL |
 | `GATEKEEPER_SERVICE_KEY` | — | Service key for key rotation with Gatekeeper |
-| `HOOKS_TRIGGER_KEY` | — | Shared HMAC secret with the hooks service. Required to accept internal trigger requests from hooks. |
+| `EVENTS_TRIGGER_KEY` | — | Shared HMAC secret with the events service. Required to accept its internal pipeline dispatch and run polling. |
 | `REGISTRY_URL` | — | Registry base URL. Used to poll the action catalog every 5 minutes. |
 | `REGISTRY_SERVICE_KEY` | — | Service key for authenticating with the registry to fetch the action catalog. |
 | `SERVICES` | — | Comma-separated `name=url` pairs seeded at startup (e.g. `forge=http://forge:8083`). The registry catalog poller adds/updates entries automatically. `gatekeeper` is always available. |
@@ -184,7 +184,7 @@ docker run -p 8085:8085 \
   -e DATABASE_URL=postgresql://postgres:pass@db:5432/workflows \
   -e GATEKEEPER_URL=http://gatekeeper:8081 \
   -e GATEKEEPER_SERVICE_KEY=your-service-key \
-  -e HOOKS_TRIGGER_KEY=your-hmac-secret \
+  -e EVENTS_TRIGGER_KEY=your-hmac-secret \
   -e REGISTRY_URL=http://registry:8084 \
   -e REGISTRY_SERVICE_KEY=your-registry-key \
   -e SERVICES=forge=http://forge:8083,blueprints=http://blueprints:8093 \
@@ -270,11 +270,11 @@ back-compat (un-namespaced resource).
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/internal/pipelines/{id}/runs` | HMAC | Trigger a run (hooks service only) |
-| `GET` | `/internal/pipelines/{id}` | HMAC | Get `org_id` for a workflow (hooks ownership check) |
+| `POST` | `/internal/pipelines/{id}/runs` | HMAC | Trigger a run (events service only) |
+| `GET` | `/internal/pipelines/{id}` | HMAC | Get `org_id` for a workflow (events ownership check) |
 | `GET` | `/internal/runs/{id}` | HMAC | Get current run status (GitHub App polling) |
 
-Internal endpoints use `X-Hooks-Token` (HMAC-SHA256 signed with `HOOKS_TRIGGER_KEY`) and `X-Hooks-Timestamp` headers instead of Bearer auth.
+Internal endpoints use `X-Hooks-Token` (HMAC-SHA256 signed with `EVENTS_TRIGGER_KEY`) and `X-Hooks-Timestamp` headers instead of Bearer auth. The `Hooks` header names are the legacy wire spelling, kept because renaming them would break every deployment mid-upgrade; only the service holding the key changed.
 
 ---
 

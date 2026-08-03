@@ -86,7 +86,7 @@ never locks the platform.
 ## Reconciler (deploy on enable)
 
 **The Helm chart deploys the core services** — gatekeeper, conductor, registry,
-builder, portal, forge (plus its egress proxy), workflows, hooks, events, tickets,
+builder, portal, forge (plus its egress proxy), workflows, events, tickets,
 containers, artifacts, git_connector and git_factory — each gated on its own
 `<service>.enabled` value, all defaulting to true. (`outpostGateway.enabled` is the
 one that defaults to false.)

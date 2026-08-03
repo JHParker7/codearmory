@@ -80,7 +80,7 @@ env var.
 | `GIT_FACTORY_CLONE_TOKEN_KEY` | — | **secret**; HMAC key for runner clone tokens. Rotating it invalidates outstanding clone URLs |
 | `GIT_NODE_FORWARD_KEY` | — | **secret**; node→node trust for the proxy and replication. Only needed with more than one node |
 | `GIT_NODE_ADDRESS` | — | this node's own base URL, so it recognises itself. Unset on a single node |
-| `HOOKS_URL` / `HOOKS_TRIGGER_KEY` | — | where push events are posted, and the key they are signed with. Unset simply turns the integration off |
+| `EVENTS_URL` / `EVENTS_TRIGGER_KEY` | — | where push events are posted, and the key they are signed with. Unset simply turns the integration off |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP collector; telemetry off if unset |
 | `LOG_LEVEL` | `info` | slog level |
 

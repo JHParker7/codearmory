@@ -165,6 +165,7 @@ This call replaces the entire endpoint manifest, actions list, and default grant
 | `action` | string | Yes | Gatekeeper action string checked against the caller's permissions |
 | `resource` | string | Yes | Gatekeeper resource string checked against the caller's permissions |
 | `public` | bool | No | If `true`, Conductor skips the permission check for this endpoint |
+| `max_body_bytes` | int | No | Conductor's request-body limit for this endpoint. Omit (or `0`) for the default 64 KiB, which suits JSON CRUD. Set `-1` for an endpoint that carries bulk content (an upload), so Conductor streams the body instead of buffering it to measure — the backend then enforces its own limit. A positive value caps the body at that many bytes, also without buffering. |
 
 **Action fields:**
 

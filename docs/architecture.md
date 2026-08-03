@@ -14,7 +14,7 @@
 | [git_connector](git/README.md)                       | 8096 | Git credential broker — mints/brokers clone credentials for linked backends |
 | [git_factory](git-factory/README.md)                 | 9002 | The platform's own git host — bare repos + Smart HTTP. Registered as `codearmory_git_factory` |
 | [Workflows](workflows/architecture.md)               | 8085 | CI/CD pipeline orchestrator |
-| [Hooks](hooks/architecture.md)                       | 8087 | Webhook receiver and pipeline trigger |
+| [Events](events/README.md)                           | 8093 | Event collector/reactor + webhook adapters |
 | [Events](events/design.md)                           | 8093 | Event bus — triggers, actions, HMAC intake |
 | Tickets                                              | 8086 | Issue tracker — boards, tickets, comments, custom fields |
 | Containers                                           | 8089 | Docker registry proxy — per-tenant image repositories |
@@ -45,7 +45,7 @@ what it registers under and the first segment of every RBAC resource — is
         | Bearer JWT                            | POST /hooks
         v                                       v
 +---------------+                      +------------------+
-|   Conductor   |                      |     Hooks        |
+|   Conductor   |                      |     Events       |
 |   :8080       |                      |     :8087        |
 |   API gateway |                      |  Rule match      |
 |   RBAC proxy  |                      |  + dispatch      |
@@ -97,7 +97,7 @@ Client --Bearer JWT--> Conductor
 
 Services receiving requests through Conductor get a signed `X-User-ID` header and do their own permission check via Gatekeeper. Conductor only verifies that the user exists; RBAC is delegated to each backend.
 
-### 2. Direct Gatekeeper auth (Forge, Hooks, Workflows)
+### 2. Direct Gatekeeper auth (Forge, Events, Workflows)
 
 Each service calls `POST /check_permissions` on Gatekeeper, forwarding the caller's `Authorization: Bearer` token. Gatekeeper validates the JWT signature, evaluates the user's roles and permissions, and returns `{ authorized, user_id, org_id }`.
 
@@ -143,7 +143,7 @@ Incoming request
 ```
 Git host / CI system
   |
-  +-- POST /hooks -----------------------------------------> Hooks :8087
+  +-- POST /hooks -----------------------------------------> Events :8093
         |
         +-- Parse payload (repo, event, ref, commit, ...)
         |   X-Hook-Event header overrides body.event
@@ -187,7 +187,7 @@ Drive your own clusters from the control plane without granting it any inbound a
  └─────────────────────────┘             outpost_commands  (queue, SKIP LOCKED)
                                           outpost_events    (outbox + dead-letter retry)
                                                   │ dispatch to consumer (HTTP, HMAC)
-                          user ─Conductor─►  consumer service  ─► Workflows / Hooks / Portal
+                          user ─Conductor─►  consumer service  ─► Workflows / Events / Portal
 ```
 
 - **Commands** (control → outpost): a consumer service enqueues `{outpost_id, integration, type, payload}` via the gateway's internal API (shared-key HMAC); the outpost long-polls with `SKIP LOCKED` claiming and routes each to the matching module.
@@ -201,7 +201,7 @@ The control plane holds **zero** cluster credentials; all Kubernetes/CRD code li
 |--------|--------|-----------|
 | Conductor | Gatekeeper | Bearer JWT forwarded from original caller |
 | Conductor | Registry | Static `REGISTRY_READ_KEY` |
-| Hooks | Workflows | HMAC-SHA256 (`HOOKS_TRIGGER_KEY`) on `X-Hooks-Token` |
+| Events | Workflows | HMAC-SHA256 (`EVENTS_TRIGGER_KEY`) on `X-Hooks-Token` (legacy wire name) |
 | Workflows | step services | Bearer JWT forwarded from original run trigger |
 | All services | Gatekeeper | `X-Service-Key: name:key` (rotated every 25 min) |
 
@@ -215,7 +215,7 @@ Each service owns an isolated PostgreSQL database. Cross-service references (e.g
 | Registry | `registry` | Raw SQL `CREATE TABLE IF NOT EXISTS` |
 | Forge | `forge` | Raw SQL `CREATE TABLE IF NOT EXISTS` |
 | Workflows | `workflows` | GORM AutoMigrate |
-| Hooks | `hooks` | GORM AutoMigrate |
+| Events | `events` | GORM AutoMigrate |
 
 ## Observability
 

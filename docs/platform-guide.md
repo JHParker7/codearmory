@@ -14,7 +14,7 @@ This guide explains what each CodeArmory service does, how they fit together, an
 6. [Git Credentials — Git](#git-credentials--git)
 7. [Git Hosting — git_factory](#git-hosting--git_factory)
 8. [Pipeline Orchestration — Workflows](#pipeline-orchestration--workflows)
-9. [Git Webhooks — Hooks](#git-webhooks--hooks)
+9. [Events and Webhooks — Events](#events-and-webhooks--events)
 10. [Issue Tracking — Tickets](#issue-tracking--tickets)
 11. [Images and Artifacts — Containers and Artifacts](#images-and-artifacts--containers-and-artifacts)
 12. [Cluster Integrations — Outposts](#cluster-integrations--outposts)
@@ -43,7 +43,7 @@ Browser / CLI
         ├── /executions/...       ──────► Forge      :8083  (sandboxed runners)
         ├── /git_connector/...    ──────► git_connector :8096  (clone-credential broker)
         ├── /workflows/...        ──────► Workflows  :8085  (pipelines)
-        └── /hooks/...            ──────► Hooks      :8087  (webhook receiver)
+        └── /events/...           ──────► Events     :8093  (events + webhooks)
 
    Registry :8082  ← Conductor polls this to build its routing table
    Builder  :8095  ← org control plane; deploys + registers optional service modules
@@ -160,11 +160,11 @@ Once registered, Conductor picks up the new service on its next poll (every 30 s
 
 **Port:** 8083
 
-Forge runs user-submitted commands inside isolated Docker containers. It is the execution engine that Workflows steps can call to run build scripts, deployment tools, or arbitrary automation.
+Forge runs user-submitted commands inside isolated sandboxes. It is the execution engine that Workflows steps can call to run build scripts, deployment tools, or arbitrary automation.
 
 ### How it works
 
-An execution request specifies a Docker image, a command, optional environment variables, and optional file inputs. Forge pulls the image, starts a container, runs the command, streams stdout/stderr, and records the exit code. Containers run with a read-only root filesystem, no network access, and dropped Linux capabilities.
+An execution request specifies a Docker image, a command, optional environment variables, and optional file inputs. Forge pulls the image, starts the sandbox, runs the command, streams stdout/stderr, and records the exit code. Sandboxes run with a read-only root filesystem, dropped Linux capabilities, a non-root UID, and egress restricted to the public internet by an allowlisting proxy.
 
 ```bash
 curl -X POST http://localhost:8080/forge/executions \
@@ -188,15 +188,36 @@ pending → running → completed
 
 Poll `GET /executions/{id}` to check status. The full log output is available on the execution object once the run reaches a terminal state.
 
+### Runtime backends — use kata or gvisor
+
+The runtime that runs a job is selected per execution. Admins define **runtime backends** (`/runtime-backends`, admin-only CRUD) of type `docker`, `kubernetes`, `kata`, or `gvisor` and point a runner class at one; the execution snapshots that backend at submit time.
+
+**Recommendation: run untrusted workloads on `kata` or `gvisor`.** `docker` and `kubernetes` isolate a job at the *container* layer — a shared host kernel hardened with a read-only rootfs, dropped capabilities, a non-root UID, and seccomp. That is a real boundary, but a single kernel-level escape (a syscall or namespace bug) breaks out of every container on the node. Forge runs code its users wrote, so the shared-kernel backends are appropriate for trusted, first-party jobs — not for arbitrary user submissions.
+
+`kata` and `gvisor` give the job its **own kernel** and change nothing else: same submission API, same `RunResult`, same Job lifecycle, timeout, cancel, and log collection, with every container hardening setting still applied *on top of* the new boundary.
+
+| | `kata` | `gvisor` |
+|---|---|---|
+| Boundary | hardware-virtualized microVM (real guest kernel) | userspace kernel — the gVisor Sentry services every syscall |
+| Needs `/dev/kvm` / nested virt | **yes** | **no** |
+| Confines egress on its own | yes (VM network boundary — the egress *proxy* is skipped, a public-only NetworkPolicy still applies) | **no** — keeps the egress proxy and NetworkPolicy |
+| Privileged runner classes | allowed | allowed |
+
+Pick **kata** when your nodes have hardware virtualization and you want a real guest kernel. Pick **gvisor** when they do not — most managed node pools lack nested virt — since the Sentry needs no special hardware. Both are Kubernetes-only; the `docker` backend has no kernel-isolated equivalent.
+
+Because the kernel — not the container — is the boundary on these backends, a runner class may set `privileged: true` to run as **root with a writable rootfs** so package managers work. Forge rejects that flag on `docker`/`kubernetes` with a `400`.
+
+Enable it in the chart with `forge.kata.enabled=true` **or** `forge.gvisor.enabled=true` (mutually exclusive), and set `forge.env.k8sRuntimeClass` to the RuntimeClass name your cluster registered — the chart fails to render without it. Installing the RuntimeClass itself (`kata-deploy`, or the `runsc` containerd shim) is a cluster prerequisite Forge does not perform. See [forge/kata.md](forge/kata.md) and [forge/gvisor.md](forge/gvisor.md).
+
 ### Security model
 
-Each container is isolated at the OS level. Forge enforces:
+Whichever backend runs the job, Forge enforces:
 
-- **Read-only root filesystem** — the container cannot write to its own image layers.
-- **No network** — containers cannot make outbound connections unless explicitly configured. When outbound access is needed, Forge supports optional egress allowlisting so workloads can reach only an approved set of domains.
+- **Read-only root filesystem** — the sandbox cannot write to its own image layers (unless a privileged runner class on a kernel-isolated backend opts out).
+- **Confined egress** — sandboxes reach the public internet only. The egress proxy defaults to public-only mode and an always-on dial-time IP guard blocks loopback, private, link-local, and cloud-metadata addresses, so a runner can never reach an internal service. Set `PROXY_ALLOWED_DOMAINS` to a comma-separated list to narrow it to specific domains (empty blocks all egress).
 - **Dropped capabilities** — all Linux capabilities are dropped; only the minimum required to run the command are re-added.
 - **Resource limits** — CPU and memory limits are set per execution.
-- **Timeout enforcement** — containers that exceed `timeout_secs` are forcibly stopped.
+- **Timeout enforcement** — sandboxes that exceed `timeout_secs` are forcibly stopped.
 
 ### Integration with Workflows
 
@@ -360,53 +381,102 @@ The caller's Bearer token is stored with the run and forwarded to each step — 
 
 `DELETE /runs/{id}` cancels a pending or running run. The cancellation is authoritative at the database level; a best-effort signal is also sent to the in-progress goroutine. A run that completes between the cancel request and the signal is recorded as `completed`, not `cancelled`.
 
-### Triggering from Hooks
+### Triggering from Events
 
-Workflows exposes an internal endpoint (`POST /internal/workflows/{id}/runs`) that the Hooks service uses to trigger pipeline runs from Git events. This endpoint bypasses JWT auth and instead validates an HMAC-SHA256 token signed with a shared secret (`HOOKS_TRIGGER_KEY`), with a ±5 minute timestamp window to prevent replay attacks.
+Workflows exposes an internal endpoint (`POST /internal/pipelines/{id}/runs`) that the Events service uses to start pipeline runs when a trigger matches. This endpoint bypasses JWT auth and instead validates an HMAC-SHA256 token signed with a shared secret (`EVENTS_TRIGGER_KEY`), with a timestamp window to prevent replay attacks.
 
 ---
 
-## Git Webhooks — Hooks
+## Events and Webhooks — Events
 
-**Port:** 8087
+**Port:** 8093
 
-Hooks receives incoming Git webhook payloads (from GitHub, GitLab, Gitea, or any compatible source) and triggers Workflows pipeline runs based on configurable pipeline rules.
+Events is the platform's reaction plane. Every service emits JSON **events** to it; **triggers** whose field-based filters match dispatch **actions** — run a pipeline, open a ticket, notify, call an outbound webhook, enqueue an outpost command. It also hosts the inbound webhook adapters, so a push from GitHub or Forgejo becomes an event like any other.
 
-### Pipeline rules
+It supersedes the former `hooks` service, which it absorbed. The difference is the data model, and it is worth being precise about: a hooks *rule* was a git-shaped tuple (`source` + `events` + `ref_filter`) that could only ever trigger a workflow. A trigger is a filter over **any field of any event**, dispatching **any action** — so reacting to a ticket transition or a failed run is the same mechanism as reacting to a push, not a special case.
 
-A pipeline rule specifies:
+### The envelope
 
-| Field | Description |
-|-------|-------------|
-| `event_type` | Webhook event to match (e.g. `push`, `pull_request`) |
-| `repository` | Repository name or pattern to match |
-| `branch` | Branch or pattern to match (supports wildcards) |
-| `workflow_id` | Which workflow to trigger |
-| `inputs` | Static inputs to pass to the triggered run |
+One shape for every event:
 
-When an incoming webhook matches a rule, Hooks calls `POST /internal/workflows/{id}/runs` on the Workflows service, signing the request with the shared HMAC key.
+```json
+{
+  "id": "01J...",
+  "type": "repo.push",
+  "source": "codearmory_git_factory",
+  "subject": "acme/myapp",
+  "actor": { "org_id": "org-1", "user_id": "u-42" },
+  "occurred_at": "2026-08-02T10:04:11Z",
+  "data": { "ref": "main", "commit": "abc123", "pusher": "alice" }
+}
+```
 
-### Registering a webhook
+`subject` is the specific resource the event is about, and is what makes triggers addressable
+per-resource. `data` is free-form; filters reach into it by dotted path.
+
+### Triggers
+
+A trigger's `match` is either a **group** (`all` / `any` / `not`) or a **leaf**
+(`field` / `op` / `value`). The recursion allows arbitrary boolean logic while the common case
+stays a flat `all`:
 
 ```bash
-# Create a pipeline rule
-curl -X POST http://localhost:8080/hooks/rules \
+curl -X POST http://localhost:8080/events/triggers \
   -H "Authorization: Bearer <token>" \
   -d '{
     "name": "deploy-on-push",
-    "event_type": "push",
-    "repository": "my-org/my-app",
-    "branch": "main",
-    "workflow_id": "uuid-of-deploy-workflow",
-    "inputs": {"ENV": "production"}
+    "match": { "all": [
+      { "field": "type",     "op": "eq", "value": "repo.push" },
+      { "field": "subject",  "op": "eq", "value": "my-org/my-app" },
+      { "field": "data.ref", "op": "eq", "value": "main" }
+    ]},
+    "actions": [
+      { "kind": "run_pipeline", "config": {
+          "pipeline_id": "uuid-of-deploy-workflow",
+          "inputs": { "ENV": "production", "IMAGE_TAG": "{{ data.commit }}" }
+      }}
+    ]
   }'
 ```
 
-Configure your Git provider to send webhook payloads to `http://conductor:8080/hooks/hooks`. Hooks verifies the webhook signature before processing the payload.
+String values in an action's config are templated — `{{ data.commit }}` interpolates from the
+event. `POST /events/triggers/test-match` dry-runs a filter against an event you supply,
+answering "would this fire?" without persisting anything.
 
-### Supported event types
+### Inbound webhooks
 
-Hooks processes any webhook payload format that includes repository and branch information. Standard events include `push`, `pull_request`, `tag`, and `release`. Multiple pipeline rules can match the same event.
+| Endpoint | Source |
+|----------|--------|
+| `POST /events/hooks` | Generic — any system that can POST JSON |
+| `POST /events/hooks/git` | The platform's own `git_factory` |
+| `POST /events/hooks/gitea` | Forgejo / Gitea, in their native payload shape |
+| `POST /events/hooks/github` | GitHub App (registered only when configured) |
+
+All of them are public and verify a provider HMAC over the raw body against
+`EVENTS_WEBHOOK_SECRET` (`X-Hub-Signature-256` or `X-Gitea-Signature`). **With no secret
+configured they reject everything** — these endpoints start pipeline runs, so an unsigned
+payload is never trusted.
+
+Because a third-party payload carries no codearmory identity, the tenant comes from the
+endpoint URL (`?org_id=` / `?user_id=`). The secret attests that whoever configured the webhook
+holds it, not that the repo belongs to that tenant; the two are bound only by being configured
+together in the provider's settings.
+
+### GitHub App
+
+With `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET` set, the App
+reports **back** as well as in: for each pipeline run a matched trigger starts, it opens a
+check run on the pushed commit and watches it to completion, so the result appears on the PR in
+GitHub's UI.
+
+### Delivery guarantees
+
+At-least-once, with idempotency rather than exactly-once. Ingestion is idempotent on the event
+id, so a redelivery is a no-op; dispatch claims each `(trigger, event)` pair through a unique
+index, so a redelivered event never double-fires; failures retry with exponential backoff and
+then dead-letter.
+
+See [Events README](events/README.md).
 
 ---
 
@@ -465,7 +535,7 @@ your cluster                                     control plane
 │ (you choose which)      │ ◄────────► │ ingest events  (Postgres backbone)  │
 └─────────────────────────┘  long-poll └──────────┬──────────────────────────┘
                               + POST     dispatch to consumer
-                                         consumer service → Workflows / Hooks / Portal
+                                         consumer service → Workflows / Events / Portal
 ```
 
 **How it flows.** A consumer service enqueues a *command* for an outpost via the gateway. The outpost long-polls, the right module performs the action in-cluster, and reports *events* back. The gateway delivers each event to the owning consumer service, which updates its records and weaves the result into workflows, hooks, and the portal. Everything is at-least-once and idempotent, backed by Postgres queues — no message broker.
@@ -548,9 +618,9 @@ All services emit OpenTelemetry traces and metrics. Set `OTEL_EXPORTER_OTLP_ENDP
 | Forge | `forge.executions.cancelled.total` | — |
 | Gatekeeper | `gatekeeper.logins.total` | — |
 | Gatekeeper | `gatekeeper.permission_checks.total` | `result` (allowed/denied) |
-| Hooks | `hooks.received.total` | `repo` |
-| Hooks | `hooks.rules.matched.total` | `repo`, `workflow.id` |
-| Hooks | `hooks.runs.triggered.total` | `workflow.id` |
+| Events | `events.received.total` | `source` |
+| Events | `events.triggers.matched.total` | `event.type` |
+| Events | `events.actions.run.total` | `kind`, `ok` |
 | Workflows | `workflows.runs.triggered.total` | `workflow.id` |
 | Workflows | `workflows.runs.completed.total` | `workflow.id`, `status` |
 | Workflows | `workflows.steps.completed.total` | `workflow.id`, `status` |
@@ -579,6 +649,8 @@ env:
   DATABASE_URL_FILE: /var/run/secrets/db-url
 ```
 
+If Forge will run anything a user submitted, enable a kernel-isolated sandbox backend rather than the default shared-kernel one — `forge.kata.enabled=true` where nodes have hardware virtualization, `forge.gvisor.enabled=true` where they do not, with `forge.env.k8sRuntimeClass` naming the RuntimeClass. See [Runtime backends](#runtime-backends--use-kata-or-gvisor).
+
 ### Minimal subset
 
 You can run a subset of services depending on your use case:
@@ -586,7 +658,7 @@ You can run a subset of services depending on your use case:
 | Use case | Required services |
 |----------|------------------|
 | Control plane | Gatekeeper, Conductor, Registry, Builder, Portal |
-| CI/CD pipelines | Add Forge, Git, Workflows, Hooks |
+| CI/CD pipelines | Add Forge, Git, Workflows, Events |
 | Cluster integrations | Add Outpost Gateway, and deploy an outpost in the target cluster |
 | Optional capabilities | Deployed and registered at runtime as modules by Builder (e.g. `gitea_integration` for Forgejo/Gitea repo management) |
 

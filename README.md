@@ -5,7 +5,7 @@
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8)](https://go.dev)
 [![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange)](../../releases)
 
-**A modular, self-hosted CI/CD platform — pipelines that run sandboxed jobs, triggered by git webhooks, behind one auth/RBAC layer, with a builder that brings new services online as modules and a CLI that keeps you in your terminal.**
+**A modular, self-hosted CI/CD platform — pipelines that run sandboxed jobs, triggered by platform events and git webhooks, behind one auth/RBAC layer, with a builder that brings new services online as modules and a CLI that keeps you in your terminal.**
 
 ---
 
@@ -16,7 +16,7 @@
 - **Self-hosted git, built in** — host your repositories on the platform itself: bare repos over Smart HTTP with gatekeeper-backed auth, collaborators, branch protection, pull requests, and pull-through mirrors of upstream repos so CI clones stay in-cluster (git_factory). It is a **core service** — the chart deploys it and the registry manifest registers it, so there is nothing to enable. Repos on GitHub, GitLab or Forgejo keep working through the credential broker (git_connector), so this is an option rather than a migration.
 - **Issue tracking** — boards, tickets, comments and custom fields, linkable to pipeline runs and sandboxed executions, so work items and the builds that address them live in one place (Tickets).
 - **Container registry** — per-tenant image repositories fronted by a registry proxy (Containers), plus a build-artifact store (Artifacts).
-- **Git webhook triggers** — receive pushes and PRs from GitHub, GitLab, or Forgejo/Gitea and map them to pipeline runs with at-least-once delivery (Hooks).
+- **Event-driven triggers** — receive pushes and PRs from GitHub, GitLab, or Forgejo/Gitea, or any platform event, and map them to pipeline runs with at-least-once delivery (Events).
 - **Auth + RBAC + SSO** — ES256 JWT sessions, orgs, teams, and roles covering every service. Gatekeeper is also an OIDC provider, so it can be your SSO identity source.
 - **Unified API gateway** — every request enters through Conductor, which routes by service prefix and verifies permissions with Gatekeeper before forwarding. Services declare their routes, actions, and RBAC in the Registry.
 - **Modular by design** — Builder is the per-org control plane *and* the runtime deployer: enable a service for an org and Builder deploys + registers it at runtime, no chart edit. New capabilities ship as **modules** in their own repos, not as forks of the core.
@@ -55,9 +55,9 @@ Every request enters through Conductor, which polls Registry for service manifes
     Core services Conductor routes to:
 
     ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-    │  Workflows  │   │    Forge    │   │    Hooks    │
-    │   :8085     │   │   :8083     │   │   :8087     │
-    │  pipelines  │   │   runners   │   │  webhooks   │
+    │  Workflows  │   │    Forge    │   │   Events    │
+    │   :8085     │   │   :8083     │   │   :8093     │
+    │  pipelines  │   │   runners   │   │  triggers   │
     └─────────────┘   └─────────────┘   └─────────────┘
 
     ┌─────────────┐   ┌─────────────┐
@@ -177,7 +177,7 @@ armory pipelines list pipelines                      # see all pipelines
 armory pipelines run pipeline <id> --input KEY=VALUE # trigger a run
 armory pipelines get run <id>                        # inspect results
 armory forge exec run --image node:20 -- npm test    # sandboxed run
-armory hooks rules create --name ci --repo myorg/myapp --events push --workflow <id> --secret <hmac>
+armory events triggers create --name ci --match type=repo.push --match subject=myorg/myapp --run-pipeline <id>
 armory admin orgs invite <org> colleague@example.com
 ```
 
@@ -196,9 +196,8 @@ Binaries for Linux, macOS, and Windows are attached to each [GitHub release](../
 | Egress Proxy | 3128 | [Sandbox egress control](docs/egress-proxy/README.md) |
 | Workflows | 8085 | [Pipeline orchestration](docs/workflows/README.md) |
 | Tickets | 8086 | Issue tracker — boards, tickets, comments, custom fields |
-| Hooks | 8087 | [Webhook receiver](docs/hooks/README.md) |
 | Containers | 8089 | Docker registry proxy — per-tenant image repositories |
-| Events | 8093 | [Event bus — triggers and actions](docs/events/design.md) |
+| Events | 8093 | [Event collector/reactor + webhook adapters](docs/events/README.md) |
 | Builder | 8095 | [Org control plane + runtime service deployer](docs/builder/README.md) |
 | git_connector | 8096 | [Git credential broker](docs/git/README.md) |
 | Artifacts | 8097 | Build artifact store |
@@ -224,7 +223,6 @@ ghcr.io/code-armory-app/forge:alpha-latest
 ghcr.io/code-armory-app/egress-proxy:alpha-latest
 ghcr.io/code-armory-app/workflows:alpha-latest
 ghcr.io/code-armory-app/tickets:alpha-latest
-ghcr.io/code-armory-app/hooks:alpha-latest
 ghcr.io/code-armory-app/containers:alpha-latest
 ghcr.io/code-armory-app/events:alpha-latest
 ghcr.io/code-armory-app/builder:alpha-latest
@@ -274,7 +272,7 @@ docker compose --profile test run --rm registry-integration-tests
 docker compose --profile test run --rm conductor-integration-tests
 docker compose --profile test run --rm forge-integration-tests
 docker compose --profile test run --rm workflows-integration-tests
-docker compose --profile test run --rm hooks-integration-tests
+docker compose --profile test run --rm events-integration-tests
 docker compose --profile test run --rm outpost-gateway-integration-tests
 docker compose --profile test run --rm portal-integration-tests
 ```

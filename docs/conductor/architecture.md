@@ -95,7 +95,9 @@ After a successful identity check, Conductor rewrites headers before forwarding:
 | `true` | `Authorization` unchanged | — |
 | `false` | `X-User-ID`, `X-Conductor-Token`, `X-Conductor-Timestamp` | `Authorization` |
 
-`X-Conductor-Token` is `hex(HMAC-SHA256(CONDUCTOR_FORWARD_KEY, "conductor:{userID}:{timestamp}"))`. Backend services with `forward_auth=false` can verify this token to confirm that `X-User-ID` was injected by a trusted Conductor instance, not forged by a client.
+`X-Conductor-Token` is `hex(HMAC-SHA256(CONDUCTOR_FORWARD_KEY, "conductor:{userID}:{timestamp}"))`, intended to let a `forward_auth=false` backend confirm that `X-User-ID` was injected by a trusted Conductor instance rather than forged by a client.
+
+**Status: not in use.** Every service registered in either manifest sets `forward_auth=true`, and no backend reads `X-Conductor-Token`. Conductor still computes and sends it, but nothing verifies it, so it provides no protection today. A service moved to `forward_auth=false` would need to implement verification first — otherwise it would trust an unverified `X-User-ID` header.
 
 Conductor strips `X-User-ID`, `X-Conductor-Token`, `X-Conductor-Timestamp`, `X-Service-Key`, and standard proxy headers from every incoming request before conditionally re-setting them.
 
