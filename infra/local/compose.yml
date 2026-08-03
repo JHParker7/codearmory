@@ -71,7 +71,7 @@ services:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/gatekeeper
       REDIS_URL: redis://redis:6379/0
-      GATEKEEPER_SERVICES: forge=forge-local-secret,workflows=workflows-local-secret,hooks=hooks-local-secret,outpost-gateway=outpost-gateway-local-secret,builder=builder-local-secret,tickets=tickets-local-secret,git_connector=git-local-secret,codearmory_git_factory=git-factory-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
+      GATEKEEPER_SERVICES: forge=forge-local-secret,workflows=workflows-local-secret,events=events-local-secret,outpost-gateway=outpost-gateway-local-secret,builder=builder-local-secret,tickets=tickets-local-secret,git_connector=git-local-secret,codearmory_git_factory=git-factory-local-secret,gitea_integration=gitea-integration-local-secret,containers=containers-local-secret,test-service=test-service-local-secret
       SECRETS_LOOKUP_ALLOWED_CALLERS: "forge,containers"
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: gatekeeper-registry-read-local-secret
@@ -80,6 +80,16 @@ services:
       BUILDER_URL: http://builder:8095
       BUILDER_INTERNAL_KEY: builder-internal-local-secret
       OIDC_ISSUER: http://localhost:8080
+      # LOCAL HTTP ONLY — never set this in a deployed environment (the Helm chart
+      # leaves it unset, so the cookie stays Secure there).
+      #
+      # The session cookie is the portal's credential: the SPA no longer keeps the JWT
+      # in localStorage, so `armory_session` is what carries a reloaded tab. Chrome
+      # refuses to STORE a Secure cookie from a non-secure origin, and this stack is
+      # plain http on hostnames like http://portal:3001 — not localhost, so it gets no
+      # exemption. Left at the default, the cookie is silently dropped and every
+      # browser session dies on refresh.
+      COOKIE_SECURE: "false"
       GATEKEEPER_SECRETS_KEY: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
       SIGNUP_RATE_LIMIT: "1000"
       SIGNUP_RATE_WINDOW: 1h
@@ -220,6 +230,14 @@ services:
       CONDUCTOR_FORWARD_KEY: forge-conductor-shared-local-secret
       # Shared with registry (CONDUCTOR_NOTIFY_KEY) so registry can push route refreshes.
       CONDUCTOR_NOTIFY_KEY: conductor-notify-local-secret
+      # The suspicious-activity block is keyed on source IP, and in this stack every
+      # caller — the browser suite, the pytest suites, a developer's curl — arrives
+      # from the same one. The browser tests deliberately exercise logged-out and
+      # rejected-session states, so at the shipped threshold of 10 they lock
+      # themselves (and everything else) out mid-run for an hour. Raised here for the
+      # same reason LOGIN_RATE_LIMIT is; production leaves both unset.
+      CONDUCTOR_SUSPECT_THRESHOLD: "100000"
+      CONDUCTOR_BLOCK_DURATION: 1m
     ports:
       - "8080:8080"
     depends_on:
@@ -255,11 +273,11 @@ services:
       <<: *otel-env
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/workflows
       GATEKEEPER_URL: http://gatekeeper:8081
-      SERVICES: registry=http://registry:8084,conductor=http://conductor:8080,hooks=http://hooks:8087
+      SERVICES: registry=http://registry:8084,conductor=http://conductor:8080,events=http://events:8093
       REGISTRY_URL: http://registry:8084
       REGISTRY_SERVICE_KEY: workflows-registry-local-secret
       GATEKEEPER_SERVICE_KEY: workflows-local-secret
-      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
+      EVENTS_TRIGGER_KEY: events-trigger-local-secret
       WORKFLOWS_TOKEN_KEY: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
     ports:
       - "8085:8085"
@@ -342,8 +360,8 @@ services:
       GATEKEEPER_URL: http://gatekeeper:8081
       # Must match the tickets entry in gatekeeper's GATEKEEPER_SERVICES.
       GATEKEEPER_SERVICE_KEY: tickets-local-secret
-      HOOKS_URL: http://hooks:8087
-      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
+      EVENTS_URL: http://events:8093
+      EVENTS_TRIGGER_KEY: events-trigger-local-secret
     ports:
       - "8086:8086"
     depends_on:
@@ -522,6 +540,30 @@ services:
     profiles: [test]
     restart: no
 
+  # Browser E2E for the SPA (Playwright by default; run `-m selenium` for the
+  # Selenium half). These are the only tests that exercise how the portal HOLDS a
+  # session — the credential is an HttpOnly cookie the app cannot read, so nothing
+  # below the browser can tell you whether a reload stays signed in.
+  #
+  # Depends on gatekeeper's COOKIE_SECURE=false above: over plain http on a non-
+  # localhost hostname Chrome refuses to store a Secure cookie, and every session
+  # test would fail on an empty session.
+  portal-frontend-tests:
+    build:
+      context: ../../tests/portal-frontend
+    environment:
+      PORTAL_URL: http://portal:3001
+      API_URL: http://conductor:8080
+    depends_on:
+      portal:
+        condition: service_started
+      conductor:
+        condition: service_started
+      gatekeeper:
+        condition: service_healthy
+    profiles: [test]
+    restart: no
+
   forge-integration-tests:
     build:
       context: ../../tests/forge
@@ -550,23 +592,29 @@ services:
     profiles: [test]
     restart: no
 
-  hooks:
+  events:
     build:
       context: ../../src/systems
-      dockerfile: hooks/Dockerfile
+      dockerfile: events/Dockerfile
     environment:
       <<: *otel-env
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/hooks
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/events
       GATEKEEPER_URL: http://gatekeeper:8081
       WORKFLOWS_URL: http://workflows:8085
-      GATEKEEPER_SERVICE_KEY: hooks-local-secret
-      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
+      TICKETS_URL: http://tickets:8086
+      GATEKEEPER_SERVICE_KEY: events-local-secret
+      # Shared with workflows (pipeline dispatch + run polling) and with every emitter
+      # (git-factory, tickets) that signs an event.
+      EVENTS_TRIGGER_KEY: events-trigger-local-secret
+      # Keys the provider HMAC on the public webhook endpoints (/hooks, /hooks/git,
+      # /hooks/gitea). Unset closes them — an unsigned webhook is never trusted.
+      EVENTS_WEBHOOK_SECRET: events-webhook-local-secret
       # GitHub App integration (optional — configure to enable check runs)
       # GITHUB_APP_ID: ""
       # GITHUB_APP_PRIVATE_KEY: ""       # PEM content or use GITHUB_APP_PRIVATE_KEY_FILE
       # GITHUB_APP_WEBHOOK_SECRET: ""
     ports:
-      - "8087:8087"
+      - "8093:8093"
     depends_on:
       postgres:
         condition: service_healthy
@@ -617,10 +665,10 @@ services:
       # Repo storage. A named volume, not a bind mount: the git plane shells out to
       # git-receive-pack, which needs a real filesystem it owns.
       GIT_STORAGE_ROOT: /var/lib/git-factory
-      # Push events go to hooks, which fans them out to pipeline triggers. The key must
-      # match the hooks-trigger key the hooks and workflows services share.
-      HOOKS_URL: http://hooks:8087
-      HOOKS_TRIGGER_KEY: hooks-trigger-local-secret
+      # Push events go to the events service, which fans them out to matching triggers.
+      # The key must match the one events and workflows share.
+      EVENTS_URL: http://events:8093
+      EVENTS_TRIGGER_KEY: events-trigger-local-secret
     volumes:
       - git-factory-data:/var/lib/git-factory
     ports:
@@ -632,15 +680,16 @@ services:
         condition: service_healthy
     restart: on-failure
 
-  hooks-integration-tests:
+  events-integration-tests:
     build:
-      context: ../../tests/hooks
+      context: ../../tests/events
     environment:
-      HOOKS_URL: http://hooks:8087
+      EVENTS_URL: http://events:8093
+      EVENTS_WEBHOOK_SECRET: events-webhook-local-secret
       WORKFLOWS_URL: http://workflows:8085
       GATEKEEPER_URL: http://gatekeeper:8081
     depends_on:
-      hooks:
+      events:
         condition: service_started
       workflows:
         condition: service_started

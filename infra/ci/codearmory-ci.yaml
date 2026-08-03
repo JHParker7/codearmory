@@ -6,10 +6,16 @@ project: codearmory
 # Whole-run wall-clock cap (default 1800/30m). Raised to 1h: a cold-cache run that must
 # rebuild every service (e.g. after the reaper clears the gocache) can exceed 30 minutes.
 timeout_secs: 3600
-# No declared inputs: the hooks service injects every webhook payload field at run
-# time as HOOK_<KEY> (HOOK_REF, HOOK_COMMIT, HOOK_REPO, …), so ${inputs.HOOK_*} resolves
-# without needing declarations. The outpost deploy target is a fixed value, hardcoded
-# at its use sites below rather than passed in.
+# No declared inputs: the HOOK_* values below are supplied by the events trigger that
+# starts this pipeline, whose run_pipeline action templates them off the event —
+#
+#   inputs = { HOOK_REF = "{{ data.ref }}", HOOK_BEFORE = "{{ data.before }}", ... }
+#
+# so ${inputs.HOOK_*} resolves without needing declarations. (The former hooks service
+# auto-exposed every payload field as HOOK_<KEY>; events makes the mapping explicit, so a
+# renamed or missing field fails visibly at the trigger rather than silently resolving to
+# empty here.) The outpost deploy target is a fixed value, hardcoded at its use sites
+# below rather than passed in.
 steps:
 - action: forge/create-volume
   name: workspace
@@ -242,18 +248,6 @@ steps:
       SHA=$(git rev-parse --short HEAD)
       SUBJECT=$(git log -1 --pretty=%s)
       echo "commit: $SHA — $SUBJECT"
-- action: tickets/create
-  name: open-ticket
-  timeout: 60
-  with:
-    title: codearmory-ci — ${steps.commit.output.SHA} ${steps.commit.output.SUBJECT}
-    description: |-
-      Automated CI for commit `${steps.commit.output.SHA}` on dev-2.
-
-      Run: `${run_id}`
-    status: in_progress
-    run_id: ${run_id}
-    workflow_id: ${workflow_id}
 - action: forge/run
   name: discover
   timeout: 120
@@ -514,18 +508,6 @@ steps:
       deployment: ca-codearmory-portal
       image: 192.168.53.171:3000/jp01/portal:${steps.commit.output.SHA}
       ignore_missing: true
-- action: tickets/comment
-  name: track-tested
-  timeout: 60
-  with:
-    id: ${steps.open-ticket.output.ticket_id}
-    body: ✅ **build + unit tests** passed for all modules.
-- action: tickets/comment
-  name: track-images
-  timeout: 60
-  with:
-    id: ${steps.open-ticket.output.ticket_id}
-    body: '✅ **images** built and pushed to Forgejo: `192.168.53.171:3000/jp01/<svc>:${steps.commit.output.SHA}` (changed services only).'
 - action: outpost-gateway/enqueueCommand
   name: redeploy
   timeout: 120
@@ -595,18 +577,6 @@ steps:
     payload:
       image: 192.168.53.171:3000/jp01/ci-e2e:latest
       timeout_secs: 600
-- action: tickets/update
-  name: close-ticket
-  timeout: 60
-  with:
-    id: ${steps.open-ticket.output.ticket_id}
-    status: resolved
-- action: tickets/update
-  name: fail-ticket
-  timeout: 60
-  with:
-    id: ${steps.open-ticket.output.ticket_id}
-    status: open
 maps:
 - id: per-service
   var: svc
@@ -643,39 +613,21 @@ routes:
   to: checkout
 - from: checkout
   to: commit
-- from: commit
-  to: open-ticket
 - from: checkout
   to: warm-cache
 - from: warm-cache
   to: discover
-- from: open-ticket
+# Was commit -> open-ticket -> discover. With the ticket steps gone this edge carries
+# the same ordering directly: discover still runs only after commit has resolved the
+# SHA that the image steps interpolate.
+- from: commit
   to: discover
 - from: discover
   to: test
 - from: test
   to: image
-- from: test
-  to: track-tested
 - from: discover
   to: test-extra
-- from: test-extra
-  to: fail-ticket
-  when: steps["test-extra"].status == 'failed'
-- from: image
-  to: track-images
-- from: discover
-  to: fail-ticket
-  when: steps.discover.status == 'failed'
-- from: test
-  to: fail-ticket
-  when: steps.test.status == 'failed'
-- from: image
-  to: fail-ticket
-  when: steps.image.status == 'failed'
-- from: image-portal
-  to: fail-ticket
-  when: steps["image-portal"].status == 'failed'
 - from: discover
   to: test-portal
   when: steps.discover.json.PORTAL == "1"
@@ -683,12 +635,6 @@ routes:
   to: build-portal-bff
 - from: build-portal-bff
   to: image-portal
-- from: test-portal
-  to: fail-ticket
-  when: steps["test-portal"].status == 'failed'
-- from: build-portal-bff
-  to: fail-ticket
-  when: steps["build-portal-bff"].status == 'failed'
 - from: image
   to: redeploy
 - from: image-portal
@@ -718,8 +664,3 @@ routes:
 # before the rollout that uses it. The step runs exactly once regardless.
 - from: discover
   to: prune-images
-- from: integration-tests
-  to: close-ticket
-- from: integration-tests
-  to: fail-ticket
-  when: steps["integration-tests"].status == 'failed'
