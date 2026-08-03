@@ -417,15 +417,22 @@ func handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
+		// An omitted name means "leave it as it is", which requires reading the name
+		// that is already stored. Every failure here must return: falling through on a
+		// non-notfound error leaves repo zero-valued, so req.Name becomes "" and the
+		// Update below RENAMES THE REPOSITORY TO THE EMPTY STRING — a transient
+		// database fault turning a no-op edit into data loss.
 		repo, err := getRepo(ctx, userID, id)
 		if err != nil {
 			if errors.Is(err, errRepoNotFound) {
 				http.Error(w, "Repo not found", http.StatusNotFound)
 				return
 			}
+			slog.ErrorContext(ctx, "update Repo: reload current name", "Repo_id", id, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
 		}
 		req.Name = repo.Name
-
 	}
 	// Empty means "leave it alone" (Repo.Update skips the column); anything else has
 	// to be a visibility we recognise, since this is how a repo gets published.
@@ -788,7 +795,7 @@ func handleSetDefaultBranch(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	id := r.PathValue("id")
-	re, userID, ok := authorizeRepo(ctx, w, r, id, "setDefaultBranch")
+	re, _, ok := authorizeRepo(ctx, w, r, id, "setDefaultBranch")
 	if !ok {
 		return
 	}
@@ -803,11 +810,24 @@ func handleSetDefaultBranch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := connect().WithContext(ctx).Model(&Repo{}).
-		Where("id = ? AND owner = ?", re.ID, userID).
-		Updates(map[string]any{"default_branch": req.DefaultBranch, "updated_at": time.Now().UTC()}).Error; err != nil {
-		slog.ErrorContext(ctx, "set default branch", "Repo_id", re.ID, "error", err)
+	// Scoped by id alone, NOT by owner. authorizeRepo has already decided this caller
+	// may set the default branch, and a "write" collaborator holds setDefaultBranch
+	// (shareActions in collab.go) — so an owner filter here would match no row for
+	// them, silently leaving HEAD moved on disk while default_branch kept its old
+	// value. That is exactly the drift this handler exists to prevent, and it would
+	// have been reported as a 200. RowsAffected is checked for the same reason: the
+	// only way the row can be missing now is a concurrent delete, and that must not
+	// read as success either.
+	res := connect().WithContext(ctx).Model(&Repo{}).
+		Where("id = ?", re.ID).
+		Updates(map[string]any{"default_branch": req.DefaultBranch, "updated_at": time.Now().UTC()})
+	if res.Error != nil {
+		slog.ErrorContext(ctx, "set default branch", "Repo_id", re.ID, "error", res.Error)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if res.RowsAffected == 0 {
+		http.Error(w, "Repo not found", http.StatusNotFound)
 		return
 	}
 	updated, _ := getRepoByID(ctx, re.ID)

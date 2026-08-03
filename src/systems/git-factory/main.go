@@ -166,6 +166,11 @@ func main() {
 	}
 	initMetrics()
 	httpClient = initHTTPClient()
+	// Built after httpClient so the emitter reuses the instrumented transport.
+	initEventEmitter()
+	if !eventsEnabled() {
+		slog.Info("events integration disabled — set EVENTS_URL and EVENTS_TRIGGER_KEY to enable")
+	}
 
 	// Before anything can accept a push: confirm the storage root actually provides
 	// the properties git's correctness rests on. Runs first because a filesystem that

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Storage preflight (ARCHITECTURE §5).
@@ -41,6 +42,67 @@ import (
 // use. Verifying the cross-client half needs two pods against one mount and belongs in
 // the deployment checklist, not here.
 
+// localProbeID identifies this client among everything sharing the mount.
+//
+// hostname+pid: unique per pod, and stable across restarts of the same pod (in a
+// container the pid is always 1), which is what keeps the leftover-probe tolerance below
+// meaningful — a pod killed mid-check finds its own file on the way back up rather than
+// a name it has never seen.
+func localProbeID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown"
+	}
+	return fmt.Sprintf("%s-%d", host, os.Getpid())
+}
+
+// probePath names a probe file for one check, scoped to ONE client of the mount.
+//
+// The probes run in the storage root itself — they have to, since the whole point is to
+// test the filesystem the repos live on. On a shared mount (§5 Step 2) that root is also
+// where every OTHER replica runs its probes, and replicas start together: a rollout
+// brings up two pods within milliseconds of each other. With a fixed filename they probe
+// each other's files, and every failure mode is a false negative that refuses to start a
+// working deployment:
+//
+//	rename  — the other pod's cleanup removes the source mid-check (ENOENT), or the
+//	          destination is read back as the other pod's half-written bytes
+//	flock   — the second pod is refused the lock the first pod holds, which is the
+//	          property WORKING, reported as if it were broken
+//
+// Since the mode is enforce by default, that is a crash loop on exactly the deployment
+// the check was written for, resolved only by pods happening to stagger.
+//
+// The id comes from localProbeID in the running service; it is a parameter rather than a
+// process global so a test can drive several *distinct* clients against one directory,
+// which is the only faithful model of the failure above.
+func probePath(dir, kind, id string) string {
+	return filepath.Join(dir, fmt.Sprintf("%s.%s.probe", kind, id))
+}
+
+// sweepStaleProbes removes probe files abandoned by pods that no longer exist.
+//
+// Each probe is cleaned up by the check that made it, so this only ever finds files from
+// a process killed inside the sub-second preflight window. But the names are per-pod and
+// pod names do not repeat, so without a sweep those few bytes would sit in the repo store
+// forever. Age-gated so it can never race a probe another replica is using right now.
+func sweepStaleProbes(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".probe") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || time.Since(info.ModTime()) < time.Hour {
+			continue
+		}
+		os.Remove(filepath.Join(dir, e.Name())) //nolint:errcheck // best effort litter collection
+	}
+}
+
 // storagePreflightMode selects what a failed check does, from GIT_STORAGE_PREFLIGHT:
 //
 //	enforce (default) — refuse to start
@@ -71,8 +133,8 @@ func storagePreflightMode() string {
 // refs/heads/<name>.lock this way, and the whole serialisation scheme rests on the
 // SECOND creator being refused. A filesystem that reports success twice hands the same
 // ref to two writers at once, which is a lost update with nothing logged anywhere.
-func checkExclusiveCreate(dir string) error {
-	path := filepath.Join(dir, "excl.probe")
+func checkExclusiveCreate(dir, id string) error {
+	path := probePath(dir, "excl", id)
 	os.Remove(path) //nolint:errcheck // a leftover from a killed probe must not fail the run
 
 	first, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -100,9 +162,9 @@ func checkExclusiveCreate(dir string) error {
 // really copy-then-delete (what object-storage FUSE layers do) leaves a window where the
 // ref is absent or half-written. A reader in that window sees a repository with a
 // missing branch.
-func checkAtomicRename(dir string) error {
-	src := filepath.Join(dir, "rename.probe.tmp")
-	dst := filepath.Join(dir, "rename.probe")
+func checkAtomicRename(dir, id string) error {
+	src := probePath(dir, "rename-src", id)
+	dst := probePath(dir, "rename", id)
 	defer func() {
 		os.Remove(src) //nolint:errcheck
 		os.Remove(dst) //nolint:errcheck
@@ -142,8 +204,8 @@ func checkAtomicRename(dir string) error {
 // descriptions regardless of process, so the check is meaningful without forking, and a
 // no-op implementation (FUSE layers that accept every lock request and enforce nothing)
 // grants both.
-func checkFlock(dir string) error {
-	path := filepath.Join(dir, "flock.probe")
+func checkFlock(dir, id string) error {
+	path := probePath(dir, "flock", id)
 	defer os.Remove(path) //nolint:errcheck
 
 	held, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
@@ -180,13 +242,21 @@ func checkFlock(dir string) error {
 // All of them run even after one fails: an operator debugging a storage backend wants
 // the full picture in one restart, not a new failure revealed on each attempt.
 func runStoragePreflight(dir string) []error {
+	return runStoragePreflightAs(dir, localProbeID())
+}
+
+// runStoragePreflightAs is runStoragePreflight for one named client of the mount. Split
+// out so a test can run several at once against one directory — two replicas starting
+// together on shared storage, which is what the fixed probe names used to break.
+func runStoragePreflightAs(dir, id string) []error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return []error{fmt.Errorf("storage root %q is not usable: %w", dir, err)}
 	}
+	sweepStaleProbes(dir)
 
 	checks := []struct {
 		name string
-		fn   func(string) error
+		fn   func(string, string) error
 	}{
 		{"O_CREAT|O_EXCL exclusivity (git's ref-lock primitive)", checkExclusiveCreate},
 		{"atomic rename onto an existing path (how ref updates commit)", checkAtomicRename},
@@ -195,7 +265,7 @@ func runStoragePreflight(dir string) []error {
 
 	var failures []error
 	for _, c := range checks {
-		if err := c.fn(dir); err != nil {
+		if err := c.fn(dir, id); err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", c.name, err))
 		}
 	}

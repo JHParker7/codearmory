@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	sdkevents "github.com/code-armory-app/codearmory_sdk/events"
 	"github.com/google/uuid"
 )
 
@@ -860,29 +862,78 @@ func TestPushEvent_ChangedRefsAndSafety(t *testing.T) {
 		t.Errorf("deletion reported as a change: %v", d)
 	}
 
-	// With hooks unconfigured the integration is inert — the platform runs without it.
-	prevURL, prevKey := hooksURL, hooksEventKey
-	hooksURL, hooksEventKey = "", ""
-	t.Cleanup(func() { hooksURL, hooksEventKey = prevURL, prevKey })
-	if hooksEnabled() {
-		t.Error("hooks reported enabled with no URL or key")
+	// With events unconfigured the integration is inert — the platform runs without it.
+	prev := eventEmitter
+	eventEmitter = sdkevents.New("", "", gitEventSource, nil)
+	t.Cleanup(func() { eventEmitter = prev })
+	if eventsEnabled() {
+		t.Error("events reported enabled with no URL or key")
 	}
 	// Must not panic or block when disabled.
 	notifyPush(context.Background(), Repo{ID: "x", Namespace: "admin", Name: "r"}, "user-1", []string{"main"}, nil)
 }
 
-// The HMAC must match what hooks verifies, or every event is silently rejected.
-func TestSignHookEvent_MatchesHooksVerification(t *testing.T) {
-	prev := hooksEventKey
-	hooksEventKey = "test-key"
-	t.Cleanup(func() { hooksEventKey = prev })
+// A push must be attributed to the repo's OWNER, not whoever pushed. Triggers are matched per
+// tenant, so scoping by the pusher would run a collaborator's triggers on someone else's repo
+// and never the owner's — which is what the former hooks service did.
+func TestNotifyPush_TenantIsRepoOwner(t *testing.T) {
+	var got sdkevents.Event
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(srv.Close)
 
-	token, ts := signHookEvent(gitHookSource, eventPush, "", "user-1")
-	mac := hmac.New(sha256.New, []byte("test-key"))
-	fmt.Fprintf(mac, "event:%s:%s:%s:%s:%s", gitHookSource, eventPush, "", "user-1", ts)
-	if want := hex.EncodeToString(mac.Sum(nil)); token != want {
-		t.Errorf("token = %s, want %s — hooks would reject every event", token, want)
+	prev := eventEmitter
+	eventEmitter = sdkevents.New(srv.URL, "test-key", gitEventSource, srv.Client())
+	t.Cleanup(func() { eventEmitter = prev })
+
+	re := Repo{ID: "r1", Owner: "owner-user", Namespace: "acme", Name: "app"}
+	ev := sdkevents.Event{
+		Type:    eventPush,
+		Source:  gitEventSource,
+		Subject: re.Namespace + "/" + re.Name,
+		Actor:   sdkevents.Actor{UserID: re.Owner},
 	}
+	ev.Data = map[string]any{"pusher": "collaborator-user"}
+	if err := eventEmitter.Emit(context.Background(), ev); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if got.Actor.UserID != "owner-user" {
+		t.Errorf("actor.user_id = %q, want the repo owner", got.Actor.UserID)
+	}
+	if got.Data["pusher"] != "collaborator-user" {
+		t.Errorf("data.pusher = %v, want the pusher preserved on the payload", got.Data["pusher"])
+	}
+	if got.Subject != "acme/app" {
+		t.Errorf("subject = %q, want namespace/name", got.Subject)
+	}
+}
+
+// The HMAC must match what the events service verifies, or every event is silently rejected.
+func TestSignEvent_MatchesEventsVerification(t *testing.T) {
+	ev := sdkevents.Event{
+		ID: "evt-1", Type: eventPush, Source: gitEventSource, Subject: "acme/app",
+		Actor: sdkevents.Actor{UserID: "user-1"},
+		Data:  map[string]any{"ref": "main"},
+	}
+	ts := "1700000000"
+	digest := sha256.Sum256(mustJSON(t, ev.Data))
+	mac := hmac.New(sha256.New, []byte("test-key"))
+	fmt.Fprintf(mac, "event:%s:%s:%s:%s:%s:%s:%s:%s",
+		ev.ID, ev.Type, ev.Source, ev.Subject, "", "user-1", hex.EncodeToString(digest[:]), ts)
+	if want, got := hex.EncodeToString(mac.Sum(nil)), sdkevents.Sign("test-key", ev, ts); got != want {
+		t.Errorf("token = %s, want %s — events would reject every emit", got, want)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
 }
 
 // Merging is the part with real consequences, so the cases that matter are the ones
