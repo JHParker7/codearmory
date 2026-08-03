@@ -40,6 +40,7 @@ var coreServices = map[string]bool{
 	"git_connector":          true,
 	"codearmory_git_factory": true,
 	"containers":             true,
+	"events":                 true,
 }
 
 // comingSoonServices are the platform services whose source was spun out into its

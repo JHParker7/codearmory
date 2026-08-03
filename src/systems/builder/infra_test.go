@@ -44,21 +44,21 @@ func TestProvision_WritesDerivedSecrets(t *testing.T) {
 	b := newTestBackend(t, rec)
 	ctx := context.Background()
 
-	// hooks declares a shared derived key (hooks-trigger-key).
-	if err := b.provision(ctx, "hooks", "postgres://h@db/h", nil); err != nil {
-		t.Fatalf("provision hooks: %v", err)
+	// chaos declares a shared derived key (events-trigger-key).
+	if err := b.provision(ctx, "chaos", "postgres://h@db/h", nil); err != nil {
+		t.Fatalf("provision chaos: %v", err)
 	}
-	sec, err := b.client.CoreV1().Secrets("codearmory").Get(ctx, "codearmory-hooks", metav1.GetOptions{})
+	sec, err := b.client.CoreV1().Secrets("codearmory").Get(ctx, "codearmory-chaos", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get secret: %v", err)
 	}
 	// The shared key is 64-hex and equals the deterministic derivation (so consumers agree).
-	v := string(sec.Data["hooks-trigger-key"])
+	v := string(sec.Data["events-trigger-key"])
 	if raw, err := hex.DecodeString(v); err != nil || len(raw) != 32 {
-		t.Errorf("hooks-trigger-key: not 64-hex (got %q)", v)
+		t.Errorf("events-trigger-key: not 64-hex (got %q)", v)
 	}
-	if v != deriveSharedKey("hooks-trigger-key") {
-		t.Error("hooks-trigger-key does not match deriveSharedKey")
+	if v != deriveSharedKey("events-trigger-key") {
+		t.Error("events-trigger-key does not match deriveSharedKey")
 	}
 
 	// blueprints gets its private encryption-key.
@@ -80,12 +80,12 @@ func TestTemplatePod_DeterministicEnv(t *testing.T) {
 		t.Errorf("GATEKEEPER_URL = %q", v)
 	}
 	// ${PREFIX} substituted in inter-service env.
-	if v, _ := envValue(c, "HOOKS_URL"); v != "http://codearmory-hooks:8087" {
-		t.Errorf("HOOKS_URL = %q", v)
+	if v, _ := envValue(c, "EVENTS_URL"); v != "http://codearmory-events:8093" {
+		t.Errorf("EVENTS_URL = %q", v)
 	}
 	// Derived secret wired as a secret ref to its key.
-	if k := envRefKey(c, "HOOKS_TRIGGER_KEY"); k != "hooks-trigger-key" {
-		t.Errorf("HOOKS_TRIGGER_KEY ref = %q, want hooks-trigger-key", k)
+	if k := envRefKey(c, "EVENTS_TRIGGER_KEY"); k != "events-trigger-key" {
+		t.Errorf("EVENTS_TRIGGER_KEY ref = %q, want events-trigger-key", k)
 	}
 	if k := envRefKey(c, "GATEKEEPER_SERVICE_KEY"); k != "gatekeeper-service-key" {
 		t.Errorf("GATEKEEPER_SERVICE_KEY ref = %q", k)

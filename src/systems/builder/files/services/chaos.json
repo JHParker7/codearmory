@@ -14,9 +14,9 @@
       "name": "outpost-internal-key"
     },
     {
-      "envVar": "HOOKS_TRIGGER_KEY",
+      "envVar": "EVENTS_TRIGGER_KEY",
       "kind": "shared",
-      "name": "hooks-trigger-key"
+      "name": "events-trigger-key"
     }
   ],
   "requiredConfig": [
@@ -28,7 +28,7 @@
   ],
   "envExtras": {
     "OUTPOST_GATEWAY_URL": "http://${PREFIX}-outpost-gateway:8092",
-    "HOOKS_URL": "http://${PREFIX}-hooks:8087"
+    "EVENTS_URL": "http://${PREFIX}-events:8093"
   },
   "endpoints": [
     {

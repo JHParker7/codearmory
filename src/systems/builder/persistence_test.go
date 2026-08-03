@@ -366,7 +366,7 @@ func TestNoPersistence_ShapeUnchanged(t *testing.T) {
 // emitter signs, the receiver 401s, and nothing reports a misconfiguration.
 func TestSharedKeyOwner(t *testing.T) {
 	cases := map[string]string{
-		"hooks-trigger-key":      "hooks",     // builder-catalog service
+		"events-trigger-key":     "events",    // Helm-deployed core service
 		"conductor-forward-key":  "conductor", // core service
 		"encryption-key":         "",          // not a service — derive
 		"gatekeeper-service-key": "gatekeeper",
@@ -386,18 +386,18 @@ func TestProvision_SharedKeyAdoptsTheOwnersValue(t *testing.T) {
 	enableDerivation(t)
 	ctx := context.Background()
 
-	// hooks already exists with a key builder did not derive (as the Helm chart leaves it).
+	// events already exists with a key builder did not derive (as the Helm chart leaves it).
 	const chartKey = "chart-generated-not-derived"
-	hooksSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "codearmory-hooks", Namespace: "codearmory"},
-		Data:       map[string][]byte{"hooks-trigger-key": []byte(chartKey)},
+	eventsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "codearmory-events", Namespace: "codearmory"},
+		Data:       map[string][]byte{"events-trigger-key": []byte(chartKey)},
 	}
-	b := newTestBackend(t, &registerRecorder{}, hooksSecret)
+	b := newTestBackend(t, &registerRecorder{}, eventsSecret)
 
-	// A service whose def declares the same shared key must adopt hooks' value.
+	// A service whose def declares the same shared key must adopt events' value.
 	withServiceDef(t, serviceDef{
 		RegistryName: "emitter", K8sName: "emitter", ImageRepo: "emitter", Port: 9000,
-		DerivedSecrets: []derivedSecret{{EnvVar: "HOOKS_TRIGGER_KEY", Kind: "shared", Name: "hooks-trigger-key"}},
+		DerivedSecrets: []derivedSecret{{EnvVar: "EVENTS_TRIGGER_KEY", Kind: "shared", Name: "events-trigger-key"}},
 	})
 	if err := b.provision(ctx, "emitter", "", nil); err != nil {
 		t.Fatalf("provision: %v", err)
@@ -406,7 +406,7 @@ func TestProvision_SharedKeyAdoptsTheOwnersValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get secret: %v", err)
 	}
-	if got := string(sec.Data["hooks-trigger-key"]); got != chartKey {
+	if got := string(sec.Data["events-trigger-key"]); got != chartKey {
 		t.Errorf("hooks-trigger-key = %q, want the owner's value %q — a derived value would 401 at hooks", got, chartKey)
 	}
 }

@@ -9,7 +9,7 @@ import (
 // expectedNonCore is every non-core service the chart no longer deploys; builder must
 // carry an embedded definition for each so it can deploy + register it at runtime.
 var expectedNonCore = []string{
-	"blueprints", "notifications", "hooks",
+	"blueprints", "notifications",
 	"outpost-gateway", "chaos", "argo",
 	"gitea_integration",
 }
