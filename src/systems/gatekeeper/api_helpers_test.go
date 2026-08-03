@@ -1265,3 +1265,71 @@ func TestAuthMiddleware_NoCredentialIsInvalidRequest(t *testing.T) {
 		t.Errorf("WWW-Authenticate = %q, want an invalid_request error code", challenge)
 	}
 }
+
+// X-Forwarded-For is APPENDED to by each hop, so only the entries a trusted proxy
+// added can be believed. Reading the leftmost entry returns whatever the CLIENT put
+// there — which would let any caller reaching gatekeeper through the trusted proxy
+// forge its source IP and walk straight through the service-account CIDR allowlist in
+// requireServiceAuth, this function's only consumer.
+func TestRealClientIP_SpoofedPrefixIsIgnored(t *testing.T) {
+	orig := trustedProxyNets
+	t.Cleanup(func() { trustedProxyNets = orig })
+	_, proxyNet, _ := net.ParseCIDR("10.0.0.0/8")
+	trustedProxyNets = []*net.IPNet{proxyNet}
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.1:9999" // the trusted proxy
+	// The client sent "198.51.100.9" itself; the proxy then appended what it saw.
+	r.Header.Set("X-Forwarded-For", "198.51.100.9, 203.0.113.7")
+	if got := realClientIP(r); got != "203.0.113.7" {
+		t.Fatalf("got %q, want the proxy-observed 203.0.113.7 — a client-supplied prefix must never win", got)
+	}
+}
+
+// A chain of trusted proxies is walked past, landing on the first address none of
+// them vouch for.
+func TestRealClientIP_SkipsTrustedHops(t *testing.T) {
+	orig := trustedProxyNets
+	t.Cleanup(func() { trustedProxyNets = orig })
+	_, proxyNet, _ := net.ParseCIDR("10.0.0.0/8")
+	trustedProxyNets = []*net.IPNet{proxyNet}
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.1:9999"
+	r.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.5, 10.0.0.6")
+	if got := realClientIP(r); got != "203.0.113.7" {
+		t.Fatalf("got %q, want 203.0.113.7", got)
+	}
+}
+
+// When every entry is a trusted proxy there is no client address in the header, so
+// the immediate peer is the honest answer.
+func TestRealClientIP_AllTrustedFallsBackToPeer(t *testing.T) {
+	orig := trustedProxyNets
+	t.Cleanup(func() { trustedProxyNets = orig })
+	_, proxyNet, _ := net.ParseCIDR("10.0.0.0/8")
+	trustedProxyNets = []*net.IPNet{proxyNet}
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.1:9999"
+	r.Header.Set("X-Forwarded-For", "10.0.0.5, 10.0.0.6")
+	if got := realClientIP(r); got != "10.0.0.1" {
+		t.Fatalf("got %q, want the peer 10.0.0.1", got)
+	}
+}
+
+// An unparseable entry is client-supplied garbage. The walk stops rather than
+// stepping further left into values the trusted hop cannot vouch for.
+func TestRealClientIP_GarbageEntryStopsTheWalk(t *testing.T) {
+	orig := trustedProxyNets
+	t.Cleanup(func() { trustedProxyNets = orig })
+	_, proxyNet, _ := net.ParseCIDR("10.0.0.0/8")
+	trustedProxyNets = []*net.IPNet{proxyNet}
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.1:9999"
+	r.Header.Set("X-Forwarded-For", "203.0.113.7, not-an-ip")
+	if got := realClientIP(r); got != "10.0.0.1" {
+		t.Fatalf("got %q, want the peer 10.0.0.1", got)
+	}
+}

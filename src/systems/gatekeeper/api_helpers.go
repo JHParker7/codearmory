@@ -1068,9 +1068,35 @@ func initTrustedProxies() {
 	}
 }
 
-// realClientIP returns the originating client IP. When the immediate peer is a
-// trusted proxy (per TRUSTED_PROXY_CIDRS), the leftmost IP in X-Forwarded-For
-// is used; otherwise r.RemoteAddr is returned directly.
+// isTrustedProxy reports whether ip is one of the configured trusted proxies.
+func isTrustedProxy(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, n := range trustedProxyNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// realClientIP returns the originating client IP, walking X-Forwarded-For from the
+// RIGHT and returning the first address that is not itself a trusted proxy.
+//
+// The direction is the whole point. X-Forwarded-For is APPENDED to by each hop, so
+// only the entries a trusted proxy added are trustworthy — everything to the left of
+// them was supplied by the client and can say anything. Reading the LEFTMOST entry
+// therefore returns an attacker-chosen string: a caller that reaches gatekeeper
+// through the trusted proxy just sends its own "X-Forwarded-For: <allowed-ip>" and
+// the header arrives as "<allowed-ip>, <real-client>". That is a silent bypass of the
+// service-account CIDR allowlist in requireServiceAuth, which is the only consumer of
+// this function and exists precisely to bound where a service key may be used from.
+//
+// Walking right-to-left past the trusted hops lands on the address the outermost
+// trusted proxy actually observed, which is the closest thing to the truth the
+// request carries. When every entry is a trusted proxy (or there is no header), the
+// immediate peer is the honest answer.
 func realClientIP(r *http.Request) string {
 	peerIP, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -1079,25 +1105,31 @@ func realClientIP(r *http.Request) string {
 	if len(trustedProxyNets) == 0 {
 		return peerIP
 	}
-	peer := net.ParseIP(peerIP)
-	isTrusted := false
-	for _, n := range trustedProxyNets {
-		if n.Contains(peer) {
-			isTrusted = true
-			break
-		}
-	}
-	if !isTrusted {
+	if !isTrustedProxy(net.ParseIP(peerIP)) {
+		// The peer is not a proxy we trust, so it IS the client and whatever
+		// X-Forwarded-For it sent is its own invention. Ignore the header entirely.
 		return peerIP
 	}
-	// Extract the leftmost (originating) IP from X-Forwarded-For.
 	xff := r.Header.Get("X-Forwarded-For")
 	if xff == "" {
 		return peerIP
 	}
-	parts := strings.SplitN(xff, ",", 2)
-	if ip := strings.TrimSpace(parts[0]); ip != "" {
-		return ip
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		hop := strings.TrimSpace(parts[i])
+		if hop == "" {
+			continue
+		}
+		ip := net.ParseIP(hop)
+		if ip == nil {
+			// An unparseable entry is client-supplied garbage. Stop rather than skip
+			// past it: continuing would step further left, into values this hop cannot
+			// vouch for — exactly the trust the right-to-left walk exists to preserve.
+			return peerIP
+		}
+		if !isTrustedProxy(ip) {
+			return hop
+		}
 	}
 	return peerIP
 }
