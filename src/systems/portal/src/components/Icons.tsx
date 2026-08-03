@@ -6,7 +6,7 @@
  */
 
 export type IconName =
-  | 'workflows' | 'blueprints' | 'forge' | 'tickets' | 'hooks'
+  | 'workflows' | 'blueprints' | 'forge' | 'tickets' | 'events'
   | 'containers' | 'git' | 'outposts' | 'chaos' | 'argo'
   | 'builder' | 'audit' | 'gatekeeper' | 'settings' | 'projects';
 
@@ -39,8 +39,8 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M14 6.5v11" strokeDasharray="2 2" />
     </>
   ),
-  // curved hook (webhook)
-  hooks: (
+  // radiating signal (event)
+  events: (
     <path d="M15 4a3 3 0 0 0-3 3v7a3 3 0 1 1-3-3" />
   ),
   // 3D box

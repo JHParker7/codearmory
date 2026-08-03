@@ -63,11 +63,16 @@ export function ServiceFrame() {
       style={{ flex: 1, width: '100%', height: '100%', border: 'none', background: T.bg }}
       // NO allow-same-origin. The src is same-origin (it goes through the BFF), so
       // "allow-scripts allow-same-origin" would not be a sandbox at all: the framed
-      // document could reach into the parent, read the session token out of
-      // localStorage ('ca_token'), and even clear this very sandbox attribute on its
-      // own frame element. That token is the user's full session — good against EVERY
-      // service, not just the one being framed — and a mini-portal is shipped by a
-      // builder-deployed service, i.e. code this repo does not own.
+      // document could reach into the parent, ride the session cookie against every
+      // service, and even clear this very sandbox attribute on its own frame element.
+      // A mini-portal is shipped by a builder-deployed service, i.e. code this repo
+      // does not own.
+      //
+      // The session no longer sits in localStorage (see authSlice — it is an HttpOnly
+      // cookie), which removes the read-the-token-out-of-storage path specifically.
+      // It does NOT make same-origin framing safe: a same-origin document can simply
+      // CALL /api/* and the browser attaches the cookie for it. The sandbox is what
+      // denies that, so it stays.
       //
       // Without allow-same-origin the document loads into an opaque origin: it renders
       // and runs its own scripts, but has no access to the portal's storage, cookies or

@@ -12,7 +12,7 @@ import { Icon, IconName } from '../../components/Icons';
 import { useResizablePane } from '../../components/ResizeHandle';
 import { useReloadOnReconnect } from '../../hooks/useReloadOnReconnect';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
-import { logout, hydrateUser, hydratePermissions, hydrateRegisteredServices } from '../../store/authSlice';
+import { logoutSession, hydrateUser, hydratePermissions, hydrateRegisteredServices } from '../../store/authSlice';
 import { setCurrentProject, fetchKnownProjects } from '../../store/projectSlice';
 import { shortId } from '../../utils';
 import { useOrgNames } from '../../hooks/useNames';
@@ -28,7 +28,7 @@ const ROUTE_SERVICE: Record<string, string> = {
   forge: 'forge',
   workflows: 'workflows',
   tickets: 'tickets',
-  hooks: 'hooks',
+  events: 'events',
   containers: 'containers',
   git: 'git_connector',
   codearmory_git_factory: 'codearmory_git_factory',
@@ -41,7 +41,7 @@ const ROUTE_SERVICE: Record<string, string> = {
 // changes. Bundled pages always out-rank the dynamic iframe route. Admin/account
 // services (gatekeeper, builder) are bundled and never iframe-hosted.
 const BUNDLED_SERVICES = new Set<string>([
-  'forge', 'workflows', 'hooks', 'gatekeeper', 'builder',
+  'forge', 'workflows', 'events', 'gatekeeper', 'builder',
   'tickets', 'git_connector', 'containers', 'outpost-gateway',
   'codearmory_git_factory',
 ]);
@@ -184,7 +184,7 @@ function ProjectSwitcher({ collapsed, onExpand }: { collapsed: boolean; onExpand
   return (
     <div style={{ position: 'relative', padding: '10px 14px', borderBottom: `1px solid ${T.border}` }}>
       <div style={{ fontSize: 10, color: T.faint, letterSpacing: 1, marginBottom: 5, textTransform: 'uppercase' }}>project</div>
-      <button onClick={() => { const next = !open; setOpen(next); if (next && token) dispatch(fetchKnownProjects(token)); }}
+      <button onClick={() => { const next = !open; setOpen(next); if (next) dispatch(fetchKnownProjects(token)); }}
         style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: T.card, border: `1px solid ${open ? T.green : T.border}`, color: current ? T.textHi : T.dim, fontFamily: T.mono, fontSize: 12, padding: '6px 9px', cursor: 'pointer', transition: 'border-color .12s' }}>
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {current ? <><span style={{ color: T.green }}>◆ </span>{current}</> : 'all projects'}
@@ -325,11 +325,15 @@ export function AppLayout() {
   // Seed the project switcher's known-label list once the user is hydrated; it
   // refreshes again each time the switcher dropdown opens.
   useEffect(() => {
-    if (user && token) dispatch(fetchKnownProjects(token));
+    // Not gated on `token`: it is empty after a reload, where the cookie authenticates.
+    if (user) dispatch(fetchKnownProjects(token));
   }, [user, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLogout = () => {
-    dispatch(logout());
+    // The thunk, not the bare reducer: it revokes the session and clears the
+    // HttpOnly cookie server-side. Clearing local state alone leaves the
+    // credential working.
+    dispatch(logoutSession());
     navigate('/');
   };
 
@@ -387,7 +391,7 @@ export function AppLayout() {
                 elsewhere — so it is not mistaken for repos/, which hosts them here. */}
             <NavItem to="/app/git" label="git connector/" desc="Connect & clone your repositories" service="git_connector" collapsed={navCollapsed} icon="git" />
             <NavItem to="/app/forge" label="forge/" desc="Run commands in secure sandboxes" service="forge" collapsed={navCollapsed} icon="forge" />
-            <NavItem to="/app/hooks" label="hooks/" desc="Trigger actions from webhooks" service="hooks" collapsed={navCollapsed} icon="hooks" />
+            <NavItem to="/app/events" label="events/" desc="React to platform events with triggers" service="events" collapsed={navCollapsed} icon="events" />
             <NavItem to="/app/containers" label="containers/" desc="Your private image registry" service="containers" collapsed={navCollapsed} icon="containers" />
             <NavItem to="/app/outposts" label="outposts/" desc="Link your Kubernetes clusters" service="outpost-gateway" collapsed={navCollapsed} icon="outposts" />
             {/* Generic iframe-hosted services (blueprints, chaos, argo, and any future
