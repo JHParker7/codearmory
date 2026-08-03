@@ -266,13 +266,27 @@ func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetStatus(codes.Ok, "")
 
-	// Copy in both directions concurrently. Each goroutine signals done when the
-	// connection half-closes; we wait for both so neither side is closed early.
+	// Copy in both directions concurrently, and tear the tunnel down as soon as
+	// EITHER direction ends.
+	//
+	// Waiting for both to finish is the intuitive version and it leaks: TCP allows a
+	// half-close, so a peer can stop sending while never closing its read side. The
+	// surviving io.Copy then blocks forever, the deferred Close calls never run, and
+	// the goroutine pair plus both sockets are pinned for the life of the process.
+	// Sandboxed user code can open those deliberately, so the leak is reachable by
+	// anything the proxy is meant to contain.
+	//
+	// Closing both conns on the first completion unblocks the other copy immediately
+	// (it fails with "use of closed network connection", which is why the errors are
+	// ignored here). A half-close therefore ends the tunnel rather than outliving it —
+	// correct for CONNECT, where the two directions belong to one session.
 	done := make(chan struct{}, 2)
 	go func() { io.Copy(target, clientConn); done <- struct{}{} }() //nolint:errcheck
 	go func() { io.Copy(clientConn, target); done <- struct{}{} }() //nolint:errcheck
 	<-done
-	<-done
+	clientConn.Close()
+	target.Close()
+	<-done // reap the second goroutine so it cannot outlive the handler
 }
 
 func (p *proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
