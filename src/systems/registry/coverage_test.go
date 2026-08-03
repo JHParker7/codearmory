@@ -703,13 +703,8 @@ func TestLoadManifestEntry_CreateThenUpdate(t *testing.T) {
 		ForwardAuth: true,
 		ServiceKey:  "sk",
 	}
-	entry.Endpoints = append(entry.Endpoints, struct {
-		Method   string `json:"method"`
-		Path     string `json:"path"`
-		Action   string `json:"action"`
-		Resource string `json:"resource"`
-		Public   bool   `json:"public"`
-	}{Method: "GET", Path: "/p", Action: "getP", Resource: "svc/p"})
+	entry.Endpoints = append(entry.Endpoints,
+		manifestEndpointSpec{Method: "GET", Path: "/p", Action: "getP", Resource: "svc/p"})
 	entry.Actions = []manifestActionEntry{
 		{Name: name + "/a", Method: "POST", Path: "/run", Async: json.RawMessage(`{"id_field":"x"}`)},
 		{Name: "", Method: "GET", Path: "/skip"}, // skipped

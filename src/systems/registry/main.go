@@ -227,13 +227,10 @@ type manifestEntry struct {
 	ForwardAuth bool   `json:"forward_auth"`
 	ServiceKey  string `json:"service_key"`
 	UIPath      string `json:"ui_path"`
-	Endpoints   []struct {
-		Method   string `json:"method"`
-		Path     string `json:"path"`
-		Action   string `json:"action"`
-		Resource string `json:"resource"`
-		Public   bool   `json:"public"`
-	} `json:"endpoints"`
+	// The named spec rather than an inline struct: this is the same shape the
+	// admin PUT /services/{id}/endpoints body carries, and keeping two anonymous
+	// copies in step is how a field added to one silently goes missing from the other.
+	Endpoints     []manifestEndpointSpec `json:"endpoints"`
 	Actions       []manifestActionEntry  `json:"actions"`
 	DefaultGrants []manifestDefaultGrant `json:"default_grants"`
 }

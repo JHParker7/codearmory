@@ -49,16 +49,19 @@ type ServiceRole struct {
 // ServiceEndpoint maps an HTTP method + path on a service to a gatekeeper
 // action/resource pair. Public endpoints bypass permission checks entirely.
 type ServiceEndpoint struct {
-	EndpointID string    `json:"endpoint_id"`
-	ServiceID  string    `json:"service_id"`
-	Method     string    `json:"method"`
-	Path       string    `json:"path"`
-	Action     string    `json:"action"`
-	Resource   string    `json:"resource"`
-	Public     bool      `json:"public"`
-	Active     bool      `json:"active"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	EndpointID string `json:"endpoint_id"`
+	ServiceID  string `json:"service_id"`
+	Method     string `json:"method"`
+	Path       string `json:"path"`
+	Action     string `json:"action"`
+	Resource   string `json:"resource"`
+	Public     bool   `json:"public"`
+	// MaxBodyBytes is the gateway request-body limit conductor applies to this
+	// endpoint: 0 = conductor's default, -1 = unlimited (the backend enforces its own).
+	MaxBodyBytes int64     `json:"max_body_bytes"`
+	Active       bool      `json:"active"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type serviceWithEndpoints struct {
@@ -620,11 +623,11 @@ func handleUpdateServiceEndpoints(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("service.id", id))
 
 	var req struct {
-		URL           string               `json:"url"`
-		Description   string               `json:"description"`
-		Roles         []manifestRoleSpec   `json:"roles"`
+		URL           string                 `json:"url"`
+		Description   string                 `json:"description"`
+		Roles         []manifestRoleSpec     `json:"roles"`
 		Endpoints     []manifestEndpointSpec `json:"endpoints"`
-		Actions       []manifestActionEntry `json:"actions"`
+		Actions       []manifestActionEntry  `json:"actions"`
 		DefaultGrants []manifestDefaultGrant `json:"default_grants"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

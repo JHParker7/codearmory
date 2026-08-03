@@ -47,16 +47,20 @@ type ServiceRoleModel struct {
 func (ServiceRoleModel) TableName() string { return "service_roles" }
 
 type ServiceEndpointModel struct {
-	EndpointID string    `gorm:"column:endpoint_id;primaryKey"`
-	ServiceID  string    `gorm:"column:service_id;not null"`
-	Method     string    `gorm:"column:method;not null"`
-	Path       string    `gorm:"column:path;not null"`
-	Action     string    `gorm:"column:action;not null"`
-	Resource   string    `gorm:"column:resource;not null"`
-	Public     bool      `gorm:"column:public;not null;default:false"`
-	Active     bool      `gorm:"column:active;not null;default:true"`
-	CreatedAt  time.Time `gorm:"column:created_at;not null;default:now()"`
-	UpdatedAt  time.Time `gorm:"column:updated_at;not null;default:now()"`
+	EndpointID string `gorm:"column:endpoint_id;primaryKey"`
+	ServiceID  string `gorm:"column:service_id;not null"`
+	Method     string `gorm:"column:method;not null"`
+	Path       string `gorm:"column:path;not null"`
+	Action     string `gorm:"column:action;not null"`
+	Resource   string `gorm:"column:resource;not null"`
+	Public     bool   `gorm:"column:public;not null;default:false"`
+	// MaxBodyBytes is the gateway's request-body limit for this endpoint. 0 means
+	// "conductor's default"; -1 means "no gateway limit — the backend enforces its
+	// own", which is what an upload route needs (see conductor's readAndValidateBody).
+	MaxBodyBytes int64     `gorm:"column:max_body_bytes;not null;default:0"`
+	Active       bool      `gorm:"column:active;not null;default:true"`
+	CreatedAt    time.Time `gorm:"column:created_at;not null;default:now()"`
+	UpdatedAt    time.Time `gorm:"column:updated_at;not null;default:now()"`
 }
 
 func (ServiceEndpointModel) TableName() string { return "service_endpoints" }
@@ -148,11 +152,15 @@ type manifestRoleSpec struct {
 }
 
 type manifestEndpointSpec struct {
-	Method   string
-	Path     string
-	Action   string
-	Resource string
-	Public   bool
+	Method   string `json:"method"`
+	Path     string `json:"path"`
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+	Public   bool   `json:"public"`
+	// Tagged explicitly: Go's case-insensitive fallback matches "public" to Public but
+	// would never match "max_body_bytes" to MaxBodyBytes, so an untagged field would
+	// silently decode as 0 and put every upload route back under the default cap.
+	MaxBodyBytes int64 `json:"max_body_bytes"`
 }
 
 // ── ServiceModel ──────────────────────────────────────────────────────────────
@@ -334,31 +342,31 @@ func (a ServiceAccountModel) List(ctx context.Context, limit, offset int) ([]db,
 // These entities are only ever managed in bulk via replaceServiceManifest or
 // loadManifestEntry; individual CRUD methods are not called directly.
 
-func (m ServiceRoleModel) Add(_ context.Context) error          { return errors.New("not implemented") }
-func (m ServiceRoleModel) Update(_ context.Context) error       { return errors.New("not implemented") }
-func (m ServiceRoleModel) Remove(_ context.Context) error       { return errors.New("not implemented") }
+func (m ServiceRoleModel) Add(_ context.Context) error    { return errors.New("not implemented") }
+func (m ServiceRoleModel) Update(_ context.Context) error { return errors.New("not implemented") }
+func (m ServiceRoleModel) Remove(_ context.Context) error { return errors.New("not implemented") }
 func (m ServiceRoleModel) Get(_ context.Context) (db, error)    { return nil, errors.New("not implemented") }
 func (m ServiceRoleModel) List(_ context.Context, _, _ int) ([]db, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m ServiceEndpointModel) Add(_ context.Context) error       { return errors.New("not implemented") }
-func (m ServiceEndpointModel) Update(_ context.Context) error    { return errors.New("not implemented") }
-func (m ServiceEndpointModel) Remove(_ context.Context) error    { return errors.New("not implemented") }
+func (m ServiceEndpointModel) Add(_ context.Context) error    { return errors.New("not implemented") }
+func (m ServiceEndpointModel) Update(_ context.Context) error { return errors.New("not implemented") }
+func (m ServiceEndpointModel) Remove(_ context.Context) error { return errors.New("not implemented") }
 func (m ServiceEndpointModel) Get(_ context.Context) (db, error) { return nil, errors.New("not implemented") }
 func (m ServiceEndpointModel) List(_ context.Context, _, _ int) ([]db, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m ServiceActionModel) Add(_ context.Context) error       { return errors.New("not implemented") }
-func (m ServiceActionModel) Update(_ context.Context) error    { return errors.New("not implemented") }
-func (m ServiceActionModel) Remove(_ context.Context) error    { return errors.New("not implemented") }
+func (m ServiceActionModel) Add(_ context.Context) error    { return errors.New("not implemented") }
+func (m ServiceActionModel) Update(_ context.Context) error { return errors.New("not implemented") }
+func (m ServiceActionModel) Remove(_ context.Context) error { return errors.New("not implemented") }
 func (m ServiceActionModel) Get(_ context.Context) (db, error) { return nil, errors.New("not implemented") }
 func (m ServiceActionModel) List(_ context.Context, _, _ int) ([]db, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m ServiceDefaultGrantModel) Add(_ context.Context) error       { return errors.New("not implemented") }
+func (m ServiceDefaultGrantModel) Add(_ context.Context) error { return errors.New("not implemented") }
 func (m ServiceDefaultGrantModel) Update(_ context.Context) error    { return errors.New("not implemented") }
 func (m ServiceDefaultGrantModel) Remove(_ context.Context) error    { return errors.New("not implemented") }
 func (m ServiceDefaultGrantModel) Get(_ context.Context) (db, error) { return nil, errors.New("not implemented") }
@@ -505,7 +513,7 @@ func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, err
 		}
 
 		epRows, err := connect().WithContext(ctx).Raw(
-			`SELECT endpoint_id, service_id, method, path, action, resource, public, active, created_at, updated_at
+			`SELECT endpoint_id, service_id, method, path, action, resource, public, max_body_bytes, active, created_at, updated_at
 			 FROM service_endpoints WHERE service_id IN (?) AND active = true ORDER BY service_id`,
 			svcIDs).Rows()
 		if err != nil {
@@ -514,7 +522,7 @@ func listServicesWithEndpoints(ctx context.Context) ([]serviceWithEndpoints, err
 			for epRows.Next() {
 				var ep ServiceEndpoint
 				if err := epRows.Scan(&ep.EndpointID, &ep.ServiceID, &ep.Method, &ep.Path,
-					&ep.Action, &ep.Resource, &ep.Public, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
+					&ep.Action, &ep.Resource, &ep.Public, &ep.MaxBodyBytes, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
 					slog.ErrorContext(ctx, "listServicesWithEndpoints: scan endpoint", "error", err)
 					continue
 				}
@@ -678,8 +686,8 @@ func replaceServiceManifest(ctx context.Context, id, url, description string,
 			continue
 		}
 		if err := tx.Exec(
-			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			uuid.New().String(), id, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public).Error; err != nil {
+			`INSERT INTO service_endpoints (endpoint_id, service_id, method, path, action, resource, public, max_body_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			uuid.New().String(), id, ep.Method, ep.Path, ep.Action, ep.Resource, ep.Public, ep.MaxBodyBytes).Error; err != nil {
 			return err
 		}
 	}
@@ -771,13 +779,14 @@ func loadManifestEntry(ctx context.Context, e manifestEntry) {
 
 	for _, ep := range e.Endpoints {
 		m := ServiceEndpointModel{
-			EndpointID: uuid.New().String(),
-			ServiceID:  serviceID,
-			Method:     ep.Method,
-			Path:       ep.Path,
-			Action:     ep.Action,
-			Resource:   ep.Resource,
-			Public:     ep.Public,
+			EndpointID:   uuid.New().String(),
+			ServiceID:    serviceID,
+			Method:       ep.Method,
+			Path:         ep.Path,
+			Action:       ep.Action,
+			Resource:     ep.Resource,
+			Public:       ep.Public,
+			MaxBodyBytes: ep.MaxBodyBytes,
 		}
 		if err := conn.Create(&m).Error; err != nil {
 			slog.ErrorContext(ctx, "manifest: failed to insert endpoint", "service", e.Name, "path", ep.Path, "error", err)
