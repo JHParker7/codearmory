@@ -1,14 +1,26 @@
-# JuiceFS metadata engine.
+# JuiceFS metadata engine — Postgres. NOT THE ONE IN USE, and not applied by
+# setup.sh. The engine is Redis (10-meta-redis.yaml); this file is kept only so
+# the comparison that chose it can be re-run instead of taken on trust.
+#
+# It measured ~430ms per push against Redis's ~67ms — roughly 4x worse — because a
+# push is ~972 effectively serialised metadata round-trips, so push latency is
+# metadata round-trip latency and the engine is most of it. ARCHITECTURE §5 Step 2
+# originally specified CloudNativePG on the strength of an argument rather than a
+# number; this is the number.
+#
+# To reproduce: apply this, point the metaurl in 30-juicefs-fs.yaml at it, and
+# note that switching engines FORMATS A NEW EMPTY FILESYSTEM — the repos do not
+# come with it, so re-run the migration job or expect an empty store.
+#
+# ---- original notes, still accurate about what the engine has to provide ----
 #
 # This is the half of the filesystem that has to be transactional: every inode,
 # dentry, chunk map and — critically for git — every flock/O_EXCL decision is a
 # row here, not an object in the bucket. It is why a JuiceFS mount passes the
 # preflight in storagecheck.go and a plain S3-over-FUSE mount cannot.
 #
-# ARCHITECTURE §5 Step 2 names CloudNativePG for this in production, "with a
-# connection cap so a git gc storm can't starve other services". On minikube
-# that operator is more moving parts than the thing being validated, so this is a
-# single stock postgres with the same TWO properties that matter:
+# On minikube CloudNativePG is more moving parts than the thing being validated,
+# so this is a single stock postgres with the same TWO properties that matter:
 #
 #   * its OWN database instance, not the platform's — a repack storm here must
 #     not take conductor/gatekeeper down with it, which is the whole point of the

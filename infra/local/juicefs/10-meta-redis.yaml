@@ -1,0 +1,249 @@
+# JuiceFS metadata engine — Redis, with Sentinel.
+#
+# This is the half of the filesystem that has to be transactional: every inode,
+# dentry, chunk map and — critically for git — every flock/O_EXCL decision is a
+# key here, not an object in the bucket. It is why a JuiceFS mount passes the
+# preflight in storagecheck.go and a plain S3-over-FUSE mount cannot.
+#
+# WHY REDIS AND NOT POSTGRES. ARCHITECTURE §5 Step 2 originally specified
+# CloudNativePG. It was measured and it lost: ~430ms per push against ~67ms on
+# Redis, because a push is ~972 effectively serialised metadata round-trips, so
+# push latency IS metadata round-trip latency. alt-meta-postgres.yaml is kept
+# alongside this file so that comparison can be re-run rather than believed.
+#
+# WHY SENTINEL. One filesystem's metadata lives on ONE instance — JuiceFS pins it
+# there deliberately, so multi-key metadata transactions never span instances —
+# which makes that instance the filesystem's availability. Sentinel is what turns
+# a lost primary into a failover instead of an outage. It is deployed here rather
+# than left to production because the metaurl format below is easy to get wrong
+# and worth exercising for real.
+#
+# Losing this data loses the filesystem even though every byte is still intact in
+# the bucket (ARCHITECTURE §"Never lose the metadata"). Hence a PVC, AOF and RDB
+# together, and a separate ticket for backup/restore — an emptyDir here would put
+# the whole store one restart away from unreadable blocks.
+#
+# NOT PRODUCTION-SHAPED IN TWO WAYS, both deliberate and both local-only:
+#   * NO AUTHENTICATION. A real deployment sets `requirepass` and passes the
+#     password in the metaurl, plus SENTINEL_PASSWORD in the mount pod's
+#     environment for the Sentinel connection itself (they are separate
+#     credentials — the metaurl password is NOT used for Sentinel).
+#   * one replica and three Sentinels on a SINGLE node, so a node loss still
+#     takes everything with it. The shape is right; the redundancy is not.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: juicefs-meta-redis
+  namespace: juicefs
+data:
+  redis.conf: |
+    port 6379
+    dir /data
+
+    # DURABILITY. AOF and RDB together, which is what JuiceFS recommends: the AOF
+    # is replayed on recovery because it is the more complete of the two, and the
+    # RDB stays useful as a compact snapshot to copy off-box for backups.
+    appendonly yes
+    appendfsync everysec
+    save 900 1
+    save 300 10
+    save 60 10000
+
+    # THE ONE SETTING THAT MUST NOT BE WRONG. Eviction here does not shed load, it
+    # deletes filesystem metadata: an evicted key is an inode or a chunk map that
+    # no longer exists, and the blocks it pointed at become unreachable while
+    # remaining perfectly intact in the bucket. JuiceFS tries to set this itself on
+    # startup and only WARNS if it cannot, so a misconfigured instance looks
+    # healthy right up until it silently starts destroying the filesystem.
+    maxmemory-policy noeviction
+
+    # Sized for a local store; see the RAM table in ARCHITECTURE §5 for real
+    # numbers (50 TB of git across 500k repos is ~7.4 GB, because a repacked bare
+    # repo is a handful of large packfiles, so key count tracks REPO count rather
+    # than data volume).
+    #
+    # Know the failure mode before raising or lowering it: at maxmemory with
+    # noeviction, Redis rejects every write with OOM — and that includes DELETES,
+    # since removing a file is itself a metadata write. A full metadata engine
+    # cannot be freed by deleting things from the filesystem, so this needs
+    # monitoring with headroom, not a high-water alarm.
+    maxmemory 256mb
+
+    # Report pod DNS names rather than pod IPs, so a failover announces an address
+    # that survives a pod restart.
+    replica-announce-ip ${POD_FQDN}
+  sentinel.conf.tmpl: |
+    port 26379
+    sentinel resolve-hostnames yes
+    sentinel announce-hostnames yes
+    sentinel monitor jfs-meta ${MASTER_HOST} 6379 2
+    sentinel down-after-milliseconds jfs-meta 5000
+    sentinel failover-timeout jfs-meta 10000
+    sentinel parallel-syncs jfs-meta 1
+  start-redis.sh: |
+    #!/bin/sh
+    set -eu
+    ORD=${HOSTNAME##*-}
+    POD_FQDN="${HOSTNAME}.juicefs-meta.juicefs.svc.cluster.local"
+    sed "s|\${POD_FQDN}|${POD_FQDN}|" /etc/redis/redis.conf > /tmp/redis.conf
+
+    # Who is the primary? Ask Sentinel rather than assume, because after a failover
+    # the pod with ordinal 0 may well be a replica — and a pod that assumes it is
+    # the primary because of its name is how a split brain starts. Sentinel is the
+    # authority on this; the ordinal is only the bootstrap answer for the very
+    # first start, when no Sentinel has ever seen a master.
+    # No --no-raw here, and it matters: that flag returns the human-readable form
+    # (`1) "host"`) rather than the value, so the replica ends up told to follow a
+    # host literally named `1) juicefs-meta-0...`. It fails quietly — the pod runs,
+    # reports role:slave, and master_link_status sits at "down" forever. The strip
+    # below is belt-and-braces for the same class of mistake.
+    MASTER=""
+    if command -v redis-cli >/dev/null 2>&1; then
+      MASTER=$(redis-cli -h juicefs-sentinel -p 26379 \
+                 sentinel get-master-addr-by-name jfs-meta 2>/dev/null \
+               | head -1 | tr -d '"' | sed 's/^[0-9]*) *//' || true)
+    fi
+    if [ -z "$MASTER" ] && [ "$ORD" != "0" ]; then
+      MASTER="juicefs-meta-0.juicefs-meta.juicefs.svc.cluster.local"
+    fi
+
+    if [ -n "$MASTER" ] && [ "$MASTER" != "$POD_FQDN" ]; then
+      echo "starting as a replica of ${MASTER}"
+      exec redis-server /tmp/redis.conf --replicaof "$MASTER" 6379
+    fi
+    echo "starting as the primary"
+    exec redis-server /tmp/redis.conf
+  start-sentinel.sh: |
+    #!/bin/sh
+    set -eu
+    # Sentinel rewrites its own config file as it learns the topology, so it needs
+    # a writable copy rather than the read-only ConfigMap mount.
+    MASTER_HOST="juicefs-meta-0.juicefs-meta.juicefs.svc.cluster.local"
+    sed "s|\${MASTER_HOST}|${MASTER_HOST}|" /etc/redis/sentinel.conf.tmpl > /tmp/sentinel.conf
+    exec redis-sentinel /tmp/sentinel.conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: juicefs-meta
+  namespace: juicefs
+spec:
+  # Headless: Sentinel and the replicas address individual pods by stable DNS, so
+  # a single load-balanced VIP would be actively wrong here.
+  clusterIP: None
+  selector:
+    app: juicefs-meta
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: juicefs-sentinel
+  namespace: juicefs
+spec:
+  selector:
+    app: juicefs-sentinel
+  ports:
+    - port: 26379
+      targetPort: 26379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: juicefs-meta
+  namespace: juicefs
+spec:
+  serviceName: juicefs-meta
+  replicas: 2
+  selector:
+    matchLabels:
+      app: juicefs-meta
+  template:
+    metadata:
+      labels:
+        app: juicefs-meta
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/etc/redis/start-redis.sh"]
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              # Above maxmemory, with room for Redis's own overhead and the
+              # copy-on-write fork an RDB save takes. A limit AT maxmemory gets the
+              # pod OOM-killed mid-snapshot instead of returning the OOM error that
+              # noeviction is there to produce.
+              memory: 768Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/redis
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: juicefs-meta-redis
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: juicefs-sentinel
+  namespace: juicefs
+spec:
+  # Three, so a quorum of 2 can still be reached when one is gone. On one node
+  # this is shape rather than redundancy.
+  replicas: 3
+  selector:
+    matchLabels:
+      app: juicefs-sentinel
+  template:
+    metadata:
+      labels:
+        app: juicefs-sentinel
+    spec:
+      containers:
+        - name: sentinel
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/etc/redis/start-sentinel.sh"]
+          ports:
+            - containerPort: 26379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "-p", "26379", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/redis
+      volumes:
+        - name: config
+          configMap:
+            name: juicefs-meta-redis

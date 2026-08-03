@@ -15,8 +15,45 @@ stringData:
   # Changing it later points the driver at a DIFFERENT filesystem rather than
   # renaming this one.
   name: git-factory
-  metaurl: postgres://juicefs:juicefs@juicefs-meta.juicefs.svc.cluster.local:5432/juicefs?sslmode=disable
+  # Sentinel, not a direct connection: the address here is the SENTINEL service,
+  # and the client asks it which instance is currently the primary.
+  #
+  # Read the format carefully, because it does not look like a normal Redis URL —
+  # the first element of the host list is the MASTER NAME, not a host, and every
+  # Sentinel address shares the single trailing port:
+  #
+  #   redis[s]://[[USER]:PASSWORD@]MASTER_NAME,SENTINEL[,SENTINEL]:PORT[/DB]
+  #
+  # so `jfs-meta` below is the monitored master's name (10-meta-redis.yaml,
+  # `sentinel monitor jfs-meta ...`) and NOT a hostname that resolves. Getting this
+  # wrong yields a connection error naming a host that does not exist, which reads
+  # like a DNS problem and is not one.
+  #
+  # A real deployment adds `:PASSWORD@` here AND sets SENTINEL_PASSWORD in the
+  # mount pod's environment — they are two different credentials, and the URL's
+  # password is not used to authenticate to Sentinel.
+  #
+  # The trailing /1 is the Redis database number, and it is part of the
+  # filesystem's identity: changing it points at a different (empty) filesystem
+  # rather than reconnecting to this one.
+  metaurl: redis://jfs-meta,juicefs-sentinel.juicefs.svc.cluster.local:26379/1
   storage: minio
+  # THE BUCKET AND THE METADATA ENGINE ARE A MATCHED PAIR, and JuiceFS enforces it:
+  # formatting a fresh engine against a prefix that already holds blocks fails with
+  #
+  #   Storage minio://.../git-factory/ is not empty; please clean it up or pick
+  #   another volume name
+  #
+  # which is the right refusal — those blocks belong to a filesystem whose metadata
+  # says what they are, and a new engine would have no idea. It is worth knowing
+  # before an engine swap rather than during one: changing `metaurl` alone does not
+  # migrate anything, it asks for a NEW filesystem, and the old bucket contents
+  # block it. Either start on a clean prefix (change `name` above, which changes the
+  # object prefix) or empty the old one, and either way re-run the migration job —
+  # the repos do not follow the metadata engine.
+  #
+  # It is also why "one bucket or prefix per shard" appears in the sharding design:
+  # one engine, one prefix, no sharing.
   bucket: http://juicefs-minio.juicefs.svc.cluster.local:9000/git-factory
   access-key: juicefs
   secret-key: juicefs123
