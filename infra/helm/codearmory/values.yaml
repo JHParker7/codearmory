@@ -985,9 +985,25 @@ gitFactory:
     # Per-repo size ceiling in MB; a push that would exceed it is rejected.
     # Empty/0 leaves repos unlimited.
     repoQuotaMB: ""
-    # How often the in-process repack (git maintenance) loop runs, as a Go duration
-    # e.g. "6h". Empty uses the service's own default.
+    # How often the repack (git maintenance) sweep runs, as a Go duration e.g. "6h".
+    # Empty uses the service's own default of 1h; "0" disables it.
+    #
+    # Every replica ticks on this interval, but only the one holding the sweep lease
+    # does any work (git-factory/lease.go) — so this is how often the STORE is swept,
+    # not how often each pod sweeps it.
     maintenanceInterval: ""
+    # How long the maintenance sweep lease is granted for, as a Go duration.
+    #
+    # It is NOT a budget for the sweep: the holder renews while it works, so a sweep
+    # may run as long as it needs. It is how long the sweep stays blocked after a
+    # holder dies WITHOUT releasing — a pod OOM-killed mid-sweep leaves the lease held
+    # until it expires, and no other replica will sweep before then.
+    #
+    # Shorter means faster takeover and more renewal traffic against the database
+    # (the holder renews at a third of this). Keep it well under maintenanceInterval,
+    # so a lost holder costs at most one skipped tick; the service's own default of 5m
+    # is sized against the default 1h interval. Empty uses that default.
+    maintenanceLeaseTTL: ""
     # How long a git .lock file may sit untouched before the janitor treats it as
     # abandoned and clears it, as a Go duration. A lock left by a pod that was killed
     # mid-push blocks that ref from every pod until it is removed, and nothing can
