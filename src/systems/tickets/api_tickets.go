@@ -278,7 +278,7 @@ func handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	meterTicketsCreated.Add(ctx, 1, metric.WithAttributes(attribute.String("priority", t.Priority)))
-	notifyHooks(ctx, eventTicketCreated, t.Status, t, nil)
+	notifyEvents(ctx, eventTicketCreated, t, nil)
 	span.SetAttributes(attribute.String("ticket.id", t.TicketID))
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "ticket created", "ticket_id", t.TicketID, "user_id", userID)
@@ -568,9 +568,9 @@ func handleUpdateTicket(w http.ResponseWriter, r *http.Request) {
 		meterTicketsResolved.Add(ctx, 1, metric.WithAttributes(attribute.String("status", req.Status)))
 	}
 
-	notifyHooks(ctx, eventTicketUpdated, existing.Status, existing, nil)
+	notifyEvents(ctx, eventTicketUpdated, existing, nil)
 	if existing.Status != prevStatus {
-		notifyHooks(ctx, eventTicketStatus, existing.Status, existing, map[string]string{
+		notifyEvents(ctx, eventTicketStatus, existing, map[string]any{
 			"old_status": prevStatus,
 			"new_status": existing.Status,
 		})
@@ -643,7 +643,7 @@ func handleDeleteTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	notifyHooks(ctx, eventTicketDeleted, t.Status, t, nil)
+	notifyEvents(ctx, eventTicketDeleted, t, nil)
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "ticket deleted", "ticket_id", id, "user_id", userID)
 	w.WriteHeader(http.StatusNoContent)

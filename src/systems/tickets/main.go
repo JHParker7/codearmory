@@ -212,10 +212,11 @@ func main() {
 	registry.StartKeyRotation(ctx, gatekeeperURL, "tickets",
 		secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
-	if hooksEnabled() {
-		slog.Info("hooks integration enabled — ticket lifecycle events will be emitted", "hooks_url", hooksURL)
+	initEventEmitter()
+	if eventsEnabled() {
+		slog.Info("events integration enabled — ticket lifecycle events will be emitted", "events_url", eventsURL)
 	} else {
-		slog.Info("hooks integration disabled — set HOOKS_URL and HOOKS_TRIGGER_KEY to enable")
+		slog.Info("events integration disabled — set EVENTS_URL and EVENTS_TRIGGER_KEY to enable")
 	}
 
 	mux := telemetry.NewMux()
