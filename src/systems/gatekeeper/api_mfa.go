@@ -390,18 +390,36 @@ func totpValidate(ctx context.Context, userID, code string, cred *TOTPCredential
 	return true, http.StatusOK, ""
 }
 
+// oauthPending carries the OAuth2 parameters an MFA detour has to preserve, so the
+// code minted after verification is identical to the one the non-MFA path would have
+// issued. Zero-valued for a direct (non-OAuth) login.
+//
+// A struct rather than positional arguments: these are six interchangeable strings,
+// and the failure mode of getting two of them the wrong way round is a silently
+// weakened flow rather than a compile error.
+type oauthPending struct {
+	ClientID            string
+	RedirectURI         string
+	State               string
+	Scope               string
+	CodeChallenge       string
+	CodeChallengeMethod string
+}
+
 // newMFAPending builds and persists a fresh pending MFA token for userID with a
-// 2-minute TTL. The OAuth fields are zero-valued for direct login flows.
-func newMFAPending(ctx context.Context, userID, oauthClientID, oauthRedirectURI, oauthState, oauthScope string) (MFAPending, error) {
+// 2-minute TTL. oa is zero-valued for direct login flows.
+func newMFAPending(ctx context.Context, userID string, oa oauthPending) (MFAPending, error) {
 	pending := MFAPending{
-		Token:            uuid.New().String(),
-		UserID:           userID,
-		ExpiresAt:        time.Now().Add(2 * time.Minute).UTC(),
-		CreatedAt:        time.Now().UTC(),
-		OAuthClientID:    oauthClientID,
-		OAuthRedirectURI: oauthRedirectURI,
-		OAuthState:       oauthState,
-		OAuthScope:       oauthScope,
+		Token:                    uuid.New().String(),
+		UserID:                   userID,
+		ExpiresAt:                time.Now().Add(2 * time.Minute).UTC(),
+		CreatedAt:                time.Now().UTC(),
+		OAuthClientID:            oa.ClientID,
+		OAuthRedirectURI:         oa.RedirectURI,
+		OAuthState:               oa.State,
+		OAuthScope:               oa.Scope,
+		OAuthCodeChallenge:       oa.CodeChallenge,
+		OAuthCodeChallengeMethod: oa.CodeChallengeMethod,
 	}
 	if err := pending.Add(ctx); err != nil {
 		return MFAPending{}, err

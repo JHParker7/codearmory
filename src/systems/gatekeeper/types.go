@@ -307,14 +307,20 @@ func (OAuthClient) TableName() string { return "oauth_clients" }
 // OAuthCode is a short-lived single-use authorization code issued during the
 // OAuth2 authorization_code flow. Codes expire after 10 minutes.
 type OAuthCode struct {
-	Code        string    `gorm:"column:code;primaryKey"`
-	ClientID    string    `gorm:"column:client_id"`
-	UserID      string    `gorm:"column:user_id"`
-	RedirectURI string    `gorm:"column:redirect_uri"`
-	Scopes      []string  `gorm:"column:scopes;serializer:json"`
-	Used        bool      `gorm:"column:used;default:false"`
-	ExpiresAt   time.Time `gorm:"column:expires_at"`
-	CreatedAt   time.Time `gorm:"column:created_at"`
+	Code        string   `gorm:"column:code;primaryKey"`
+	ClientID    string   `gorm:"column:client_id"`
+	UserID      string   `gorm:"column:user_id"`
+	RedirectURI string   `gorm:"column:redirect_uri"`
+	Scopes      []string `gorm:"column:scopes;serializer:json"`
+	// CodeChallenge binds the code to the client that STARTED the flow (RFC 7636).
+	// Empty means the client did not use PKCE, in which case none is required at
+	// exchange — the extension is per-request, so requiring it unconditionally would
+	// break every client that predates it.
+	CodeChallenge       string    `gorm:"column:code_challenge"`
+	CodeChallengeMethod string    `gorm:"column:code_challenge_method"`
+	Used                bool      `gorm:"column:used;default:false"`
+	ExpiresAt           time.Time `gorm:"column:expires_at"`
+	CreatedAt           time.Time `gorm:"column:created_at"`
 }
 
 func (OAuthCode) TableName() string { return "oauth_codes" }
@@ -350,6 +356,11 @@ type MFAPending struct {
 	OAuthRedirectURI string    `gorm:"column:oauth_redirect_uri"`
 	OAuthState       string    `gorm:"column:oauth_state"`
 	OAuthScope       string    `gorm:"column:oauth_scope"`
+	// The PKCE challenge has to survive the MFA detour like every other OAuth
+	// parameter: the code is minted after MFA completes, and a challenge dropped here
+	// would silently turn PKCE off for exactly the accounts with MFA enabled.
+	OAuthCodeChallenge       string `gorm:"column:oauth_code_challenge"`
+	OAuthCodeChallengeMethod string `gorm:"column:oauth_code_challenge_method"`
 }
 
 // RoleMembership assigns a role to a user in addition to the single role they already

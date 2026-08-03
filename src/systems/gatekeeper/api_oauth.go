@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -140,7 +141,10 @@ func handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 		"scopes_supported":                      []string{"openid", "email", "profile", "groups"},
 		"grant_types_supported":                 []string{"authorization_code", "client_credentials"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_post", "client_secret_basic"},
-		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "email", "name", "preferred_username", "groups"},
+		// Advertised so a client knows PKCE is available and which method to use.
+		// S256 only — "plain" is deliberately not supported (see pkceMethodS256).
+		"code_challenge_methods_supported": []string{pkceMethodS256},
+		"claims_supported":                 []string{"sub", "iss", "aud", "exp", "iat", "email", "name", "preferred_username", "groups"},
 	})
 }
 
@@ -204,6 +208,8 @@ var loginFormTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
     <input type="hidden" name="state"         value="{{.State}}">
     <input type="hidden" name="scope"         value="{{.Scope}}">
     <input type="hidden" name="response_type" value="{{.ResponseType}}">
+    <input type="hidden" name="code_challenge"        value="{{.CodeChallenge}}">
+    <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
     <label>Email<input type="email" name="email" required autocomplete="username"></label>
     <label>Password<input type="password" name="password" required autocomplete="current-password"></label>
     <button type="submit">Sign in</button>
@@ -220,15 +226,54 @@ type loginFormData struct {
 	ResponseType string
 	AppName      string
 	Error        string
+	// Round-tripped through the form as hidden fields so the challenge survives the
+	// GET→POST hop. Dropping it here would silently disable PKCE for every browser
+	// flow — the code would be minted with no challenge and the token endpoint would
+	// have nothing to enforce.
+	CodeChallenge       string
+	CodeChallengeMethod string
 }
 
 // oauthParams holds validated OAuth2 request parameters.
 type oauthParams struct {
-	client       OAuthClient
-	redirectURI  string
-	state        string
-	scope        string
-	responseType string
+	client              OAuthClient
+	redirectURI         string
+	state               string
+	scope               string
+	responseType        string
+	codeChallenge       string
+	codeChallengeMethod string
+}
+
+// pkceMethodS256 is the only code_challenge_method accepted.
+//
+// RFC 7636 also defines "plain", where the verifier IS the challenge — which protects
+// against nothing if the authorization request or the browser history is observable,
+// the exact exposure PKCE exists to close. The spec's own guidance is to use S256
+// wherever the client can compute SHA-256, and since no client uses PKCE against this
+// server yet, there is no legacy to accommodate: refusing "plain" outright costs
+// nothing and removes a downgrade a client could otherwise ask for.
+const pkceMethodS256 = "S256"
+
+// verifyPKCE reports whether verifier matches the challenge recorded on the code.
+//
+// A code with no challenge requires no verifier: PKCE is per-request, so demanding one
+// unconditionally would break every client that does not use it. But a code that DOES
+// carry a challenge must be presented with a matching verifier — that binding is the
+// entire point, and skipping it when the verifier is merely absent would let an
+// intercepted code be redeemed by whoever holds it.
+func verifyPKCE(code OAuthCode, verifier string) bool {
+	if code.CodeChallenge == "" {
+		return true
+	}
+	if verifier == "" {
+		return false
+	}
+	sum := sha256.Sum256([]byte(verifier))
+	return subtle.ConstantTimeCompare(
+		[]byte(base64.RawURLEncoding.EncodeToString(sum[:])),
+		[]byte(code.CodeChallenge),
+	) == 1
 }
 
 // parseOAuthParams extracts and validates OAuth2 parameters from the request.
@@ -273,12 +318,33 @@ func parseOAuthParams(w http.ResponseWriter, r *http.Request, fromForm bool) (oa
 		return oauthParams{}, false
 	}
 
+	// PKCE (RFC 7636). Optional, but once a challenge is supplied it is validated
+	// here and enforced at the token endpoint.
+	codeChallenge := get("code_challenge")
+	codeChallengeMethod := get("code_challenge_method")
+	if codeChallenge != "" {
+		// An omitted method defaults to "plain" per RFC 7636 §4.3. We do not accept
+		// plain, so require the method to be stated rather than silently downgrading
+		// a client that meant S256 and forgot the parameter.
+		if codeChallengeMethod != pkceMethodS256 {
+			oauthRedirectError(w, r, redirectURI, state, "invalid_request",
+				"code_challenge_method must be "+pkceMethodS256)
+			return oauthParams{}, false
+		}
+	} else if codeChallengeMethod != "" {
+		oauthRedirectError(w, r, redirectURI, state, "invalid_request",
+			"code_challenge_method was supplied without code_challenge")
+		return oauthParams{}, false
+	}
+
 	return oauthParams{
-		client:       client,
-		redirectURI:  redirectURI,
-		state:        state,
-		scope:        get("scope"),
-		responseType: responseType,
+		client:              client,
+		redirectURI:         redirectURI,
+		state:               state,
+		scope:               get("scope"),
+		responseType:        responseType,
+		codeChallenge:       codeChallenge,
+		codeChallengeMethod: codeChallengeMethod,
 	}, true
 }
 
@@ -300,6 +366,9 @@ func handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		Scope:        params.scope,
 		ResponseType: params.responseType,
 		AppName:      params.client.Name,
+
+		CodeChallenge:       params.codeChallenge,
+		CodeChallengeMethod: params.codeChallengeMethod,
 	})
 }
 
@@ -330,6 +399,9 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 			ResponseType: params.responseType,
 			AppName:      params.client.Name,
 			Error:        msg,
+
+			CodeChallenge:       params.codeChallenge,
+			CodeChallengeMethod: params.codeChallengeMethod,
 		})
 	}
 
@@ -361,8 +433,11 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if userHasTOTP(r.Context(), user.UserID) {
-		pending, err := newMFAPending(r.Context(), user.UserID,
-			params.client.ClientID, params.redirectURI, params.state, params.scope)
+		pending, err := newMFAPending(r.Context(), user.UserID, oauthPending{
+			ClientID: params.client.ClientID, RedirectURI: params.redirectURI,
+			State: params.state, Scope: params.scope,
+			CodeChallenge: params.codeChallenge, CodeChallengeMethod: params.codeChallengeMethod,
+		})
 		if err != nil {
 			slog.ErrorContext(r.Context(), "oauth authorize: failed to create MFA pending", "user_id", user.UserID, "error", err)
 			renderError("Internal server error.")
@@ -374,13 +449,15 @@ func handleAuthorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	code := OAuthCode{
-		Code:        uuid.New().String(),
-		ClientID:    params.client.ClientID,
-		UserID:      user.UserID,
-		RedirectURI: params.redirectURI,
-		Scopes:      strings.Fields(params.scope),
-		ExpiresAt:   time.Now().Add(10 * time.Minute).UTC(),
-		CreatedAt:   time.Now().UTC(),
+		Code:                uuid.New().String(),
+		ClientID:            params.client.ClientID,
+		UserID:              user.UserID,
+		RedirectURI:         params.redirectURI,
+		Scopes:              strings.Fields(params.scope),
+		CodeChallenge:       params.codeChallenge,
+		CodeChallengeMethod: params.codeChallengeMethod,
+		ExpiresAt:           time.Now().Add(10 * time.Minute).UTC(),
+		CreatedAt:           time.Now().UTC(),
 	}
 	if err := code.Add(r.Context()); err != nil {
 		slog.ErrorContext(r.Context(), "oauth authorize: persist code failed", "error", err)
@@ -442,6 +519,16 @@ func handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if authCode.RedirectURI != r.FormValue("redirect_uri") {
 		tokenError(w, "invalid_grant", "redirect_uri mismatch")
+		return
+	}
+
+	// PKCE (RFC 7636). Checked BEFORE the code is redeemed below, so a wrong verifier
+	// leaves the code unspent for the legitimate client rather than burning it — an
+	// attacker must not be able to invalidate a code merely by guessing at it.
+	if !verifyPKCE(authCode, r.FormValue("code_verifier")) {
+		slog.WarnContext(r.Context(), "oauth token: PKCE verification failed",
+			"client_id", clientID, "user_id", authCode.UserID)
+		tokenError(w, "invalid_grant", "code_verifier does not match code_challenge")
 		return
 	}
 
@@ -775,8 +862,11 @@ func handleOAuthMFAPost(w http.ResponseWriter, r *http.Request) {
 
 	renderTOTPError := func(msg string) {
 		// Re-issue a fresh pending token so the user can retry without starting over.
-		newPending, err := newMFAPending(ctx, pending.UserID,
-			pending.OAuthClientID, pending.OAuthRedirectURI, pending.OAuthState, pending.OAuthScope)
+		newPending, err := newMFAPending(ctx, pending.UserID, oauthPending{
+			ClientID: pending.OAuthClientID, RedirectURI: pending.OAuthRedirectURI,
+			State: pending.OAuthState, Scope: pending.OAuthScope,
+			CodeChallenge: pending.OAuthCodeChallenge, CodeChallengeMethod: pending.OAuthCodeChallengeMethod,
+		})
 		if err != nil {
 			slog.ErrorContext(ctx, "oauth mfa: re-issue pending failed", "user_id", pending.UserID, "error", err)
 			oauthRedirectError(w, r, pending.OAuthRedirectURI, pending.OAuthState, "server_error", "internal error")
@@ -799,13 +889,15 @@ func handleOAuthMFAPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	authCode := OAuthCode{
-		Code:        uuid.New().String(),
-		ClientID:    pending.OAuthClientID,
-		UserID:      pending.UserID,
-		RedirectURI: pending.OAuthRedirectURI,
-		Scopes:      mfaPendingOAuthScopes(pending.OAuthScope),
-		ExpiresAt:   time.Now().Add(10 * time.Minute).UTC(),
-		CreatedAt:   time.Now().UTC(),
+		Code:                uuid.New().String(),
+		ClientID:            pending.OAuthClientID,
+		UserID:              pending.UserID,
+		RedirectURI:         pending.OAuthRedirectURI,
+		Scopes:              mfaPendingOAuthScopes(pending.OAuthScope),
+		CodeChallenge:       pending.OAuthCodeChallenge,
+		CodeChallengeMethod: pending.OAuthCodeChallengeMethod,
+		ExpiresAt:           time.Now().Add(10 * time.Minute).UTC(),
+		CreatedAt:           time.Now().UTC(),
 	}
 	if err := authCode.Add(ctx); err != nil {
 		slog.ErrorContext(ctx, "oauth mfa: persist auth code failed", "error", err)

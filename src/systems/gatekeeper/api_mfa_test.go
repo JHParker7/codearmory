@@ -441,7 +441,7 @@ func TestHandleMFAVerify_Success(t *testing.T) {
 	u, secret := createTOTPUser(t, "password")
 	t.Cleanup(func() { connect().Model(&Session{}).Where("user_id = ?", u.UserID).Update("active", false) })
 
-	pending, err := newMFAPending(context.Background(), u.UserID, "", "", "", "")
+	pending, err := newMFAPending(context.Background(), u.UserID, oauthPending{})
 	if err != nil {
 		t.Fatalf("newMFAPending: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestHandleMFAVerify_Success(t *testing.T) {
 func TestHandleMFAVerify_InvalidCode(t *testing.T) {
 	u, _ := createTOTPUser(t, "password")
 
-	pending, err := newMFAPending(context.Background(), u.UserID, "", "", "", "")
+	pending, err := newMFAPending(context.Background(), u.UserID, oauthPending{})
 	if err != nil {
 		t.Fatalf("newMFAPending: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestHandleMFAVerify_TokenUsedOnce(t *testing.T) {
 	u, secret := createTOTPUser(t, "password")
 	t.Cleanup(func() { connect().Model(&Session{}).Where("user_id = ?", u.UserID).Update("active", false) })
 
-	pending, err := newMFAPending(context.Background(), u.UserID, "", "", "", "")
+	pending, err := newMFAPending(context.Background(), u.UserID, oauthPending{})
 	if err != nil {
 		t.Fatalf("newMFAPending: %v", err)
 	}

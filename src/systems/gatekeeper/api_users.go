@@ -44,9 +44,70 @@ func setSessionCookie(w http.ResponseWriter, token string, expiresAt time.Time) 
 	})
 }
 
-// handleLogout clears the session cookie. Callers that used JWT-only auth can
-// delete their own session via DELETE /sessions/{id}.
+// verifiedLogoutSession resolves the session the caller is presenting, verifying the
+// token's signature against that session's own stored public key before returning it.
+//
+// That verification is what makes an unauthenticated logout safe. The endpoint has to
+// stay unauthenticated — clearing a credential must work even when the credential is
+// expired or malformed, which is precisely when a user most wants to be rid of it — so
+// the session id arrives from the caller. Acting on the jti UNVERIFIED would turn
+// logout into "revoke any session by id": a free, unauthenticated denial of service
+// against any user whose session id was observed or guessed. Only a token that
+// actually verifies against the session it names may revoke that session.
+func verifiedLogoutSession(r *http.Request) (Session, bool) {
+	tokenString := ""
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		tokenString = strings.TrimPrefix(h, "Bearer ")
+	} else if c, err := r.Cookie("armory_session"); err == nil {
+		tokenString = c.Value
+	}
+	if tokenString == "" {
+		return Session{}, false
+	}
+	unverified, _, err := jwt.NewParser().ParseUnverified(tokenString, &authClaims{})
+	if err != nil {
+		return Session{}, false
+	}
+	claims, ok := unverified.Claims.(*authClaims)
+	if !ok || claims.ID == "" {
+		return Session{}, false
+	}
+	row, err := (Session{SessionID: claims.ID}).Get(r.Context())
+	if err != nil {
+		return Session{}, false
+	}
+	session := row.(Session)
+	pubKey, err := parseECPublicKey(session.PubKey)
+	if err != nil {
+		return Session{}, false
+	}
+	verified, err := jwt.ParseWithClaims(tokenString, &authClaims{}, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodECDSA); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return pubKey, nil
+	}, jwt.WithIssuer("gatekeeper"))
+	if err != nil || !verified.Valid {
+		return Session{}, false
+	}
+	return session, true
+}
+
+// handleLogout ends the caller's session: it clears the session cookie AND revokes the
+// session server-side.
+//
+// Clearing the cookie alone is not a logout. It removes the browser's copy of the
+// credential and nothing else — the session row stays active until it expires, so any
+// other copy of that token keeps authenticating: one captured earlier, one a browser
+// session-restore puts back, or the bearer the SPA still holds. Revocation is the half
+// that actually ends access, and it is the half this endpoint was missing.
+//
+// Deliberately unauthenticated, and it never fails: a caller presenting a credential we
+// cannot verify still gets the cookie cleared. Returning 401 here would leave the very
+// callers who most need to shed a bad credential holding on to it.
 func handleLogout(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	// Cleared first and unconditionally, so nothing below can skip it.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "armory_session",
 		Value:    "",
@@ -56,6 +117,21 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		Secure:   os.Getenv("COOKIE_SECURE") != "false",
 	})
+
+	if session, ok := verifiedLogoutSession(r); ok {
+		if err := session.Remove(ctx); err != nil {
+			// The cookie is already gone, so the caller is logged out of this browser
+			// either way; the session simply lives until it expires. Worth an error
+			// log — a revocation that silently did not happen is exactly the kind of
+			// thing an incident review needs to be able to see.
+			slog.ErrorContext(ctx, "logout: session revocation failed",
+				"session_id", session.SessionID, "user_id", session.UserID, "error", err)
+		} else {
+			slog.InfoContext(ctx, "logout: session revoked",
+				"session_id", session.SessionID, "user_id", session.UserID)
+			writeAudit(ctx, session.UserID, "user", "session.revoke", session.SessionID, "logout")
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -625,7 +701,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if userHasTOTP(ctx, user.UserID) {
-		pending, err := newMFAPending(ctx, user.UserID, "", "", "", "")
+		pending, err := newMFAPending(ctx, user.UserID, oauthPending{})
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "mfa pending creation failed")
