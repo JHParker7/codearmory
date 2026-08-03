@@ -33,19 +33,19 @@ func registeredAll(admin bool) map[string]bool {
 // modules (empty Service) and other registered services remain.
 func TestFilterScreens_HidesUnregisteredService(t *testing.T) {
 	full := filterScreens(false, nil) // nil = unknown → fail open, nothing hidden
-	if !titlesPresent(full, "Forge", "Hooks") {
-		t.Fatalf("expected Forge and Hooks in the unfiltered user hub, got %v", screenTitles(full))
+	if !titlesPresent(full, "Forge", "Events") {
+		t.Fatalf("expected Forge and Events in the unfiltered user hub, got %v", screenTitles(full))
 	}
 
-	// Registered = everything except forge → forge is hidden, hooks remain.
+	// Registered = everything except forge → forge is hidden, events remain.
 	registered := registeredAll(false)
 	delete(registered, "forge")
 	filtered := filterScreens(false, registered)
 	if titlesPresent(filtered, "Forge") {
 		t.Errorf("Forge screen should be hidden when the forge service is not registered")
 	}
-	if !titlesPresent(filtered, "Hooks") {
-		t.Errorf("Hooks screen should remain when only forge is unregistered")
+	if !titlesPresent(filtered, "Events") {
+		t.Errorf("Events screen should remain when only forge is unregistered")
 	}
 	if len(filtered) != len(full)-1 {
 		t.Errorf("dropping forge should remove exactly one screen: full=%d filtered=%d", len(full), len(filtered))
@@ -97,7 +97,7 @@ func TestRegisteredServices_FailsOpenUnderTest(t *testing.T) {
 var knownPlatformServices = map[string]bool{
 	"gatekeeper": true, "conductor": true, "registry": true, "builder": true,
 	"blueprints": true, "forge": true, "workflows": true, "tickets": true,
-	"hooks": true, "containers": true, "gitea_integration": true, "git_connector": true,
+	"events": true, "containers": true, "gitea_integration": true, "git_connector": true,
 	"chaos": true, "argo": true, "outpost-gateway": true, "notifications": true,
 }
 

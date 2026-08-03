@@ -422,26 +422,6 @@ func TestParseEnvAssignments_Invalid(t *testing.T) {
 	}
 }
 
-// ── splitEvents ───────────────────────────────────────────────────────────────
-
-func TestSplitEvents_Spaces(t *testing.T) {
-	if got := splitEvents("push pull_request"); !equalSlice(got, []string{"push", "pull_request"}) {
-		t.Errorf("got %v, want [push pull_request]", got)
-	}
-}
-
-func TestSplitEvents_Commas(t *testing.T) {
-	if got := splitEvents("push,pull_request, tag"); !equalSlice(got, []string{"push", "pull_request", "tag"}) {
-		t.Errorf("got %v, want [push pull_request tag]", got)
-	}
-}
-
-func TestSplitEvents_Empty(t *testing.T) {
-	if got := splitEvents("   "); len(got) != 0 {
-		t.Errorf("got %v, want empty", got)
-	}
-}
-
 func equalSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

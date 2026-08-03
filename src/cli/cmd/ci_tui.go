@@ -18,7 +18,7 @@ import (
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 // These styles are shared by every list/detail TUI (ci, forge, audit, steps,
-// hooks). buildCITUIStyles rebuilds them, plus the status color map, from the
+// events). buildCITUIStyles rebuilds them, plus the status color map, from the
 // active theme.
 var (
 	tuiBoxStyle   lipgloss.Style
