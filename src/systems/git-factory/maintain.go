@@ -198,14 +198,12 @@ func gcRepo(ctx context.Context, repoID string) (ran bool, err error) {
 	return true, nil
 }
 
-// runMaintenance sweeps every repo once. Errors are per-repo and never abort the
+// runMaintenanceWhile sweeps every repo once. Errors are per-repo and never abort the
 // sweep: one broken repository must not stop the rest from being repacked.
-func runMaintenance(ctx context.Context) (swept, skipped, locksCleared int) {
-	return runMaintenanceWhile(ctx, func() bool { return true })
-}
-
-// runMaintenanceWhile is runMaintenance with an abort condition consulted between
-// repos. The leased sweep uses it to stop once it no longer holds the lease.
+//
+// keepGoing is consulted between repos and stops the sweep when it returns false. The
+// leased sweep uses it to give up once it no longer holds the lease; pass a function
+// returning true to sweep unconditionally.
 func runMaintenanceWhile(ctx context.Context, keepGoing func() bool) (swept, skipped, locksCleared int) {
 	ids, err := listAllRepoIDs(ctx)
 	if err != nil {

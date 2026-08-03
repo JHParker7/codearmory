@@ -190,11 +190,11 @@ func TestRunMaintenance_SweepsEveryRepo(t *testing.T) {
 	for _, name := range []string{"one", "two", "three"} {
 		seedRepoVisible(t, uuid.New().String(), "user-1", "admin", name, visibilityPrivate)
 	}
-	swept, skipped, locks := runMaintenance(ctx)
+	swept, skipped, locks := runMaintenanceWhile(ctx, func() bool { return true })
 	if swept != 3 || skipped != 0 {
-		t.Errorf("runMaintenance swept %d, skipped %d; want 3 and 0", swept, skipped)
+		t.Errorf("the sweep repacked %d, skipped %d; want 3 and 0", swept, skipped)
 	}
 	if locks != 0 {
-		t.Errorf("runMaintenance cleared %d locks on freshly created repos; want 0", locks)
+		t.Errorf("the sweep cleared %d locks on freshly created repos; want 0", locks)
 	}
 }
