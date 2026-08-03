@@ -237,7 +237,7 @@ class TestRouteGuardsPlaywright:
     def test_authenticated_user_visiting_login_redirects_to_app(
         self, pw_auth_page, portal_url, user
     ):
-        """When a valid token is in localStorage, /login should redirect to /app/blueprints."""
+        """With a live session (cookie + ca_uid), /login should redirect to /app/blueprints."""
         import json
 
         pw_auth_page.route("**/api/users/**", lambda r: r.fulfill(

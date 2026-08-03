@@ -16,8 +16,14 @@ const BASE = '/api';
 async function req<T>(method: string, path: string, token?: string, body?: unknown): Promise<T> {
   const res = await fetch(BASE + path, {
     method,
+    // The session is an HttpOnly `armory_session` cookie; conductor accepts it on
+    // every non-public route. Stated explicitly rather than relying on fetch's
+    // same-origin default, because that default is the only thing authenticating a
+    // reloaded tab — the bearer below is present only for the tab that logged in.
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
+      // Omitted when empty, which is the normal state after a reload.
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -68,6 +74,23 @@ export function signup(payload: SignupPayload) {
 
 export function login(email: string, password: string) {
   return req<LoginResult>('POST', '/gatekeeper/login', undefined, { email, password });
+}
+
+/**
+ * End the session server-side: revokes the session row AND expires the HttpOnly
+ * `armory_session` cookie gatekeeper set at login.
+ *
+ * Dropping client state alone is not a logout. The cookie and the session both survive
+ * it, so the credential keeps authenticating — a restored tab, or any copy of the
+ * bearer, still reaches the API as the "logged out" user. This is the call that
+ * actually ends it.
+ *
+ * The route is public (clearing a credential must work even when that credential is
+ * expired), but the bearer is sent so the server can tell WHICH session to revoke; it
+ * only revokes one whose signature verifies.
+ */
+export function logout(token?: string) {
+  return req<void>('POST', '/gatekeeper/logout', token);
 }
 
 // ── First-run setup ─────────────────────────────────────────────────────────
@@ -725,79 +748,101 @@ export function deleteBoard(token: string, id: string, confirmName: string) {
   return req<void>('DELETE', `/tickets/boards/${id}?confirm=${encodeURIComponent(confirmName)}`, token);
 }
 
-// ── Hooks ─────────────────────────────────────────────────────────────────────
+// ── Events ────────────────────────────────────────────────────────────────────
 
-export interface PipelineRule {
-  rule_id: string;
+/**
+ * A filter node: either a group (any of all/any/not set) or a leaf condition (field set).
+ * A group ANDs `all`, ORs `any`, and negates `not`; a leaf applies `op` to the value at
+ * `field`. The recursion lets a trigger express arbitrary boolean logic while the common
+ * case stays a flat `all: [...]`.
+ */
+export interface EventMatch {
+  all?: EventMatch[];
+  any?: EventMatch[];
+  not?: EventMatch;
+  /** Dotted path into the event, e.g. "data.ref". */
+  field?: string;
+  op?: string;
+  value?: unknown;
+  values?: unknown[];
+}
+
+/** One thing a matched trigger does. `config` is kind-specific. */
+export interface TriggerAction {
+  kind: 'run_pipeline' | 'create_ticket' | 'notify' | 'webhook_out' | 'enqueue_outpost_command';
+  config?: Record<string, unknown>;
+}
+
+export interface EventTrigger {
+  id: string;
   name: string;
-  /** Webhook source repo this rule matches (e.g. "owner/repo"). The hooks service serialises this as `source`. */
-  source: string;
-  events: string[];
-  ref_filter?: string | null;
-  workflow_id: string;
-  input_mapping?: Record<string, string> | null;
+  match: EventMatch;
+  actions: TriggerAction[];
+  enabled: boolean;
   created_by: string;
   org_id?: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface HookTrigger {
-  trigger_id: string;
-  event_id: string;
-  rule_id: string;
-  workflow_id: string;
-  run_id?: string | null;
-  status: string;
-  error?: string | null;
-  created_at: string;
+/** The tenant an event belongs to. At least one field is always set. */
+export interface EventActor {
+  org_id?: string | null;
+  user_id?: string | null;
 }
 
-export interface HookEvent {
-  event_id: string;
-  /** Source repo the delivery came from (e.g. "owner/repo"). Serialised as `source` by the hooks service. */
+/** An entry in the append-only event log. */
+export interface PlatformEvent {
+  id: string;
+  spec_version?: string;
+  /** Dotted, namespaced, stable — e.g. "repo.push". */
+  type: string;
+  /** The emitting service. */
   source: string;
-  event_type: string;
-  ref?: string | null;
-  payload?: unknown;
-  rules_matched: number;
-  status: string;
-  triggers?: HookTrigger[];
-  created_at: string;
+  /** The resource the event is about — a repo, a run, a ticket id. */
+  subject: string;
+  actor: EventActor;
+  occurred_at: string;
+  trace_id?: string | null;
+  causation_id?: string | null;
+  /** Type-specific payload; filters reach into it by dotted path. */
+  data?: Record<string, unknown> | null;
 }
 
-export function listRules(token: string) {
-  return req<PipelineRule[]>('GET', '/hooks/rules', token);
+export function listTriggers(token: string) {
+  return req<EventTrigger[]>('GET', '/events/triggers', token);
 }
 
-export function getRule(token: string, id: string) {
-  return req<PipelineRule>('GET', `/hooks/rules/${id}`, token);
+export function getTrigger(token: string, id: string) {
+  return req<EventTrigger>('GET', `/events/triggers/${id}`, token);
 }
 
-// Create a rule. The hooks service requires a non-empty `secret` (the HMAC secret
-// that authenticates deliveries) and a `workflow_id` that resolves to a workflow
-// in the caller's org.
-export function createRule(token: string, payload: { name: string; source: string; events: string[]; ref_filter?: string; workflow_id: string; secret: string; input_mapping?: Record<string, string> }) {
-  return req<PipelineRule>('POST', '/hooks/rules', token, payload);
+export function createTrigger(token: string, payload: { name: string; match: EventMatch; actions: TriggerAction[]; enabled?: boolean }) {
+  return req<EventTrigger>('POST', '/events/triggers', token, payload);
 }
 
-// Update a rule. Send the full rule (name/source/events/workflow_id are all
-// required by the service). Omit `secret` to keep the existing one; a non-empty
-// value replaces it. An empty-string secret is rejected server-side.
-export function updateRule(token: string, id: string, payload: Partial<{ name: string; source: string; events: string[]; ref_filter: string; workflow_id: string; secret: string; input_mapping: Record<string, string> }>) {
-  return req<PipelineRule>('PUT', `/hooks/rules/${id}`, token, payload);
+// Update a trigger. The service replaces the mutable fields wholesale (name, match,
+// actions, enabled), so send the complete document — a missing `actions` clears them.
+export function updateTrigger(token: string, id: string, payload: { name: string; match: EventMatch; actions: TriggerAction[]; enabled: boolean }) {
+  return req<EventTrigger>('PUT', `/events/triggers/${id}`, token, payload);
 }
 
-export function deleteRule(token: string, id: string) {
-  return req<void>('DELETE', `/hooks/rules/${id}`, token);
+export function deleteTrigger(token: string, id: string) {
+  return req<void>('DELETE', `/events/triggers/${id}`, token);
 }
 
-export function listHookEvents(token: string) {
-  return req<HookEvent[]>('GET', '/hooks/events', token);
+/** Dry-run a filter against an event — "would this trigger fire?" — without persisting. */
+export function testTriggerMatch(token: string, match: EventMatch, event: Partial<PlatformEvent>) {
+  return req<{ matched: boolean; error?: string }>('POST', '/events/triggers/test-match', token, { match, event });
 }
 
-export function getHookEvent(token: string, id: string) {
-  return req<HookEvent>('GET', `/hooks/events/${id}`, token);
+export function listEvents(token: string, type?: string) {
+  const q = type ? `?type=${encodeURIComponent(type)}` : '';
+  return req<PlatformEvent[]>('GET', `/events/events${q}`, token);
+}
+
+export function getEvent(token: string, id: string) {
+  return req<PlatformEvent>('GET', `/events/events/${id}`, token);
 }
 
 // ── Blueprints — BFF-normalized shape ────────────────────────────────────────

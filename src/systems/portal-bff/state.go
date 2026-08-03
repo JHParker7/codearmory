@@ -62,7 +62,10 @@ func handleState(cache *stateCache) http.HandlerFunc {
 }
 
 func handleStateGet(w http.ResponseWriter, r *http.Request, cache *stateCache, safePath string) {
-	auth := r.Header.Get("Authorization")
+	// Keyed on whatever credential the caller actually presented — a cookie-only
+	// caller sends no Authorization, and keying on that alone would put every such
+	// user in the SAME cache partition (one user's state served to another).
+	auth := credentialKey(r)
 	if v, ok := cache.get(safePath, auth); ok {
 		recordCacheHit(r.Context())
 		writeJSON(w, http.StatusOK, v)
@@ -71,9 +74,7 @@ func handleStateGet(w http.ResponseWriter, r *http.Request, cache *stateCache, s
 	recordCacheMiss(r.Context())
 
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, conductorURL+"/blueprints/state/"+safePath, nil)
-	if auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
+	forwardCredentials(req, r)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "upstream state fetch failed", "error", err, "wsPath", safePath)
@@ -121,9 +122,7 @@ func handleStateGet(w http.ResponseWriter, r *http.Request, cache *stateCache, s
 
 func handleStateDelete(w http.ResponseWriter, r *http.Request, cache *stateCache, safePath string) {
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodDelete, conductorURL+"/blueprints/state/"+safePath, nil)
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
+	forwardCredentials(req, r)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "upstream state delete failed", "error", err, "wsPath", safePath)

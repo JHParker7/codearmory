@@ -17,7 +17,7 @@ import { Workflows } from './pages/app/Workflows';
 import { RunView } from './pages/app/RunView';
 import { Forge } from './pages/app/Forge';
 import { Tickets } from './pages/app/Tickets';
-import { Hooks } from './pages/app/Hooks';
+import { Events } from './pages/app/Events';
 import { Containers } from './pages/app/Containers';
 import { Git } from './pages/app/Git';
 import { Repos } from './pages/app/Repos';
@@ -36,18 +36,26 @@ function Loading() {
   );
 }
 
-/** Route guard for the `/app` shell: shows Loading while the session resolves, else redirects to /login when unauthenticated. */
+/**
+ * Route guard for the `/app` shell: shows Loading while the session resolves, else
+ * redirects to /login when unauthenticated.
+ *
+ * Gated on `userId`, NOT on `token`. The credential is the HttpOnly cookie, which this
+ * code cannot read, and `token` is only populated for the tab that performed the login —
+ * so a reload legitimately has an empty token while still being fully signed in.
+ * Gating on the token would bounce every refresh to /login.
+ */
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { token, status } = useAppSelector(s => s.auth);
+  const { userId, status } = useAppSelector(s => s.auth);
   if (status === 'loading') return <Loading />;
-  if (!token) return <Navigate to="/login" replace />;
+  if (!userId) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }
 
 /** Inverse guard for public auth pages (login/signup): bounces an already-authenticated visitor to /app. */
 function RedirectIfAuthed({ children }: { children: React.ReactNode }) {
-  const { token } = useAppSelector(s => s.auth);
-  if (token) return <Navigate to="/app" replace />;
+  const { userId } = useAppSelector(s => s.auth);
+  if (userId) return <Navigate to="/app" replace />;
   return <>{children}</>;
 }
 
@@ -72,7 +80,7 @@ const LANDING_MODULES: { path: string; service: string }[] = [
   { path: 'forge', service: 'forge' },
   { path: 'workflows', service: 'workflows' },
   { path: 'tickets', service: 'tickets' },
-  { path: 'hooks', service: 'hooks' },
+  { path: 'events', service: 'events' },
   { path: 'containers', service: 'containers' },
   { path: 'git', service: 'git_connector' },
   { path: 'outposts', service: 'outpost-gateway' },
@@ -124,7 +132,7 @@ export function App() {
             <Route path="workflows" element={<Workflows />} />
             <Route path="workflows/runs/:runId" element={<RunView />} />
             <Route path="tickets" element={<Tickets />} />
-            <Route path="hooks" element={<Hooks />} />
+            <Route path="events" element={<Events />} />
             <Route path="containers" element={<Containers />} />
             <Route path="git" element={<Git />} />
             {/* The git host keeps its registry-name path: /app/codearmory_git_factory

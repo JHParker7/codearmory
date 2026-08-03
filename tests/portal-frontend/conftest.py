@@ -50,7 +50,9 @@ def user(api_url: str) -> dict:
         "username": f"fe_{uid}",
         "password": "TestPassword1!",
     }
-    resp = requests.post(f"{api_url}/signup", json=payload, timeout=10)
+    # Conductor routes everything under a service-name prefix, so this is
+    # /gatekeeper/signup, not /signup — the bare path is a 404.
+    resp = requests.post(f"{api_url}/gatekeeper/signup", json=payload, timeout=10)
     assert resp.status_code == 201, f"fixture signup failed: {resp.status_code} {resp.text}"
     payload["user_id"] = resp.json()["user_id"]
     return payload
@@ -60,7 +62,7 @@ def user(api_url: str) -> dict:
 def token(api_url: str, user: dict) -> str:
     """JWT for the session user."""
     resp = requests.post(
-        f"{api_url}/login",
+        f"{api_url}/gatekeeper/login",
         json={"email": user["email"], "password": user["password"]},
         timeout=10,
     )
@@ -79,15 +81,38 @@ def pw_page(page, portal_url):
     return page
 
 
-@pytest.fixture
-def pw_auth_page(page, portal_url, token):
-    """Playwright page with the auth token pre-loaded in localStorage.
+def _portal_login(request_ctx, portal_url: str, user: dict) -> str:
+    """Log in through the PORTAL's own origin and return the user id.
 
-    Navigates to the portal root first (establishes the origin), injects the
-    token, then returns the page for the test to drive to a specific route.
+    Going through `{portal_url}/api/gatekeeper/login` rather than straight to
+    conductor is the whole point: gatekeeper sets the `armory_session` cookie on
+    whatever origin served the response, and the SPA only ever calls same-origin
+    `/api/*`. A cookie set on the conductor origin would never be sent by the app.
+
+    The returned id is what the SPA persists (`ca_uid`); the token in the response
+    body is deliberately NOT stored anywhere — the cookie is the credential.
+    """
+    resp = request_ctx.post(
+        f"{portal_url}/api/gatekeeper/login",
+        data={"email": user["email"], "password": user["password"]},
+    )
+    assert resp.ok, f"portal-origin login failed: {resp.status} {resp.text()}"
+    return user["user_id"]
+
+
+@pytest.fixture
+def pw_auth_page(page, portal_url, user):
+    """Playwright page holding a real, cookie-backed session.
+
+    Authenticates the way the app does: log in over the portal origin so the
+    HttpOnly `armory_session` cookie lands in the browser context, then seed
+    `ca_uid` so a load resumes the session. Nothing secret is written to storage —
+    injecting a token into localStorage (as this fixture used to) authenticates
+    nothing now, because the app ignores and purges that key.
     """
     page.goto(portal_url)
-    page.evaluate(f"localStorage.setItem('ca_token', {json.dumps(token)})")
+    user_id = _portal_login(page.request, portal_url, user)
+    page.evaluate(f"localStorage.setItem('ca_uid', {json.dumps(user_id)})")
     return page
 
 
@@ -118,22 +143,33 @@ def sel_driver(portal_url):
 
 
 @pytest.fixture
-def sel_auth_driver(portal_url, token):
-    """Selenium Chrome driver with auth token injected via CDP.
+def sel_auth_driver(portal_url, api_url, user):
+    """Selenium Chrome driver holding a real, cookie-backed session.
 
-    Using addScriptToEvaluateOnNewDocument ensures the token is set before
-    React's useEffect reads localStorage, even after client-side navigations
-    that cause a full page reload.
+    Logs in through the browser's own form so the `armory_session` cookie is set by
+    the server exactly as it is in production, then seeds `ca_uid` on every new
+    document (via CDP) so a reload resumes rather than bouncing to /login.
+
+    The seeding is CDP-based for the same reason it always was: it has to run before
+    React reads storage, including after a full page reload.
     """
     driver = _chrome_driver()
+    driver.get(f"{portal_url}/login")
 
-    # Inject token into localStorage on every new document (before React runs).
+    # Real form login — this is what puts the HttpOnly cookie in the browser. It
+    # cannot be injected the way a localStorage token could: JS cannot write an
+    # HttpOnly cookie, which is precisely why the app moved to one.
+    WebDriverWait(driver, 20).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email']"))
+    ).send_keys(user["email"])
+    driver.find_element(By.CSS_SELECTOR, "input[type='password']").send_keys(user["password"])
+    driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+    WebDriverWait(driver, 20).until(lambda d: "/login" not in d.current_url)
+
     driver.execute_cdp_cmd(
         "Page.addScriptToEvaluateOnNewDocument",
-        {"source": f"localStorage.setItem('ca_token', {json.dumps(token)})"},
+        {"source": f"localStorage.setItem('ca_uid', {json.dumps(user['user_id'])})"},
     )
-
-    driver.get(portal_url)
     yield driver
     driver.quit()
 

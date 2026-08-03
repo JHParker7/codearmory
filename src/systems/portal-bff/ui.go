@@ -42,9 +42,7 @@ func handleServiceUI(w http.ResponseWriter, r *http.Request) {
 		target += "?" + r.URL.RawQuery
 	}
 	req, _ := http.NewRequestWithContext(r.Context(), r.Method, target, nil)
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
+	forwardCredentials(req, r)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -62,6 +60,7 @@ func handleServiceUI(w http.ResponseWriter, r *http.Request) {
 	if cc := resp.Header.Get("Cache-Control"); cc != "" {
 		w.Header().Set("Cache-Control", cc)
 	}
+	copySetCookie(w, resp)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }

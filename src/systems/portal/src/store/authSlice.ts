@@ -1,19 +1,54 @@
 /**
- * Auth slice — the session source of truth for the SPA. Holds the JWT, decoded
- * user id, hydrated user object, and two derived gating layers the UI reads:
- * `permissions` (per-action allow map for admin nav) and `registeredServices`
- * (which modules are routable). The token is mirrored to localStorage so a reload
- * rehydrates the session; logout and an expired-session rejection both clear it.
+ * Auth slice — the session source of truth for the SPA. Holds the user id, the
+ * hydrated user object, and two derived gating layers the UI reads: `permissions`
+ * (per-action allow map for admin nav) and `registeredServices` (which modules are
+ * routable).
+ *
+ * ## Where the credential lives
+ *
+ * NOT in localStorage. Gatekeeper issues the session as an HttpOnly, Secure,
+ * SameSite=Strict `armory_session` cookie at login, and conductor accepts that cookie
+ * on every non-public route (it converts it to a bearer before forwarding). The cookie
+ * is therefore the credential, and JavaScript cannot read it — which is the entire
+ * point: the SPA previously mirrored the same JWT into `localStorage.ca_token`, so any
+ * XSS could lift a full session token good against every service and use it from
+ * anywhere. Persisting it there forfeited the protection the HttpOnly flag exists to
+ * give.
+ *
+ * `token` below is an in-memory copy, kept only for the tab that performed the login
+ * (it is "" after a reload). It is never required: `req` simply omits the Authorization
+ * header when it is empty and the cookie authenticates the call. It is retained because
+ * dozens of call sites pass it through, and passing "" is harmless.
+ *
+ * ## What survives a reload
+ *
+ * Only the USER ID (`ca_uid`), which is not a credential — it already appears in the
+ * path of most API calls. On startup it seeds `userId` and the app fetches the user
+ * with the cookie; a 401 means the session is genuinely gone and the app falls back to
+ * the login screen. Nothing an attacker could replay is written to storage.
  */
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { getUser, updateUser, login as apiLogin, signup as apiSignup, checkPermission, listRegisteredServices } from '../api/bff';
+import { getUser, updateUser, login as apiLogin, logout as apiLogout, signup as apiSignup, checkPermission, listRegisteredServices } from '../api/bff';
 import type { User, SignupPayload } from '../api/bff';
 import { decodeUserId } from '../utils';
 
-const TOKEN_KEY = 'ca_token';
+/**
+ * The persisted user id. Deliberately not the token: a user id is an identifier, not a
+ * credential — holding it grants nothing without the HttpOnly cookie.
+ */
+const USER_ID_KEY = 'ca_uid';
+
+/** Legacy key. Removed on sight so a token persisted by an older build does not linger. */
+const LEGACY_TOKEN_KEY = 'ca_token';
 
 export interface AuthState {
-  token: string | null;
+  /**
+   * In-memory bearer for the tab that logged in; "" after a reload, when the
+   * HttpOnly cookie is the only credential. Never null, so the many call sites that
+   * forward it keep their `string` type — `req` omits the header when it is empty.
+   * Do NOT treat this as "is the user signed in": use `userId` for that.
+   */
+  token: string;
   userId: string | null;
   user: User | null;
   status: 'idle' | 'loading' | 'succeeded' | 'failed';
@@ -31,19 +66,25 @@ export interface AuthState {
   servicesResolved: boolean;
 }
 
-/** Seed the initial token/userId/status from a persisted JWT, discarding a token that can't be decoded into a user id. */
-function readStoredToken() {
-  const token = localStorage.getItem(TOKEN_KEY);
-  if (!token) return { token: null, userId: null, status: 'idle' as const };
-  const userId = decodeUserId(token);
-  if (!userId) {
-    localStorage.removeItem(TOKEN_KEY);
-    return { token: null, userId: null, status: 'idle' as const };
-  }
-  return { token, userId, status: 'loading' as const };
+/**
+ * Seed userId from storage so a reload can resume the session on the cookie alone.
+ *
+ * `status: 'loading'` matters: it is what stops the route guard bouncing to /login
+ * before the session has been checked. The id alone proves nothing — hydrateUser
+ * immediately verifies it against the server, and a 401 clears it.
+ */
+function readStoredSession() {
+  // Drop any token left by a build that persisted one. Doing this unconditionally,
+  // and on every start, is what makes the migration self-cleaning rather than leaving
+  // a live credential in the storage of everyone who upgraded.
+  localStorage.removeItem(LEGACY_TOKEN_KEY);
+
+  const userId = localStorage.getItem(USER_ID_KEY);
+  if (!userId) return { token: '', userId: null, status: 'idle' as const };
+  return { token: '', userId, status: 'loading' as const };
 }
 
-const stored = readStoredToken();
+const stored = readStoredSession();
 
 const initialState: AuthState = {
   ...stored,
@@ -62,7 +103,10 @@ export const hydrateUser = createAsyncThunk(
   'auth/hydrateUser',
   async (_, { getState, rejectWithValue }) => {
     const { token, userId } = (getState() as { auth: AuthState }).auth;
-    if (!token || !userId) return rejectWithValue({ transient: false });
+    // Gated on userId ALONE. After a reload there is no in-memory token and the
+    // cookie is the credential, so requiring one here would reject every resumed
+    // session and log the user out on every refresh.
+    if (!userId) return rejectWithValue({ transient: false });
     try {
       return await getUser(token, userId);
     } catch (err: unknown) {
@@ -86,7 +130,9 @@ export const loginAndFetch = createAsyncThunk(
       const { token } = await apiLogin(email, password);
       const userId = decodeUserId(token);
       if (!userId) return rejectWithValue({ status: 0, message: 'invalid token' });
-      localStorage.setItem(TOKEN_KEY, token);
+      // The id, never the token: login already set the HttpOnly cookie, which is the
+      // credential from here on.
+      localStorage.setItem(USER_ID_KEY, userId);
       const user = await getUser(token, userId);
       return { token, userId, user };
     } catch (err: unknown) {
@@ -114,7 +160,7 @@ export const signupAndLogin = createAsyncThunk(
       const { token } = await apiLogin(payload.email, payload.password);
       const userId = decodeUserId(token);
       if (!userId) return rejectWithValue({ status: 0, message: 'invalid token' });
-      localStorage.setItem(TOKEN_KEY, token);
+      localStorage.setItem(USER_ID_KEY, userId);
       let user: User | null = null;
       try {
         user = await getUser(token, userId);
@@ -156,8 +202,9 @@ const PERMISSION_GATES = [
 export const hydratePermissions = createAsyncThunk(
   'auth/hydratePermissions',
   async (_, { getState }) => {
+    // No token guard: after a reload the cookie authenticates these probes, and
+    // bailing out here would leave every admin affordance hidden until re-login.
     const { token } = (getState() as { auth: AuthState }).auth;
-    if (!token) return {};
     // Builder is a system-admin-only global control plane: the configure grant is
     // checked against the single "default" baseline, never the caller's org. Only
     // the wildcard admin matches codearmory/builder/orgs/default, so this gate alone surfaces
@@ -190,7 +237,6 @@ export const hydrateRegisteredServices = createAsyncThunk(
   'auth/hydrateRegisteredServices',
   async (_, { getState }) => {
     const { token } = (getState() as { auth: AuthState }).auth;
-    if (!token) return null;
     try {
       const services = await listRegisteredServices(token);
       const uiPaths: Record<string, string> = {};
@@ -232,8 +278,9 @@ const authSlice = createSlice({
   reducers: {
     /** Clear the session and all derived state (token, user, permissions, services) and drop the persisted token. */
     logout(state) {
-      localStorage.removeItem(TOKEN_KEY);
-      state.token = null;
+      localStorage.removeItem(USER_ID_KEY);
+      localStorage.removeItem(LEGACY_TOKEN_KEY);
+      state.token = '';
       state.userId = null;
       state.user = null;
       state.status = 'idle';
@@ -258,8 +305,9 @@ const authSlice = createSlice({
           state.status = 'succeeded';
           return;
         }
-        localStorage.removeItem(TOKEN_KEY);
-        state.token = null;
+        // A real 401/403: the session is gone, so drop the resumable id too.
+        localStorage.removeItem(USER_ID_KEY);
+        state.token = '';
         state.userId = null;
         state.status = 'idle';
       })
@@ -314,4 +362,26 @@ const authSlice = createSlice({
 });
 
 export const { logout } = authSlice.actions;
+
+/**
+ * Log out properly: ask the server to revoke the session and expire its cookie, then
+ * clear local state.
+ *
+ * The `logout` reducer on its own only forgets the session in this tab — the session
+ * row stays active until it expires and the HttpOnly cookie stays in the browser, so
+ * the credential still authenticates afterwards. Dispatch THIS from UI logout, not the
+ * bare reducer.
+ *
+ * The server call is best-effort: if it fails (offline, already-expired token) the user
+ * must still end up logged out locally, so the reducer runs either way.
+ */
+export const logoutSession = createAsyncThunk('auth/logoutSession', async (_arg: void, { getState, dispatch }) => {
+  const { token } = (getState() as { auth: AuthState }).auth;
+  try {
+    await apiLogout(token ?? undefined);
+  } catch {
+    // Revocation is unavailable; clearing local state below is still correct.
+  }
+  dispatch(logout());
+});
 export const authReducer = authSlice.reducer;

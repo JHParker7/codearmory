@@ -9,7 +9,7 @@ import type { ReactNode } from 'react';
 import { T, THEMES, applyTheme, getStoredTheme } from '../../theme';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
-import { saveUser, logout } from '../../store/authSlice';
+import { saveUser, logoutSession } from '../../store/authSlice';
 import { getSession, deleteSession } from '../../api/bff';
 import type { Session } from '../../api/bff';
 import { decodeJwtPayload } from '../../utils';
@@ -78,7 +78,7 @@ function SessionsCard({ token }: { token: string }) {
       // Revoking your own current session invalidates this token server-side;
       // clear local auth so the UI signs out immediately (as the hint promises)
       // instead of operating with a dead token until the next request 401s.
-      if (id.trim() === currentSessionId) dispatch(logout());
+      if (id.trim() === currentSessionId) dispatch(logoutSession());
     }
     catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
