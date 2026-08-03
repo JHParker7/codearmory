@@ -9,7 +9,10 @@
 set -euo pipefail
 
 NS_JFS=juicefs
-NS_APP=${NS_APP:-gitfactory}
+# Not an override: 30/40/50 carry `namespace: gitfactory` in the manifests themselves,
+# and an explicit namespace in a manifest wins over `kubectl -n`. This constant only
+# keeps the waits and queries below pointed at the same place they apply to.
+NS_APP=gitfactory
 CSI_VERSION=0.32.0
 IMAGE_TAG=${IMAGE_TAG:-git-factory:juicefs}
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,6 +83,15 @@ say "Filesystem, StorageClass and the ReadWriteMany claim"
 # secret — there is no separate `juicefs format` step.
 kubectl apply -f "$HERE/30-juicefs-fs.yaml"
 kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/git-factory-repos -n "$NS_APP" --timeout=180s
+
+# The migration copies FROM a pre-existing ReadWriteOnce claim named `repos`, which
+# nothing in this directory provisions — on a fresh install there is no old store and the
+# Job would sit Pending on a PVC that does not exist until the wait below timed out ten
+# minutes later. Detect that rather than make the caller know to pass SKIP_MIGRATE.
+if [[ "${SKIP_MIGRATE:-0}" != "1" ]] && ! kubectl get pvc/repos -n "$NS_APP" >/dev/null 2>&1; then
+  say "No existing repo store (no pvc/repos in $NS_APP) — nothing to migrate"
+  SKIP_MIGRATE=1
+fi
 
 if [[ "${SKIP_MIGRATE:-0}" != "1" ]]; then
   say "Migrating the existing repo store onto JuiceFS"
