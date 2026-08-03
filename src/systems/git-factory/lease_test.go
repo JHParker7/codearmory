@@ -223,6 +223,13 @@ func TestMaintenanceLeaseTTL(t *testing.T) {
 		// replica would sweep every tick — the bug this whole file exists to fix.
 		{"0", 5 * time.Minute},
 		{"-1m", 5 * time.Minute},
+		// The floor. The renewal ticker runs at a third of the TTL, and time.NewTicker
+		// panics on a non-positive interval — anything under 3ns divides to zero, which
+		// would take the process down from a goroutine on the first sweep rather than
+		// at startup.
+		{"1ns", 5 * time.Minute},
+		{"999ms", 5 * time.Minute},
+		{"1s", time.Second},
 	}
 	for _, c := range cases {
 		t.Setenv("GIT_MAINTENANCE_LEASE_TTL", c.env)

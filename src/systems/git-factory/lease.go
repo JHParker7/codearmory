@@ -55,12 +55,23 @@ const maintenanceLeaseName = "maintenance-sweep"
 // this rather than deleting the row, so release and expiry take the same code path.
 var leaseEpoch = time.Unix(0, 0).UTC()
 
+// minMaintenanceLeaseTTL is the shortest TTL worth honouring. The holder renews at a
+// third of the TTL (runLeasedSweep), so this is also what keeps that interval a
+// positive duration: time.NewTicker panics on a non-positive one, and any TTL under 3ns
+// divides to exactly zero. A sub-second lease is a typo rather than a tuning decision
+// either way — it would renew tens of times a second against the database and hand the
+// lease over on ordinary query latency.
+const minMaintenanceLeaseTTL = time.Second
+
 // maintenanceLeaseTTL is how long a lease is granted for, from
 // GIT_MAINTENANCE_LEASE_TTL. It is NOT how long a sweep may take — the holder renews
 // while it works — it is how long the sweep stays blocked after a holder dies without
 // releasing. Shorter means faster takeover and more renewal traffic; the default of 5
 // minutes is well under the default hourly interval, so a killed pod costs at most one
 // skipped tick.
+//
+// This is the ONLY place a TTL is validated, so it must return something every caller
+// can use unconditionally: at or above minMaintenanceLeaseTTL, always positive.
 func maintenanceLeaseTTL() time.Duration {
 	const def = 5 * time.Minute
 	raw := strings.TrimSpace(envOrDefault("GIT_MAINTENANCE_LEASE_TTL", ""))
@@ -68,8 +79,12 @@ func maintenanceLeaseTTL() time.Duration {
 		return def
 	}
 	d, err := time.ParseDuration(raw)
-	if err != nil || d <= 0 {
-		slog.Warn("maintenance: bad GIT_MAINTENANCE_LEASE_TTL, using the default", "value", raw)
+	if err != nil || d < minMaintenanceLeaseTTL {
+		// Fall back rather than clamp. A value this far out is a mistake, and running
+		// on a silently corrected one hides it — whereas the default is at least a
+		// duration someone chose.
+		slog.Warn("maintenance: bad GIT_MAINTENANCE_LEASE_TTL, using the default",
+			"value", raw, "minimum", minMaintenanceLeaseTTL.String(), "default", def.String())
 		return def
 	}
 	return d

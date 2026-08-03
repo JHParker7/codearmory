@@ -306,6 +306,9 @@ func runLeasedSweep(ctx context.Context, holder string, ttl time.Duration) {
 	renewing.Add(1)
 	go func() {
 		defer renewing.Done()
+		// A third of the TTL, so two renewals may fail before the lease lapses.
+		// Non-positive would panic here; maintenanceLeaseTTL guarantees it cannot be,
+		// by refusing any TTL below minMaintenanceLeaseTTL.
 		t := time.NewTicker(ttl / 3)
 		defer t.Stop()
 		for {
