@@ -27,10 +27,18 @@ import (
 )
 
 var (
-	gatekeeperClient  *gk.Client
-	gatekeeperURL     = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
-	gatekeeperKey     func() string // current workflows service key, updated by key rotation
-	hooksTriggerKey   = os.Getenv("HOOKS_TRIGGER_KEY")
+	gatekeeperClient *gk.Client
+	gatekeeperURL    = envOrDefault("GATEKEEPER_URL", "http://localhost:8080")
+	gatekeeperKey    func() string // current workflows service key, updated by key rotation
+	// eventsTriggerKey authenticates the events service's internal pipeline dispatch and run
+	// polling. Read via secret() so a file-mounted k8s secret works, and shared byte-for-byte
+	// with the events service's key of the same name.
+	//
+	// The wire scheme it keys still says "hooks" — the `hooks:`/`hooks-poll:` MAC prefixes and
+	// the X-Hooks-Token/X-Hooks-Timestamp headers — because that is the protocol the events
+	// service already speaks and renaming it would break every deployment mid-upgrade for no
+	// functional gain. Only the service that holds the key changed.
+	eventsTriggerKey  = secret("EVENTS_TRIGGER_KEY")
 	registryNotifyKey = os.Getenv("WORKFLOWS_NOTIFY_KEY")
 
 	// serviceURLs maps registered service names to their base URLs.

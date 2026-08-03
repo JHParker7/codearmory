@@ -66,7 +66,7 @@ info:
     resource owner's org receive `404 Not Found` rather than `403 Forbidden`.
 
     Internal endpoints (`/internal/*`) use HMAC-SHA256 authentication via
-    `X-Hooks-Token` and `X-Hooks-Timestamp` headers (hooks service only).
+    `X-Hooks-Token` and `X-Hooks-Timestamp` headers (events service only).
 
     ## Input & output substitution
 
@@ -435,14 +435,14 @@ paths:
       - $ref: '#/components/parameters/Id'
 
     post:
-      summary: Internal — trigger run (hooks service only)
+      summary: Internal — trigger run (events service only)
       operationId: internalTriggerRun
       security: []
       description: |
-        Trigger endpoint used exclusively by the hooks service. Not intended
+        Trigger endpoint used exclusively by the events service. Not intended
         for direct consumer use.
 
-        Requires two request headers signed with the shared `HOOKS_TRIGGER_KEY`:
+        Requires two request headers signed with the shared `EVENTS_TRIGGER_KEY`:
         - `X-Hooks-Token`: `hex(HMAC-SHA256(key, "hooks:{workflow_id}:{triggered_by}:{timestamp}"))`
         - `X-Hooks-Timestamp`: Unix timestamp (seconds) used in the HMAC
       requestBody:
@@ -479,12 +479,12 @@ paths:
       - $ref: '#/components/parameters/Id'
 
     get:
-      summary: Internal — get workflow org (hooks service only)
+      summary: Internal — get workflow org (events service only)
       operationId: internalGetWorkflow
       security: []
       description: |
         Returns `{"org_id": "..."}` for the requested workflow. Used by the
-        hooks service to verify org ownership before triggering a run.
+        events service to verify org ownership before triggering a run.
 
         Same HMAC authentication as `POST /internal/workflows/{id}/runs`.
       responses:
@@ -507,12 +507,12 @@ paths:
       - $ref: '#/components/parameters/Id'
 
     get:
-      summary: Internal — get run status (hooks service only)
+      summary: Internal — get run status (events service only)
       operationId: internalGetRun
       security: []
       description: |
         Returns the current status of a run. Used by the GitHub App in the
-        hooks service to poll for run completion.
+        events service to poll for run completion.
 
         Same HMAC authentication as `POST /internal/workflows/{id}/runs`.
       responses:

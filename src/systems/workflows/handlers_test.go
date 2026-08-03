@@ -745,27 +745,27 @@ func TestSubstituteWith_NoInputs(t *testing.T) {
 // ── verifyHooksTrigger ────────────────────────────────────────────────────────
 
 func TestVerifyHooksTrigger_NoKey(t *testing.T) {
-	orig := hooksTriggerKey
-	hooksTriggerKey = ""
-	defer func() { hooksTriggerKey = orig }()
+	orig := eventsTriggerKey
+	eventsTriggerKey = ""
+	defer func() { eventsTriggerKey = orig }()
 	if verifyHooksTrigger("wf", "user", "tok", "123") {
 		t.Fatal("expected false when key is empty")
 	}
 }
 
 func TestVerifyHooksTrigger_InvalidTimestamp(t *testing.T) {
-	orig := hooksTriggerKey
-	hooksTriggerKey = "secret"
-	defer func() { hooksTriggerKey = orig }()
+	orig := eventsTriggerKey
+	eventsTriggerKey = "secret"
+	defer func() { eventsTriggerKey = orig }()
 	if verifyHooksTrigger("wf", "user", "tok", "not-a-number") {
 		t.Fatal("expected false for non-numeric timestamp")
 	}
 }
 
 func TestVerifyHooksTrigger_ExpiredTimestamp(t *testing.T) {
-	orig := hooksTriggerKey
-	hooksTriggerKey = "secret"
-	defer func() { hooksTriggerKey = orig }()
+	orig := eventsTriggerKey
+	eventsTriggerKey = "secret"
+	defer func() { eventsTriggerKey = orig }()
 	oldTS := fmt.Sprintf("%d", time.Now().Unix()-60)
 	if verifyHooksTrigger("wf", "user", "tok", oldTS) {
 		t.Fatal("expected false for timestamp older than 30 s")
@@ -773,9 +773,9 @@ func TestVerifyHooksTrigger_ExpiredTimestamp(t *testing.T) {
 }
 
 func TestVerifyHooksTrigger_WrongSignature(t *testing.T) {
-	orig := hooksTriggerKey
-	hooksTriggerKey = "secret"
-	defer func() { hooksTriggerKey = orig }()
+	orig := eventsTriggerKey
+	eventsTriggerKey = "secret"
+	defer func() { eventsTriggerKey = orig }()
 	ts := fmt.Sprintf("%d", time.Now().Unix())
 	if verifyHooksTrigger("wf", "user", "deadbeef", ts) {
 		t.Fatal("expected false for wrong signature")
@@ -783,12 +783,12 @@ func TestVerifyHooksTrigger_WrongSignature(t *testing.T) {
 }
 
 func TestVerifyHooksTrigger_ValidSignature(t *testing.T) {
-	orig := hooksTriggerKey
-	hooksTriggerKey = "test-key-123"
-	defer func() { hooksTriggerKey = orig }()
+	orig := eventsTriggerKey
+	eventsTriggerKey = "test-key-123"
+	defer func() { eventsTriggerKey = orig }()
 
 	ts := fmt.Sprintf("%d", time.Now().Unix())
-	mac := hmac.New(sha256.New, []byte(hooksTriggerKey))
+	mac := hmac.New(sha256.New, []byte(eventsTriggerKey))
 	fmt.Fprintf(mac, "hooks:%s:%s:%s", "wf-id", "user-id", ts)
 	token := hex.EncodeToString(mac.Sum(nil))
 
@@ -980,9 +980,9 @@ func TestHandleInternalTriggerRun_InvalidBody(t *testing.T) {
 }
 
 func TestHandleInternalTriggerRun_NoKey(t *testing.T) {
-	orig := hooksTriggerKey
-	hooksTriggerKey = ""
-	defer func() { hooksTriggerKey = orig }()
+	orig := eventsTriggerKey
+	eventsTriggerKey = ""
+	defer func() { eventsTriggerKey = orig }()
 
 	body := `{"triggered_by":"user-1","org_id":"org-1"}`
 	r := httptest.NewRequest(http.MethodPost, "/internal/workflows/wf-1/runs", bytes.NewBufferString(body))
@@ -995,9 +995,9 @@ func TestHandleInternalTriggerRun_NoKey(t *testing.T) {
 }
 
 func TestHandleInternalTriggerRun_WrongSignature(t *testing.T) {
-	orig := hooksTriggerKey
-	hooksTriggerKey = "test-key"
-	defer func() { hooksTriggerKey = orig }()
+	orig := eventsTriggerKey
+	eventsTriggerKey = "test-key"
+	defer func() { eventsTriggerKey = orig }()
 
 	body := `{"triggered_by":"user-1","org_id":"org-1"}`
 	r := httptest.NewRequest(http.MethodPost, "/internal/workflows/wf-1/runs", bytes.NewBufferString(body))
@@ -1012,9 +1012,9 @@ func TestHandleInternalTriggerRun_WrongSignature(t *testing.T) {
 }
 
 func TestHandleInternalGetWorkflow_NoKey(t *testing.T) {
-	orig := hooksTriggerKey
-	hooksTriggerKey = ""
-	defer func() { hooksTriggerKey = orig }()
+	orig := eventsTriggerKey
+	eventsTriggerKey = ""
+	defer func() { eventsTriggerKey = orig }()
 
 	r := httptest.NewRequest(http.MethodGet, "/internal/workflows/wf-1", nil)
 	r.SetPathValue("id", "wf-1")
@@ -1026,9 +1026,9 @@ func TestHandleInternalGetWorkflow_NoKey(t *testing.T) {
 }
 
 func TestHandleInternalGetRun_NoKey(t *testing.T) {
-	orig := hooksTriggerKey
-	hooksTriggerKey = ""
-	defer func() { hooksTriggerKey = orig }()
+	orig := eventsTriggerKey
+	eventsTriggerKey = ""
+	defer func() { eventsTriggerKey = orig }()
 
 	r := httptest.NewRequest(http.MethodGet, "/internal/runs/run-1", nil)
 	r.SetPathValue("id", "run-1")

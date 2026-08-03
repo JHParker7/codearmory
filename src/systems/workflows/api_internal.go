@@ -26,7 +26,7 @@ import (
 // service. Returns false if the key is unconfigured, the token is malformed,
 // or the 30-second window has elapsed.
 func verifyHooksTrigger(workflowID, triggeredBy, token, timestamp string) bool {
-	if hooksTriggerKey == "" {
+	if eventsTriggerKey == "" {
 		return false
 	}
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
@@ -36,7 +36,7 @@ func verifyHooksTrigger(workflowID, triggeredBy, token, timestamp string) bool {
 	if math.Abs(float64(time.Now().Unix()-ts)) > 30 {
 		return false
 	}
-	mac := hmac.New(sha256.New, []byte(hooksTriggerKey))
+	mac := hmac.New(sha256.New, []byte(eventsTriggerKey))
 	fmt.Fprintf(mac, "hooks:%s:%s:%s", workflowID, triggeredBy, timestamp)
 	expected := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(token), []byte(expected))
@@ -151,14 +151,14 @@ func handleInternalTriggerRun(w http.ResponseWriter, r *http.Request) {
 // verifyHooksWorkflowCheck validates the HMAC for a workflow ownership check
 // from the hooks service. The token covers "hooks-check:{workflowID}:{timestamp}".
 func verifyHooksWorkflowCheck(workflowID, token, timestamp string) bool {
-	if hooksTriggerKey == "" {
+	if eventsTriggerKey == "" {
 		return false
 	}
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil || math.Abs(float64(time.Now().Unix()-ts)) > 30 {
 		return false
 	}
-	mac := hmac.New(sha256.New, []byte(hooksTriggerKey))
+	mac := hmac.New(sha256.New, []byte(eventsTriggerKey))
 	fmt.Fprintf(mac, "hooks-check:%s:%s", workflowID, timestamp)
 	return hmac.Equal([]byte(token), []byte(hex.EncodeToString(mac.Sum(nil))))
 }
@@ -187,14 +187,14 @@ func handleInternalGetWorkflow(w http.ResponseWriter, r *http.Request) {
 // verifyHooksPoll validates the HMAC-SHA256 token used by the hooks service to
 // poll run status. The token covers "hooks-poll:{runID}:{timestamp}".
 func verifyHooksPoll(runID, token, timestamp string) bool {
-	if hooksTriggerKey == "" {
+	if eventsTriggerKey == "" {
 		return false
 	}
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil || math.Abs(float64(time.Now().Unix()-ts)) > 30 {
 		return false
 	}
-	mac := hmac.New(sha256.New, []byte(hooksTriggerKey))
+	mac := hmac.New(sha256.New, []byte(eventsTriggerKey))
 	fmt.Fprintf(mac, "hooks-poll:%s:%s", runID, timestamp)
 	return hmac.Equal([]byte(token), []byte(hex.EncodeToString(mac.Sum(nil))))
 }

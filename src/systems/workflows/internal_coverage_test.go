@@ -18,9 +18,9 @@ import (
 
 func setHooksKey(t *testing.T, key string) {
 	t.Helper()
-	orig := hooksTriggerKey
-	hooksTriggerKey = key
-	t.Cleanup(func() { hooksTriggerKey = orig })
+	orig := eventsTriggerKey
+	eventsTriggerKey = key
+	t.Cleanup(func() { eventsTriggerKey = orig })
 }
 
 // hooksToken signs an HMAC token matching the production verifyHooks* helpers:
@@ -32,7 +32,7 @@ func hooksToken(prefix string, parts ...string) (token, ts string) {
 		msg += ":" + p
 	}
 	msg += ":" + ts
-	mac := hmac.New(sha256.New, []byte(hooksTriggerKey))
+	mac := hmac.New(sha256.New, []byte(eventsTriggerKey))
 	mac.Write([]byte(msg)) //nolint:errcheck
 	return hex.EncodeToString(mac.Sum(nil)), ts
 }
