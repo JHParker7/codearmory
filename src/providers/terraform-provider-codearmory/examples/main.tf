@@ -33,23 +33,27 @@ data "codearmory_runner_class" "standard" {
   name = "standard"
 }
 
-resource "codearmory_hook_rule" "on_push" {
-  name        = "build-on-push"
-  source      = "myorg/myrepo"
-  events      = ["push"]
-  ref_filter  = "refs/heads/main"
-  workflow_id = "00000000-0000-0000-0000-000000000000" # a pipeline ID in your org
-  secret      = var.webhook_secret
+resource "codearmory_event_trigger" "on_push" {
+  name = "build-on-push"
 
-  input_mapping = {
-    BRANCH = "ref"
-    SHA    = "commit"
-  }
-}
+  match = jsonencode({
+    all = [
+      { field = "type", op = "eq", value = "repo.push" },
+      { field = "subject", op = "eq", value = "myorg/myrepo" },
+      { field = "data.ref", op = "eq", value = "main" },
+    ]
+  })
 
-variable "webhook_secret" {
-  type      = string
-  sensitive = true
+  actions = jsonencode([{
+    kind = "run_pipeline"
+    config = {
+      pipeline_id = "00000000-0000-0000-0000-000000000000" # a pipeline ID in your org
+      inputs = {
+        BRANCH = "{{ data.ref }}"
+        SHA    = "{{ data.commit }}"
+      }
+    }
+  }])
 }
 
 output "standard_runner_memory" {

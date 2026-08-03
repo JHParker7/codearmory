@@ -12,7 +12,7 @@ Minimal scaffold. Implemented:
 | Type | Name | Backend route (via Conductor) |
 |------|------|-------------------------------|
 | resource | `codearmory_runner_class` | `/forge/runner-classes` |
-| resource | `codearmory_hook_rule` | `/hooks/rules` |
+| resource | `codearmory_event_trigger` | `/events/triggers` |
 | data source | `codearmory_runner_class` | `/forge/runner-classes/{name}` |
 
 ## Authentication
@@ -67,10 +67,10 @@ With `dev_overrides` you skip `init`; just run `tofu plan` / `tofu apply` in the
 
 ## Notes & limitations
 
-- **Write-only secrets.** `codearmory_hook_rule.secret` is never returned by the
+- **Write-only secrets.** Some write-only attributes are never returned by the
   API. The configured value is kept in state but drift on it cannot be detected,
   and `import` cannot recover it (set it in config; the next apply re-sends it).
-- **`workflow_id` validation.** The hooks service verifies the referenced pipeline
+- **`pipeline_id` validation.** The events service verifies the referenced pipeline
   exists and belongs to the caller's org, so use a real pipeline ID.
 - **RBAC scoping.** A provider principal can only manage resources its role grants.
   Runner classes are global; managing them needs an `org/<orgname>/forge/runner-classes`

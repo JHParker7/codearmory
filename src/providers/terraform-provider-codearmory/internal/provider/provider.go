@@ -112,7 +112,7 @@ func (p *codearmoryProvider) Configure(ctx context.Context, req provider.Configu
 func (p *codearmoryProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		newRunnerClassResource,
-		newHookRuleResource,
+		newEventTriggerResource,
 		newGitRepositoryResource,
 		newPipelineResource,
 		newStepResource,

@@ -4,12 +4,12 @@
 # monorepo (codearmory) — this creates:
 #   * a hosted git repository (codearmory_git_repository),
 #   * a build-and-test pipeline (codearmory_pipeline), and
-#   * a push webhook rule that triggers the pipeline on main (codearmory_hook_rule).
+#   * an event trigger that runs the pipeline on a push to main (codearmory_event_trigger).
 #
 # Apply with:
 #   export CODEARMORY_URL="http://localhost:8080"
 #   export CODEARMORY_TOKEN="<a bearer token>"
-#   terraform apply -var 'webhook_secret=<shared secret>'
+#   terraform apply
 
 terraform {
   required_providers {
@@ -30,12 +30,6 @@ variable "token" {
   description = "Bearer token. Falls back to CODEARMORY_TOKEN."
   sensitive   = true
   default     = ""
-}
-
-variable "webhook_secret" {
-  type        = string
-  description = "Shared secret the git host signs push webhooks with."
-  sensitive   = true
 }
 
 provider "codearmory" {
@@ -87,19 +81,28 @@ resource "codearmory_pipeline" "ci" {
 }
 
 # 3. Trigger each pipeline on a push to main of its repo.
-resource "codearmory_hook_rule" "on_push" {
-  for_each    = local.repos
-  name        = "${each.key}-build-on-push"
-  source      = "${codearmory_git_repository.repo[each.key].namespace}/${codearmory_git_repository.repo[each.key].name}"
-  events      = ["push"]
-  ref_filter  = "refs/heads/main"
-  workflow_id = codearmory_pipeline.ci[each.key].id
-  secret      = var.webhook_secret
+resource "codearmory_event_trigger" "on_push" {
+  for_each = local.repos
+  name     = "${each.key}-build-on-push"
 
-  input_mapping = {
-    BRANCH = "ref"
-    SHA    = "commit"
-  }
+  match = jsonencode({
+    all = [
+      { field = "type", op = "eq", value = "repo.push" },
+      { field = "subject", op = "eq", value = "${codearmory_git_repository.repo[each.key].namespace}/${codearmory_git_repository.repo[each.key].name}" },
+      { field = "data.ref", op = "eq", value = "main" },
+    ]
+  })
+
+  actions = jsonencode([{
+    kind = "run_pipeline"
+    config = {
+      pipeline_id = codearmory_pipeline.ci[each.key].id
+      inputs = {
+        BRANCH = "{{ data.ref }}"
+        SHA    = "{{ data.commit }}"
+      }
+    }
+  }])
 }
 
 output "clone_urls" {
