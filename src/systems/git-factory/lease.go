@@ -133,9 +133,44 @@ func renewLease(ctx context.Context, name, holder string, ttl time.Duration) (bo
 	return res.RowsAffected == 1, nil
 }
 
+// coolDownLease holds the lease until the next sweep is due, and is what actually makes
+// the lease save anything.
+//
+// Releasing on completion instead would only prevent CONCURRENT sweeps: replicas tick
+// on their own offsets, so the pod that ticks next in the same interval would find the
+// lease free and walk the whole store again. N replicas would still cost N full sweeps
+// per interval — serialised rather than overlapping, but exactly the cost this file
+// exists to avoid. Keeping the lease until the interval elapses is what turns "one
+// sweeper at a time" into "one sweep per interval".
+//
+// Measured from the END of the sweep, so the gap between sweeps is at least d even when
+// a sweep runs long. That makes the true period interval + sweep duration rather than
+// interval, which is the right way round: drifting slightly slow costs nothing, while
+// dating the cooldown from the start would let a sweep lasting longer than the interval
+// be followed immediately by another.
+//
+// A holder that dies during the cooldown blocks nothing: the row expires exactly when
+// the next sweep was due anyway, so any replica picks it up on schedule.
+func coolDownLease(ctx context.Context, name, holder string, d time.Duration) error {
+	// WithoutCancel for the same reason as releaseLease: this runs on the way out of a
+	// sweep, and failing here on a cancelled context would leave the lease on its short
+	// sweep TTL instead of the cooldown.
+	ctx = context.WithoutCancel(ctx)
+	if err := connect().WithContext(ctx).Model(&MaintenanceLease{}).
+		Where("name = ? AND holder = ?", name, holder).
+		Update("expires_at", time.Now().UTC().Add(d)).Error; err != nil {
+		return fmt.Errorf("cool down lease: %w", err)
+	}
+	return nil
+}
+
 // releaseLease gives the lease up early, so the next tick can go to any replica instead
 // of waiting out the TTL. Scoped to the holder so a pod that already lost the lease
 // cannot expire the new holder's grant on its way out.
+//
+// Used when a sweep ends WITHOUT having covered the store — shutdown, specifically.
+// A completed sweep cools down instead; releasing there is the bug coolDownLease
+// documents.
 func releaseLease(ctx context.Context, name, holder string) error {
 	// WithoutCancel: release runs on the way out of a sweep, including when that sweep
 	// ended because ctx was cancelled at shutdown. Releasing on the cancelled context
