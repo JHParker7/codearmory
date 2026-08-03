@@ -100,6 +100,12 @@ func acquireLease(ctx context.Context, name, holder string, ttl time.Duration) (
 	// grants it. DoNothing on conflict is what keeps several replicas racing through a
 	// cold start from turning first boot into an error — GORM renders it as ON CONFLICT
 	// DO NOTHING on both Postgres and SQLite.
+	//
+	// This runs on every call, not only the first: after the row exists it is a no-op
+	// insert, one round-trip per replica per tick. Cheap enough at maintenance
+	// intervals (hours) that keeping acquire a single unconditional path is worth more
+	// than saving it — but it is a real query, so do not reuse this helper for anything
+	// that ticks fast.
 	if err := db.Clauses(clause.OnConflict{DoNothing: true}).
 		Create(&MaintenanceLease{Name: name, ExpiresAt: leaseEpoch}).Error; err != nil {
 		return false, fmt.Errorf("ensure lease row: %w", err)
