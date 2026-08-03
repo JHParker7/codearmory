@@ -13,6 +13,23 @@ import (
 // setArtifactQuota/deleteArtifactQuota to no one by default, so only a role an admin
 // explicitly hands out can call them. A user reads their OWN allowance through
 // GET /usage instead, which needs no admin right.
+//
+// Every resource below lives in the "codearmory/" PLATFORM namespace, which is what
+// makes the admin-only property hold. Gatekeeper prefixes the CALLER's username to an
+// unscoped resource (scopeResource), so the natural-looking "artifacts/quotas/<id>"
+// is evaluated as "<caller>/artifacts/quotas/<id>" — caller-prefixed on the grant side
+// too, so it matches by SYMMETRY rather than by ownership. A user holding
+// setArtifactQuota over their own namespace would then pass the check for ANY
+// scope_id, i.e. edit everyone's quota. Naming the platform namespace explicitly
+// removes the caller from the resource entirely, so only a grant that genuinely names
+// "codearmory/..." can satisfy it — the same shape forge uses for its
+// concurrency-limits and containers for its registries.
+const resQuotas = "codearmory/artifacts/quotas"
+
+// resQuotaOf is the per-scope resource. The scope is part of it: a user-scoped and an
+// org-scoped quota for the same id are different objects, and collapsing them to the
+// bare id (as the resource once did) would let a grant over one authorize the other.
+func resQuotaOf(scope, scopeID string) string { return resQuotas + "/" + scope + "/" + scopeID }
 
 type quotaRequest struct {
 	// MaxBytes is the cap for this scope. Exactly one of MaxBytes/MaxMB is required;
@@ -42,7 +59,7 @@ func quotaView(ctx contextT, userID string) (QuotaView, error) {
 // see what has been configured without probing user by user.
 func handleListQuotas(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listArtifactQuota", "artifacts/quotas"); !ok {
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "listArtifactQuota", resQuotas); !ok {
 		return
 	}
 	rows, err := listQuotas(ctx)
@@ -72,11 +89,14 @@ func handleListQuotas(w http.ResponseWriter, r *http.Request) {
 func handleGetQuota(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	scope, scopeID := r.PathValue("scope"), r.PathValue("scope_id")
-	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getArtifactQuota", "artifacts/quotas/"+scopeID); !ok {
-		return
-	}
+	// Scope is validated BEFORE it is interpolated into the RBAC resource. Conductor
+	// does not constrain this path param, so an unchecked value would become part of
+	// the string the permission check is evaluated against.
 	if scope != ScopeUser {
 		http.Error(w, "only the user scope is supported", http.StatusBadRequest)
+		return
+	}
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getArtifactQuota", resQuotaOf(scope, scopeID)); !ok {
 		return
 	}
 	view, err := quotaView(ctx, scopeID)
@@ -91,12 +111,12 @@ func handleGetQuota(w http.ResponseWriter, r *http.Request) {
 func handleSetQuota(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	scope, scopeID := r.PathValue("scope"), r.PathValue("scope_id")
-	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "setArtifactQuota", "artifacts/quotas/"+scopeID)
-	if !ok {
-		return
-	}
 	if scope != ScopeUser {
 		http.Error(w, "only the user scope is supported", http.StatusBadRequest)
+		return
+	}
+	userID, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "setArtifactQuota", resQuotaOf(scope, scopeID))
+	if !ok {
 		return
 	}
 	var req quotaRequest
@@ -127,7 +147,13 @@ func handleSetQuota(w http.ResponseWriter, r *http.Request) {
 func handleDeleteQuota(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	scope, scopeID := r.PathValue("scope"), r.PathValue("scope_id")
-	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteArtifactQuota", "artifacts/quotas/"+scopeID); !ok {
+	// The same scope guard the get/set handlers apply. It was missing here, so a
+	// delete could name a scope the other two reject.
+	if scope != ScopeUser {
+		http.Error(w, "only the user scope is supported", http.StatusBadRequest)
+		return
+	}
+	if _, _, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "deleteArtifactQuota", resQuotaOf(scope, scopeID)); !ok {
 		return
 	}
 	n, err := deleteQuota(ctx, scope, scopeID)
