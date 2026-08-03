@@ -161,3 +161,27 @@ func handleListEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, evs)
 }
+
+// handleGetEvent returns one event from the log. An event belonging to another tenant is
+// reported as "not found" rather than forbidden, so the endpoint never confirms that an id
+// exists for someone else.
+func handleGetEvent(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := r.PathValue("id")
+	// The permission check names the COLLECTION, not the id. Conductor can only template a
+	// resource from path params, so `events/{id}` would evaluate to `<caller>/events/<id>` —
+	// identical in shape for every id, meaning gatekeeper would authorise any of them and only
+	// this handler's own filter would protect the row. The honest resource is the collection;
+	// the per-record decision is made below with the row loaded, and a miss is a 404 so the
+	// log never confirms an id exists for another tenant.
+	userID, orgID, ok := gatekeeperClient.CheckPermissions(ctx, w, r, "getEvent", "events")
+	if !ok {
+		return
+	}
+	e, err := getEventScoped(ctx, id, orgID, userID)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, e)
+}

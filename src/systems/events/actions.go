@@ -15,43 +15,68 @@ import (
 	"time"
 )
 
-// runActions executes a matched trigger's actions in order, stopping at the first failure so
-// the dispatch is retried as a unit.
-func runActions(ctx context.Context, t Trigger, e Event) error {
-	evMap, err := e.asMap()
-	if err != nil {
-		return err
-	}
-	for i, a := range t.Actions {
-		if err := runAction(ctx, t, a, e, evMap); err != nil {
-			return fmt.Errorf("action[%d] %s: %w", i, a.Kind, err)
-		}
-	}
-	return nil
+// actionOutcome is what an action produced, for callers that follow up on it. Only
+// run_pipeline currently yields anything: the id of the run it started, which the GitHub App
+// adapter turns into a check run on the commit that triggered it.
+type actionOutcome struct {
+	Kind  string
+	RunID string
 }
 
-func runAction(ctx context.Context, t Trigger, a Action, e Event, evMap map[string]any) error {
+// runActions executes a matched trigger's actions in order, stopping at the first failure so
+// the dispatch is retried as a unit. The outcomes of the actions that did run are returned
+// even on failure — a later action failing does not un-start a pipeline an earlier one
+// launched, and the caller still needs to track it.
+func runActions(ctx context.Context, t Trigger, e Event) ([]actionOutcome, error) {
+	evMap, err := e.asMap()
+	if err != nil {
+		return nil, err
+	}
+	var outs []actionOutcome
+	for i, a := range t.Actions {
+		out, err := runAction(ctx, t, a, e, evMap)
+		countActionRun(ctx, a.Kind, err == nil)
+		if out != nil {
+			outs = append(outs, *out)
+		}
+		if err != nil {
+			return outs, fmt.Errorf("action[%d] %s: %w", i, a.Kind, err)
+		}
+	}
+	return outs, nil
+}
+
+func runAction(ctx context.Context, t Trigger, a Action, e Event, evMap map[string]any) (*actionOutcome, error) {
 	switch a.Kind {
 	case "run_pipeline":
-		return actRunPipeline(ctx, a, e, evMap)
+		runID, err := actRunPipeline(ctx, a, e, evMap)
+		if runID == "" {
+			return nil, err
+		}
+		return &actionOutcome{Kind: a.Kind, RunID: runID}, err
 	case "webhook_out":
-		return actWebhookOut(ctx, t, a, e, evMap)
+		return nil, actWebhookOut(ctx, t, a, e, evMap)
 	case "create_ticket":
-		return actInternalPost(ctx, ticketsURL+"/internal/tickets", a, e, evMap)
+		return nil, actInternalPost(ctx, ticketsURL+"/internal/tickets", a, e, evMap)
 	case "notify":
-		return actInternalPost(ctx, envOrDefault("NOTIFICATIONS_URL", "http://localhost:8088")+"/internal/notify", a, e, evMap)
+		return nil, actInternalPost(ctx, envOrDefault("NOTIFICATIONS_URL", "http://localhost:8088")+"/internal/notify", a, e, evMap)
 	case "enqueue_outpost_command":
-		return actInternalPost(ctx, envOrDefault("OUTPOST_GATEWAY_URL", "http://localhost:8092")+"/internal/commands", a, e, evMap)
+		return nil, actInternalPost(ctx, envOrDefault("OUTPOST_GATEWAY_URL", "http://localhost:8092")+"/internal/commands", a, e, evMap)
 	default:
-		return fmt.Errorf("unknown action kind %q", a.Kind)
+		return nil, fmt.Errorf("unknown action kind %q", a.Kind)
 	}
 }
 
 // ── run_pipeline (folds the former hooks dispatchWorkflow) ───────────────────────────────
-func actRunPipeline(ctx context.Context, a Action, e Event, evMap map[string]any) error {
+//
+// Returns the id of the run workflows started, so a caller that needs to track the run
+// (the GitHub App check-run reporter) can. An empty id with a nil error means workflows
+// accepted the dispatch but its response carried no run_id — the run exists, we just cannot
+// follow it, which is not worth failing the action over.
+func actRunPipeline(ctx context.Context, a Action, e Event, evMap map[string]any) (string, error) {
 	pipelineID, _ := a.Config["pipeline_id"].(string)
 	if pipelineID == "" {
-		return fmt.Errorf("run_pipeline: pipeline_id is required")
+		return "", fmt.Errorf("run_pipeline: pipeline_id is required")
 	}
 	inputs := map[string]string{}
 	if raw, ok := a.Config["inputs"].(map[string]any); ok {
@@ -73,21 +98,25 @@ func actRunPipeline(ctx context.Context, a Action, e Event, evMap map[string]any
 	url := workflowsURL + "/internal/pipelines/" + pipelineID + "/runs"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Hooks-Token", hex.EncodeToString(mac.Sum(nil)))
 	req.Header.Set("X-Hooks-Timestamp", ts)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("%s -> %d: %s", url, resp.StatusCode, strings.TrimSpace(string(b)))
+		return "", fmt.Errorf("%s -> %d: %s", url, resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-	return nil
+	var out struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.Unmarshal(respBody, &out) // an unparseable body is not a dispatch failure
+	return out.RunID, nil
 }
 
 // ── webhook_out — POST the (templated) event to a customer URL, signed ───────────────────

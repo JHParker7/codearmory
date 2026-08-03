@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -53,6 +54,58 @@ func verifyGitSignature(body []byte, h http.Header) bool {
 	return false
 }
 
+// tenantFromQuery reads the tenant an inbound provider webhook belongs to from its URL
+// (?org_id=… / ?user_id=…).
+//
+// A third-party provider's payload has no codearmory identity in it, so the tenant has to
+// come from the endpoint the operator registered with that provider. The deployment-wide
+// webhook secret attests "whoever configured this webhook holds the secret" — it does not
+// attest which tenant the repo belongs to, exactly as for /hooks/git. What binds the two is
+// that the URL and the secret are configured together, by the same operator, in the provider's
+// webhook settings. Per-repo secrets (or, for the App, an installation→tenant mapping) are
+// what would make this attestation tenant-specific.
+func tenantFromQuery(r *http.Request) Actor {
+	q := r.URL.Query()
+	return Actor{OrgID: q.Get("org_id"), UserID: q.Get("user_id")}
+}
+
+// ingestAdapterEvent is the tail every adapter shares: validate the envelope, append it to the
+// log, then evaluate triggers off the request path. It writes the error response itself and
+// reports whether the event was accepted.
+//
+// obs is handed to the dispatcher so an adapter can follow up on what a trigger started (the
+// GitHub App turning a pipeline run into a check run); pass nil when there is nothing to
+// report back to.
+func ingestAdapterEvent(ctx context.Context, w http.ResponseWriter, e Event, obs dispatchObserver) bool {
+	if msg := validateEvent(&e); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return false
+	}
+	countEvent(ctx, e.Source)
+	if err := addEvent(ctx, e); err != nil {
+		slog.ErrorContext(ctx, "store event", "error", err, "id", e.ID)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return false
+	}
+	go evaluateAndDispatchObserved(detach(ctx), e, obs)
+	return true
+}
+
+// gitPushData is the payload every git adapter puts on a repo.* event, so a trigger filter
+// written against `data.ref` works the same whether the push arrived from git_factory, a
+// Forgejo webhook, or a GitHub App.
+func gitPushData(ref, commit, pusher, message string) map[string]any {
+	return map[string]any{"ref": ref, "commit": commit, "pusher": pusher, "message": message}
+}
+
+// stripRef reduces a full git ref to the bare branch/tag name, so a filter can compare against
+// "main" rather than "refs/heads/main". The commit SHA in the same payload is what a pipeline
+// actually checks out, so nothing is lost.
+func stripRef(ref string) string {
+	ref = strings.TrimPrefix(ref, "refs/heads/")
+	return strings.TrimPrefix(ref, "refs/tags/")
+}
+
 func handleGitWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx, span := otel.Tracer(serviceName).Start(r.Context(), "handleGitWebhook")
 	defer span.End()
@@ -91,18 +144,10 @@ func handleGitWebhook(w http.ResponseWriter, r *http.Request) {
 		Source:  "git",
 		Subject: p.Repo,
 		Actor:   Actor{OrgID: p.OrgID, UserID: p.UserID},
-		Data: map[string]any{
-			"ref": p.Ref, "commit": p.Commit, "pusher": p.Pusher, "message": p.Message,
-		},
+		Data:    gitPushData(p.Ref, p.Commit, p.Pusher, p.Message),
 	}
-	if msg := validateEvent(&e); msg != "" {
-		http.Error(w, msg, http.StatusBadRequest)
+	if !ingestAdapterEvent(ctx, w, e, nil) {
 		return
 	}
-	if err := addEvent(ctx, e); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	go evaluateAndDispatch(detach(ctx), e)
 	w.WriteHeader(http.StatusAccepted)
 }

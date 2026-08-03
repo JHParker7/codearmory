@@ -19,10 +19,21 @@ const (
 // cancelled when the request returns — dispatch outlives the HTTP handler.
 func detach(ctx context.Context) context.Context { return context.WithoutCancel(ctx) }
 
+// dispatchObserver is notified of what a matched trigger's actions produced. It exists for
+// adapters that must report a pipeline run back to the system that sent the event — the
+// GitHub App creating a check run on the pushed commit. It runs after the outcome is
+// recorded, and must not block: implementations hand off to a goroutine.
+type dispatchObserver func(ctx context.Context, t Trigger, e Event, outs []actionOutcome)
+
 // evaluateAndDispatch matches every enabled trigger of the event's tenant and runs the
 // actions of those whose filter passes. A (trigger, event) pair is claimed exactly once
 // (unique index), so a redelivery of the same event never double-fires.
 func evaluateAndDispatch(ctx context.Context, e Event) {
+	evaluateAndDispatchObserved(ctx, e, nil)
+}
+
+// evaluateAndDispatchObserved is evaluateAndDispatch with a per-trigger completion callback.
+func evaluateAndDispatchObserved(ctx context.Context, e Event, obs dispatchObserver) {
 	triggers, err := triggersForTenant(ctx, e.Actor.OrgID, e.Actor.UserID)
 	if err != nil {
 		slog.ErrorContext(ctx, "load triggers", "error", err)
@@ -37,10 +48,11 @@ func evaluateAndDispatch(ctx context.Context, e Event) {
 		if !ok {
 			continue
 		}
+		countTriggerMatched(ctx, e.Type)
 		if !claimDispatch(ctx, t, e) {
 			continue // already handled (idempotent)
 		}
-		runAndRecord(ctx, t, e)
+		runAndRecord(ctx, t, e, obs)
 	}
 }
 
@@ -57,8 +69,11 @@ func claimDispatch(ctx context.Context, t Trigger, e Event) bool {
 
 // runAndRecord executes a trigger's actions and records the outcome, scheduling a retry on
 // failure and dead-lettering after maxDispatchAttempts.
-func runAndRecord(ctx context.Context, t Trigger, e Event) {
-	err := runActions(ctx, t, e)
+func runAndRecord(ctx context.Context, t Trigger, e Event, obs dispatchObserver) {
+	outs, err := runActions(ctx, t, e)
+	if obs != nil && len(outs) > 0 {
+		obs(ctx, t, e, outs)
+	}
 	upd := map[string]any{"updated_at": time.Now().UTC()}
 	if err == nil {
 		upd["status"] = "done"
@@ -119,7 +134,9 @@ func retryDue(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		runAndRecord(ctx, *t, *e)
+		// No observer on retries: the adapter that would have reported the run (a check run
+		// on a commit) is long gone with the request that created it.
+		runAndRecord(ctx, *t, *e, nil)
 	}
 }
 

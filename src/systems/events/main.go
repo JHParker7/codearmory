@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -18,6 +20,25 @@ import (
 
 // gatekeeperClient verifies caller permissions on the trigger/event CRUD endpoints.
 var gatekeeperClient *gk.Client
+
+// initGithubApp builds the optional GitHub App from the environment. Returns (nil, nil) when
+// no App is configured. A half-configured App is an error rather than a silent downgrade: an
+// App id with no webhook secret would accept unverified deliveries.
+func initGithubApp() (*githubApp, error) {
+	rawID := secret("GITHUB_APP_ID")
+	if rawID == "" {
+		return nil, nil
+	}
+	appID, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("GITHUB_APP_ID %q is not an integer: %w", rawID, err)
+	}
+	webhookSecret := secret("GITHUB_APP_WEBHOOK_SECRET")
+	if webhookSecret == "" {
+		return nil, fmt.Errorf("GITHUB_APP_WEBHOOK_SECRET must be set when GITHUB_APP_ID is configured")
+	}
+	return newGithubApp(appID, secret("GITHUB_APP_PRIVATE_KEY"), webhookSecret)
+}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
@@ -45,15 +66,31 @@ func main() {
 	}
 	eventsServiceKey = registry.StartKeyRotation(ctx, gatekeeperURL, serviceName, secret("GATEKEEPER_SERVICE_KEY"), 25*time.Minute)
 
+	initMetrics()
 	startRetryLoop(ctx)
+
+	// The GitHub App is optional: without GITHUB_APP_ID there is no App, so /hooks/github is
+	// not registered at all rather than served with nothing to verify deliveries against.
+	ghApp, err := initGithubApp()
+	if err != nil {
+		slog.Error("GitHub App configuration", "error", err)
+		os.Exit(1)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /openapi.yaml", handleOpenAPIYAML)
 
 	// Emitters (trusted, HMAC).
 	mux.HandleFunc("POST /internal/events", handleInternalEvent)
-	// External git webhooks (normalized).
+	// Inbound webhooks (normalized into envelopes).
+	mux.HandleFunc("POST /hooks", handleGenericWebhook)
 	mux.HandleFunc("POST /hooks/git", handleGitWebhook)
+	mux.HandleFunc("POST /hooks/gitea", handleGiteaWebhook)
+	if ghApp != nil {
+		mux.HandleFunc("POST /hooks/github", handleGitHubWebhook(ghApp))
+		slog.Info("GitHub App configured", "app_id", ghApp.appID)
+	}
 
 	// Trigger CRUD + the event log (RBAC via conductor → gatekeeper).
 	mux.HandleFunc("POST /triggers", handleCreateTrigger)
@@ -63,8 +100,9 @@ func main() {
 	mux.HandleFunc("DELETE /triggers/{id}", handleDeleteTrigger)
 	mux.HandleFunc("POST /triggers/test-match", handleTestMatch)
 	mux.HandleFunc("GET /events", handleListEvents)
+	mux.HandleFunc("GET /events/{id}", handleGetEvent)
 
-	port := envOrDefault("PORT", "8087")
+	port := envOrDefault("PORT", "8093")
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           otelhttp.NewHandler(mux, serviceName),

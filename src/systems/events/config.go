@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -31,6 +32,10 @@ var (
 	// the live key rather than the bootstrap value.
 	eventsServiceKey func() string
 
+	// githubAPIBase is the GitHub REST root the App adapter talks to. Overridable for GitHub
+	// Enterprise Server, whose API lives at https://<host>/api/v3.
+	githubAPIBase = envOrDefault("GITHUB_API_URL", "https://api.github.com")
+
 	httpClient = &http.Client{Timeout: 20 * time.Second}
 )
 
@@ -43,10 +48,15 @@ func envOrDefault(key, def string) string {
 }
 
 // secret reads NAME_FILE first (k8s volume-mounted secret) then the NAME env var.
+//
+// The trailing newline is stripped: a Kubernetes secret mounted from a file (or written by
+// `echo`) carries one, and these values are HMAC keys compared byte-for-byte against what the
+// peer signed with. An untrimmed "\n" makes every signature mismatch with no error to point at
+// it — the emitter looks unauthorized rather than misconfigured.
 func secret(name string) string {
 	if path := os.Getenv(name + "_FILE"); path != "" {
 		if b, err := os.ReadFile(path); err == nil {
-			return string(b)
+			return strings.TrimRight(string(b), "\n")
 		}
 	}
 	return os.Getenv(name)

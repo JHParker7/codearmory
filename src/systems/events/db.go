@@ -119,6 +119,21 @@ func listEvents(ctx context.Context, orgID, userID, typ string, limit int) ([]Ev
 	return out, nil
 }
 
+// getEventScoped loads one event, restricted to the caller's tenant. The scoping is what makes
+// a wrong-tenant id indistinguishable from a missing one: the handler turns the resulting
+// ErrRecordNotFound into a 404, so the log never confirms that an event id exists for someone
+// else. Replaces the former hooks GET /events/{id}, which had to reconstruct access from the
+// rules that matched — the event log carries the owning tenant on the row itself.
+func getEventScoped(ctx context.Context, id, orgID, userID string) (*Event, error) {
+	var r eventRow
+	q := scopeTenant(connectRead().WithContext(ctx).Where("id = ?", id), orgID, userID, "user_id")
+	if err := q.First(&r).Error; err != nil {
+		return nil, err
+	}
+	e := r.toEvent()
+	return &e, nil
+}
+
 // scopeTenant restricts a query to the caller's org (when in an org) or their own records.
 // The owner column differs by table — events store it as user_id, triggers as created_by —
 // so the caller names it. This is the multi-tenant isolation every read/match honours.
