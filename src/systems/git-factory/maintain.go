@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -200,6 +201,12 @@ func gcRepo(ctx context.Context, repoID string) (ran bool, err error) {
 // runMaintenance sweeps every repo once. Errors are per-repo and never abort the
 // sweep: one broken repository must not stop the rest from being repacked.
 func runMaintenance(ctx context.Context) (swept, skipped, locksCleared int) {
+	return runMaintenanceWhile(ctx, func() bool { return true })
+}
+
+// runMaintenanceWhile is runMaintenance with an abort condition consulted between
+// repos. The leased sweep uses it to stop once it no longer holds the lease.
+func runMaintenanceWhile(ctx context.Context, keepGoing func() bool) (swept, skipped, locksCleared int) {
 	ids, err := listAllRepoIDs(ctx)
 	if err != nil {
 		slog.ErrorContext(ctx, "maintenance: could not list repos", "error", err)
@@ -207,6 +214,13 @@ func runMaintenance(ctx context.Context) (swept, skipped, locksCleared int) {
 	}
 	for _, id := range ids {
 		if ctx.Err() != nil {
+			break
+		}
+		// Between repos, never during one. Losing the lease mid-repack is not a reason
+		// to kill `git gc`: an interrupted gc leaves its gc.pid behind, and git then
+		// declines to gc that repo until the file ages out — so tearing one down to
+		// avoid a few seconds of overlap would cost far more than the overlap does.
+		if !keepGoing() {
 			break
 		}
 		// Locks before gc, and unconditionally — not inside gcRepo. A stale
@@ -240,10 +254,13 @@ func startMaintenance(ctx context.Context) {
 		slog.Info("maintenance: disabled")
 		return
 	}
+	holder, ttl := instanceID(), maintenanceLeaseTTL()
 	slog.Info("maintenance: started",
 		"interval", interval.String(),
 		"quota_mb", repoQuotaBytes()/(1024*1024),
-		"ref_lock_max_age", refLockMaxAge().String())
+		"ref_lock_max_age", refLockMaxAge().String(),
+		"lease_holder", holder,
+		"lease_ttl", ttl.String())
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -252,10 +269,85 @@ func startMaintenance(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				swept, skipped, locks := runMaintenance(ctx)
-				slog.InfoContext(ctx, "maintenance: sweep complete",
-					"repacked", swept, "skipped_busy", skipped, "stale_locks_cleared", locks)
+				runLeasedSweep(ctx, holder, ttl)
 			}
 		}
 	}()
+}
+
+// runLeasedSweep runs one sweep, but only if this replica wins the lease for it.
+//
+// Every replica ticks and every replica calls this; at most one of them does any work.
+// See lease.go for why that is a cost mechanism rather than a safety one.
+func runLeasedSweep(ctx context.Context, holder string, ttl time.Duration) {
+	got, err := acquireLease(ctx, maintenanceLeaseName, holder, ttl)
+	if err != nil {
+		// Skip the tick. A sweep needs the database anyway — listAllRepoIDs is its
+		// first call — so a database that cannot grant a lease is a database that
+		// cannot enumerate repos either, and pressing on would just fail later and
+		// noisier.
+		slog.WarnContext(ctx, "maintenance: could not take the sweep lease, skipping this tick", "error", err)
+		return
+	}
+	if !got {
+		slog.DebugContext(ctx, "maintenance: another replica holds the sweep lease, skipping this tick")
+		return
+	}
+
+	// Renew while the sweep runs, rather than granting a lease long enough to cover it.
+	// A sweep is unbounded — it repacks every repo in the store — so a TTL sized to the
+	// worst sweep would also be how long a dead holder blocks maintenance. Renewing
+	// decouples the two: the TTL stays short (fast takeover) while the sweep may run as
+	// long as it needs.
+	sweepCtx, stopRenew := context.WithCancel(ctx)
+	defer stopRenew()
+	var lost atomic.Bool
+	var renewing sync.WaitGroup
+	renewing.Add(1)
+	go func() {
+		defer renewing.Done()
+		t := time.NewTicker(ttl / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-sweepCtx.Done():
+				return
+			case <-t.C:
+				ok, err := renewLease(sweepCtx, maintenanceLeaseName, holder, ttl)
+				switch {
+				case err != nil:
+					// Transient: keep sweeping and try the next tick. Abandoning a
+					// half-finished sweep over one failed query would make a database
+					// blip more disruptive than it needs to be, and the worst case if
+					// the failures continue is that the lease lapses and another
+					// replica takes over — which is the designed behaviour anyway.
+					slog.WarnContext(ctx, "maintenance: lease renewal failed", "error", err)
+				case !ok:
+					lost.Store(true)
+					return
+				}
+			}
+		}
+	}()
+
+	swept, skipped, locks := runMaintenanceWhile(sweepCtx, func() bool { return !lost.Load() })
+	stopRenew()
+	renewing.Wait()
+
+	if lost.Load() {
+		// Worth a warning rather than silence: it means a sweep took longer than the
+		// TTL without a successful renewal, so either the store has outgrown the
+		// interval or the database is struggling.
+		slog.WarnContext(ctx, "maintenance: lost the sweep lease mid-sweep, stopped early",
+			"repacked", swept, "skipped_busy", skipped, "stale_locks_cleared", locks)
+		return
+	}
+
+	// Release rather than sit on it until the TTL: the next tick should be free to land
+	// on any replica.
+	if err := releaseLease(ctx, maintenanceLeaseName, holder); err != nil {
+		slog.WarnContext(ctx, "maintenance: could not release the sweep lease", "error", err)
+	}
+	slog.InfoContext(ctx, "maintenance: sweep complete",
+		"repacked", swept, "skipped_busy", skipped, "stale_locks_cleared", locks)
 }

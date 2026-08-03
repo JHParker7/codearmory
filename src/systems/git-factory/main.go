@@ -178,7 +178,7 @@ func main() {
 	// only copy of pushed source (ARCHITECTURE §5).
 	verifyStorage()
 
-	if err := connect().AutoMigrate(&Repo{}, &ShardNode{}, &ReplicaState{}, &RepoShare{}, &PullRequest{}, &BranchProtection{}); err != nil {
+	if err := connect().AutoMigrate(&Repo{}, &ShardNode{}, &ReplicaState{}, &RepoShare{}, &PullRequest{}, &BranchProtection{}, &MaintenanceLease{}); err != nil {
 		slog.Error("failed to migrate database", "error", err)
 		os.Exit(1)
 	}

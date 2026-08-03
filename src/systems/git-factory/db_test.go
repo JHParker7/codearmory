@@ -46,7 +46,7 @@ func setupTestDB(t *testing.T) (db *gorm.DB, storageRoot string) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := gdb.AutoMigrate(&Repo{}, &ShardNode{}, &ReplicaState{}); err != nil {
+	if err := gdb.AutoMigrate(&Repo{}, &ShardNode{}, &ReplicaState{}, &MaintenanceLease{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 

@@ -40,7 +40,8 @@ import (
 // failure mode the doc warns about: s3fs does not become atomic when there is only one
 // writer. Treat a pass as "not obviously unsafe", not as certification for multi-writer
 // use. Verifying the cross-client half needs two pods against one mount and belongs in
-// the deployment checklist, not here.
+// the deployment checklist, not here — that checklist is executable, in
+// infra/local/juicefs/verify.sh.
 
 // localProbeID identifies this client among everything sharing the mount.
 //
@@ -49,11 +50,7 @@ import (
 // meaningful — a pod killed mid-check finds its own file on the way back up rather than
 // a name it has never seen.
 func localProbeID() string {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		host = "unknown"
-	}
-	return fmt.Sprintf("%s-%d", host, os.Getpid())
+	return instanceID()
 }
 
 // probePath names a probe file for one check, scoped to ONE client of the mount.
