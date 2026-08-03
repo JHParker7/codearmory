@@ -74,11 +74,11 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-workflows
                   key: gatekeeper-service-key
-            - name: HOOKS_TRIGGER_KEY
+            - name: EVENTS_TRIGGER_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ $fullname }}-workflows
-                  key: hooks-trigger-key
+                  key: events-trigger-key
             - name: WORKFLOWS_TOKEN_KEY
               valueFrom:
                 secretKeyRef:

@@ -146,12 +146,12 @@ spec:
             - name: GIT_STORAGE_PREFLIGHT
               value: {{ . | quote }}
             {{- end }}
-            {{- if .Values.hooks.enabled }}
+            {{- if .Values.events.enabled }}
             # Push events are posted here (POST /internal/events), signed with
-            # HOOKS_TRIGGER_KEY below. Unset when hooks is disabled, which simply turns
+            # EVENTS_TRIGGER_KEY below. Unset when events is disabled, which simply turns
             # the integration off — git_factory runs fine without it.
-            - name: HOOKS_URL
-              value: "http://{{ $fullname }}-hooks:{{ .Values.hooks.port }}"
+            - name: EVENTS_URL
+              value: "http://{{ $fullname }}-events:{{ .Values.events.port }}"
             {{- end }}
             {{- include "codearmory.otel.envs" (list . .Values.gitFactory.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "git-factory" "git_factory" $fullname) | nindent 12 }}
@@ -183,13 +183,13 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-git-factory
                   key: git-factory-clone-token-key
-            # Shared HMAC with hooks/workflows/events; every one of the four carries the
-            # identical value or push-triggered pipelines 401.
-            - name: HOOKS_TRIGGER_KEY
+            # Shared HMAC with events and workflows; all three carry the identical value or
+            # push-triggered pipelines 401.
+            - name: EVENTS_TRIGGER_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ $fullname }}-git-factory
-                  key: hooks-trigger-key
+                  key: events-trigger-key
             {{- include "codearmory.tls.envs" .Values.gitFactory.tls | nindent 12 }}
           volumeMounts:
             - name: repos

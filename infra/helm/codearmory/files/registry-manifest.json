@@ -71,6 +71,13 @@
       },
       {
         "method": "POST",
+        "path": "/logout",
+        "action": "logout",
+        "resource": "gatekeeper/users",
+        "public": true
+      },
+      {
+        "method": "POST",
         "path": "/check_permissions",
         "action": "checkPermissions",
         "resource": "gatekeeper/permissions"
@@ -1977,7 +1984,8 @@
         "method": "PUT",
         "path": "/artifacts/{name}",
         "action": "createArtifact",
-        "resource": "artifacts/artifacts"
+        "resource": "artifacts/artifacts",
+        "max_body_bytes": -1
       },
       {
         "method": "GET",
@@ -2001,25 +2009,25 @@
         "method": "GET",
         "path": "/quotas",
         "action": "listArtifactQuota",
-        "resource": "artifacts/quotas"
+        "resource": "codearmory/artifacts/quotas"
       },
       {
         "method": "GET",
         "path": "/quotas/{scope}/{scope_id}",
         "action": "getArtifactQuota",
-        "resource": "artifacts/quotas/{scope_id}"
+        "resource": "codearmory/artifacts/quotas/{scope}/{scope_id}"
       },
       {
         "method": "PUT",
         "path": "/quotas/{scope}/{scope_id}",
         "action": "setArtifactQuota",
-        "resource": "artifacts/quotas/{scope_id}"
+        "resource": "codearmory/artifacts/quotas/{scope}/{scope_id}"
       },
       {
         "method": "DELETE",
         "path": "/quotas/{scope}/{scope_id}",
         "action": "deleteArtifactQuota",
-        "resource": "artifacts/quotas/{scope_id}"
+        "resource": "codearmory/artifacts/quotas/{scope}/{scope_id}"
       }
     ],
     "default_grants": [
@@ -2039,97 +2047,6 @@
     ]
   },
   {
-    "name": "hooks",
-    "url": "http://hooks:8087",
-    "description": "Webhook ingestion and pipeline rule management",
-    "forward_auth": true,
-    "service_key": "hooks-registry-local-secret",
-    "endpoints": [
-      {
-        "method": "POST",
-        "path": "/hooks",
-        "action": "receiveHook",
-        "resource": "hooks/hooks",
-        "public": true
-      },
-      {
-        "method": "POST",
-        "path": "/hooks/github",
-        "action": "receiveGithubHook",
-        "resource": "hooks/hooks",
-        "public": true
-      },
-      {
-        "method": "POST",
-        "path": "/hooks/gitea",
-        "action": "receiveGiteaHook",
-        "resource": "hooks/hooks"
-      },
-      {
-        "method": "POST",
-        "path": "/rules",
-        "action": "createRule",
-        "resource": "hooks/rules"
-      },
-      {
-        "method": "GET",
-        "path": "/rules",
-        "action": "listRule",
-        "resource": "hooks/rules"
-      },
-      {
-        "method": "GET",
-        "path": "/rules/{id}",
-        "action": "getRule",
-        "resource": "hooks/rules/{id}"
-      },
-      {
-        "method": "PUT",
-        "path": "/rules/{id}",
-        "action": "updateRule",
-        "resource": "hooks/rules/{id}"
-      },
-      {
-        "method": "DELETE",
-        "path": "/rules/{id}",
-        "action": "deleteRule",
-        "resource": "hooks/rules/{id}"
-      },
-      {
-        "method": "GET",
-        "path": "/events",
-        "action": "listEvent",
-        "resource": "hooks/events"
-      },
-      {
-        "method": "GET",
-        "path": "/events/{id}",
-        "action": "getEvent",
-        "resource": "hooks/events/{id}"
-      }
-    ],
-    "default_grants": [
-      {
-        "grant_on": "user",
-        "actions": [
-          "createRule",
-          "listRule",
-          "getRule",
-          "updateRule",
-          "deleteRule",
-          "listEvent",
-          "getEvent"
-        ],
-        "resources": [
-          "{username}/hooks/rules",
-          "{username}/hooks/rules/*",
-          "{username}/hooks/events",
-          "{username}/hooks/events/*"
-        ]
-      }
-    ]
-  },
-  {
     "name": "events",
     "url": "http://events:8093",
     "description": "Event collection and reactor: field-filtered triggers dispatch actions",
@@ -2139,6 +2056,27 @@
       {
         "method": "POST",
         "path": "/hooks/git",
+        "action": "receiveGitHook",
+        "resource": "events/hooks",
+        "public": true
+      },
+      {
+        "method": "POST",
+        "path": "/hooks",
+        "action": "receiveHook",
+        "resource": "events/hooks",
+        "public": true
+      },
+      {
+        "method": "POST",
+        "path": "/hooks/gitea",
+        "action": "receiveGitHook",
+        "resource": "events/hooks",
+        "public": true
+      },
+      {
+        "method": "POST",
+        "path": "/hooks/github",
         "action": "receiveGitHook",
         "resource": "events/hooks",
         "public": true
@@ -2184,6 +2122,12 @@
         "path": "/events",
         "action": "listEvent",
         "resource": "events"
+      },
+      {
+        "method": "GET",
+        "path": "/events/{id}",
+        "action": "getEvent",
+        "resource": "events"
       }
     ],
     "default_grants": [
@@ -2195,7 +2139,8 @@
           "getTrigger",
           "updateTrigger",
           "deleteTrigger",
-          "listEvent"
+          "listEvent",
+          "getEvent"
         ],
         "resources": [
           "{username}/events/triggers",

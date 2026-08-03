@@ -10,7 +10,7 @@ FOR UPDATE ... SKIP LOCKED, so N replicas never double-process. The HTTP service
 A service is scalable here only if its Deployment is named "<fullname>-<key>", which is
 the chart's convention for all of these.
 */ -}}
-{{- $scalable := list "gatekeeper" "registry" "conductor" "workflows" "forge" "tickets" "artifacts" "hooks" }}
+{{- $scalable := list "gatekeeper" "registry" "conductor" "workflows" "forge" "tickets" "artifacts" "events" }}
 {{- range $svc := $scalable }}
 {{- $cfg := index $.Values $svc }}
 {{- /* Core services (gatekeeper/registry/conductor) have no `enabled` key — always on.

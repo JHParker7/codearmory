@@ -50,7 +50,7 @@ gatekeeper:
     # Comma-separated list of service names permitted to register. Core services
     # deployed by this chart (incl. the forge + workflows CI/CD pair) are listed
     # here; non-core services are auto-permitted at runtime when builder registers them.
-    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git_connector,containers,hooks,events,outpost-gateway"
+    permittedServices: "gatekeeper,registry,builder,forge,workflows,tickets,git_connector,containers,events,outpost-gateway"
     # Comma-separated services allowed to resolve org secrets via the internal
     # lookup endpoint (deny-all when empty). Defaults to "forge" so forge can resolve
     # "secret:<name>" job secret_refs; add "containers" to let the container registry
@@ -78,7 +78,7 @@ gatekeeper:
     # Override to use an external Redis instance.
     redisUrl: ""
     # Comma-separated "name=key" pairs for service-to-service authentication,
-    # e.g. "blueprints=<key>,forge=<key>,workflows=<key>,tickets=<key>,hooks=<key>".
+    # e.g. "blueprints=<key>,forge=<key>,workflows=<key>,tickets=<key>,events=<key>".
     # Auto-assembled from each service's secret on upgrade. Leave empty for auto-generation.
     # Set explicitly only if you need to pin specific keys or add services outside this chart.
     gatekeeperServices: ""
@@ -528,9 +528,9 @@ workflows:
     # Must match the workflows entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
-    # Shared HMAC secret with the hooks service for authenticating internal trigger requests.
-    # Auto-synced from hooks.secret.hooksTriggerKey when hooks is deployed. Leave empty for auto-generation.
-    hooksTriggerKey: ""
+    # Shared HMAC authenticating the events service's internal pipeline dispatch and run
+    # polling. Auto-synced from events.secret.eventsTriggerKey. Leave empty for auto-generation.
+    eventsTriggerKey: ""
     # AES-256 key for encrypting run tokens at rest in the database.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     tokenKey: ""
@@ -722,53 +722,9 @@ tickets:
     # Must match the tickets entry in gatekeeper.secret.gatekeeperServices.
     # Auto-generated on first install and preserved across upgrades. Leave empty for auto-generation.
     gatekeeperServiceKey: ""
-    # Shared HMAC secret with hooks for authenticating internal trigger requests.
-    # Auto-synced from the hooks secret when present. Leave empty for auto-generation.
-    hooksTriggerKey: ""
-  tls:
-    certSecret: ""
-    clientAuth: ""
-    caSecret: ""
-    clientCertSecret: ""
-    caBundle: ""
-
-# ── Hooks ─────────────────────────────────────────────────────────────────────
-# Webhook receiver + rule engine: takes push/PR webhooks from a git host (Forgejo,
-# GitHub, ...), matches them against rules, and triggers workflow runs. Webhooks hit
-# the service DIRECTLY (they authenticate by HMAC, not a codearmory bearer), so to
-# receive them from an external git host expose the service — set service.type NodePort
-# (dev) or front it with an Ingress (prod).
-hooks:
-  enabled: true
-  image:
-    repository: hooks
-    tag: ""
-  replicaCount: 1
-  port: 8087
-  service:
-    # ClusterIP (default) keeps webhooks in-cluster; NodePort exposes the endpoint to
-    # an external git host on a fixed node port.
-    type: ClusterIP
-    nodePort: ""          # set with type NodePort to pin the port (else auto-assigned)
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
-  env:
-    logLevel: info
-    otelEndpoint: ""
-  secret:
-    # PostgreSQL DSN. Auto-constructed from the postgresql subchart when left empty.
-    databaseUrl: ""
-    # Must match the hooks entry in gatekeeper.secret.gatekeeperServices.
-    # Auto-generated on first install and preserved across upgrades.
-    gatekeeperServiceKey: ""
-    # Shared HMAC that signs hook→workflows trigger calls; workflows verifies with the
-    # same value. Auto-derived to match workflows. Leave empty for auto-generation.
-    hooksTriggerKey: ""
+    # Shared HMAC signing tickets' lifecycle events to the events service.
+    # Auto-synced from the events secret when present. Leave empty for auto-generation.
+    eventsTriggerKey: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -777,9 +733,10 @@ hooks:
     caBundle: ""
 
 # ── Events ───────────────────────────────────────────
-# Event collector + reactor (folds in hooks): services emit JSON events to
+# Event collector + reactor (supersedes the former hooks service): services emit JSON events to
 # /internal/events; triggers whose field-filters match dispatch actions (run a
-# pipeline, open a ticket, notify, ...). Runs alongside hooks during the cutover.
+# pipeline, open a ticket, notify, ...). Also hosts the inbound webhook adapters
+# (generic, git, Forgejo/Gitea, GitHub App).
 events:
   enabled: true
   image:
@@ -805,14 +762,27 @@ events:
     gatekeeperServiceKey: ""
     # Shared HMAC authenticating emitters posting to /internal/events and signing
     # events' internal calls. Must match what emitters sign with AND what workflows
-    # verifies trigger calls with (workflows.secret.hooksTriggerKey). Leave empty to
+    # verifies trigger calls with (workflows.secret.eventsTriggerKey). Leave empty to
     # derive the same value workflows uses.
     eventsTriggerKey: ""
     # Secret configured on the git provider's webhook (GitHub/Gitea/Forgejo). events
-    # verifies the provider HMAC on the public POST /hooks/git against it. Leave empty
-    # to keep that endpoint closed — it is never auto-generated, since the provider must
-    # be configured with the same value.
+    # verifies the provider HMAC on the public POST /hooks, /hooks/git and /hooks/gitea
+    # against it. Leave empty to keep those endpoints closed — it is never auto-generated,
+    # since the provider must be configured with the same value.
     webhookSecret: ""
+  # Optional GitHub App. Setting appId registers POST /hooks/github, which normalises
+  # GitHub deliveries into events AND reports each triggered pipeline run back as a check
+  # run on the pushed commit. privateKey and webhookSecret are required alongside it —
+  # events refuses to start with an app id but no webhook secret rather than accepting
+  # unverified deliveries. The App's webhook secret is its own, distinct from
+  # secret.webhookSecret above (which keys the non-App endpoints).
+  githubApp:
+    appId: ""
+    # PEM contents of the App's private key (PKCS1 or PKCS8).
+    privateKey: ""
+    webhookSecret: ""
+    # GitHub Enterprise Server: https://<host>/api/v3. Empty uses api.github.com.
+    apiUrl: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -1028,10 +998,10 @@ gitFactory:
     # verified only inside git_factory, so it is shared with nothing. Leave empty for
     # auto-generation.
     cloneTokenKey: ""
-    # Shared HMAC that signs git_factory's push events to hooks; hooks, workflows and
-    # events must all carry the identical value or push-triggered pipelines 401.
-    # Auto-derived from the hooks/workflows secrets. Leave empty for auto-generation.
-    hooksTriggerKey: ""
+    # Shared HMAC that signs git_factory's push events to the events service; events and
+    # workflows must carry the identical value or push-triggered pipelines 401.
+    # Auto-derived from the events/workflows secrets. Leave empty for auto-generation.
+    eventsTriggerKey: ""
   tls:
     certSecret: ""
     clientAuth: ""
@@ -1332,6 +1302,6 @@ postgresql:
           CREATE DATABASE git;
           CREATE DATABASE git_factory;
           CREATE DATABASE artifacts;
-          CREATE DATABASE hooks;
+          CREATE DATABASE events;
           CREATE DATABASE events;
           CREATE DATABASE outpost_gateway;

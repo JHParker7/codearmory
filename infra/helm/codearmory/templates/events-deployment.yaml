@@ -56,6 +56,11 @@ spec:
             # events-trigger-key, which the workflows service verifies.
             - name: WORKFLOWS_URL
               value: "http://{{ $fullname }}-workflows:{{ .Values.workflows.port }}"
+            {{- if .Values.tickets.enabled }}
+            # Target of the create_ticket action.
+            - name: TICKETS_URL
+              value: "http://{{ $fullname }}-tickets:{{ .Values.tickets.port }}"
+            {{- end }}
             {{- include "codearmory.otel.envs" (list . .Values.events.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "events" "events" $fullname) | nindent 12 }}
             - name: GATEKEEPER_SERVICE_KEY
@@ -77,6 +82,28 @@ spec:
                   name: {{ $fullname }}-events
                   key: events-webhook-secret
                   optional: true
+            {{- if .Values.events.githubApp.appId }}
+            # GitHub App: enables POST /hooks/github, which reports each triggered pipeline
+            # run back to GitHub as a check run on the pushed commit. All three values are
+            # required together — events refuses to start with an app id but no webhook
+            # secret, rather than accepting unverified deliveries.
+            - name: GITHUB_APP_ID
+              value: {{ .Values.events.githubApp.appId | quote }}
+            {{- with .Values.events.githubApp.apiUrl }}
+            - name: GITHUB_API_URL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-events
+                  key: github-app-private-key
+            - name: GITHUB_APP_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-events
+                  key: github-app-webhook-secret
+            {{- end }}
             {{- include "codearmory.tls.envs" .Values.events.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.events.tls) }}
           volumeMounts:

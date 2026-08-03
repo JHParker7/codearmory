@@ -53,9 +53,13 @@ spec:
               value: {{ .Values.tickets.env.logLevel | quote }}
             - name: GATEKEEPER_URL
               value: "http://{{ $fullname }}-gatekeeper:{{ .Values.gatekeeper.port }}"
-            # hooks is a non-core service builder deploys on demand; its port is fixed at 8087.
-            - name: HOOKS_URL
-              value: "http://{{ $fullname }}-hooks:8087"
+            {{- if .Values.events.enabled }}
+            # Ticket lifecycle events are posted here (POST /internal/events), signed with
+            # EVENTS_TRIGGER_KEY below. Unset when events is disabled, which simply turns the
+            # integration off — tickets runs fine without it.
+            - name: EVENTS_URL
+              value: "http://{{ $fullname }}-events:{{ .Values.events.port }}"
+            {{- end }}
             {{- include "codearmory.otel.envs" (list . .Values.tickets.env) | nindent 12 }}
             {{- include "codearmory.postgresql.env" (list . "tickets" "tickets" $fullname) | nindent 12 }}
             - name: GATEKEEPER_SERVICE_KEY
@@ -63,11 +67,11 @@ spec:
                 secretKeyRef:
                   name: {{ $fullname }}-tickets
                   key: gatekeeper-service-key
-            - name: HOOKS_TRIGGER_KEY
+            - name: EVENTS_TRIGGER_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ $fullname }}-tickets
-                  key: hooks-trigger-key
+                  key: events-trigger-key
             {{- include "codearmory.tls.envs" .Values.tickets.tls | nindent 12 }}
           {{- with (include "codearmory.tls.volumeMounts" .Values.tickets.tls) }}
           volumeMounts:
