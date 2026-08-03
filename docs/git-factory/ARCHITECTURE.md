@@ -211,9 +211,10 @@ This is ~90% of the value for ~10% of the complexity, and it makes
 
 **Step 2 — Shared storage (JuiceFS).** Point `GIT_STORAGE_ROOT` at a **JuiceFS**
 mount instead of a local directory. JuiceFS splits the two halves of a filesystem:
-**metadata** into a transactional engine (CloudNativePG — its own database on the
-platform cluster, with a connection cap so a `git gc` storm can't starve other
-services) and **data blocks** into S3-compatible object storage (MinIO, or the
+**metadata** into a transactional engine (originally specified as CloudNativePG — its own
+database on the platform cluster, with a connection cap so a `git gc` storm can't starve
+other services; **the measurement below argues against Postgres here**, at ~4x Redis on
+git's write path) and **data blocks** into S3-compatible object storage (MinIO, or the
 provider's), with a local NVMe **read** cache in front.
 
 No application code changes — it is still a path on a filesystem. What changes is
@@ -224,7 +225,8 @@ who can reach it: every git process now sees the same bytes.
 markers. Delegating durability to the object store makes it configuration instead
 of code. That one decision is what collapses Step 3 and defers Step 4 entirely.
 
-*Status — the service and chart side are ready; the cluster side is not deployed.*
+*Status — service and chart side ready; cluster side deployed and measured at local scale
+(`infra/local/juicefs/`), and **rejected as the scale path** on the measurement below.*
 Because there are no application code changes, "ready" means the service can be
 pointed at a shared mount safely rather than hopefully:
 
@@ -246,20 +248,220 @@ pointed at a shared mount safely rather than hopefully:
   operation in it is a transaction — on a large store that turns pod startup into a
   long outage, repeated by every replica.
 
-Still to do, and deliberately not written blind: deploying the JuiceFS CSI driver,
-the CloudNativePG metadata cluster (with its connection cap) and the object-storage
-backend. Those are cluster-specific and cannot be validated by rendering a template.
+The cluster side — the JuiceFS CSI driver, the metadata engine (with its connection cap)
+and the object-storage backend — is cluster-specific and cannot be validated by rendering
+a template. It is now deployed and exercised at **local scale**, in
+`infra/local/juicefs/`: CSI driver, metadata engine, MinIO, a ReadWriteMany claim, a
+migration job for an existing store, and git_factory running **two replicas** against one
+mount. `verify.sh` there is the cross-client checklist this section asks for — two pods,
+one mount, checking that `O_CREAT|O_EXCL` refuses the second pod, that `flock` is
+*enforced* rather than merely accepted, and that a genuine concurrent push to one branch
+leaves exactly one winner (the loser rejected with git's own `incorrect old value
+provided`) with both pods reading the same ref and `fsck` clean.
+
+### Step 2 — the measurement, and the architecture it selects
+
+This step was always gated on a measurement rather than a preference ("it is a
+measurement, not a guess", Step 4 below). **That measurement has been taken**, on the
+`infra/local/juicefs/` bring-up, and it selects a design that is neither Step 2 nor Step 4
+as originally written: **shared storage, sharded** — one JuiceFS filesystem with its own
+metadata engine per shard, the repo → shard routing table kept, and replication, primary
+election and the staleness gate retired.
+
+Read this section together with `DESIGN-read-replicas.md` §10, which records the same
+decision from the read-replica side.
+
+#### What was measured
+
+**A methodology warning first, because it inverted an earlier draft of this section.** The
+client must be on local disk with only the bare repo on the shared volume. Measuring a
+clone or commit with *both* ends on the mount measures the client writing a working tree
+over FUSE, which is not work a git server ever does. That error made shared storage look
+~10x worse than it is, and the corrected figures below are the ones to trust.
+
+**Correctness — passes.** All three non-negotiable properties hold across distinct pods on
+one mount, not merely inside one process (`verify.sh`): `O_CREAT|O_EXCL` refuses the second
+pod, `flock` is enforced rather than merely accepted, and a genuine concurrent push to one
+branch leaves exactly one winner — the loser rejected with git's own `incorrect old value
+provided`, both pods reading the same ref, `fsck` clean.
+
+**Reads — free.** `git bundle create` (pure server-side packing) and a clone to a local
+destination both run at local-disk speed. Since git hosting is overwhelmingly
+read-dominated, this is the majority of the workload and it costs nothing.
+
+**Writes — a latency floor.** Client on local disk, bare repo on the volume, 30 incremental
+pushes:
+
+| target | 30 pushes | per push |
+|---|---|---|
+| local disk | ~0s | <33ms |
+| JuiceFS + **Redis** metadata | 2s | ~67ms |
+| JuiceFS + **Postgres** metadata | 13s | ~430ms |
+
+Server-side maintenance is slower too but stays small: repack of a 2,000-file, 40-commit
+repo measured 2s against ~0s on local disk.
+
+**Why it is a floor.** A single small push costs **~972 metadata operations** (a clone ~575,
+a bare-repo create ~814), effectively serialised: 972 × 0.071ms RTT = 69ms predicted
+against 67ms measured. Push latency *is* metadata round-trips. The model is the important
+output because it extrapolates — this cluster has the metadata engine on the same node, so
+0.071ms is a best case, and a realistic cross-node 0.3ms puts the same push near **290ms**.
+It also sets a per-filesystem throughput ceiling: ~130k ops/s ÷ ~972 ≈ **134 pushes/sec**.
+
+**And it cannot be cached away.** The metadata coherence that makes cross-pod `flock` and
+`O_CREAT|O_EXCL` work — the thing that makes JuiceFS safe for git where object storage over
+FUSE is not — is what forbids caching metadata locally. `--writeback` would fix the write
+path and is forbidden here for the same reason. The property that makes it correct is the
+property that makes it slow.
+
+#### Why this selects sharded shared storage
+
+**290ms is not a user-visible problem.** It is server-side overhead inside a push that
+already pays network time, and it sits well under the ~1s threshold where humans notice.
+The latency budget is properly a concern for CI-rate automation and for maintenance, not
+for interactive use — and it is a floor for the *smallest* push, growing with files touched.
+
+**Sharding answers the two objections the latency floor creates.** Both the ~134 pushes/sec
+ceiling and the blast radius of one metadata store are per-*filesystem* properties, so one
+filesystem per shard fixes both, linearly. This goes with JuiceFS's grain rather than
+against it: JuiceFS **pins all metadata for one filesystem to a single metadata instance by
+design**, precisely to avoid transactions spanning instances. One filesystem per shard is
+therefore the intended unit, not a workaround.
+
+**And sharding is nearly free here, because the routing table already exists.**
+`shard.go` (`Repo.Shard`, `resolveNode`, `shardOf`) and `proxy.go` were built for Step 4
+(see `DESIGN-read-replicas.md` §2). The shard key is the only thing shared storage adds.
+
+**What it lets you delete is the point.** Within a shard there is one copy of each repo, so
+two pods physically cannot diverge: no replication pipeline, no primary election, no
+per-repo version marker, no replica repair or reconciliation. That is where distributed git
+hosts spend their bug budget, and it is code you would otherwise maintain forever.
+
+#### Metadata engine: Redis per shard
+
+Use **Redis with Sentinel**, one instance per shard. Not Postgres, and not TiKV.
+
+This is now deployed rather than proposed (`infra/local/juicefs/10-meta-redis.yaml`), and
+the failover half was exercised: killing the primary promoted the replica in ~12s, a key
+written beforehand survived, and the restarted ex-primary rejoined as a replica because it
+asks Sentinel who the master is instead of trusting its own ordinal. Two things that bite
+and are recorded there rather than here — the Sentinel metaurl's first host element is the
+*master name* and not a host, and a metadata engine can only be swapped together with its
+bucket, since JuiceFS refuses to format fresh metadata over existing blocks.
+
+- **Not CloudNativePG**, as this section originally specified: Postgres measured ~4x worse
+  on git's write path (~430ms vs ~67ms per push).
+- **Not Redis Cluster.** It does not scale a single filesystem at all — JuiceFS routes every
+  key for a volume to one hash slot (database numbers become `{N}` prefixes) so that
+  multi-key metadata transactions stay on one instance. You would get slot routing and
+  cluster operations while the RAM and throughput ceilings stay exactly where they were.
+- **Not TiKV**, despite it being the better engine in the abstract — Raft-committed
+  durability, distributed transactions, metadata on disk instead of in RAM. Its two
+  advantages are horizontal scaling of one filesystem, which sharding makes unnecessary, and
+  strong consistency at failover. It costs a dedicated PD + 3-node cluster. Revisit it if
+  the failover-durability window below proves unacceptable.
+
+**RAM is not the constraint for git**, which is what makes Redis viable. At the measured
+241 bytes/key, and given that a repacked bare repo is a handful of large packfiles so file
+count tracks *repo* count rather than data volume:
+
+| git data | repos | keys | Redis RAM |
+|---|---|---|---|
+| 1 TB | 10k | 0.6M | 0.1 GB |
+| 10 TB | 100k | 6.1M | 1.5 GB |
+| 50 TB | 500k | 30.7M | **7.4 GB** |
+
+Even a pathological never-repacked store (200 files/repo) reaches only ~48 GB — one node.
+Note Redis persists (RDB/AOF, backed up to object storage) but does **not** tier: the
+dataset is served from RAM and the disk copy is for recovery, so this table is a real
+budget, not an optional one.
+
+#### Cost, which the first draft of this decision omitted
+
+This is the axis that most favours shared storage, and it strengthens with size, because
+3× replication couples storage capacity to **server count** — you buy machines to hold
+bytes:
+
+| git data | 3× as raw NVMe | boxes to hold it | €/mo servers | JuiceFS object storage |
+|---|---|---|---|---|
+| 1 TB | 3 TB | 1 | ~€100 | ~€6 |
+| 10 TB | 30 TB | 9 | ~€900 | ~€62 |
+| 50 TB | 150 TB | **43** | ~€4,300 | ~€312 |
+
+On cloud block volumes the annualised delta at 50 TB is ~**€75,000/yr**. Below roughly
+10 TB the argument reverses: on bundled NVMe you already own the disks, 3× is effectively
+free, and local disk wins on latency at no cost. **The crossover is where storage forces
+machines you do not need for compute.**
+
+#### Decision
+
+**Target: sharded shared storage.** Per shard — one JuiceFS filesystem, one Redis (with
+Sentinel), one bucket or prefix, and stateless git_factory pods that can each serve any
+repo in that shard. Keep the repo → shard routing table. **Retire replication, primary
+election and the `Applied >= Version` staleness gate — leave the code dormant rather than
+deleted**, since it is the fallback if the write path ever becomes binding.
+
+Small installs change nothing: single node, local disk, Step 1. Step 4 (sharded local disk
+with 3× replication) returns to being the **contingency** it was originally written as —
+correct if push rate or write latency becomes the binding constraint, or on bundled
+hardware below the cost crossover.
+
+#### What this costs, stated plainly
+
+- A write latency floor of ~290ms per small push, growing with files touched; repack ~2s.
+- A per-shard throughput ceiling near 134 pushes/sec that local disk does not have.
+- A ~1s metadata loss window from Redis AOF `everysec`, and the possibility of losing
+  acknowledged writes on Sentinel promotion. `appendfsync always` closes the first at a
+  latency cost; TiKV closes both.
+- Blast radius is per **shard**, not per repo.
+- **A new external dependency**: writes require the object store to be reachable. Local disk
+  has no such coupling — a degraded S3 endpoint stops that shard's writes with every server
+  healthy.
+- Unfamiliar failure modes: see the preflight-collision bug below, which is the genre.
+- Rebalancing a repo between shards moves bytes between filesystems. Choose the shard key
+  with that in mind.
+
+#### Confidence
+
+Every figure here is **single-node, small-repo**, with the metadata engine and object store
+on the same host as the client — which flatters shared storage, since real cross-node RTT
+makes the latency floor worse, not better. The 50 TB and cross-node numbers are a model
+extrapolated from measured per-operation costs, not measurements. Before committing at that
+scale, validate on a multi-node cluster with representative repo sizes, paying particular
+attention to repack, the one server-side operation that was consistently slower. The
+manifests and `verify.sh` in `infra/local/juicefs/` exist so this can be re-run and
+re-argued rather than taken on trust.
+
+#### A bug the bring-up found
+
+That bring-up also found a bug worth recording, because it is invisible on local disk and
+appears only on the deployment this step exists for: the preflight probed under **fixed**
+filenames in the storage root, which on shared storage is the same directory every other
+replica probes. Two replicas starting together — an ordinary rollout — read each other's
+probe files and each concluded the filesystem was broken, `flock` most sharply, where
+being *refused* the lock another pod held (the property working) was reported as failure.
+In the default enforce mode both pods crash-looped on a filesystem that was entirely
+correct. Probe names are now scoped per pod.
 
 **Step 3 — Scale the git plane horizontally.** Because storage is shared, git
 server pods are **stateless compute** — any pod can serve any repo. Run N of them
 behind an ordinary Kubernetes Service with ordinary autoscaling, and have the
 control plane **reverse-proxy** to that Service rather than to a particular node.
 
-No routing table, no shard map, no primary election. One copy of each repo means
+No primary election, no replication, no staleness marker. One copy of each repo means
 nothing can diverge, so git's own on-disk locking (`O_CREAT|O_EXCL` lock files
 plus atomic `rename`) serializes concurrent writers, and two pushes racing the
 same branch resolve exactly as they would on one machine: one wins, the other is
-told to retry.
+told to retry — verified across pods, not just in theory (`infra/local/juicefs/verify.sh`).
+
+*One amendment from the Step 2 measurement.* This step originally claimed "no routing table,
+no shard map" as well. That holds for a single filesystem, and a single filesystem is enough
+until you meet its ceiling (~134 pushes/sec, and one blast radius for every repo on it). Past
+that the selected design shards — one filesystem plus its own metadata engine per shard — so
+a **repo → shard routing table is retained**. It is the one piece of Step 4's machinery the
+target design keeps, and it already exists (`shard.go`). Everything else in Step 4 —
+replication, election, the version gate — stays unnecessary, because sharding changes *which*
+filesystem holds a repo without ever making a second copy of it.
 
 *Why a proxy and not gRPC.* `git-upload-pack`/`git-receive-pack` are long-lived,
 chunked, binary byte streams, and Smart HTTP is **already HTTP** — so forwarding
@@ -286,13 +488,27 @@ door call the node's HTTP endpoint, or introduce a protocol-agnostic
 HTTP is the primary and recommended integration path (it traverses corporate
 proxies, reuses gatekeeper's token auth, and needs no key management in CI).
 
-**Step 4 — (contingent) Sharded local disk.** Only if the shared-filesystem write
-path proves too slow. Git is metadata-heavy and `fsync`-heavy, and on JuiceFS a
-durable flush is a round-trip to object storage — **this is the one risk the
-design carries**, and it is a measurement, not a guess (§7).
+**Step 4 — (still contingent) Sharded local disk with replication.** The contingency was
+"only if the shared-filesystem write path proves too slow", and that is a measurement, not
+a guess. The measurement is in Step 2 above, and the outcome is genuinely mixed rather than
+a clean pass or fail: the write path *is* slow in relative terms (~972 serialised metadata
+round-trips per push; ~67ms measured, ~290ms modelled cross-node, against sub-millisecond
+on local disk), but it is not slow in *user-visible* terms, reads are free, and the storage
+economics run heavily the other way. Sharding the shared filesystem answers the throughput
+ceiling and the blast radius that the latency floor creates, so **Step 2-sharded is the
+selected target** and this step stays the fallback it was written as.
 
-If it fails the bar, fall back to local NVMe per shard — and only then do you need
-everything Step 2 avoided: a `repo → shard → node` routing table (`Repo.Shard`
+Take this step when the write path becomes the binding constraint — CI-rate push traffic,
+large monorepos where repack cost dominates, or a latency budget that cannot absorb the
+floor — or on bundled hardware below the cost crossover in Step 2, where 3× replication is
+effectively free and local disk simply wins.
+
+It is not speculative work: the machinery is already built (`shard.go`, `proxy.go`,
+`replicate.go`, the `Applied >= Version` gate — `DESIGN-read-replicas.md` §2). Under the
+selected design it stays **dormant rather than deleted**, precisely so this fallback stays
+one deployment decision away.
+
+If taken: local NVMe per shard, and with it everything Step 2 avoided: a `repo → shard → node` routing table (`Repo.Shard`
 already exists for it), writes pinned to a primary, replicas for HA and read
 fan-out, and a per-repo version marker so a read immediately after a push isn't
 served stale. That is the DGit / Gitaly-Cluster (Praefect) shape. Keep the §1

@@ -9,11 +9,24 @@ then cut CI over. Do it in this order — each step is safe on its own and the f
 (`GIT_CLONE_URL: git:http://ca-codearmory-git-factory:9002/admin/codearmory.git`), and the
 chart provisions `GIT_FACTORY_CLONE_TOKEN_KEY`, so clone tokens are live rather than inert.
 
-**Before scaling past one replica, read `ARCHITECTURE.md` §5.** Multi-node here is the
-*contingent* sharded-disk path (Step 4), which is only meant to be chosen if the shared
-filesystem's write path fails a measurement that has not been taken. Shared storage
-(Step 2) reaches the same goal without a routing table, primary election or version
-marker, and its service and chart sides are ready.
+**Before scaling past one replica, read `ARCHITECTURE.md` §5 — this runbook is now the
+fallback path, not the default.** Multi-node here is sharded local disk with 3×
+replication (Step 4). It was gated on a measurement of the shared-storage alternative's
+write path; that measurement has been taken, and the selected target is instead **sharded
+shared storage**: one JuiceFS filesystem plus its own Redis per shard, this document's
+routing table kept, replication and the version gate retired but left in the tree.
+
+The short version of why: a push on shared storage is ~972 serialised metadata round-trips
+(~67ms measured, ~290ms modelled cross-node, against sub-millisecond on local disk), which
+is real but below what a human notices; reads are free; and 3× replication couples storage
+capacity to server count (~43 NVMe boxes for 50 TB of git, against ~€312/mo of object
+storage). See §5 "Step 2 — the measurement, and the architecture it selects", reproducible
+from `infra/local/juicefs/`.
+
+**Follow this runbook when** the write path is the binding constraint — CI-rate push
+traffic, monorepos where repack dominates — or on bundled NVMe below the cost crossover,
+where 3× replication is effectively free and local disk simply wins. The code is built and
+merged either way; what follows is deployment.
 
 ## New configuration
 

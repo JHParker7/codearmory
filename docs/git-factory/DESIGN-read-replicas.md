@@ -234,23 +234,71 @@ no host-network hop) and offloads clone load from the upstream; the mirror is a 
 | **1 — Mirror on one node** | *The CI clone-speed win.* `Kind=mirror` repos, `/internal/mirrors` + refresh-on-ref, git-connector `prefer_mirror` returns git-factory URL, dogfood CI clones from git-factory | git-factory, git-connector, (CI yaml) | ✅ |
 | **2 — Remote git-node + proxy** | Control plane can serve a repo whose bytes are on another node (reverse proxy) | git-factory | ✅ on the WIRE path (`proxy.go`). `errRemoteNodeUnsupported` remains for the disk-touching API endpoints (commits, blobs, gc), which shared storage removes rather than the proxy |
 | **3 — Replication + read fan-out** | primary/replica roles, version gate, async pack replication, read→replica / write→primary | git-factory | ✅ (`replicate.go`, `pickReadNode`) |
-| **4 — Deploy at scale** | StatefulSet git-nodes, placement bootstrap, Helm/builder, CI cut over | infra, builder | ❌ — the code exists; nothing multi-node is deployed |
+| **4 — Deploy at scale** | StatefulSet git-nodes, placement bootstrap, Helm/builder, CI cut over | infra, builder | ❌ — the code exists; nothing multi-node is deployed. **Fallback, not the target** (see §10): sharded shared storage was selected instead, keeping this document's routing table and retiring its replication |
 
-**Where the work actually goes next.** Phases 1–3 are built, so the remaining question is
-not "build the read-replica machinery" but **which of two paths to deploy**, and they are
-alternatives rather than a sequence:
+**Where the work actually goes next — decided.** Phases 1–3 are built, so the remaining
+question was never "build the read-replica machinery" but **which of two paths to deploy**.
+It is now settled by measurement, and the answer is a **hybrid that keeps this document's
+routing table and retires its replication**:
+
+> **Sharded shared storage.** Per shard: one JuiceFS filesystem, its own Redis metadata
+> engine (with Sentinel), one bucket or prefix, and stateless git_factory pods that can each
+> serve any repo in that shard. The repo → shard routing table is **kept**. Replication,
+> primary election and the `Applied >= Version` staleness gate are **retired — dormant, not
+> deleted.**
+
+The measurement is written up in `ARCHITECTURE.md` §5 ("Step 2 — the measurement, and the
+architecture it selects") and reproducible from `infra/local/juicefs/`. In short: shared
+storage is correct for git across pods, **free on the read path** — which is the majority of
+git traffic — and costs a write latency floor of ~972 serialised metadata round-trips per
+push (~67ms measured, ~290ms modelled cross-node, against sub-millisecond on local disk).
+That floor is below the threshold a human notices on a push, and it cannot be cached away,
+because the coherence that makes cross-pod locking correct forbids caching metadata.
+
+**Why sharding rather than one big filesystem.** The two real objections to shared storage —
+a ~134 pushes/sec ceiling and a blast radius covering every repo — are per-*filesystem*
+properties, so one filesystem per shard fixes both, linearly. That also goes with JuiceFS's
+grain: it pins all metadata for one filesystem to a single metadata instance by design, to
+keep multi-key transactions off the wire. And it is nearly free here, because **the routing
+table this document already built is the only thing sharding adds.**
+
+**Why this retires Phases 2–3 rather than deploying them.** Within a shard there is one copy
+of each repo, so two pods cannot diverge — there is nothing for replication to synchronise
+and nothing for a version gate to protect against. The `errRemoteNodeUnsupported` gap this
+document notes for disk-touching endpoints (commits, blobs, gc) closes for the same reason:
+every pod in a shard can reach every repo's bytes directly, so the proxy is no longer load-
+bearing for correctness. Cost is the other half of it — 3× replication couples capacity to
+server count (50 TB of git needs ~43 NVMe boxes to hold 150 TB raw, against ~€312/mo of
+object storage), an axis the first draft of this decision omitted entirely.
+
+**Keep the code.** `replicate.go`, `pickReadNode` and the version gate stay in the tree,
+unwired. They are the fallback if the write path ever becomes binding — CI-rate push
+traffic, monorepos where repack dominates, or deployment on bundled NVMe below the cost
+crossover, where 3× is effectively free and local disk simply wins. Phase 1's pull-through
+mirror is unaffected and remains valuable on its own.
+
+The original framing of the two paths, kept because it is still the clearest statement of
+the trade — with the caveat that the answer turned out to be neither pole but the shard-wise
+combination above:
 
 - **Shared storage** (`ARCHITECTURE.md` §5 Step 2 — JuiceFS). One copy of each repo, git
   pods become stateless compute, and no routing table, primary election or version marker
   is needed *at all*. The service and chart sides are ready (storage preflight,
-  `persistence.existingClaim`, RWX-aware replicas); the CSI driver, CloudNativePG metadata
-  engine and object store are not deployed.
+  `persistence.existingClaim`, RWX-aware replicas), and the cluster side — CSI driver,
+  metadata engine, object store — is deployed and measured at local scale in
+  `infra/local/juicefs/`. **Selected, with one amendment**: sharded, so the routing table
+  *is* retained — the "at all" above holds only for a single filesystem. The metadata engine
+  must be Redis (or TiKV), not CloudNativePG, which measured ~4x worse on this path.
 - **Phase 4 here** — sharded local disk with StatefulSet git-nodes, which is
-  `ARCHITECTURE.md`'s *contingent* Step 4 and is only supposed to be chosen if the shared
-  filesystem's write path fails a measurement that has not been taken.
+  `ARCHITECTURE.md`'s Step 4. **Fallback, not deployed.** It was gated on a measurement of
+  the shared filesystem's write path; that measurement showed a floor that is real but not
+  user-visible, and cheaper to absorb than 3× replication is to own and to buy.
 
-Deploying Phase 4 without taking that measurement first would commit to the more complex
-of the two on a guess, which is exactly what §5 Step 4 says not to do.
+The gate did its job: the choice rests on evidence rather than a guess, which is what §5
+Step 4 asked for — and the evidence pointed between the two poles rather than at one of
+them. What remains is deployment of the shard-wise shared-storage target: a shard key and
+placement bootstrap, per-shard filesystem + Redis + Sentinel, Helm/builder wiring, and the
+CI cutover. The read-replica machinery is not deleted, and not deployed.
 
 ---
 
