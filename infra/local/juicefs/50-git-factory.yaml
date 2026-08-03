@@ -1,0 +1,101 @@
+# git_factory on shared storage — ARCHITECTURE §5 Step 2/Step 3.
+#
+# This is the local-minikube equivalent of setting, in the Helm chart:
+#
+#   gitFactory.replicaCount: 2
+#   gitFactory.persistence.existingClaim: git-factory-repos
+#   gitFactory.persistence.accessMode: ReadWriteMany
+#   gitFactory.persistence.fsGroup: false
+#   gitFactory.env.refLockMaxAge: 1h
+#
+# There is no application change and no new flag: GIT_STORAGE_ROOT is still just a
+# path. What changed is that every replica now sees the same bytes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-factory
+  namespace: gitfactory
+spec:
+  # >1 is legal ONLY because the claim below is ReadWriteMany and the ref-lock
+  # janitor is on. The chart refuses to render this combination without both.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: git-factory
+  strategy:
+    # Surge-first, not Recreate. With RWO the old pod had to release the volume
+    # before the new one could take it; shared storage removes that constraint, so
+    # a rollout no longer needs a gap in service.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: git-factory
+    spec:
+      # NO fsGroup. values.yaml is explicit about why: the ownership pass is a
+      # RECURSIVE chown over the whole store, and on a metadata-engine filesystem
+      # every chown in it is a transaction — on a large store that turns pod
+      # startup into a long outage, repeated by every replica. The init container
+      # below does the one-directory version instead.
+      initContainers:
+        - name: own-storage-root
+          image: git-factory:juicefs
+          imagePullPolicy: Never
+          securityContext:
+            runAsUser: 0
+          # Non-recursive on purpose: exactly the two directories the service
+          # needs to be able to write into, regardless of store size. Idempotent,
+          # so it costs nothing on the replicas that find it already correct.
+          command: ["sh", "-c", "mkdir -p /data/repos && chown 100:101 /data /data/repos"]
+          volumeMounts:
+            - name: repos
+              mountPath: /data
+      containers:
+        - name: git-factory
+          image: git-factory:juicefs
+          imagePullPolicy: Never
+          env:
+            - name: DATABASE_URL
+              value: postgres://postgres:postgres@postgres:5432/codearmory_git_factory
+            - name: GATEKEEPER_URL
+              value: http://gatekeeper:8081
+            - name: GATEKEEPER_SERVICE_KEY
+              value: codearmory_git_factory-local-secret
+            - name: GIT_STORAGE_ROOT
+              value: /data/repos
+            - name: GIT_HTTP_BASE_URL
+              value: http://git.local
+            - name: PORT
+              value: "9002"
+            # Left at the default (enforce) deliberately. This is the check that
+            # decides whether the mount underneath is a real filesystem or an
+            # object store wearing one, and it is the reason this switch is a
+            # configuration change rather than a leap of faith (storagecheck.go).
+            - name: GIT_STORAGE_PREFLIGHT
+              value: enforce
+            # REQUIRED once there is more than one replica. Shared storage does
+            # not fix an abandoned .lock file left by a pod killed mid-push; it
+            # widens it from one host to all of them.
+            - name: GIT_REF_LOCK_MAX_AGE
+              value: 1h
+          ports:
+            - containerPort: 9002
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9002
+            initialDelaySeconds: 5
+            periodSeconds: 3
+          volumeMounts:
+            - name: repos
+              mountPath: /data
+      volumes:
+        - name: repos
+          persistentVolumeClaim:
+            # The JuiceFS claim from 30-juicefs-fs.yaml. Provisioned outside any
+            # release, because the CSI driver, metadata engine and object store
+            # outlive it.
+            claimName: git-factory-repos

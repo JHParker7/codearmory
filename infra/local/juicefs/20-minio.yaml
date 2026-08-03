@@ -1,0 +1,108 @@
+# JuiceFS data backend — the object store that holds the blocks.
+#
+# The split matters: this holds only opaque 4MiB chunks. It is never asked for a
+# rename, a lock or a directory listing that git depends on, which is why putting
+# the DATA in object storage is safe when mounting the BUCKET directly is not.
+#
+# On a real cluster this is the provider's S3 (or a real MinIO tenant). Here it is
+# one pod with a PVC, sized for local experiments.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: juicefs-minio
+  namespace: juicefs
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: juicefs-minio
+  namespace: juicefs
+type: Opaque
+stringData:
+  # Local-only credentials; the JuiceFS format secret in 30-juicefs-fs.yaml must
+  # carry the same pair.
+  MINIO_ROOT_USER: juicefs
+  MINIO_ROOT_PASSWORD: juicefs123
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: juicefs-minio
+  namespace: juicefs
+spec:
+  selector:
+    app: juicefs-minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: juicefs-minio
+  namespace: juicefs
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: juicefs-minio
+  template:
+    metadata:
+      labels:
+        app: juicefs-minio
+    spec:
+      securityContext:
+        runAsUser: 0
+      initContainers:
+        # `juicefs format` expects the bucket to exist. With MinIO's filesystem
+        # backend a bucket IS a top-level directory under the data root, so this
+        # creates it without needing the `mc` client image — one less thing to
+        # sideload on a node that cannot reach a registry.
+        - name: create-bucket
+          image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "mkdir -p /data/git-factory"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+          imagePullPolicy: IfNotPresent
+          args: ["server", "/data", "--console-address", ":9001"]
+          envFrom:
+            - secretRef:
+                name: juicefs-minio
+          ports:
+            - containerPort: 9000
+            - containerPort: 9001
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: juicefs-minio

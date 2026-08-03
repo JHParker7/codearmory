@@ -1,0 +1,109 @@
+# JuiceFS metadata engine.
+#
+# This is the half of the filesystem that has to be transactional: every inode,
+# dentry, chunk map and — critically for git — every flock/O_EXCL decision is a
+# row here, not an object in the bucket. It is why a JuiceFS mount passes the
+# preflight in storagecheck.go and a plain S3-over-FUSE mount cannot.
+#
+# ARCHITECTURE §5 Step 2 names CloudNativePG for this in production, "with a
+# connection cap so a git gc storm can't starve other services". On minikube
+# that operator is more moving parts than the thing being validated, so this is a
+# single stock postgres with the same TWO properties that matter:
+#
+#   * its OWN database instance, not the platform's — a repack storm here must
+#     not take conductor/gatekeeper down with it, which is the whole point of the
+#     cap in the production design;
+#   * an explicit max_connections, so the blast radius is a JuiceFS error rather
+#     than an exhausted shared pool.
+#
+# Losing this database loses the filesystem even though every byte is still in
+# the bucket (ARCHITECTURE §"Never lose the metadata"). It is backed by a PVC for
+# that reason — an emptyDir here would make the whole store a restart away from
+# unreadable blocks.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: juicefs-meta
+  namespace: juicefs
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: juicefs-meta
+  namespace: juicefs
+type: Opaque
+stringData:
+  # Local-only credentials. The real deployment takes these from the CNPG cluster
+  # secret; nothing here is intended to leave a laptop.
+  POSTGRES_USER: juicefs
+  POSTGRES_PASSWORD: juicefs
+  POSTGRES_DB: juicefs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: juicefs-meta
+  namespace: juicefs
+spec:
+  selector:
+    app: juicefs-meta
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: juicefs-meta
+  namespace: juicefs
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: juicefs-meta
+  template:
+    metadata:
+      labels:
+        app: juicefs-meta
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          # The connection cap. Every mount pod holds connections here, so this is
+          # the knob that decides whether a metadata storm degrades JuiceFS or the
+          # database host.
+          args: ["postgres", "-c", "max_connections=100"]
+          envFrom:
+            - secretRef:
+                name: juicefs-meta
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "juicefs", "-d", "juicefs"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: juicefs-meta

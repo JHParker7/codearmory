@@ -1,0 +1,54 @@
+# One-shot copy of an existing repo store onto the JuiceFS volume.
+#
+# Repo paths are derived from the row id (`${GIT_STORAGE_ROOT}/{id[:3]}/{id}.git`,
+# ARCHITECTURE §4), so pointing GIT_STORAGE_ROOT somewhere else does not migrate
+# anything — it just makes every existing row's bytes unreachable while the row
+# still claims they exist. Run this before the cutover, with git-factory scaled
+# to zero so nothing is mid-push.
+#
+# Skip it entirely on a fresh install; delete the Job when it has completed.
+#
+# NOTE this mounts the OLD ReadWriteOnce claim alongside the new one, which works
+# because minikube is a single node. On a multi-node cluster, pin this Job to the
+# node holding the old volume.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: git-factory-repos-migrate
+  namespace: gitfactory
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      # Root, because it has to hand the copied tree to the service's uid.
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: copy
+          image: git-factory:juicefs
+          imagePullPolicy: Never
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /new/repos
+              # -a preserves the mode/ownership git relies on; the trailing /.
+              # copies the CONTENTS so the destination root keeps its own perms.
+              cp -a /old/repos/. /new/repos/
+              chown -R 100:101 /new/repos
+              echo "migrated:"
+              find /new/repos -maxdepth 2 -name '*.git' | wc -l
+          volumeMounts:
+            - name: old
+              mountPath: /old
+            - name: new
+              mountPath: /new
+      volumes:
+        - name: old
+          persistentVolumeClaim:
+            claimName: repos
+        - name: new
+          persistentVolumeClaim:
+            claimName: git-factory-repos

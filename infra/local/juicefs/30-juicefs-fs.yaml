@@ -1,0 +1,66 @@
+# The JuiceFS filesystem definition, and the StorageClass that hands it out.
+#
+# There is no separate `juicefs format` step: the CSI controller formats the
+# volume the first time it provisions against this secret, and every node that
+# mounts it reads the same secret. That is why the secret carries both halves —
+# the metadata engine URL and the object-store coordinates.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: juicefs-git-factory
+  namespace: juicefs
+type: Opaque
+stringData:
+  # The JuiceFS volume name, recorded in the metadata engine at format time.
+  # Changing it later points the driver at a DIFFERENT filesystem rather than
+  # renaming this one.
+  name: git-factory
+  metaurl: postgres://juicefs:juicefs@juicefs-meta.juicefs.svc.cluster.local:5432/juicefs?sslmode=disable
+  storage: minio
+  bucket: http://juicefs-minio.juicefs.svc.cluster.local:9000/git-factory
+  access-key: juicefs
+  secret-key: juicefs123
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: juicefs-git-factory
+provisioner: csi.juicefs.com
+# Retain, not Delete. Pushed source lives only here, and the whole reason the
+# chart takes `persistence.existingClaim` is that this store must outlive any one
+# release's lifecycle (values.yaml, gitFactory.persistence.existingClaim).
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  csi.storage.k8s.io/provisioner-secret-name: juicefs-git-factory
+  csi.storage.k8s.io/provisioner-secret-namespace: juicefs
+  csi.storage.k8s.io/node-publish-secret-name: juicefs-git-factory
+  csi.storage.k8s.io/node-publish-secret-namespace: juicefs
+  # Give the subdirectory a name a human can recognise in the metadata engine.
+  pathPattern: "${.PVC.namespace}-${.PVC.name}"
+mountOptions:
+  # Local read cache in front of the object store (ARCHITECTURE §5 Step 2: "a
+  # local NVMe read cache in front"). Git is read-heavy on packfiles.
+  - cache-size=2048
+  # NEVER add --writeback here. ARCHITECTURE §"Never enable JuiceFS --writeback"
+  # is explicit: it buffers writes locally and uploads them later, so a node loss
+  # loses acknowledged pushes, and a second pod does not see them at all — which
+  # would quietly break the very cross-pod visibility this setup exists to give.
+---
+# The repo store itself. ReadWriteMany is the thing that makes
+# gitFactory.replicaCount > 1 legal at all — the chart refuses to render more
+# than one replica against a ReadWriteOnce claim (git-factory-deployment.yaml).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: git-factory-repos
+  namespace: gitfactory
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: juicefs-git-factory
+  resources:
+    requests:
+      # JuiceFS does not preallocate; this is the quota the CSI driver records,
+      # not space taken from the object store.
+      storage: 20Gi

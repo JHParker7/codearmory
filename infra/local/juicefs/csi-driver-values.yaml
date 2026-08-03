@@ -1,0 +1,57 @@
+# Helm values for the JuiceFS CSI driver on a local minikube.
+#
+#   helm repo add juicefs https://juicedata.github.io/charts/
+#   helm upgrade --install juicefs-csi-driver juicefs/juicefs-csi-driver \
+#     --namespace juicefs --version 0.32.0 -f csi-driver-values.yaml
+#
+# Everything below is a minikube accommodation, not JuiceFS advice. The two that
+# matter:
+#
+#   * pullPolicy IfNotPresent everywhere. The minikube node has IP connectivity
+#     but cannot resolve registry hosts, so every image here is sideloaded with
+#     `minikube image load` (see setup.sh) and MUST NOT be re-pulled.
+#   * defaultMountImage.ce is pinned rather than left to the driver's built-in
+#     default, for the same reason: an unpinned default is an image nobody
+#     sideloaded, and the failure surfaces as a mount pod stuck in ImagePullBackOff
+#     while the git-factory pod sits in ContainerCreating.
+image:
+  repository: juicedata/juicefs-csi-driver
+  tag: "v0.32.0"
+  pullPolicy: IfNotPresent
+
+sidecars:
+  livenessProbeImage:
+    repository: registry.k8s.io/sig-storage/livenessprobe
+    tag: "v2.12.0"
+    pullPolicy: IfNotPresent
+  nodeDriverRegistrarImage:
+    repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
+    tag: "v2.9.0"
+    pullPolicy: IfNotPresent
+  csiResizerImage:
+    repository: registry.k8s.io/sig-storage/csi-resizer
+    tag: "v1.9.0"
+    pullPolicy: IfNotPresent
+
+# The CE mount client. One image per node, shared by every mount pod.
+defaultMountImage:
+  ce: juicedata/mount:ce-v1.3.0
+
+# Run the client in a dedicated mount pod (the default). Worth keeping rather
+# than switching to `process` mode: a mount pod is exactly how a real cluster runs
+# it, so what gets validated here is what would run in production.
+mountMode: mountpod
+
+# Off locally — it is an observability UI, and it is one more image to sideload.
+dashboard:
+  enabled: false
+
+# The controller does its own provisioning (needed for the StorageClass's
+# pathPattern in 30-juicefs-fs.yaml).
+controller:
+  provisioner: true
+
+# cert-manager is not installed on this minikube; the chart self-signs instead.
+webhook:
+  certManager:
+    enabled: false
