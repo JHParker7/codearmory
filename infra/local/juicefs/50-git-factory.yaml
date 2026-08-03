@@ -81,6 +81,18 @@ spec:
             # widens it from one host to all of them.
             - name: GIT_REF_LOCK_MAX_AGE
               value: 1h
+            # DELIBERATELY SHORT, and local-only — production uses the 1h default.
+            # The sweep is what the maintenance lease guards, and at an hourly
+            # interval a checklist cannot observe whether the guard works. At 30s
+            # verify.sh can watch several intervals go by and confirm the store is
+            # swept once per interval rather than once per replica. The store here
+            # is a handful of repos, so the sweep itself costs nothing.
+            - name: GIT_MAINTENANCE_INTERVAL
+              value: 30s
+            # Likewise short, so a killed holder is taken over within the window
+            # the checklist watches instead of blocking it.
+            - name: GIT_MAINTENANCE_LEASE_TTL
+              value: 10s
           ports:
             - containerPort: 9002
           readinessProbe:
