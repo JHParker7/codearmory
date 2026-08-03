@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -191,16 +192,81 @@ func checkUserAuth(r *http.Request, service, action, resource string) (authOutco
 
 // ── Suspicious-activity block list ───────────────────────────────────────────
 
-const (
-	suspectThreshold = 10
-	blockDuration    = time.Hour
+// suspectThreshold and blockDuration are read from the environment at startup
+// (CONDUCTOR_SUSPECT_THRESHOLD, CONDUCTOR_BLOCK_DURATION), defaulting to the values
+// below.
+//
+// They are configurable because the block is keyed on SOURCE IP alone, and an IP is
+// not a user. Everyone behind one NAT egress — an office, a CI runner, a
+// kubectl port-forward — shares a single counter, so ten failures from any one of
+// them locks out all of them for an hour. A deployment whose users share an egress
+// needs to raise this; a browser test suite, which deliberately exercises
+// logged-out and rejected-session states, needs to raise it a lot.
+var (
+	suspectThreshold = defaultSuspectThreshold
+	blockDuration    = defaultBlockDuration
 )
+
+const (
+	defaultSuspectThreshold = 10
+	defaultBlockDuration    = time.Hour
+	// suspectWindow is how long a failure counts toward the streak. It bounds the
+	// state below — entries are otherwise only ever removed on a SUCCESSFUL auth from
+	// the same IP, so a scanner that fails a few times and never returns is remembered
+	// forever and the map grows without limit. It is also the more correct rule: nine
+	// failures a week ago should not make today's first failure the tenth.
+	suspectWindow = time.Hour
+	// suspectPruneAt is the tracked-IP count past which a sweep runs. Pruning is O(n),
+	// so it is amortised behind a threshold rather than done on every failure.
+	suspectPruneAt = 1024
+)
+
+// initSuspectLimits applies the environment overrides. Invalid or absent values keep
+// the defaults, so a typo degrades to the shipped behaviour rather than to no
+// protection at all.
+func initSuspectLimits() {
+	if v := os.Getenv("CONDUCTOR_SUSPECT_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			suspectThreshold = n
+		} else {
+			slog.Warn("invalid CONDUCTOR_SUSPECT_THRESHOLD, using default", "value", v, "default", defaultSuspectThreshold)
+		}
+	}
+	if v := os.Getenv("CONDUCTOR_BLOCK_DURATION"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			blockDuration = d
+		} else {
+			slog.Warn("invalid CONDUCTOR_BLOCK_DURATION, using default", "value", v, "default", defaultBlockDuration)
+		}
+	}
+}
+
+// suspectEntry is a failure streak and when it was last added to.
+type suspectEntry struct {
+	count int
+	last  time.Time
+}
 
 var (
 	suspectMu   sync.Mutex
-	suspectHits = map[string]int{}
+	suspectHits = map[string]suspectEntry{}
 	blockedIPs  = map[string]time.Time{}
 )
+
+// pruneSuspects drops stale failure streaks and expired blocks. Callers must hold
+// suspectMu.
+func pruneSuspects(now time.Time) {
+	for ip, e := range suspectHits {
+		if now.Sub(e.last) > suspectWindow {
+			delete(suspectHits, ip)
+		}
+	}
+	for ip, until := range blockedIPs {
+		if now.After(until) {
+			delete(blockedIPs, ip)
+		}
+	}
+}
 
 // sourceIP returns the immediate peer IP from r.RemoteAddr, stripping the port.
 func sourceIP(r *http.Request) string {
@@ -243,8 +309,20 @@ func recordSuspect(ip, userID, method, path string) {
 	if _, already := blockedIPs[ip]; already {
 		return
 	}
-	suspectHits[ip]++
-	n := suspectHits[ip]
+	now := time.Now()
+	if len(suspectHits)+len(blockedIPs) > suspectPruneAt {
+		pruneSuspects(now)
+	}
+	e := suspectHits[ip]
+	// A streak that has gone quiet for longer than the window starts over rather than
+	// resuming where it left off.
+	if now.Sub(e.last) > suspectWindow {
+		e.count = 0
+	}
+	e.count++
+	e.last = now
+	suspectHits[ip] = e
+	n := e.count
 	slog.Warn("user passed conductor auth but failed service validation",
 		"source_ip", ip, "user_id", userID,
 		"method", method, "path", path, "failure_count", n)

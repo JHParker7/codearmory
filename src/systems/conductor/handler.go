@@ -16,6 +16,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// maxRequestBodyBytes is the default request-body cap. It is a JSON-API limit, not a
+// transfer limit: an endpoint that carries bulk content declares max_body_bytes in the
+// registry manifest instead (-1 for "the backend enforces its own").
 const maxRequestBodyBytes = 64 * 1024
 
 var (
@@ -68,10 +71,22 @@ func validatePathParams(w http.ResponseWriter, paramNames []string, paramValues 
 	return out, true
 }
 
-// readAndValidateBody reads the request body, enforcing the global size limit.
+// readAndValidateBody reads the request body, enforcing the size limit.
 // For POST/PUT requests with JSON content type it also checks JSON validity.
 // For the signup endpoint it validates field formats.
-// Returns the buffered body (or nil if no body), and false if an error response was already written.
+// Returns the buffered body (or nil if no body was buffered), and false if an error
+// response was already written.
+//
+// The default limit is maxRequestBodyBytes, which suits the JSON CRUD that is nearly
+// all of this gateway's traffic. An endpoint may override it in the registry manifest
+// (max_body_bytes), and an upload route MUST: enforcing the default here buffers the
+// whole body into memory to measure it, so an artifact upload — sized against a
+// multi-gigabyte per-user quota the artifacts service enforces itself — was answered
+// 413 by the gateway at 64 KiB and never reached that quota at all.
+//
+// A route that declares its own limit is therefore STREAMED, never buffered, and skips
+// the JSON inspection below: an upload is not JSON, so there is nothing to validate,
+// and reading it to find out would reintroduce the very buffering being avoided.
 func readAndValidateBody(w http.ResponseWriter, r *http.Request, entry endpointEntry) ([]byte, bool) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
 		return nil, true
@@ -79,6 +94,20 @@ func readAndValidateBody(w http.ResponseWriter, r *http.Request, entry endpointE
 	if r.Body == nil {
 		return nil, true
 	}
+
+	if entry.maxBodyBytes != 0 {
+		if entry.maxBodyBytes > 0 {
+			// A declared Content-Length lets us answer 413 before reading a byte;
+			// MaxBytesReader is the real enforcement, since the header is only a claim.
+			if r.ContentLength > entry.maxBodyBytes {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return nil, false
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, entry.maxBodyBytes)
+		}
+		return nil, true
+	}
+
 	lr := &io.LimitedReader{R: r.Body, N: maxRequestBodyBytes + 1}
 	body, err := io.ReadAll(lr)
 	if err != nil {
@@ -249,6 +278,13 @@ func prepareForwardRequest(r *http.Request, userID, normalizedAuth string, svc s
 	r2.Header.Del("X-Forwarded-Host")
 	r2.Header.Del("X-Forwarded-Proto")
 	r2.Header.Del("X-Real-IP")
+	// git-factory treats this header as proof that a PEER NODE already authorized the
+	// request and serves the repo straight from disk with no permission check
+	// (isTrustedForward in its proxy.go). It is only ever set node-to-node, never by a
+	// client, and node-to-node traffic does not pass through conductor — so anything
+	// arriving here carrying it is forging it. Stripping costs nothing and means a
+	// leaked or weak GIT_NODE_FORWARD_KEY is not reachable through the gateway.
+	r2.Header.Del("X-Git-Node-Forward")
 
 	if strippedPath != r.URL.Path {
 		r2.URL.Path = strippedPath

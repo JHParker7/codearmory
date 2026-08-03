@@ -32,6 +32,9 @@ type endpointEntry struct {
 	public       bool   // skip user auth and permission check
 	serviceName  string // which service owns this endpoint
 	originalPath string // path template as declared in the registry (e.g. /users/{id})
+	// maxBodyBytes is the registry-declared request-body limit: 0 = the default cap,
+	// -1 = unlimited. See readAndValidateBody.
+	maxBodyBytes int64
 }
 
 // serviceState holds the proxy and per-service routing config for one service.
@@ -100,11 +103,12 @@ func refreshServiceCache(ctx context.Context) {
 		ForwardAuth bool   `json:"forward_auth"`
 		UIPath      string `json:"ui_path"`
 		Endpoints   []struct {
-			Method   string `json:"method"`
-			Path     string `json:"path"`
-			Action   string `json:"action"`
-			Resource string `json:"resource"`
-			Public   bool   `json:"public"`
+			Method       string `json:"method"`
+			Path         string `json:"path"`
+			Action       string `json:"action"`
+			Resource     string `json:"resource"`
+			Public       bool   `json:"public"`
+			MaxBodyBytes int64  `json:"max_body_bytes"`
 		} `json:"endpoints"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&svcs); err != nil {
@@ -153,6 +157,7 @@ func refreshServiceCache(ctx context.Context) {
 				public:       ep.Public,
 				serviceName:  s.Name,
 				originalPath: ep.Path,
+				maxBodyBytes: ep.MaxBodyBytes,
 			})
 		}
 	}

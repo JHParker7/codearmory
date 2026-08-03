@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,4 +85,83 @@ func TestValidatePathParams(t *testing.T) {
 			t.Errorf("hex uuid not normalised to hyphenated form: %q", out[0])
 		}
 	}
+}
+
+// readAndValidateBody's default cap is a JSON-API limit, not a transfer limit. An
+// endpoint that carries bulk content declares max_body_bytes in the registry manifest;
+// without that, the gateway buffered every POST/PUT to measure it and answered 413 at
+// 64 KiB — which made artifact upload (sized against a multi-gigabyte per-user quota
+// the artifacts service enforces itself) impossible through conductor.
+func TestReadAndValidateBodyLimits(t *testing.T) {
+	big := strings.Repeat("x", maxRequestBodyBytes+1)
+
+	newReq := func(body string) *http.Request {
+		r := httptest.NewRequest(http.MethodPut, "/artifacts/cache", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/octet-stream")
+		return r
+	}
+
+	t.Run("default cap still rejects an oversized body", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		if _, ok := readAndValidateBody(rec, newReq(big), endpointEntry{}); ok {
+			t.Fatal("oversized body accepted under the default cap")
+		}
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("status = %d, want 413", rec.Code)
+		}
+	})
+
+	t.Run("unlimited streams the body through unbuffered", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r := newReq(big)
+		buffered, ok := readAndValidateBody(rec, r, endpointEntry{maxBodyBytes: -1})
+		if !ok {
+			t.Fatalf("body rejected, status %d", rec.Code)
+		}
+		// nil, not the bytes: an upload must never be read into conductor's memory.
+		if buffered != nil {
+			t.Errorf("body was buffered (%d bytes); it must be streamed", len(buffered))
+		}
+		got, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read forwarded body: %v", err)
+		}
+		if len(got) != len(big) {
+			t.Errorf("forwarded %d bytes, want %d", len(got), len(big))
+		}
+	})
+
+	t.Run("explicit cap rejects a declared Content-Length over it", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		if _, ok := readAndValidateBody(rec, newReq(big), endpointEntry{maxBodyBytes: 128}); ok {
+			t.Fatal("body over the declared cap accepted")
+		}
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("status = %d, want 413", rec.Code)
+		}
+	})
+
+	t.Run("explicit cap enforced when Content-Length is absent", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r := newReq(big)
+		r.ContentLength = -1 // chunked: the header cannot be trusted to pre-screen
+		if _, ok := readAndValidateBody(rec, r, endpointEntry{maxBodyBytes: 128}); !ok {
+			t.Fatalf("body rejected up front, status %d", rec.Code)
+		}
+		if _, err := io.ReadAll(r.Body); err == nil {
+			t.Error("body read past the cap without error; MaxBytesReader is not enforcing")
+		}
+	})
+
+	t.Run("JSON validation still runs on the default path", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader("{not json"))
+		r.Header.Set("Content-Type", "application/json")
+		if _, ok := readAndValidateBody(rec, r, endpointEntry{}); ok {
+			t.Fatal("malformed JSON accepted")
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", rec.Code)
+		}
+	})
 }

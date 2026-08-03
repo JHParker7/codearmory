@@ -29,7 +29,7 @@ var (
 	registryURL         = envOrDefault("REGISTRY_URL", "http://localhost:8084")
 	conductorForwardKey = secret("CONDUCTOR_FORWARD_KEY") // shared secret for signing X-User-ID on all non-forwardAuth services
 	conductorNotifyKey  = secret("CONDUCTOR_NOTIFY_KEY")  // shared secret allowing registry to push refresh notifications
-	httpClient          *http.Client // set in main() after telemetry.Setup so the transport uses the real OTel provider
+	httpClient          *http.Client                      // set in main() after telemetry.Setup so the transport uses the real OTel provider
 	// gatekeeperClient and registryClient carry static peer.service attributes so
 	// Tempo's service-graph processor can label edges correctly even when SERVER
 	// spans arrive after the store expiry window.
@@ -198,6 +198,7 @@ func main() {
 		defer shutdown(context.Background())
 	}
 	initMetrics()
+	initSuspectLimits()
 
 	httpClient = &http.Client{
 		Timeout:   10 * time.Second,
