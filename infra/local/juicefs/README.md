@@ -26,6 +26,17 @@ in-process preflight explicitly cannot cover.
 ./verify.sh    # the cross-pod checks — run this before trusting >1 replica
 ```
 
+**Before you run it.** `50-git-factory.yaml` is only the git_factory Deployment; it
+expects `postgres:5432` and `gatekeeper:8081` to resolve inside the `gitfactory`
+namespace, and nothing here deploys them. Bring the rest of the local stack up in that
+namespace first, or edit `DATABASE_URL`/`GATEKEEPER_URL` to point at wherever they run —
+otherwise the pods roll out and then crash-loop on startup rather than failing in a way
+that names the cause.
+
+Migration is automatic *and* optional: `setup.sh` copies an existing store only if it
+finds a ReadWriteOnce claim named `repos` in that namespace, and says so and skips when
+there is none. `SKIP_MIGRATE=1` forces the skip.
+
 ## Why this changes anything
 
 git_factory is the one core service holding user data on a filesystem rather than in
@@ -50,7 +61,7 @@ who can reach it.
 
 | file | what |
 | --- | --- |
-| `00-namespace.yaml` | the `juicefs` namespace |
+| `00-namespace.yaml` | the `juicefs` (storage plane) and `gitfactory` (the service) namespaces |
 | `10-meta-redis.yaml` | metadata engine — Redis (primary + replica) and three Sentinels |
 | `alt-meta-postgres.yaml` | the Postgres engine it replaced. **Not applied** — kept to re-run the comparison |
 | `20-minio.yaml` | data backend — MinIO plus the bucket, created as a directory by an init container |
@@ -169,8 +180,14 @@ repos only; no large-monorepo or concurrent-push load.
 **Operational notes if you use this anyway.** `TrashDays` defaults to 1, and `git
 gc`/repack deletes packfiles constantly, so object-storage usage and metadata counts run
 persistently above the live repo size; consider `--trash-days 0` for a git store.
-`startMaintenance` no longer sweeps from every replica — it takes a lease first (lease.go),
-so one pod sweeps per interval however many are running.
+`startMaintenance` no longer sweeps from every replica — it takes a lease first
+(`lease.go`), so the store is swept once per interval however many pods are running.
+Two parts to that, and the second is the one that actually saves the work: winning the
+lease is what stops sweeps overlapping, and *holding* it until the next interval is due
+(`coolDownLease`) is what stops the next replica to tick from walking the same store
+again a few seconds later. `verify.sh` §6 checks it by counting completions over several
+intervals, which is the only way to see it — the redundant sweeps are sequential, not
+simultaneous, because replicas tick on their own offsets.
 
 ## The metadata engine, and what was checked
 
