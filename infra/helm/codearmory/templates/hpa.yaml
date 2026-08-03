@@ -8,11 +8,20 @@ FOR UPDATE ... SKIP LOCKED, so N replicas never double-process. The HTTP service
 (conductor, gatekeeper, registry, tickets, artifacts) are stateless request handlers.
 
 A service is scalable here only if its Deployment is named "<fullname>-<key>", which is
-the chart's convention for all of these.
+the chart's convention for all of these — except git_factory, whose values key is
+camelCase while its Deployment is "<fullname>-git-factory", hence the override below.
+
+git_factory is scalable ONLY on shared storage, and only because the maintenance sweep
+now takes a cluster-wide lease (git-factory/lease.go) instead of running in every
+replica. Without that lease an autoscaler multiplies the repack load by the replica
+count. The ReadWriteMany requirement is enforced in git-factory-deployment.yaml, where
+the other storage guardrails live.
 */ -}}
-{{- $scalable := list "gatekeeper" "registry" "conductor" "workflows" "forge" "tickets" "artifacts" "events" }}
+{{- $scalable := list "gatekeeper" "registry" "conductor" "workflows" "forge" "tickets" "artifacts" "events" "gitFactory" }}
+{{- $componentNames := dict "gitFactory" "git-factory" }}
 {{- range $svc := $scalable }}
 {{- $cfg := index $.Values $svc }}
+{{- $component := default $svc (get $componentNames $svc) }}
 {{- /* Core services (gatekeeper/registry/conductor) have no `enabled` key — always on.
        Only an explicit `enabled: false` disables one. */ -}}
 {{- if and $cfg (not (eq $cfg.enabled false)) $cfg.autoscaling $cfg.autoscaling.enabled }}
@@ -20,15 +29,15 @@ the chart's convention for all of these.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "codearmory.fullname" $ }}-{{ $svc }}
+  name: {{ include "codearmory.fullname" $ }}-{{ $component }}
   labels:
     {{- include "codearmory.labels" $ | nindent 4 }}
-    app.kubernetes.io/component: {{ $svc }}
+    app.kubernetes.io/component: {{ $component }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "codearmory.fullname" $ }}-{{ $svc }}
+    name: {{ include "codearmory.fullname" $ }}-{{ $component }}
   minReplicas: {{ $cfg.autoscaling.minReplicas | default 2 }}
   maxReplicas: {{ $cfg.autoscaling.maxReplicas | default 6 }}
   metrics:

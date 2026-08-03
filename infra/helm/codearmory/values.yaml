@@ -879,14 +879,45 @@ gitFactory:
   image:
     repository: git-factory
     tag: ""
-  # PINNED AT 1 — do not raise, and do not give this service an HPA. The repo store is
-  # a ReadWriteOnce volume and git has no cross-node write locking, so a second replica
-  # either cannot schedule (RWO) or would corrupt objects against the repack loop.
-  # Scaling reads is a sharding/replica-node concern inside the service, not a replica
-  # count here.
+  # 1 is correct for the DEFAULT storage below (ReadWriteOnce), and raising it against
+  # RWO is refused at render time: git has no cross-node write locking, so a second
+  # replica either never schedules or becomes a second writer and corrupts objects.
+  #
+  # It is no longer a permanent pin. On shared storage (persistence.accessMode:
+  # ReadWriteMany, backed by a filesystem with real atomic O_CREAT|O_EXCL, atomic rename
+  # and ENFORCED flock — see the accessMode notes below) git pods are stateless compute
+  # and this may be raised. ARCHITECTURE §5 Step 2 records the measurement behind that,
+  # and infra/local/juicefs/ is a worked example with the cross-pod checks scripted.
+  #
+  # Before raising it, two things must be true, and the chart checks both:
+  #   * accessMode is ReadWriteMany;
+  #   * env.refLockMaxAge is not "0" — shared storage widens an abandoned ref lock from
+  #     one host to all pods rather than fixing it.
   replicaCount: 1
+  # Autoscaling is legal only on shared storage, and is refused at render time otherwise
+  # (an HPA scaling to a second writer on an RWO store is the same hazard as setting
+  # replicaCount > 1, but it appears later, under load).
+  #
+  # What made it safe at all is that the periodic repack/janitor sweep now takes a
+  # cluster-wide lease rather than running in every replica — see git-factory/lease.go.
+  # An older image without that lease will sweep the whole store once per replica per
+  # interval, so an autoscaler multiplies the maintenance load by the replica count.
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
   port: 9002
   persistence:
+    # ONE STORE, ONE DEPLOYMENT. The target architecture is sharded shared storage —
+    # several filesystems, each with its own metadata engine and bucket, each served by
+    # its own pods — and this block cannot express that: it describes a single claim.
+    #
+    # Deliberately not modelled yet. The service binds a shard to a mount before the
+    # chart can usefully render one Deployment per shard; rendering it first would emit a
+    # topology nothing knows how to route to. A single-shard install is exactly what this
+    # block already describes, and it is what every install runs today.
+    #
     # The bare repos. Disable ONLY for a throwaway install: without a PVC the store is
     # an emptyDir and a restart destroys every pushed commit.
     enabled: true
@@ -897,7 +928,7 @@ gitFactory:
     storageClass: ""
     # Use a PVC that already exists instead of letting the chart create one. This is the
     # normal way to attach a JuiceFS volume: the JuiceFS CSI driver, its metadata engine
-    # (CloudNativePG) and its object-storage backend are cluster-wide infrastructure with
+    # (Redis + Sentinel) and its object-storage backend are cluster-wide infrastructure with
     # their own lifecycle, and binding their deletion to a `helm uninstall` of this
     # release is not a trade anyone wants to make. When set, no PVC is rendered and
     # size/storageClass/retain are ignored.
@@ -912,6 +943,8 @@ gitFactory:
     # and corrupts repositories rather than merely being slow. The service runs a startup
     # preflight for exactly this (env.storagePreflight below), but it can only verify the
     # properties locally — confirming they hold ACROSS pods is a deployment check.
+    # infra/local/juicefs/ is a worked example of the whole arrangement (CSI driver,
+    # metadata engine, object store, RWX claim) with that cross-pod check scripted.
     #
     # Before running more than one replica, also make sure the stale ref-lock janitor is
     # on (env.refLockMaxAge). Shared storage does not fix an abandoned lock file; it

@@ -21,6 +21,18 @@
 {{- if and (gt (int .Values.gitFactory.replicaCount) 1) (eq (toString .Values.gitFactory.env.refLockMaxAge) "0") }}
 {{- fail "gitFactory.env.refLockMaxAge is \"0\" (janitor disabled) with more than one replica. Shared storage does not fix stale ref locks, it widens them from one host to all pods: a lock left by a killed pod blocks that ref everywhere, indefinitely. Leave refLockMaxAge empty for the default, or set a duration." }}
 {{- end }}
+{{- /* An autoscaler on a ReadWriteOnce store is the same second-writer hazard as a fixed
+       replicaCount > 1, only harder to see coming: it renders fine and breaks the first
+       time load rises. Both janitor guards above apply to the autoscaled case too, since
+       an HPA's minReplicas is at least 2. */}}
+{{- if and .Values.gitFactory.autoscaling .Values.gitFactory.autoscaling.enabled }}
+{{- if not $shared }}
+{{- fail (printf "gitFactory.autoscaling.enabled is true but persistence.accessMode is %q. Autoscaling git_factory requires shared storage (ReadWriteMany) — an HPA scales to a second writer against a store with no cross-node locking. See ARCHITECTURE §5 Step 2." $p.accessMode) }}
+{{- end }}
+{{- if eq (toString .Values.gitFactory.env.refLockMaxAge) "0" }}
+{{- fail "gitFactory.env.refLockMaxAge is \"0\" (janitor disabled) with autoscaling enabled. A lock left by a scaled-down or killed pod blocks that ref from every remaining pod, indefinitely." }}
+{{- end }}
+{{- end }}
 {{- /* GIT_HTTP_BASE_URL is what git_factory hands back as a repo's clone URL, so it has
        to be the address a git client outside the cluster can reach — not the in-cluster
        Service. An explicit value wins; otherwise the ingress host below is exactly that
