@@ -1,0 +1,142 @@
+{{- if .Values.platformIngress.enabled }}
+{{- $fullname := include "codearmory.fullname" . -}}
+{{- $class := .Values.platformIngress.className -}}
+{{- $hosts := .Values.platformIngress.hosts -}}
+{{- $extra := .Values.platformIngress.annotations -}}
+{{- /*
+  A SINGLE front door for the platform, as opposed to the per-service conductor/portal
+  ingresses next to this file (which each need their own hostname). One origin, split by
+  path:
+
+    /api/… → conductor   (prefix STRIPPED — conductor's routes are /gatekeeper/…,
+                          /codearmory_git_factory/…; it has never heard of /api)
+    /app/… → portal      (prefix KEPT — the SPA is built with base=/app/ and portal-bff
+                          strips it itself, which is what keeps its asset URLs resolvable)
+    /      → 308 → /app
+
+  Same origin for both halves is the point: the SPA calls /api/… with cookies, so one
+  host keeps that same-origin and sidesteps CORS and cookie-domain problems.
+
+  THREE Ingress objects rather than one, because `rewrite-target` and
+  `permanent-redirect` are per-INGRESS annotations, not per-path. A single object would
+  apply /api's rewrite to /app as well — stripping the prefix the portal now requires,
+  which 404s the whole app. nginx merges them into one server block.
+
+  Note what /api → conductor gives up: portal-bff's own /api handlers (its
+  workspace-state cache at /api/state/) are bypassed. Nothing in the SPA calls it today,
+  and service UIs still resolve because conductor routes /<service>/ui itself. Point /api
+  at the portal Service instead if you want the BFF in that path.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: platform
+  annotations:
+    # Strips /api: the capture group below is referenced as $2.
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    {{- with $extra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if $class }}
+  ingressClassName: {{ $class }}
+  {{- end }}
+  {{- with .Values.platformIngress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $hosts }}
+    - {{- if . }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
+        paths:
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ $fullname }}-conductor
+                port:
+                  name: http
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}-app
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: platform
+  {{- with $extra }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if $class }}
+  ingressClassName: {{ $class }}
+  {{- end }}
+  {{- with .Values.platformIngress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $hosts }}
+    - {{- if . }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
+        paths:
+          {{- /* Deliberately NO rewrite-target on this object: the portal is mounted at
+                 /app and must receive the prefix intact. Prefix (not
+                 ImplementationSpecific) so /app, /app/ and /app/assets/… all match. */}}
+          {{- /* $ (root context), not "." — inside this range "." is the host string. */}}
+          - path: {{ $.Values.platformIngress.rootRedirectTo | default "/app" }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-portal
+                port:
+                  name: http
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}-root-redirect
+  labels:
+    {{- include "codearmory.labels" . | nindent 4 }}
+    app.kubernetes.io/component: platform
+  annotations:
+    # 308, not 302: permanent, and browsers must not downgrade the method — a redirected
+    # POST stays a POST.
+    nginx.ingress.kubernetes.io/permanent-redirect: {{ .Values.platformIngress.rootRedirectTo | quote }}
+    nginx.ingress.kubernetes.io/permanent-redirect-code: "308"
+    {{- with $extra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if $class }}
+  ingressClassName: {{ $class }}
+  {{- end }}
+  rules:
+    {{- range $hosts }}
+    - {{- if . }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
+        paths:
+          {{- /* Exact, so ONLY "/" redirects. A Prefix rule here would swallow /api and
+                 /app and redirect the whole platform to itself. */}}
+          - path: /
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $fullname }}-portal
+                port:
+                  name: http
+    {{- end }}
+{{- end }}

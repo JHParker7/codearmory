@@ -58,6 +58,14 @@ spec:
               value: {{ .Values.gatekeeper.env.trustedProxyCIDRs | quote }}
             {{- end }}
             {{- include "codearmory.otel.envs" (list . .Values.gatekeeper.env) | nindent 12 }}
+            {{- /* Escape hatch for settings the chart does not model as first-class
+                   values — notably the signup/login rate limits, which a test
+                   deployment needs to raise because every client shares one source IP
+                   behind a port-forward. Listed last so it can also override anything
+                   above it. */ -}}
+            {{- with .Values.gatekeeper.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
             {{- include "codearmory.postgresql.env" (list . "gatekeeper" "gatekeeper" (include "codearmory.fullname" .)) | nindent 12 }}
             - name: REDIS_URL
               valueFrom:
